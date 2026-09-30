@@ -80,12 +80,16 @@ class _CoordinatorStub:
         self.action_registry = _ACTION_REGISTRY
         self.framework_agent_discover_timeout_sec = 0.0
         # Build a minimal _coord so methods that go through self._coord work.
-        dispatcher_stub = type(
-            "_DispatcherStub",
-            (),
-            {"_registry_lanes_ttl": DispatcherCollaborator._registry_lanes_ttl},
-        )()
-        dispatcher_stub._coord = self  # type: ignore[attr-defined]
+        outer_self = self
+
+        class _DispatcherStub:
+            @property
+            def action_registry(self):
+                return outer_self.action_registry
+
+            _registry_lanes_ttl = DispatcherCollaborator._registry_lanes_ttl
+
+        dispatcher_stub = _DispatcherStub()
         self._coord = type("_FakeCoord", (), {"dispatcher": dispatcher_stub, "shared_state": self.shared_state})()  # type: ignore[attr-defined]
 
 

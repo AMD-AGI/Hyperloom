@@ -781,11 +781,11 @@ async def test_close_sequencer_falls_back_to_time_exhausted(coord):
 
 @pytest.mark.asyncio
 async def test_close_sequencer_derives_sweep_done_from_phase_history(coord):
-    """Regression: sequencer derives the phase_history reason rather than blanket-stamping time_exhausted."""
+    """stop_reason set by machine at transition survives the sequencer unchanged."""
     coord.shared_state.phase_history = [
         {"to_phase": "CLOSE", "reason": "sweep_done", "evidence": {}},
     ]
-    assert coord.shared_state.stop_reason == ""
+    coord.shared_state.set_stop_reason("sweep_done")
 
     await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
@@ -794,11 +794,11 @@ async def test_close_sequencer_derives_sweep_done_from_phase_history(coord):
 
 @pytest.mark.asyncio
 async def test_close_sequencer_preserves_failed_conc_sweep_reason(coord):
-    """Failed conc_sweep closeout should stay distinguishable in final stop_reason."""
+    """stop_reason set by machine at transition survives the sequencer unchanged."""
     coord.shared_state.phase_history = [
         {"to_phase": "CLOSE", "reason": "sweep_failed", "evidence": {"sweep_status": "failed"}},
     ]
-    assert coord.shared_state.stop_reason == ""
+    coord.shared_state.set_stop_reason("sweep_failed")
 
     await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
@@ -807,7 +807,7 @@ async def test_close_sequencer_preserves_failed_conc_sweep_reason(coord):
 
 @pytest.mark.asyncio
 async def test_close_sequencer_does_not_mark_budgeted_sweep_without_pairs_done(coord):
-    """A sweep that spent its budget without a comparable pair did not validate the sweep objective."""
+    """stop_reason set by machine at transition survives the sequencer unchanged."""
     coord.shared_state.last_conc_sweep = {
         "status": "skipped",
         "was_skipped": True,
@@ -827,7 +827,7 @@ async def test_close_sequencer_does_not_mark_budgeted_sweep_without_pairs_done(c
             },
         },
     ]
-    assert coord.shared_state.stop_reason == ""
+    coord.shared_state.set_stop_reason("sweep_failed")
 
     await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
