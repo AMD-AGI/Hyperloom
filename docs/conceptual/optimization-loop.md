@@ -261,8 +261,8 @@ look very different from Orchestration's side:
   `kernel_agent` task, which holds `server_lifecycle`, `workspace_mutation` and
   `benchmark_lane` for the whole pipeline. Under GEAK it runs a single
   whole-pipeline GEAK e2e run, which then sets the
-  `skip_to_sweep` escalate hint. When the run produces no win, `exit_normal_kernel`
-  honours the hint immediately and the phase closes without Orchestration ever
+  `skip_to_sweep` escalate hint. When the run produces no win, the phase machine
+  consumes the hint immediately and the phase closes without Orchestration ever
   taking a turn in it.
 - **On a GEAK win**, the same `kernel_agent` task re-measures the candidate on
   the orchestrator's own harness under the lanes it already holds, and writes
