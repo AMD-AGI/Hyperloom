@@ -2076,12 +2076,11 @@ class KernelPhase(CoordinatorCollaborator):
                 provenance=provenance,
                 rejection_reason="overlay_not_proven_loaded",
             )
-        if base > 0:
-            self._coord.writeback.validate(
-                measured,
-                graded_measurement,
-                source="geak_e2e_promote",
-            )
+        self._coord.writeback.validate(
+            measured,
+            graded_measurement,
+            source="geak_e2e_promote",
+        )
         self.shared_state.geak_pending = {}
         return True
 

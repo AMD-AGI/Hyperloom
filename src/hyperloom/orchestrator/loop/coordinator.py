@@ -374,9 +374,7 @@ class Coordinator:
         return r
 
     def _collaborator(self, attr: str, factory):
-        """Lazily build + cache a collaborator object (like ``router``/``writeback``); works for
-        ``Coordinator.__new__`` test doubles too (uses ``__dict__``).
-        """
+        """Lazily build + cache a collaborator object; works for ``Coordinator.__new__`` test doubles too (uses ``__dict__``)."""
         obj = self.__dict__.get(attr)
         if obj is None:
             obj = factory(self)
@@ -711,6 +709,7 @@ class Coordinator:
             log.exception("phase advance before reactors failed")
             self._record_coordinator_exception(stage="advance_phase_pre_reactor", exc=exc)
         in_closing = bool(self.shared_state.closing_phase)
+        self.conversation._refresh_target_gap_pct()
         # One reactor + dispatcher pass; during closing skip LLM passes.
         if not in_closing:
             for name in self._tick_roles:
@@ -887,7 +886,6 @@ class Coordinator:
     ) -> str:
         """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason."""
         objective = objective or TimeOnlyObjective()
-        # Stash so _compose_prompt can update target_gap_pct.
         self._current_objective = objective
         # A dedicated thread reading the interpreter's wakeup pipe, not a loop
         # callback: a TERM has to be recorded while the loop is busy.
@@ -1035,8 +1033,6 @@ class Coordinator:
         """Run one reactor turn for ``agent_name`` and route its intents."""
         backend = self.backends[agent_name]
         sys_prompt = await self.conversation._load_system_prompt(agent_name)
-        if agent_name == "orchestration":
-            self.conversation._refresh_target_gap_pct()
         prompt = await self.conversation._compose_prompt(agent_name)
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
@@ -1108,6 +1104,10 @@ class Coordinator:
         for intent in result.intents:
             await self.router.handle_intent(agent_name, intent)
         await self.conversation._advance_rendered_cursor(agent_name)
+        if agent_name == "orchestration":
+            state = self.shared_state
+            state.last_discarded_escalate_hint = ""
+            state.last_discarded_escalate_hint_ts = ""
         self.shared_state.agent_last_active[agent_name] = time.time()
 
     def _trace_mcp_setup(self, *, agent_name: str, backend: Backend) -> None:

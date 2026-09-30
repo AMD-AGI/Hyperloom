@@ -32,7 +32,6 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_PRECISION,
 )
 from ..session.paths import _SESSION_SKELETON
-from ..session.session_paths import agent_prompt_snapshot
 from .model_gate import _load_model_arch, _load_model_config_tags
 from ..model_config_utils import summarize_model_config
 
@@ -309,18 +308,17 @@ def _snapshot_system_prompts(
     orchestration_phase: str = "",
     macro_cycle: int = 0,
 ) -> None:
-    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.snapshot.md``.
+    """Persist each agent's effective system prompt via the shared snapshot writer.
 
-    The orchestration role additionally writes a cycle-scoped copy (``system_prompt.cN[.PHASE].snapshot.md``).
+    The orchestration role additionally writes a phase-scoped copy when ``orchestration_phase`` is set.
     """
+    from hyperloom.orchestrator.prompts import write_prompt_snapshot
+
     for role, body in prompts.items():
-        target = agent_prompt_snapshot(session_dir, role, macro_cycle=macro_cycle)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(body or "(empty)", encoding="utf-8")
+        write_prompt_snapshot(session_dir, role, body, macro_cycle=macro_cycle)
     boot_phase = orchestration_phase.strip()
     if boot_phase and "orchestration" in prompts:
-        scoped = agent_prompt_snapshot(session_dir, "orchestration", phase=boot_phase, macro_cycle=macro_cycle)
-        scoped.write_text(prompts["orchestration"] or "(empty)", encoding="utf-8")
+        write_prompt_snapshot(session_dir, "orchestration", prompts["orchestration"], phase=boot_phase, macro_cycle=macro_cycle)
 
 
 def _print_session_skeleton(session_dir: Path) -> None:
