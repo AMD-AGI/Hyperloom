@@ -6519,7 +6519,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "resume: re-entering KERNEL GEAK delegation (no completion "
             "evidence on the current phase row); recover-from-disk or re-run."
         )
-        await self._coord.phase_kernel._on_enter_kernel(from_phase="resume")
+        from hyperloom.orchestrator.phases.machine import Transition
+        await self._coord.phase_kernel._on_enter_kernel(Transition(from_phase="resume", to_phase="KERNEL_AGENT", reason="resume", evidence={}, loopback=False))
 
     @property
     def resumed_from(self) -> dict[str, Any]:

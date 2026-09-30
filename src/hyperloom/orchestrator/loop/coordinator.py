@@ -724,6 +724,8 @@ class Coordinator:
             await self.dispatcher._pump_dispatcher_once()
         if not in_closing:
             phase = (self.shared_state.phase or "").strip().upper()
+            if not self.phase_machine._pump_table:
+                self.phase_machine._build_dispatch_tables()
             pump = self.phase_machine._pump_table.get(phase)
             if pump is not None:
                 await pump()
