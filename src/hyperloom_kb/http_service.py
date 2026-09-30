@@ -15,7 +15,7 @@ import sqlite3
 import threading
 import uuid
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
@@ -493,6 +493,9 @@ class ExperienceHTTPService:
                 if contribution.experience_id == reference.id
             ]
             experiences.append(item)
+        contents: list[JsonValue] = [
+            {"ref": ref, "bytes": len(text.encode()), "content": text} for ref, text in external.items()
+        ]
         response.update(
             {
                 "status": result.status.value,
@@ -501,9 +504,7 @@ class ExperienceHTTPService:
                 "experiences": experiences,
                 "rendered_count": len(result.rendered_refs),
                 "warnings": list(result.warnings),
-                "contents": [
-                    {"ref": ref, "bytes": len(text.encode()), "content": text} for ref, text in external.items()
-                ],
+                "contents": contents,
             }
         )
         return response
@@ -675,7 +676,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         except (ValueError, StorageContractError) as exc:
             self._write(HTTPStatus.BAD_REQUEST, {"error": "invalid_request", "detail": str(exc)})
         except Exception as exc:
-            log.exception("Experience service request failed: %s %s", self.command, self.path)
+            path = self.path.replace("\r", "").replace("\n", "")
+            log.exception("Experience service request failed: %s %s", self.command, path)
             self._write(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {"error": "internal_error", "detail": type(exc).__name__},
@@ -751,12 +753,8 @@ def main(argv: list[str] | None = None) -> int:
         ),
         flush=True,
     )
-    try:
+    with server, suppress(KeyboardInterrupt):
         server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
     return 0
 
 

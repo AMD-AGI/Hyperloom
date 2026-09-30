@@ -11,14 +11,11 @@ from collections import Counter
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 from hyperloom_kb.remote import RemoteClient, RemoteClientError, RemoteConfig
-from hyperloom_kb.schema import Experience, JsonValue
+from hyperloom_kb.schema import Experience, ExperienceDeclaration, JsonValue
 from hyperloom_kb.storage import StorageContractError
-
-if TYPE_CHECKING:
-    from hyperloom_kb.http_service import ExperienceHTTPService
 
 GLOBAL_URL_ENV = "HYPERLOOM_GLOBAL_KB_URL"
 GLOBAL_TOKEN_ENV = "HYPERLOOM_GLOBAL_KB_TOKEN"
@@ -126,10 +123,27 @@ def _record_id(item: Mapping[str, Any]) -> str:
     return str(experience.get("id") or "") if isinstance(experience, Mapping) else ""
 
 
+class SyncedService(Protocol):
+    """What sync needs of the Experience service it pushes from and pulls into."""
+
+    @property
+    def schema_refs(self) -> tuple[str, ...]:
+        """Every schema this service holds."""
+
+    def declaration_for(self, schema_ref: str) -> ExperienceDeclaration:
+        """The declaration registered for ``schema_ref``."""
+
+    def write(self, experience: Experience) -> dict[str, JsonValue]:
+        """Store one Experience; the result carries its ``status``."""
+
+    def records_after(self, after: int, limit: int) -> tuple[tuple[tuple[int, Experience], ...], int, bool]:
+        """Up to ``limit`` records written after sequence ``after``, the next cursor, and whether more remain."""
+
+
 class GlobalSync:
     """One service's sync with its global KB; one push or pull batch runs at a time."""
 
-    def __init__(self, service: ExperienceHTTPService, ledger: SyncLedger, target: RemoteClient | None) -> None:
+    def __init__(self, service: SyncedService, ledger: SyncLedger, target: RemoteClient | None) -> None:
         self._service = service
         self._ledger = ledger
         self._target = target
@@ -212,5 +226,6 @@ __all__ = [
     "GlobalSync",
     "SyncLedger",
     "SyncUnavailable",
+    "SyncedService",
     "global_config_from_env",
 ]

@@ -40,7 +40,8 @@ class EvaluationError(ValueError):
 
 
 class Expression(Protocol):
-    def evaluate(self, scope: Scope) -> Any: ...
+    def evaluate(self, scope: Scope) -> Any:
+        """The value this expression takes in ``scope``."""
 
 
 def is_present(value: Any) -> bool:

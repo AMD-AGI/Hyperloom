@@ -53,10 +53,12 @@ class CollectionTarget(Protocol):
     """What collection needs of a configured Experience KB."""
 
     @property
-    def enabled(self) -> bool: ...
+    def enabled(self) -> bool:
+        """Whether the KB is configured to take writes."""
 
     @property
-    def schema_ref(self) -> str: ...
+    def schema_ref(self) -> str:
+        """The schema this KB's Experiences are written under."""
 
     def begin(
         self,
@@ -72,7 +74,8 @@ class CollectionTarget(Protocol):
         parent_id: str = "",
         supersedes: str = "",
         created_at: datetime | None = None,
-    ) -> Any: ...
+    ) -> Any:
+        """Open the Experience session for ``run_id``/``seq``, through which its decision and outcome are recorded."""
 
 
 @dataclass(frozen=True)

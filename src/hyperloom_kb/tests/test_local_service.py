@@ -19,7 +19,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-import hyperloom_kb
 from hyperloom_kb import (
     PACKAGED_DECLARATION,
     ExperienceDeclaration,
@@ -181,7 +180,7 @@ def test_a_service_serving_an_older_declaration_is_restarted_with_the_packaged_o
     older = subprocess.Popen(
         [sys.executable, "-m", "hyperloom_kb", "--declaration", str(declaration)]
         + ["--home", str(tmp_path / "older"), "--port", str(port)],
-        env={**env, "HYPERLOOM_KB_TOKEN": TOKEN, "PYTHONPATH": str(Path(hyperloom_kb.__file__).parent.parent)},
+        env={**env, "HYPERLOOM_KB_TOKEN": TOKEN, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

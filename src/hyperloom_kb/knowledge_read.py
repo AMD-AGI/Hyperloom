@@ -109,8 +109,6 @@ PLANNER_TOOL_INPUT_SCHEMA: dict[str, JsonValue] = {
     },
 }
 PLANNER_PROMPT_HASH = hashlib.sha256(PLANNER_SYSTEM_PROMPT.encode()).hexdigest()
-_PLAN_ID_PREFIX = "query-plan:sha256:"
-_PLANNER_CONFIG_PREFIX = "planner-config:sha256:"
 _SCHEMA_REF_PREFIX = "schema:sha256:"
 
 
