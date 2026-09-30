@@ -1569,13 +1569,9 @@ class IntentRouter:
 
     async def _handle_update_state(self, source: str, intent: Intent) -> None:
         """Apply agent-requested SharedState changes and report the result."""
-        # Apply to persistent SharedState (PolicyGate enforces core-field writes).
-        applied = self.shared_state.apply_changes(
-            intent.payload["changes"],
-            allow_core=False,
-        )
-        if applied:
-            self.shared_state.save(self.session_dir)
+        changes = intent.payload["changes"]
+        self.shared_state.apply_agent_update(changes)
+        self.shared_state.save(self.session_dir)
         await self.bus.append_and_seq(
             Message.new(
                 source,
@@ -1583,8 +1579,7 @@ class IntentRouter:
                 "observation",
                 {
                     "kind": "update_state",
-                    "changes": applied,
-                    "rejected": sorted(set(intent.payload["changes"]) - set(applied)),
+                    "changes": dict(changes),
                 },
             )
         )

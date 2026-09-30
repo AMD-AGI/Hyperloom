@@ -73,7 +73,6 @@ class AgentRole:
     api_key_env: str
     allowed_intents: frozenset[IntentType]
     can_delegate_side_effects: bool = False
-    can_mutate_core_state: bool = False
     no_tools: bool = False  # Codex roles
     system_prompt_filename: str = ""
     prompt_driven: bool = True  # False = deterministic role; no system prompt is loaded
@@ -98,7 +97,6 @@ def default_role_registry() -> dict[str, AgentRole]:
             api_key_env=DEFAULT_CLAUDE_API_KEY_ENV,
             allowed_intents=_ORCHESTRATION_INTENTS,
             can_delegate_side_effects=True,
-            can_mutate_core_state=False,
             no_tools=False,
         ),
         "critic": AgentRole(
@@ -108,7 +106,6 @@ def default_role_registry() -> dict[str, AgentRole]:
             api_key_env=DEFAULT_CODEX_API_KEY_ENV,
             allowed_intents=_CRITIC_INTENTS,
             can_delegate_side_effects=False,
-            can_mutate_core_state=False,
             no_tools=True,  # Codex no-tools
         ),
     }
