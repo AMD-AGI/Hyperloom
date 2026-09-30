@@ -642,11 +642,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-allow-mm-text-fallback to fail-fast on text-coercible "
         "models too. Default: enabled.",
     )
-    # Retired with the kernel LLM role; accepted as no-ops so a launcher or operator template that still passes them
-    # does not exit 2.
-    for _retired in ("--kernel-codex", "--kernel-claude"):
-        opt.add_argument(_retired, action="store_true", default=False, help=argparse.SUPPRESS)
-    opt.add_argument("--kernel-prompt", type=str, default=None, help=argparse.SUPPRESS)
     opt.add_argument(
         "--no-kernel",
         action="store_true",
