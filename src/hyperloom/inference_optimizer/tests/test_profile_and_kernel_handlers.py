@@ -1220,7 +1220,7 @@ def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
     import sys
     from pathlib import Path as _Path
 
-    _tools_dir = str(_Path(__file__).resolve().parents[3] / "agents" / "kernel" / "tools")
+    _tools_dir = str(_Path(__file__).resolve().parents[2] / "agents" / "kernel" / "tools")
     _added = _tools_dir not in sys.path
     if _added:
         sys.path.insert(0, _tools_dir)
