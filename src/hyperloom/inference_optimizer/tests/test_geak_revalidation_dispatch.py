@@ -303,7 +303,7 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     state.baseline_double_run = False
     state.current_best = {"tput": 110.0, **current}
     state.geak_result = {"schema_version": 2, "status": "ok", "accepted_config": accepted}
-    enqueued = coordinator._geak_rebench_params(reason="launch_controls_regression")
+    enqueued = coordinator.writeback._geak_rebench_params(reason="launch_controls_regression")
     task = await coordinator.tasks.create(kind="explore", params=enqueued, idempotency_key="geak-revalidate-c0")
     calls = []
     fingerprints = []
@@ -363,13 +363,13 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     if current.get("extra_envs", {}).get("SGLANG_USE_AITER"):
         assert envs["SGLANG_USE_AITER"] == "1"
     assert len(result["winners"]) == 1
-    assert coordinator._promote_geak_from_candidate(
+    assert coordinator.phase_kernel._promote_geak_from_candidate(
         state.geak_result, measured_tput=120.0, measurement_provenance=result["best_variant"], overlay_loaded=False
     )
     state.geak_result = {}
     state.save(coordinator.session_dir)
     coordinator.shared_state = SharedState.load_or_init(coordinator.session_dir)
-    resumed = await coordinator._enqueue_internal_stack_rebench(reason="launch_controls_resume")
+    resumed = await coordinator.writeback._enqueue_internal_stack_rebench(reason="launch_controls_resume")
     resume_task = await coordinator.tasks.get(str(resumed["task_id"]))
     await ExploreExecutor(session_dir=coordinator.session_dir)(
         SimpleNamespace(task=resume_task, extra={"shared_state": coordinator.shared_state})
