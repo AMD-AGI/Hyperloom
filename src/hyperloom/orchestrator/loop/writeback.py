@@ -6468,8 +6468,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
         driven purely by whether THIS KERNEL phase's history row already carries
         a ``geak`` completion record, so it self-classifies:
 
-          * completed-this-phase -> only re-arm (+persist) the ``skip_to_sweep``
-            hint the delegation sets, so the phase machine winds down to SWEEP
+          * completed-this-phase -> the kernel work is done; the phase machine
+            exits KERNEL automatically on the next tick (agent settled, no pending work)
             with no e2e re-run;
           * not-completed -> re-enter ``_on_enter_kernel``; its own entry guard
             promotes an existing OK ``result.json`` (crash-before-handback) and
