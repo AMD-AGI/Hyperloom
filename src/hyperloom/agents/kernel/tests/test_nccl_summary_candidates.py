@@ -253,7 +253,7 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         self.assertTrue(cand["source_file"].endswith("custom_all_reduce.cuh"))
         self.assertEqual(cand["source_line"], 1)
         self.assertEqual(cand["source_function"], "cross_device_reduce_2stage")
-        self.assertEqual(cand["source_resolution_method"], "nccl_summary_symbol_lookup")
+        self.assertEqual(cand["source_resolution_method"], "symbol_index")
         self.assertEqual(cand["candidate_source"], "nccl_summary")
         self.assertTrue(cand["is_multigpu"])
         self.assertEqual(cand["tracelens_category"], "collective")

@@ -199,6 +199,16 @@ class _RenderMixin:
             f"variant={self.current_best.get('variant_name', '?')}"
         )
 
+    def to_latency_budget_summary(self) -> str:
+        """One line stating the latency budget; empty when unset. Refusals surface in the existing ledgers."""
+        budget = float(getattr(self, "latency_budget_ms", 0.0))
+        if budget <= 0:
+            return ""
+        return (
+            f"{budget:g} ms mean end-to-end: a KEEP over it, or with no latency reported, is refused "
+            "(reason latency_budget_exceeded / latency_unmeasured in explore_search and the journal)"
+        )
+
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
         """Render the ``=== Warm start ===`` prompt section from the T0 warm-start context.
 
