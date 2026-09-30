@@ -18,10 +18,11 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
@@ -71,8 +72,9 @@ MAX_LIST_LIMIT = 500
 MAX_EXPORT_LIMIT = 100
 READ_POLICY_VERSION = "shared-experience-read@v1"
 DEFAULT_HOME = Path("~/.local/share/hyperloom-kb").expanduser()
-_MAX_REQUEST_BYTES = 2 * 1024 * 1024
-_READ_FIELDS = frozenset({"decision", "context", "outcome", "limit", "schema_ref"})
+# A transport guard, not a data policy: Experiences of any size are stored.
+_MAX_REQUEST_BYTES = 256 * 1024 * 1024
+_READ_FIELDS = frozenset({"decision", "context", "outcome", "limit", "schema_ref", "content_inline_limit"})
 _WRITE_FIELDS = frozenset({"experience", "declaration"})
 
 
@@ -404,13 +406,20 @@ class ExperienceHTTPService:
         outcome: str | None = None,
         limit: int = DEFAULT_READ_LIMIT,
         schema_ref: str | None = None,
+        content_inline_limit: int | None = None,
     ) -> dict[str, JsonValue]:
-        """Search one schema's Experiences, this service's default schema unless ``schema_ref`` names another."""
+        """Search one schema's Experiences, this service's default schema unless ``schema_ref`` names another.
+
+        With ``content_inline_limit``, a ``change.content`` over that many bytes is rendered as a reference and its
+        text is returned under ``contents``.
+        """
 
         decision = _required_text(decision, "decision")
         declaration = self.declaration_for(schema_ref or self.declaration.schema_ref)
         selected_outcome = self._outcome(outcome, declaration)
         limit = _bounded_int(limit, "limit", minimum=1, maximum=MAX_READ_LIMIT)
+        if content_inline_limit is not None:
+            content_inline_limit = _bounded_int(content_inline_limit, "content_inline_limit", minimum=0)
         view = self._views[declaration.schema_ref]
         if selected_outcome != MIXED_OUTCOME:
             view = QueryViewBuilder().restrict(
@@ -433,9 +442,11 @@ class ExperienceHTTPService:
             "eligible_count": eligible_count,
             "rendered_count": 0,
             "warnings": [],
+            "contents": [],
         }
         if eligible_count == 0:
             return response
+        external: dict[str, str] = {}
 
         views = InMemoryQueryViewStore()
         views.publish_view(view)
@@ -454,7 +465,7 @@ class ExperienceHTTPService:
                 self._mirror,
                 views,
                 providers=(LexicalFuzzyProvider(self._mirror),),
-                renderer=render_complete_experience,
+                renderer=partial(render_complete_experience, inline_limit=content_inline_limit, external=external),
             ),
             provider_refs=provider_refs,
         )
@@ -490,6 +501,9 @@ class ExperienceHTTPService:
                 "experiences": experiences,
                 "rendered_count": len(result.rendered_refs),
                 "warnings": list(result.warnings),
+                "contents": [
+                    {"ref": ref, "bytes": len(text.encode()), "content": text} for ref, text in external.items()
+                ],
             }
         )
         return response
@@ -632,6 +646,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         maximum=MAX_READ_LIMIT,
                     ),
                     schema_ref=None if schema_ref is None else _required_text(schema_ref, "schema_ref"),
+                    content_inline_limit=cast(int | None, body.get("content_inline_limit")),
                 ),
             )
             return

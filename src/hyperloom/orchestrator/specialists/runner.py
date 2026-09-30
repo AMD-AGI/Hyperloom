@@ -31,6 +31,7 @@ from hyperloom.common.timeutil import now_iso
 
 from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, runs_dir, specialist_intel_path
 from ..roles.base import BackendError, LLMCallFailed
+from ..state.experience_citations import normalize_citations, shown_ids
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
@@ -1473,6 +1474,13 @@ class SpecialistRunner:
         for _proposal in done_payload.get("proposal_set") or []:
             if isinstance(_proposal, dict):
                 _proposal.setdefault("scope", prep.profile.scope)
+        # A specialist may cite only the Experiences its dispatch read showed it.
+        shown = shown_ids((ctx.task.params or {}).get("kb_rendered_refs"))
+        for _proposal in done_payload.get("proposal_set") or []:
+            if isinstance(_proposal, dict) and "experience_citations" in _proposal:
+                _proposal["experience_citations"] = normalize_citations(_proposal["experience_citations"], shown)
+        if "experience_citations" in done_payload:
+            done_payload["experience_citations"] = normalize_citations(done_payload["experience_citations"], shown)
 
         # Universal patch-safety gate: drop non-diff/escaping patches, git-ground
         # the rest, and scan for smuggled claims. Grounding is per set, not per

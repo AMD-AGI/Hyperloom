@@ -9,6 +9,8 @@ import hashlib
 import json
 import logging
 import os
+import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,9 @@ log = logging.getLogger(__name__)
 
 _FRAMEWORK_DECISION = "Select the next framework optimization to benchmark."
 _SPECIALIST_DECISION = "Propose framework optimizations for this specialist investigation."
+# A change.content over this many bytes reaches the prompt as a file under the session, not inline.
+CONTENT_INLINE_LIMIT = 2048
+CONTENT_DIR = Path("experience_kb") / "contents"
 
 
 def _json_safe(value: Any) -> Any:
@@ -50,6 +55,65 @@ def _bottleneck(state: Any) -> str:
         return str(state.current_top_bottleneck() or "").strip()
     except Exception:  # noqa: BLE001 — optional state helper
         return ""
+
+
+def _write_once(path: Path, text: str) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _patch_files(directory: Path, content: str) -> list[Path]:
+    """Write each patch of a ``hyperloom-sbd-v6`` source change as its own file, ready to apply."""
+
+    try:
+        value = json.loads(content)
+    except ValueError:
+        return []
+    patches = value.get("patches") if isinstance(value, dict) else None
+    paths: list[Path] = []
+    for index, patch in enumerate(patches if isinstance(patches, list) else [], start=1):
+        text = patch.get("content") if isinstance(patch, dict) else None
+        if not isinstance(text, str):
+            continue
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(str(patch.get("path") or "")).name) or "change.patch"
+        path = directory / f"{index}-{name}"
+        _write_once(path, text)
+        paths.append(path)
+    return paths
+
+
+def _materialize_contents(root: Path, contents: Iterable[Mapping[str, Any]]) -> str:
+    """Write each ``change.content`` a read referenced instead of inlining, and return the block's file legend."""
+
+    lines: list[str] = []
+    for item in contents:
+        ref, text = str(item.get("ref") or ""), item.get("content")
+        digest = ref.removeprefix("sha256:")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest) or not isinstance(text, str):
+            continue
+        path = root / f"{digest}.txt"
+        try:
+            _write_once(path, text)
+            patches = _patch_files(root / digest, text)
+        except OSError:
+            log.warning("Experience KB content %s could not be written under %s", ref, root, exc_info=True)
+            lines.append(f"- {ref} ({len(text.encode())} bytes): not available in this session")
+            continue
+        lines.append(f"- {ref} ({len(text.encode())} bytes): {path}")
+        lines.extend(f"  - patch: {patch}" for patch in patches)
+    if not lines:
+        return ""
+    return "\n".join(
+        [
+            "Each `<external content sha256:...>` above is that Experience's complete change.content, "
+            "kept out of this prompt because of its size. Read its file when you need the change itself:",
+            *lines,
+        ]
+    )
 
 
 @dataclass(frozen=True)
@@ -226,12 +290,15 @@ class ExperienceKBIntegration:
         cached = self._by_context.get(context_hash)
         if cached is not None:
             return cached
-        result = self.client.read(decision, context, schema_ref=self.schema_ref)
+        result = self.client.read(
+            decision, context, schema_ref=self.schema_ref, content_inline_limit=CONTENT_INLINE_LIMIT
+        )
+        legend = _materialize_contents(self.session_dir / CONTENT_DIR, result.contents)
         evidence = ExperienceKBEvidence(
             tick=tick,
             read_id=result.read_id,
             status=result.status,
-            prompt_block=result.prompt_block,
+            prompt_block="\n\n".join(part for part in (result.prompt_block, legend) if part),
             rendered_refs=tuple(item.to_dict() for item in result.rendered_refs),
             warnings=tuple(result.warnings),
             experiences=tuple(dict(item) for item in result.experiences),

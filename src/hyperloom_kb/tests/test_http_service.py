@@ -259,6 +259,38 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
     }
 
 
+def test_a_read_can_reference_large_change_content_instead_of_inlining_it(tmp_path: Path) -> None:
+    schema = _declaration()
+    large = replace(
+        _experience(schema, seq=0, knob="page_size"),
+        change=Change({"knob": "page_size"}, "Patch page size.", kind="source_patch", content="+optimized\n" * 400),
+    )
+    assert large.change is not None
+    patch = large.change.content
+    small = replace(
+        _experience(schema, seq=1, knob="chunk"),
+        change=Change({"knob": "chunk"}, "Chunk.", kind="config", content="--chunk 8192"),
+    )
+    ref = "sha256:" + hashlib.sha256(patch.encode()).hexdigest()
+
+    with RunningServer(_app(tmp_path / "service", schema)) as url:
+        client = _client(url, tmp_path)
+        for experience in (large, small):
+            client.publish(experience)
+        referenced = client.read(DECISION, _read_context(), content_inline_limit=2048)
+        inline = client.read(DECISION, _read_context())
+
+    placeholder = f"<external content {ref}, {len(patch.encode())} bytes>"
+    record = _record_json(referenced.prompt_block, large.id)
+    assert record["change"]["content"] == placeholder
+    assert {**record, "change": {**record["change"], "content": patch}} == large.to_dict()
+    assert _record_json(referenced.prompt_block, small.id) == small.to_dict()
+    assert referenced.contents == ({"ref": ref, "bytes": len(patch.encode()), "content": patch},)
+    assert patch not in referenced.prompt_block
+    assert _record_json(inline.prompt_block, large.id) == large.to_dict()
+    assert inline.contents == ()
+
+
 def test_read_defaults_to_ten_mixed_and_filters_by_outcome(tmp_path: Path) -> None:
     schema = _declaration()
     app = _app(tmp_path / "service", schema)

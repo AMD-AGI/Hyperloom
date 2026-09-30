@@ -333,6 +333,9 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
                     "args_mode": "replace",
                     "note": "Increase the scheduler batch to reduce dispatch overhead.",
                     "reasoning_origin": "action_payload.reasoning",
+                    "experience_citations": [
+                        {"id": "exp-00000000000000000000000000000001", "stance": "adapt", "claim": "Larger batch."}
+                    ],
                 },
                 "gates": [
                     {
@@ -405,8 +408,12 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
     assert keep["reasoning"] == "Increase the scheduler batch to reduce dispatch overhead."
     assert keep["reasoning_origin"] == "action_payload.reasoning"
     assert keep["proposal_ref"] == "proposal-config-1"
+    assert keep["experience_citations"] == [
+        {"id": "exp-00000000000000000000000000000001", "stance": "adapt", "claim": "Larger batch."}
+    ]
 
     killed = attempts["fp2"]
+    assert killed["experience_citations"] == []
     assert killed["outcome"] == "KILLED_OVERTIME"
     assert killed["adopted"] is False
     # An anchor with nothing measured against it, so there is no gain to divide back out.
@@ -706,9 +713,11 @@ def test_a_source_proposal_keeps_every_kb_read_that_shaped_it(session_dir: Path)
         "specialist_task_id": "t-auth-1",
         "framework_agent_candidate_id": "https://x/pr/1",
     }
+    citation = {"id": authoring_ref["id"], "stance": "adapt", "claim": "Same fusion, rebased onto this version."}
     _forward_integrate_source(
         {"domain": "serving_specialist", "kb_read_id": "read-authoring", "kb_rendered_refs": [authoring_ref]},
         integrate_params,
+        {"experience_citations": [citation]},
     )
     coord.phase_framework._record_framework_agent_authored_outcome(
         task=SimpleNamespace(task_id="t-int-1", kind="integrate_patch", params=integrate_params),
@@ -721,6 +730,7 @@ def test_a_source_proposal_keeps_every_kb_read_that_shaped_it(session_dir: Path)
     [proposal] = [row for row in ext["proposals"] if row["proposal_id"] == attempt["proposal_ref"]]
     assert proposal["rendered_refs"] == [discovery_ref, authoring_ref]
     assert proposal["kb_read_id"] == "read-authoring"
+    assert attempt["experience_citations"] == [citation]
 
 
 def _authored_outcome(coord, result: dict) -> dict:

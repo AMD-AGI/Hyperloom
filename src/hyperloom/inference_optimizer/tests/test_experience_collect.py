@@ -65,7 +65,8 @@ def test_patch_material_keeps_only_publishable_session_patches(tmp_path: Path) -
     (session / "patches").mkdir(parents=True)
     kept = session / "patches" / "a.diff"
     kept.write_text("+a = 2\n")
-    (session / "patches" / "big.diff").write_text("+" * (129 * 1024))
+    big = "+" * (3 * 1024 * 1024)
+    (session / "patches" / "big.diff").write_text(big)
     (session / "patches" / "secret.diff").write_text("+OPENAI_API_KEY=sk-abcdefghijkl\n")
     (session / "patches" / "binary.diff").write_bytes(b"\xff\xfe")
     outside = tmp_path / "outside.diff"
@@ -86,7 +87,8 @@ def test_patch_material_keeps_only_publishable_session_patches(tmp_path: Path) -
     )
 
     assert material == [
-        {"path": "patches/a.diff", "sha256": hashlib.sha256(b"+a = 2\n").hexdigest(), "content": "+a = 2\n"}
+        {"path": "patches/a.diff", "sha256": hashlib.sha256(b"+a = 2\n").hexdigest(), "content": "+a = 2\n"},
+        {"path": "patches/big.diff", "sha256": hashlib.sha256(big.encode()).hexdigest(), "content": big},
     ]
 
 

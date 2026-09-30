@@ -43,6 +43,7 @@ from ..state.shared_state import (
     inject_stack_base_params,
     is_valid_escalate_hint,
 )
+from ..state.experience_citations import normalize_citations, shown_ids
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_INTENT,
@@ -109,16 +110,29 @@ def _stamp_kb_exposure(
     *,
     source: str,
 ) -> None:
-    """Attach the current orchestration read to proposals emitted by that tick."""
-    evidence = getattr(router._coord, "_kb_last_read", None)
-    if (
-        source != "orchestration"
-        or evidence is None
-        or int(getattr(evidence, "tick", -1)) != int(getattr(router.shared_state, "tick", 0) or 0)
-    ):
+    """Attach the current orchestration read to proposals emitted by that tick, and the citations it supports."""
+    if source != "orchestration":
         return
-    payload["kb_read_id"] = str(getattr(evidence, "read_id", "") or "")
-    payload["kb_rendered_refs"] = list(getattr(evidence, "rendered_refs", ()) or ())
+    evidence = getattr(router._coord, "_kb_last_read", None)
+    current = evidence is not None and int(getattr(evidence, "tick", -1)) == int(
+        getattr(router.shared_state, "tick", 0) or 0
+    )
+    if current:
+        payload["kb_read_id"] = str(getattr(evidence, "read_id", "") or "")
+        payload["kb_rendered_refs"] = list(getattr(evidence, "rendered_refs", ()) or ())
+    params = payload.get("params")
+    if not isinstance(params, dict) or not isinstance(params.get("grid"), list):
+        return
+    shown = shown_ids(payload.get("kb_rendered_refs") if current else ())
+    payload["params"] = {
+        **params,
+        "grid": [
+            {**row, "experience_citations": normalize_citations(row.get("experience_citations"), shown)}
+            if isinstance(row, dict) and "experience_citations" in row
+            else row
+            for row in params["grid"]
+        ],
+    }
 
 
 def _variant_review_rows(

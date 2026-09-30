@@ -243,6 +243,13 @@ label such as `llm_direct` is not a substitute for reasoning. Legacy `note`,
 `reason`, and `rationale` fields remain readable, but new proposals emit
 `reasoning`.
 
+When an Experience from this tick's Experience KB block shaped a variant, cite
+it in that variant's `experience_citations`: `{id, stance, claim}`, where
+`stance` is `adopt` (you run its change), `adapt` (you run it modified),
+`avoid` (you leave it out because of its outcome), or `contrast` (you chose a
+different change designed against it), and `claim` is one sentence on why.
+Cite only Experience ids shown in this tick's block; other ids are discarded.
+
 **GPU specialists** hold the same cards as the serving stack and acquire
 `gpu_research_lane` (mutually exclusive with benchmark/profile/serving
 lanes). Use them opportunistically in the idle research window — while

@@ -1,8 +1,6 @@
 """Configuration-driven Experience collection from producer logs."""
 
 from hyperloom_kb.collect.engine import (
-    MAX_CHANGE_CONTENT_BYTES,
-    MAX_EXPERIENCE_BYTES,
     REPORT_FORMAT,
     CollectedExperience,
     CollectionTarget,
@@ -25,8 +23,6 @@ from hyperloom_kb.collect.mapping import (
 __all__ = [
     "BUILTINS",
     "MAPPING_FORMAT",
-    "MAX_CHANGE_CONTENT_BYTES",
-    "MAX_EXPERIENCE_BYTES",
     "REPORT_FORMAT",
     "CollectMapping",
     "CollectReport",

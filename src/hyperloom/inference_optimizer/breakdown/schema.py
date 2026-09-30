@@ -1798,6 +1798,16 @@ class V6FrameworkPatch(TypedDict, total=False):
     content: str
 
 
+class V6ExperienceCitation(TypedDict, total=False):
+    """An Experience the deciding agent was shown and says shaped this attempt.
+
+    ``stance`` is ``adopt``, ``adapt``, ``avoid``, or ``contrast``; ``claim`` is its reason, as it wrote it."""
+
+    id: str
+    stance: str
+    claim: str
+
+
 class V6FrameworkProposal(TypedDict, total=False):
     """One thing this entry pursued, whichever producer raised it.
 
@@ -1954,6 +1964,7 @@ class V6FrameworkAttempt(TypedDict, total=False):
     patch_material: list[V6FrameworkPatch]
     reasoning: str
     reasoning_origin: str
+    experience_citations: list[V6ExperienceCitation]
     target_files: list[str]
     accepted_kernels: list[str]
     measured_against: V6FrameworkStack
@@ -2664,6 +2675,7 @@ __all__ = [
     "V6FrameworkGate",
     "V6FrameworkLifecycleStep",
     "V6FrameworkMeasurement",
+    "V6ExperienceCitation",
     "V6FrameworkPatch",
     "V6FrameworkPlateauReading",
     "V6FrameworkPolicy",

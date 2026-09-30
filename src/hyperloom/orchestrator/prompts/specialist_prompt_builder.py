@@ -1587,8 +1587,12 @@ def _section_experience_kb(inp: SpecialistPromptInputs) -> list[str]:
         "## 4b. EXPERIENCE KB (measured outcomes from earlier sessions)",
         "",
         "Compare each Experience's identity and baseline configuration with Sections 2 and 3 "
-        + "before relying on it, and cite its id in a proposal's ``kb_evidence`` when it shaped "
-        + "that proposal.",
+        + "before relying on it. When one shaped a proposal, cite it in that proposal's "
+        + "``experience_citations``, or for a patch you wrote in the payload's top-level "
+        + "``experience_citations``: ``{id, stance, claim}`` with ``stance`` one of ``adopt`` "
+        + "(you did its change), ``adapt`` (you did it modified), ``avoid`` (you left it out "
+        + "because of its outcome), or ``contrast`` (you chose a different change designed "
+        + "against it), and ``claim`` one sentence on why. Only ids shown below are kept.",
         "",
         inp.experience_kb_block,
     ]
@@ -2217,9 +2221,10 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                             "kb_evidence": [],
                             "pr_evidence": [],
                             "source_evidence": [],
+                            "experience_citations": [],
                         }
                     ],
-                    **({"patches_written": []} if authors_patches else {}),
+                    **({"patches_written": [], "experience_citations": []} if authors_patches else {}),
                     "summary": "≤ 500 char overview of what you tried this round",
                     "confidence": 0.6,
                     "new_findings": [],

@@ -99,6 +99,8 @@ class RemoteReadResult:
     rendered_refs: tuple[RenderedRef, ...]
     warnings: tuple[str, ...]
     experiences: tuple[dict[str, JsonValue], ...] = ()
+    # ``{"ref", "bytes", "content"}`` for each ``change.content`` the prompt block references instead of inlining.
+    contents: tuple[dict[str, JsonValue], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -180,6 +182,7 @@ class RemoteClient:
         outcome: str | None = None,
         limit: int | None = None,
         schema_ref: str | None = None,
+        content_inline_limit: int | None = None,
     ) -> RemoteReadResult:
         body: dict[str, JsonValue] = {"decision": decision, "context": dict(context)}
         if outcome is not None:
@@ -188,12 +191,20 @@ class RemoteClient:
             body["limit"] = limit
         if schema_ref is not None:
             body["schema_ref"] = schema_ref
+        if content_inline_limit is not None:
+            body["content_inline_limit"] = content_inline_limit
         try:
             payload = self._request("POST", "/v1/read", body)
             refs = payload.get("rendered_refs")
             experiences = payload.get("experiences")
             warnings = payload.get("warnings")
-            if not isinstance(refs, list) or not isinstance(experiences, list) or not isinstance(warnings, list):
+            contents = payload.get("contents", [])
+            if not (
+                isinstance(refs, list)
+                and isinstance(experiences, list)
+                and isinstance(warnings, list)
+                and isinstance(contents, list)
+            ):
                 raise RemoteClientError("Experience read response is invalid")
             return RemoteReadResult(
                 read_id=str(payload.get("read_id") or ""),
@@ -202,6 +213,7 @@ class RemoteClient:
                 rendered_refs=tuple(RenderedRef.from_dict(item) for item in refs),
                 warnings=tuple(str(item) for item in warnings),
                 experiences=tuple(item for item in experiences if isinstance(item, dict)),
+                contents=tuple(item for item in contents if isinstance(item, dict)),
             )
         except (RemoteClientError, ValueError) as exc:
             return RemoteReadResult(

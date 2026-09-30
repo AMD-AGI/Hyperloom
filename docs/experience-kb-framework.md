@@ -19,6 +19,7 @@ session_breakdown.timeline[type=framework_agent].ext
   ├── proposals   reasoning, kb_read_id, rendered_refs
   └── attempts    measured_against, measurement, config_delta, gates, accuracy,
                   failure.attribution, reasoning, reasoning_origin,
+                  experience_citations,
                   patch_path, patches_applied, patches_reverted, patch_material
 ```
 
@@ -32,9 +33,9 @@ declared in `breakdown/schema.py` (`V6FrameworkAttempt`, `V6FrameworkProposal`).
   `candidate_caused` failures become Experiences.
 - **Patch material.** Source attempts record each session-local patch they
   applied or reverted as `{path, sha256, content}`, in the order `patch_path`,
-  `patches_applied`, `patches_reverted`. A patch outside the session, over
-  128 KiB, not UTF-8, or carrying a credential is left out, and an attempt with
-  no recorded patch is not published.
+  `patches_applied`, `patches_reverted`, whatever their size. A patch outside
+  the session, not UTF-8, or carrying a credential is left out, and an attempt
+  with no recorded patch is not published.
 
 ## Reasoning provenance
 
@@ -47,8 +48,15 @@ accepted as original decision reasoning, and a provenance label such as
 `llm_direct` is not a substitute for reasoning.
 
 `rendered_refs` records the Experiences the service injected into the decision
-that produced the proposal. Whether the LLM relied on them requires a separate
-usage-trace design.
+that produced the proposal; it is exposure, not reliance. What the deciding
+agent says it relied on is `experience_citations`: per variant for the
+orchestration agent, per proposal or per written patch for a specialist, each
+`{id, stance, claim}` with `stance` one of `adopt`, `adapt`, `avoid`, or
+`contrast`. A citation of an Experience that agent was not shown, or with
+another stance, is dropped where the agent's output enters the loop. The
+Experience carries its citations in `provenance.extra.experience_citations`;
+how often a cited Experience worked out is not stored on any record but
+derived by the KB that holds both.
 
 ## Publication
 
