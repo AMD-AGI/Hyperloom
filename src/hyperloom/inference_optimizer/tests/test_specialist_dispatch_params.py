@@ -18,73 +18,67 @@ from hyperloom.orchestrator.policy.gate import (
 from hyperloom.orchestrator.specialists.domains import SPECIALIST_DOMAINS
 from hyperloom.orchestrator.specialists.profile import (
     DEFAULT_BENCH,
-    DEFAULT_LANE,
     DEFAULT_MODE,
     DEFAULT_SCOPE,
-    LANE_CPU,
-    LANE_GPU,
     MODE_PATCH,
     MODE_RESEARCH,
     SCOPE_DOMAIN,
     SCOPE_FREEFORM,
     SpecialistProfile,
     holds_serving_slot,
+    requires_gpu,
     resolve_specialist_profile,
+    specialist_lanes,
     uses_whole_machine_gpu_lane,
+    wall_budget_base_min,
 )
 
 
 # --------------------------------------------------------------------------- # resolve_specialist_profile — the dial
 # matrix --------------------------------------------------------------------------- #
-def test_bare_dispatch_defaults_to_freeform_research_cpu():
-    """A truly bare dispatch (no scope, no domain/tag anchor) resolves to the cheap, read-only freeform/research/CPU lane — safe & cheap first."""
+def test_bare_dispatch_defaults_to_freeform_research():
+    """A bare dispatch (no scope, no domain/tag anchor) resolves to the cheap, read-only freeform/research mode."""
     prof = resolve_specialist_profile(None)
     assert prof.scope == SCOPE_FREEFORM
     assert prof.mode == MODE_RESEARCH
     assert prof.bench is False
-    assert prof.lane == LANE_CPU
     assert prof.reserves_benchmark_lane is False
 
 
-def test_anchored_dispatch_keeps_legacy_patch_gpu_default():
-    """A dispatch that carries a domain anchor but no explicit dials keeps the historical single-domain, patch-authoring, GPU-leased behaviour."""
+def test_anchored_dispatch_keeps_patch_default():
+    """A dispatch that carries a domain anchor but no explicit dials keeps the historical single-domain, patch-authoring behaviour."""
     prof = resolve_specialist_profile({"domain": "serving_specialist"})
     assert prof == SpecialistProfile(
         scope=DEFAULT_SCOPE,
         mode=DEFAULT_MODE,
         bench=DEFAULT_BENCH,
-        lane=DEFAULT_LANE,
     )
     assert prof.scope == SCOPE_DOMAIN
     assert prof.mode == MODE_PATCH
     assert prof.bench is False
-    assert prof.lane == LANE_GPU
 
 
 def test_unknown_values_fall_back_without_raising():
     prof = resolve_specialist_profile(
-        {"scope": "galaxy", "mode": "telepathy", "lane": "quantum", "domain": "serving_specialist"},
+        {"scope": "galaxy", "mode": "telepathy", "domain": "serving_specialist"},
     )
     assert prof.scope == DEFAULT_SCOPE
     assert prof.mode == DEFAULT_MODE
-    assert prof.lane == LANE_GPU
 
 
 def test_unknown_scope_without_anchor_falls_back_to_freeform():
     prof = resolve_specialist_profile(
-        {"scope": "galaxy", "mode": "telepathy", "lane": "quantum"},
+        {"scope": "galaxy", "mode": "telepathy"},
     )
     assert prof.scope == SCOPE_FREEFORM
     assert prof.mode == MODE_RESEARCH
-    assert prof.lane == LANE_CPU
 
 
-def test_freeform_defaults_to_research_on_cpu():
-    """Freeform recon is read-only research on the CPU lane unless told otherwise."""
+def test_freeform_defaults_to_research():
+    """Freeform recon is read-only research mode unless told otherwise."""
     prof = resolve_specialist_profile({"scope": "freeform"})
     assert prof.scope == SCOPE_FREEFORM
     assert prof.mode == MODE_RESEARCH
-    assert prof.lane == LANE_CPU
     assert prof.is_freeform is True
     assert prof.reserves_benchmark_lane is False
 
@@ -104,16 +98,18 @@ def test_bench_falsy_values(falsy):
 
 
 def test_holds_serving_slot_only_for_bench_capable():
-    """phase-3 §4 / invariant §6.3: only bench-capable patch specialists hold the whole-machine serving_slot; authoring-only (incl. framework authoring) holds num_gpus only so it can share the GPU queue."""
+    """Only bench-capable patch specialists hold the whole-machine serving_slot."""
     # Bench-capable patch specialist -> holds the slot.
     assert holds_serving_slot({"mode": "patch", "bench": True}) is True
-    # Framework authoring is NOT bench-capable by default -> no slot, but it still draws from the whole-machine pool
-    # (uses_whole_machine_gpu_lane).
+    # Framework authoring is CPU now -> no slot, no whole-machine pool.
     fw = {"framework_agent_authoring": True, "domain": "serving_specialist"}
     assert holds_serving_slot(fw) is False
-    assert uses_whole_machine_gpu_lane(fw) is True
-    # A bench-capable framework specialist DOES hold the slot for that window.
-    assert holds_serving_slot({"framework_agent_authoring": True, "mode": "patch", "bench": True}) is True
+    assert uses_whole_machine_gpu_lane(fw) is False
+    # Enablement authoring still uses the whole-machine pool (boots a server).
+    en = {"enablement": True, "domain": "serving_specialist"}
+    assert uses_whole_machine_gpu_lane(en) is True
+    # A bench-capable specialist DOES hold the slot for that window.
+    assert holds_serving_slot({"mode": "patch", "bench": True}) is True
     # Plain research / non-bench GPU probe -> no slot.
     assert holds_serving_slot({"mode": "research"}) is False
     assert holds_serving_slot(None) is False
@@ -126,13 +122,60 @@ def test_bench_is_meaningless_for_research_mode():
     assert prof.reserves_benchmark_lane is False
 
 
-def test_explicit_lane_overrides_default():
-    assert resolve_specialist_profile({"mode": "research", "lane": "gpu"}).lane == LANE_GPU
-    assert resolve_specialist_profile({"mode": "patch", "lane": "cpu"}).lane == LANE_CPU
+def test_requires_gpu_variants():
+    """requires_gpu covers needs_gpu, bench and enablement authoring."""
+    assert requires_gpu({"needs_gpu": True}) is True
+    assert requires_gpu({"mode": "patch", "bench": True}) is True
+    assert requires_gpu({"enablement": True}) is True
+    assert requires_gpu({"framework_agent_authoring": True}) is False
+    assert requires_gpu({"mode": "patch"}) is False
+    assert requires_gpu({"mode": "research"}) is False
+    assert requires_gpu(None) is False
 
 
-def test_research_mode_defaults_to_cpu_lane():
-    assert resolve_specialist_profile({"scope": "domain", "mode": "research"}).lane == LANE_CPU
+def test_specialist_lanes_cpu():
+    """CPU specialists use only research_lane."""
+    lanes = specialist_lanes({"mode": "patch"}, ["research_lane"])
+    assert lanes == ["research_lane"]
+
+
+def test_specialist_lanes_gpu():
+    """GPU specialists replace research_lane with gpu_research_lane."""
+    lanes = specialist_lanes({"needs_gpu": True}, ["research_lane"])
+    assert "gpu_research_lane" in lanes
+    assert "research_lane" not in lanes
+
+
+def test_specialist_lanes_bench():
+    """Bench specialists get gpu_research_lane + benchmark_lane."""
+    lanes = specialist_lanes({"mode": "patch", "bench": True}, ["research_lane"])
+    assert "gpu_research_lane" in lanes
+    assert "benchmark_lane" in lanes
+    assert "research_lane" not in lanes
+
+
+def test_specialist_lanes_enablement():
+    """Enablement authoring specialists get gpu_research_lane."""
+    lanes = specialist_lanes({"enablement": True}, ["research_lane"])
+    assert "gpu_research_lane" in lanes
+
+
+def test_specialist_lanes_framework_authoring_cpu():
+    """FRAMEWORK authoring specialists are CPU; they keep research_lane only."""
+    lanes = specialist_lanes({"framework_agent_authoring": True}, ["research_lane"])
+    assert lanes == ["research_lane"]
+    assert "gpu_research_lane" not in lanes
+
+
+def test_wall_budget_base_min_by_mode():
+    """Budget base is 60 min for patch, 10 min for research."""
+    assert wall_budget_base_min({"mode": "patch"}) == 60.0
+    assert wall_budget_base_min({"mode": "research"}) == 10.0
+    assert wall_budget_base_min({"scope": "freeform"}) == 10.0
+    # bare dispatch resolves to freeform research mode
+    assert wall_budget_base_min(None) == 10.0
+    # domain-anchored (default patch mode)
+    assert wall_budget_base_min({"domain": "serving_specialist"}) == 60.0
 
 
 # --------------------------------------------------------------------------- # Freeform sanity gate (PolicyGate)
@@ -762,13 +805,12 @@ def test_bench_specialist_no_serving_tp_defaults_to_whole_machine(orchestration_
     )
 
 
-# --------------------------------------------------------------------------- # domain.default_mode → mode=research,
-# lane=cpu --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # domain.default_mode
+# --------------------------------------------------------------------------- #
 def test_research_mode_param_forces_research_mode():
     """params['mode']='research' must override the global default."""
     profile = resolve_specialist_profile({"mode": "research", "domain": "serving_specialist"})
     assert profile.mode == MODE_RESEARCH
-    assert profile.lane == LANE_CPU
     assert profile.bench is False
 
 
@@ -783,7 +825,6 @@ def test_research_default_mode_domain_resolves_to_research():
         assert domain is not None
         profile = resolve_specialist_profile({"domain": key}, domain=domain)
         assert profile.mode == MODE_RESEARCH, f"{key} should resolve to research mode"
-        assert profile.lane == LANE_CPU, f"{key} should resolve to cpu lane"
 
 
 def test_patch_capable_domains_default_to_patch():

@@ -56,7 +56,7 @@ a `delegated_result` inbox event on a later tick.
 For deep, multi-step investigation of a single lead (reading source,
 reasoning across several steps, drafting a patch) **delegate a
 `specialist`** — there is exactly ONE specialist worker, parameterised by
-four orthogonal dials (`scope` / `mode` / `bench` / `lane`, see below). It
+three orthogonal dials (`scope` / `mode` / `bench`, see below). It
 runs autonomously and reports back a structured `specialist_done`. Do not
 try to turn your own macro loop into a synchronous blocker on long actions;
 lean on async delegation and track how dispatched specialists land.
@@ -479,7 +479,7 @@ likely to have worked on — a hot kernel, a known-slow path, a framework
 version well behind head — and not only when configuration search stalls.
 
 <!-- phase: FRAMEWORK_AGENT -->
-### One specialist, four dials (scope / mode / bench / lane)
+### One specialist, three dials (scope / mode / bench)
 
 Shape every `delegate{action_name='specialist'}` with these dials (code
 defaults the rest; omitting a dial is safe):

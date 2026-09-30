@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Specialist dispatch profile — the four orthogonal dials that parameterise a single ``specialist`` worker."""
+"""Specialist dispatch profile — the three orthogonal dials that parameterise a single ``specialist`` worker."""
 
 from __future__ import annotations
 
@@ -25,18 +25,11 @@ MODE_RESEARCH = "research"
 MODE_PATCH = "patch"
 MODE_VALUES: frozenset[str] = frozenset({MODE_RESEARCH, MODE_PATCH})
 
-# lane
-LANE_CPU = "cpu"
-LANE_GPU = "gpu"
-LANE_VALUES: frozenset[str] = frozenset({LANE_CPU, LANE_GPU})
-
-
-# Defaults: an anchored dispatch resolves to single-domain, patch-authoring, GPU-leased behaviour; a truly bare
-# dispatch is inferred ``freeform`` and resolves to the cheap read-only research/CPU lane.
+# Defaults: an anchored dispatch resolves to single-domain, patch-authoring behaviour; a truly bare
+# dispatch is inferred ``freeform`` and resolves to the cheap read-only research mode.
 DEFAULT_SCOPE = SCOPE_DOMAIN
 DEFAULT_MODE = MODE_PATCH
 DEFAULT_BENCH = False
-DEFAULT_LANE = LANE_GPU
 
 
 @dataclass(frozen=True)
@@ -46,7 +39,6 @@ class SpecialistProfile:
     scope: str = DEFAULT_SCOPE
     mode: str = DEFAULT_MODE
     bench: bool = DEFAULT_BENCH
-    lane: str = DEFAULT_LANE
 
     @property
     def is_freeform(self) -> bool:
@@ -72,10 +64,65 @@ def _infer_scope(p: dict[str, Any]) -> str:
     return SCOPE_FREEFORM
 
 
-def is_authoring_specialist(params: dict[str, Any] | None) -> bool:
-    """True for a FRAMEWORK or ENABLEMENT authoring specialist, which defaults to every GPU on the machine."""
+def requires_gpu(params: dict[str, Any] | None) -> bool:
+    """True when a specialist needs a GPU lease.
+
+    Covers explicit ``needs_gpu``, bench-capable dispatches, and
+    enablement authoring (which boots a server to validate the patch).
+    FRAMEWORK authoring runs CPU-only; its integration benchmark goes
+    through ``integrate_patch``.
+    """
     p = params or {}
-    return bool(p.get("framework_agent_authoring")) or bool(p.get("enablement"))
+    if is_truthy(p.get("needs_gpu")):
+        return True
+    if resolve_specialist_profile(p).reserves_benchmark_lane:
+        return True
+    # Enablement specialists compile and boot a server; they need the whole machine.
+    if bool(p.get("enablement")):
+        return True
+    return False
+
+
+def specialist_lanes(params: dict[str, Any] | None, base_lanes: list[str]) -> list[str]:
+    """Compute the lane list for a specialist dispatch.
+
+    CPU specialists use only ``base_lanes`` (typically ``["research_lane"]``).
+    GPU specialists replace ``research_lane`` with ``gpu_research_lane``.
+    Bench specialists also add ``benchmark_lane``.
+    """
+    p = params or {}
+    gpu = requires_gpu(p)
+    profile = resolve_specialist_profile(p)
+    lanes: list[str] = []
+    for lane in base_lanes:
+        if lane == "research_lane" and gpu:
+            lanes.append("gpu_research_lane")
+        else:
+            lanes.append(lane)
+    if gpu and "gpu_research_lane" not in lanes:
+        lanes.append("gpu_research_lane")
+    if profile.reserves_benchmark_lane and "benchmark_lane" not in lanes:
+        lanes.append("benchmark_lane")
+    return list(dict.fromkeys(lanes))
+
+
+def wall_budget_base_min(params: dict[str, Any] | None) -> float:
+    """Base wall-clock budget in minutes for a specialist, tiered by mode.
+
+    Patch mode gets 60 minutes; research mode gets 10 minutes. The bench
+    floor (rebench timeout + 10 min) is applied by the caller.
+    """
+    profile = resolve_specialist_profile(params or {})
+    return 60.0 if profile.mode == MODE_PATCH else 10.0
+
+
+def is_authoring_specialist(params: dict[str, Any] | None) -> bool:
+    """True for an ENABLEMENT authoring specialist, which defaults to every GPU on the machine.
+
+    FRAMEWORK authoring is no longer whole-machine GPU.
+    """
+    p = params or {}
+    return bool(p.get("enablement"))
 
 
 def uses_whole_machine_gpu_lane(params: dict[str, Any] | None) -> bool:
@@ -94,7 +141,7 @@ def resolve_specialist_profile(
     params: dict[str, Any] | None,
     domain: "SpecialistDomain | None" = None,
 ) -> SpecialistProfile:
-    """Resolve scope/mode/bench/lane from dispatch params, falling back to safe defaults."""
+    """Resolve scope/mode/bench from dispatch params, falling back to safe defaults."""
     p = params or {}
 
     scope = str(p.get("scope") or "").strip().lower()
@@ -113,21 +160,13 @@ def resolve_specialist_profile(
     if mode != MODE_PATCH:
         bench = False
 
-    lane = str(p.get("lane") or "").strip().lower()
-    if lane not in LANE_VALUES:
-        lane = LANE_GPU if mode == MODE_PATCH else LANE_CPU
-
-    return SpecialistProfile(scope=scope, mode=mode, bench=bench, lane=lane)
+    return SpecialistProfile(scope=scope, mode=mode, bench=bench)
 
 
 __all__ = [
     "DEFAULT_BENCH",
-    "DEFAULT_LANE",
     "DEFAULT_MODE",
     "DEFAULT_SCOPE",
-    "LANE_CPU",
-    "LANE_GPU",
-    "LANE_VALUES",
     "MODE_PATCH",
     "MODE_RESEARCH",
     "MODE_VALUES",
@@ -138,6 +177,9 @@ __all__ = [
     "SpecialistProfile",
     "holds_serving_slot",
     "is_authoring_specialist",
+    "requires_gpu",
     "resolve_specialist_profile",
+    "specialist_lanes",
     "uses_whole_machine_gpu_lane",
+    "wall_budget_base_min",
 ]

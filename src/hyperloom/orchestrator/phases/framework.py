@@ -915,8 +915,6 @@ class FrameworkPhase:
             "framework_audit": (audit if isinstance(audit, dict) else {}),
             "source": "coordinator_internal",
             "notes": notes,
-            # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
-            **self._coord._framework_gpu_params(),
         }
         await self._coord._warm_specialist_params(params)
         idem = f"framework_agent_authoring:{batch_id}:{cand_id}"
@@ -1194,7 +1192,6 @@ class FrameworkPhase:
             "source": "coordinator_internal",
             "notes": notes,
             "apply_retry_attempt": attempt,
-            **self._coord._framework_gpu_params(),
         }
         await self._coord._warm_specialist_params(params)
         # Gap id and attempt both repeat across cycles.
@@ -1429,7 +1426,6 @@ class FrameworkPhase:
             "framework_audit": {},
             "framework_local_explore": True,
             "source": "coordinator_internal",
-            **self._coord._framework_gpu_params(),
         }
         await self._coord._warm_specialist_params(params)
         lanes, ttl = self._coord._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)

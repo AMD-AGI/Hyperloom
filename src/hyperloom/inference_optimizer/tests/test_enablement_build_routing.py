@@ -47,7 +47,6 @@ def coord(build_coord):
         build_coord._rearm_calls.append(dict(res) if isinstance(res, dict) else {})
 
     build_coord._maybe_rearm_enablement = _maybe_rearm_enablement
-    build_coord._framework_gpu_params = lambda: {}
     build_coord._framework_authoring_lanes_ttl = lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec)
     # The launch probe is an ``integrate_patch`` task, so it resolves its lanes from that kind rather than from the
     # specialist research lane.
@@ -701,7 +700,6 @@ def _make_params_fake(**kw):
     fake._discover_enablement_candidate_refs = lambda req, plan, *, deadline=None: []
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
-    fake._framework_gpu_params = lambda: {}
     return fake
 
 

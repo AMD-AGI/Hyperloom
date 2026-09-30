@@ -701,7 +701,6 @@ class SpecialistRunner:
                 scope=profile.scope,
                 mode=profile.mode,
                 bench=profile.bench,
-                lane=profile.lane,
                 task_description=task_description,
                 # Coordinator-injected note when this is a bounded auto-retry.
                 auto_retry_reason=str(params.get("_auto_retry_reason") or ""),

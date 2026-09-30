@@ -941,7 +941,6 @@ class SpecialistPromptInputs:
     scope: str = "domain"
     mode: str = MODE_PATCH
     bench: bool = False
-    lane: str = "gpu"
     # Free-form task description (only populated when scope == 'freeform').
     task_description: str = ""
 

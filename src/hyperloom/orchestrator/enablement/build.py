@@ -474,7 +474,7 @@ class EnablementBuild(CoordinatorCollaborator):
         task whose enablement:True result is routed by the dispatcher through
         _maybe_rearm_authored_lane → _maybe_rearm_enablement, producing a
         genuine KEEP/advanced/reverted outcome.  The whole-machine GPU pool is
-        acquired via _framework_gpu_params.
+        acquired because enablement=True is set on the params.
 
         The probe is what declares KEEP for a build, so it must not be opened
         into a session that cannot run it: the queue scan drops a queued row the
@@ -513,7 +513,6 @@ class EnablementBuild(CoordinatorCollaborator):
             # watched this failure persisted.
             "enablement_before_observation_path": state.enablement.launch_observation_path,
             "source": "coordinator_internal",
-            **self._framework_gpu_params(),
             **_enablement_carrier_params(state),
         }
         # Prefer the eval-origin probe config so the re-run keeps the original workload/eval contract; fall back to

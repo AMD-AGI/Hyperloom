@@ -305,7 +305,7 @@ class _Tasks:
 
 
 class _DispatchStub:
-    """The Coordinator side of a local-explore dispatch, with lanes, GPU params and warm-start stubbed out."""
+    """The Coordinator side of a local-explore dispatch, with lanes and warm-start stubbed out."""
 
     def __init__(self, tmp_path: Path, framework: str, evidence: str = "") -> None:
         from hyperloom.orchestrator.state.shared_state import SharedState
@@ -317,10 +317,6 @@ class _DispatchStub:
     def _cycle_idem_suffix(self) -> str:
         """Macro-cycle 0, as the Coordinator would report it."""
         return ""
-
-    def _framework_gpu_params(self) -> dict:
-        """Provide no GPU params; not under test here."""
-        return {}
 
     def _framework_authoring_lanes_ttl(self, _params, *, base_ttl_sec: int) -> tuple[list[str], int]:
         """Provide fixed lanes/TTL; lane accounting is not under test here."""

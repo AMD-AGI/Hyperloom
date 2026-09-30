@@ -161,7 +161,6 @@ class InternalTasksPhase(CoordinatorCollaborator):
             "reason": str(reason),
             "scope": "domain",
             "mode": "research",
-            "lane": "cpu",
         }
         # Seed the curated checklist + rendered prompt block; best-effort.
         try:

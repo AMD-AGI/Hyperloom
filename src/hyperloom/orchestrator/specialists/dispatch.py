@@ -327,20 +327,11 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         # Mirror _handle_delegate lane/ttl resolution so the retry task holds the
         # same pools as the original and cannot run concurrently with serving.
         lanes, ttl = self._registry_lanes_ttl("specialist")
-        from .profile import resolve_specialist_profile, uses_whole_machine_gpu_lane
+        from .profile import requires_gpu, specialist_lanes
 
-        if resolve_specialist_profile(retry_params).reserves_benchmark_lane:
-            lanes = list(dict.fromkeys((*lanes, "benchmark_lane")))
-        needs_gpu = is_truthy(retry_params.get("needs_gpu"))
-        if not needs_gpu and uses_whole_machine_gpu_lane(retry_params):
-            # bench specialist: ensure needs_gpu is set so gpu_research_lane is acquired.
-            needs_gpu = True
-        if needs_gpu:
-            lanes = list(dict.fromkeys((*lanes, "gpu_research_lane")))
-            ttl = self._gpu_lease_ttl_sec(
-                int(ttl or 0),
-                params=retry_params,
-            )
+        lanes = list(specialist_lanes(retry_params, list(lanes)))
+        if requires_gpu(retry_params):
+            ttl = self._gpu_lease_ttl_sec(int(ttl or 0), params=retry_params)
 
         # Stable base key across attempts: strip any prior ``-autoretryN`` suffix.
         base_key = str(task.idempotency_key or task.task_id or "")
@@ -484,7 +475,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             for carry in (
                 "mode",
                 "bench",
-                "lane",
                 "model",
                 "priority",
                 "timeout_minutes",
@@ -493,7 +483,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 if isinstance(task, dict) and carry in task:
                     sub_params[carry] = task[carry]
             sub_params.setdefault("mode", "research")
-            sub_params.setdefault("lane", "cpu")
             sub_payload = dict(intent.payload)
             sub_payload["params"] = sub_params
             if base_key:

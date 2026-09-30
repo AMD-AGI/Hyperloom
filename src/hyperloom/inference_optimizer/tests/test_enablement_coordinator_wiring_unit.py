@@ -74,7 +74,6 @@ def _fake_self(**state_kw):
     # Stub weight-facts derivation to empty so the builder path stays pure.
     fake._derive_checkpoint_weight_facts = lambda _log: ""
     # No GPU pool, so dispatch degrades to the research-lane-only path.
-    fake._framework_gpu_params = lambda: {}
     return fake
 
 
@@ -331,7 +330,6 @@ def _enqueue_self(**state_kw):
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
     # No GPU pool, so dispatch stays on research_lane only.
-    fake._framework_gpu_params = lambda: {}
     fake._framework_authoring_lanes_ttl = lambda params, *, base_ttl_sec: (
         ["research_lane"],
         base_ttl_sec,

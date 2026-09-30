@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests that framework-family authoring specialists lease the whole machine."""
+"""Tests that enablement authoring specialists lease the whole machine, while FRAMEWORK authoring is CPU."""
 
 from __future__ import annotations
 
@@ -96,52 +96,46 @@ class _GpuProbe:
         }
 
 
-# ── 1. params carry needs_gpu + whole-machine gpu_count (perf & enablement) ──
-
-
-def test_framework_gpu_params_request_whole_machine(tmp_path, monkeypatch):
-    """The shared helper (used by BOTH the perf-framework and enablement param builders) requests the whole machine when GPUs are visible + single-node."""
-    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
-    assert coord.framework_gpu_pool.capacity == 4
-    gpu_params = coord._framework_gpu_params()
-    assert gpu_params.get("needs_gpu") is True
-    assert gpu_params.get("gpu_count") == 4
+# ── 1. enablement authoring carries GPU; FRAMEWORK authoring is CPU ──
 
 
 def test_enablement_params_carry_whole_machine_gpu(tmp_path, monkeypatch):
-    """The enablement param builder merges needs_gpu + whole-machine gpu_count."""
+    """The enablement param builder sets enablement=True; requires_gpu derives whole-machine GPU from that."""
+    from hyperloom.orchestrator.specialists.profile import requires_gpu, specialist_lanes
+
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
     coord.shared_state.framework = "sglang"
     coord.shared_state.model_name = "some/model"
-    # A missing-model-arch log classifies to an actionable signature.
     log = "Model architecture 'FooBarForCausalLM' is not supported by this build"
     params = coord._build_enablement_specialist_params(log)
     assert params is not None
     assert params.get("enablement") is True
-    assert params.get("needs_gpu") is True
-    assert params.get("gpu_count") == 4
+    assert requires_gpu(params) is True
+    lanes = specialist_lanes(params, ["research_lane"])
+    assert "gpu_research_lane" in lanes
 
 
-def test_framework_gpu_params_empty_without_gpus(tmp_path, monkeypatch):
-    """No visible cards → no needs_gpu (never deadlock the dispatcher)."""
-    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0, visible_devices="")
-    assert coord.framework_gpu_pool.capacity == 0
-    assert coord._framework_gpu_params() == {}
+def test_framework_authoring_is_cpu(tmp_path, monkeypatch):
+    """FRAMEWORK authoring no longer requests the whole-machine GPU."""
+    from hyperloom.orchestrator.specialists.profile import requires_gpu, specialist_lanes
+
+    fw_params = {
+        "framework_agent_authoring": True,
+        "domain": "serving_specialist",
+        "mode": "patch",
+    }
+    assert requires_gpu(fw_params) is False
+    lanes = specialist_lanes(fw_params, ["research_lane"])
+    assert lanes == ["research_lane"]
+    assert "gpu_research_lane" not in lanes
 
 
-def test_framework_gpu_params_empty_on_multi_node(tmp_path, monkeypatch):
-    """Multi-node → no whole-machine GPU request (integrate_patch is single-node)."""
-    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    assert coord._framework_gpu_params() == {}
-
-
-# ── 2. dispatch leases the whole machine even when capacity=0 ────────────────
+# ── 2. dispatch leases the whole machine when capacity=0 (enablement) ────────────────
 
 
 @pytest.mark.asyncio
-async def test_framework_family_leases_whole_machine_when_capacity_zero(tmp_path, monkeypatch):
-    """A framework-family GPU task leases every card from ``framework_gpu_pool`` even though ``gpu_specialist_capacity=0`` empties the EXPLORE pool."""
+async def test_enablement_leases_whole_machine_when_capacity_zero(tmp_path, monkeypatch):
+    """An enablement GPU task leases every card from ``framework_gpu_pool`` even when ``gpu_specialist_capacity=0`` empties the EXPLORE pool."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
     assert coord.gpu_specialist_pool.capacity == 0  # EXPLORE pool empty
     assert coord.framework_gpu_pool.capacity == 4  # whole machine
@@ -153,49 +147,21 @@ async def test_framework_family_leases_whole_machine_when_capacity_zero(tmp_path
         params={
             "domain": "enablement_specialist",
             "gap_canonical_id": "gap.enablement.test",
-            "framework_agent_authoring": True,
             "enablement": True,
             "needs_gpu": True,
             "gpu_count": 4,
         },
         idempotency_key="fw-gpu-wholemachine",
-        requires_lanes=["research_lane", "gpu_research_lane"],
+        requires_lanes=["gpu_research_lane"],
         lease_ttl_sec=3600,
     )
 
     await coord._pump_dispatcher_once()
 
-    assert probe.entries, "framework GPU task never dispatched"
+    assert probe.entries, "enablement GPU task never dispatched"
     tid = probe.entries[0]
     assert probe.gpu_ids_by_task[tid] == [0, 1, 2, 3]
     assert not await coord.tasks.queued()
-
-
-@pytest.mark.asyncio
-async def test_framework_family_defaults_gpu_count_to_whole_machine(tmp_path, monkeypatch):
-    """Omitting ``gpu_count`` defaults a framework-family task to the whole machine (not the serving TP)."""
-    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
-    probe = _GpuProbe()
-    coord.sub.register_executor("specialist", probe)
-
-    await coord.tasks.create_or_return_existing(
-        kind="specialist",
-        params={
-            "domain": "serving_specialist",
-            "gap_canonical_id": "gap.framework.test",
-            "framework_agent_authoring": True,
-            "needs_gpu": True,
-            # no explicit gpu_count → default to whole-machine capacity
-        },
-        idempotency_key="fw-gpu-default-count",
-        requires_lanes=["research_lane", "gpu_research_lane"],
-        lease_ttl_sec=3600,
-    )
-
-    await coord._pump_dispatcher_once()
-
-    assert probe.entries
-    assert probe.gpu_ids_by_task[probe.entries[0]] == [0, 1, 2, 3]
 
 
 # ── 3. gpu_research_lane serializes the serving lanes (mutex) ────────────────

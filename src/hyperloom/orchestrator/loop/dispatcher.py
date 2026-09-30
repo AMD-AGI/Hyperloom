@@ -626,7 +626,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             extra_context: dict[str, Any] = {}
             if task.kind == "specialist":
                 params = task.params or {}
-                needs_gpu = is_truthy(params.get("needs_gpu"))
+                from ..specialists.profile import requires_gpu as _requires_gpu
+
+                needs_gpu = _requires_gpu(params)
                 # Absolute stop instant, tightened by the session bound.
                 specialist_deadline = self._specialist_deadline(
                     needs_gpu=needs_gpu,
@@ -1026,21 +1028,20 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         as an absent budget.
 
         Args:
-            needs_gpu: Whether the specialist holds a GPU lease (selects the
-                60min GPU lane base vs the 10min cpu base).
-            params: Specialist dispatch parameters, used to identify
-                bench-capable patch specialists.
+            needs_gpu: Kept for call-site compatibility; budget is now derived
+                from the dispatch mode via ``wall_budget_base_min``.
+            params: Specialist dispatch parameters.
 
         Returns:
             float: A positive wall-clock budget in seconds.
         """
-        base_min = 60.0 if needs_gpu else 10.0
+        from ..specialists.profile import resolve_specialist_profile, wall_budget_base_min
+        from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
+
+        base_min = wall_budget_base_min(params)
         macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
         budget_min = min(base_min * (macro_cycle + 1), 240.0)
         budget_sec = budget_min * 60.0
-        from ..specialists.profile import resolve_specialist_profile
-        from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
-
         profile = resolve_specialist_profile(params or {})
         if profile.reserves_benchmark_lane:
             budget_sec = max(budget_sec, resolve_benchmark_timeouts()[1] + 10 * 60)
