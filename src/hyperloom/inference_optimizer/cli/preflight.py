@@ -765,10 +765,7 @@ _SETUP_INSTALLABLE_FRAMEWORKS = frozenset({"sglang", "vllm"})
 def _setup_install_command(framework: str) -> str:
     """The documented setup invocation for ``framework``, verbatim in shape."""
     extra = " --framework-env isolated" if framework == "vllm" else ""
-    return (
-        'PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- '
-        f"--install-framework {framework}{extra} --yes"
-    )
+    return f'PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework {framework}{extra} --yes'
 
 
 # Rootfs markers the runtimes drop: Docker writes the first, podman the second.

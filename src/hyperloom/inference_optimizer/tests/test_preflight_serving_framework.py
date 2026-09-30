@@ -733,7 +733,7 @@ def test_the_remedy_matches_the_documented_setup_invocation(framework):
     documented = [
         line.strip()
         for line in skill.splitlines()
-        if "inference_optimizer.setup" in line and f"--install-framework {framework}" in line
+        if "-m hyperloom setup" in line and f"--install-framework {framework}" in line
     ]
     assert documented, f"no documented setup line for {framework}"
 
