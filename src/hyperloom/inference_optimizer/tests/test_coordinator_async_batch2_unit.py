@@ -246,8 +246,8 @@ async def test_resume_consistency_marks_unvalidated_keeps(coord: Coordinator) ->
 
     warning_kinds = {w["kind"] for w in report["warnings"]}
     assert "resume_unvalidated_keeps" in warning_kinds
-    assert coord.shared_state.resume_pending_revalidation is True
-    assert any(isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
+    assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
+    assert not any(isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
 
 
 @pytest.mark.asyncio
@@ -936,7 +936,7 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
         "/session/optimization_stack/src/spec-orphan/manifest.json"
     )
     assert coord.shared_state.optimization_stack[-1]["target_files"] == ["vllm/model.py"]
-    assert coord.shared_state.resume_pending_revalidation is True
+    assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
 
 
 @pytest.mark.asyncio
@@ -972,7 +972,7 @@ async def test_resume_consistency_replays_pending_integrate_keep(coord: Coordina
     assert "domain" not in coord.shared_state.optimization_stack[-1]
     assert "framework_agent_authoring" not in coord.shared_state.optimization_stack[-1]
     assert coord.shared_state.optimization_stack[-1]["recipe_publishable"] is False
-    assert coord.shared_state.resume_pending_revalidation is True
+    assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
 
 
 @pytest.mark.asyncio
@@ -1299,7 +1299,7 @@ async def test_resume_consistency_enqueues_stack_rebench_for_unvalidated(coord: 
 
     report = await coord.writeback._resume_consistency_pass()
 
-    assert coord.shared_state.resume_pending_revalidation is True
+    assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
     queued = await coord.tasks.queued()
     assert any(t.kind == "explore" and t.params.get("source") == "resume_stack_revalidate" for t in queued)
     assert any(isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
@@ -1308,7 +1308,7 @@ async def test_resume_consistency_enqueues_stack_rebench_for_unvalidated(coord: 
 @pytest.mark.asyncio
 async def test_resume_stack_revalidate_promote_clears_flag_and_sets_watermark(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 100.0
-    coord.shared_state.resume_pending_revalidation = True
+    # resume_pending_revalidation was removed; unvalidated keeps now tracked via optimization_stack
     coord.shared_state.optimization_stack = [
         {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
     ]
@@ -1320,7 +1320,7 @@ async def test_resume_stack_revalidate_promote_clears_flag_and_sets_watermark(co
         task=task,
     )
 
-    assert coord.shared_state.resume_pending_revalidation is False
+    assert not coord.shared_state.optimization_stack_has_unvalidated_keeps()
     assert coord.shared_state.cumulative_gain_validated_stack_len == 1
     assert coord.shared_state.cumulative_gain_validated == pytest.approx(21.0)
 
@@ -1328,7 +1328,7 @@ async def test_resume_stack_revalidate_promote_clears_flag_and_sets_watermark(co
 @pytest.mark.asyncio
 async def test_resume_revalidate_failed_rebench_keeps_flag_set(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 100.0
-    coord.shared_state.resume_pending_revalidation = True
+    # resume_pending_revalidation was removed; unvalidated keeps now tracked via optimization_stack
     coord.shared_state.optimization_stack = [
         {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
     ]
@@ -1340,7 +1340,7 @@ async def test_resume_revalidate_failed_rebench_keeps_flag_set(coord: Coordinato
         task=task,
     )
 
-    assert coord.shared_state.resume_pending_revalidation is True
+    assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
     assert coord.shared_state.cumulative_gain_validated_stack_len == 0
 
 
