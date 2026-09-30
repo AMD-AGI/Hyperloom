@@ -17,16 +17,37 @@ def test_native_satisfies_protocol() -> None:
     assert isinstance(rp.NativeRooflineProvider(), rp.RooflineProvider)
 
 
-def test_factory_returns_native_for_all_modes() -> None:
+def test_factory_native_without_csv_dir() -> None:
     class _S:
         roofline_csv_dir = ""
         roofline_csv_strict = False
 
-    # default (no dir) and --no-roofline-csv both stay native in M1
+    # default (no dir) and --no-roofline-csv both stay pure native
     assert isinstance(rp.make_roofline_provider(_S()), rp.NativeRooflineProvider)
-    s2 = _S()
-    s2.roofline_csv_dir = "/some/external/dir"  # M1: still native (external branch lands in M2)
-    assert isinstance(rp.make_roofline_provider(s2), rp.NativeRooflineProvider)
+
+
+def test_factory_external_with_csv_dir(tmp_path) -> None:
+    class _S:
+        roofline_csv_dir = str(tmp_path)
+        roofline_csv_strict = False
+
+    prov = rp.make_roofline_provider(_S())
+    assert isinstance(prov, rp.CsvRooflineProvider)
+    # an empty external dir -> every value misses -> lenient fallback to native (no raise)
+    assert prov.arch_peak("mi355x", "bf16") == rp.NativeRooflineProvider().arch_peak("mi355x", "bf16")
+
+
+def test_factory_external_strict_raises_on_missing(tmp_path) -> None:
+    class _S:
+        roofline_csv_dir = str(tmp_path)
+        roofline_csv_strict = True
+
+    prov = rp.make_roofline_provider(_S())
+    assert isinstance(prov, rp.CsvRooflineProvider)
+    import pytest
+
+    with pytest.raises(FileNotFoundError):
+        prov.arch_peak("mi355x", "bf16")  # empty dir + strict -> raise, no fallback
 
 
 def test_arch_peak_delegates_to_native() -> None:
