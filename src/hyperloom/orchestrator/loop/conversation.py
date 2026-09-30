@@ -639,7 +639,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         not either fired -- "evaluated and did not trip" is the reading that
         explains a phase staying open.
         """
-        recorder = self.phase_framework.timeline()
+        recorder = self._coord.phase_framework.timeline()
         if recorder is None:
             return
         from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (

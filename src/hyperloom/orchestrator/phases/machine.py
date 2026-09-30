@@ -252,7 +252,7 @@ class MachinePhase(CoordinatorCollaborator):
             allowed_kinds=_phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset()),
             reason=barrier_reason,
         )
-        stopped = await self.dispatcher.cancel_inflight_actions(reason=barrier_reason)
+        stopped = await self._coord.dispatcher.cancel_inflight_actions(reason=barrier_reason)
         if cancelled or stopped:
             log.info(
                 "Coordinator.phase: %s cancelled %d queued and stopped %d running task(s)",
