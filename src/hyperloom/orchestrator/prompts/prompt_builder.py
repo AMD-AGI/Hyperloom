@@ -241,10 +241,10 @@ def _section_phase_semantics(
             "KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes",
             "to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
-            "'skip_to_kernel' | 'skip_to_sweep'}` directly when you judge the",
-            "current phase exhausted; the Coordinator validates the hint vocab",
-            "and routes the transition on the next tick. `skip_to_close` is not",
-            "in that set — see the exception below for when it applies.",
+            "'skip_to_kernel'}` in EXPLORE or FRAMEWORK_AGENT when you judge",
+            "the current phase exhausted; the Coordinator validates the hint",
+            "vocab and routes the transition on the next tick. `skip_to_close`",
+            "is not in that set — see the exception below for when it applies.",
             "`skip_to_close` is reserved, in EVERY phase, for genuine early",
             "abandonment (e.g. infra is dead and the sweep cannot run at all):",
             "it closes the run instead of advancing a phase. Running low on",
@@ -639,9 +639,9 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   In OPTIMIZE the Plateau advisory reports each arm separately: BOTH arms",
             "   dry advances to KERNEL_AGENT (``reason=optimize_no_more_leverage``) at",
             "   the next phase-compute, while one arm dry means work the other.",
-            "   When you judge the current phase exhausted,",
+            "   When you judge EXPLORE or FRAMEWORK_AGENT exhausted,",
             "   emit ``escalate_strategy_change{next_action_hint=",
-            "   'skip_to_kernel' | 'skip_to_sweep'}``. `skip_to_close` is not a",
+            "   'skip_to_kernel'}``. `skip_to_close` is not a",
             "   phase advance -- see PHASE CONTRACT before emitting it.",
             "",
             "If you cannot move forward, emit",
@@ -768,9 +768,8 @@ verdict (KEEP→integrate next; PARTIAL→the lane retries at most
 `_DEFAULT_KERNEL_OPT_MAX_PARTIAL` times then rejects; REVERT→rejected),
 `rejected_kernel_ids` lists the ids already written off, and
 `last_action_failures` explains a request of your own that failed.
-KERNEL_AGENT → SWEEP advance is driven by the phase budget, an
-`escalate_strategy_change` hint, or a terminal stop_reason. Emit
-`skip_to_sweep` to wind down sooner.
+KERNEL_AGENT → SWEEP advance is driven by the phase budget, idle-no-progress,
+agent settled with no pending kernel work, or a terminal stop_reason.
 
 ### `trace_analyze` — read-only candidate analysis
 

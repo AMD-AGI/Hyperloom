@@ -45,6 +45,8 @@ class _StubSharedState:
     warm_replay_pending: dict = field(default_factory=dict)
     warm_kernel_kb_attempted: bool = False
     warm_kernel_kb_plan: list = field(default_factory=list)
+    baseline_accuracy: float = 0.0
+    gpu_trace_unsupported_reason: str = ""
     warm_history_injected: bool = False
     auto_roofline_pending_task_id: str = ""
     stop_reason: str = ""
@@ -112,6 +114,20 @@ class _StubSharedState:
 
     def set_stop_reason(self, reason: str) -> None:
         self.stop_reason = reason
+
+    def __getattr__(self, name: str):
+        from hyperloom.orchestrator.state import shared_state as _ss
+
+        cls = _ss.SharedState
+        for field in cls.__dataclass_fields__.values():
+            if field.name == name:
+                import dataclasses
+
+                if field.default is not dataclasses.MISSING:
+                    return field.default
+                if field.default_factory is not dataclasses.MISSING:
+                    return field.default_factory()
+        return None
 
 
 class _StubTaskRegistry:
@@ -715,7 +731,7 @@ async def test_warm_replay_resume_with_lost_disable_flag_is_still_blocked(
         warm_start_recipe=_warm_recipe_t1(),
         warm_replay_enabled=False,
     )
-    await coord1._maybe_enqueue_warm_replay(baseline_tput=600.0)
+    await coord1.phase_prelude._maybe_enqueue_warm_replay(baseline_tput=600.0)
     assert coord1.shared_state.warm_replay_attempted is True
     coord2 = _make_coord(
         tmp_path,
@@ -723,7 +739,7 @@ async def test_warm_replay_resume_with_lost_disable_flag_is_still_blocked(
         warm_replay_enabled=True,
         resume_from_disk=True,
     )
-    task = await coord2._maybe_enqueue_warm_replay(baseline_tput=600.0)
+    task = await coord2.phase_prelude._maybe_enqueue_warm_replay(baseline_tput=600.0)
     assert task is None
     assert coord2.tasks.calls == []
 
@@ -1005,7 +1021,7 @@ def test_promote_warm_replay_reports_its_verdict(tmp_path):
 
     failed = _make_coord(tmp_path / "failed", warm_start_recipe=_warm_recipe_t1())
     failed.shared_state.warm_replay_outcome = {"status": "in_flight"}
-    assert failed._promote_warm_replay({"status": "failed", "error": "boom"}, task=task) is Verdict.FAILED
+    assert failed.phase_prelude._promote_warm_replay({"status": "failed", "error": "boom"}, task=task) is Verdict.FAILED
 
 
 def test_promote_warm_replay_keeps_prebaseline_enablement_as_zero_gain_anchor(
@@ -1501,7 +1517,7 @@ async def test_dispatch_failure_rolls_back_preapplied_warm_kernel(tmp_path):
         async def append_and_seq(self, _message):
             return 1
 
-    dispatcher.bus = _Bus()
+    coord.bus = _Bus()
     coord.shared_state.baseline_tput = 600.0
     target = tmp_path / "site-packages/vllm/prefix_prefill.py"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -2651,7 +2667,7 @@ def test_current_contract_threshold_preserves_local_legacy_positive_gain(tmp_pat
     )
     current.shared_state.baseline_tput = 600.0
     current.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
-    current._promote_warm_replay(
+    current.phase_prelude._promote_warm_replay(
         {"status": "succeeded", "output_throughput": 603.0},
         task=_StubTask(
             params={
@@ -2667,7 +2683,7 @@ def test_current_contract_threshold_preserves_local_legacy_positive_gain(tmp_pat
     legacy = _make_coord(tmp_path / "legacy", warm_start_recipe=_warm_recipe_t1())
     legacy.shared_state.baseline_tput = 600.0
     legacy.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
-    legacy._promote_warm_replay(
+    legacy.phase_prelude._promote_warm_replay(
         {"status": "succeeded", "output_throughput": 603.0},
         task=_StubTask(
             params={
@@ -2684,7 +2700,7 @@ def test_zero_and_nonfinite_combined_thresholds(tmp_path):
     zero.shared_state.baseline_tput = 600.0
     zero.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
     # +0.5%: clears the explicit 0.0 threshold, not the 1.0 default.
-    zero._promote_warm_replay(
+    zero.phase_prelude._promote_warm_replay(
         {"status": "succeeded", "output_throughput": 603.0},
         task=_StubTask(
             params={
@@ -2704,7 +2720,7 @@ def test_zero_and_nonfinite_combined_thresholds(tmp_path):
     )
     nonfinite.shared_state.baseline_tput = 600.0
     nonfinite.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
-    nonfinite._promote_warm_replay(
+    nonfinite.phase_prelude._promote_warm_replay(
         {"status": "succeeded", "output_throughput": 603.0},
         task=_StubTask(
             params={

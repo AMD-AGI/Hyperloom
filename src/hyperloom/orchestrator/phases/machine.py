@@ -286,9 +286,9 @@ class MachinePhase(CoordinatorCollaborator):
             # SWEEP already had an honest closeout, so skip_to_close was suppressed in _global_terminal.
             state.consume_pending_escalate_hint()
         elif state.pending_escalate_hint and target != _phase_state.PHASE_FRAMEWORK_AGENT:
-            # The FRAMEWORK_AGENT and KERNEL_AGENT phase exits consume ``skip_to_sweep``, so a transition to
-            # any phase other than FRAMEWORK_AGENT leaves the hint unclaimable. A transition *into* FRAMEWORK_AGENT is
-            # the opposite case: discarding there would drop the hint on the doorstep of the rules that read it.
+            # FRAMEWORK_AGENT exit consumes ``skip_to_kernel``; a transition to any other phase leaves the hint
+            # unclaimable. A transition *into* FRAMEWORK_AGENT is the opposite case: discarding there would drop
+            # the hint on the doorstep of the rules that read it.
             discarded_hint = state.discard_pending_escalate_hint()
             log.info(
                 "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",

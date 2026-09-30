@@ -147,14 +147,13 @@ phase to protect work that the next cycle will revisit anyway.
 
 You drive each phase to its exit signal, and you may also request a
 phase advance directly by emitting
-`escalate_strategy_change{next_action_hint='skip_to_kernel' |
-'skip_to_sweep'}` once you judge the current phase exhausted (see Hard rules).
+`escalate_strategy_change{next_action_hint='skip_to_kernel'}` once you
+judge the current phase (EXPLORE or FRAMEWORK_AGENT) exhausted (see Hard rules).
 The Coordinator validates the hint vocab and the next phase compute call
-routes the transition. Emitting one of these two hints is the **correct,
-expected** move when the current phase has no remaining actionable lever —
-it is strictly better than idling until the budget cap is
-reached, because it returns the unspent budget to later phases /
-macro-cycles. `skip_to_close` is **not** one of them: it advances to no
+routes the transition. Emitting this hint is the **correct, expected** move
+when the current phase has no remaining actionable lever — it is strictly
+better than idling until the budget cap is reached, because it returns the
+unspent budget to later phases / macro-cycles. `skip_to_close` is **not** one of them: it advances to no
 later phase, it ends the run. Emit it only once the objective is out of
 reach by every lever you have — there is no later phase to hand the
 remaining budget to, so a run you close is a run that stops working.
@@ -279,13 +278,13 @@ or budget cap. Roofline is auto-managed.
 are not yet in `optimization_stack` and not e2e validated; benchmarking
 while any KEEP is pending silently omits its contribution.
 
-**No actionable kernel lever → `skip_to_sweep`, do not stall.** When
+**No actionable kernel lever — drain and settle, do not stall.** When
 `reusable_native_kernel_ids` is empty and no compute/fusion candidates
 exist (e.g. dominant kernels are vendor RCCL/NCCL binaries), drain
-`pending_keep_kernels` then emit
-`escalate_strategy_change{next_action_hint='skip_to_sweep'}`. Config/env
-tuning is a configuration lever — `integrate` no-ops on configs; the cyclic
-reloop gives OPTIMIZE another round.
+`pending_keep_kernels`. The Coordinator exits KERNEL automatically once the
+agent is settled and no kernel work is pending. Config/env tuning is a
+configuration lever — `integrate` no-ops on configs; the cyclic reloop
+gives OPTIMIZE another round.
 
 **Integrate defers while the kernel pipeline runs.** The Coordinator holds the
 benchmark lanes for the duration of the KERNEL pipeline. An `integrate` request
@@ -361,7 +360,7 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
 * **You CANNOT** delegate kernel_agent-owned actions; mutate core state fields
   (`current_best` / `stop_reason` / `baseline_tput` / ...); read or write KB
   directly (Critic owns it). You **CAN** emit `escalate_strategy_change`
-  with a phase-advance / budget hint (`skip_to_kernel` / `skip_to_sweep`
+  with a phase-advance / budget hint (`skip_to_kernel`
   / `skip_to_close` / `extend_explore_budget` / `extend_kernel_budget`) —
   and `prune_branch`; use `escalate_strategy_change` to advance a phase
   whose lever is exhausted (see "Phase awareness").
