@@ -1770,6 +1770,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
             if runner_gpu_type != state.gpu_type:
                 print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
+        _emit_launch_info(
+            pid=os.getpid(),
+            session_dir=session_dir,
+            session_id=str(manifest.get("session_id") or ""),
+            run_log=os.environ.get("INFERENCE_OPTIMIZER_RUN_LOG", ""),
+            gpu_type=state.gpu_type or "",
+            framework=state.framework or "",
+            model=str(state.model_path or ""),
+            launch_info_file=getattr(args, "launch_info_file", None),
+        )
         # Resolve workload knobs with the resumed state as the fallback source (explicit --isl/--conc/... on this
         # resume still win), then project the resolved values into env so resume sees the same workload contract (not
         # YAML defaults).
