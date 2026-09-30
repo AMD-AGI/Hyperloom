@@ -436,6 +436,10 @@ def _build_variant_yaml(
         benchmark_script=benchmark_script,
         conc=variant_conc(variant),
     )
+    from ._workload_envs import validate_agentx_workload_overrides
+
+    base_extra_envs = validate_agentx_workload_overrides(bench, base_extra_envs, base_unset_envs)
+    variant_extra_envs = validate_agentx_workload_overrides(bench, variant.extra_envs, variant.unset_envs)
     extra_args_env = server_args_env_name(bench.get("framework"))
 
     variant_remove = to_str_list(getattr(variant, "remove_args", []))
@@ -482,7 +486,7 @@ def _build_variant_yaml(
             log.warning("grid: refusing to unset pinned env %s for variant %s", k, variant.name)
             continue
         envs.pop(str(k), None)
-    for k, v in variant.extra_envs.items():
+    for k, v in variant_extra_envs.items():
         envs[str(k)] = str(v)
     # The launcher re-exports these unconditionally, so a value carried here is
     # one the run never used.
