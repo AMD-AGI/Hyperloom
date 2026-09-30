@@ -1371,11 +1371,15 @@ def compute_roofline_breakdown_from_state(
     modes compute the arms here as before; the native CSV *write* happens at the
     two assembly sites (``shared_state`` baseline + per-cycle) via
     :func:`write_ceiling_arm`, not on every call.
+
+    The external-vs-native dispatch is owned by the :class:`RooflineProvider` seam
+    (:func:`make_roofline_provider`): its ``ceiling`` reads the external arm and falls back to
+    the native compute, so this call is byte-identical to the prior inline branch while routing
+    every ceiling read through the single provider choke point.
     """
-    external = _external_ceiling_breakdown(state, arm)
-    if external is not None:
-        return external
-    return _compute_roofline_breakdown_native(state, arm=arm)
+    from .roofline_provider import make_roofline_provider
+
+    return make_roofline_provider(state).ceiling(state, arm=arm)
 
 
 def _external_ceiling_breakdown(state: Any, arm: str | None) -> RooflineBreakdown | None:
