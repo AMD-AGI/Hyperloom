@@ -1,26 +1,28 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""GEAK must measure the throughput axis Hyperloom reads.
+"""GEAK must measure the axis Hyperloom grades on.
 
-An agentic replay is guarded on total token throughput; a fixed-ISL/OSL run is
-graded on output. GEAK measures whichever axis ``E2E_METRIC`` names and records
-the matching ``metric_basis``, so the flag has to follow the workload rather
-than sit pinned to one value. ``E2E_METRIC`` chooses between output and total
-token throughput, so it cannot name the interactivity axis AgentX is graded on;
-total is the throughput half of that 2-D verdict.
+An agentic replay is graded on interactivity and guarded on total token
+throughput; a fixed-ISL/OSL run is graded on output. GEAK measures whichever
+axis ``E2E_METRIC`` names and records the matching ``metric_basis``, so the flag
+has to follow the workload rather than sit pinned to one value.
 
-Two failure modes these cover:
+Three failure modes these cover:
 
 * A pinned ``E2E_METRIC=output`` on an AgentX session points GEAK's search at a
   figure the session never scores. On this corpus the two axes run ~140x apart,
   and the load is prefill-dominated, so a kernel that lifts the decode-side
-  output number need not lift the graded total by the same margin.
-* Reading the throughput back out of ``bench_summary.json`` by its output-named
-  field. ``bench_e2e.sh`` sets ``output_throughput_tok_s_median`` to null under
-  ``E2E_METRIC=total`` -- deliberately, so nobody reads total throughput under an
-  "output" name -- which would make every rung of an agentic sweep report "no
-  throughput" the moment the flag flipped.
+  output number need not lift the graded axes by the same margin.
+* Sending an AgentX session at the *guard* instead of the objective. That is
+  what this file asserted before GEAK could measure interactivity, and it is
+  near-incompressible: under a ~97% prefix cache the guard is ~99% input tokens
+  that were never computed, so no kernel win can surface on it.
+* Reading the measurement back out of ``bench_summary.json`` by its output-named
+  field. ``bench_e2e.sh`` sets ``output_throughput_tok_s_median`` to null off the
+  output axis -- deliberately, so nobody reads another axis under an "output"
+  name -- which would make every rung of an agentic sweep report "no throughput"
+  the moment the flag flipped.
 
 Synthetic runs must come out byte-identical, so each case here has its
 fixed-ISL/OSL twin.
@@ -51,10 +53,10 @@ def _clear_axis_env(monkeypatch: pytest.MonkeyPatch) -> None:
     [
         ("", None, ("output", "aggregate_output_tok_s")),
         ("synthetic", None, ("output", "aggregate_output_tok_s")),
-        ("agentx", None, ("total", "aggregate_total_token_tok_s")),
+        ("agentx", None, ("intvty", "e2e_norm_intvty_p90")),
         # The persisted mode is the durable signal, but a round driven from a
         # subprocess that only inherited the env var must resolve the same way.
-        ("", "1", ("total", "aggregate_total_token_tok_s")),
+        ("", "1", ("intvty", "e2e_norm_intvty_p90")),
     ],
 )
 def test_the_axis_follows_the_grader(monkeypatch, benchmark_mode, agentx_env, expected):
@@ -72,7 +74,7 @@ def test_an_explicit_override_wins_in_both_directions(monkeypatch):
     assert geak_metric_axis(benchmark_mode="agentx")[0] == "output"
 
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", INTVTY_V1)
-    assert geak_metric_axis(benchmark_mode="synthetic")[0] == "total"
+    assert geak_metric_axis(benchmark_mode="synthetic")[0] == "intvty"
 
 
 def _sweep_with_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, summary: dict[str, Any]):
@@ -136,6 +138,36 @@ async def test_a_total_mode_summary_still_reports_a_throughput(tmp_path, monkeyp
     # which axis it is. Renaming the row field would ripple through every
     # downstream sweep consumer, so it is left alone deliberately.
     assert points[0]["output_throughput"] == pytest.approx(23_697.0)
+
+
+@pytest.mark.asyncio
+async def test_an_intvty_mode_summary_is_not_published_as_output_throughput(tmp_path, monkeypatch):
+    """The interactivity median is a per-request rate, not a throughput.
+
+    ``output_throughput`` is ``GRADED_OUTPUT``, which the perf snapshot reads, so publishing
+    an interactivity score there would record it as the session's output throughput. Total
+    mode keeps the historical name (it really is a throughput); this axis does not.
+    """
+    go = _sweep_with_summary(
+        tmp_path,
+        monkeypatch,
+        {
+            "throughput_tok_s_median": 84.45,
+            "output_throughput_tok_s_median": None,
+            "metric_basis": "e2e_norm_intvty_p90",
+            "guard_total_tok_s_median": 59_226.0,
+            "ttft_ms_median": 10.0,
+            "tpot_ms_median": 3.0,
+        },
+    )
+    result = await go()
+    assert result["status"] == "succeeded"
+    point = result["points"][0]
+    assert point["measured_value"] == pytest.approx(84.45)
+    assert point["metric_basis"] == "e2e_norm_intvty_p90"
+    assert "output_throughput" not in point
+    # The rung must still be selectable, or an agentic sweep reports nothing again.
+    assert result["promotion_measurement"]["measured_value"] == pytest.approx(84.45)
 
 
 @pytest.mark.asyncio
