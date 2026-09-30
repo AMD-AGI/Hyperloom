@@ -444,6 +444,39 @@ def _build_specialist_env() -> dict[str, str]:
 #: largest deadline the dispatcher hands down.
 UNBOUNDED_REAP_CAP_SEC: float = 4 * 60 * 60.0
 
+_SPECIALIST_TOOLS_ENV = "HYPERLOOM_SPECIALIST_TOOLS"
+#: Built-in tools the claude CLI loads for a specialist. Every built-in rides in
+#: the prompt of every request (the CLI's full default set is ~27k tokens), and
+#: specialists call little beyond these; ``Task`` keeps the ``--agents`` leaves
+#: reachable, ``TaskOutput``/``TaskStop`` serve background Bash.
+SPECIALIST_BUILTIN_TOOLS: tuple[str, ...] = (
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "WebSearch",
+    "WebFetch",
+    "Task",
+    "TaskOutput",
+    "TaskStop",
+)
+
+
+def specialist_builtin_tools(env: dict[str, str] | None = None) -> tuple[str, ...] | None:
+    """Return the built-in tools a specialist CLI loads.
+
+    ``HYPERLOOM_SPECIALIST_TOOLS`` overrides the default with a comma list;
+    ``all`` returns ``None``, which leaves the CLI's full default set in place.
+    """
+    raw = str((env if env is not None else os.environ).get(_SPECIALIST_TOOLS_ENV) or "").strip()
+    if not raw:
+        return SPECIALIST_BUILTIN_TOOLS
+    if raw.lower() == "all":
+        return None
+    return tuple(name.strip() for name in raw.split(",") if name.strip())
+
 
 # Live deadline extensions granted by ``extend_lease`` while a specialist is
 # already spawned, keyed by task_id. The reap loop re-reads this every poll so
@@ -1427,6 +1460,9 @@ class SpecialistSubprocessDispatcher:
         ]
         if cfg.model:
             cmd.extend(["--model", cfg.model])
+        builtin = specialist_builtin_tools()
+        if builtin is not None:
+            cmd.extend(["--tools", ",".join(name for name in builtin if name not in disallowed_tools)])
         if disallowed_tools:
             cmd.extend(["--disallowedTools", ",".join(sorted(disallowed_tools))])
         from .leaf import build_leaf_agents_json

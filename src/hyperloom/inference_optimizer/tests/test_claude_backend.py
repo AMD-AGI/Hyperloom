@@ -307,6 +307,27 @@ def test_build_options_effort_env_override_and_thinking_off(monkeypatch):
     assert "thinking" not in o.kwargs
 
 
+def test_build_options_loads_only_the_agent_builtins(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENT_BUILTIN_TOOLS", raising=False)
+    b = ClaudeBackend(model="m", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions)
+    o = b._build_options(tools=["WebSearch", "mcp__srv__tool"], max_turns=4, system_prompt="sp")
+    assert o.kwargs["tools"] == ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebSearch"]
+
+
+def test_build_options_keeps_the_cli_default_set_on_request(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENT_BUILTIN_TOOLS", "all")
+    b = ClaudeBackend(model="m", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions)
+    assert "tools" not in b._build_options(tools=[], max_turns=4, system_prompt="sp").kwargs
+
+
+def test_raw_completion_loads_no_builtins(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENT_BUILTIN_TOOLS", raising=False)
+    b = ClaudeBackend(
+        model="m", raw_completion=True, sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions
+    )
+    assert b._build_options(tools=[], max_turns=4, system_prompt="sp").kwargs["tools"] == []
+
+
 def test_real_sdk_options_accept_hyperloom_kwargs(monkeypatch):
     """SDK compat: the pinned SDK must accept the kwargs _build_options sends."""
     _clear_effort_env(monkeypatch)

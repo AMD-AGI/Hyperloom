@@ -28,11 +28,13 @@ from hyperloom.orchestrator.specialists.runner import (
 )
 from hyperloom.orchestrator.specialists import subprocess_
 from hyperloom.orchestrator.specialists.subprocess_ import (
+    SPECIALIST_BUILTIN_TOOLS,
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     _build_specialist_env,
     _pick_worktree_base,
     _setup_worktree,
+    specialist_builtin_tools,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
@@ -1226,6 +1228,38 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
     # Worktree first, workspace second, then each distinct framework root.
     # integrate_patch is the only writer of source; the specialist gets neither.
     assert add_dirs == [str(worktree), str(workspace)]
+
+
+def _cmd_with_tools(tmp_path: Path, disallowed: frozenset[str] = frozenset()) -> list[str]:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    return SpecialistSubprocessDispatcher(SpecialistSubprocessConfig())._build_claude_cmd(
+        system_prompt_file=workspace / "system_prompt.md",
+        system_prompt="SYSTEM",
+        workspace=workspace,
+        worktree=None,
+        disallowed_tools=disallowed,
+    )
+
+
+def test_build_claude_cmd_loads_only_the_specialist_builtins(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_TOOLS", raising=False)
+    cmd = _cmd_with_tools(tmp_path, disallowed=frozenset({"WebSearch"}))
+
+    tools = cmd[cmd.index("--tools") + 1].split(",")
+    assert "Task" in tools and "Bash" in tools
+    assert "WebSearch" not in tools
+    assert set(tools) == set(SPECIALIST_BUILTIN_TOOLS) - {"WebSearch"}
+
+
+def test_build_claude_cmd_keeps_the_cli_default_set_on_request(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_TOOLS", "all")
+    assert "--tools" not in _cmd_with_tools(tmp_path)
+
+
+def test_specialist_builtin_tools_env_list():
+    assert specialist_builtin_tools({"HYPERLOOM_SPECIALIST_TOOLS": " Bash, Read ,"}) == ("Bash", "Read")
+    assert specialist_builtin_tools({}) == SPECIALIST_BUILTIN_TOOLS
 
 
 @pytest.mark.asyncio
