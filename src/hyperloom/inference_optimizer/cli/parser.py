@@ -1166,14 +1166,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Re-run even when the session already looks complete (close_sequence_done / breakdown already recorded).",
     )
     rec.add_argument(
-        "--backfill-trace",
-        action="store_true",
-        help="Also replay reports/trace/llm_calls.jsonl as Langfuse "
-        "generations. Use ONLY when the live emitter never ran for this "
-        "session (e.g. it was disabled during the run); otherwise it "
-        "duplicates generations already pushed live.",
-    )
-    rec.add_argument(
         "--confirm-stopped",
         metavar="TASK_ID",
         help="Attest that one task's complete process tree, remote workers and Ray actor have stopped, "
@@ -1185,7 +1177,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--confirmation-reason",
         metavar="TEXT",
         help="Required audit reason for --confirm-stopped. Both options must be provided together "
-        "and cannot be combined with --force or --backfill-trace.",
+        "and cannot be combined with --force.",
     )
 
     return p

@@ -500,7 +500,6 @@ def _recover_args(tmp_path, **changes):
     values = dict(
         session_dir=tmp_path,
         force=False,
-        backfill_trace=False,
         confirm_stopped="task-1",
         confirmation_reason="Verified process tree and Ray actors stopped; secret-ticket",
     )
@@ -537,7 +536,6 @@ def test_confirmation_cli_is_offline_and_does_not_resume(tmp_path, monkeypatch, 
         {"confirm_stopped": ""},
         {"confirmation_reason": " \t"},
         {"force": True},
-        {"backfill_trace": True},
     ],
 )
 def test_confirmation_cli_rejects_bad_argument_pairs_before_reports(tmp_path, monkeypatch, changes):
@@ -564,7 +562,7 @@ def test_confirmation_cli_keeps_old_namespace_compatible(tmp_path, monkeypatch):
         )
     )
     monkeypatch.setattr(recover, "_session_recovery_status", status_probe)
-    args = argparse.Namespace(session_dir=tmp_path, force=False, backfill_trace=False)
+    args = argparse.Namespace(session_dir=tmp_path, force=False)
 
     result = recover._run_recover_session(args)
 

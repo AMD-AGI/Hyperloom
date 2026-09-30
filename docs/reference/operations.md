@@ -240,14 +240,13 @@ that exited abnormally — without re-running the optimization loop — use the
 dedicated subcommand instead of `--resume-from`:
 
 ```bash
-  python3 -m hyperloom.inference_optimizer.cli recover-session --session-dir "$SESSION_DIR" [--force] [--backfill-trace]
+  python3 -m hyperloom recover --session-dir "$SESSION_DIR" [--force]
 ```
 
-`--force` re-runs even when the session already looks complete;
-`--backfill-trace` replays `reports/trace/llm_calls.jsonl` as Langfuse
-generations (use only when the live emitter never ran, or it duplicates
-generations). `--resume-from` = keep optimizing; `recover-session` = rebuild
-the breakdown artifact.
+`--force` re-runs even when the session already looks complete. To replay
+`reports/trace/llm_calls.jsonl` as Langfuse generations (only when the live
+emitter never ran), use `hyperloom session backfill --session-dir "$SESSION_DIR"`.
+`--resume-from` = keep optimizing; `recover` = rebuild the breakdown artifact.
 
 ### Scenario B: PV lost or corrupted
 

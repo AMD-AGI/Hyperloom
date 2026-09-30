@@ -62,8 +62,8 @@ def _run_recover_session(args: argparse.Namespace) -> int:
                 "ERROR: --confirm-stopped and a nonempty --confirmation-reason are required together.", file=sys.stderr
             )
             return 2
-        if getattr(args, "force", False) or getattr(args, "backfill_trace", False):
-            print("ERROR: cleanup confirmation cannot be combined with --force or --backfill-trace.", file=sys.stderr)
+        if getattr(args, "force", False):
+            print("ERROR: cleanup confirmation cannot be combined with --force.", file=sys.stderr)
             return 2
         from ..session.resume_guard import CleanupConfirmationError, confirm_task_stopped
 
@@ -115,17 +115,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
     except Exception:
         log.exception("recover-session: langfuse push failed (non-fatal)")
 
-    # 3) Optional full generation replay (off by default).
-    if args.backfill_trace:
-        try:
-            from ..tools.backfill_langfuse import build_plan, ingest
-
-            rc = ingest(build_plan(session_dir))
-            print(f"  trace backfill    : rc={rc}")
-        except Exception:
-            log.exception("recover-session: trace backfill failed (non-fatal)")
-
-    # 4) Re-package the artifact bundle so /workspace carries the recovered SBD.
+    # 3) Re-package the artifact bundle so /workspace carries the recovered SBD.
     try:
         from ..breakdown import package_session_artifacts
 

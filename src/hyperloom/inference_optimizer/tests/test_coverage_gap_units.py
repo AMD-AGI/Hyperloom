@@ -7,7 +7,6 @@ import argparse
 import json
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -186,12 +185,12 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
     )
     monkeypatch.setattr(emitter, "flush_session", lambda s: calls.append("flush"))
     monkeypatch.setattr(emitter, "record_session_breakdown", lambda s: calls.append("record"))
-    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True, backfill_trace=False))
+    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True))
     assert rc == 0
     assert calls == ["write", "flush", "patch", "record", "package"]
 
     monkeypatch.setattr(breakdown_mod, "write_breakdown_json", lambda _s: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert recover._run_recover_session(argparse.Namespace(session_dir=session, force=True, backfill_trace=False)) == 1
+    assert recover._run_recover_session(argparse.Namespace(session_dir=session, force=True)) == 1
 
 
 def test_cli_multi_node_gc_backend_and_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -986,43 +985,3 @@ def test_conc_sweep_plot_helper_series_and_payload_loading(tmp_path: Path) -> No
     assert cx == [200.0, 300.0]
     assert cy == [400.0, 300.0]
     assert plot._ceiling_series({"rows": [{"conc": 0, "t_peak_tok_s": 0}]}, tp_eff=1.0) == ([], [])
-
-
-def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.inference_optimizer.cli import recover
-    import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
-
-    session = tmp_path / "session"
-    session.mkdir()
-    calls: list[str] = []
-    monkeypatch.setattr(
-        recover,
-        "_session_recovery_status",
-        lambda _s: {
-            "looks_complete": False,
-            "close_done": False,
-            "breakdown_exists": False,
-            "breakdown_recorded": False,
-            "counts_final": False,
-        },
-    )
-    monkeypatch.setattr(
-        breakdown_mod, "write_breakdown_json", lambda s: calls.append("write") or s / "session_breakdown.json"
-    )
-    monkeypatch.setattr(emitter, "flush_session", lambda _s: (_ for _ in ()).throw(RuntimeError("langfuse down")))
-    monkeypatch.setattr(
-        breakdown_mod, "package_session_artifacts", lambda _s: (_ for _ in ()).throw(RuntimeError("zip failed"))
-    )
-
-    fake_backfill = SimpleNamespace(
-        build_plan=lambda s: calls.append("plan") or {"session": str(s)},
-        ingest=lambda plan: calls.append("ingest") or 0,
-    )
-    monkeypatch.setitem(
-        __import__("sys").modules, "hyperloom.inference_optimizer.tools.backfill_langfuse", fake_backfill
-    )
-
-    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True, backfill_trace=True))
-    assert rc == 0
-    assert calls == ["write", "plan", "ingest"]
