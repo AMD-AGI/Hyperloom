@@ -4445,6 +4445,27 @@ class TestTracelensRootResolution:
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
 
+    def test_trace_analyze_handler_bypass_selfheals_default_root_then_fails_if_unrecovered(self, tmp_path, monkeypatch):
+        # Bypass transitively imports TraceLens for source mapping, so it is provisioned like the agent route:
+        # a missing default root self-heals, then fails clearly instead of crashing the subprocess at import time.
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
+        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "no-tracelens-here"))
+        called = {"n": 0}
+
+        def _fake_heal(root, *, log=None):
+            called["n"] += 1
+
+        monkeypatch.setattr(ta, "_maybe_selfheal_tracelens_root", _fake_heal)
+        out = asyncio.run(
+            ta.trace_analyze_handler(
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "bypass"}, session_dir=tmp_path
+            )
+        )
+        assert called["n"] == 1  # self-heal attempted on the bypass route too
+        assert out["status"] == "failed"
+        assert out["error_class"] == "tracelens_root_missing"
+
     def test_trace_analyze_handler_selfheals_incomplete_default_root(self, tmp_path, monkeypatch):
         # an incomplete default checkout (dir present, no .git) must still trigger self-heal.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))

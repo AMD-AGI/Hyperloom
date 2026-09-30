@@ -675,17 +675,15 @@ async def trace_analyze_handler(
         }
     analysis_route = explicit_route or "agent"
     is_bypass = analysis_route == "bypass"
-    # Resolve TraceLens root independently of inherited env, self-healing a
-    # vanished checkout before validation. Skipped on bypass.
-    tracelens_root: Path | None = None
-    if not is_bypass:
-        tracelens_root = _resolve_tracelens_root()
-        # Self-heal when the checkout is missing or incomplete (no .git).
-        if not (tracelens_root / ".git").exists():
-            _maybe_selfheal_tracelens_root(tracelens_root, log=log)
-        tl_err = _tracelens_root_error(tracelens_root)
-        if tl_err:
-            return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
+    # Both routes need an importable checkout: bypass transitively imports
+    # TraceLens for source-path mapping.
+    tracelens_root = _resolve_tracelens_root()
+    # Self-heal when the checkout is missing or incomplete (no .git).
+    if not (tracelens_root / ".git").exists():
+        _maybe_selfheal_tracelens_root(tracelens_root, log=log)
+    tl_err = _tracelens_root_error(tracelens_root)
+    if tl_err:
+        return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
 
     # Pass the session root so artefacts settle under ``<session_dir>/kernel-agent/runs/...``.
     workspace_path = payload.get("workspace_path") or str(session_dir)
