@@ -37,17 +37,19 @@ def test_factory_external_with_csv_dir(tmp_path) -> None:
     assert prov.arch_peak("mi355x", "bf16") == rp.NativeRooflineProvider().arch_peak("mi355x", "bf16")
 
 
-def test_factory_external_strict_raises_on_missing(tmp_path) -> None:
+def test_external_non_ceiling_readers_are_lenient_under_strict(tmp_path) -> None:
+    # --roofline-csv-strict is contractually scoped to the ceiling read (enforced in
+    # _external_ceiling_breakdown), so the other readers stay lenient and fall back on a miss
+    # rather than raising — matching their live seams.
     class _S:
         roofline_csv_dir = str(tmp_path)
         roofline_csv_strict = True
 
     prov = rp.make_roofline_provider(_S())
     assert isinstance(prov, rp.CsvRooflineProvider)
-    import pytest
-
-    with pytest.raises(FileNotFoundError):
-        prov.arch_peak("mi355x", "bf16")  # empty dir + strict -> raise, no fallback
+    native = rp.NativeRooflineProvider()
+    assert prov.arch_peak("mi355x", "bf16") == native.arch_peak("mi355x", "bf16")
+    assert prov.mem_bw("mi355x") == native.mem_bw("mi355x")
 
 
 def test_arch_peak_delegates_to_native() -> None:

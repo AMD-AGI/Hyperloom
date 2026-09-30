@@ -1,8 +1,10 @@
 """RooflineProvider — one seam for analytical roofline data (native compute vs external CSV).
 
 Consumers ask a provider for a value; the provider decides whether to compute it natively or
-read it from an external (MAIDAS-authored) CSV. This collapses the mode-selection logic that was
-otherwise duplicated at every consume site (arch peak / ceiling / model-meta / per-kernel).
+read it from an external (MAIDAS-authored) CSV. This is the seam that collapses the
+external-vs-native mode selection. The ceiling read (:func:`compute_roofline_breakdown_from_state`)
+is wired through it today; the other read methods (arch peak / model-meta / per-kernel) are the
+stable read surface those consume sites migrate onto.
 
 The five read methods mirror the shapes the native math already exposes, so ``NativeRooflineProvider``
 is a thin delegate — the default provider runs the identical stock computation with no CSV, which
@@ -96,38 +98,36 @@ class NativeRooflineProvider:
 class CsvRooflineProvider:
     """Read-through provider over an external (MAIDAS-authored) CSV dir, with native fallback.
 
-    A per-value miss falls through to ``fallback`` (native) unless ``strict`` is set, in which case a
-    missing required value raises — mirroring ``--roofline-csv-strict``. Used in external mode
+    A per-value miss falls through to ``fallback`` (native). Used in external mode
     (``--roofline-csv-dir``); it wraps the leaf ``RooflineResolver`` and the module-level external
     readers rather than re-implementing any read logic.
+
+    ``--roofline-csv-strict`` is enforced where it is contractually scoped — the ceiling read, inside
+    :func:`roofline_ceiling._external_ceiling_breakdown` (which raises on a missing arm row). The other
+    readers here are lenient by design (they fall back), matching their live seams; a strict guard is
+    added deliberately, with a test, only if/when one of those sites needs it.
     """
 
-    def __init__(self, csv_dir: "str | Path", *, fallback: "RooflineProvider", strict: bool = False):
+    def __init__(self, csv_dir: "str | Path", *, fallback: "RooflineProvider"):
         from .roofline_csv import RooflineResolver
 
         self._resolver = RooflineResolver(csv_dir)
         self._fallback = fallback
-        self._strict = strict
-
-    def _miss(self, what: str, fallback_call):
-        if self._strict:
-            raise FileNotFoundError(f"roofline-csv-strict: no external {what}")
-        return fallback_call()
 
     def arch_peak(self, device: str, dtype: str) -> float | None:
         v = self._resolver.arch_peak(device, dtype)
         if isinstance(v, (int, float)) and v > 0:
             return float(v)
-        return self._miss(f"arch_peak[{device}/{dtype}]", lambda: self._fallback.arch_peak(device, dtype))
+        return self._fallback.arch_peak(device, dtype)
 
     def mem_bw(self, device: str) -> float | None:
         v = self._resolver.mem_bw(device)
         if isinstance(v, (int, float)) and v > 0:
             return float(v)
-        return self._miss(f"mem_bw[{device}]", lambda: self._fallback.mem_bw(device))
+        return self._fallback.mem_bw(device)
 
     def ceiling(self, state: Any, *, arm: str | None = None) -> "RooflineBreakdown | None":
-        # _external_ceiling_breakdown reads the external ceiling arm and honours strict (raises) /
+        # _external_ceiling_breakdown reads the external ceiling arm and owns the strict-raise /
         # trust guards; None means "not in the external CSV" -> native fallback.
         from .roofline_ceiling import _external_ceiling_breakdown
 
@@ -144,19 +144,16 @@ class CsvRooflineProvider:
             from .roofline_ceiling import _model_meta_from_row
 
             return _model_meta_from_row(row)
-        return self._miss(
-            "model_meta",
-            lambda: self._fallback.model_meta(state, model_path, precision_hint=precision_hint),
-        )
+        return self._fallback.model_meta(state, model_path, precision_hint=precision_hint)
 
     def kernel(self, name: str) -> dict | None:
-        # A per-kernel miss is not an error even under strict: the consumer keeps its inline
-        # computation for kernels the external author did not supply.
+        # A per-kernel miss is not an error: the consumer keeps its inline computation for kernels the
+        # external author did not supply.
         return self._resolver.kernel(name)
 
 
 def make_roofline_provider(state: Any) -> RooflineProvider:
-    """Pick the provider for this run from the roofline-csv flags (the single decision point).
+    """Pick the provider for this run from the roofline-csv flags.
 
     - ``--roofline-csv-dir`` set -> external: read the MAIDAS CSVs, native fallback (``CsvRooflineProvider``).
     - otherwise (default or ``--no-roofline-csv``) -> pure native.
@@ -167,9 +164,5 @@ def make_roofline_provider(state: Any) -> RooflineProvider:
     native = NativeRooflineProvider()
     csv_dir = str(getattr(state, "roofline_csv_dir", "") or "").strip()
     if csv_dir:
-        return CsvRooflineProvider(
-            csv_dir,
-            fallback=native,
-            strict=bool(getattr(state, "roofline_csv_strict", False)),
-        )
+        return CsvRooflineProvider(csv_dir, fallback=native)
     return native
