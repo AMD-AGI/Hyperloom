@@ -733,7 +733,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Append-only operator-facing lifecycle log.
     lifecycle: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget share per phase: seeded once at phase init from CLI flags/defaults with disabled phases' shares
-    # redistributed, raised by ``extend_*_budget`` hints, kept as-is on resume. Empty => library defaults.
+    # redistributed, raised by ``extend_*_budget`` hints, kept on resume unless a --*-pct flag is given. Empty => library defaults.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
     # Cyclic phase machine macro-cycle counter (cycle 0 is the first pass; each SWEEP→FRAMEWORK_AGENT loopback
     # increments it).
