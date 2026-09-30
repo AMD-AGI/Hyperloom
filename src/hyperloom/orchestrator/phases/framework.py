@@ -773,6 +773,8 @@ class FrameworkPhase(CoordinatorCollaborator):
         # An authored patch awaiting Critic review (or a candidate awaiting its pre-screen verdict) keeps the phase
         # open, but only while the proposal targets a still-unprocessed candidate.
         for p in self.state.pending_proposals.values():
+            if getattr(p, "decided", False):
+                continue
             if getattr(p, "action_name", "") != "integrate_patch":
                 continue
             payload = getattr(p, "payload", None) or {}
@@ -1774,7 +1776,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         cand_id = str(payload.get("framework_agent_candidate_id") or self._framework_candidate_key(candidate))
         batch_id = str(payload.get("batch_id") or candidate.get("batch_id") or "")
         _record_review_outcome(self, cand_id, materialized=True)
-        authoring_enabled = True
+        authoring_enabled = bool(getattr(self.shared_state, "framework_agent_authoring_enabled", False))
         want_raw = audit_step == "direct_framework"
         want_author = audit_step == "author_via_specialist"
         if audit_step not in ("direct_framework", "author_via_specialist"):

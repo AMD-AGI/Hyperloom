@@ -155,6 +155,7 @@ async def test_warm_specialist_params_fills_pr_monitor_available(tmp_path: Path)
         warm_start_pitfalls: list = None
         warm_start_lessons: list = None
         gpu_type: str = "MI300X"
+        macro_cycle: int = 0
 
     state = _State(
         warm_start_recipe={"backend": "sglang", "tp": 8},
@@ -186,6 +187,7 @@ async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path
         warm_start_pitfalls: list = None
         warm_start_lessons: list = None
         gpu_type: str = ""
+        macro_cycle: int = 0
 
     coord.shared_state = _State()
 

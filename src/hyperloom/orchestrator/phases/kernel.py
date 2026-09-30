@@ -1277,7 +1277,9 @@ class KernelPhase(CoordinatorCollaborator):
         launch_server_script = self._resolve_launch_server_script(recipe_bench)
         if launch_server_script:
             handoff["launch_server_script"] = launch_server_script
-        # Only forward resolved fidelity knobs; absence => GEAK adapter default.
+        # Additive identity values first so resolved non-zero knobs override them.
+        handoff["max_model_len"] = 0
+        handoff["mem_fraction"] = 0.0
         handoff.update(_serving_fidelity)
         # Full layered environment and its matching measurement identity.
         if env_spec:
