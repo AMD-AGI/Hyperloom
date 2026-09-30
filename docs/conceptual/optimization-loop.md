@@ -337,7 +337,6 @@ turn never depends on what an earlier turn happened to remember.
   in-flight work (`get_running_tasks`), failure packets (`get_failure` /
   `get_variant_failures`), reference docs (`read_reference`), the raw
   `analysis.md` (`show_analysis_md`), denial history (`why_denied`) — plus
-  `run_action_now` for a whitelist of cheap synchronous actions.
   Transports without MCP tools get the projection only.
 - **Resume**: On resume the projection is rebuilt from
   `orchestration_memory` plus the authoritative `SharedState` facts —

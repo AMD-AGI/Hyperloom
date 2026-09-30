@@ -62,6 +62,7 @@ from ._grid_base import (
     TS_KILLED_OVERTIME,
     TS_SKIPPED_DEDUP,
 )
+from .benchmark_result import double_run_requested
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     _MN_BACKENDS_PRIORITY,
@@ -788,7 +789,7 @@ class ExploreExecutor:
         lifecycle_port = int(lifecycle.get("port") or 0)
 
         # Warm-decision mode.
-        _double_run = is_truthy(params["baseline_double_run"]) if "baseline_double_run" in params else True
+        _double_run = double_run_requested(params)
         use_warm_decision = lifecycle_eligible and _double_run
         # Admission uses the measured warm duration when this round reuses a server.
         decision_anchor_sec = (

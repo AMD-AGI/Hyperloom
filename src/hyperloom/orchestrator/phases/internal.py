@@ -18,7 +18,7 @@ log = _logging.getLogger(__name__)
 
 
 class InternalTasksPhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """Handles internal task execution: report, session breakdown, and internal bookkeeping tasks."""
 
     async def _enqueue_internal_research_scout_task(
         self,

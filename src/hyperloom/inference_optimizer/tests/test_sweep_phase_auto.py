@@ -1009,6 +1009,8 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     assert coord.shared_state.last_conc_sweep["status"] == "failed"
     assert coord.shared_state.last_conc_sweep["skip_reason"] == "enqueue_failed"
     assert coord.shared_state.save_count >= 1
+    exit_reason, _ = machine_state._sweep_exit({"sweep_result": coord.shared_state.last_conc_sweep})
+    assert exit_reason == "sweep_failed"
 
 
 @pytest.mark.asyncio

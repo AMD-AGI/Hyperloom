@@ -1157,12 +1157,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
     # Resolve from actual server args (baseline yaml + current_best overlay).
     current_best = getattr(state, "current_best", None) or {}
-    try:
-        server_args = resolve_runtime_workload(state, arm="current_best").server_args
-    except Exception:  # noqa: BLE001 - best-effort fallback for partial state/test doubles
-        server_args = ""
-        if isinstance(current_best, dict):
-            server_args = str(current_best.get("extra_server_args") or "")
+    server_args = resolve_runtime_workload(state, arm="current_best").server_args
     extra_envs = dict(current_best.get("extra_envs") or {}) if isinstance(current_best, dict) else {}
     ref_envs = dict(getattr(state, "reference_envs", None) or {})
     per_token_signal = is_truthy(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")) or is_truthy(
