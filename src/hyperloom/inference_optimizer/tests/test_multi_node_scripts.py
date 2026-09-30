@@ -1797,3 +1797,15 @@ def test_rayjob_restart_without_per_role_pd_reaches_the_cluster(monkeypatch, ns)
     _stub_rayjob_state(monkeypatch, mn_cli)
     with pytest.raises(_ReachedCluster):
         mn_cli.cmd_restart_server(ns)
+
+
+def test_finalize_patch_prints_logs_when_pod_json_is_unparseable(monkeypatch, capsys):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.setattr(mn_cli, "_load_state", lambda: {"backend": "rayjob", "head_pod_ip": "10.0.0.1"})
+    monkeypatch.setattr(mn_cli, "_submit_and_collect_pod_json", lambda *a, **k: (0, None, "pod traceback"))
+    args = mn_cli.build_parser().parse_args(["finalize-patch", "--records-json", '{"k": {}}', "--print-logs"])
+    assert mn_cli.cmd_finalize_patch(args) == mn_cli.EXIT_TRANSIENT
+    captured = capsys.readouterr()
+    assert captured.out == "pod traceback\n"
+    assert "finalize-patch: could not parse per-pod JSON from dashboard logs" in captured.err

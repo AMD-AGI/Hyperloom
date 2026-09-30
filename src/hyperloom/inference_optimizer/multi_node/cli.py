@@ -1122,7 +1122,7 @@ def cmd_finalize_patch(args: argparse.Namespace) -> int:
         args.records_json,
         args.timeout_sec,
     )
-    rc, parsed, _logs = _submit_and_collect_pod_json(
+    rc, parsed, logs = _submit_and_collect_pod_json(
         state,
         entrypoint,
         label="finalize-patch",
@@ -1130,6 +1130,9 @@ def cmd_finalize_patch(args: argparse.Namespace) -> int:
         poll_timeout=_poll_timeout_from_args(args),
     )
     if parsed is None:
+        err("finalize-patch: could not parse per-pod JSON from dashboard logs")
+        if args.print_logs:
+            print(logs)
         return EXIT_TRANSIENT
     print(json.dumps(parsed, indent=2, sort_keys=True))
     return rc
@@ -1858,6 +1861,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("--records-json", required=True)
     sp.add_argument("--timeout-sec", type=int, default=60)
+    sp.add_argument("--print-logs", action="store_true", help="dump full dashboard job_logs on parse failure")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_finalize_patch)
 
