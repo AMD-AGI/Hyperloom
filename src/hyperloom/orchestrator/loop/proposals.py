@@ -194,7 +194,7 @@ def _extra_server_args(payload: Mapping[str, Any]) -> str:
 
 
 class ProposalsCollaborator(CoordinatorCollaborator):
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+    """Manages recipe proposals: workload fingerprinting, proposal cache, and recipe writes."""
 
     def __init__(self, coordinator: "Coordinator") -> None:
         super().__init__(coordinator)

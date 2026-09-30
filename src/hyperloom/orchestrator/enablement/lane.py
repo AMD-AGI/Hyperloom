@@ -341,7 +341,7 @@ class EnablementLane(CoordinatorCollaborator):
         # Undecided proposal keeps the round open; once ruled, approve lands the task matched below and reject rearms
         # directly, so it cannot defer forever.
         for p in self.state.pending_proposals.values():
-            if p.action_name != "integrate_patch" or p.decided:
+            if p.action_name != "integrate_patch":
                 continue
             if (p.payload.get("params") or {}).get("specialist_task_id") == holder:
                 return True

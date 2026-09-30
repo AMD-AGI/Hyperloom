@@ -900,18 +900,9 @@ def _section_cycle_directive(
 ) -> list[str]:
     """Build the CYCLE DIRECTIVE section.
 
-    When ``cycle_directive`` is non-empty it carries an LLM-authored focus
-    mandate for this macro-cycle (see ``orchestration_memory.next_cycle_directive``).
-    When ``cycle_strategy`` is provided (a dict from ``_plan_cycle_focus``), the
-    deterministic focus, rationale, saturated directions, and condensed cycle history
-    are rendered after the LLM directive (or instead of the breadth→depth default when
-    no directive is present).
-
-    Args:
-        macro_cycle: Current macro-cycle counter; shown verbatim.
-        cycle_directive: Optional LLM-authored focus text for this cycle.
-        cycle_strategy: Optional dict from ``_plan_cycle_focus`` with keys ``focus``,
-            ``score``, ``rationale``, ``saturated_at_start``, and ``prior_cycles``.
+    Renders the LLM-authored ``cycle_directive`` when present, the deterministic
+    ``cycle_strategy`` focus/history when provided, or the breadth→depth default
+    when neither is set.
 
     Returns:
         list[str]: Markdown lines for the section.
@@ -940,12 +931,11 @@ def _section_cycle_directive(
             ]
         )
     if cycle_strategy:
-        cs = dict(cycle_strategy)
-        focus = str(cs.get("focus") or "").strip()
-        score = cs.get("score")
-        rationale = str(cs.get("rationale") or "").strip()
-        saturated = cs.get("saturated_at_start") or []
-        prior_cycles: list[Any] = list(cs.get("prior_cycles") or [])
+        focus = str(cycle_strategy.get("focus") or "").strip()
+        score = cycle_strategy.get("score")
+        rationale = str(cycle_strategy.get("rationale") or "").strip()
+        saturated = cycle_strategy.get("saturated_at_start") or []
+        prior_cycles: list[Any] = list(cycle_strategy.get("prior_cycles") or [])
         lines.append("")
         lines.append(f"Deterministic focus: focus={focus} score={score}")
         if rationale:
@@ -955,11 +945,10 @@ def _section_cycle_directive(
         if prior_cycles:
             lines.append("previous cycles:")
             for row in prior_cycles[-5:]:
-                if isinstance(row, dict):
-                    lines.append(
-                        f"  - cycle={row.get('cycle')} focus={row.get('focus')} "
-                        f"gain_delta={row.get('gain_delta')} saturated={row.get('saturated_at_start') or []}"
-                    )
+                lines.append(
+                    f"  - cycle={row.get('cycle')} focus={row.get('focus')} "
+                    f"gain_delta={row.get('gain_delta')} saturated={row.get('saturated_at_start') or []}"
+                )
         lines.append("Advisory only: use this as a prior, not a dispatch gate.")
     return lines
 
@@ -1054,7 +1043,7 @@ def build_orchestration_prompt(
             section.
         cycle_directive: optional LLM-authored focus text for this cycle
             (from ``orchestration_memory.next_cycle_directive``); empty string
-            renders the standing breadth→depth default.
+            with no ``cycle_strategy`` renders the standing breadth→depth default.
         cycle_strategy: optional dict from ``_plan_cycle_focus`` with deterministic
             focus, rationale, saturated directions, and prior-cycle history; rendered
             in the CYCLE DIRECTIVE section after the LLM directive (if any).

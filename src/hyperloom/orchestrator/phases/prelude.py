@@ -1197,7 +1197,7 @@ class PreludePhase(CoordinatorCollaborator):
             conf = float(warm.get("confidence") or 0.0)
         except (TypeError, ValueError):
             conf = 0.0
-        min_conf = float(float(self.shared_state.warm_replay_min_confidence))
+        min_conf = float(self.shared_state.warm_replay_min_confidence)
         recipe = warm.get("recipe") or {}
         if not isinstance(recipe, dict):
             recipe = {}

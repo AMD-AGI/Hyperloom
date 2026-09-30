@@ -30,7 +30,7 @@ def _novelty_idempotency_key(action: TargetedBuildAction) -> str:
 
 
 class BuildLifecycleCollaborator(CoordinatorCollaborator):
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+    """Manages targeted build lifecycle: enqueue, track, and resolve build tasks."""
 
     async def enqueue_targeted_build(self, action: TargetedBuildAction) -> str:
         """Enqueue a ``targeted_build`` row (idempotent by novelty key)."""
