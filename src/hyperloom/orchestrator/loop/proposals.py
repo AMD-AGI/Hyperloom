@@ -37,11 +37,9 @@ class PendingProposal:
     action_name: str
     predicted_gain_pct: float
     payload: dict[str, Any]
-    decided: bool = False
-    verdict: str | None = None  # approve / reject / redirect / advise / needs_review
 
 
-async def _record_proposal(
+async def record_proposal(
     coord: Any,
     *,
     from_agent: str,

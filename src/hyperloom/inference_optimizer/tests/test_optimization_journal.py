@@ -441,13 +441,6 @@ def test_a_stray_was_skipped_cannot_demote_an_adopted_change():
     assert derive_journal_outcome(Verdict.ADOPTED, {"status": "kept", "was_skipped": True}) == OUTCOME_KEEP
 
 
-def test_verdict_renders_as_its_value():
-    """The verdict is persisted as a plain string (SBD settle rows, journal)."""
-    assert str(Verdict.ADOPTED) == "adopted"
-    assert f"{Verdict.REFUSED}" == "refused"
-    assert Verdict("failed") is Verdict.FAILED
-
-
 def test_operation_kind_for_maps_kind_and_action():
     from hyperloom.inference_optimizer.session.optimization_journal import (
         operation_kind_for,

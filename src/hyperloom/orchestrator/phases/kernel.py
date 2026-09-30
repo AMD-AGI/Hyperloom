@@ -205,6 +205,7 @@ class KernelPhase(CoordinatorCollaborator):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     _REPROFILE_CHANGE_TOL: float = 1e-5
+    _kernel_timeline_recorder: "KernelEventRecorder | None" = None
 
     @staticmethod
     def _serving_config_signature(serving_config: Any) -> str:

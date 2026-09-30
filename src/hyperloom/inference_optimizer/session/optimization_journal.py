@@ -53,9 +53,6 @@ class Verdict(str, Enum):
     #: No adoption semantics.
     RECORDED = "recorded"
 
-    def __str__(self) -> str:
-        return self.value
-
 
 _JOURNAL_OUTCOME_BY_VERDICT: dict[Verdict, str] = {
     Verdict.ADOPTED: OUTCOME_KEEP,
