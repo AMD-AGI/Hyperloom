@@ -31,6 +31,7 @@ from kernelforge.rewrite_by_flydsl.attempt import (
 )
 from kernelforge.rewrite_by_flydsl.kb import (
     RewriteKbReadResult,
+    scored_speedup,
     try_flydsl_kb_warmstart,
     write_flydsl_kb_solution,
 )
@@ -38,6 +39,7 @@ from kernelforge.rewrite_by_flydsl.optimize import run_optimize
 from kernelforge.rewrite_by_flydsl.port_loop import PortResult, run_port_loop
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.tracker import UsageAccumulator, UsageLedgerFile, combine_usage_totals
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +66,14 @@ def _git(workspace: str, *args: str) -> subprocess.CompletedProcess:
     return git("-C", workspace, *args, check=False)
 
 
+#: Interpreter caches appear beside any module the driver imports, at any depth
+#: under the path being added. The exclusion is anchored under that path because
+#: a leading-wildcard pathspec matches nothing here and would silently stage an
+#: empty set, and ``**/`` alone requires an intervening directory, which misses
+#: the cache sitting next to the entry point.
+_PYCACHE_EXCLUDES = (":(exclude){path}/__pycache__/**", ":(exclude){path}/**/__pycache__/**")
+
+
 def _ensure_git_committed(
     workspace: str,
     message: str,
@@ -71,7 +81,13 @@ def _ensure_git_committed(
     *,
     branch: str = "",
 ) -> None:
-    """Ensure ``workspace`` is a git repo and commit ONLY ``paths`` on ``branch``."""
+    """Ensure ``workspace`` is a git repo and commit ONLY ``paths`` on ``branch``.
+
+    A path may be a directory, which commits what it holds. That is what the
+    port needs: the driver validates an implementation as it stands on disk, so
+    committing one declared file out of it would select something no stage ever
+    measured.
+    """
     if not (Path(workspace) / ".git").exists():
         _git(workspace, "init")
         _git(workspace, "config", "user.email", "forge-rewrite@local")
@@ -84,8 +100,10 @@ def _ensure_git_committed(
         if not p:
             continue
         # Force-add: the candidate lives under a dot-directory a caller's ignore rules may exclude, and forge-loop's
-        # keep/revert silently no-ops on an untracked kernel.
-        r = _git(workspace, "add", "-f", "--", p)
+        # keep/revert silently no-ops on an untracked kernel. Interpreter caches are the one thing a path may hold
+        # that no consumer wants; excluding them keeps a directory path usable here.
+        excludes = [item.format(path=p.rstrip("/")) for item in _PYCACHE_EXCLUDES]
+        r = _git(workspace, "add", "-f", "--", p, *excludes)
         if r.returncode != 0:
             log.warning("forge-rewrite: git add failed for %s: %s", p, (r.stderr or r.stdout).strip())
             continue
@@ -136,14 +154,23 @@ def run_rewrite(
     invocation_spec_file: str = "",
     applyback_import_modules: list[str] | tuple[str, ...] = (),
     max_applyback_attempts: int = 2,
+    applyback_enabled: bool = True,
     rewrite_kb_enabled: bool = True,
 ) -> dict:
     """Run the full rewrite pipeline; return (and sentinel-print) the result dict."""
+    # The nested forge-loop runs from the workspace and resolves this path against its own working directory, so a
+    # relative one would send the two processes to different directories for the artifacts they share.
+    experiments_dir = str(Path(experiments_dir).resolve())
     Path(experiments_dir).mkdir(parents=True, exist_ok=True)
+    # Only this process's own stages feed the shared ledger: the nested forge-loop publishes its own share to the same
+    # file, so folding the combined total in here would count that share twice.
+    usage_ledger = UsageLedgerFile(experiments_dir)
+    usage = UsageAccumulator(on_update=usage_ledger.publish)
+    usage_ledger.publish(usage.totals())
     started_at = time.time()
     if not deadline_unix or deadline_unix <= 0:
         deadline_unix = started_at + optimize_max_hours * 3600.0
-    rewrite_budget = DEFAULT_REWRITE_BUDGET
+    rewrite_budget = DEFAULT_REWRITE_BUDGET if applyback_enabled else DEFAULT_REWRITE_BUDGET.without_applyback()
     search_stop_unix = rewrite_budget.search_stop_unix(deadline_unix)
     print(
         "  [forge-rewrite] budget: "
@@ -159,9 +186,29 @@ def run_rewrite(
     rewrite_base_commit = (
         base_result.stdout.strip().splitlines()[0] if base_result.returncode == 0 and base_result.stdout.strip() else ""
     )
+    # A resolvable HEAD is what the agent sessions need, not evidence that the caller wants a framework patch. Asking
+    # is what makes one required: a consumer of the standalone kernel has no framework tree for a patch to target, and
+    # its run must not be judged on a stage it declined.
+    applyback_required = applyback_enabled and bool(rewrite_base_commit)
+    if not applyback_enabled:
+        print("  [forge-rewrite] apply-back not requested; the standalone kernel is the whole deliverable", flush=True)
 
     # Producer-owned scratch the consumer may reclaim.
     temporary_paths: list[str] = []
+
+    def _total_usage(optimize_result: dict | None = None, *, optimize_ran: bool = False) -> dict:
+        """This run's cumulative spend: the in-process stages plus the nested forge-loop's own ledger.
+
+        A forge-loop that was cut off or killed reports a ledger that stops at its last checkpoint, so the totals are
+        published as partial rather than as a complete provider-priced answer.
+        """
+        opt_result = optimize_result or {}
+        nested = opt_result.get("llm_usage")
+        return combine_usage_totals(
+            usage.totals(),
+            nested if isinstance(nested, dict) else None,
+            incomplete=optimize_ran and not opt_result.get("llm_usage_complete"),
+        )
 
     # Emit a clean, scorable failure result (no traceback) on any setup error so the caller can attribute it, instead
     # of the process dying opaquely.
@@ -173,9 +220,11 @@ def run_rewrite(
             port_attempts=0,
             source_ms=None,
             optimize_result={},
+            llm_usage=_total_usage(),
             failure_class=failure_class,
             failure_detail=reason,
             temporary_paths=temporary_paths,
+            budget_policy=rewrite_budget,
         )
         payload = report.emit_result(result, result_json)
         print(f"{report.SENTINEL}{payload}{report.SENTINEL}", flush=True)
@@ -253,6 +302,7 @@ def run_rewrite(
                 deadline_unix=search_stop_unix,
                 invocation_spec_file=invocation_spec_file,
                 initial_preflight=preflight,
+                usage=usage,
             )
         )
         if not prepared.ok or prepared.preflight is None:
@@ -276,6 +326,7 @@ def run_rewrite(
     for warning in preflight.warnings:
         print(f"  [forge-rewrite] driver contract warning: {warning}", flush=True)
     source_ms = preflight.source_ms
+    source_case_ms = preflight.source_case_ms
     if source_ms is None:
         return _setup_failed(
             "the conforming rewrite driver reported no source baseline",
@@ -283,7 +334,7 @@ def run_rewrite(
         )
     print(
         f"  [forge-rewrite] source baseline: {source_ms:.4f} ms (full suite, "
-        f"cases={list(preflight.reference_case_ids) or 'unreported'})",
+        f"cases={list(preflight.reference_case_ids)})",
         flush=True,
     )
     print(
@@ -300,7 +351,7 @@ def run_rewrite(
                     spec,
                     driver_path,
                     config,
-                    source_ms=source_ms,
+                    source_case_ms=source_case_ms,
                     framework=framework,
                     stop_at_unix=search_stop_unix,
                 )
@@ -342,6 +393,7 @@ def run_rewrite(
                 permission_mode=permission_mode,
                 stop_at_unix=search_stop_unix,
                 pre_task_context=kb_read.reference_context,
+                usage=usage,
             )
         )
     if not port.ok:
@@ -352,6 +404,7 @@ def run_rewrite(
             port_attempts=port.attempts,
             source_ms=source_ms,
             optimize_result={},
+            llm_usage=_total_usage(),
             kb_experience={
                 "read": kb_read.to_dict(),
                 "write": {"written": False, "reason": "port_failed"},
@@ -359,6 +412,7 @@ def run_rewrite(
             failure_class=PORT_FAILED,
             failure_detail=port.error_tail,
             temporary_paths=temporary_paths,
+            budget_policy=rewrite_budget,
         )
         payload = report.emit_result(result, result_json)
         print(f"{report.SENTINEL}{payload}{report.SENTINEL}", flush=True)
@@ -366,10 +420,16 @@ def run_rewrite(
     print(f"  [forge-rewrite] PORT OK (attempt {port.attempts}, SNR={port.snr_db})", flush=True)
 
     # Commit the correct port so forge-loop starts from a clean committed state.
+    # The whole attempt directory, not the kernel alone: a port free to structure
+    # its implementation may put part of it in a module beside the entry point,
+    # and the driver validated all of it. Committing only the entry point would
+    # select a candidate that was never measured, and leave the rest behind for
+    # a consumer that reads the commit. The directory is the producer's own, so
+    # this adds nothing the caller protects.
     _ensure_git_committed(
         workspace,
         "forge-rewrite: initial correct flydsl port",
-        [spec.flydsl_kernel],
+        [attempt.relative_root],
         branch=optimize_git_branch,
     )
     port_commit_result = _git(workspace, "rev-parse", "HEAD")
@@ -382,6 +442,7 @@ def run_rewrite(
     # (5b) Interim result: measure the ported FlyDSL kernel and write the result JSON NOW, reflecting a SUCCESSFUL
     # port (compiled + correct) with the ported kernel's own time as the interim best.
     flydsl_baseline_ms = None
+    flydsl_baseline_speedup = None
     if time.time() < search_stop_unix:
         flydsl_budget = max(1, min(600, int(search_stop_unix - time.time())))
         candidate = driver_contract.preflight_candidate(
@@ -394,6 +455,7 @@ def run_rewrite(
             print(f"  [forge-rewrite] driver contract warning: {warning}", flush=True)
         if candidate.ok:
             flydsl_baseline_ms = candidate.timing_ms
+            flydsl_baseline_speedup = scored_speedup(candidate.case_ms, source_case_ms)
         elif candidate.failure_class in _FATAL_CANDIDATE_FAILURES:
             return _setup_failed(candidate.detail, candidate.failure_class)
         else:
@@ -409,6 +471,7 @@ def run_rewrite(
             config,
             source_ms=source_ms,
             flydsl_best_ms=flydsl_baseline_ms,
+            speedup=flydsl_baseline_speedup,
             best_commit=port_commit,
             framework=framework,
             snr_db=port.snr_db,
@@ -430,14 +493,19 @@ def run_rewrite(
         port_ok=True,
         port_attempts=port.attempts,
         source_ms=source_ms,
-        optimize_result={"best_ms": flydsl_baseline_ms},
-        applyback_result={"ok": False, "error": "apply-back pending"},
-        applyback_required=bool(rewrite_base_commit),
+        optimize_result={
+            "best_ms": flydsl_baseline_ms,
+            "mean_case_speedup": flydsl_baseline_speedup,
+        },
+        applyback_result={"ok": False, "error": "apply-back pending"} if applyback_enabled else None,
+        applyback_required=applyback_required,
+        llm_usage=_total_usage(),
         kb_experience={
             "read": kb_read.to_dict(),
             "write": port_kb_write,
         },
         temporary_paths=temporary_paths,
+        budget_policy=rewrite_budget,
     )
     if result_json:
         report.emit_result(interim, result_json)
@@ -476,6 +544,7 @@ def run_rewrite(
             config,
             source_ms=source_ms,
             flydsl_best_ms=payload.get("best_ms"),
+            speedup=payload.get("mean_case_speedup"),
             best_commit=commit,
             framework=framework,
             # PORT's SNR belongs to the ported kernel, not to the KEEP that has since been optimized out of it, and
@@ -490,7 +559,9 @@ def run_rewrite(
         )
 
     opt: dict = {}
+    optimize_ran = False
     if time.time() < search_stop_unix:
+        optimize_ran = True
         remaining_hours = max(1.0, (deadline_unix - time.time()) / 3600.0)
         opt = run_optimize(
             spec,
@@ -504,6 +575,10 @@ def run_rewrite(
             profile_timeout_sec=profile_timeout_sec,
             deadline_unix=deadline_unix,
             stop_at_unix=search_stop_unix,
+            # Anchor the loop on the source, so every score it reports -- each KEEP published below and the run's
+            # final result -- already divides by the kernel this rewrite replaced.
+            source_ms=source_ms,
+            source_case_ms=source_case_ms,
             on_new_best=_publish_keep if rewrite_kb_enabled else None,
         )
     else:
@@ -511,10 +586,18 @@ def run_rewrite(
             "  [forge-rewrite] 20-minute finalization reserve reached after PORT; skipping forge-loop",
             flush=True,
         )
+    if optimize_ran and not opt.get("llm_usage_complete"):
+        print(
+            "  [forge-rewrite] WARNING: forge-loop did not report a final token ledger; the reported llm_usage covers "
+            "only what it checkpointed and is published as partial",
+            flush=True,
+        )
 
     # (7) Report: FlyDSL best vs source baseline.
     if opt.get("best_ms") is None:
         opt = {**opt, "best_ms": flydsl_baseline_ms}
+    if opt.get("mean_case_speedup") is None:
+        opt = {**opt, "mean_case_speedup": flydsl_baseline_speedup}
     if not opt.get("best_commit"):
         opt = {**opt, "best_commit": port_commit}
 
@@ -526,6 +609,7 @@ def run_rewrite(
             config,
             source_ms=source_ms,
             flydsl_best_ms=opt.get("best_ms"),
+            speedup=opt.get("mean_case_speedup"),
             best_commit=final_commit,
             framework=framework,
             # PORT's reading measures the artifact being recorded only while the run's best is still the ported kernel.
@@ -539,43 +623,49 @@ def run_rewrite(
         kb_write = {"written": False, "reason": "disabled"}
 
     # The standalone best is now restored in the rewrite workspace.
-    applyback = generate_applyback_patch(
-        spec,
-        config,
-        base_commit=rewrite_base_commit,
-        experiments_dir=experiments_dir,
-        framework=framework,
-        best_commit=str(opt.get("best_commit") or ""),
-        source_ms=source_ms,
-        flydsl_best_ms=opt.get("best_ms"),
-        reference_snr_db=port.snr_db,
-        deadline_unix=deadline_unix,
-        import_modules=applyback_import_modules,
-        max_attempts=max_applyback_attempts,
-    )
-    if applyback.ok:
-        print(
-            f"  [forge-rewrite] apply-back patch ready: {applyback.patch_path}",
-            flush=True,
+    applyback = None
+    if applyback_enabled:
+        applyback = generate_applyback_patch(
+            spec,
+            config,
+            base_commit=rewrite_base_commit,
+            experiments_dir=experiments_dir,
+            framework=framework,
+            best_commit=str(opt.get("best_commit") or ""),
+            source_ms=source_ms,
+            flydsl_best_ms=opt.get("best_ms"),
+            speedup=opt.get("mean_case_speedup"),
+            reference_snr_db=port.snr_db,
+            deadline_unix=deadline_unix,
+            import_modules=applyback_import_modules,
+            max_attempts=max_applyback_attempts,
+            usage=usage,
         )
-    else:
-        print(
-            f"  [forge-rewrite] APPLY-BACK FAILED: {applyback.error}",
-            flush=True,
-        )
+        if applyback.ok:
+            print(
+                f"  [forge-rewrite] apply-back patch ready: {applyback.patch_path}",
+                flush=True,
+            )
+        else:
+            print(
+                f"  [forge-rewrite] APPLY-BACK FAILED: {applyback.error}",
+                flush=True,
+            )
     result = report.build_result(
         op_name=op_name,
         port_ok=True,
         port_attempts=port.attempts,
         source_ms=source_ms,
         optimize_result=opt,
-        applyback_result=applyback.to_dict(),
-        applyback_required=bool(rewrite_base_commit),
+        applyback_result=applyback.to_dict() if applyback is not None else None,
+        applyback_required=applyback_required,
+        llm_usage=_total_usage(opt, optimize_ran=optimize_ran),
         kb_experience={
             "read": kb_read.to_dict(),
             "write": kb_write,
         },
         temporary_paths=temporary_paths,
+        budget_policy=rewrite_budget,
     )
     payload = report.emit_result(result, result_json)
     sp = result.speedup

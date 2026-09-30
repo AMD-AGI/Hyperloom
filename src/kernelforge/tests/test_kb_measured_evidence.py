@@ -88,7 +88,9 @@ SUMMARY = {
     "lessons": "Wider blocks are not always faster.",
 }
 
-CANONICAL_ID = "kernel:forge-loop:deterministic:aiter:unspecified:triton:mi355x"
+#: No framework version is observable here, and one word says so: ``unspecified``
+#: was one of the several spellings this dimension used to carry for that.
+CANONICAL_ID = "kernel:forge-loop:deterministic:aiter:unknown:triton:mi355x"
 
 #: Set per test by the autouse fixture; producer and consumer share one store.
 _KNOWLEDGE_ROOT: Path | None = None

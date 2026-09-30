@@ -120,6 +120,75 @@ def check_gpu_status(skip: bool = False) -> list[GpuInfo]:
         return []
 
 
+#: MI355X/ROCm 7.2 measured 1.64 GiB peak per hipcc job; round up to cover
+#: heavier templates and prevent aiter's unconstrained parallel build from OOMing.
+HIPCC_JOB_BYTES = 2 * 1024**3
+
+#: How much of the container's memory allowance a build may claim. The rest is
+#: the tuner process that launched it -- torch, a loaded model, GPU buffers --
+#: all of it already resident and none of it accounted for by the compiler.
+BUILD_MEMORY_SHARE = 0.7
+
+#: Where the kernel publishes the container's memory ceiling, cgroup v2 first.
+_CGROUP_MEMORY_LIMITS = (
+    "/sys/fs/cgroup/memory.max",
+    "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+)
+
+
+def cgroup_memory_limit() -> int | None:
+    """Return the cgroup memory ceiling, or None when absent or unlimited."""
+    for path in _CGROUP_MEMORY_LIMITS:
+        try:
+            raw = Path(path).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if raw == "max":
+            return None
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        # v1's "no limit" is PAGE_COUNTER_MAX rounded to a page; anything past
+        # a petabyte is that sentinel rather than a real allowance.
+        return value if 0 < value < 2**50 else None
+    return None
+
+
+def build_job_limit(cpus: int | None = None, memory_bytes: int | None = None) -> int | None:
+    """Return a cgroup-safe compile-job limit, or None when no cap is needed."""
+    if cpus is None:
+        # The affinity mask, not the host's core count: a container pinned to a
+        # subset is the case where the two differ and the smaller one is true.
+        cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    if memory_bytes is None:
+        memory_bytes = cgroup_memory_limit()
+    if not memory_bytes:
+        return None
+    fits = int(memory_bytes * BUILD_MEMORY_SHARE) // HIPCC_JOB_BYTES
+    capped = max(1, min(cpus, fits))
+    return capped if capped < cpus else None
+
+
+def cap_build_parallelism(env: dict[str, str]) -> dict[str, str]:
+    """Set ``MAX_JOBS`` only when cgroup memory requires a lower default."""
+    if env.get("MAX_JOBS"):
+        return env
+    limit = build_job_limit()
+    if limit is None:
+        return env
+    log.info(
+        "capping MAX_JOBS at %d: %d CPUs visible but the cgroup allows %.0f GiB, "
+        "and one hipcc job holds about %.1f GiB",
+        limit,
+        len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1),
+        (cgroup_memory_limit() or 0) / 1024**3,
+        HIPCC_JOB_BYTES / 1024**3,
+    )
+    env["MAX_JOBS"] = str(limit)
+    return env
+
+
 def run_subprocess(
     cmd: list[str],
     *,
@@ -134,6 +203,8 @@ def run_subprocess(
     env = os.environ.copy()
     if env_override:
         env.update(env_override)
+    # Every tuner here shells out to something that ends in an aiter JIT build.
+    cap_build_parallelism(env)
 
     log.info("Running: %s", " ".join(cmd))
     started = time.time()

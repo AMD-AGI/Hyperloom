@@ -41,15 +41,23 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 from pathlib import Path
 
-from ..breakdown import BREAKDOWN_FILENAME, build, write_breakdown_json
+from ..breakdown import build, write_breakdown_json
 from ..session.paths import session_dir as default_session_dir
+from ..session.session_paths import BREAKDOWN_FILENAME
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the argument parser for the session-breakdown CLI."""
+    """Build the argument parser for the session-breakdown CLI.
+
+    Returns:
+        argparse.ArgumentParser: Parser configured with ``--session-dir``,
+        ``--output``, ``--dry-run``, ``--print``,
+        and ``--verbose`` options.
+    """
     parser = argparse.ArgumentParser(
         prog="dump_session_breakdown",
         description=__doc__,
@@ -85,11 +93,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Also print the full JSON to stdout (useful for piping).",
     )
     parser.add_argument(
-        "--include-transcripts",
-        action="store_true",
-        help=("Inline specialist transcript bodies under specialist_runs[i].transcripts[j].body."),
-    )
-    parser.add_argument(
         "--verbose",
         "-v",
         action="count",
@@ -113,26 +116,35 @@ def _setup_logging(verbose: int) -> None:
 
 
 def _summary_line(breakdown: dict) -> str:
-    """Format a one-line summary of a session breakdown."""
-    sess = breakdown.get("session") or {}
-    final = breakdown.get("final") or {}
-    optimization_entries = (breakdown.get("optimizations") or {}).get("entries") or []
-    geak_n = sum(1 for entry in optimization_entries if isinstance(entry, dict) and entry.get("backend") == "geak")
-    lifecycle = breakdown.get("kernel_lifecycle") or {}
-    sweep = breakdown.get("sweep") or {}
-    warnings = breakdown.get("warnings") or []
-    dj_n = len(breakdown.get("decision_journal") or [])
-    kp_n = len(breakdown.get("kernel_profiling") or [])
+    """Format a one-line summary of a session breakdown.
+
+    Args:
+        breakdown (dict): Session breakdown mapping produced by ``build``.
+
+    Returns:
+        str: Single-line summary with session id, stop reason, validated gain,
+        the shape of the session's record, and how it closed.
+    """
+    sess = (breakdown.get("metadata") or {}).get("session") or {}
+    outcome = breakdown.get("outcome") or {}
+    final = outcome.get("final") or {}
+    validation = outcome.get("validation") or {}
+    by_source = (validation.get("attribution") or {}).get("by_source") or {}
+    geak_n = int((((by_source.get("kernel") or {}).get("by_backend") or {}).get("geak") or {}).get("keep_count") or 0)
+    timeline = breakdown.get("timeline") or []
+    close = breakdown.get("close") or {}
+    warnings = (breakdown.get("metadata") or {}).get("warnings") or []
+    gain = final.get("gain_pct")
+    gain_text = f"{gain:.2f}%" if isinstance(gain, (int, float)) and not math.isnan(gain) else "n/a"
     return (
         f"session_id={sess.get('session_id', '?')}  "
         f"claw_session_id={sess.get('claw_session_id') or '(none)'}  "
-        f"stop_reason={sess.get('stop_reason') or '?'}  "
-        f"gain_validated={final.get('cumulative_gain_pct_validated', 0.0):.2f}%  "
+        f"stop_reason={outcome.get('stop_reason') or '?'}  "
+        f"gain_validated={gain_text}  "
         f"geak={geak_n}  "
-        f"detected={len(lifecycle.get('detected') or [])}  "
-        f"adopted={len(lifecycle.get('adopted') or [])}  "
-        f"sweep={len(sweep.get('all_variants') or [])}  "
-        f"decision_journal={dj_n}  kernel_profiling={kp_n}  "
+        f"adopted={int(validation.get('adoption_count') or 0)}  "
+        f"events={len(timeline)}  "
+        f"close={close.get('status') or '?'}  "
         f"warnings={len(warnings)}"
     )
 
@@ -150,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.dry_run:
-        breakdown = build(sd, include_transcripts=args.include_transcripts)
+        breakdown = build(sd)
         print(_summary_line(breakdown))
         if args.print_json:
             print(json.dumps(breakdown, indent=2, sort_keys=True))
@@ -160,14 +172,13 @@ def main(argv: list[str] | None = None) -> int:
         out_path = write_breakdown_json(
             sd,
             output_path=args.output,
-            include_transcripts=args.include_transcripts,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.exception("write_breakdown_json failed")
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
-    breakdown = build(sd, include_transcripts=args.include_transcripts)
+    breakdown = json.loads(out_path.read_text(encoding="utf-8"))
     print(f"Wrote {out_path}")
     print(_summary_line(breakdown))
     if args.print_json:

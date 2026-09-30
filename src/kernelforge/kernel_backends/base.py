@@ -14,6 +14,7 @@ from kernelforge.kernel_backends.constants import (
     KERNEL_BACKEND_PROMPT_MODULES,
     resolve_language_dirs,
 )
+from kernelforge.loop.scoring import canonical_gate_prompt
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +37,15 @@ def build_single_kernel_backend_prompt(
     task_type: str = "",
     source_paths: list[str] | None = None,
 ) -> str:
-    """Build ONE kernel backend's system prompt for the autonomous forge-loop (no network)."""
+    """Build ONE kernel backend's system prompt for the autonomous forge-loop (no network).
+
+    One kernel backend runs per kernel, so the prompt carries that backend's role
+    and development discipline plus a knowledge block it can Read on demand,
+    assembled in layers from the curated ``local_knowledge/`` tree (see
+    ``build_forge_knowledge``). Under ``Config.defer_knowledge_maps``
+    (experimental, off) every level is a one-line pointer instead of an inlined
+    map. Returns the prompt text, or "" for an unknown kernel_backend.
+    """
     backend = (kernel_backend_name or "").strip()
     module_path = KERNEL_BACKEND_PROMPT_MODULES.get(backend)
     if module_path is None:
@@ -50,7 +59,15 @@ def build_single_kernel_backend_prompt(
     # Experimental ablation-only knob (off by default): see Config.include_mori_kb.
     include_mori = bool(getattr(config, "include_mori_kb", False))
 
-    knowledge = build_forge_knowledge(root, language=language, include_aiter=include_aiter, include_mori=include_mori)
+    knowledge = build_forge_knowledge(
+        root,
+        language=language,
+        include_aiter=include_aiter,
+        include_mori=include_mori,
+        defer_all=bool(getattr(config, "defer_knowledge_maps", False)),
+    )
 
+    # The backend is resolved here and nowhere else, so this is the one place that can pair a prompt with the gate the
+    # loop will apply to it. A prompts module naming its own backend would be a second copy of that pairing.
     build_prompt = importlib.import_module(module_path).build_system_prompt
-    return build_prompt(config.gpu_target, knowledge)
+    return build_prompt(config.gpu_target, knowledge, canonical_gate_prompt(backend))

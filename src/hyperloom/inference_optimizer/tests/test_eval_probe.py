@@ -376,48 +376,7 @@ def test_eval_probe_summary_names_the_kind_and_the_evidence():
     assert "16384" in summary
 
 
-def test_probe_record_reaches_session_breakdown(tmp_path):
-    """End of the traceability chain: the writeback audit stores the record in the attempt's ``extras``, and the collector must carry it into ``session_breakdown.json``."""
-    from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_baseline
-
-    probe_record = {
-        "kind": EVAL_KIND_GENERATION_PATHOLOGY,
-        "reason": "model_not_terminating",
-        "observed_samples": 16,
-        "finish_reason_length": 16,
-    }
-    state = {
-        "baseline_tput": 1234.0,
-        "baseline_accuracy": 0.0,
-        "baseline_attempts": [
-            {
-                "ts": "2026-08-03T00:00:00+00:00",
-                "task_id": "t1",
-                "status": "succeeded",
-                "decision": "promoted",
-                "key_metric": 1234.0,
-                "error_class": None,
-                "extras": {"eval_probe": probe_record},
-            }
-        ],
-    }
-
-    section = collect_baseline(tmp_path, state, [])
-
-    assert section["attempts_history"][0]["extras"]["eval_probe"] == probe_record
-
-
-def test_breakdown_attempt_extras_default_to_empty(tmp_path):
-    """Attempts recorded before this field existed must still render."""
-    from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_baseline
-
-    state = {"baseline_attempts": [{"ts": "2026-08-03T00:00:00+00:00", "task_id": "t1", "status": "failed"}]}
-
-    section = collect_baseline(tmp_path, state, [])
-
-    assert section["attempts_history"][0]["extras"] == {}
-
-
+# ---------------------------------------------------------------------------
 # Per-request bounds
 
 BOUNDS_FILENAME = "hyperloom_eval_bounds.json"

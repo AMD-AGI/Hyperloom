@@ -59,7 +59,7 @@ def test_produce_kernel_csv_keeps_only_analytical(tmp_path: Path) -> None:
         ]
     }
     t.publish_kernel_roofline_csv(csv_dir, payload, None)
-    import hyperloom.orchestrator.kernel.roofline_csv as rc
+    import hyperloom.inference_optimizer.roofline_csv as rc
 
     rows = rc.read_kernel_roofline(csv_dir / "kernel_roofline.csv")
     row = rows[rc.canonical_key("triton_gemm_x")]
@@ -79,7 +79,7 @@ def test_produce_arch_csv_renames_fp4(tmp_path: Path) -> None:
         )
     )
     t.publish_arch_peaks_csv(csv_dir, arch, None)
-    import hyperloom.orchestrator.kernel.roofline_csv as rc
+    import hyperloom.inference_optimizer.roofline_csv as rc
 
     peaks = rc.read_arch_peaks(csv_dir / "gpu_arch_peaks.csv")
     assert peaks["MI355X"]["matrix_bf16_tflops"] == 1686.0

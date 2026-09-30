@@ -11,6 +11,10 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.knowledge.recipe_kb.local_store import (
+    _normalise_lessons,
+    _normalise_str_dicts,
+)
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.specialists.domains import (
     get_domain,
@@ -58,11 +62,9 @@ async def test_warm_specialist_params_populates_warm_start_lessons(tmp_path: Pat
             "canonical_id": "lesson:abc",
             "kind": "lesson",
             "confidence": 0.9,
-            "attrs": {
-                "statement": "--attention-backend AITER → +12.3%",
-                "measured_impact": "gain_pct=12.30",
-                "source_session_id": "session-A",
-            },
+            "statement": "--attention-backend AITER → +12.3%",
+            "measured_impact": "gain_pct=12.30",
+            "source_session_id": "session-A",
         },
     ]
     coord = _make_coord(tmp_path, state=_BareState(warm_start_lessons=lessons))
@@ -107,19 +109,15 @@ def test_section_lessons_renders_each_lesson_with_metadata():
         {
             "canonical_id": "lesson:abc",
             "confidence": 0.85,
-            "attrs": {
-                "statement": "--attention-backend AITER → +12.3%",
-                "measured_impact": "gain_pct=12.30 throughput_after=875.0",
-                "source_session_id": "session-A",
-            },
+            "statement": "--attention-backend AITER → +12.3%",
+            "measured_impact": "gain_pct=12.30 throughput_after=875.0",
+            "source_session_id": "session-A",
         },
         {
             "canonical_id": "lesson:def",
             "confidence": 0.5,
-            "attrs": {
-                "statement": "VLLM_ROCM_USE_AITER=1 → +9.5%",
-                "measured_impact": "gain_pct=9.50",
-            },
+            "statement": "VLLM_ROCM_USE_AITER=1 → +9.5%",
+            "measured_impact": "gain_pct=9.50",
         },
     ]
     rows = _section_lessons(_make_inp(lessons))
@@ -140,14 +138,12 @@ def test_section_lessons_renders_dict_measured_impact_as_human_readable_line():
         {
             "canonical_id": "lesson:dict",
             "confidence": 0.85,
-            "attrs": {
-                "statement": "--attention-backend AITER → +12.3%",
-                "measured_impact": {
-                    "gain_pct": 12.3,
-                    "throughput_after": 678.0,
-                    "stack_depth_at_apply": 2,
-                    "measured_at": "2026-05-26T08:48:00Z",
-                },
+            "statement": "--attention-backend AITER → +12.3%",
+            "measured_impact": {
+                "gain_pct": 12.3,
+                "throughput_after": 678.0,
+                "stack_depth_at_apply": 2,
+                "measured_at": "2026-05-26T08:48:00Z",
             },
         },
     ]
@@ -165,12 +161,10 @@ def test_section_lessons_renders_validated_count_when_above_1():
         {
             "canonical_id": "lesson:multi",
             "confidence": 0.85,
-            "attrs": {
-                "statement": "AITER+TileLang → +15%",
-                "measured_impact": "gain_pct=15",
-                "validated_count": 5,
-                "source_session_ids": ["s-a", "s-b", "s-c", "s-d", "s-e"],
-            },
+            "statement": "AITER+TileLang → +15%",
+            "measured_impact": "gain_pct=15",
+            "validated_count": 5,
+            "source_session_ids": ["s-a", "s-b", "s-c", "s-d", "s-e"],
         },
     ]
     rows = _section_lessons(_make_inp(lessons))
@@ -186,11 +180,9 @@ def test_section_lessons_singleton_validation_omits_validated_tag():
         {
             "canonical_id": "lesson:single",
             "confidence": 0.7,
-            "attrs": {
-                "statement": "x → +5%",
-                "validated_count": 1,
-                "source_session_ids": ["s-only"],
-            },
+            "statement": "x → +5%",
+            "validated_count": 1,
+            "source_session_ids": ["s-only"],
         },
     ]
     rows = _section_lessons(_make_inp(lessons))
@@ -203,8 +195,8 @@ def test_section_lessons_singleton_validation_omits_validated_tag():
 def test_section_lessons_skips_lessons_with_empty_statement():
     """Defensive: a KB row with empty ``statement`` is skipped."""
     lessons = [
-        {"canonical_id": "lesson:empty", "attrs": {"statement": ""}},
-        {"canonical_id": "lesson:real", "attrs": {"statement": "real one"}},
+        {"canonical_id": "lesson:empty", "statement": ""},
+        {"canonical_id": "lesson:real", "statement": "real one"},
     ]
     rows = _section_lessons(_make_inp(lessons))
     text = "\n".join(rows)
@@ -213,11 +205,47 @@ def test_section_lessons_skips_lessons_with_empty_statement():
     assert "**** " not in text
 
 
+def test_section_lessons_renders_the_shape_the_local_kb_actually_writes():
+    """A lesson stored by the local KB has to survive the trip back into the prompt.
+
+    The fixture is built by the writer rather than by hand, so the reader and the
+    stored shape cannot drift apart silently again — reading a field
+    ``_normalise_lessons`` does not write turned every recorded lesson into
+    ``(none)``.
+    """
+    stored = _normalise_lessons(
+        [
+            {
+                "statement": "raise the MLA decode KV-split cap at conc=1",
+                "measured_impact": "gain_pct=30.00",
+            }
+        ]
+    )
+    rows = _section_lessons(_make_inp(stored))
+    text = "\n".join(rows)
+    assert "raise the MLA decode KV-split cap at conc=1" in text
+    assert "gain_pct=30.00" in text
+    assert "(none" not in text
+
+
+def test_section_pitfalls_renders_the_shape_the_local_kb_actually_writes():
+    """The same writer/reader contract for pitfalls, which flatten the same way."""
+    stored = _normalise_str_dicts(
+        [{"description": "--max-num-seqs 1024 on MoE regressed 8%", "severity": "regress"}],
+        ("description", "severity"),
+    )
+    rows = _section_pitfalls(_make_inp(pitfalls=stored))
+    text = "\n".join(rows)
+    assert "--max-num-seqs 1024 on MoE regressed 8%" in text
+    assert "severity=regress" in text
+    assert "(none" not in text
+
+
 def test_build_specialist_prompts_inserts_5b_between_recipe_and_pr_monitor():
     """End-to-end: section 5b is inserted between section 5 (recipe) and 5c (pitfalls)."""
     inp = _make_inp(
         [
-            {"canonical_id": "lesson:x", "attrs": {"statement": "x → +1%"}},
+            {"canonical_id": "lesson:x", "statement": "x → +1%"},
         ]
     )
     _system, user = build_specialist_prompts(inp)
@@ -242,19 +270,15 @@ def test_section_pitfalls_renders_each_pitfall_with_metadata():
         {
             "canonical_id": "pitfall:abc",
             "confidence": 0.7,
-            "attrs": {
-                "description": "VLLM_ROCM_USE_AITER_FP4BMM=1 → crash on gfx942",
-                "severity": "crash",
-                "source_session_id": "session-A",
-            },
+            "description": "VLLM_ROCM_USE_AITER_FP4BMM=1 → crash on gfx942",
+            "severity": "crash",
+            "source_session_id": "session-A",
         },
         {
             "canonical_id": "pitfall:def",
             "confidence": 0.4,
-            "attrs": {
-                "description": "--max-num-seqs 1024 on MoE → -8% regress",
-                "severity": "regress",
-            },
+            "description": "--max-num-seqs 1024 on MoE → -8% regress",
+            "severity": "regress",
         },
     ]
     rows = _section_pitfalls(_make_inp(pitfalls=pitfalls))
@@ -268,12 +292,12 @@ def test_section_pitfalls_renders_each_pitfall_with_metadata():
 
 
 def test_section_pitfalls_skips_pitfalls_with_empty_description():
-    """Defensive against partial / legacy rows lacking ``attrs.description``."""
+    """Defensive against partial / legacy rows lacking ``description``."""
     pitfalls = [
-        {"canonical_id": "pitfall:empty", "attrs": {"description": ""}},
-        # Legacy row shape lacking attrs.description.
+        {"canonical_id": "pitfall:empty", "description": ""},
+        # Legacy row shape carrying no description at all.
         {"raw": '{"points":[...legacy json blob...]}'},
-        {"canonical_id": "pitfall:real", "attrs": {"description": "real one", "severity": "crash"}},
+        {"canonical_id": "pitfall:real", "description": "real one", "severity": "crash"},
     ]
     rows = _section_pitfalls(_make_inp(pitfalls=pitfalls))
     text = "\n".join(rows)

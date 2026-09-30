@@ -576,25 +576,6 @@ def test_R2_orchestration_can_dispatch_specialist(gate):
     )
 
 
-def test_R2_robustness_cannot_dispatch_specialist(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "robustness",
-            Intent(
-                type=IntentType.DELEGATE,
-                payload={
-                    "action_name": "specialist",
-                    "params": {
-                        "domain": "serving_specialist",
-                        "gap_canonical_id": "gap.kv.fp8",
-                    },
-                },
-            ),
-        )
-    assert exc.value.rule == "specialist_dispatch_source"
-    assert "Orchestration" in (exc.value.hint or "")
-
-
 def test_R2_unknown_domain_allowed(gate):
     """An unknown domain tag is observed, not denied; SpecialistRunner synthesizes an empty result."""
     gate.validate_intent(

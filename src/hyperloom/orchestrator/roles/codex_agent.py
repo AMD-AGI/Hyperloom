@@ -23,9 +23,15 @@ from hyperloom.inference_optimizer.protocol.intent import (
     validate_envelope,
 )
 
-from ..trace.llm_trace import new_call_id
-from .agent_role import DEFAULT_CODEX_MODEL
-from .base import BackendError, BackendTurnResult, LLMCallFailed, parse_call_timeout_env, safe_int
+from hyperloom.inference_optimizer.trace.llm_trace import new_call_id
+from hyperloom.common.llm_config import DEFAULT_CODEX_MODEL
+from .base import (
+    BackendError,
+    BackendTurnResult,
+    LLMCallFailed,
+    parse_call_timeout_env,
+    safe_int,
+)
 
 
 _BARE_INTENTS_RE = re.compile(r'(\{.*?"intents".*\})', re.DOTALL)

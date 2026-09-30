@@ -692,7 +692,7 @@ def test_a_fail_open_review_records_no_ruling(tmp_path, monkeypatch):
     loop._record_critic_ruling(
         4,
         PlanCriticOutcome(
-            verdict="REVISE",
+            verdict="NOT_REVIEWED",
             error="backend timed out",
             verdict_source="error",
         ),

@@ -9,7 +9,6 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.framework import client as _fa_client
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
@@ -118,9 +117,6 @@ class _Stub(FakeCoordinator):
     async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
         return None
 
-    def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
-        return [_fa_client.repo_url_for_framework(framework or "sglang")]
-
 
 _CANDIDATE = {
     "pr_url": "https://github.com/sgl-project/sglang/pull/42",
@@ -150,12 +146,12 @@ def _pump_then_materialize(stub: _Stub) -> None:
         if getattr(p, "action_name", "") == "integrate_patch" and not getattr(p, "decided", False)
     ]
     for p in pendings:
-        asyncio.run(stub._materialize_framework_agent_candidate(p))
+        asyncio.run(stub.phase_framework.materialize_candidate(p))
         p.decided = True
 
 
 def _materialize(stub: _Stub, *, audit_step: str = "") -> None:
-    from hyperloom.orchestrator.loop.coordinator import PendingProposal
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     pending = PendingProposal(
         proposal_msg_id="m-fpr",
@@ -170,7 +166,7 @@ def _materialize(stub: _Stub, *, audit_step: str = "") -> None:
             "audit_step": audit_step,
         },
     )
-    asyncio.run(stub._materialize_framework_agent_candidate(pending))
+    asyncio.run(stub.phase_framework.materialize_candidate(pending))
 
 
 def test_pump_submits_candidate_proposal(
@@ -227,7 +223,7 @@ def test_materialize_authoring_disabled_runs_diff_track_only(
 
 
 def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_path: Path):
-    from hyperloom.orchestrator.phases.explore import _forward_integrate_source
+    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
 
     stub = _Stub(tmp_path, authoring=True)
 
@@ -366,13 +362,10 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     assert asyncio.run(stub._framework_agent_authoring_inflight()) is False
 
 
-def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
+def test_record_authored_outcome_writes_progress(
     tmp_path: Path,
 ):
     stub = _Stub(tmp_path, authoring=True)
-    stub.shared_state.framework_agent_batches = [
-        {"batch_id": "b1", "max_gain_pct_observed_in_batch": 1.0},
-    ]
     task = SimpleNamespace(
         task_id="i-1",
         params={
@@ -402,7 +395,6 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
     assert row["candidate_id"] == "pr-42"
     assert row["gain_pct"] == pytest.approx(6.5)
     assert row["reauthor_attempt"] == 1
-    assert stub.shared_state.framework_agent_batches[0]["max_gain_pct_observed_in_batch"] == pytest.approx(6.5)
 
 
 def test_record_authored_outcome_records_apply_failed_terminal(tmp_path: Path):
@@ -607,11 +599,12 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
         return None
 
     stub._record_intervention_for_task = lambda *_args, **_kwargs: None
-    stub._record_framework_agent_authored_outcome = lambda *, task, result: recorded.append(
+    phase = stub.phase_framework
+    phase._record_framework_agent_authored_outcome = lambda *, task, result: recorded.append(
         str(result.result.get("status") or "")
     )
-    stub._maybe_rearm_authored_lane = _noop_async
-    stub._drain_apply_fail_retry_pending = _noop_async
+    phase._maybe_rearm_authored_lane = _noop_async
+    phase._drain_apply_fail_retry_pending = _noop_async
     stub._is_promotable_result = lambda *_args, **_kwargs: False
     stub._handle_unpromotable_result = _noop_async
     stub._fact_write_hook = _noop_async
@@ -713,7 +706,7 @@ def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
 
 def test_config_levers_helper_extracts_from_proposal_set():
     """Proposal args and envs retain separate channels; patches take precedence."""
-    from hyperloom.orchestrator.loop.coordinator import (
+    from hyperloom.orchestrator.phases.framework import (
         _framework_config_levers_from_done,
     )
 
@@ -733,10 +726,20 @@ def test_config_levers_helper_extracts_from_proposal_set():
         "extra_envs": {"VLLM_USE_MTP": "1"},
     }
 
-    # A patch deliverable is NOT a config-only outcome.
-    assert (
-        _framework_config_levers_from_done({"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]}) == {}
-    )
+    # A patch alongside a non-atomic lever, while optimizing: the patch is its own
+    # outcome and the lever is judged on its own, so nothing rides with the patch.
+    patched = {"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]}
+    assert _framework_config_levers_from_done(patched) == {}
+    # The same deliverable in an ENABLEMENT round: the pair is jointly what makes
+    # the model boot, so the lever rides with the patch.
+    coupled = _framework_config_levers_from_done(patched, levers_ride_with_patches=True)
+    assert coupled.get("extra_envs") == {"VLLM_USE_MTP": "1"}
+    # An explicitly atomic lever rides with the patch on either lane.
+    atomic = {
+        "patches_written": ["p.patch"],
+        "proposal_set": [{**done["proposal_set"][0], "atomic": True}],
+    }
+    assert _framework_config_levers_from_done(atomic).get("extra_envs") == {"VLLM_USE_MTP": "1"}
     # No levers → empty.
     assert (
         _framework_config_levers_from_done({"patches_written": [], "proposal_set": [{"name": "research-only"}]}) == {}

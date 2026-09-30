@@ -152,10 +152,12 @@ def test_controller_full_path_publishes_a_shared_base_patch(
         output_dir=tmp_path / "output",
     )
 
+    # The agent's draft says ``standalone``; publication folds it, because that is
+    # what forge-loop resolves the override to before the run files its result.
     identity = KernelRecipeIdentity(
         producer="forge-loop",
         kernel_name="kernel",
-        framework="standalone",
+        framework="unknown",
         framework_version="unknown",
         backend="triton",
         gpu="mi355x",
@@ -216,7 +218,7 @@ def test_an_unpublishable_validated_result_records_its_reason_durably(
 
     assert state.patch_count == 0
     assert [failure["operator_id"] for failure in state.recovery_failures] == [
-        "kernel:forge-loop:kernel:standalone:unknown:triton:mi355x"
+        "kernel:forge-loop:kernel:unknown:unknown:triton:mi355x"
     ]
     assert "patches root is read-only" in state.recovery_failures[0]["reason"]
     assert state.recovery_failures[0]["best_commit"]
@@ -293,6 +295,11 @@ def test_runtime_failure_is_not_mislabeled_as_handoff_validation(
 ) -> None:
     repo = _source_repo(tmp_path)
     output = tmp_path / "output"
+    # The stages before recovery have to be faked like every other test here: unfaked, the analysis reaches a real
+    # agent backend and the dispatch a real ``forge-loop`` subprocess with the full budget, which is a live campaign
+    # rather than a unit test. What this one is about happens after both.
+    _wire_fake_analysis(monkeypatch, _TaskAgentBackend(repo))
+    monkeypatch.setattr(dispatcher, "run_forge_loop", _successful_forge)
     monkeypatch.setattr(
         controller,
         "recover_all_task_results",

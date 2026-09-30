@@ -16,8 +16,8 @@ from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.loop.coordinator import (
     Coordinator,
     CoordinatorState,
-    PendingProposal,
 )
+from hyperloom.orchestrator.loop.proposals import PendingProposal
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
@@ -243,7 +243,6 @@ class _BusMessage:
     topic: str
     payload: dict[str, Any]
     in_reply_to: str = ""
-    priority: int = 1
     msg_id: str = ""
 
 
@@ -253,7 +252,7 @@ class _StubBus:
     def __init__(self) -> None:
         self.messages: list[_BusMessage] = []
 
-    async def append_and_seq(self, msg: Any) -> Any:  # noqa: ANN401
+    async def append_and_seq(self, msg: Any) -> Any:
         self.messages.append(
             _BusMessage(
                 from_agent=getattr(msg, "from_agent", ""),
@@ -261,7 +260,6 @@ class _StubBus:
                 topic=getattr(msg, "topic", ""),
                 payload=dict(getattr(msg, "payload", {}) or {}),
                 in_reply_to=getattr(msg, "in_reply_to", "") or "",
-                priority=int(getattr(msg, "priority", 1) or 1),
                 msg_id=getattr(msg, "msg_id", ""),
             )
         )
@@ -457,7 +455,7 @@ async def test_verdict_for_unknown_proposal_logs_observation(coord):
 @pytest.mark.asyncio
 async def test_single_verdict_rebroadcast_carries_full_advisory_fieldset(coord):
     """The rebroadcast payload and the compact inbox line both flow through the one serializer, carrying the full advisory field set."""
-    from hyperloom.orchestrator.loop.coordinator import _format_inbox_event
+    from hyperloom.orchestrator.loop.conversation import _format_inbox_event
     from hyperloom.orchestrator.bus.message_bus import Message
 
     pending = PendingProposal(
@@ -513,7 +511,7 @@ async def test_single_verdict_rebroadcast_carries_full_advisory_fieldset(coord):
 @pytest.mark.asyncio
 async def test_single_verdict_without_advisory_keeps_bare_payload(coord):
     """A verdict with no advisory fields rebroadcasts only verdict/reasoning, and the inbox line stays minimal."""
-    from hyperloom.orchestrator.loop.coordinator import _format_inbox_event
+    from hyperloom.orchestrator.loop.conversation import _format_inbox_event
     from hyperloom.orchestrator.bus.message_bus import Message
 
     pending = PendingProposal(
@@ -1660,7 +1658,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             create_calls.append(dict(kwargs))
             from hyperloom.orchestrator.state.task_registry import Task
 
@@ -1684,7 +1682,6 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     class _MoreState(_BareSharedState):
         baseline_config_path: str = ""
         baseline_tput: float = 1000.0
-        synergy_attempted: list[str] = field(default_factory=list)
         backends_search: dict = field(default_factory=dict)
         params_search: dict = field(default_factory=dict)
         current_best: dict = field(default_factory=dict)
@@ -1713,7 +1710,7 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             create_calls.append(dict(kwargs))
             raise AssertionError("empty filtered grid must not create a task")
 
@@ -1723,7 +1720,6 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
     class _MoreState(_BareSharedState):
         baseline_config_path: str = ""
         baseline_tput: float = 1000.0
-        synergy_attempted: list[str] = field(default_factory=list)
         backends_search: dict = field(default_factory=dict)
         params_search: dict = field(default_factory=dict)
         current_best: dict = field(default_factory=dict)
@@ -1747,7 +1743,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             create_calls.append(dict(kwargs))
             from hyperloom.orchestrator.state.task_registry import Task
 
@@ -1774,7 +1770,6 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
         baseline_tput: float = 1000.0
         recipe_kb_session_id: str = "sid-test"
         save_count: int = 0
-        synergy_attempted: list[str] = field(default_factory=list)
         backends_search: dict = field(default_factory=dict)
         params_search: dict = field(default_factory=dict)
         current_best: dict = field(default_factory=dict)
@@ -1826,7 +1821,7 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
     create_calls: list[dict[str, Any]] = []
 
     class _TaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             create_calls.append(dict(kwargs))
             from hyperloom.orchestrator.state.task_registry import Task
 
@@ -1874,7 +1869,7 @@ async def test_delegate_explore_seeds_the_stack_with_the_anchor(tmp_path: Path):
     created: list[dict[str, Any]] = []
 
     class _TaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             created.append(dict(kwargs["params"]))
             from hyperloom.orchestrator.state.task_registry import Task
 
@@ -1919,7 +1914,7 @@ async def test_delegate_sweep_seeds_the_stack_too(tmp_path: Path):
     created: list[dict[str, Any]] = []
 
     class _TaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             created.append(dict(kwargs["params"]))
             from hyperloom.orchestrator.state.task_registry import Task
 
@@ -1979,81 +1974,6 @@ def test_specialist_prompt_renders_proposal_target_and_ceiling():
     assert "reviews each surviving variant" in text
 
 
-# critic_robustness breakdown renderer (formerly test_critic_robustness_renderer_units.py)
-class TestCriticRobustnessRenderer:
-    """Exercises the four observable shapes of the collector input."""
-
-    @staticmethod
-    def _render(payload):
-        from hyperloom.inference_optimizer.breakdown.reporters._renderers import (
-            critic_robustness as cr_mod,
-        )
-
-        return cr_mod.render({"critic_robustness": payload})
-
-    def test_empty_returns_skipped(self):
-        from hyperloom.inference_optimizer.breakdown.reporters.base import RenderedSection
-
-        out = self._render([])
-        assert isinstance(out, RenderedSection)
-        assert out.section_id == "critic_robustness"
-        assert out.skipped is True
-        assert any("no critic robustness" in s.lower() for s in out.key_facts)
-
-    def test_prompt_only_v1_payload_is_skipped(self):
-        out = self._render(["raw prompt"])
-        assert out.skipped is True
-        assert any("prompt-only" in w for w in out.warnings)
-
-    def test_empty_payloads_v2_is_skipped(self):
-        out = self._render(
-            [
-                {"prompt": "x", "response": None, "decision": "", "rationale": ""},
-            ]
-        )
-        assert out.skipped is True
-        assert any("non-actionable" in w for w in out.warnings)
-
-    def test_populated_payload_renders_markdown_table(self):
-        out = self._render(
-            [
-                {
-                    "ts": "2026-05-13T01:01:01Z",
-                    "action": "kernel_opt",
-                    "decision": "KEEP",
-                    "pass_count": 3,
-                    "fail_count": 1,
-                    "rationale": "Improved attention kernel reduces decode latency by 4%.",
-                },
-                {
-                    "prompt": "raw fallback",
-                },
-            ]
-        )
-        assert out.skipped is False
-        assert "decision" in out.markdown_block
-        assert "kernel_opt" in out.markdown_block
-
-    def test_excess_rows_truncated_with_banner(self):
-        from hyperloom.inference_optimizer.breakdown.reporters._renderers import (
-            critic_robustness as cr_mod,
-        )
-
-        rows = [
-            {
-                "decision": "KEEP",
-                "pass_count": 1,
-                "fail_count": 0,
-                "ts": f"t{i}",
-            }
-            for i in range(cr_mod._MAX_ROWS + 5)
-        ]
-        out = self._render(rows)
-        assert out.skipped is False
-        assert "Showing first" in out.markdown_block
-
-
-# per-action verdict_class metadata (formerly test_n38_action_verdict_class.py)
 class TestN38ActionVerdictClass:
     """Per-action ``verdict_class`` metadata so new actions don't reintroduce prior deadlocks."""
 

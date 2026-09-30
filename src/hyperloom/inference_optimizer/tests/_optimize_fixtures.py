@@ -41,6 +41,7 @@ def optimize_state(
     **overrides: Any,
 ) -> SharedState:
     """A real ``SharedState`` positioned in the optimisation phase."""
+    from hyperloom.orchestrator.lever import LEVER_CONFIG, LEVER_SOURCE_PATCH
     from hyperloom.orchestrator.phases.machine_state import PHASE_FRAMEWORK_AGENT
 
     state = SharedState()
@@ -48,18 +49,18 @@ def optimize_state(
     state.macro_cycle = 0
     state.baseline_tput = 1500.0
     state.framework_agent_phase_done = source_exhausted
-    state.framework_agent_phase_progress = [
-        {"status": "reverted", "kept": False, "cycle": 0} for _ in range(source_no_keep)
-    ]
-    state.explore_search = {
-        "winners_history": [{"gain_pct": config_keep_gain_pct, "cycle": 0} for _ in range(6)],
-    }
-    state.specialist_rounds = [
-        {"proposals_total": 0, "proposals_kept": 0, "cycle": 0}
-        if i < config_empty_rounds
-        else {"proposals_total": 2, "proposals_kept": 1, "cycle": 0}
-        for i in range(max(config_empty_rounds, 1))
-    ]
+
+    # Seed the unified attempts ledger used by per_lever_dryness.
+    # Patch arm: N trailing no-keep source-patch attempts.
+    for _ in range(source_no_keep):
+        state.record_attempt({"lever_kind": LEVER_SOURCE_PATCH, "outcome": "REVERT", "adopted": False})
+    # Config arm: one KEEP row carrying the requested gain, then empty rounds after it.
+    state.record_attempt(
+        {"lever_kind": LEVER_CONFIG, "outcome": "KEEP", "adopted": True, "gain_pct": config_keep_gain_pct}
+    )
+    for _ in range(config_empty_rounds):
+        state.record_attempt({"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False})
+
     for key, value in overrides.items():
         setattr(state, key, value)
     return state
@@ -90,14 +91,8 @@ class FakeCoordinator:
             # A collaborator-internal helper: reachable only from inside its own class in production, so it has no
             # delegation entry.
             owner = self._sole_owner(name)
-        key = f"_collab_{owner}"
-        collaborator = self.__dict__.get(key)
-        if collaborator is None:
-            module_path, cls_name = Coordinator._COLLAB_MODULES[owner]
-            module = importlib.import_module(f"hyperloom.orchestrator.{module_path}")
-            collaborator = getattr(module, cls_name)(self)
-            self.__dict__[key] = collaborator
-        return getattr(collaborator, name)
+        # The Coordinator property, so a method reached by name and one reached through ``phase_*`` share one instance.
+        return getattr(getattr(self, owner), name)
 
     @staticmethod
     def _sole_owner(name: str) -> str:

@@ -13,13 +13,14 @@ from typing import Any, NamedTuple
 from .event_ids import parse_event_id
 from .event_rows import EVENT_ID_FIELD
 from .event_sink import EventSink
+from .recorder_warnings import RECORDING_ERRORS
 
 __all__ = [
     "EVENT_STATUS_INTERRUPTED",
     "EVENT_STATUS_RUNNING",
+    "OPEN_EVENT_STATUSES",
     "RESIDUAL_NO_EVENT",
     "RESIDUAL_RUNNING",
-    "TERMINAL_EVENT_STATUSES",
     "TIMELINE_SEQUENCE_FIELD",
     "ResidualEvent",
     "build_envelope",
@@ -41,17 +42,13 @@ EVENT_STATUS_RUNNING = "running"
 #: verdict was never reached.
 EVENT_STATUS_INTERRUPTED = "interrupted"
 
-#: Statuses that mean an event closed. Anything outside this set, including a
-#: missing status, leaves the event open as far as finalize is concerned.
-TERMINAL_EVENT_STATUSES: frozenset[str] = frozenset(
-    {
-        "succeeded",
-        "failed",
-        "degraded",
-        "skipped",
-        EVENT_STATUS_INTERRUPTED,
-    }
-)
+#: Statuses that mean an event is still open: the one :func:`open_event` writes,
+#: and the absence of an event behind the fragments. Every other status is one a
+#: closing write put there, so finalize leaves it alone. Stated this way round
+#: because the terminal vocabulary is each event type's own -- a warm replay
+#: closes ``rejected`` -- and an allowlist here would silently recover a status
+#: it had not been told about, overwriting a real verdict with ``interrupted``.
+OPEN_EVENT_STATUSES: frozenset[str] = frozenset({"", EVENT_STATUS_RUNNING})
 
 #: An event on disk as ``running`` whose closing write never ran. Its sequence
 #: is on the event-level fragment, so finalize updates that same entry.
@@ -80,6 +77,8 @@ def build_envelope(
     ext: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the envelope every event type shares."""
+    from ..workflow_contract import event_semantics
+
     parse_event_id(event)
     envelope: dict[str, Any] = {
         "type": str(event_type),
@@ -93,6 +92,7 @@ def build_envelope(
     if end_time:
         envelope["end_time"] = str(end_time)
     envelope["ext"] = dict(ext or {})
+    envelope.update(event_semantics(event_type, status, envelope["ext"]))
     return envelope
 
 
@@ -123,7 +123,7 @@ def open_event(
     )
     try:
         write_timeline_event(envelope)
-    except Exception as exc:  # noqa: BLE001 — observability cannot change phase behavior
+    except RECORDING_ERRORS as exc:
         log.debug("timeline: failed to open %s event %s", event_type, event, exc_info=True)
         _park(record_write_warning, component=f"timeline.{event_type}.open", exc=exc)
         return None
@@ -164,23 +164,22 @@ def finish_event(
         set_timeline_sequence(envelope, sequence)
     try:
         return write_timeline_event(envelope)
-    except Exception as exc:  # noqa: BLE001 — observability cannot change phase behavior
+    except RECORDING_ERRORS as exc:
         log.debug("timeline: failed to close %s event %s", event_type, event, exc_info=True)
         _park(record_write_warning, component=f"timeline.{event_type}.finish", exc=exc)
         return None
 
 
 def _opened_sequence(event: str, *, event_section: str) -> int | None:
-    """Return the sequence an earlier :func:`open_event` took for this event."""
+    """The sequence an earlier :func:`open_event` took, from the event-level fragment.
+
+    ``None`` when the event has not been opened yet or the spool cannot be read.
+    """
     from ...session.sbd_v6 import timeline_sequence
 
-    from .assembler import event_parts
+    from .assembler import recorded_section
 
-    try:
-        rows = event_parts((event_section,)).get(event_section) or []
-    except Exception:  # noqa: BLE001 — a spool we cannot read is not a reason to skip the shell
-        log.debug("timeline: cannot read %s to check whether %s is open", event_section, event, exc_info=True)
-        return None
+    rows = recorded_section(event_section, detail=f"checking whether event {event} is already open")
     for row in rows:
         if str(row.get(EVENT_ID_FIELD) or "") != str(event):
             continue
@@ -219,7 +218,7 @@ def residual_events(
         if not event or event in seen:
             continue
         seen.add(event)
-        if on_disk.get(event, "") in TERMINAL_EVENT_STATUSES:
+        if on_disk.get(event, "") not in OPEN_EVENT_STATUSES:
             continue
         sequence = timeline_sequence(row)
         residual.append(
@@ -242,7 +241,7 @@ def _park(record_warning: Any, *, component: str, exc: BaseException) -> None:
         return
     try:
         record_warning(session, component=component, exc=exc)
-    except Exception:  # noqa: BLE001 — the warning sidecar is itself best-effort
+    except RECORDING_ERRORS:
         # The sidecar is what makes the parked failures above visible in the export, so losing it is the point at
         # which the original failure would otherwise go unreported entirely.
         log.warning(

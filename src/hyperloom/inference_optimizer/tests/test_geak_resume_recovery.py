@@ -8,10 +8,10 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.phases.machine_state import ESCALATE_HINT_SKIP_TO_SWEEP
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 
 
@@ -82,9 +82,16 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
         raise RuntimeError("runner should not be resolved when result.json exists")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         _runner_should_not_be_needed,
     )
+
+    revalidations: list[str] = []
+
+    async def _record_revalidation(*, reason: str) -> None:
+        revalidations.append(reason)
+
+    coord.phase_kernel._revalidate_geak_candidate = _record_revalidation  # type: ignore[method-assign]
 
     await coord._run_geak_kernel_phase(from_phase="KERNEL")
 
@@ -98,15 +105,12 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
     assert not any(e.get("action") == "geak_e2e" for e in coord.shared_state.optimization_stack)
     assert coord.shared_state.pending_escalate_hint == ESCALATE_HINT_SKIP_TO_SWEEP
 
-    # The main-flow rebench was enqueued to validate the recovered candidate.
-    rebench = [t for t in coord.tasks.created if (t.params or {}).get("geak_fallback")]
-    assert rebench, "recovery must enqueue a geak main-flow rebench"
-    assert coord.shared_state.geak_pending["revalidation_task_id"] == rebench[0].task_id
+    # The recovered candidate is handed to the same-harness revalidation.
+    assert revalidations == ["geak_e2e_win_recovered"]
 
     saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert saved["geak_result"]["status"] == "ok"
     assert saved["geak_pending"]["status"] == "awaiting_rebench"
-    assert saved["geak_pending"]["revalidation_task_id"] == rebench[0].task_id
 
 
 @pytest.mark.asyncio
@@ -148,7 +152,7 @@ async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(
         raise RuntimeError("stop before launching subprocess")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         _runner_resolved,
     )
 
@@ -191,7 +195,7 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
         raise RuntimeError("stop after handoff write")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         _runner_resolved,
     )
 
@@ -203,6 +207,85 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
     assert handoff["accepted_flags"] == "--no-enable-prefix-caching"
     assert handoff["raw_baseline_tput"] == 100.0
     assert handoff["e2e_metric"] == "output"
+    # No AgentX recipe here, so the launcher hint stays absent and GEAK keeps
+    # deriving the script that actually launched the baseline.
+    assert "launch_server_script" not in handoff
+
+
+@pytest.mark.asyncio
+async def test_an_agentx_handoff_names_the_server_script_not_the_aiperf_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An AgentX baseline must hand GEAK the builtin server script.
+
+    Without it GEAK derives its launcher from the recipe's ``benchmark_script``,
+    which AgentX has pinned to the aiperf client -- so it runs a CLIENT under
+    ``MAGPIE_RUN_PHASE=server``, gets no pid back, and aborts the bench before a
+    single repeat lands in ``bench_runs.jsonl``.
+    """
+    benchmarks = tmp_path / "InferenceX" / "benchmarks"
+    benchmarks.mkdir(parents=True)
+    for name in ("benchmark_lib.sh", "vllm_mi355x.sh", "aiperf_client.sh"):
+        (benchmarks / name).write_text("# stub\n", encoding="utf-8")
+    recipe = tmp_path / "baseline_config.with_envs.yaml"
+    recipe.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "runner_type": "mi355x",
+                    "envs": {"FRAMEWORK": "vllm", "AGENTX_DURATION": "3600"},
+                    "benchmark_script": "aiperf_client.sh",
+                    "inferencex_path": str(benchmarks.parent),
+                    "workload_spec": {
+                        "kind": "agentx_trace_replay",
+                        "client": "aiperf",
+                        "scenario": "inferencex-agentx-mvp",
+                        "corpus": "semianalysis_cc_traces_weka_062126",
+                        "duration_s": 3600,
+                        "geak_loop_duration_s": 900,
+                        "concurrency": 8,
+                        "metric_basis": "aggregate_output_tok_s",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(
+        baseline_tput=168.99,
+        current_best={"action": "baseline", "tput": 168.99},
+        model_path="/models/Kimi-K3",
+        gpu_type="mi355x",
+        isl=1024,
+        osl=1024,
+        conc=8,
+        baseline_config_path=str(recipe),
+    )
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    monkeypatch.setenv("TP", "8")
+
+    def _runner_resolved(_name: str) -> Path:
+        raise RuntimeError("stop after handoff write")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
+        _runner_resolved,
+    )
+
+    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+
+    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    assert handoff["launch_server_script"] == str(benchmarks / "vllm_mi355x.sh")
+    spec = handoff.get("workload_spec") or {}
+    assert spec.get("kind") == "agentx_trace_replay"
+    assert spec.get("client") == "aiperf"
 
 
 @pytest.mark.asyncio
@@ -233,7 +316,7 @@ async def test_geak_handoff_forwards_the_actual_gpu_pin(
         raise RuntimeError("stop after handoff write")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         _runner_resolved,
     )
 
@@ -291,7 +374,7 @@ async def test_geak_handoff_keeps_a_hip_pin_against_the_recipe_autofill(
         raise RuntimeError("stop after handoff write")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         _runner_resolved,
     )
 

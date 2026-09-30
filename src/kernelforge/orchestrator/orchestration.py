@@ -61,10 +61,11 @@ PLAN_REVISION_TIMEOUT_SEC = 600
 # The round partition divides ground the analyses already name, so it is given no tools and a bound short enough that
 # a slow answer costs the round its partition rather than its planning window.
 ROUND_PARTITION_MAX_TURNS = 8
-# Dividing ground the analyses already name is a reading task, not the deepest reasoning the round does; the plans
-# behind it keep the maximum.
-ROUND_PARTITION_EFFORT = "high"
 ROUND_PARTITION_TIMEOUT_SEC = 900
+# Dividing ground the analyses already name is a reading task, not the deepest reasoning the round does; the plans
+# behind it keep the maximum. A ceiling rather than a value, so an operator running the campaign below it keeps their
+# own setting -- see ``AgentRunSpec.resolved``.
+ROUND_PARTITION_EFFORT_CEILING = "high"
 
 
 @contextmanager
@@ -1008,7 +1009,7 @@ class OrchestrationAgent:
                     max_turns=ROUND_PARTITION_MAX_TURNS,
                     timeout_sec=min(self.timeout_sec, ROUND_PARTITION_TIMEOUT_SEC),
                     tools=False,
-                    reasoning_effort=ROUND_PARTITION_EFFORT,
+                    max_reasoning_effort=ROUND_PARTITION_EFFORT_CEILING,
                 )
                 grounds, move, notes = self._parse_lane_grounds(response, lanes=lanes)
             except (
@@ -1142,7 +1143,7 @@ class OrchestrationAgent:
         allow_incomplete: bool = False,
         timeout_sec: int | None = None,
         tools: bool = True,
-        reasoning_effort: str = "max",
+        max_reasoning_effort: str = "",
     ) -> str:
         result = await self._run_result(
             context,
@@ -1152,7 +1153,7 @@ class OrchestrationAgent:
             max_turns=max_turns,
             timeout_sec=timeout_sec,
             tools=tools,
-            reasoning_effort=reasoning_effort,
+            max_reasoning_effort=max_reasoning_effort,
             role="orchestration",
         )
         text = str(result.text or "")
@@ -1179,7 +1180,7 @@ class OrchestrationAgent:
         max_turns: int | None = None,
         timeout_sec: int | None = None,
         tools: bool = True,
-        reasoning_effort: str = "max",
+        max_reasoning_effort: str = "",
     ) -> AgentRunResult:
         effective_timeout = self.timeout_sec if timeout_sec is None else timeout_sec
         try:
@@ -1191,8 +1192,9 @@ class OrchestrationAgent:
                         user_prompt=user_prompt,
                         max_turns=max_turns,
                         timeout_sec=effective_timeout,
+                        role=role,
                         tools=tools,
-                        reasoning_effort=reasoning_effort,
+                        max_reasoning_effort=max_reasoning_effort,
                     ),
                     usage=usage,
                 ),
@@ -1222,6 +1224,7 @@ class OrchestrationAgent:
             user_prompt="",
             max_turns=max_turns,
             timeout_sec=timeout_sec,
+            role=role,
             read_only_resume=True,
         )
         try:
@@ -1247,9 +1250,10 @@ class OrchestrationAgent:
         user_prompt: str,
         max_turns: int | None,
         timeout_sec: int,
+        role: str = "orchestration",
         read_only_resume: bool = False,
         tools: bool = True,
-        reasoning_effort: str = "max",
+        max_reasoning_effort: str = "",
     ) -> AgentRunSpec:
         """One read-only orchestration turn."""
         return AgentRunSpec(
@@ -1258,7 +1262,8 @@ class OrchestrationAgent:
             cwd=context.workspace,
             writable=False,
             timeout_sec=timeout_sec,
-            reasoning_effort=reasoning_effort,
+            role=role,
+            max_reasoning_effort=max_reasoning_effort,
             read_only_resume=read_only_resume,
             allow_dirty_targets=read_only_resume,
             allow_untracked=read_only_resume,

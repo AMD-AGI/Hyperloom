@@ -15,7 +15,6 @@ This guide walks through a complete kernel development workflow — from install
 **Billing choice.** `kernelforge forge-loop` drives its agent sessions through `claude-agent-sdk.query()`, which spawns the `claude` CLI as a subprocess, so whatever that CLI authenticates with is what gets billed. A `claude` logged in with Claude Code Max bills against your Max subscription and needs **no `ANTHROPIC_API_KEY`**. Where a login cannot persist — a container, CI — `CLAUDE_CODE_OAUTH_TOKEN` reaches the same subscription. Set `ANTHROPIC_API_KEY` only if you want API-credit billing instead; the CLI reads it ahead of the subscription token, so setting both bills the key.
 
 Optional but recommended:
-- [RTK](https://github.com/rtk-ai/rtk) for 60-90% token savings: `cargo install rtk`
 - AITER repo cloned at `/work/aiter-amd` (or wherever your kernel workspace is)
 
 ## Step 1: Install
@@ -334,15 +333,6 @@ python driver.py --warmup 10 --iters 200 --bench-mode   # wall_ms: 0.081920 per 
 The full contract — every mode, every line, and the rules for multi-rank and self-managed-stream tasks — is in [`src/kernelforge/data/examples/README.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/kernelforge/data/examples/README.md).
 
 ## Troubleshooting
-
-### `rtk --version` reports nothing
-
-RTK is optional but saves 60-90% of tokens; it is used transparently whenever it is on PATH. Install it:
-```bash
-cargo install rtk
-# or
-pip install rtk
-```
 
 ### Agent doesn't find kernel source files
 

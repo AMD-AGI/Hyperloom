@@ -369,7 +369,7 @@ def test_preflight_blocks_gemma3(tmp_path, monkeypatch):
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "unsupported_model_arch"
     breakdown = json.loads((sd / "session_breakdown.json").read_text())
-    assert breakdown["session"]["stop_reason"] == "unsupported_model_arch"
+    assert breakdown["outcome"]["stop_reason"] == "unsupported_model_arch"
 
 
 def test_preflight_blocks_unknown_arch(tmp_path, monkeypatch):
@@ -408,7 +408,7 @@ def test_preflight_allows_missing_config(tmp_path, monkeypatch):
 
 # 3. stop_reason vocabulary registration
 def test_stop_reason_is_canonical_vocab():
-    from hyperloom.orchestrator.phases.machine_state import (
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import (
         STOP_REASON_VOCAB,
         is_valid_stop_reason,
     )

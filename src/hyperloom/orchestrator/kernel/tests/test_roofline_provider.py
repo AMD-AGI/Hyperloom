@@ -9,8 +9,8 @@ byte-identical by construction). These tests pin the delegation + factory contra
 
 from __future__ import annotations
 
-import hyperloom.orchestrator.kernel.roofline_ceiling as rcl
-import hyperloom.orchestrator.kernel.roofline_provider as rp
+import hyperloom.inference_optimizer.roofline_ceiling as rcl
+import hyperloom.inference_optimizer.roofline_provider as rp
 
 
 def test_native_satisfies_protocol() -> None:

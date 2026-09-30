@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Re-time a generated tuner's candidates with our own clock."""
+"""Independently re-time generated candidates.
+
+Warm clocks, interleave baseline and candidate, use repeat minima to resist
+additive interference, require best/typical agreement, and clear a noise floor.
+Callers provide dispatch callables; generated timing claims are ignored.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +22,14 @@ log = logging.getLogger(__name__)
 WARMUP_CALLS = 20
 CALLS_PER_SAMPLE = 30
 REPEATS = 9
+
+#: MI355X null comparisons reached 1.00925x, so require 1.01x to beat noise
+#: rather than promoting the baseline as an improvement.
+MIN_SPEEDUP = 1.01
+
+
+class CaptureFailed(RuntimeError):
+    """The work could not be captured into a CUDA/HIP graph, so replay cannot time it."""
 
 
 @dataclass(frozen=True)
@@ -51,10 +64,13 @@ class Judgement:
     best_timing: PairedTiming | None = None
     timings: list[tuple[dict[str, Any], PairedTiming]] = field(default_factory=list)
     rejected_incorrect: int = 0
+    #: Why the shape produced no comparison at all; empty when it was judged.
+    reason: str = ""
 
     @property
     def improved(self) -> bool:
-        return bool(self.best_timing and self.best_timing.usable and (self.best_timing.speedup or 0) > 1.0)
+        """Faster than the baseline by more than the baseline beats itself."""
+        return bool(self.best_timing and self.best_timing.usable and (self.best_timing.speedup or 0) >= MIN_SPEEDUP)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -64,6 +80,7 @@ class Judgement:
             "improved": self.improved,
             "rejected_incorrect": self.rejected_incorrect,
             "candidates_timed": len(self.timings),
+            "reason": self.reason,
         }
 
 

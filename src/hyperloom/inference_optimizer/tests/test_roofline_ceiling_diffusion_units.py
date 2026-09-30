@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.kernel import roofline_ceiling as rc
+from hyperloom.inference_optimizer import roofline_ceiling as rc
 
 
 def _model(tmp_path: Path, *, transformer: dict | None = None, vae: dict | None = None) -> str:
@@ -333,7 +333,7 @@ def test_diffusion_breakdown_is_empty_without_weights_or_geometry(tmp_path):
 # mirroring the LLM ceilings; native/miss falls back to the vendor HW_SPECS table.
 # --------------------------------------------------------------------------- #
 
-from hyperloom.orchestrator.kernel import roofline_csv as _rcsv  # noqa: E402
+from hyperloom.inference_optimizer import roofline_csv as _rcsv  # noqa: E402
 
 
 def test_diffusion_mem_ceiling_peak_swaps_hbm_bw_from_csv(tmp_path):

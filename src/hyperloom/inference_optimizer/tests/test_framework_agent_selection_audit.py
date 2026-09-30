@@ -11,6 +11,7 @@ import types
 import pytest
 
 from hyperloom.orchestrator.loop import coordinator as coord_mod
+from hyperloom.orchestrator.phases import framework as framework_mod
 from hyperloom.orchestrator.phases import machine_state as ps_mod
 from hyperloom.orchestrator.actions.executors import _patch_source_pr as fpr_mod
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
@@ -27,7 +28,7 @@ def _silent_plan() -> ScriptedPlan:
 
 
 def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
 
 
 @pytest.fixture
@@ -36,17 +37,20 @@ def coord(session_dir) -> Coordinator:
 
 
 # _framework_config_levers_from_done
-def test_config_levers_non_dict_and_patch_precedence() -> None:
-    f = coord_mod._framework_config_levers_from_done
+def test_config_levers_non_dict_and_missing() -> None:
+    f = framework_mod._framework_config_levers_from_done
     assert f(None) == {}
-    # A patch deliverable is not a config-only outcome.
-    assert f({"patches_written": ["a.patch"], "proposal_set": [{"extra_envs": {"X": "1"}}]}) == {}
+    # A patch takes precedence over a lever that merely accompanies it, unless the
+    # lane says the pair is inseparable.
+    patched = {"patches_written": ["a.patch"], "proposal_set": [{"extra_envs": {"X": "1"}}]}
+    assert f(patched) == {}
+    assert f(patched, levers_ride_with_patches=True).get("extra_envs") == {"X": "1"}
     assert f({"proposal_set": "nope"}) == {}
     assert f({}) == {}
 
 
 def test_config_levers_preserve_envs_and_args() -> None:
-    f = coord_mod._framework_config_levers_from_done
+    f = framework_mod._framework_config_levers_from_done
     extra_args = '--enable-x --compilation-config \'{"mode": "max-autotune"}\' --bare'
     levers = f(
         {
@@ -65,13 +69,13 @@ def test_config_levers_preserve_envs_and_args() -> None:
 
 
 def test_config_levers_args_as_list() -> None:
-    f = coord_mod._framework_config_levers_from_done
+    f = framework_mod._framework_config_levers_from_done
     levers = f({"proposal_set": [{"extra_args": ["--flag", "value with space"]}]})
     assert levers == {}
 
 
 def test_invalid_config_args_preserve_independent_env_overrides() -> None:
-    f = coord_mod._framework_config_levers_from_done
+    f = framework_mod._framework_config_levers_from_done
     levers = f(
         {
             "proposal_set": [
@@ -89,7 +93,7 @@ def test_invalid_config_args_preserve_independent_env_overrides() -> None:
 
 
 def test_config_levers_json_args_as_list_stay_unquoted() -> None:
-    f = coord_mod._framework_config_levers_from_done
+    f = framework_mod._framework_config_levers_from_done
     levers = f(
         {
             "proposal_set": [
@@ -118,7 +122,7 @@ def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
         {"candidate_id": "c2", "status": "in_flight"},  # non-terminal -> excluded
         {"candidate_id": "c3", "status": "critic_denied", "rationale": "off the bottleneck"},
     ]
-    priors = coord._collect_framework_agent_candidate_priors()
+    priors = coord.phase_framework._collect_framework_agent_candidate_priors()
     statuses = {o["status"] for o in priors["recent_outcomes"]}
     assert statuses == {"kept", "critic_denied"}
     # The denial reason has to reach the Critic, or the priors carry the verdict without the argument behind it.
@@ -174,7 +178,7 @@ class _FakeStream:
     async def __anext__(self):
         try:
             return next(self._it)
-        except StopIteration:  # noqa: PERF203
+        except StopIteration:
             raise StopAsyncIteration from None
 
 
@@ -197,7 +201,7 @@ class _FakeClient:
 
 
 def _scripted_run_git(diff_text: str = "diff --git a b\n+x\n", fetch_ok: bool = True, seen: list | None = None):
-    def _fake(args, timeout=None):  # noqa: ANN001
+    def _fake(args, timeout=None):
         sub = args[2] if len(args) > 2 else ""
         if seen is not None:
             seen.append(sub)
@@ -358,9 +362,6 @@ def _enablement_authoring_task(task_id: str = "spec-enable-1") -> types.SimpleNa
     return types.SimpleNamespace(
         task_id=task_id,
         params={
-            "framework_agent_authoring": True,
-            "framework_agent_candidate_id": "cand-e",
-            "framework_batch_id": "batch-e",
             "enablement": True,
             "enablement_before_observation_path": "/s/reports/bringup/round-abc-000.json",
             "enablement_setup_commands": ["pip install -U vllm==0.21.0"],
@@ -424,19 +425,19 @@ async def test_autosubmit_config_build_only_skips_integrate(coord: Coordinator) 
 # _record_framework_agent_authored_outcome
 def test_record_authored_outcome_non_dict_and_empty_status(coord: Coordinator) -> None:
     # result.result not a dict -> no-op.
-    coord._record_framework_agent_authored_outcome(
+    coord.phase_framework._record_framework_agent_authored_outcome(
         task=types.SimpleNamespace(task_id="t", params={}),
         result=types.SimpleNamespace(result=None),
     )
     # empty status -> no-op.
-    coord._record_framework_agent_authored_outcome(
+    coord.phase_framework._record_framework_agent_authored_outcome(
         task=types.SimpleNamespace(task_id="t", params={}),
         result=types.SimpleNamespace(result={"status": ""}),
     )
     assert not (coord.shared_state.framework_agent_phase_progress or [])
 
 
-def test_record_authored_outcome_kept_rolls_batch_stat(coord: Coordinator) -> None:
+def test_record_authored_outcome_kept_writes_progress(coord: Coordinator) -> None:
     coord.shared_state.framework_agent_batches = [{"batch_id": "batch-1"}]
     coord.shared_state.framework_agent_phase_progress = []
     task = types.SimpleNamespace(
@@ -457,12 +458,11 @@ def test_record_authored_outcome_kept_rolls_batch_stat(coord: Coordinator) -> No
             "accuracy_pass": True,
         }
     )
-    coord._record_framework_agent_authored_outcome(task=task, result=result)
+    coord.phase_framework._record_framework_agent_authored_outcome(task=task, result=result)
     rows = coord.shared_state.framework_agent_phase_progress
     assert rows[-1]["candidate_id"] == "cand-1"
     assert rows[-1]["status"] == "kept" and rows[-1]["kept"] is True
     assert rows[-1]["gain_pct"] == 4.5
-    assert coord.shared_state.framework_agent_batches[0]["max_gain_pct_observed_in_batch"] == 4.5
 
 
 def test_record_authored_outcome_uses_candidate_map_and_batch_fallback(coord: Coordinator) -> None:
@@ -474,7 +474,7 @@ def test_record_authored_outcome_uses_candidate_map_and_batch_fallback(coord: Co
         params={"framework_agent_authoring": True, "specialist_task_id": "spec-9"},
     )
     result = types.SimpleNamespace(result={"status": "reverted", "delta_pct": -1.0})
-    coord._record_framework_agent_authored_outcome(task=task, result=result)
+    coord.phase_framework._record_framework_agent_authored_outcome(task=task, result=result)
     row = coord.shared_state.framework_agent_phase_progress[-1]
     assert row["candidate_id"] == "cand-from-map"
     assert row["batch_id"] == "latest-batch"
@@ -489,16 +489,16 @@ def _enter_fpr(coord: Coordinator) -> None:
 def test_record_authoring_empty_guards(coord: Coordinator) -> None:
     _enter_fpr(coord)
     # Not authoring -> no-op.
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=types.SimpleNamespace(task_id="t", params={}), done_payload={}
     )
     # Patch present -> no-op (integrate_patch will own the row).
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=_authoring_task(),
         done_payload={"patches_written": ["p.patch"]},
     )
     # Config-lever deliverable -> no-op (config autosubmit owns the row).
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=_authoring_task(),
         done_payload={"proposal_set": [{"extra_envs": {"X": "1"}}]},
     )
@@ -516,14 +516,14 @@ def test_record_authoring_empty_already_present(coord: Coordinator) -> None:
             "framework_audit": {"semantic_status": "already_equivalent"},
         },
     )
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task, done_payload={"payload": {"patches_written": [], "summary": "already there"}}
     )
     row = coord.shared_state.framework_agent_phase_progress[-1]
     assert row["candidate_id"] == "cand-2"
     assert row["status"] == "already_present"
     # Idempotent: a second call does not append a duplicate.
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task, done_payload={"payload": {"patches_written": [], "summary": "again"}}
     )
     assert sum(1 for p in coord.shared_state.framework_agent_phase_progress if p["candidate_id"] == "cand-2") == 1
@@ -533,7 +533,7 @@ def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
     _enter_fpr(coord)
     coord.shared_state.framework_agent_phase_progress = []
     # not_present -> not_applicable.
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=types.SimpleNamespace(
             task_id="s-a",
             params={
@@ -545,7 +545,7 @@ def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
         done_payload={"patches_written": [], "summary": "missing"},
     )
     # no audit -> author_empty.
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=types.SimpleNamespace(
             task_id="s-b",
             params={"framework_agent_authoring": True, "framework_agent_candidate_id": "ae-1"},

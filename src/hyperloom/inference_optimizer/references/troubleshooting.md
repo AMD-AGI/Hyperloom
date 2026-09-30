@@ -47,7 +47,7 @@ The CLI calls `make_session_dir(model_name=…)` once at startup; that creates
 Auth / SDK drift (`Claude SDK exit code 1`, `Primus.00009 token not present`,
 `ANTHROPIC_AUTH_TOKEN not set`, `BackendError: claude-agent-sdk not installed`,
 `Fatal error in message reader`) is owned by `_preflight()`; see Recovery above
-for the supervisor + install rerun loop. Manual SDK fallback if frozen pip
+for explicit diagnosis and an install rerun. Manual SDK fallback if frozen pip
 blocks `_ensure_python_sdks()`:
 `python -m pip install 'claude-agent-sdk>=0.2.110' 'openai>=1.50' 'httpx>=0.27'`.
 Transient SDK errors retry/resume up to the Coordinator emergency threshold.
@@ -93,10 +93,9 @@ Bypass with `--critic-mock` for offline / smoke runs. See
   (Leverage exhaustion *within* a single phase is now the non-terminal
   phase-exit reason `optimize_no_more_leverage` / `kernel_no_more_leverage`,
   which switches lever rather than ending the run.)
-- `stop_reason=policy_loop`: a legacy stop_reason kept in the vocabulary for
-  resuming old sessions; nothing in the runtime sets it. Repeated `policy_denied`
-  for the same (action, rule) pair is advisory only — there is no auto-prune at
-  streak ≥5 and no `policy_loop` stop at streak ≥10. Inspect
+- `policy_denied` streaks (not a stop reason — nothing in the runtime stops a run
+  over them): repeated denial of the same (action, rule) pair is advisory only —
+  there is no auto-prune at streak ≥5 and no stop at streak ≥10. Inspect
   `SharedState.policy_denial_history` via the `why_denied` tool or the
   `=== Recent policy denials ===` block, then change something substantive (a new
   `params.grid` variant, a different `benchmark_script`, or a sibling action

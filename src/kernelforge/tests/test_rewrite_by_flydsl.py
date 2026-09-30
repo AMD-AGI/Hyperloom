@@ -319,20 +319,55 @@ def test_rewrite_uses_forge_loop_result_sentinel():
     assert report.SENTINEL == "__FORGE_RESULT__"
 
 
-def test_speedup_only_when_port_ok_and_both_times():
+def test_speedup_only_when_port_ok_and_scored():
     ok = report.build_result(
-        op_name="op", port_ok=True, port_attempts=1, source_ms=2.0, optimize_result={"best_ms": 1.0}
+        op_name="op",
+        port_ok=True,
+        port_attempts=1,
+        source_ms=2.0,
+        optimize_result={"best_ms": 1.0, "mean_case_speedup": 2.0},
     )
     assert ok.speedup == pytest.approx(2.0)
     assert ok.compiled and ok.correct and ok.target_language == "flydsl"
 
-    no_base = report.build_result(
-        op_name="op", port_ok=True, port_attempts=1, source_ms=None, optimize_result={"best_ms": 1.0}
+    unscored = report.build_result(
+        op_name="op", port_ok=True, port_attempts=1, source_ms=2.0, optimize_result={"best_ms": 1.0}
     )
-    assert no_base.speedup is None
+    assert unscored.speedup is None
 
-    failed = report.build_result(op_name="op", port_ok=False, port_attempts=3, source_ms=2.0, optimize_result={})
+    failed = report.build_result(
+        op_name="op",
+        port_ok=False,
+        port_attempts=3,
+        source_ms=2.0,
+        optimize_result={"mean_case_speedup": 2.0},
+    )
     assert failed.speedup is None and not failed.correct
+
+
+def test_rewrite_result_includes_cumulative_llm_usage():
+    usage = {
+        "input_tokens": 123,
+        "output_tokens": 45,
+        "cache_creation_input_tokens": 6,
+        "cache_read_input_tokens": 78,
+        "total_cost_usd": 0.5,
+        "cost_available": True,
+        "cost_source": "provider",
+        "calls": 2,
+    }
+
+    result = report.build_result(
+        op_name="op",
+        port_ok=True,
+        port_attempts=1,
+        source_ms=2.0,
+        optimize_result={"best_ms": 1.0},
+        llm_usage=usage,
+    )
+
+    assert result.llm_usage == usage
+    assert result.to_dict()["llm_usage"] == usage
 
 
 def test_applyback_is_required_only_for_framework_repositories():

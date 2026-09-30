@@ -144,14 +144,15 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     # both start at 1_000_000.
     s.start_ts = datetime.fromtimestamp(1_000_000.0, tz=timezone.utc).isoformat()
     phase = _ps.PHASE_FRAMEWORK_AGENT
-    s.record_phase_transition(
+    _ps.record_phase_transition(
+        s,
         to_phase=phase,
         reason="prelude_done",
         evidence={"baseline_tput": 100},
         ts="2026-05-19T00:00:00+00:00",
         ts_unix=1_000_000.0,
     )
-    out = s.to_phase_status_summary(budget_pct={phase: 0.5}, now_unix=1_000_120.0)
+    out = _ps.phase_status_summary(s, budget_pct={phase: 0.5}, now_unix=1_000_120.0)
     assert f"phase     : {phase}" in out
     assert "entered" in out
     assert "elapsed_sec=120" in out
@@ -163,64 +164,140 @@ def test_shared_state_phase_status_summary_renders_compact_block():
 
 
 def test_shared_state_phase_status_summary_no_max_minutes_marks_unlimited():
+    from hyperloom.orchestrator.phases import machine_state as _ps
+
     s = SharedState(max_minutes=0)
-    s.record_phase_transition(
+    _ps.record_phase_transition(
+        s,
         to_phase="FRAMEWORK_AGENT",
         reason="prelude_done",
         evidence={},
         ts="2026-05-19T00:00:00+00:00",
         ts_unix=1.0,
     )
-    out = s.to_phase_status_summary(now_unix=10.0)
+    out = _ps.phase_status_summary(s, now_unix=10.0)
     assert "unlimited run" in out.lower()
-
-
-def test_shared_state_phase_budget_telemetry_reports_per_phase_elapsed():
-    s = SharedState(max_minutes=60)
-    s.record_phase_transition(
-        to_phase="PRELUDE",
-        reason="phase_entered",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1_000_000.0,
-    )
-    s.record_phase_transition(
-        to_phase="FRAMEWORK_AGENT",
-        reason="prelude_done",
-        evidence={},
-        ts="2026-05-19T00:01:00+00:00",
-        ts_unix=1_000_060.0,
-    )
-    out = s.to_phase_budget_telemetry(now_unix=1_000_300.0)
-    # PRELUDE: 60s elapsed, cap 108s (3% of 3600s), used 56%.
-    assert "PRELUDE: elapsed=60s" in out
-    # FRAMEWORK_AGENT: 240s elapsed (300-60).
-    assert "FRAMEWORK_AGENT: elapsed=240s" in out
-    # Both lines present.
-    assert out.count("elapsed=") == 2
 
 
 def test_shared_state_warm_start_summary_empty_when_no_recipe():
     assert SharedState().to_warm_start_summary() == ""
 
 
-def test_shared_state_warm_start_summary_renders_recipe_and_pitfalls():
-    s = SharedState()
-    s.warm_start_recipe = {
-        "workload": "deepseek-r1",
-        "hw": "mi300x",
-        "raw": "recipe_id=42 stack=sglang/0.4.10\nbest_config={'foo':'bar'}\nwhat_worked=[A, B]",
-    }
-    s.warm_start_pitfalls = [
-        {"raw": "OOM on fp8 expert_dtype — switch to fp4"},
-        {"raw": "TP=8 + ISL>=8k causes nccl hang"},
-    ]
-    out = s.to_warm_start_summary()
-    assert "workload=deepseek-r1" in out
-    assert "hw=mi300x" in out
-    assert "recipe_id=42" in out
-    assert "pitfalls (2):" in out
-    assert "OOM on fp8" in out
+def _t0_warm_started(tmp_path, **put_kwargs) -> SharedState:
+    """Seed a recipe, run the real T0 anchor, return the state the renderer sees.
+
+    Hand-built fixtures are how this block came to render fields no writer
+    produces — a ``raw`` blob that has never existed on ``warm_start_recipe``.
+    Driving ``run_t0_anchor`` means the context under assertion is the one a
+    session actually builds, for whichever shape the KB and T0 agree on.
+    """
+    from hyperloom.orchestrator.knowledge.recipe_kb import (
+        LocalRecipeStore,
+        RecipeKB,
+        recipe_canonical_id,
+    )
+    from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
+
+    state = SharedState()
+    state.framework_name = "vllm"
+    state.framework_version = "0.11.0"
+    state.precision = "fp8"
+    kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"))
+    if put_kwargs:
+        kb.put_recipe(
+            canonical_id=recipe_canonical_id(
+                model="kimi-k3",
+                hardware="mi355x",
+                framework_name=state.framework_name,
+                framework_version=state.framework_version,
+                precision=state.precision,
+            ),
+            model="kimi-k3",
+            hardware="mi355x",
+            framework_name=state.framework_name,
+            framework_version=state.framework_version,
+            precision=state.precision,
+            provenance={"source": "seed", "generator": "ut"},
+            **put_kwargs,
+        )
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(exist_ok=True)
+    run_t0_anchor(
+        kb,
+        state,
+        workload="kimi-k3",
+        hw="mi355x",
+        extra_attrs={"framework_name": state.framework_name},
+        session_dir=session_dir,
+    )
+    return state
+
+
+def test_warm_start_summary_reports_the_recipe_a_hit_actually_matched(tmp_path):
+    """On a KB hit the block must not claim there is nothing to go on.
+
+    It read a ``raw`` text field that no writer produces, so a matched recipe
+    rendered as "first session for this workload/hw" — worse than saying nothing.
+    """
+    state = _t0_warm_started(
+        tmp_path,
+        best_config={
+            "extra_server_args": "--attention-backend=AITER",
+            "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+        },
+        best_throughput=875.0,
+    )
+    out = state.to_warm_start_summary()
+    assert "first session" not in out
+    assert "tier=exact" in out
+    assert "--attention-backend=AITER" in out
+    # Envs render as pairs, not a Python dict repr.
+    assert "VLLM_ROCM_USE_AITER=1" in out
+    assert "{'" not in out
+
+
+def test_warm_start_summary_attributes_a_borrowed_config_to_its_donor(tmp_path):
+    """A non-exact match must not read as this session's own measurement.
+
+    ``tier``/``confidence`` sit in the context beside the numbers; rendering the
+    numbers without them turns "wrongly says cold start" into "wrongly says this
+    is your warm data", which is harder to catch.
+    """
+    state = _t0_warm_started(
+        tmp_path,
+        best_config={"extra_server_args": "--tp 8"},
+        best_throughput=875.0,
+    )
+    out = state.to_warm_start_summary()
+    assert "confidence=" in out
+    assert "tier=" in out
+
+
+def test_warm_start_summary_pitfall_count_matches_the_rows_it_prints(tmp_path):
+    """A ``pitfalls (N):`` header with fewer rows beneath it is its own small lie."""
+    state = _t0_warm_started(
+        tmp_path,
+        best_throughput=875.0,
+        pitfalls=[
+            {"description": "K=8 draft overprovision at conc=1", "severity": "regress"},
+            {"description": "", "severity": "regress"},
+        ],
+    )
+    out = state.to_warm_start_summary()
+    assert "K=8 draft overprovision at conc=1" in out
+    assert "pitfalls (1):" in out
+
+
+def test_warm_start_summary_still_says_first_session_on_a_real_first_session(tmp_path):
+    """The honest case for that message, and it is ``seed_only``, not ``miss``.
+
+    T0 seeds a row for every session, so a genuine first session comes back as a
+    seed-only match rather than a miss — the state a hand-built fixture would not
+    have produced.
+    """
+    state = _t0_warm_started(tmp_path)
+    assert state.warm_start_context.get("status") == "seed_only"
+    assert "first session" in state.to_warm_start_summary()
 
 
 # Coordinator per-tick prompt assembly
@@ -236,7 +313,6 @@ def coordinator_with_mocks(session_dir):
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockRobustnessBackend,
         ScriptedPlan,
     )
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -245,7 +321,6 @@ def coordinator_with_mocks(session_dir):
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
     return Coordinator(session_dir, backends=backends)
 
@@ -256,7 +331,7 @@ async def test_compose_prompt_emits_phase_block_for_every_role(
 ):
     c = coordinator_with_mocks
     try:
-        for role in ("orchestration", "critic", "robustness"):
+        for role in ("orchestration", "critic"):
             prompt = await c._compose_prompt(role)
             assert "=== Phase ===" in prompt, f"{role}: phase block missing"
             assert "phase     : PRELUDE" in prompt, f"{role}: phase value missing"
@@ -272,16 +347,20 @@ async def test_compose_prompt_orchestration_renders_warm_start_when_set(
 ):
     c = coordinator_with_mocks
     try:
-        c.shared_state.warm_start_recipe = {
-            "workload": "qwen3-8b",
-            "hw": "mi325x",
-            "raw": "recipe_id=99 best_throughput=2100",
+        c.shared_state.warm_start_context = {
+            "status": "hit",
+            "match": {"tier": "exact", "confidence": 1.0},
+            "recommended_replay": {
+                "best_throughput": 2100.0,
+                "extra_server_args": "--tp 8",
+                "config_tier": "self",
+            },
         }
         c.shared_state.save(session_dir)
         prompt = await c._compose_prompt("orchestration")
         assert "=== Warm start (Recipe KB T0) ===" in prompt
-        assert "workload=qwen3-8b" in prompt
-        assert "recipe_id=99" in prompt
+        assert "tier=exact" in prompt
+        assert "best_throughput=2100" in prompt
     finally:
         await c.stop()
 
@@ -299,7 +378,7 @@ async def test_compose_prompt_orchestration_omits_warm_start_when_empty(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("agent_name", ["robustness", "orchestration"])
+@pytest.mark.parametrize("agent_name", ["orchestration"])
 async def test_compose_prompt_omits_specialist_health_block(
     coordinator_with_mocks,
     agent_name,
@@ -310,25 +389,6 @@ async def test_compose_prompt_omits_specialist_health_block(
         prompt = await c._compose_prompt(agent_name)
         assert "Specialist health" not in prompt
         assert "stale" not in prompt.lower()
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_robustness_includes_budget_telemetry(
-    coordinator_with_mocks,
-    session_dir,
-):
-    c = coordinator_with_mocks
-    try:
-        # Force PRELUDE -> FRAMEWORK_AGENT so there is a segment to report.
-        c.shared_state.baseline_tput = 1500.0
-        c.shared_state.save(session_dir)
-        await c.tick(1)
-        prompt = await c._compose_prompt("robustness")
-        assert "=== Phase budget telemetry ===" in prompt
-        assert "PRELUDE: elapsed=" in prompt
-        assert "FRAMEWORK_AGENT: elapsed=" in prompt
     finally:
         await c.stop()
 

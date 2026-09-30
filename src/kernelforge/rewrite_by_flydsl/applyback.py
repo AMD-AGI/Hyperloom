@@ -33,6 +33,7 @@ from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.rewrite_by_flydsl.protocol import validate_applyback_manifest
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 from kernelforge.durable_io import atomic_write_text
+from kernelforge.tracker import UsageAccumulator
 
 # Framework apply-back artifacts live beside, never inside, the artifact paths the nested standalone FlyDSL forge-loop
 # owns (``forge_experiments/best*``).
@@ -326,6 +327,7 @@ async def _run_agent(
     timeout_sec: int,
     progress_log: list[str],
     prior_failure: str = "",
+    usage: UsageAccumulator | None = None,
 ) -> tuple[str, str]:
     runtime = config.agent_runtime()
     backend = create_registered_backend(
@@ -349,10 +351,10 @@ async def _run_agent(
             "reference implementation. Work directly in the supplied git worktree."
         ),
         user_prompt=prompt,
+        role="flydsl applyback",
         cwd=str(worktree),
         writable=True,
         timeout_sec=timeout_sec,
-        reasoning_effort="max",
         additional_directories=[str(reference_path.parent)],
         allow_untracked=True,
         hooks=_make_applyback_hooks(deadline_monotonic=deadline_monotonic),
@@ -367,7 +369,7 @@ async def _run_agent(
         ),
     )
     result = await asyncio.wait_for(
-        backend.run(run_spec),
+        backend.run(run_spec, usage=usage),
         timeout=watchdog_timeout_sec(timeout_sec),
     )
     # A turn cap or SDK error leaves a half-rewired integration that passes host validation and every gate after it,
@@ -590,6 +592,7 @@ def _publish_patch(
     commit_ref: str,
     source_ms: float | None,
     flydsl_best_ms: float | None,
+    speedup: float | None,
     reference_snr_db: float | None,
     patch: str,
     changed_files: list[str],
@@ -618,7 +621,6 @@ def _publish_patch(
     version_name = f"iter_{iteration:03d}"
     version = best_root / version_name
     relative_dir = version.relative_to(root)
-    speedup = source_ms / flydsl_best_ms if source_ms and flydsl_best_ms and flydsl_best_ms > 0 else None
     manifest = validate_applyback_manifest(
         {
             "schema_version": protocol.ARTIFACT_SCHEMA_VERSION,
@@ -720,10 +722,12 @@ def generate_applyback_patch(
     best_commit: str = "",
     source_ms: float | None = None,
     flydsl_best_ms: float | None = None,
+    speedup: float | None = None,
     reference_snr_db: float | None = None,
     deadline_unix: float | None = None,
     import_modules: list[str] | tuple[str, ...] = (),
     max_attempts: int = 2,
+    usage: UsageAccumulator | None = None,
 ) -> ApplybackResult:
     """Run bounded clean-room agent attempts and publish a validated patch."""
     workspace = Path(spec.workspace).resolve()
@@ -856,6 +860,7 @@ def generate_applyback_patch(
                         timeout_sec=timeout_sec,
                         progress_log=progress_log,
                         prior_failure=prior_failure,
+                        usage=usage,
                     )
                 )
 
@@ -886,6 +891,7 @@ def generate_applyback_patch(
                     commit_ref=commit_ref,
                     source_ms=source_ms,
                     flydsl_best_ms=flydsl_best_ms,
+                    speedup=speedup,
                     reference_snr_db=reference_snr_db,
                     patch=patch,
                     changed_files=changed_files,

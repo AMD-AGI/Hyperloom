@@ -146,7 +146,7 @@ def test_capability_absent_raises():
         return "usage: aiperf profile [options]\n  --public-dataset ...\n"
 
     with pytest.raises(AgentXPreflightError) as ei:
-        check_aiperf_capability("/venv/bin/aiperf", probe=_probe)
+        check_aiperf_capability("/venv/bin/aiperf", probe=_probe, loader_probe=lambda _bin: None)
     assert "weka-trace" in str(ei.value) or "capab" in str(ei.value).lower()
 
 
@@ -165,7 +165,7 @@ def test_capability_present_ok():
         return _CAPABLE_HELP
 
     # must not raise
-    check_aiperf_capability("/venv/bin/aiperf", probe=_probe)
+    check_aiperf_capability("/venv/bin/aiperf", probe=_probe, loader_probe=lambda _bin: None)
 
 
 def test_capability_rejects_build_without_progress_api():
@@ -191,7 +191,7 @@ def test_capability_rejects_pre_scenario_build():
         return "usage: aiperf profile\n  --custom-dataset-type weka-trace ...\n"
 
     with pytest.raises(AgentXPreflightError) as ei:
-        check_aiperf_capability("/venv/bin/aiperf", probe=_probe)
+        check_aiperf_capability("/venv/bin/aiperf", probe=_probe, loader_probe=lambda _bin: None)
     assert "--scenario" in str(ei.value)
 
 
@@ -200,7 +200,7 @@ def test_probe_failure_raises_not_crash():
         raise OSError("cannot exec")
 
     with pytest.raises(AgentXPreflightError):
-        check_aiperf_capability("/venv/bin/aiperf", probe=_probe)
+        check_aiperf_capability("/venv/bin/aiperf", probe=_probe, loader_probe=lambda _bin: None)
 
 
 # --- loader-allowlist assertion ------------------------------------------------

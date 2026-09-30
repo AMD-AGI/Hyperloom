@@ -17,6 +17,7 @@ from kernelforge.knowledge.kernel_identity import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )
+from kernelforge.knowledge.warmstart_identity import rank_fallback_identities
 from kernelforge.rewrite_by_flydsl.identity import session_id as candidate_session_id
 from kernelforge.rewrite_by_flydsl.record_store import (
     RewriteRecordStore,
@@ -195,6 +196,17 @@ class KernelRecipeKB:
                 )
             return bundles
         except Exception as error:  # noqa: BLE001 - a KB read must cold-start
+            self.reason = sanitize_read_error(error, secrets=self._config_secrets())
+            return []
+
+    def fallback_canonical_ids(self, limit: int = 300) -> list[str]:
+        """Discover fuzzy donor identities after an exact lookup misses."""
+        if not self.active or self._identity is None or limit <= 0:
+            return []
+        try:
+            rows = self._store.search_identities(self._identity, limit=limit)
+            return rank_fallback_identities(self._identity, rows)
+        except Exception as error:  # noqa: BLE001 - fuzzy search must cold-start
             self.reason = sanitize_read_error(error, secrets=self._config_secrets())
             return []
 

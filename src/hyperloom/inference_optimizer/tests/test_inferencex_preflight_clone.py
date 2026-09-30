@@ -140,6 +140,13 @@ def test_validated_inferencex_path_overwrites_env_not_setdefault():
     assert 'os.environ.setdefault("INFERENCEX_PATH"' not in src
 
 
+def test_a_network_mount_checkout_is_recorded_rather_than_copied():
+    """Nothing relocates the checkout, so the ledger is what tells a flapped round from one that cannot serve."""
+    src = Path(cli_preflight.__file__).read_text(encoding="utf-8")
+    assert "inferencex_network_fs = is_network_fs(inferencex_path)" in src
+    assert '"network_fs": inferencex_network_fs,' in src
+
+
 def test_auto_detected_inferencex_candidates_must_be_writable():
     """Auto-detected read-only checkouts are skipped so preflight can clone."""
     src = Path(cli_preflight.__file__).read_text(encoding="utf-8")

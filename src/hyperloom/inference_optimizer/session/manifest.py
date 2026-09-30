@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env import is_truthy
+from hyperloom.common.env import env_bool
 from hyperloom.common.provenance import build_provenance
 from hyperloom.common.timeutil import now_iso, utc_now_compact
 
@@ -194,7 +194,7 @@ def _gpu_specialist_capacity_from_args(args: argparse.Namespace | None) -> int:
             return max(0, int(raw))
         except (TypeError, ValueError):
             pass
-    from hyperloom.orchestrator.policy.gate import detect_gpu_count
+    from hyperloom.common.visible_devices import detect_gpu_count
 
     return detect_gpu_count()
 
@@ -219,7 +219,7 @@ def build_manifest(
     }
     # An agentic replay takes its request shape from the corpus, so $ISL/$OSL
     # are inert. The Critic reads this block, so it carries the distribution.
-    _agentx_on = is_truthy(os.environ.get("HYPERLOOM_AGENTX"))
+    _agentx_on = env_bool("HYPERLOOM_AGENTX")
     if _agentx_on:
         from hyperloom.inference_optimizer.agentx.mapping import (
             CANONICAL_CORPUS_DURATION_S,
@@ -298,6 +298,15 @@ def build_manifest(
         # Locked at session start; resume reads it back so a restart can't change concurrency semantics.
         "research_lane_capacity": int(getattr(args, "research_lane_capacity", 1) or 1) if args is not None else 1,
         "gpu_specialist_capacity": _gpu_specialist_capacity_from_args(args),
+        # Workflow identity is stamped only on a fresh manifest. Resumed
+        # pre-contract sessions therefore remain honestly legacy.
+        "workflow_flags": {
+            "kernel_enabled": not bool(getattr(args, "no_kernel", False)) if args is not None else True,
+            "framework_agent_enabled": not bool(getattr(args, "no_framework_agent", False))
+            if args is not None
+            else True,
+            "enablement_mode": str(getattr(args, "enablement", "all") or "all") if args is not None else "all",
+        },
         # IR-3 soft-degrade audit.
         "kb_degraded_reason": (getattr(args, "kb_degraded_reason", None) if args is not None else None),
         "pr_degraded_reason": (getattr(args, "pr_degraded_reason", None) if args is not None else None),
@@ -326,6 +335,12 @@ def write_manifest(
         encoding="utf-8",
     )
     os.replace(tmp_path, target)
+    # The manifest stamp is where the spawn-time image, host and pid are
+    # resolved; record them now so the exporter reads a fact instead of
+    # re-probing the environment of whichever process happens to export.
+    from ..breakdown.recorder import record_metadata_identity
+
+    record_metadata_identity(sd, manifest)
     return manifest
 
 

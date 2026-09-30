@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+from hyperloom.common.unified_diff import parse_unified_diff
+
 from ._file_lock import best_effort_file_lock
 
 log = logging.getLogger(__name__)
@@ -112,12 +114,31 @@ _PATCH_TREE_REL = ("examples", "custom_workflows", "inference_analysis")
 # Both patch trees this module applies are SGLang's, and each ships its subdirs under this prefix.
 _PATCH_SUBDIR_PREFIX = "sglang"
 
+#: Suffix of the patch sets cut against SGLang's release branch rather than its
+#: point-release tag. The two differ in the files a patch expects, so a build off
+#: the release branch only applies cleanly against this variant.
+_RELEASE_BRANCH_SUFFIX = "sgldev"
 
-def _versioned_patches_subdir_name(version: str) -> str | None:
-    """Map an SGLang version to the per-version patch subdir name (e.g."""
+
+def _is_release_branch_build(version: str, source_root: Path | None = None) -> bool:
+    """Whether the installed SGLang is a build off its release branch.
+
+    setuptools_scm marks those with a ``.dev`` segment, a ``+g<sha>`` local part,
+    or both (``0.5.18.dev20260825+g0c7ff19e3b``). SETUPTOOLS_SCM_PRETEND_VERSION
+    flattens that to a bare release number, so a source checkout counts on the
+    strength of its own git dir: a point release is never installed that way.
+    """
+    text = (version or "").strip()
+    if text and (".dev" in text or re.search(r"\+g[0-9a-f]{7,}", text)):
+        return True
+    return source_root is not None and (source_root / ".git").exists()
+
+
+def _versioned_patches_subdir_names(version: str, source_root: Path | None = None) -> list[str]:
+    """Patch subdir names to try for an SGLang version, best match first."""
     text = (version or "").strip()
     if not text:
-        return None
+        return []
     # Strip dev/local suffixes so point-release tags still resolve.
     head = text.split("-", 1)[0].split("+", 1)[0]
     parts = head.split(".") if head else []
@@ -129,8 +150,17 @@ def _versioned_patches_subdir_name(version: str) -> str | None:
         else:
             break
     if len(numeric) < 2:
-        return None
-    return f"{_PATCH_SUBDIR_PREFIX}_" + "_".join(numeric)
+        return []
+    base = f"{_PATCH_SUBDIR_PREFIX}_" + "_".join(numeric)
+    if _is_release_branch_build(version, source_root):
+        return [f"{base}_{_RELEASE_BRANCH_SUFFIX}", base]
+    return [base]
+
+
+def _versioned_patches_subdir_name(version: str, source_root: Path | None = None) -> str | None:
+    """The preferred patch subdir name for a version, or ``None`` if unparseable."""
+    names = _versioned_patches_subdir_names(version, source_root)
+    return names[0] if names else None
 
 
 def _subdir_version_tuple(name: str) -> tuple[int, ...] | None:
@@ -147,17 +177,22 @@ def _subdir_version_tuple(name: str) -> tuple[int, ...] | None:
     return tuple(numeric) if len(numeric) >= 2 else None
 
 
+def _subdir_is_release_branch(name: str) -> bool:
+    """Whether a patch subdir name is the release-branch variant."""
+    return name.endswith(f"_{_RELEASE_BRANCH_SUFFIX}")
+
+
 def _resolve_versioned_patches_dir(
     patches_root: Path,
     version: str,
+    source_root: Path | None = None,
 ) -> Path | None:
     """Locate the per-version patches dir for the running SGLang version."""
 
     def _qualifies(d: Path) -> bool:
         return any(d.glob("*.patch"))
 
-    subdir_name = _versioned_patches_subdir_name(version)
-    if subdir_name is not None:
+    for subdir_name in _versioned_patches_subdir_names(version, source_root):
         candidate = patches_root / subdir_name
         if candidate.is_dir() and _qualifies(candidate):
             return candidate
@@ -168,13 +203,20 @@ def _resolve_versioned_patches_dir(
     running = _version_tuple(version)
     if running is None:
         return None
+    # Keyed by version alone, the plain and release-branch subdirs of one version
+    # collide and directory order decides the winner; prefer the variant matching
+    # the running build instead.
+    want_branch = _is_release_branch_build(version, source_root)
     available: dict[tuple[int, ...], Path] = {}
-    for d in patches_root.iterdir():
+    for d in sorted(patches_root.iterdir()):
         if not d.is_dir() or not _qualifies(d):
             continue
         vt = _subdir_version_tuple(d.name)
-        if vt:
-            available[vt] = d
+        if not vt:
+            continue
+        if vt in available and _subdir_is_release_branch(d.name) is not want_branch:
+            continue
+        available[vt] = d
     if not available:
         return None
     if len(running) >= 2:
@@ -211,6 +253,64 @@ def ensure_sglang_patched_for_tracelens(
     if plan is None:
         return False
     return _ensure_patched(plan)
+
+
+# SGLang shape-discovery gate: >= 0.5.18 uses the no-patch TraceLens tool
+# (PYTHONPATH + sitecustomize + TRACELENS_SHAPE_DISCOVERY); older uses git-apply.
+_SGLANG_SITECUSTOMIZE_MIN_VERSION: tuple[int, ...] = (0, 5, 18)
+_SGLANG_SHAPE_MODE_ENV = "HYPERLOOM_SGLANG_SHAPE_MODE"
+# No-patch tool location, relative to TRACELENS_ROOT.
+_KERNEL_SHAPE_TOOL_REL: tuple[str, ...] = ("TraceLens", "TraceUtils", "kernel_shape_tool")
+
+
+def sglang_shape_mode(version: str) -> str:
+    """Return the shape-discovery mechanism for an SGLang version.
+
+    ``"sitecustomize"`` (>= 0.5.18) uses the no-patch TraceLens tool;
+    ``"patched"`` (< 0.5.18) uses the legacy ``git apply`` flow.
+    ``HYPERLOOM_SGLANG_SHAPE_MODE=patch|sitecustomize`` overrides the gate
+    (``auto`` / unset = version-based).
+    """
+    override = os.environ.get(_SGLANG_SHAPE_MODE_ENV, "auto").strip().lower()
+    if override in {"patch", "patched"}:
+        return "patched"
+    if override == "sitecustomize":
+        return "sitecustomize"
+    vt = _version_tuple(version)
+    if vt is None:
+        # Unparseable version: keep the safe legacy mechanism.
+        return "patched"
+    return "sitecustomize" if vt >= _SGLANG_SITECUSTOMIZE_MIN_VERSION else "patched"
+
+
+def kernel_shape_tool_dir(tracelens_root: Path | str | None = None) -> Path | None:
+    """Resolve the no-patch ``kernel_shape_tool`` dir under TRACELENS_ROOT, or None."""
+    root = _resolve_tracelens_root(tracelens_root)
+    if root is None:
+        return None
+    tool = root.joinpath(*_KERNEL_SHAPE_TOOL_REL)
+    return tool if tool.is_dir() else None
+
+
+def _detect_installed_sglang_version() -> str | None:
+    """Return the locally-installed SGLang version, or ``None`` if unimportable."""
+    try:
+        import sglang  # type: ignore
+    except Exception:  # noqa: BLE001
+        return None
+    return (getattr(sglang, "__version__", "") or "").strip() or None
+
+
+def resolve_sglang_shape_mode() -> str:
+    """Resolve the SGLang shape mode from override -> local install -> MN version pin.
+
+    ``HYPERLOOM_SGLANG_SHAPE_MODE`` wins; otherwise the version comes from the
+    locally-installed SGLang (single-node / sandbox) or, when SGLang is not
+    importable in the controller (multi-node), ``HYPERLOOM_SGLANG_VERSION_PIN``.
+    Falls back to ``"patched"`` (legacy) when the version cannot be determined.
+    """
+    version = _detect_installed_sglang_version() or os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
+    return sglang_shape_mode(version)
 
 
 def ensure_sglang_patched_for_ck_blockscale(
@@ -268,12 +368,7 @@ def _patch_target_paths(patches: Sequence[Path]) -> frozenset[str]:
         # An unreadable patch would silently shrink the sentinel set, which is the detection hole this derivation
         # exists to close.
         text = patch.read_text(encoding="utf-8", errors="replace")
-        for line in text.splitlines():
-            if not line.startswith("+++ "):
-                continue
-            target = line[4:].split("\t", 1)[0].strip()
-            if target and target != "/dev/null":
-                targets.add(target.replace("\\", "/"))
+        targets.update(change.path.replace("\\", "/") for change in parse_unified_diff(text) if not change.is_deleted)
     return frozenset(targets)
 
 
@@ -405,7 +500,7 @@ def _discover_vllm_install() -> tuple[str, Path] | None:
     version = ""
     install_root: Path | None = None
     try:
-        import vllm  # type: ignore  # noqa: I001 - runtime probe
+        import vllm  # type: ignore
 
         version = (getattr(vllm, "__version__", "") or "").strip()
         install_root = Path(vllm.__file__).resolve().parent.parent
@@ -506,7 +601,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         return None
 
     try:
-        import sglang  # type: ignore  # noqa: I001 - runtime probe
+        import sglang  # type: ignore
     except Exception as e:  # noqa: BLE001
         log.warning("_server_patcher: sglang not importable (%s); skip patch", e)
         return None
@@ -522,15 +617,23 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         )
         return None
 
+    # Resolved before the patch set so its git dir can tell a source checkout
+    # from a point release when the version string cannot.
+    sglang_module = Path(sglang.__file__).resolve()
+    apply_resolution = _resolve_sglang_apply_root(sglang_module)
+    if apply_resolution is None:
+        return None
+    apply_root, apply_strip = apply_resolution
+
     # Per-version subdir layout required.
-    patches_dir = _resolve_versioned_patches_dir(patches_root, version)
+    patches_dir = _resolve_versioned_patches_dir(patches_root, version, apply_root)
     if patches_dir is None:
         log.warning(
             "_server_patcher: no SGLang patches found under %s/%s/ for "
             "version %s; upgrade TraceLens to Hyperloom_integration_v0.3.1+ — "
             "kernel shape profiling will be unavailable",
             patches_root,
-            _versioned_patches_subdir_name(version) or "<unknown>",
+            _versioned_patches_subdir_name(version, apply_root) or "<unknown>",
             version,
         )
         return None
@@ -551,13 +654,6 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     if not patches:
         log.warning("_server_patcher: SGLang patches directory empty; skip")
         return None
-
-    # Support both editable and wheel layouts (see _resolve_sglang_apply_root).
-    sglang_module = Path(sglang.__file__).resolve()
-    apply_resolution = _resolve_sglang_apply_root(sglang_module)
-    if apply_resolution is None:
-        return None
-    apply_root, apply_strip = apply_resolution
 
     filtered_patches: list[Path] = list(patches)
 
@@ -664,7 +760,7 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
         return None
 
     try:
-        import sglang  # type: ignore  # noqa: I001 - runtime probe
+        import sglang  # type: ignore
     except Exception as e:  # noqa: BLE001 - any import failure → fail-soft
         log.warning(
             "_server_patcher: sglang not importable (%s); skip CK block-scale patch",

@@ -142,11 +142,11 @@ Each iteration runs:
    10 minutes per plan it reads, bounded by the Orchestration session timeout,
    because a round of several plans is several times the reading. Sized for one
    plan it was not enough: a measured two-lane review ran about eleven minutes,
-   failed open to `ACCEPT`, and lost a verdict that had found a lane not worth
-   its session. Critic failure uses the draft; revision failure publishes a
-   non-executable framework fallback. Diagnostics retain phase duration and
-   whether the Critic verdict was explicit or inferred. Shorter sessions skip
-   this step.
+   timed out, and lost a verdict that had found a lane not worth its session.
+   Critic failure uses the draft and records the verdict `NOT_REVIEWED`;
+   revision failure publishes a non-executable framework fallback. Diagnostics
+   retain phase duration and whether the Critic verdict was explicit or
+   inferred. Shorter sessions skip this step.
 5. Publication of the final `optimization_plan.md`.
 6. Implementer execution of that plan.
 7. Canonical validation, benchmark, and KEEP/REVERT.

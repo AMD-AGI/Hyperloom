@@ -20,12 +20,6 @@ _COLLAPSE_PATTERN = re.compile(r"\bforge_llm\b|\bforge_gemm_tune\b")
 
 _COLLAPSE_ALLOWED: tuple[tuple[str, str, str], ...] = (
     (
-        "CHANGELOG.md",
-        r"forge_llm|forge_gemm_tune",
-        "Release notes recording what the packages used to be called. An entry "
-        "that gets renamed stops telling the reader which spelling to migrate from.",
-    ),
-    (
         "src/kernelforge/gemm_tune/tune_robustness.py",
         r"~/\.forge_gemm_tune/",
         "A user-home cache directory, not a module path. Renaming it would orphan "
@@ -47,12 +41,6 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         "can warn the operator that it is ignored; renaming it silences the warning.",
     ),
     (
-        "*",
-        r"KERNEL_AGENTS_MODEL",
-        "Legacy alias for FORGE_AGENT_MODEL, kept working on purpose. A "
-        "back-compat alias that gets renamed is not a back-compat alias.",
-    ),
-    (
         "src/kernelforge/agent_backends/registry.py",
         r"kernel_agents\.agent_providers",
         "Pre-rename entry-point group, still read so third-party provider plugins "
@@ -69,9 +57,15 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         "Coverage for the deprecated entry-point group's dual-read; the test has to name the group it is asserting on.",
     ),
     (
-        "CHANGELOG.md",
-        r"kernel_agents|kernel-agents",
-        "Historical release notes.",
+        "src/kernelforge/tests/test_agent_env_contract.py",
+        r"KERNEL_AGENTS_MODEL",
+        "The test that asserts the alias is no longer read has to name it.",
+    ),
+    (
+        "docs/release-notes.md",
+        r"kernel-agents",
+        "Release notes naming the retired console script, so an operator whose script "
+        "still invokes it recognises the spelling that now fails.",
     ),
 )
 
@@ -101,9 +95,10 @@ _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
         "This file names the old spelling in order to forbid it.",
     ),
     (
-        "CHANGELOG.md",
-        r"(?i)fellow",
-        "Historical release notes. An entry that gets renamed stops telling the reader which spelling to migrate from.",
+        "docs/release-notes.md",
+        r"FORGE_DISABLE_COMPILED_FELLOWS",
+        "The retired environment-variable spelling, named so a migrating operator can "
+        "find it; it is forwarded then ignored, and silently re-enables the backends.",
     ),
 )
 

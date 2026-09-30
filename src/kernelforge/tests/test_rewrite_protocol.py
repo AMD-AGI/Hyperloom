@@ -22,6 +22,7 @@ def test_capabilities_report_the_supported_protocol():
         "source_kinds": ["triton", "hip_cpp"],
         "result_sentinel": "__FORGE_RESULT__",
         "driver_preparation": True,
+        "applyback_optional": True,
     }
     # A consumer parses this from stdout, so it must round-trip as plain JSON.
     assert json.loads(json.dumps(capabilities)) == capabilities

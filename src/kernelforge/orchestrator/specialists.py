@@ -489,10 +489,10 @@ class SpecialistAgent:
                     AgentRunSpec(
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
+                        role=f"specialist {self.definition.role_id}",
                         cwd=context.workspace,
                         writable=False,
                         timeout_sec=self.timeout_sec,
-                        reasoning_effort="max",
                         tool_policy=AgentToolPolicy(
                             read=True,
                             search=True,
@@ -556,7 +556,7 @@ class SpecialistAgent:
                 message=f"{type(error).__name__}: {error}",
                 probe_setup=probe_setup,
             )
-        except Exception as error:  # noqa: BLE001 - failures are isolated by design
+        except Exception as error:
             log.exception(
                 "specialist %s failed unexpectedly",
                 assignment.role_id,

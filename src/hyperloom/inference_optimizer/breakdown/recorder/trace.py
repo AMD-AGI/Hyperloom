@@ -59,7 +59,12 @@ _CHANGED_LIMIT = 8
 
 
 def enable_trace(enabled: bool = True) -> None:
-    """Turn the write trace on or off for this process."""
+    """Turn the write trace on or off for this process.
+
+    The level is set on this logger rather than the root so the trace can be
+    read without lowering everything else, and so it survives a ``basicConfig``
+    that floors the root level above it.
+    """
     global _enabled
     _enabled = bool(enabled)
     if _enabled:
@@ -127,7 +132,7 @@ def _call_site() -> str:
     """Locate the code responsible for a write, on both sides of the SDK."""
     via = ""
     try:
-        frame: Any = sys._getframe(1)  # noqa: SLF001 - cheap, and guarded by the level check
+        frame: Any = sys._getframe(1)
     except (ValueError, AttributeError):
         return "via=? from=?"
     while frame is not None:
@@ -183,7 +188,7 @@ def trace_write(
         if error is not None:
             fields.append(f"error={type(error).__name__}:{_short(error)}")
         _emit(section, fields)
-    except Exception:  # noqa: BLE001 - a trace must never break a recording
+    except Exception:
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 
 
@@ -212,7 +217,7 @@ def trace_skip(
         if error is not None:
             fields.append(f"error={type(error).__name__}:{_short(error)}")
         _emit(section, fields)
-    except Exception:  # noqa: BLE001 - a trace must never break a recording
+    except Exception:
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 
 

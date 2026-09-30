@@ -17,8 +17,8 @@ log = logging.getLogger(__name__)
 
 __all__ = ["SignalDrain"]
 
-#: Signals an operator uses to ask for a graceful stop.
-STOP_SIGNALS: tuple[int, ...] = (signal.SIGINT, signal.SIGTERM)
+#: Signals that ask the coordinator to stop.
+STOP_SIGNALS: tuple[int, ...] = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 class SignalDrain:
@@ -43,6 +43,8 @@ class SignalDrain:
         self.requested = threading.Event()
         """threading.Event: Set by the reading thread the instant a stop arrives,
         so synchronous code on the tick's stack can see it without the loop."""
+        self.received: set[int] = set()
+        """Signal numbers observed by the drain thread."""
         self._read_fd = -1
         self._write_fd = -1
         self._previous: dict[int, Any] = {}
@@ -88,6 +90,7 @@ class SignalDrain:
                 return
             if not data:
                 return
+            self.received.update(data)
             self.requested.set()
             try:
                 self._loop.call_soon_threadsafe(self._stop_event.set)
@@ -112,24 +115,26 @@ class SignalDrain:
                 log.debug("SignalDrain: closing %s failed", what, exc_info=True)
         return -1
 
-    def close(self) -> None:
-        """Restore the previous handlers and stop the draining thread."""
-        if self._previous_wakeup != -1 or self._previous:
-            try:
-                signal.set_wakeup_fd(self._previous_wakeup if self._previous_wakeup != -1 else -1)
-            except (ValueError, OSError):
-                log.debug("SignalDrain: restoring the wakeup fd failed", exc_info=True)
-            self._previous_wakeup = -1
+    def close(self) -> frozenset[int]:
+        """Stop the drain and return every signal captured before closure."""
+        restore_wakeup = self._previous_wakeup != -1 or bool(self._previous)
         for sig, handler in list(self._previous.items()):
             try:
                 signal.signal(sig, handler)
             except (ValueError, OSError, TypeError):
                 log.debug("SignalDrain: restoring handler for signal %s failed", sig, exc_info=True)
         self._previous.clear()
+        if restore_wakeup:
+            try:
+                signal.set_wakeup_fd(self._previous_wakeup if self._previous_wakeup != -1 else -1)
+            except (ValueError, OSError):
+                log.debug("SignalDrain: restoring the wakeup fd failed", exc_info=True)
+            self._previous_wakeup = -1
         # Closing the write end ends the reader's blocking read.
         self._write_fd = self._close_fd(self._write_fd, "the write end")
-        self._read_fd = self._close_fd(self._read_fd, "the read end")
         thread, self._thread = self._thread, None
         if thread is not None:
-            thread.join(timeout=1.0)
+            thread.join()
+        self._read_fd = self._close_fd(self._read_fd, "the read end")
         self.armed = False
+        return frozenset(self.received)

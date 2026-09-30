@@ -31,8 +31,9 @@ from kernelforge.agent_backends.base import (
     with_writable_sandbox,
 )
 from kernelforge.agent_backends.registry import create_registered_backend
-from kernelforge.llm.git import git
+from kernelforge.llm.git import ensure_commit_identity, git
 from kernelforge.config import Config
+from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
 from kernelforge.loop.external_artifacts import (
     ExternalArtifactError,
     ExternalArtifactTransaction,
@@ -127,7 +128,7 @@ class PreflightResult:
 # timing independently of whatever the driver prints: an eager driver replays zero times, a graph-timed one replays
 # once per timed iteration.
 _GRAPH_PROBE_SITECUSTOMIZE = r'''
-import atexit, json, os
+import atexit, json, os, sys
 
 _n = [0]
 # Collected only when the caller declares a rank count. A single-rank probe
@@ -159,17 +160,13 @@ _ancestors = _ancestor_pids()
 _import_pid = os.getpid()
 
 
-def _install():
+def _install(torch):
     """Patch CUDAGraph.replay lazily: torch may not be imported yet.
 
-    Everything is inside the guard, not only the import. A module named torch
-    that carries no ``cuda`` is a real shape -- a test stub, a partially
-    initialized package mid-import -- and reading the attribute outside would
-    raise out of an import hook that runs in every process on the path.
+    A module named torch may be a stub or partially initialized. Use the
+    existing module rather than importing through our own lazy hook again.
     """
     try:
-        import torch
-
         orig = torch.cuda.CUDAGraph.replay
 
         def _replay(self, *a, **k):
@@ -182,7 +179,7 @@ def _install():
         return False
 
 
-_graph_ready = _install()
+_graph_ready = _install(sys.modules.get("torch"))
 
 if not _graph_ready:
     # torch is imported by the driver, not by us. Hook the import so the patch
@@ -194,10 +191,10 @@ if not _graph_ready:
     def _hooked(name, *a, **k):
         global _graph_ready
         mod = _real_import(name, *a, **k)
-        if name == "torch" or name.startswith("torch."):
-            _graph_ready = _install()
-            if _graph_ready:
-                builtins.__import__ = _real_import
+        if not _graph_ready and (name == "torch" or name.startswith("torch.")):
+            _graph_ready = _install(sys.modules.get("torch"))
+        if _graph_ready and builtins.__import__ is _hooked:
+            builtins.__import__ = _real_import
         return mod
 
     builtins.__import__ = _hooked
@@ -288,10 +285,9 @@ def _deadline_timeout(deadline_unix: float, default: float) -> float:
 def _cleanup_probe(out_path: str, probe_dir: str) -> None:
     """Remove the probe's output shards and its sitecustomize directory."""
     for path in (out_path, *glob.glob(f"{out_path}.*")):
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             os.unlink(path)
-    with contextlib.suppress(Exception):
-        shutil.rmtree(probe_dir, ignore_errors=True)
+    shutil.rmtree(probe_dir, ignore_errors=True)
 
 
 # Replay counts are non-negative, so negative values carry the reason a count
@@ -524,22 +520,16 @@ async def _count_graph_replays(
         )
     except asyncio.TimeoutError:
         _kill_process_group(proc)
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(proc.wait(), timeout=10)
-        with contextlib.suppress(Exception):
-            from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
-
-            cleanup_current_owned_aiter_locks()
+        cleanup_current_owned_aiter_locks()
         _cleanup_probe(out_path, probe_dir)
         return PROBE_FAILED, "benchmark timed out"
     except asyncio.CancelledError:
         _kill_process_group(proc)
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(proc.wait(), timeout=10)
-        with contextlib.suppress(Exception):
-            from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
-
-            cleanup_current_owned_aiter_locks()
+        cleanup_current_owned_aiter_locks()
         _cleanup_probe(out_path, probe_dir)
         raise
     except Exception as exc:  # noqa: BLE001
@@ -590,12 +580,12 @@ async def _check_profile_contract(
         )
     except asyncio.TimeoutError:
         _kill_process_group(proc)
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(proc.wait(), timeout=10)
         return False, "profile-run timed out"
     except asyncio.CancelledError:
         _kill_process_group(proc)
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(proc.wait(), timeout=10)
         raise
     output = (out.decode(errors="replace") if out else "") + (err.decode(errors="replace") if err else "")
@@ -854,27 +844,31 @@ class PrepareResult:
 
 
 def _snapshot(paths: list[Path]) -> dict[Path, bytes | None]:
-    """Record current bytes (or None if absent) for each path, for rollback."""
-    snap: dict[Path, bytes | None] = {}
-    for p in paths:
-        try:
-            snap[p] = p.read_bytes() if p.is_file() else None
-        except Exception:
-            snap[p] = None
-    return snap
+    """Record current bytes (or None if absent) for each path, for rollback.
+
+    Taken before preparation touches anything, so an unreadable path aborts while the workspace is still the
+    caller's: recording it as absent would make the rollback delete the file it was meant to protect.
+    """
+    return {p: (p.read_bytes() if p.is_file() else None) for p in paths}
 
 
-def _restore(snapshot: dict[Path, bytes | None]) -> None:
-    """Restore snapshotted paths: rewrite originals, delete ones that were absent."""
+def _restore(snapshot: dict[Path, bytes | None]) -> set[Path]:
+    """Restore snapshotted paths — rewrite originals, delete ones that were absent — and report what it could not.
+
+    Every entry is attempted: one path the filesystem will not give back must not cost the rest of the
+    protected source its restoration. The paths returned are still carrying whatever the agent left there,
+    so the caller owes the operator their names.
+    """
+    unrestored: set[Path] = set()
     for p, original in snapshot.items():
         try:
             if original is None:
-                if p.is_file():
-                    p.unlink()
+                p.unlink(missing_ok=True)
             else:
                 p.write_bytes(original)
-        except Exception:
-            continue
+        except OSError:
+            unrestored.add(p)
+    return unrestored
 
 
 def _abs(workspace: Path, path_like: str) -> Path:
@@ -918,6 +912,21 @@ def _git_untracked(workspace: Path) -> set[str]:
     return {line.strip() for line in out.splitlines() if line.strip()}
 
 
+def _stage_preparation_changes(workspace: Path, pre_untracked: set[str]) -> tuple[int, str]:
+    """Stage tracked edits and only untracked files created by preparation."""
+    code, output = _git(workspace, "add", "-u", "--", ".")
+    if code != 0:
+        return code, output
+    created = sorted(
+        path
+        for path in (_git_untracked(workspace) - pre_untracked)
+        if path != "forge_experiments" and not path.startswith("forge_experiments/")
+    )
+    if not created:
+        return 0, output
+    return _git(workspace, "add", "--", *created)
+
+
 def _git_indexed(workspace: Path, path: Path) -> bool | None:
     """Whether ``path`` is in the workspace's index, i.e. will be committed."""
     try:
@@ -943,7 +952,7 @@ def _git_changed_since(workspace: Path, base_sha: str) -> list[str]:
 def _remove_new_untracked(workspace: Path, pre_untracked: set[str]) -> None:
     """Delete untracked files that appeared during prep (rollback of new files)."""
     for rel in _git_untracked(workspace) - pre_untracked:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             (workspace / rel).unlink()
 
 
@@ -955,7 +964,7 @@ def _safe_rmtree(path: Path | None) -> None:
 
 
 def _safe_unlink(path: Path) -> None:
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(OSError):
         if path.is_file():
             path.unlink()
 
@@ -981,7 +990,7 @@ def _find_reference_harness(ref_dir: Path | None) -> str | None:
     for cand in sorted(ref_dir.rglob("graph_harness.py")):
         try:
             text = cand.read_text()
-        except Exception:
+        except OSError:
             continue
         if "def cuda_graph_bench" in text and "dirty" in text:
             return text
@@ -998,7 +1007,7 @@ def _materialize_reference(workspace: Path) -> Path | None:
         if examples and Path(examples).is_dir():
             shutil.copytree(examples, ref_dir, ignore=_REFERENCE_IGNORE)
             return ref_dir
-    except Exception:
+    except OSError:
         _safe_rmtree(ref_dir)
 
     # Fallback: no examples tree resolved — materialize the compact contract and a driver template so the agent still
@@ -1008,7 +1017,7 @@ def _materialize_reference(workspace: Path) -> Path | None:
         (ref_dir / "CONTRACT.md").write_text(DRIVER_CONTRACT_SPEC)
         (ref_dir / "driver_template.py").write_text(REFERENCE_DRIVER_TEMPLATE.lstrip("\n"))
         return ref_dir
-    except Exception:
+    except OSError:
         _safe_rmtree(ref_dir)
         return None
 
@@ -1215,7 +1224,7 @@ def _kill_process_group(proc) -> None:
         except Exception:  # noqa: BLE001 - group may already be gone
             pass
     if not signalled:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             proc.kill()
 
 
@@ -1223,19 +1232,17 @@ def _ensure_agent_git_workspace(workspace: Path) -> None:
     """Create a private baseline commit when a backend requires a git cwd."""
     code, _ = _git(workspace, "rev-parse", "--show-toplevel")
     if code == 0:
+        ensure_commit_identity(workspace)
         return
     code, output = _git(workspace, "init")
     if code != 0:
         raise RuntimeError(f"could not initialize preparation workspace: {output}")
+    ensure_commit_identity(workspace)
     code, output = _git(workspace, "add", "-A")
     if code != 0:
         raise RuntimeError(f"could not stage preparation workspace: {output}")
     code, output = _git(
         workspace,
-        "-c",
-        "user.name=KernelForge",
-        "-c",
-        "user.email=kernel-forge@localhost",
         "commit",
         "--allow-empty",
         "-m",
@@ -1268,6 +1275,7 @@ async def _run_prepare_agent(
     spec = AgentRunSpec(
         system_prompt=system_prompt,
         user_prompt=prompt,
+        role="task preparation",
         cwd=str(workspace),
         writable=True,
         timeout_sec=max(1, int(timeout_sec)),
@@ -1304,7 +1312,7 @@ async def _run_prepare_agent(
 def _read_limited(path: Path, limit: int = 16000) -> str:
     try:
         return path.read_text(errors="replace")[:limit]
-    except Exception:
+    except OSError:
         return ""
 
 
@@ -1731,10 +1739,22 @@ async def prepare_task(
     # resetting the whole tree to HEAD.
     pre_diff = _git_diff_patch(workspace, prep_base_sha)
 
-    def _restore_sources() -> None:
-        _restore(src_snapshot)
-        if prep_base_sha:
-            _git(workspace, "checkout", "--", *[p.as_posix() for p in protected])
+    # Protected paths the rollback could not put back. Preparation cannot be declared successful while the
+    # caller's own source still carries the prep agent's edits, so this outranks any verdict on the driver.
+    unrestored_sources: set[Path] = set()
+
+    def _restore_protected() -> None:
+        # Every round attempts the whole snapshot, so the latest round is the complete answer and a path that came
+        # back on a retry is no longer unrestored.
+        unrestored_sources.clear()
+        unrestored_sources.update(_restore(src_snapshot))
+
+    def _unrestored_message() -> str:
+        named = ", ".join(p.as_posix() for p in sorted(unrestored_sources))
+        return (
+            f"could not restore the protected source after preparation: {named}; the workspace still holds "
+            "the prep agent's edits to it, so the task was not prepared"
+        )
 
     def _restore_kernel_workspace() -> None:
         # Undo everything the agent did while preserving the caller's pre-prep state: reset tracked files to HEAD,
@@ -1745,7 +1765,7 @@ async def prepare_task(
             _git(workspace, "checkout", "--", ".")
             _remove_new_untracked(workspace, pre_untracked)
             _git_apply_patch(workspace, pre_diff)
-        _restore(src_snapshot)
+        _restore_protected()
 
     def _rollback() -> None:
         _restore_kernel_workspace()
@@ -1858,7 +1878,7 @@ async def prepare_task(
             _restore_kernel_workspace()
             external_transaction.restore_passthroughs()
         else:
-            _restore_sources()
+            _restore_protected()
         _safe_rmtree(ref_dir)
         if ref_dir is not None and ref_dir.exists():
             # A partial removal leaves both halves of the invariant broken at once and neither is visible later:
@@ -1882,20 +1902,34 @@ async def prepare_task(
         pf: PreflightResult,
         attempt_count: int,
     ) -> PrepareResult:
-        # Drop an unused provided harness so it does not become persistent scaffolding when the driver does not import
-        # it.
-        if provided_harness and not driver_external:
-            try:
-                uses_harness = "graph_harness" in driver_path.read_text()
-            except Exception:
-                uses_harness = True
-            if not uses_harness:
-                _safe_unlink(harness_path)
         if driver_external:
             # Publish the complete validated driver/helper change set from the isolated staging tree.
             _restore_kernel_workspace()
             assert external_transaction is not None
             external_transaction.restore_passthroughs()
+        elif provided_harness:
+            # Drop an unused provided harness so it does not become persistent scaffolding when the driver does not
+            # import it.
+            try:
+                uses_harness = "graph_harness" in driver_path.read_text()
+            except OSError:
+                uses_harness = True
+            if not uses_harness:
+                _safe_unlink(harness_path)
+        if unrestored_sources:
+            # Signing off here would carry the agent's edit of the source under optimization into the pristine
+            # commit, and every measurement after it would judge a kernel the caller never wrote.
+            return PrepareResult(
+                ok=False,
+                attempts=attempt_count,
+                wrote_files=[],
+                created_files=[],
+                rolled_back=False,
+                final_preflight=pf,
+                message=_unrestored_message(),
+                audit_dir=audit_dir_str,
+            )
+        if driver_external:
             try:
                 changes = external_transaction.publish()
             except ExternalArtifactError as exc:
@@ -1926,7 +1960,19 @@ async def prepare_task(
             )
 
         # In-repository task scaffolding must become part of pristine before IterationLoop captures its base SHA.
-        _git(workspace, "add", "-A", "--", ".", ":(exclude)forge_experiments")
+        stage_code, stage_out = _stage_preparation_changes(workspace, pre_untracked)
+        if stage_code != 0:
+            _rollback()
+            return PrepareResult(
+                ok=False,
+                attempts=attempt_count,
+                wrote_files=[],
+                created_files=[],
+                rolled_back=True,
+                final_preflight=pf,
+                message=f"could not stage prepared task files: {stage_out.strip()[-200:]}",
+                audit_dir=audit_dir_str,
+            )
         # The driver is about to become pristine; anything it reads at runtime has to become pristine with it.
         spec_indexed = None if spec_path is None else _git_indexed(workspace, spec_path)
         if spec_path is not None and spec_indexed is not True:
@@ -1951,6 +1997,9 @@ async def prepare_task(
                 ),
                 audit_dir=audit_dir_str,
             )
+        # The agent path that names an identity runs only when the backend needs
+        # a git cwd, and a commit with none to auto-detect cannot land.
+        ensure_commit_identity(workspace)
         _, commit_out = _git(
             workspace,
             "commit",
@@ -2224,7 +2273,21 @@ async def prepare_task(
     # (3) Failure: roll the workspace back to its exact pre-prep state (tracked files reset to HEAD, caller's
     # uncommitted mods re-applied, prep-created untracked removed, protected source restored).
     _rollback()
-    rolled_back = not external_rollback_error
+    rolled_back = not external_rollback_error and not unrestored_sources
+    if unrestored_sources:
+        # Lead with it: the operator has a file on disk that is not theirs any more, which they have to deal
+        # with before any reason the driver was refused.
+        log.error("%s", _unrestored_message())
+        return PrepareResult(
+            ok=False,
+            attempts=attempts,
+            wrote_files=[],
+            created_files=[],
+            rolled_back=rolled_back,
+            final_preflight=last_pf,
+            message=_unrestored_message(),
+            audit_dir=audit_dir_str,
+        )
     if scaffold_error:
         # Lead with it: the preflight reasons describe a driver judged in a state that was never valid, so quoting
         # them first would send the operator after the driver.

@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from hyperloom.common.env import EnvValueError
 from kernelforge.gemm_tune import cli
 
 _MISS = (
@@ -81,7 +84,10 @@ class TestDerivingDemand:
 
         assert path == str(out / "demand.json")
         report = json.loads((out / "demand.json").read_text(encoding="utf-8"))
-        assert not report["demands"]  # no dense miss anywhere in this log
+        # No dense miss anywhere in this log, so the only demand is the MoE one
+        # the dispatch record now also states as a demand.
+        (dense,) = [d for d in report["demands"] if d["table"] != "tuned_fmoe.csv"] or [None]
+        assert dense is None
         (key,) = moe_dispatch_keys(report)
         assert key["tokens"] == [16]
         assert key["inter_dim"] == "384"
@@ -107,6 +113,19 @@ class TestDerivingDemand:
 
         monkeypatch.setattr("kernelforge.gemm_tune.evidence.write_demand", _boom)
         assert cli._demand_from_serving_log(src, tmp_path) == ""
+
+    def test_a_bad_parse_bound_is_not_read_as_a_log_without_demand(self, tmp_path, monkeypatch):
+        """An empty return here is indistinguishable from a clean log, and it silently keeps the configured shapes."""
+        from kernelforge.gemm_tune import evidence as ev
+
+        src = _log(tmp_path, [_MISS.format(m=512)])
+        out = tmp_path / "out"
+        out.mkdir()
+        assert cli._demand_from_serving_log(src, out)
+
+        monkeypatch.setenv(ev._MAX_LINES_ENV, "0")
+        with pytest.raises(EnvValueError, match=ev._MAX_LINES_ENV):
+            cli._demand_from_serving_log(src, out)
 
     def test_the_derived_file_is_what_load_demand_expects(self, tmp_path):
         # It is handed on as if an operator had passed --demand, so it has to round-trip through the same reader.

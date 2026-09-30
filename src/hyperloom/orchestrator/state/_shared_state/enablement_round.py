@@ -28,9 +28,6 @@ class EnablementRound:
     # Set on an eval-origin KEEP: the patch passed the gate but a genuine baseline must revalidate accuracy before the
     # run is considered enabled.
     validation_pending: bool = False
-    # How many times the pre-enablement guard has dropped a ``skip_to_close``.
-    # Bounds the guard so it can delay a close but never forbid one.
-    skip_to_close_suppressions: int = 0
     # ``launch_log``: captured launch/traceback text when baseline cannot launch.
     launch_log: str = ""
     launch_observation_path: str = ""
@@ -84,6 +81,59 @@ class EnablementRound:
     # Flat ordered deduped artifact dicts derived from kept_rounds (last-wins per
     # target); used for the specialist mandate note and session-breakdown reporting.
     kept_artifacts: list = field(default_factory=list)
+    # Append-only, one row per ATTEMPTED setup execution. Parallel to
+    # setup_commands, which stays a deduped command list: a command that ran
+    # twice, or ran and failed, has no representation there at all.
+    setup_executions: list = field(default_factory=list)
+    # One record per root that contributed a patch or artifact to the accepted
+    # stack; patch steps and artifacts carry its id, so a round spanning several
+    # trees stays representable where framework_root keeps only the last one.
+    roots: list = field(default_factory=list)
+    # Per-patch apply root, where the authoring stage recorded one.
+    patch_roots: dict = field(default_factory=dict)
+    # HEAD of the session framework root BEFORE the accepted round mutated it:
+    # the tree the kept patches apply to. Read pre-mutation, never after a KEEP
+    # commit, or the recorded sha would already contain the patches.
+    base_sha: str = ""
+    # {root: sha} read BEFORE the stack's first mutation of each root, and
+    # never replaced. ``base_sha`` above is the one this round's KEEP reports;
+    # this is the map that carries the FIRST mutating round's reading forward.
+    # An ADVANCED round commits and stacks a patch while recording no per-root
+    # identity at all, so without this the KEEP that finally reports a base
+    # reads a HEAD that already contains every advanced round's patch -- and the
+    # recipe still replays those patches on top of it.
+    base_sha_by_root: dict = field(default_factory=dict)
+    # Per-root snapshot manifests captured at the enablement KEEP.
+    source_snapshots: list = field(default_factory=list)
+    # {root_id: {rel: op}} the accepted stack declares, checked against what each
+    # snapshot actually captured.
+    accepted_stack_targets: dict = field(default_factory=dict)
+    # {patch_path: {rel: op}} each kept patch declares, as its own diff headers
+    # state it. The recipe emits one patch step per kept patch, and this is the
+    # only record of what any one of them touches: without it the decision can
+    # check that *some* targets were captured but not that *this step's* were,
+    # which is how a recipe covering the final round alone reads as complete.
+    patch_targets: dict = field(default_factory=dict)
+    # Which branch produced accepted_config: a booted kept bench, or an advanced
+    # round's proposal merge, which is by construction never booted.
+    accepted_config_source: str = ""
+    # Persisted projection of the graded launch evidence; raw env values and
+    # host-internal paths are removed before the result reaches durable state.
+    launch_evidence: dict = field(default_factory=dict)
+    launch_argv_refused: bool = False
+    # Version assertions observed AT the KEEP, after every mutation that reaches
+    # the launched image.
+    installed_versions_at_keep: dict = field(default_factory=dict)
+    # Compiled extensions the linked build produced for the framework package
+    # that the framework root does not carry. A build installs nothing itself:
+    # its outputs travel only as artifacts a specialist declares one by one.
+    build_extensions_not_carried: list = field(default_factory=list)
+    # Accepted env levers in the framework's own namespace that nothing in the
+    # framework tree reads. A lever is accepted because a round advanced, not
+    # because a reader was shown to exist.
+    levers_without_readers: list = field(default_factory=list)
+    # {interpreter_tag, distributions} of the accepted runtime.
+    environment_closure: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "EnablementRound":

@@ -17,6 +17,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentHook,
@@ -28,8 +29,8 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
 )
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
+from hyperloom.common.llm_headers import format_custom_headers
 from kernelforge.llm import (
-    format_custom_headers,
     normalize_anthropic_base_url,
     resolve_anthropic_gateway,
 )
@@ -39,7 +40,6 @@ from kernelforge.llm.process_reaping import (
     reap_processes_under,
 )
 
-DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 log = logging.getLogger(__name__)
 
 
@@ -90,7 +90,10 @@ def _supports_adaptive_thinking(model: str) -> bool:
     if not normalized:
         return False
     family = re.search(
-        r"claude-(?:opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:[-._]|$)",
+        # ``[`` terminates the family: an operator who spells a windowed id
+        # by hand still names ``claude-opus-5``, and reading the bracket as part
+        # of the version would drop it out of the family it belongs to.
+        r"claude-(?:opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:[-._\[]|$)",
         normalized,
     )
     if family:
@@ -249,6 +252,16 @@ def _prepare_claude_environment() -> None:
         os.environ["ANTHROPIC_CUSTOM_HEADERS"] = format_custom_headers(gateway.headers)
 
 
+def _builtin_tools(names: list[str]) -> list[str]:
+    """Narrow a permission list to the built-in tools it names.
+
+    ``--tools`` selects from the CLI's built-in set and rejects anything else, so
+    an MCP tool -- which reaches the session through ``allowed_tools`` and its own
+    server declaration -- must not be forwarded here.
+    """
+    return [name for name in dict.fromkeys(names) if not name.startswith("mcp__")]
+
+
 class ClaudeBackend:
     """Execute Forge sessions through the Claude Agent SDK."""
 
@@ -279,13 +292,18 @@ class ClaudeBackend:
 
     def preflight(self) -> None:
         """Validate that an explicitly configured executable is Claude CLI."""
-        explicit = self.runtime.executable.strip()
-        if not explicit:
+        if not self.runtime.executable.strip():
             return
-        candidate = Path(explicit).expanduser()
-        executable = str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else shutil.which(explicit)
+        self.validate_runtime(self.runtime)
+
+    @staticmethod
+    def validate_runtime(runtime: AgentRuntimeConfig) -> None:
+        """Check the selected CLI with a 10-second --version call, without loading the SDK."""
+        selected = resolve_claude_cli(runtime.executable)
+        candidate = Path(selected).expanduser()
+        executable = str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else shutil.which(selected)
         if not executable:
-            raise ClaudeUnavailableError(f"Claude CLI is not executable: {explicit}")
+            raise ClaudeUnavailableError(f"Claude CLI is not executable: {selected}")
         try:
             version = subprocess.run(
                 [executable, "--version"],
@@ -298,7 +316,7 @@ class ClaudeBackend:
         version_text = b"\n".join([version.stdout, version.stderr]).decode(errors="replace").strip()
         if version.returncode != 0 or "claude" not in version_text.lower():
             raise ClaudeUnavailableError(
-                f"configured CLI does not appear to be Claude: {explicit}; --version returned {version_text!r}"
+                f"configured CLI does not appear to be Claude: {selected}; --version returned {version_text!r}"
             )
 
     def probe(
@@ -324,7 +342,11 @@ class ClaudeBackend:
             "--model",
             selected_model,
             "--effort",
-            reasoning_effort.strip() or "low",
+            # The probe answers "will the campaign's configuration work", so it
+            # has to ask under that configuration: pinning ``low`` here made the
+            # probe pass on deployments where the configured effort is the thing
+            # the gateway rejects.
+            reasoning_effort.strip() or self.runtime.reasoning_effort.strip() or "low",
             "--permission-mode",
             "dontAsk",
             "--tools",
@@ -384,6 +406,23 @@ class ClaudeBackend:
             allowed_tools.extend(policy.extra_tools)
             options.update(
                 allowed_tools=list(dict.fromkeys(allowed_tools)),
+                # ``allowed_tools`` is only a permission list: the CLI still loads
+                # and describes every built-in tool, and those schemas sit in the
+                # cached prefix that is re-read on every turn of the session, so
+                # naming the base set here is a per-turn saving rather than a
+                # one-off. Four campaigns differing in this line alone, all
+                # deferring the knowledge maps, put an analysis session's
+                # first-turn prefix at 35,555 / 35,507 tokens with the default
+                # set against 8,487 / 8,439 naming the six an implementer uses:
+                # -27,068, or -76.2%, with each arm's two replicates within 50
+                # tokens of each other. The implementer lanes of those runs
+                # split by the same amount, 44.9-47.1k against 17.4-19.6k.
+                # The two savings are sequential, not additive: while the maps
+                # were still inlined they dominated the prefix and this change
+                # measured only -5,317 against that larger baseline.
+                # MCP tools are not part of the built-in set and are carried by
+                # ``allowed_tools`` alone.
+                tools=_builtin_tools(allowed_tools),
                 permission_mode=(policy.permission_mode or os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits")),
             )
             if policy.max_turns is not None:
@@ -420,6 +459,10 @@ class ClaudeBackend:
             allowed = options.setdefault("allowed_tools", [])
             if "Task" not in allowed:
                 allowed.append("Task")
+            if "tools" in options and "Task" not in options["tools"]:
+                # Task is built-in, so a restricted base set has to name it or the
+                # subagents declared just above are unreachable.
+                options["tools"] = [*options["tools"], "Task"]
         if spec.mcp_servers:
             options["mcp_servers"] = {
                 name: {
@@ -532,7 +575,7 @@ class ClaudeBackend:
                 async with deadline:
                     async for message in agen:
                         if usage is not None:
-                            usage.add_from_message(message)
+                            usage.add_from_message(message, role=spec.role)
                         _record_progress(spec.progress_log, message)
                         # The init SystemMessage and the final ResultMessage both carry the session id; keep the
                         # latest non-empty one so a caller can resume this exact conversation later.
@@ -555,7 +598,7 @@ class ClaudeBackend:
                                             getattr(block, "input", {}) or {},
                                         )
                                     )
-            except Exception as exc:  # noqa: BLE001 - convert to a resumable result
+            except Exception as exc:
                 if deadline.expired():
                     reap_on_exit = True
                     if not session_id:
@@ -598,7 +641,7 @@ class ClaudeBackend:
                 # ``async for`` does not close its iterator on exit (PEP 533 was deferred), so close it to tear the
                 # CLI down, then reap any detached benchmark child that outlived it -- an orphan holding the GPU
                 # corrupts the canonical measurement that follows.
-                with suppress(Exception):
+                with suppress(Exception):  # broad-suppress: SDK generator close; the reap below is what matters
                     await agen.aclose()
                 report = await _reap_workspace_processes(spec.cwd)
                 if report.contended:
@@ -622,8 +665,13 @@ class ClaudeBackend:
             end_reason = "turn_cap"
         elif subtype and subtype != "success":
             end_reason = f"sdk_{subtype}"
-        else:
+        elif subtype == "success":
             end_reason = "agent_stopped"
+        else:
+            # The stream ended without the ResultMessage that carries the subtype, so the CLI never said how the
+            # session finished; reading that as a voluntary stop hands the caller whatever the session left behind
+            # as the agent's answer.
+            end_reason = "sdk_no_result"
 
         result = AgentRunResult(
             text="\n".join(text_parts).strip(),
@@ -640,7 +688,7 @@ class ClaudeBackend:
         except Exception:
             # verify() restores the baseline itself before raising, so this covers the paths that fail earlier and
             # must not mask them.
-            with suppress(Exception):
+            with suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
                 guard.rollback()
             raise
         result.target_edit_count = guard.count_target_edits()
@@ -653,6 +701,5 @@ __all__ = [
     "ClaudeBackendError",
     "ClaudeTimeoutError",
     "ClaudeUnavailableError",
-    "DEFAULT_CLAUDE_MODEL",
     "resolve_claude_cli",
 ]

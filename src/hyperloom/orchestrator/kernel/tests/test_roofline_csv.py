@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-import hyperloom.orchestrator.kernel.roofline_csv as rc
+import hyperloom.inference_optimizer.roofline_csv as rc
 
 
 # --------------------------------------------------------------------------- #

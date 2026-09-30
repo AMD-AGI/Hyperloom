@@ -1,7 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Where an executor's rows land, decided by its caller rather than by itself."""
+"""Where an executor's rows land, decided by its caller rather than by itself.
+
+This is the write side's boundary: a row that cannot be written is dropped with
+a warning rather than taken out on the phase that produced it. What counts as
+"cannot be written" is :data:`~.recorder_warnings.RECORDING_ERRORS` -- the
+spool failing, or no session being bound. A recorder that raises anything else
+is broken, and is left to say so.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +19,7 @@ from typing import Any, Protocol
 
 from .event_ids import fragment_key, parse_event_id
 from .event_rows import EVENT_ID_FIELD
+from .recorder_warnings import RECORDING_ERRORS, note_failure
 
 __all__ = ["EventSink", "RecordSink", "make_sink"]
 
@@ -34,6 +42,9 @@ class RecordSink(Protocol):
         natural_ids: str | Sequence[str] = (),
     ) -> Path | None:
         """Record one row into ``section``."""
+
+    def append(self, section: str, payload: Mapping[str, Any]) -> Path | None:
+        """Append one row to ``section``, with no identity of its own."""
 
 
 class EventSink:
@@ -80,7 +91,7 @@ class EventSink:
             key = fragment_key(self._event_id, row_type, *ids)
             row = {EVENT_ID_FIELD: self._event_id, **dict(payload)}
             return get_recorder(producer=self._producer).record_upsert_item(section, row, key=key)
-        except Exception:  # noqa: BLE001 — observability cannot change phase behavior
+        except RECORDING_ERRORS as exc:
             log.warning(
                 "recorder: dropped a %s row of event %s (key %s, producer %s); "
                 "the assembled event will be missing this fact",
@@ -88,11 +99,98 @@ class EventSink:
                 self._event_id,
                 key or "<unbuilt>",
                 self._producer,
+                extra={"error": exc},
                 exc_info=True,
+            )
+            note_failure(
+                section=section,
+                error=exc,
+                producer=self._producer,
+                detail=f"dropped a {section} row of event {self._event_id}",
+            )
+            return None
+
+    def has_row(
+        self,
+        section: str,
+        *,
+        row_type: str = "",
+        natural_ids: str | Sequence[str] = (),
+    ) -> bool:
+        """Whether a row with this identity is already recorded on this event.
+
+        For a caller that reconstructed this sink's event id rather than being
+        handed it: :meth:`record` would mint the row if the reconstruction were
+        wrong, so asking first keeps a late verdict from inventing the thing it
+        was meant to rule on. A question that cannot be answered reports
+        ``False``, which keeps the caller's guard closed.
+        """
+        from .recorder import get_recorder  # local: avoid an import cycle at module load
+
+        try:
+            ids = (natural_ids,) if isinstance(natural_ids, str) else tuple(natural_ids)
+            return get_recorder(producer=self._producer).item_fragment_exists(
+                section,
+                key=fragment_key(self._event_id, row_type, *ids),
+            )
+        except RECORDING_ERRORS:
+            log.warning(
+                "recorder: could not tell whether event %s holds a %s row; treating it as absent",
+                self._event_id,
+                section,
+                exc_info=True,
+            )
+            return False
+
+    def append(self, section: str, payload: Mapping[str, Any]) -> Path | None:
+        """Append one row to ``section``, tagged for this sink's event.
+
+        For observations in time rather than entities: a plateau reading, a
+        lifecycle step. They have nothing to be keyed by, and two rows minting
+        the same key silently become one, so an appended row gets a
+        write-unique fragment and a resumed leg needs no knowledge of what an
+        earlier leg wrote. The price is that the fragment carries no identity:
+        ``payload`` is written as given, and a fact that gets re-ruled later
+        wants :meth:`record` instead.
+        """
+        from .recorder import get_recorder  # local: avoid an import cycle at module load
+
+        try:
+            declared = str(payload.get(EVENT_ID_FIELD) or "") if isinstance(payload, Mapping) else ""
+            if declared and declared != self._event_id:
+                raise ValueError(
+                    f"payload claims event {declared!r} but this sink writes {self._event_id!r}; "
+                    "the event id is the sink's to decide, so the caller should not set it"
+                )
+            row = {EVENT_ID_FIELD: self._event_id, **dict(payload)}
+            return get_recorder(producer=self._producer).record_item(section, row)
+        except RECORDING_ERRORS as exc:
+            log.warning(
+                "recorder: dropped an appended %s row of event %s (producer %s); "
+                "the assembled event will be missing this fact",
+                section,
+                self._event_id,
+                self._producer,
+                extra={"error": exc},
+                exc_info=True,
+            )
+            note_failure(
+                section=section,
+                error=exc,
+                producer=self._producer,
+                detail=f"dropped an appended {section} row of event {self._event_id}",
             )
             return None
 
 
 def make_sink(event: str, *, producer: str) -> EventSink:
-    """Build the sink for one event."""
+    """Build the sink for one event.
+
+    The standalone and inline wrappers of a shared executor both call this;
+    they differ only in the event id they pass, which is the whole of the
+    difference between the two modes.
+
+    Raises:
+        ValueError: If ``event`` is not a well-formed event id.
+    """
     return EventSink(event, producer=producer)

@@ -14,12 +14,15 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 
 HARNESS = {harness!r}
 ENV_FLAGS = {env_flags!r}
 CASE_ID = {case_id!r}
 REPORT_LOG = {report_log!r}
 FUSED_MODULE = {fused_module!r}
+WORKSPACE = {workspace!r}
+GIT_ENV = {git_env!r}
 
 
 def _fused_kernel_authored():
@@ -39,6 +42,36 @@ def _fused_kernel_authored():
         return False
 
 
+def _git(env, *args):
+    return subprocess.run(
+        ["git", *args],
+        cwd=WORKSPACE, capture_output=True, text=True, env=env, timeout=300,
+    )
+
+
+def _measured_tree():
+    """Name the tracked tree this run measured, the way git names it.
+
+    The loop stages EVERY tracked modification into its keep commit, so the
+    whole tracked tree -- not the recipe's declared source files -- is the
+    candidate a report describes. Asking git for the tree id over a scratch
+    index also puts both sides of the match on blob bytes, so a .gitattributes
+    filter that rewrites a file on its way into the index cannot make the
+    worktree and the commit disagree.
+    """
+    if not WORKSPACE:
+        return ""
+    with tempfile.TemporaryDirectory() as scratch:
+        env = dict(os.environ)
+        env.update(GIT_ENV)
+        env["GIT_INDEX_FILE"] = os.path.join(scratch, "index")
+        for args in (("read-tree", "HEAD"), ("add", "-u")):
+            if _git(env, *args).returncode != 0:
+                return ""
+        written = _git(env, "write-tree")
+        return written.stdout.strip() if written.returncode == 0 else ""
+
+
 def _record(report):
     """Append one harness report so the campaign can recover what it measured.
 
@@ -46,8 +79,10 @@ def _record(report):
     per-arm timings would otherwise be lost by the time the manifest is written.
     One short line per append keeps concurrent lanes from interleaving.
     """
+    identified = dict(report)
+    identified["tracked_tree"] = _measured_tree()
     with open(REPORT_LOG, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(report, sort_keys=True) + "\\n")
+        handle.write(json.dumps(identified, sort_keys=True) + "\\n")
 
 
 def _harness_json(env):
@@ -89,20 +124,49 @@ def main():
         print("PARITY MISSING: harness reported no comparable shape")
         return 1
 
-    # A skipped microbench (the Mamba/SSM backend cannot init on ROCm) is not a
-    # failure: parity still decided correctness, so report the eager time for
-    # both arms and let the loop see no speedup rather than an error.
+    # Launch counts are the fusion's actual lever, and the loop scores on time
+    # alone, so surface them here: the author reads this stdout every iteration,
+    # and a regression found now is one that forge-fuse does not have to reject
+    # at export. The baseline run has no fusion yet and is exempt.
+    eager_launches = report.get("eager_launches")
+    fused_launches = report.get("fused_launches")
+    if isinstance(eager_launches, int) and isinstance(fused_launches, int):
+        print("launches: eager %d -> fused %d" % (eager_launches, fused_launches))
+        if fused_launches >= eager_launches and _fused_kernel_authored():
+            print(
+                "LAUNCH COUNT NOT REDUCED: the fused path issues %d launches vs %d "
+                "eager. This candidate will be REJECTED even if it benchmarks "
+                "faster; find what the fused path launches besides your kernel."
+                % (fused_launches, eager_launches)
+            )
+    elif _fused_kernel_authored():
+        print("launches: UNCOUNTED (harness reported no eager_launches/fused_launches)")
+
     eager_us = report.get("eager_us")
     fused_us = report.get("fused_us")
-    if report.get("skipped") or not fused_us:
+    if report.get("skipped"):
+        # A microbench the harness declined to run (the Mamba/SSM backend cannot init on
+        # ROCm) is not a failure: parity still decided correctness, so report the eager
+        # time for both arms and let the loop see no speedup rather than an error.
         print("SKIPPED: " + str(report.get("skip_reason") or "microbench unavailable"))
         if eager_us:
             print("case_ms: %s %.6f" % (CASE_ID, float(eager_us) / 1000.0))
             print("wall_ms: %.6f" % (float(eager_us) / 1000.0))
         return 0
 
-    print("case_ms: %s %.6f" % (CASE_ID, float(fused_us) / 1000.0))
-    print("wall_ms: %.6f" % (float(fused_us) / 1000.0))
+    if not fused_us and _fused_kernel_authored():
+        print("BENCH MISSING: harness ran the microbench but reported no fused_us")
+        return 1
+
+    # With no kernel authored yet there is no fused arm to time, so the eager time
+    # anchors the case: that pristine run IS the baseline, not a failed measurement.
+    case_us = fused_us or eager_us
+    if not case_us:
+        print("BENCH MISSING: harness reported no timing for either arm")
+        return 1
+
+    print("case_ms: %s %.6f" % (CASE_ID, float(case_us) / 1000.0))
+    print("wall_ms: %.6f" % (float(case_us) / 1000.0))
     if eager_us:
         print("eager_ms: %.6f" % (float(eager_us) / 1000.0))
     return 0
@@ -121,6 +185,8 @@ def render_driver(
     case_id: str = "decode",
     timeout_sec: int = 1800,
     fused_module: str = "",
+    workspace: str = "",
+    git_env: dict[str, str] | None = None,
 ) -> str:
     """Render the driver source for one recipe's harness."""
     return _SHIM_TEMPLATE.format(
@@ -130,6 +196,8 @@ def render_driver(
         timeout=int(timeout_sec),
         report_log=str(report_log),
         fused_module=str(fused_module),
+        workspace=str(workspace),
+        git_env=dict(git_env or {}),
     )
 
 
@@ -142,6 +210,8 @@ def write_driver(
     case_id: str = "decode",
     timeout_sec: int = 1800,
     fused_module: str = "",
+    workspace: str = "",
+    git_env: dict[str, str] | None = None,
 ) -> str:
     """Write the driver next to the campaign artifacts and return its path."""
     path = Path(destination)
@@ -154,6 +224,8 @@ def write_driver(
             case_id=case_id,
             timeout_sec=timeout_sec,
             fused_module=fused_module,
+            workspace=workspace,
+            git_env=git_env,
         ),
         encoding="utf-8",
     )

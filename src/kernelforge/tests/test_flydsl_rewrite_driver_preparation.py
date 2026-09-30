@@ -15,6 +15,7 @@ from kernelforge.rewrite_by_flydsl import (
     flydsl_rewrite_driver_preparation as driver_preparation,
 )
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
+from kernelforge.tracker import UsageAccumulator
 
 
 def _spec(tmp_path: Path) -> RewriteSpec:
@@ -74,8 +75,9 @@ def test_authoring_spec_does_not_declare_the_driver_protected(tmp_path, monkeypa
     captured: dict[str, object] = {}
 
     class _Backend:
-        async def run(self, spec):
+        async def run(self, spec, usage=None):
             captured["spec"] = spec
+            captured["usage"] = usage
             raise RuntimeError("stop after capturing the spec")
 
     monkeypatch.setattr(
@@ -87,6 +89,7 @@ def test_authoring_spec_does_not_declare_the_driver_protected(tmp_path, monkeypa
     stage.mkdir()
     stage_driver = stage / ".forge_driver_probe.py"
     stage_driver.write_text("# placeholder\n", encoding="utf-8")
+    usage = UsageAccumulator()
 
     try:
         asyncio.run(
@@ -98,6 +101,7 @@ def test_authoring_spec_does_not_declare_the_driver_protected(tmp_path, monkeypa
                 prompt="author it",
                 timeout_sec=30,
                 progress_log=[],
+                usage=usage,
             )
         )
     except RuntimeError:
@@ -106,6 +110,7 @@ def test_authoring_spec_does_not_declare_the_driver_protected(tmp_path, monkeypa
     spec = captured["spec"]
     assert str(stage_driver) in spec.target_files
     assert not spec.driver_script
+    assert captured["usage"] is usage
 
 
 def test_rewrite_preflight_accepts_source_timing_and_unready_candidate(tmp_path):

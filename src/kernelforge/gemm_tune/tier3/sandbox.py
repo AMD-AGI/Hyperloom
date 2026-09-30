@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..utils import cap_build_parallelism
+
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 1800
@@ -73,6 +75,8 @@ def run_generated_tuner(
         }
     )
     env.update(env_overrides or {})
+    # Preserve caller overrides while bounding compiler memory for the one-shot sandbox run.
+    cap_build_parallelism(env)
 
     log_path = work_dir / "sandbox.log"
     started = time.perf_counter()

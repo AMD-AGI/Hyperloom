@@ -32,6 +32,7 @@ also in force).
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 __all__ = [
@@ -40,6 +41,7 @@ __all__ = [
     "HIP_LEVEL_VARS",
     "ROCR_LEVEL_VARS",
     "VISIBLE_DEVICE_VARS",
+    "detect_gpu_count",
     "effective_mask_tokens",
     "is_rocr_level",
     "mask_tokens",
@@ -182,6 +184,54 @@ def effective_mask_tokens(raw: Any) -> list[str]:
         seen.add(key)
         out.append(tok)
     return out
+
+
+def detect_gpu_count() -> int:
+    """Best-effort visible-GPU count: env masks first, then ``rocm-smi``; 0 when nothing can be probed.
+
+    ``ROCR_VISIBLE_DEVICES`` is consulted first because it is the canonical ROCm
+    pinning mask per the repo's GPU runner convention (and the CLI preflight
+    drops ``HIP_VISIBLE_DEVICES`` when ROCR is set). Honouring it here keeps the
+    GPU-specialist capacity scoped to the operator's mask instead of the whole
+    machine.
+
+    Returns:
+        int: the number of visible GPUs derived from the
+            ``ROCR_VISIBLE_DEVICES`` / ``HIP_VISIBLE_DEVICES`` /
+            ``CUDA_VISIBLE_DEVICES`` env masks (first one set wins), else the
+            count parsed from ``rocm-smi``; 0 when nothing can be probed.
+    """
+    for env_name in COUNTING_VISIBLE_DEVICE_VARS:
+        raw = os.environ.get(env_name)
+        if raw is None:
+            continue
+        raw = raw.strip()
+        if raw == "":
+            return 0
+        ids = [tok for tok in raw.split(",") if tok.strip() != ""]
+        if ids:
+            return len(ids)
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["rocm-smi", "--showid"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, OSError, ValueError, subprocess.TimeoutExpired):
+        return 0
+    if proc.returncode != 0:
+        return 0
+    indices: set[str] = set()
+    for line in (proc.stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("GPU["):
+            idx, _, _ = stripped[4:].partition("]")
+            if idx:
+                indices.add(idx)
+    return len(indices)
 
 
 def parse_device_list(raw: Any) -> list[int]:

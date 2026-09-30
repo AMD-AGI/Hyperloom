@@ -5,26 +5,51 @@
 
 from __future__ import annotations
 
-import os
 import time
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
+from hyperloom.common.env import env_bool
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
-
-
-def _shared_state_module():
-    """Import parent shared_state lazily to avoid a module-level cycle."""
-    from .. import shared_state
-
-    return shared_state
-
+from .attempt_audit import _AUDIT_ACTIONS
+from .phase_state import GAP_SEVERITY_RANK
 
 # Failure rows rendered into the prompt, and per-row excerpt budget.
 _FAILURES_RENDERED = 10
 _FAILURE_EXCERPT_CHARS = 600
+
+# Ordered (key, label) projection for advisory ``model_arch``; empty/None keys dropped.
+_MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
+    ("decoder_type", "decoder"),
+    ("attention", "attention"),
+    ("layer_mix", "layers"),
+    ("kv_cache_per_token", "kv/token"),
+    ("active_params", "params"),
+    ("num_experts", "experts"),
+    ("experts_per_tok", "experts/tok"),
+    ("mtp", "mtp"),
+    ("swa_window", "swa_window"),
+    ("norm", "norm"),
+)
+
+
+def render_model_arch_compact(arch: dict | None) -> str:
+    """Render the advisory ``model_arch`` profile as a single compact line (``\"\"`` when empty/not a dict)."""
+    if not isinstance(arch, dict) or not arch:
+        return ""
+    parts: list[str] = []
+    for key, label in _MODEL_ARCH_STRUCTURED_FIELDS:
+        val = arch.get(key)
+        if val is None or val == "":
+            continue
+        parts.append(f"{label}={val}")
+    notes = str(arch.get("notes") or "").strip()
+    if notes:
+        parts.append(f"notes={notes}")
+    return "; ".join(parts)
+
 
 # Width budget for artifact anchors; sized so a full uuid4 fid still fits ws=.
 _VARIANT_ANCHOR_MAX_CHARS = 100
@@ -39,12 +64,36 @@ _WARNING_EXTRA_FIELDS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+def _as_float(value: Any) -> float:
+    """Coerce a warm-start context number, 0.0 when absent or unparseable."""
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class _RenderMixin:
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
-        """Forwarding shim — implementation in :mod:`.policy`."""
-        from ...policy import gate as _m
+        """Render the most recent PolicyGate denials for prompt injection.
 
-        return _m.to_policy_denial_summary(self, top_k=top_k)
+        Args:
+            top_k (int): Maximum number of newest denial rows to render.
+
+        Returns:
+            str: A ``=== Recent policy denials ===`` block, or ``""`` when
+                no denials have been recorded.
+        """
+        if not self.policy_denial_history:
+            return ""
+        rows = list(self.policy_denial_history)[-top_k:]
+        lines = [f"=== Recent policy denials (newest last, total={len(self.policy_denial_history)}) ==="]
+        for r in rows:
+            lines.append(
+                f"  tick={r.get('tick')} action={r.get('action_name')!r} "
+                f"rule={r.get('rule')!r} streak={r.get('streak')} "
+                f"hint={str(r.get('hint') or '')[:140]!r}"
+            )
+        return "\n".join(lines)
 
     def to_intervention_mix_summary(self) -> str:
         """Render the intervention ledger as a one-line counts summary (``\"\"`` when empty)."""
@@ -150,183 +199,98 @@ class _RenderMixin:
             f"variant={self.current_best.get('variant_name', '?')}"
         )
 
-    def to_phase_status_summary(
-        self,
-        *,
-        budget_pct: dict[str, float] | None = None,
-        now_unix: float | None = None,
-    ) -> str:
-        """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable."""
-        from ...phases.machine_state import (
-            PHASE_FRAMEWORK_AGENT,
-            PHASE_KERNEL_AGENT,
-            PHASE_SWEEP,
-            allowed_actions_for,
-            normalize_budget_pct,
-            phase_budget_remaining_seconds,
-            phase_cumulative_seconds,
-            phase_elapsed_seconds,
-            session_remaining_seconds,
-            should_reloop_to_explore,
-        )
-
-        phase = (self.phase or "").strip().upper() or "UNSET"
-        elapsed = int(phase_elapsed_seconds(self, now_unix=now_unix))
-        # ``remaining`` paces this entry; the absolute cap reads ``cumulative``.
-        cumulative = int(phase_cumulative_seconds(self, now_unix=now_unix))
-        budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
-        budget_pct_for_phase = budget.get(phase, 0.0)
-        remaining = phase_budget_remaining_seconds(
-            self,
-            budget_pct=budget,
-            now_unix=now_unix,
-        )
-        budget_line: str
-        if remaining is None:
-            budget_line = f"budget    : pct={budget_pct_for_phase:.2f} (unlimited run; no per-phase cap)"
-        else:
-            budget_line = (
-                f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} "
-                f"cumulative_sec={cumulative} remaining_sec={int(remaining)}"
-            )
-        actions_in_phase = allowed_actions_for(phase)
-        allowed_line = f"allowed   : {', '.join(actions_in_phase) if actions_in_phase else '(none)'}"
-        lines = [
-            f"phase     : {phase}",
-            f"cycle     : {int(getattr(self, 'macro_cycle', 0) or 0)}",
-            f"entered   : {self.phase_started_ts or '(unset)'}",
-            budget_line,
-            allowed_line,
-        ]
-        # Whether deferring work to a later cycle is still a real option.
-        if phase in (PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
-            reloop, evidence = should_reloop_to_explore(self, now_unix=now_unix)
-            feasible = reloop and self.framework_agent_phase_enabled
-            reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
-            threshold = evidence.get("min_remaining_sec_effective")
-            if threshold is not None:
-                reloop_line += f" threshold_sec={int(threshold)}"
-            session_remaining = session_remaining_seconds(self, now_unix=now_unix)
-            if session_remaining is not None:
-                reloop_line += f" session_remaining_sec={int(session_remaining)}"
-            blocked = evidence.get("reloop_blocked")
-            if blocked:
-                reloop_line += f" blocked={blocked}"
-            if phase != PHASE_SWEEP:
-                reloop_line += " (projected)"
-            lines.append(reloop_line)
-        return "\n".join(lines)
-
-    def to_phase_budget_telemetry(
-        self,
-        *,
-        budget_pct: dict[str, float] | None = None,
-        now_unix: float | None = None,
-    ) -> str:
-        """Render the per-phase budget telemetry block for Robustness (one ``phase: elapsed=Xs cap=Ys (Z%)`` line per phase)."""
-        from ...phases.machine_state import (
-            DEFAULT_PHASE_BUDGET_PCT,
-            PHASE_NAMES,
-            is_phase_transition_row,
-            normalize_budget_pct,
-            phase_elapsed_seconds,
-        )
-
-        budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
-        # Aggregate elapsed per phase using real transitions only.
-        elapsed_per_phase: dict[str, float] = {}
-        history = [row for row in (self.phase_history or []) if is_phase_transition_row(row)]
-        for idx, row in enumerate(history):
-            if not isinstance(row, dict):
-                continue
-            phase = str(row.get("to_phase") or "").upper()
-            entered = float(row.get("ts_unix") or 0.0)
-            if not phase or entered <= 0:
-                continue
-            if idx + 1 < len(history) and isinstance(history[idx + 1], dict):
-                exited = float(history[idx + 1].get("ts_unix") or entered)
-            else:
-                # Currently-active segment — measure to now.
-                elapsed_now = phase_elapsed_seconds(self, now_unix=now_unix)
-                exited = entered + elapsed_now
-            elapsed_per_phase[phase] = elapsed_per_phase.get(phase, 0.0) + max(0.0, exited - entered)
-        if not elapsed_per_phase:
-            return "(no phase history yet)"
-        mm = float(self.max_minutes or 0.0)
-        total_budget_sec = mm * 60.0
-        lines: list[str] = []
-        # Iterate PHASE_NAMES for stable order.
-        for phase in PHASE_NAMES:
-            if phase not in elapsed_per_phase:
-                continue
-            elapsed = elapsed_per_phase[phase]
-            pct = budget.get(phase, DEFAULT_PHASE_BUDGET_PCT.get(phase, 0.0))
-            cap_sec = total_budget_sec * pct if total_budget_sec > 0 else 0.0
-            used_pct = (elapsed / cap_sec * 100.0) if cap_sec > 0 else 0.0
-            cap_line = f"cap={int(cap_sec)}s" if cap_sec > 0 else "cap=unlimited"
-            lines.append(f"  {phase}: elapsed={int(elapsed)}s {cap_line} used={used_pct:.0f}%")
-        return "\n".join(lines) or "(no phase history yet)"
-
-    def to_resource_pools_summary(self) -> str:
-        """Render the GPU pool / lane capacity block."""
-        from ...bus.storage.schema import DEFAULT_LANE_CAPACITIES
-        from ...policy.projection import (
-            effective_gpu_specialist_pool_size,
-            gpu_specialist_ceiling,
-            serving_tp_for_policy,
-            whole_machine_pool_size,
-        )
-
-        lines = [
-            f"serving_tp={serving_tp_for_policy(self)}",
-            f"gpu_specialist_capacity={gpu_specialist_ceiling(self)}",
-            f"serving_disjoint_gpu_pool={effective_gpu_specialist_pool_size(self)}"
-            "  (non-bench needs_gpu specialists admit against this)",
-            f"whole_machine_gpu_pool={whole_machine_pool_size()}"
-            "  (bench / framework-authoring specialists admit against this)",
-            f"research_lane_capacity={max(0, int(self.research_lane_capacity or 0))}  (concurrent specialists)",
-            f"gpu_research_lane_capacity={DEFAULT_LANE_CAPACITIES['gpu_research_lane']}"
-            "  (mutually exclusive with serving / benchmark / profile)",
-        ]
-        return "\n".join(lines)
-
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
-        """Render T0 warm-start snapshot for the ``=== Warm start ===`` prompt section; empty when no recipe/pitfalls."""
-        recipe = self.warm_start_recipe or {}
-        pitfalls = self.warm_start_pitfalls or []
-        if not recipe and not pitfalls:
+        """Render the ``=== Warm start ===`` prompt section from the T0 warm-start context.
+
+        ``recipe_kb_t0._build_warm_start_context`` already computes the
+        model-facing view on every anchor and persists it, so this renders that
+        rather than re-deriving a second one off the raw row. The three states
+        come from its ``status``; ``match`` supplies tier and confidence, and
+        ``recommended_replay`` the config — already split into args and envs, and
+        attributed to its donor, which the row itself cannot tell you.
+
+        Empty when T0 never ran (``--degraded-kb``, or a resume from before the
+        context existed).
+        """
+        ctx = self.warm_start_context or {}
+        if not isinstance(ctx, dict) or not ctx:
             return ""
-        out: list[str] = []
-        workload = str(recipe.get("workload") or "") if isinstance(recipe, dict) else ""
-        hw = str(recipe.get("hw") or "") if isinstance(recipe, dict) else ""
-        if workload or hw:
-            out.append(f"recipe: workload={workload or '?'} hw={hw or '?'}")
-        raw = str(recipe.get("raw") or "") if isinstance(recipe, dict) else ""
-        # Trim recipe raw text to at most 5 lines, 240 chars each.
-        if raw.strip():
-            kept = 0
-            for line in raw.splitlines():
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                out.append(f"  · {stripped[:240]}")
-                kept += 1
-                if kept >= 5:
-                    break
-            if kept == 0:
-                out.append("  · (recipe present but text was empty)")
-        else:
-            out.append("  · (no recipe text — first session for this workload/hw)")
-        if pitfalls:
-            out.append(f"pitfalls ({len(pitfalls)}):")
-            for entry in pitfalls[:5]:
-                if not isinstance(entry, dict):
-                    continue
-                snippet = str(entry.get("raw") or entry.get("symptom") or "")
-                if not snippet.strip():
-                    continue
-                first_line = snippet.splitlines()[0].strip()
-                out.append(f"  · {first_line[:240]}")
+        status = str(ctx.get("status") or "").strip()
+        if status == "miss":
+            return "recipe: none — first session for this workload/hw"
+        if status == "seed_only":
+            # T0 seeds a row for every session, so this — not ``miss`` — is what a
+            # genuine first session looks like: a row exists, nothing measured it.
+            return "recipe: seed only — first session for this workload/hw"
+
+        match = ctx.get("match")
+        match = match if isinstance(match, dict) else {}
+        head = [f"recipe: {status or 'hit'}"]
+        tier = str(match.get("tier") or "").strip()
+        if tier:
+            head.append(f"tier={tier}")
+        confidence = _as_float(match.get("confidence"))
+        if confidence > 0:
+            head.append(f"confidence={confidence:.2f}")
+        out: list[str] = [" ".join(head)]
+
+        replay = ctx.get("recommended_replay")
+        replay = replay if isinstance(replay, dict) else {}
+        best_tput = _as_float(replay.get("best_throughput"))
+        if best_tput > 0:
+            out.append(f"  · best_throughput={best_tput:.1f}")
+        args = str(replay.get("extra_server_args") or "").strip()
+        if args:
+            out.append(f"  · extra_server_args={args[:240]}")
+        envs = replay.get("extra_envs")
+        if isinstance(envs, dict) and envs:
+            rendered = " ".join(f"{k}={v}" for k, v in envs.items())
+            out.append(f"  · extra_envs={rendered[:240]}")
+        gain = _as_float(replay.get("expected_gain_pct"))
+        if gain > 0:
+            out.append(f"  · expected_gain={gain:.2f}%")
+        # A borrowed config is another workload's measurement; say so, or the
+        # numbers above read as this session's own history.
+        config_tier = str(replay.get("config_tier") or "").strip()
+        if replay and config_tier and config_tier != "self":
+            donor = str(replay.get("donor_model") or replay.get("donor_canonical_id") or "?")
+            donor_conf = _as_float(replay.get("config_confidence"))
+            suffix = f", confidence={donor_conf:.2f}" if donor_conf > 0 else ""
+            out.append(f"  · borrowed from {donor} (config_tier={config_tier}{suffix})")
+        if not replay:
+            # Remote Recipe hits replay through the section SDKs, so the context
+            # carries no config; the priors below are still real.
+            out.append("  · (no replayable config on this match)")
+
+        counts = [
+            (label, len(ctx.get(key) or []))
+            for label, key in (("proven", "proven_prior"), ("avoid", "do_not_repeat"), ("lessons", "lessons"))
+        ]
+        live = [f"{label}={n}" for label, n in counts if n]
+        if live:
+            out.append(f"  · priors: {' '.join(live)}")
+
+        # Count the rows that render, not the rows that exist: a header claiming
+        # "pitfalls (3)" above nothing is the same class of lie this block had.
+        rendered: list[str] = []
+        elided = 0
+        for entry in ctx.get("pitfalls") or []:
+            if not isinstance(entry, dict):
+                continue
+            description = str(entry.get("description") or "").strip()
+            if not description:
+                continue
+            if len(rendered) >= 5:
+                elided += 1
+                continue
+            severity = str(entry.get("severity") or "").strip()
+            suffix = f" (severity={severity})" if severity else ""
+            rendered.append(f"  · {description.splitlines()[0].strip()[:240]}{suffix}")
+        if rendered:
+            out.append(f"pitfalls ({len(rendered)}):")
+            out.extend(rendered)
+            if elided:
+                out.append(f"  · (+{elided} more elided; see state.json `warm_start_context`)")
         if max_lines and len(out) > max_lines:
             out = out[:max_lines]
             out.append(f"  · (truncated to {max_lines} lines)")
@@ -400,8 +364,6 @@ class _RenderMixin:
             for g in (self.gaps or [])
             if isinstance(g, dict)
         }
-        rank = {"high": 3, "medium": 2, "low": 1}
-
         ranked: list[tuple[int, int, dict[str, Any]]] = []
         seen: set[str] = set()
         for order, entry in enumerate(self.specialist_rounds or []):
@@ -423,7 +385,7 @@ class _RenderMixin:
                 row["name"] = row["name"] or f"{domain or 'specialist'}-{task_id}-{index}"
                 row["domain"] = domain
                 row["severity"] = severity
-                ranked.append((rank.get(severity, 0), order, row))
+                ranked.append((GAP_SEVERITY_RANK.get(severity, 0), order, row))
         ranked.sort(key=lambda r: (-r[0], -r[1]))
         return [row for _, _, row in ranked]
 
@@ -568,7 +530,7 @@ class _RenderMixin:
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
         ]
         # Advisory architecture profile; prompt-context only. Omitted when no profile.
-        _arch_line = _shared_state_module().render_model_arch_compact(self.model_arch)
+        _arch_line = render_model_arch_compact(self.model_arch)
         if _arch_line:
             lines.append(f"model_arch(advisory; subordinate to TraceLens analysis_md)={_arch_line}")
         lines += [
@@ -587,14 +549,12 @@ class _RenderMixin:
             f"last_profile_trace={self.last_profile_trace or '(none)'}",
             f"last_profile_status={self.last_profile_status or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
-            f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
             f"last_trace_analyze={self._format_trace_analyze_blob(self.last_trace_analyze)}",
             f"profiler_digest={self._format_profiler_digest()}",
             # Full TraceLens analysis.md.
             f"analysis_md={self._format_analysis_md_full()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"explore_search={self._format_search_state(self.explore_search)}",
-            f"discovered_flags={self._format_discovered_flags()}",
             f"last_kernel_opt={self._format_last_kernel_opt()}",
             # Pending KEEPs the integrate gate will drain, plus per-kernel attempt count.
             (f"pending_keep_kernels={self.pending_keep_kernel_ids() or '(none)'}"),
@@ -655,7 +615,7 @@ class _RenderMixin:
     def _format_attempts_history(self) -> str:
         """One-line summary across the audit actions (``baseline:total(s<succ>,f<fail>) ...``)."""
         parts: list[str] = []
-        for action in sorted(_shared_state_module()._AUDIT_ACTIONS):
+        for action in sorted(_AUDIT_ACTIONS):
             attempts_attr = f"{action}_attempts"
             history = getattr(self, attempts_attr, None) or []
             if not history:
@@ -705,19 +665,6 @@ class _RenderMixin:
             for r in self.rejected_kernel_patches[-5:]
             if isinstance(r, dict)
         ] or "(none)"
-
-    def _format_discovered_flags(self) -> str:
-        """Render the per-framework discovered-flag counts for the prompt."""
-        if not self.discovered_flags:
-            return "(none — first backends/params round will populate)"
-        parts: list[str] = []
-        for fw, entry in sorted(self.discovered_flags.items()):
-            if not isinstance(entry, dict):
-                continue
-            n_b = len(entry.get("backend_flags") or [])
-            n_p = len(entry.get("param_flags") or [])
-            parts.append(f"{fw}:backend={n_b}/param={n_p}")
-        return ", ".join(parts) or "(none)"
 
     @staticmethod
     def _format_variant_line(entry: dict[str, Any]) -> str:
@@ -852,10 +799,7 @@ class _RenderMixin:
             gain_str = "?"
         # By default point at the show_analysis_md tool; set INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE=1 to inline
         # the verbatim md.
-        if os.getenv(
-            "INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE",
-            "0",
-        ).strip().lower() not in ("1", "true", "on", "yes"):
+        if not env_bool("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE"):
             return (
                 f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
                 "full report not inlined; see profiler_digest above or call the "
@@ -870,7 +814,7 @@ class _RenderMixin:
 
     def _format_profiler_digest(self) -> str:
         """Compact bottleneck-focused profiler block; ``(none)`` until a snapshot lands."""
-        from ...kernel.roofline_snapshot import build_profiler_digest
+        from hyperloom.inference_optimizer.roofline_snapshot import build_profiler_digest
 
         digest = build_profiler_digest(
             self.roofline_snapshots,

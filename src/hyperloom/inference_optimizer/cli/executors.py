@@ -22,7 +22,6 @@ from hyperloom.orchestrator.actions.executors import (
     baseline_executor,
     conc_sweep_executor,
     explore_executor,
-    recover_executor,
     report_executor,
     session_breakdown_executor,
 )
@@ -31,7 +30,7 @@ from hyperloom.orchestrator.actions.executors.targeted_build_executor import Tar
 from hyperloom.orchestrator.actions.executors.profile import profile_executor
 from hyperloom.orchestrator.actions.executors.roofline import make_roofline_executor
 from hyperloom.orchestrator.roles import ClaudeBackend
-from hyperloom.orchestrator.framework.paths import resolve_kernel_search_roots
+from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycle
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -40,8 +39,7 @@ if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycl
 log = logging.getLogger(__name__)
 
 
-# Declarative action_kind -> ExecutorFn map. Keep in sync with
-# session_paths._RUNS_ACTIONS (not enforced by a test).
+# Declarative action_kind -> ExecutorFn map.
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline": baseline_executor,
     # replay_warm_recipe reuses BaselineExecutor, applying warm_start_recipe.best_config.
@@ -54,8 +52,6 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "conc_sweep": conc_sweep_executor,
     "report": report_executor,
     "session_breakdown": session_breakdown_executor,
-    # recover cleans up leaked VRAM owners.
-    "recover": recover_executor,
 }
 
 
@@ -89,11 +85,10 @@ def _build_specialist_executor(
     from hyperloom.orchestrator.specialists.mcp_config import write_specialist_mcp_config
     from hyperloom.orchestrator.specialists.runner import SpecialistRunner
     from hyperloom.orchestrator.specialists.domains import DEFAULT_SPECIALIST_MAX_TURNS
+    from hyperloom.common.llm_config import AGENT_BACKEND_CODEX, preferred_agent_backend
     from hyperloom.orchestrator.specialists.subprocess_ import (
-        AGENT_BACKEND_CODEX,
         SpecialistSubprocessConfig,
         resolve_codex_executable,
-        resolve_specialist_agent_backend,
     )
 
     max_turns = int(getattr(args, "specialist_max_turns", DEFAULT_SPECIALIST_MAX_TURNS) or DEFAULT_SPECIALIST_MAX_TURNS)
@@ -103,7 +98,7 @@ def _build_specialist_executor(
     framework_source_roots = tuple(resolve_kernel_search_roots())
     # Resolve the agent CLI once here so the backend, its executable and its
     # model are chosen together and a later dispatch cannot disagree with them.
-    agent_backend = resolve_specialist_agent_backend()
+    agent_backend = preferred_agent_backend()
     specialist_override = str(getattr(args, "specialist_model", None) or "").strip()
     selected_model = specialist_override or (
         str(args.codex_model).strip() if agent_backend == AGENT_BACKEND_CODEX else str(args.claude_model).strip()
@@ -276,8 +271,6 @@ def _register_executors(
         IntegratePatchExecutor(session_dir=session_dir),
     )
 
-    # FRAMEWORK per-candidate executor — Coordinator-internal only.
-
     # roofline (profile + trace_analyze): auto-enqueued at PRELUDE + each 10%
     # watermark crossing, so always registered.
     coordinator.sub.register_executor(
@@ -293,6 +286,9 @@ def _register_executors(
         "targeted_build",
         TargetedBuildExecutor(),
     )
+
+    # kernel_agent: the KERNEL_AGENT phase's whole pipeline, run under the task's lanes.
+    coordinator.sub.register_executor("kernel_agent", lambda ctx: coordinator._run_kernel_agent(ctx))
 
     if log.isEnabledFor(logging.DEBUG):
         for required_kind in ("roofline", "profile"):

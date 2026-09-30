@@ -9,6 +9,7 @@ from pathlib import Path
 
 # Registry of backend → prompt module.
 KERNEL_BACKEND_PROMPT_MODULES = {
+    "assembly": "kernelforge.kernel_backends.assembly.prompts",
     "ck": "kernelforge.kernel_backends.ck.prompts",
     "flydsl": "kernelforge.kernel_backends.flydsl.prompts",
     "triton": "kernelforge.kernel_backends.triton.prompts",
@@ -22,6 +23,8 @@ KERNEL_BACKENDS = list(KERNEL_BACKEND_PROMPT_MODULES)
 
 # The languages/ subdirectories serving each backend, in reading order.
 _BACKEND_LANGUAGE_DIRS: dict[str, tuple[str, ...]] = {
+    "flydsl": ("flydsl", "assembly"),
+    "assembly": ("assembly", "flydsl", "triton", "gluon", "hip"),
     "triton": ("triton", "gluon"),
     "gluon": ("gluon", "triton"),
 }

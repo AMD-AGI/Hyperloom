@@ -45,7 +45,7 @@ class _SoloDist:
         self.barriers = 0
         self.reductions: list[str] = []
 
-    def all_reduce(self, tensor, op):  # noqa: ARG002 - one rank needs no reduction
+    def all_reduce(self, tensor, op):
         self.reductions.append(str(op))
 
     def barrier(self):
@@ -75,10 +75,10 @@ def _case(**overrides) -> Case:
     def build_inputs(ctx):
         return torch.randn(64, device=ctx.device)
 
-    def call_candidate(ctx, inputs):  # noqa: ARG001 - the shape under test needs no ctx
+    def call_candidate(ctx, inputs):
         return inputs * 2
 
-    def reference(ctx, inputs):  # noqa: ARG001
+    def reference(ctx, inputs):
         return inputs * 2
 
     fields = {
@@ -132,7 +132,7 @@ def test_the_relaunch_forwards_the_arguments_it_was_given(monkeypatch):
     """Re-exec is the same driver, same request -- only now under torchrun."""
     seen: dict = {}
 
-    def _fake_run(command, check):  # noqa: ARG001
+    def _fake_run(command, check):
         seen["command"] = command
         return type("_Completed", (), {"returncode": 0})()
 
@@ -203,11 +203,11 @@ def test_both_candidate_calls_are_issued_before_either_is_compared(solo, context
     """
     order: list[str] = []
 
-    def call_candidate(ctx, inputs):  # noqa: ARG001
+    def call_candidate(ctx, inputs):
         order.append("candidate")
         return inputs * 2
 
-    def reference(ctx, inputs):  # noqa: ARG001
+    def reference(ctx, inputs):
         order.append("reference")
         return inputs * 2
 
@@ -230,11 +230,11 @@ def test_an_in_place_candidate_is_not_failed_for_overwriting_its_input(solo, con
     wrong, which a single-rank stub is as capable of showing as real hardware.
     """
 
-    def call_candidate(ctx, inputs):  # noqa: ARG001
+    def call_candidate(ctx, inputs):
         inputs.mul_(2)
         return inputs
 
-    def reference(ctx, inputs):  # noqa: ARG001
+    def reference(ctx, inputs):
         return inputs * 2
 
     snr = dist_harness._check_case(
@@ -251,11 +251,11 @@ def test_the_reference_sees_the_same_inputs_the_candidate_did(solo, context):
     """Rebuilding is only sound because the seed makes it identical."""
     seen: list[torch.Tensor] = []
 
-    def call_candidate(ctx, inputs):  # noqa: ARG001
+    def call_candidate(ctx, inputs):
         seen.append(inputs.clone())
         return inputs * 2
 
-    def reference(ctx, inputs):  # noqa: ARG001
+    def reference(ctx, inputs):
         seen.append(inputs.clone())
         return inputs * 2
 
@@ -280,7 +280,7 @@ def test_correctness_is_scored_by_the_worst_rank(solo, context):
 
 @requires_gpu
 def test_a_candidate_that_disagrees_scores_a_finite_snr(solo, context):
-    def call_candidate(ctx, inputs):  # noqa: ARG001
+    def call_candidate(ctx, inputs):
         return inputs * 2 + 0.5
 
     snr = dist_harness._check_case(_case(call_candidate=call_candidate), context, seed=11)

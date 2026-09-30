@@ -237,12 +237,12 @@ def test_the_seal_returns_the_argv_it_leaves_in_the_envs():
     assert sealed.tokenized
 
 
-def test_an_empty_argument_string_leaves_no_env_behind():
-    """An env holding nothing is removed, so no consumer reads an empty argv as one."""
+def test_an_explicit_empty_argument_string_stays_authoritative():
+    """The child must not inherit ambient args after an explicit replacement."""
     envs = {"EXTRA_VLLM_ARGS": "   "}
     sealed = seal_server_argv(envs, "vllm")
     assert sealed.argv == ()
-    assert "EXTRA_VLLM_ARGS" not in envs
+    assert envs["EXTRA_VLLM_ARGS"] == ""
 
 
 def test_the_digest_is_the_argv_and_the_framework_and_nothing_else():

@@ -25,7 +25,7 @@ def _silent_plan() -> ScriptedPlan:
 
 
 def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
 
 
 @pytest.fixture
@@ -56,7 +56,7 @@ def test_specialist_wall_budget_caps_at_4h(coord: Coordinator) -> None:
 def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> None:
     """Bench-capable specialists receive enough time for their advertised rebench."""
     from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
-    from hyperloom.orchestrator.specialists.rebench import DEFAULT_REBENCH_TIMEOUT_SEC
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
     params = {"scope": "domain", "mode": "patch", "bench": True}
     budget = coord._specialist_wall_budget_sec(
@@ -64,7 +64,7 @@ def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> N
         params=params,
     )
 
-    assert budget == DEFAULT_REBENCH_TIMEOUT_SEC + 10 * 60
+    assert budget == max(60 * 60, resolve_benchmark_timeouts()[1] + 10 * 60)
     assert coord._gpu_lease_ttl_sec(params=params) == pytest.approx(int(budget * (1.0 + GPU_LEASE_TTL_GRACE)), abs=2)
 
 
@@ -121,7 +121,8 @@ def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> Non
         kind = "explore"
         requires_lanes: list = []
 
-    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None):
+    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None, release_resources=None):
+        await release_resources()
         return "RESULT"
 
     async def _fake_release(lease):
@@ -152,8 +153,11 @@ def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> N
         kind = "explore"
         requires_lanes: list = []
 
-    async def _boom(task, *, prebound_lease=None, extra_context=None):
-        raise RuntimeError("subprocess crashed")
+    async def _boom(task, *, prebound_lease=None, extra_context=None, release_resources=None):
+        try:
+            raise RuntimeError("subprocess crashed")
+        finally:
+            await release_resources()
 
     async def _fake_release(lease):
         released.append(lease)
@@ -184,7 +188,8 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
         kind = "report"
         requires_lanes: list = []
 
-    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None):
+    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None, release_resources=None):
+        await release_resources()
         return "CPU"
 
     async def _fake_release(lease):
@@ -532,6 +537,32 @@ def test_derive_close_stop_reason_default(coord: Coordinator) -> None:
     assert coord._derive_close_stop_reason() == "time_exhausted"
 
 
+# -- phase denial gate -----------------------------------------------------
+def test_phase_denial_for_action(coord: Coordinator) -> None:
+    ss = coord.shared_state
+    ss.phase = "PRELUDE"
+    assert coord._phase_denial_for_action("baseline") is None
+    # ENABLEMENT runs its baseline through the Coordinator's revalidation, so an
+    # agent asking for one is refused.
+    ss.phase = "ENABLEMENT"
+    denied = coord._phase_denial_for_action("baseline")
+    assert denied is not None and denied.rule == "phase_incompatible"
+    assert coord._phase_denial_for_action("specialist") is None
+    assert coord._phase_denial_for_action("integrate_patch") is None
+    # The gate reserves named actions only; it is not a phase-membership check.
+    assert coord._phase_denial_for_action("explore") is None
+    # An unknown phase reserves nothing, so the gate abstains.
+    ss.phase = ""
+    assert coord._phase_denial_for_action("baseline") is None
+
+
+def test_the_coordinator_revalidation_baseline_is_not_phase_denied(coord: Coordinator) -> None:
+    """The revalidation pump prices its own action and never runs the phase gate."""
+    coord.shared_state.phase = "ENABLEMENT"
+    assert coord._time_budget_denial_for_action("baseline") is None
+    assert coord._admission_denial_for_action("baseline") is not None
+
+
 # -- sequence denial gates -------------------------------------------------
 def test_sequence_denial_for_action(coord: Coordinator) -> None:
     ss = coord.shared_state
@@ -607,7 +638,7 @@ def test_workload_canonical_id_and_anchor(coord: Coordinator) -> None:
 def test_select_next_framework_agent_candidate(coord: Coordinator) -> None:
     ss = coord.shared_state
     ss.framework_agent_batches = []
-    assert coord._select_next_framework_agent_candidate() is None
+    assert coord.phase_framework._select_next_framework_agent_candidate() is None
     ss.framework_agent_batches = [
         {
             "candidates": [
@@ -617,7 +648,7 @@ def test_select_next_framework_agent_candidate(coord: Coordinator) -> None:
         }
     ]
     ss.framework_agent_phase_progress = [{"candidate_id": "c1"}]
-    nxt = coord._select_next_framework_agent_candidate()
+    nxt = coord.phase_framework._select_next_framework_agent_candidate()
     assert nxt == {"candidate_id": "c2"}
 
 
@@ -633,7 +664,7 @@ def test_unprocessed_framework_agent_candidates(coord: Coordinator) -> None:
         }
     ]
     ss.framework_agent_phase_progress = [{"candidate_id": "c1"}]
-    out = coord._unprocessed_framework_agent_candidates()
+    out = coord.phase_framework._unprocessed_framework_agent_candidates()
     assert [c["candidate_id"] for c in out] == ["c2", "c3"]
 
 
@@ -642,7 +673,7 @@ def test_select_next_framework_agent_candidate_takes_discovery_order(coord: Coor
     ss = coord.shared_state
     ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}]
     ss.framework_agent_phase_progress = []
-    assert coord._select_next_framework_agent_candidate() == {"candidate_id": "c1"}
+    assert coord.phase_framework._select_next_framework_agent_candidate() == {"candidate_id": "c1"}
 
 
 def test_select_next_framework_agent_candidate_skips_processed(coord: Coordinator) -> None:
@@ -650,7 +681,7 @@ def test_select_next_framework_agent_candidate_skips_processed(coord: Coordinato
     ss = coord.shared_state
     ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}]
     ss.framework_agent_phase_progress = [{"candidate_id": "c1", "status": "reverted"}]
-    assert coord._select_next_framework_agent_candidate() == {"candidate_id": "c2"}
+    assert coord.phase_framework._select_next_framework_agent_candidate() == {"candidate_id": "c2"}
 
 
 def test_select_next_framework_agent_candidate_none_when_all_processed(coord: Coordinator) -> None:
@@ -658,7 +689,7 @@ def test_select_next_framework_agent_candidate_none_when_all_processed(coord: Co
     ss = coord.shared_state
     ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}]}]
     ss.framework_agent_phase_progress = [{"candidate_id": "c1", "status": "reverted"}]
-    assert coord._select_next_framework_agent_candidate() is None
+    assert coord.phase_framework._select_next_framework_agent_candidate() is None
 
 
 def test_framework_known_candidate_ids(coord: Coordinator) -> None:
@@ -667,14 +698,13 @@ def test_framework_known_candidate_ids(coord: Coordinator) -> None:
         {"candidates": [{"candidate_id": "c1"}, {"pr_url": "u2"}]},
     ]
     ss.research_scout_seen_pr_ids = ["p3"]
-    ids = coord._framework_known_candidate_ids()
+    ids = coord.phase_framework._framework_known_candidate_ids()
     assert {"c1", "u2", "p3"}.issubset(ids)
-    assert set(coord._framework_tried_refs()) == ids
 
 
 # -- module-level helpers --------------------------------------------------
 def test_first_present() -> None:
-    from hyperloom.orchestrator.loop.coordinator import _first_present
+    from hyperloom.orchestrator.loop.conversation import _first_present
 
     assert _first_present({"a": 1, "b": 2}, ("x", "b", "a")) == 2
     assert _first_present({"a": None, "b": 5}, ("a", "b")) == 5
@@ -683,7 +713,7 @@ def test_first_present() -> None:
 
 
 def test_lifecycle_paths() -> None:
-    from hyperloom.orchestrator.loop.coordinator import _lifecycle_paths
+    from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
 
     assert _lifecycle_paths("not-a-dict") == {}
     out = _lifecycle_paths({"patch_path": "/a/p.diff", "workspace": "", "other": "x"})
@@ -691,7 +721,7 @@ def test_lifecycle_paths() -> None:
 
 
 def test_format_inbox_event_variants() -> None:
-    from hyperloom.orchestrator.loop.coordinator import _format_inbox_event
+    from hyperloom.orchestrator.loop.conversation import _format_inbox_event
     from hyperloom.orchestrator.bus.message_bus import Message
 
     delegated = Message.new(

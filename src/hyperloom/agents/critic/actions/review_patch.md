@@ -19,7 +19,7 @@ The packet may contain:
 - Micro-benchmark data.
 - Profile or dispatch evidence.
 - Build, install, cache, and restart notes.
-- Robustness findings or RCA summaries.
+- Observed failures and session diagnostic logs.
 - KB evidence recalled by Critic or supplied by Conductor.
 - Rollback plan.
 - Prior attempts and session history.
@@ -36,9 +36,6 @@ carries an extra hard gate in PolicyGate
 (`_validate_integrate_patch_critic_gate`), and the per-proposal approval
 bar comes from the action class — see
 [review_coordinator_inbox.md](review_coordinator_inbox.md).
-
-Critic does not block Robustness emergency actions such as `prune_branch`
-or `delegate(recover)`. Review those only after the fact as advice.
 
 ## Review Steps
 
@@ -75,7 +72,7 @@ or `delegate(recover)`. Review those only after the fact as advice.
    - Framework dispatch changes do not bypass the optimized kernel.
    - Communication changes do not conflict with topology, TP/PP, or resource lane
      assumptions.
-   - Robustness findings do not flag a known crash, regression, cache
+   - Session evidence does not flag a known crash, regression, cache
      corruption, or accuracy failure for this patch family.
 
 6. Decide the verdict.

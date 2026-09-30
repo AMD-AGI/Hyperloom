@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -21,6 +22,7 @@ from typing import Callable
 from kernelforge.llm.git import git
 from kernelforge.config import Config
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
+from kernelforge.tracker import ExperimentTracker
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +61,56 @@ def _result_for_this_run(result_json: str, stdout_text: str) -> dict | None:
     if str(payload.get("experiment_id") or "") != announced:
         return None
     return payload
+
+
+def _experiment_llm_usage(experiments_dir: str, experiment_id: str) -> dict:
+    """The token ledger forge-loop last checkpointed onto its own experiment record.
+
+    forge-loop refreshes that record at every session boundary, while ``--result-json`` is only rewritten on a KEEP
+    and the stdout sentinel is only emitted on a clean exit. The record is therefore what survives a run that is cut
+    off at the optimize deadline, or one that never keeps anything — the two cases where the run's whole spend would
+    otherwise go unreported.
+    """
+    if not experiment_id:
+        return {}
+    try:
+        usage = ExperimentTracker(experiments_dir).get(experiment_id).llm_usage
+    except (OSError, TypeError, ValueError, KeyError):
+        # A missing, unreadable, or malformed record leaves the caller with whatever the result file carried.
+        return {}
+    return dict(usage) if isinstance(usage, dict) else {}
+
+
+def _ledger_progress(record: dict) -> tuple[int, int]:
+    """How far along one cumulative ledger snapshot is, for picking the latest."""
+    calls = 0
+    tokens = 0
+    with contextlib.suppress(TypeError, ValueError):
+        calls = int(record.get("calls") or 0)
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ):
+        with contextlib.suppress(TypeError, ValueError):
+            tokens += int(record.get(key) or 0)
+    return calls, tokens
+
+
+def _latest_ledger(*snapshots: dict | None) -> dict:
+    """Pick the furthest-along snapshot of ONE forge-loop ledger — never a sum.
+
+    Both the result file and the experiment record report the same accumulator's running totals, so combining them
+    would double-count; the later snapshot simply supersedes the earlier one.
+    """
+    latest: dict = {}
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict) or not snapshot:
+            continue
+        if not latest or _ledger_progress(snapshot) > _ledger_progress(latest):
+            latest = dict(snapshot)
+    return latest
 
 
 def _forge_loop_argv() -> list[str]:
@@ -185,17 +237,40 @@ def run_optimize(
     result_json: str | None = None,
     deadline_unix: float | None = None,
     stop_at_unix: float | None = None,
+    source_ms: float | None = None,
+    source_case_ms: dict[str, float] | None = None,
     on_new_best: Callable[[dict], None] | None = None,
     new_best_poll_sec: float = 5.0,
 ) -> dict:
     """Run forge-loop over the FlyDSL kernel; return its parsed result dict.
 
+    ``source_ms`` and ``source_case_ms`` are the source kernel's own timings. Passed together they become the loop's
+    scoring anchor, so every speedup it reports -- each KEEP and the final result -- is measured against the kernel
+    the port replaced rather than against the port. Without them the loop anchors on its own first bench, which
+    scores the search against the port and cannot be composed back onto the source: the equal-weight mean of
+    per-case ratios does not multiply.
+
     ``on_new_best`` is polled every ``new_best_poll_sec`` with the parsed result of each KEEP, and once more after the
     loop exits so the last one cannot be missed by timing. Anything it raises is logged and swallowed, because the
     rewrite layer publishes from it and publishing is not worth losing an optimization run over.
+
+    ``llm_usage`` on the returned dict is the run's furthest-along token ledger, recovered from the experiment record
+    when the result file could not carry it. ``llm_usage_complete`` is set only when the loop exited cleanly with a
+    result of its own, which is the one case where that ledger is final.
     """
     if result_json is None:
         result_json = str(Path(experiments_dir) / "forge_loop_result.json")
+
+    # Both halves or neither: a wall time without per-case times cannot anchor the score, and per-case times without
+    # a wall time leave the published aggregate on a different kernel than the score.
+    baseline_json = ""
+    if source_ms and source_case_ms:
+        baseline_path = Path(experiments_dir) / "forge_loop_baseline.json"
+        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        baseline_path.write_text(
+            json.dumps({"wall_ms": float(source_ms), "case_times": dict(source_case_ms)}, indent=2)
+        )
+        baseline_json = str(baseline_path)
 
     cmd = _forge_loop_argv() + [
         "forge-loop",
@@ -234,12 +309,15 @@ def run_optimize(
         "--profile-timeout-sec",
         str(profile_timeout_sec),
     ]
+    if baseline_json:
+        cmd += ["--baseline-json", baseline_json]
     if config.gpu_type:
         cmd += ["--gpu-type", config.gpu_type]
     if deadline_unix and deadline_unix > 0:
         cmd += ["--deadline-unix", str(deadline_unix)]
     # Propagate the selected model only when one is configured; an empty agent_model lets forge-loop resolve its own
-    # default from the environment (KERNEL_AGENTS_MODEL).
+    # default from the environment (CLAUDE_MODEL / CODEX_MODEL). ``Config`` exposes the model as ``agent_model`` --
+    # there is no ``config.model``.
     if config.agent_model:
         cmd += ["--model", config.agent_model]
     if permission_mode:
@@ -338,7 +416,17 @@ def run_optimize(
             fallback_content=fallback_content,
             fallback_mode=fallback_mode,
         )
-        return {"terminated_for_deadline": True} if terminated_for_deadline else {}
+        # A loop that started and then lost its supervisor still spent tokens the caller must answer for.
+        failed: dict = {}
+        recovered = _experiment_llm_usage(
+            experiments_dir,
+            _announced_experiment_id("".join(collected)) or "",
+        )
+        if recovered:
+            failed["llm_usage"] = recovered
+        if terminated_for_deadline:
+            failed["terminated_for_deadline"] = True
+        return failed
     stdout_text = "".join(collected)
 
     # Trust --result-json only if it belongs to THIS run, keyed on experiment_id. forge-loop writes the file on every
@@ -373,10 +461,25 @@ def run_optimize(
         fallback_content=fallback_content,
         fallback_mode=fallback_mode,
     )
-    if not result and not terminated_for_deadline:
+
+    # The result file only carries the ledger as of the KEEP that wrote it, so a cut-off or never-keeping run leaves
+    # the experiment record holding more of the run's spend than the result does.
+    nested_usage = _latest_ledger(
+        result.get("llm_usage"),
+        _experiment_llm_usage(experiments_dir, expected_id or ""),
+    )
+    # Only a loop that reported its own result on a clean exit has closed its ledger; every other exit truncates it at
+    # the last session boundary it managed to checkpoint.
+    usage_complete = bool(result) and not terminated_for_deadline and _poll_process(proc) == 0
+
+    if not result and not terminated_for_deadline and not nested_usage:
         return {}
-    return {
-        **result,
+    annotations: dict = {
         "terminated_for_deadline": terminated_for_deadline,
         "best_kernel_restored": restored,
     }
+    if nested_usage:
+        annotations["llm_usage"] = nested_usage
+    if usage_complete:
+        annotations["llm_usage_complete"] = True
+    return {**result, **annotations}

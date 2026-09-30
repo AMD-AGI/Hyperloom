@@ -23,8 +23,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 )
 from hyperloom.orchestrator.phases.machine_state import bank_phase_segment
 from hyperloom.orchestrator.state.shared_state import SharedState
-from .backends import _build_robustness_options
-from .parser import (
+from hyperloom.common.workload_defaults import (
     DEFAULT_ISL,
     DEFAULT_OSL,
     DEFAULT_CONC,
@@ -60,6 +59,33 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 
 # Bump when a change makes previously recorded AgentX measurements incomparable.
 AGENTX_MEASUREMENT_EPOCH = 1
+
+
+def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
+    """Resolve the grading axis and its noise band once, at seed, so they can be recorded.
+
+    The resolution reads ``HYPERLOOM_PERF_METRIC`` and ``HYPERLOOM_PERF_NOISE_PCT``. Deriving it again later -- in a
+    resumed process, a re-baseline subprocess, or the breakdown export CLOSE drives from a subprocess that often did
+    not inherit them -- can name an axis the session never graded on. This is the same reasoning that put
+    ``benchmark_mode`` in the state rather than leaving it to the ambient var.
+    """
+    from hyperloom.common.perf_metric import (
+        GRADED_INTVTY,
+        GRADED_OUTPUT,
+        intvty_serving_grading_enabled,
+        parse_intvty_noise_pct,
+    )
+
+    from .. import framework_registry
+
+    on_intvty = intvty_serving_grading_enabled(
+        scriptable=framework_registry.is_scriptable(framework),
+        benchmark_mode=benchmark_mode,
+    )
+    return {
+        "objective": GRADED_INTVTY if on_intvty else GRADED_OUTPUT,
+        "noise_pct": parse_intvty_noise_pct(),
+    }
 
 
 def agentx_state_is_stale(state: Any) -> str:
@@ -114,10 +140,8 @@ def _seed_shared_state(
 ) -> SharedState:
     """Construct and persist the initial :class:`SharedState` for a run."""
     # research_lane capacity is locked for the session; clamp to [0, ceiling].
-    from hyperloom.orchestrator.policy.gate import (
-        detect_gpu_count,
-        research_lane_ceiling,
-    )
+    from hyperloom.common.visible_devices import detect_gpu_count
+    from hyperloom.orchestrator.policy.gate import research_lane_ceiling
 
     research_lane_capacity = int(getattr(args, "research_lane_capacity", 1) or 1)
     research_lane_capacity = max(
@@ -184,49 +208,6 @@ def _seed_shared_state(
         # Treat the failure-slug as "no info".
         return "" if detected == DEFAULT_FRAMEWORK_VERSION_SLUG else detected
 
-    # --explore-overtime-kill-ratio mirror; <=0 disables the gate.
-    explore_overtime_kill_ratio_raw = getattr(
-        args,
-        "explore_overtime_kill_ratio",
-        None,
-    )
-    try:
-        explore_overtime_kill_ratio = (
-            float(explore_overtime_kill_ratio_raw) if explore_overtime_kill_ratio_raw is not None else 2.0
-        )
-    except (TypeError, ValueError):
-        explore_overtime_kill_ratio = 2.0
-
-    # --explore-variant-timeout-sec mirror; 0 (default) auto-derives the cap, positive pins it.
-    explore_variant_timeout_raw = getattr(
-        args,
-        "explore_variant_timeout_sec",
-        None,
-    )
-    try:
-        explore_variant_timeout_sec_override = max(
-            0,
-            int(explore_variant_timeout_raw) if explore_variant_timeout_raw is not None else 0,
-        )
-    except (TypeError, ValueError):
-        explore_variant_timeout_sec_override = 0
-
-    # --explore-variant-timeout-safety-margin mirror: auto-derive headroom over the soft kill ratio (neg -> 0).
-    explore_variant_timeout_safety_margin_raw = getattr(
-        args,
-        "explore_variant_timeout_safety_margin",
-        None,
-    )
-    try:
-        explore_variant_timeout_safety_margin = max(
-            0.0,
-            float(explore_variant_timeout_safety_margin_raw)
-            if explore_variant_timeout_safety_margin_raw is not None
-            else 0.5,
-        )
-    except (TypeError, ValueError):
-        explore_variant_timeout_safety_margin = 0.5
-
     # KB architecture tags from config.json; fresh-launch only.
     _cfg_tags = _load_model_config_tags(str(args.model))
 
@@ -234,7 +215,7 @@ def _seed_shared_state(
     _kernel_optimizer_record = "forge" if forge_explicitly_enabled() else "geak"
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority base for the baseline server args.
-    _ref_args, _ref_envs, _ref_model, _ref_source = _resolve_reference_recipe(args)
+    _ref_args, _ref_envs, _ref_model, _ref_source, _ref_controls = _resolve_reference_recipe(args)
 
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
@@ -282,6 +263,7 @@ def _seed_shared_state(
         cumulative_gain_validated=0.0,
         reference_server_args=_ref_args,
         reference_envs=_ref_envs,
+        reference_launch_controls=_ref_controls,
         reference_model=_ref_model,
         reference_source=_ref_source,
         # Operator launch shape; the process env carries it for one process only, so a resume re-exports it from here
@@ -293,7 +275,6 @@ def _seed_shared_state(
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
         compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
-        robustness_options=_build_robustness_options(args),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
         warm_replay_min_confidence=float(getattr(args, "warm_replay_min_confidence", 0.7)),
         warm_replay_min_reproduce_pct=float(getattr(args, "warm_replay_min_reproduce_pct", 0.8)),
@@ -301,7 +282,6 @@ def _seed_shared_state(
         research_lane_capacity=research_lane_capacity,
         gpu_specialist_capacity=gpu_specialist_capacity,
         plateau_overrides=plateau_overrides,
-        explore_overtime_kill_ratio=explore_overtime_kill_ratio,
         enable_roofline=bool(
             getattr(args, "enable_roofline", True),
         ),
@@ -312,8 +292,6 @@ def _seed_shared_state(
         # Enablement self-heal lanes; --enablement off opts out.
         enablement_mode=str(getattr(args, "enablement", "all") or "all"),
         eval_disabled=bool(getattr(args, "no_eval", False)),
-        explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
-        explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         research_scout_enabled=bool(getattr(args, "research_scout", True)),
         research_scout_interval=max(1, int(getattr(args, "research_scout_interval", 3) or 3)),
         static_recon_enabled=bool(getattr(args, "static_recon", True)),
@@ -325,12 +303,10 @@ def _seed_shared_state(
         conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", not _agentx_enabled())),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
+        grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
         conc_sweep_total_budget_sec=int(
             getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
-        ),
-        conc_sweep_variant_timeout_sec=int(
-            getattr(args, "conc_sweep_timeout_sec", 1800) or 1800,
         ),
     )
     state.save(session_dir)
@@ -390,11 +366,7 @@ def _print_final_summary(
             if failure_summary.get("server_log"):
                 print(f"  server_log           : {failure_summary.get('server_log')}")
     if state.cumulative_gain_validated_ts:
-        stale = (
-            " ⚠ stack changed since validation"
-            if len(state.optimization_stack) > state.cumulative_gain_validated_stack_len
-            else ""
-        )
+        stale = " ⚠ stack changed since validation" if state.optimization_stack_has_unvalidated_keeps() else ""
         print(
             f"  cumulative_gain_val  : {state.cumulative_gain_validated:.2f}% "
             f"(validated_at_stack_len={state.cumulative_gain_validated_stack_len}, "
@@ -411,7 +383,8 @@ def _print_final_summary(
 
 def _bank_previous_leg_phase_segment(state: SharedState) -> None:
     """Bank the phase time the stopped leg spent but never recorded."""
-    stop_unix = min(to_unix(state.stop_ts, 0.0) or 0.0, time.time())
+    boundary = state.leg_ended_ts or state.stop_ts
+    stop_unix = min(to_unix(boundary, 0.0) or 0.0, time.time())
     if stop_unix <= 0.0:
         return
     bank_phase_segment(state, until_unix=stop_unix)
@@ -441,9 +414,11 @@ def _begin_resume_leg(state: SharedState) -> str:
     state.resumed_ts = now_iso()
     state.stop_reason = ""
     state.stop_ts = ""
+    state.leg_ended_ts = ""
     state.closing_phase = False
     state.closing_started_unix = 0.0
     state.closing_report_task_id = ""
+    state.close_sequence_done = False
     state.crash_count = 0
     state.teardown_timings_sec = {}
     state.begin_leg()
@@ -487,23 +462,14 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
         if int(disk_state.crash_count or 0) < live:
             disk_state.crash_count = live
             disk_state.save(session_dir)
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("crash_count reconcile (state.json) failed (non-fatal)")
 
-    # reports/final.json: patch the single field in place if present.
     try:
-        from ..session.session_paths import reports_dir
+        from hyperloom.orchestrator.actions.executors.report import reconcile_final_crash_count
 
-        final_json = reports_dir(session_dir) / "final.json"
-        if final_json.exists():
-            data = json.loads(final_json.read_text(encoding="utf-8"))
-            if int(data.get("crash_count") or 0) < live:
-                data["crash_count"] = live
-                final_json.write_text(
-                    json.dumps(data, indent=2, sort_keys=True),
-                    encoding="utf-8",
-                )
-    except Exception:  # noqa: BLE001
+        reconcile_final_crash_count(session_dir, live)
+    except Exception:
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 
 
@@ -593,11 +559,11 @@ def _read_failure_summary(session_dir: Path) -> dict | None:
 
 def _resolve_reference_recipe(
     args: argparse.Namespace,
-) -> tuple[str, dict[str, str], str, str]:
+) -> tuple[str, dict[str, str], str, str, dict[str, Any]]:
     """Resolve the reference launch recipe for a fresh launch."""
     source = (getattr(args, "reference_script", None) or "").strip()
     if not source:
-        return ("", {}, "", "")
+        return ("", {}, "", "", {})
 
     framework = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
     from ..reference_script import parse_reference_script
@@ -608,7 +574,8 @@ def _resolve_reference_recipe(
         print(f"ERROR: --reference-script {source!r} could not be parsed: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
-    if not recipe.server_args and not recipe.envs:
+    controls = getattr(recipe, "launch_controls", {})
+    if not recipe.server_args and not recipe.envs and not controls:
         print(
             f"ERROR: --reference-script {source!r} lifted no server flags and no env exports",
             file=sys.stderr,
@@ -616,7 +583,7 @@ def _resolve_reference_recipe(
         raise SystemExit(2)
 
     print(f"Reference script: {source} ({len(recipe.server_args.split())} arg tokens, {len(recipe.envs)} env(s))")
-    return (recipe.server_args, dict(recipe.envs), recipe.model or "", source)
+    return (recipe.server_args, dict(recipe.envs), recipe.model or "", source, dict(controls))
 
 
 def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:

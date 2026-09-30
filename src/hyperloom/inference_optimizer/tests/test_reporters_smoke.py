@@ -15,73 +15,164 @@ from hyperloom.inference_optimizer.breakdown.reporters import render_session_rep
 from hyperloom.inference_optimizer.breakdown.reporters.base import REGISTRY
 
 
+def _baseline_event(**action: Any) -> dict[str, Any]:
+    """The ``baseline`` event holding the session's anchoring measurement."""
+    return {
+        "type": "baseline",
+        "ext": {
+            "actions": [
+                {
+                    "task_id": "b-1",
+                    "status": "succeeded",
+                    "start_time": "2026-05-12T10:00:00Z",
+                    "end_time": "2026-05-12T10:04:00Z",
+                    "request": {"establishes_quality_ref": True, "failure_streak_before": 0},
+                    "measurement": {"throughput_tok_s_per_gpu": 2205.0, "throughput_unit": "tok/s"},
+                    **action,
+                }
+            ]
+        },
+    }
+
+
+def _kernel_event(detected: int = 50, selected: int = 10) -> dict[str, Any]:
+    """A ``kernel`` event whose analysis nominated ``selected`` of ``detected``."""
+    return {
+        "type": "kernel",
+        "ext": {
+            "forge": {
+                "discovered_kernels": [
+                    {"kernel_id": f"k{i}", "name": f"k{i}", "gpu_pct": float(detected - i), "selected": i < selected}
+                    for i in range(detected)
+                ]
+            }
+        },
+    }
+
+
+def _framework_event(outcome: str = "KEEP") -> dict[str, Any]:
+    """A ``framework_agent`` event holding one measured configuration variant."""
+    return {
+        "type": "framework_agent",
+        "ext": {
+            "attempts": [
+                {
+                    "attempt_id": "t1:r1:fp",
+                    "arm": "config",
+                    "round_id": "r1",
+                    "variant_name": "vllm_kv_fp8",
+                    "outcome": outcome,
+                    "measurement": {"after_tput": 2447.5, "gain_pct": 10.99},
+                }
+            ]
+        },
+    }
+
+
 def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
+    # ``outcome.baseline`` is the anchoring measurement as the export projects
+    # it; the baseline event on the timeline is the same measurement as its own
+    # recorder wrote it. A real export carries both, so the fixture does too.
     base = {
-        "session": {
-            "session_id": "test-sid",
-            "claw_session_id": "test-claw",
-            "sandbox_user_id": "sandbox-1",
+        "metadata": {
+            "session": {
+                "session_id": "test-sid",
+                "claw_session_id": "test-claw",
+                "sandbox_user_id": "sandbox-1",
+                "elapsed_minutes": 720,
+                "tick_count": 12,
+                "host": "node-1",
+                "code_revision": "deadbeef",
+                "session_dir": "/path/sessions/test",
+            },
+            "task_config": {
+                "model_name": "deepseek-ai/DeepSeek-R1",
+                "framework_name": "vllm",
+                "gpu_type": "MI300X",
+                "tp": 8,
+                "conc": 64,
+                "isl": 1024,
+                "osl": 1024,
+                "precision": "FP8",
+                "max_model_len": 4096,
+                "objective": {"kind": "gain_pct", "value": 30.0},
+            },
+        },
+        "outcome": {
             "stop_reason": "time_exhausted",
-            "elapsed_minutes": 720,
-            "tick_count": 12,
-            "host": "node-1",
-            "code_revision": "deadbeef",
-            "session_dir": "/path/sessions/test",
+            "baseline": {
+                "throughput_tok_s_per_gpu": 2205.0,
+                "accuracy": None,
+                "ttft_mean_ms": None,
+                "e2el_mean_ms": None,
+            },
+            "final": {
+                "throughput_tok_s_per_gpu": 2447.5,
+                "gain_pct": 10.99,
+                "extra_server_args": "",
+                "action_path": ["explore:vllm_kv_fp8"],
+            },
+            # A ledger with no measurable per-source contribution: the session
+            # validated a total but nothing in it can be credited to a source.
+            "validation": {
+                "validated_at_stack_len": 1,
+                "validated_ts": "2026-05-12T11:54:00Z",
+                "stack_changed_after_validation": False,
+                "attribution": {"available": True, "by_source": {}},
+                "notes": [],
+            },
         },
-        "workload": {
-            "model_name": "deepseek-ai/DeepSeek-R1",
-            "framework": "vllm",
-            "gpu_type": "MI300X",
-            "tp": 8,
-            "conc": 64,
-            "isl": 1024,
-            "osl": 1024,
-            "precision": "FP8",
-            "max_model_len": 4096,
-            "objective": {"kind": "gain_pct", "value": 30.0},
+        "timeline": [_baseline_event(), _kernel_event(), _framework_event()],
+        "critic": {
+            "iterations": [
+                {
+                    "iteration_id": "critic-iteration:1:abc",
+                    "iter": 1,
+                    "ts": "2026-05-12T11:20:00Z",
+                    "topic": "backends:vllm_kv_fp8",
+                    "verdict": "1 approve",
+                    "verdict_counts": {"approve": 1},
+                    "summary": "the flag pays for itself",
+                    "phase": "FRAMEWORK_AGENT",
+                    "macro_cycle": 0,
+                    "review_path": "critic-workdir/000001/review.json",
+                    "framework_reviews": [
+                        {
+                            "proposal_msg_id": "p1",
+                            "arm": "config",
+                            "verdict": "approve",
+                            "effective_verdict": "approve",
+                            "reasoning": "cheap to try, easy to revert",
+                        }
+                    ],
+                },
+                # A pass that only spoke: it must still be reported.
+                {
+                    "iteration_id": "critic-iteration:2:def",
+                    "iter": 2,
+                    "ts": "2026-05-12T11:40:00Z",
+                    "topic": "heartbeat",
+                    "verdict": "",
+                    "verdict_counts": {},
+                    "summary": "ok (critic)",
+                    "phase": "SWEEP",
+                },
+            ]
         },
-        "baseline": {
-            "throughput_tok_s_per_gpu": 2205.0,
-            "accuracy": None,
-            "ttft_mean_ms": None,
-            "e2el_mean_ms": None,
-            "failure_streak": 0,
-            "attempts_history": [],
+        "robustness": {
+            "turns": [
+                {
+                    "turn_idx": 0,
+                    "outcome": "intents",
+                    "tick_index": 1,
+                    "intents": [
+                        {"type": "send_message", "topic": "heartbeat", "payload": {"body_md": "ok (robustness)"}}
+                    ],
+                    "parse_warnings": [],
+                },
+                {"turn_idx": 1, "outcome": "no_envelope", "tick_index": 4, "intents": [], "parse_warnings": ["empty"]},
+            ]
         },
-        "final": {
-            "throughput_tok_s_per_gpu": 2447.5,
-            "cumulative_gain_pct_validated": 10.99,
-            "validated_at_stack_len": 1,
-            "validated_ts": "2026-05-12T11:54:00Z",
-            "stack_changed_after_validation": False,
-            "extra_server_args": "",
-            "action_path": ["explore:vllm_kv_fp8"],
-        },
-        "phase_timeline": [],
-        "capability_summary": {
-            "explore": {"status": "kept", "attempts": 1, "keeps": 1},
-            "backends": {"status": "not_attempted", "attempts": 0, "keeps": 0},
-            "params": {"status": "not_attempted", "attempts": 0, "keeps": 0},
-            "geak": {"status": "not_attempted", "attempts": 0, "keeps": 0},
-            "validate_stack": {"status": "not_attempted", "attempts": 0, "keeps": 0},
-        },
-        "kernel_lifecycle": {
-            "detected": [{"kernel_id": f"k{i}"} for i in range(50)],
-            "recommended": [{"kernel_id": f"k{i}"} for i in range(10)],
-            "optimized": [],
-            "adopted": [],
-            "partial": [],
-            "reverted": [],
-            "rejected": [],
-        },
-        "param_search": {
-            "explore": {"accepted": ["vllm_kv_fp8"], "tested": {"vllm_kv_fp8": True}},
-            "backends": {"accepted": ["vllm_kv_fp8"], "tested": {"vllm_kv_fp8": True}},
-            "params": {"accepted": [], "tested": {}},
-            "discovered_flags": {},
-            "synergy_attempted": [],
-        },
-        "critic_robustness": [],
         "telemetry": {
             "gpu_monitor_aggregate": {
                 "samples": 52,
@@ -97,12 +188,6 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
             "log_files_total": 3,
             "artifact_bytes_total": 100_000,
         },
-        "attribution": {
-            "source_breakdown": {"validated_total_pct": 10.99},
-            "notes": [],
-            "method": "single_source",
-        },
-        "source_files": {"state_json": ["state.json"]},
     }
     for k, v in overrides.items():
         base[k] = v
@@ -116,21 +201,16 @@ def test_all_renderers_register_in_stable_order() -> None:
         "workload",
         "baseline",
         "final",
+        "enablement",
         "capability_summary",
         "phase_timeline",
         "kernel_lifecycle",
-        "kernel_profiling",
-        "kernel_decision_path",
         "roofline",
-        "geak_invocations",
-        "forge_invocations",
         "param_search",
-        "decision_journal",
-        "critic_robustness",
         "attribution",
         "optimizations",
-        "source_files",
-        "data_provenance",
+        "critic",
+        "robustness",
     ]
     assert [sid for sid, _ in REGISTRY] == expected
 
@@ -147,9 +227,8 @@ def test_deterministic_only_path_produces_complete_report() -> None:
     assert "## Executive Summary" in md
     assert "10.99%" in md
     assert "MI300X" in md
-    geak = next(s for s in r.sections if s.section_id == "geak_invocations")
-    assert geak.skipped
-    assert any(d.kind == "not_attempted" for d in geak.decisions)
+    lifecycle = next(s for s in r.sections if s.section_id == "kernel_lifecycle")
+    assert any(d.kind == "not_attempted" for d in lifecycle.decisions)
 
 
 def test_skipped_sections_do_not_emit_placeholders() -> None:
@@ -212,7 +291,7 @@ def test_attribution_unattributed_when_no_validated_split_path_len_1() -> None:
 
 def test_legacy_backends_action_path_reported_as_unattributed() -> None:
     bd = _fixture_breakdown()
-    bd["final"]["action_path"] = ["backends:vllm_kv_fp8"]
+    bd["outcome"]["final"]["action_path"] = ["backends:vllm_kv_fp8"]
 
     r = render_session_report(bd)
 
@@ -222,30 +301,31 @@ def test_legacy_backends_action_path_reported_as_unattributed() -> None:
     assert "backends:vllm_kv_fp8" in line
 
 
-def test_legacy_source_buckets_survive_alongside_explore() -> None:
+def test_every_source_the_ledger_credits_gets_its_own_attribution_line() -> None:
+    # A source that contributed nothing measurable is not a line: printing it
+    # as 0.00% reads as a source that ran and failed rather than one the ledger
+    # could not credit.
     bd = _fixture_breakdown()
-    bd["attribution"] = {
-        "method": "reconstructed",
-        "source_breakdown": {
-            "validated_total_pct": 14.5,
-            "explore_pct_of_total": 10.0,
-            "backends_pct_of_total": 4.5,
-            "params_pct_of_total": 0.0,
-            "geak_pct_of_total": 0.0,
-            "sweep_pct_of_total": 0.0,
+    bd["outcome"]["validation"]["validated_total_gain_pct"] = 14.5
+    bd["outcome"]["validation"]["attribution"] = {
+        "available": True,
+        "by_source": {
+            "framework_agent": {"keep_count": 1, "total_gain_pct": 10.0},
+            "kernel": {"keep_count": 1, "total_gain_pct": 4.5},
+            "warm_replay": {"keep_count": 0, "total_gain_pct": 0.0},
         },
-        "notes": [],
     }
 
-    r = render_session_report(bd)
+    lines = render_session_report(bd).global_facts.gain_attribution_lines
 
-    assert any(line.startswith("explore: 10.00% of total") for line in r.global_facts.gain_attribution_lines)
-    assert any(line.startswith("backends: 4.50% of total") for line in r.global_facts.gain_attribution_lines)
+    assert any(line.startswith("framework_agent: 10.00% of total") for line in lines)
+    assert any(line.startswith("kernel: 4.50% of total") for line in lines)
+    assert not any(line.startswith("warm_replay") for line in lines)
 
 
 def test_attribution_missing_when_no_gain() -> None:
     bd = _fixture_breakdown()
-    bd["final"] = {"throughput_tok_s_per_gpu": None, "cumulative_gain_pct_validated": None, "action_path": []}
+    bd["outcome"]["final"] = {"throughput_tok_s_per_gpu": None, "gain_pct": None, "action_path": []}
     r = render_session_report(bd)
     assert r.global_facts.attribution_method == "missing"
     assert r.global_facts.gain_attribution_lines == []
@@ -310,95 +390,113 @@ def test_kernel_lifecycle_funnel_propagates_to_global_facts() -> None:
 
 
 @pytest.mark.parametrize(
-    "cap_status,expected_kind",
+    "outcome,expected_kind",
     [
-        ("kept", "kept"),
-        ("reverted", "reverted"),
-        ("rejected", "rejected"),
+        ("KEEP", "kept"),
+        ("REVERT", "tried"),
+        ("FAILED", "tried"),
     ],
 )
-def test_capability_decision_kind_round_trips(
-    cap_status: str,
+def test_capability_decision_kind_follows_what_the_arm_kept(
+    outcome: str,
     expected_kind: str,
 ) -> None:
+    """A capability that ran and kept nothing is ``tried``, not absent.
+
+    The three verdicts a variant can end on collapse to two standings, because
+    what the report asks of a capability is whether anything it produced
+    survived -- not how the one variant that did not survive failed.
+    """
     bd = _fixture_breakdown()
-    bd["capability_summary"]["explore"] = {
-        "status": cap_status,
-        "attempts": 1,
-        "keeps": 1 if cap_status == "kept" else 0,
-    }
+    bd["timeline"] = [_baseline_event(), _kernel_event(), _framework_event(outcome=outcome)]
+
     r = render_session_report(bd)
     cap = next(s for s in r.sections if s.section_id == "capability_summary")
-    decisions = {d.subject: d.kind for d in cap.decisions}
-    assert decisions.get("explore") == expected_kind
+
+    assert {d.subject: d.kind for d in cap.decisions}.get("explore") == expected_kind
+
+
+def test_a_capability_that_never_ran_emits_no_decision() -> None:
+    """``not_attempted`` is an absence, and crediting it as a verdict would
+    put a capability nobody invoked on the same footing as one that lost."""
+    bd = _fixture_breakdown()
+    bd["timeline"] = [_baseline_event()]
+
+    r = render_session_report(bd)
+    cap = next(s for s in r.sections if s.section_id == "capability_summary")
+
+    assert cap.decisions == []
+    assert "explore" in r.global_facts.capabilities_not_attempted
 
 
 def test_gain_that_belongs_to_nobody_gets_its_own_row() -> None:
     """Shares are taken against what the session moved, so the rest must show."""
     bd = _fixture_breakdown()
-    bd.pop("attribution", None)
-    bd["optimizations"] = {
-        "entries": [{"id": "opt-1", "source": "explore", "gain_pct": 9.0, "validated": True}],
-        "summary_by_source": {"explore": {"keeps": 1, "total_gain_pct": 9.0}},
-        "validation": {
-            "method": "recorded_adoptions",
+    bd["outcome"]["validation"].update(
+        {
             "validated_total_gain_pct": 10.0,
-            "attributed_total_gain_pct": 9.0,
+            "attributed_gain_pct": 9.0,
             "unattributed_gain_pct": 1.0,
-        },
-    }
+            "attribution": {
+                "available": True,
+                "by_source": {"framework_agent": {"keep_count": 1, "total_gain_pct": 9.0}},
+            },
+        }
+    )
 
     r = render_session_report(bd)
     sec = next(s for s in r.sections if s.section_id == "attribution")
 
     assert "unattributed (between adopted steps)" in sec.markdown_block
     # 9 of 10 and 1 of 10: the shares close.
-    assert any("90.0" in fact and "explore" in fact for fact in sec.key_facts), sec.key_facts
+    assert any("90.0" in fact and "framework_agent" in fact for fact in sec.key_facts), sec.key_facts
     # The residue is not a contributor and must not reach the leaderboard.
     assert not any(d.subject.startswith("attribution:unattributed") for d in sec.decisions)
 
 
-def test_v5_attribution_method_and_notes_render_from_validation() -> None:
+def test_the_ledger_is_the_only_attribution_method_and_carries_its_findings() -> None:
+    # The section used to have to name which of several reconstructions it had
+    # managed; a split read off the ledger has one provenance, so the label is
+    # a constant and the notes are findings rather than an explanation of how
+    # the figures were assembled.
+    note = "the last whole-stack validation predates the final adoptions"
     bd = _fixture_breakdown()
-    bd.pop("attribution", None)
-    bd["optimizations"] = {
-        "entries": [
-            {
-                "id": "opt-1",
-                "source": "explore",
-                "gain_pct": 10.99,
-                "validated": True,
-            }
-        ],
-        "summary_by_source": {
-            "explore": {"keeps": 1, "total_gain_pct": 10.99},
-        },
-        "validation": {
-            "method": "reconstructed",
+    bd["outcome"]["validation"].update(
+        {
             "validated_total_gain_pct": 10.99,
-            "notes": ["gain ledger reconstructed from throughput"],
-        },
-    }
+            "attributed_gain_pct": 10.99,
+            "attribution": {
+                "available": True,
+                "by_source": {"framework_agent": {"keep_count": 1, "total_gain_pct": 10.99}},
+            },
+            "notes": [note],
+        }
+    )
 
     r = render_session_report(bd)
 
-    assert r.global_facts.attribution_method == "reconstructed"
-    assert any("gain ledger reconstructed from throughput" in flag for flag in r.global_facts.data_quality_flags)
+    assert r.global_facts.attribution_method == "stack_ledger"
+    assert any(note in flag for flag in r.global_facts.data_quality_flags)
     sec = next(s for s in r.sections if s.section_id == "attribution")
-    assert any("reconstructed" in fact for fact in sec.key_facts)
-    assert any("gain ledger reconstructed from throughput" in fact for fact in sec.key_facts)
+    assert any(note in fact for fact in sec.key_facts)
 
 
 def test_invocation_section_renders_when_present() -> None:
     """Baseline/final renderers surface an ``### Invocation`` block; secret-shaped envs are filtered out."""
     bd = _fixture_breakdown()
-    bd["session"]["image"] = "registry.example/hyperloom:abc123"
-    bd["baseline"]["invocation"] = {
-        "framework_args": "python -m sglang.launch_server --model /weka/m --tp 8",
-        "extra_envs": {"TP": "8", "VLLM_FLASH_ATTN": "1"},
-        "config_path": "runs/baseline/h1/baseline_config.with_envs.yaml",
-        "server_log_path": "runs/baseline/h1/benchmark_001/server.log",
-    }
+    bd["metadata"]["session"]["image"] = "registry.example/hyperloom:abc123"
+    bd["timeline"] = [
+        _baseline_event(
+            invocation={
+                "framework_args": "python -m sglang.launch_server --model /weka/m --tp 8",
+                "extra_envs": {"TP": "8", "VLLM_FLASH_ATTN": "1"},
+                "config_path": "runs/baseline/h1/baseline_config.with_envs.yaml",
+                "server_log_path": "runs/baseline/h1/benchmark_001/server.log",
+            }
+        ),
+        _kernel_event(),
+        _framework_event(),
+    ]
     r = render_session_report(bd)
     base = next(s for s in r.sections if s.section_id == "baseline")
     md = base.markdown_block
@@ -416,14 +514,20 @@ def test_invocation_section_renders_when_present() -> None:
 def test_invocation_renders_framework_args_source() -> None:
     """When ``invocation.framework_args_source`` is set, the renderer surfaces the lineage label under the command line."""
     bd = _fixture_breakdown()
-    bd["session"]["image"] = "registry.example/hyperloom:src"
-    bd["baseline"]["invocation"] = {
-        "framework_args": "python -m sglang.launch_server --tp 4",
-        "framework_args_source": "yaml_cmd",
-        "extra_envs": {"TP": "4"},
-        "config_path": "runs/baseline/h1/baseline_config.with_envs.yaml",
-        "server_log_path": "runs/baseline/h1/benchmark_001/server.log",
-    }
+    bd["metadata"]["session"]["image"] = "registry.example/hyperloom:src"
+    bd["timeline"] = [
+        _baseline_event(
+            invocation={
+                "framework_args": "python -m sglang.launch_server --tp 4",
+                "framework_args_source": "yaml_cmd",
+                "extra_envs": {"TP": "4"},
+                "config_path": "runs/baseline/h1/baseline_config.with_envs.yaml",
+                "server_log_path": "runs/baseline/h1/benchmark_001/server.log",
+            }
+        ),
+        _kernel_event(),
+        _framework_event(),
+    ]
     r = render_session_report(bd)
     base = next(s for s in r.sections if s.section_id == "baseline")
     md = base.markdown_block
@@ -445,7 +549,7 @@ def test_a_raising_renderer_does_not_lose_the_other_sections(restore_registry) -
     from hyperloom.inference_optimizer.breakdown.reporters.base import register_renderer
 
     @register_renderer("session")
-    def _boom(_breakdown):  # noqa: ANN001, ANN202
+    def _boom(_breakdown):
         raise TypeError("drifted shape")
 
     r = render_session_report(_fixture_breakdown())
@@ -461,7 +565,7 @@ def test_a_renderer_failure_is_reported_not_swallowed(restore_registry) -> None:
     from hyperloom.inference_optimizer.breakdown.reporters.base import register_renderer
 
     @register_renderer("baseline")
-    def _boom(_breakdown):  # noqa: ANN001, ANN202
+    def _boom(_breakdown):
         raise ValueError("bad row")
 
     r = render_session_report(_fixture_breakdown())
@@ -472,18 +576,18 @@ def test_a_renderer_failure_is_reported_not_swallowed(restore_registry) -> None:
 
 @pytest.mark.parametrize(
     "section",
-    ["session", "workload", "baseline", "final", "attribution", "kernel_lifecycle", "capability_summary"],
+    ["metadata", "baseline", "final", "attribution", "kernel_lifecycle", "capability_summary"],
 )
 def test_a_section_that_drifted_to_a_string_still_yields_a_report(section: str) -> None:
     """Producers are not schema-checked, so a drifted shape must cost one section."""
-    r = render_session_report({"session": {"session_id": "s"}, section: "drifted"})
+    r = render_session_report({"metadata": {"session": {"session_id": "s"}}, section: "drifted"})
 
     assert r.markdown.startswith("# Hyperloom Session Report")
 
 
 def test_every_section_drifting_at_once_still_yields_a_report() -> None:
     bd = {sid: "drifted" for sid, _ in REGISTRY}
-    bd["session"] = "drifted"
+    bd["metadata"] = "drifted"
 
     r = render_session_report(bd)
 
@@ -494,7 +598,8 @@ def test_every_section_drifting_at_once_still_yields_a_report() -> None:
 def test_a_drifted_section_yields_neutral_facts() -> None:
     r = render_session_report(
         {
-            "session": {"session_id": "s", "stop_reason": "target_reached"},
+            "metadata": {"session": {"session_id": "s"}},
+            "outcome": {"stop_reason": "target_reached"},
             "kernel_lifecycle": ["not", "a", "dict"],
         }
     )
@@ -508,10 +613,148 @@ def test_a_drifted_section_yields_neutral_facts() -> None:
 def test_numeric_metrics_recorded_as_strings_still_produce_a_headline() -> None:
     r = render_session_report(
         {
-            "session": {"session_id": "s"},
-            "baseline": {"throughput_tok_s_per_gpu": "2205"},
-            "final": {"throughput_tok_s_per_gpu": "2447", "cumulative_gain_pct_validated": "10.99"},
+            "metadata": {"session": {"session_id": "s"}},
+            "outcome": {
+                "baseline": {"throughput_tok_s_per_gpu": "2205"},
+                "final": {"throughput_tok_s_per_gpu": "2447", "gain_pct": "10.99"},
+            },
         }
     )
 
     assert "+10.99% validated gain" in r.global_facts.headline
+
+
+#: One AgentX round's axes, as the recorder stamps them onto ``perf``.
+_AGENTX_PERF = {
+    "e2e_norm_intvty_p50": 41.8,
+    "e2e_norm_intvty_p90": 22.4,
+    "output_tput_per_gpu": 275.6,
+    "total_throughput": 26500.0,
+    "input_throughput": 24296.0,
+    "ttft_p50_ms": 110.0,
+    "ttft_p90_ms": 240.0,
+    "tpot_p50_ms": 18.0,
+    "tpot_p90_ms": 34.0,
+    "duration_seconds": 3600.0,
+    "request_error_rate": 0.0,
+}
+
+
+def _agentx_breakdown() -> dict[str, Any]:
+    """A breakdown whose baseline and validation rounds both carry graded axes."""
+    b = _fixture_breakdown()
+    b["outcome"]["baseline"]["perf"] = dict(_AGENTX_PERF)
+    b["outcome"]["baseline"]["submission_valid"] = True
+    b["outcome"]["validation"]["perf"] = dict(_AGENTX_PERF)
+    b["timeline"][0]["ext"]["actions"][0]["measurement"]["perf"] = dict(_AGENTX_PERF)
+    b["timeline"][0]["ext"]["actions"][0]["measurement"]["submission_valid"] = True
+    return b
+
+
+def test_the_report_shows_the_axes_the_session_was_graded_on() -> None:
+    """The ``perf`` block reached the artifact from the first V6 recorder and no renderer read it.
+
+    An AgentX session is ranked on median interactivity with the tail and per-GPU output as guards, so a report
+    that shows only ``throughput_tok_s_per_gpu`` states a figure the verdict was not taken on.
+    """
+    md = render_session_report(_agentx_breakdown()).markdown
+
+    for key in ("e2e_norm_intvty_p50", "e2e_norm_intvty_p90", "output_tput_per_gpu"):
+        assert key in md, f"{key} is graded but never rendered"
+    for key in ("ttft_p50_ms", "ttft_p90_ms", "tpot_p50_ms", "tpot_p90_ms"):
+        assert key in md, f"{key} was asked for in the detail view"
+    # The inputs a pair is refused on. Without them a REVERT on the objective and one on a drifted window read the
+    # same in the report.
+    for key in ("duration_seconds", "request_error_rate"):
+        assert key in md, f"{key} decides comparability and must be auditable"
+    assert "submission_valid" in md
+
+
+def test_a_refused_round_says_why_upstream_refused_it() -> None:
+    """``submission_valid: false`` alone leaves a reader with a rejected round and no reason for it."""
+    b = _agentx_breakdown()
+    measurement = b["timeline"][0]["ext"]["actions"][0]["measurement"]
+    measurement["submission_valid"] = False
+    measurement["submission_invalid_reasons"] = ["duration=120s(canonical 3600s)"]
+
+    md = render_session_report(b).markdown
+
+    assert "submission_invalid_reasons" in md
+    assert "duration=120s(canonical 3600s)" in md
+
+
+def test_an_accepted_round_carries_no_refusal_reasons() -> None:
+    """The reasons list is empty on every accepted round; rendering the key would be noise on all of them."""
+    md = render_session_report(_agentx_breakdown()).markdown
+
+    assert "submission_valid" in md
+    assert "submission_invalid_reasons" not in md
+
+
+def test_a_round_with_no_graded_axes_renders_no_axis_block() -> None:
+    """A synthetic session measures none of them, and eleven nulls would claim it was graded on them."""
+    md = render_session_report(_fixture_breakdown()).markdown
+
+    # Anchored on a positive assertion first: both checks below would also pass on an empty report, and
+    # reporters/base.py substitutes a warning section for a renderer that raises.
+    assert "throughput_tok_s_per_gpu" in md
+    assert "AgentX graded axes" not in md
+    assert "e2e_norm_intvty_p50" not in md
+
+
+def test_only_the_interactivity_pair_marks_a_round_agentx_graded() -> None:
+    """Every other published axis is filled for an ordinary measurement too.
+
+    ``_merge_raw_result`` fills duration from raw ``duration``, the latency percentiles from ``median_ttft_ms`` and
+    friends, and the error rate whenever the raw result has it, none of them gated on the workload;
+    ``_promote_baseline`` stamps per-GPU output unconditionally. Only the interactivity pair has a single producer,
+    ``agentx/mapping.py``, so only it proves the agentic mapper ran.
+    """
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers._agentx_metrics import has_graded_axes
+
+    for key, value in (
+        ("total_throughput", 26500.0),
+        ("input_throughput", 24296.0),
+        ("output_tput_per_gpu", 275.6),
+        ("duration_seconds", 3600.0),
+        ("request_error_rate", 0.0),
+        ("ttft_p50_ms", 110.0),
+        ("ttft_p90_ms", 240.0),
+        ("tpot_p50_ms", 18.0),
+        ("tpot_p90_ms", 34.0),
+    ):
+        assert not has_graded_axes({key: value}), f"{key} is measured off AgentX too and cannot gate the block"
+    assert has_graded_axes({"e2e_norm_intvty_p50": 41.8})
+    assert has_graded_axes({"e2e_norm_intvty_p90": 22.4})
+
+
+def test_a_synthetic_round_that_reports_a_duration_heads_no_agentx_section() -> None:
+    """The reported trigger: an ordinary SGLang round whose report carries a duration, a median TTFT and a zero
+    error rate, and which never measured interactivity, must not be headed as AgentX-graded."""
+    b = _fixture_breakdown()
+    synthetic_perf = {
+        "e2e_norm_intvty_p50": None,
+        "e2e_norm_intvty_p90": None,
+        "duration_seconds": 3600.0,
+        "ttft_p50_ms": 110.0,
+        "tpot_p50_ms": 18.0,
+        "request_error_rate": 0.0,
+        "total_throughput": 26500.0,
+    }
+    b["outcome"]["baseline"]["perf"] = dict(synthetic_perf)
+    b["outcome"]["validation"]["perf"] = dict(synthetic_perf)
+    b["timeline"][0]["ext"]["actions"][0]["measurement"]["perf"] = dict(synthetic_perf)
+
+    md = render_session_report(b).markdown
+
+    assert "throughput_tok_s_per_gpu" in md
+    assert "AgentX graded axes" not in md
+
+
+def test_a_non_finite_axis_reads_the_same_in_the_facts_as_in_the_table() -> None:
+    """``_md_cell`` renders NaN as an em dash; a key fact saying "nan" would be a second answer."""
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers._agentx_metrics import graded_axes_facts
+
+    assert graded_axes_facts({"e2e_norm_intvty_p50": float("nan")}, label="X") == []
+    assert graded_axes_facts({"e2e_norm_intvty_p50": float("inf")}, label="X") == []
+    assert graded_axes_facts({"e2e_norm_intvty_p50": 41.8}, label="X") == ["X e2e_norm_intvty_p50: 41.8."]

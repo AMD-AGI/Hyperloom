@@ -11,9 +11,11 @@ import logging
 import os
 from typing import Any
 
-from hyperloom.common.env import env_bool
+from kernelforge.knowledge.implementation_identity import normalize_operator_name
+from kernelforge.knowledge.kernel_identity import KERNEL_RECIPE_PRODUCERS
 
-from ._recorder_trace import trace_recording_skipped
+from hyperloom.common.env import env_flag
+
 from .patch_landing import (
     DEFAULT_PATCH_BUDGET,
     VERDICT_STATUSES,
@@ -22,17 +24,15 @@ from .patch_landing import (
     patch_budget,
     record_source_path,
 )
+from hyperloom.common.timeutil import now_iso as _now_iso
 from ..state.kernel_decision_settings import (
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_HOT_KERNEL_GATE_TOP_N,
     _MAX_INTEGRATE_FAULT_ATTEMPTS,
-    _now_iso,
     effective_hot_kernel_gpu_pct,
     effective_hot_kernel_min_gpu_pct,
     resolve_hot_kernel_min_gpu_pct,
 )
-from ..trace.trace_env import env_flag
-
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ _HONEST_E2E_UMBRELLA_ENV = "HL_HONEST_E2E"
 
 def _honest_flag(specific_env: str) -> bool:
     """Resolve a per-fix honest-E2E flag against the umbrella flag."""
-    return env_flag(specific_env, default=env_bool(_HONEST_E2E_UMBRELLA_ENV, True))
+    return env_flag(specific_env, default=env_flag(_HONEST_E2E_UMBRELLA_ENV, default=True))
 
 
 def _stable_kernel_task_key(
@@ -596,45 +596,6 @@ def record_kernel_integrate_result(
     entry.pop("retryable", None)
     state.kernel_integrate_attempts[key] = entry
 
-    # Record the integrate outcome into the breakdown recorder (idempotent per kernel_id, best-effort).
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        sdir = getattr(state, "_session_dir", None)
-        if not sdir or not kernel_id:
-            # Checked before the recorder is reached, so the recorder's own guard never rules on it.
-            trace_recording_skipped(
-                "kernel_e2e",
-                reason="no session_dir" if not sdir else "no kernel_id",
-                entity=kernel_id,
-            )
-        else:
-            _dec = str(result.get("decision") or "").upper()
-            instrument.record_kernel_e2e(
-                sdir,
-                kernel_id=kernel_id,
-                integrated=(_dec == "KEEP"),
-                e2e_gain_pct=result.get("gain_pct"),
-                validated=True if _dec == "KEEP" else None,
-                decision=_dec,
-                patch_path=patch_path,
-                target_file=target_file,
-                extra_server_args=extra_args,
-                result=result,
-                # The id recovered above, not the one on the result: a result that reached us without one still
-                # belongs to the pending integrate we matched it to, and that is the integrate whose readings must not
-                # be written over by a later one.
-                occurrence=integration_id or None,
-                validation_tier=(str(result.get("validation_tier") or "integrate_e2e") if _dec == "KEEP" else ""),
-            )
-    except Exception as exc:  # noqa: BLE001
-        trace_recording_skipped(
-            "kernel_e2e",
-            reason="caller raised before the recorder",
-            entity=kernel_id,
-            error=exc,
-        )
-
     if result.get("decision") == "KEEP":
         validation_tier = str(result.get("validation_tier") or "")
         integration_status = str(result.get("integration_validation_status") or "")
@@ -722,21 +683,6 @@ def record_gemm_tuning(state, result: dict[str, Any]) -> None:
     attempts = list(state.gemm_tuning_attempts or [])
     attempts.append(entry)
     state.gemm_tuning_attempts = attempts[-_DEFAULT_ATTEMPTS_HISTORY:]
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        instrument.record_gemm_tuning_operation(
-            getattr(state, "_session_dir", None),
-            payload={"task_id": str(entry.get("task_id") or "kernel_entry_gemm_tuning")},
-            result=entry,
-        )
-    except Exception as exc:  # noqa: BLE001
-        trace_recording_skipped(
-            "gemm_tuning",
-            reason="caller raised before the recorder",
-            entity=str(entry.get("task_id") or ""),
-            error=exc,
-        )
 
 
 def _kernel_ids_in_optimization_stack(state) -> set[str]:
@@ -758,6 +704,43 @@ def _source_files_in_optimization_stack(state) -> set[str]:
         if src:
             sources.add(src)
     return sources
+
+
+def _canonical_kernel_recipe_operator(kernel_id: str) -> str:
+    """The ``kernel_name`` dimension out of a ``kernel:<producer>:<kernel_name>:...`` id, or ``\"\"`` when ``kernel_id`` is not that scheme.
+
+    forge-loop / flydsl / fusion land their integrations under this six-dimension recipe id (see
+    ``kernelforge.knowledge.kernel_identity``), not the roofline trace's synthetic ``kNNN`` id. The ``kernel_name``
+    dimension is already ``normalize_operator_name``-clean at write time, so it is returned as-is.
+    """
+    parts = str(kernel_id or "").split(":")
+    if len(parts) != 7 or parts[0] != "kernel" or parts[1] not in KERNEL_RECIPE_PRODUCERS:
+        return ""
+    return parts[2]
+
+
+def _forge_loop_entries_by_operator_in_optimization_stack(state) -> dict[str, dict[str, Any]]:
+    """Map normalized operator name -> its integrating optimization_stack entry (forge-loop/flydsl/fusion).
+
+    These lanes key their ``optimization_stack`` entries by the long-form recipe id
+    (``kernel:forge-loop:<operator>:<framework>:<framework_version>:<backend>:<gpu>``), which never equals a roofline
+    trace's synthetic ``kNNN`` kernel_id even though both name the same kernel. Comparing on the operator name — run
+    through the same ``normalize_operator_name`` the recipe id was built with — is the one identity the two sides
+    share.
+    """
+    entries: dict[str, dict[str, Any]] = {}
+    for e in state.optimization_stack or []:
+        if not isinstance(e, dict) or e.get("action") not in INTEGRATING_STACK_ACTIONS:
+            continue
+        operator = _canonical_kernel_recipe_operator(str(e.get("kernel_id") or ""))
+        if operator:
+            entries[normalize_operator_name(operator)] = e
+    return entries
+
+
+def _forge_loop_operators_in_optimization_stack(state) -> set[str]:
+    """Normalized operator names an integrating kernel-recipe lane has already landed; see the sibling ``_entries`` function."""
+    return set(_forge_loop_entries_by_operator_in_optimization_stack(state))
 
 
 def _record_matches_task(
@@ -947,6 +930,7 @@ def untried_hot_reusable_kernels(
         for entry in (state.optimization_stack or [])
         if isinstance(entry, dict) and entry.get("action") in INTEGRATING_STACK_ACTIONS
     ]
+    integrated_operators = _forge_loop_operators_in_optimization_stack(state)
     rejected = set(state.rejected_kernel_ids or [])
     _ensure_kernel_task_state(state)
     attempts = state.kernel_opt_task_attempts or {}
@@ -1067,6 +1051,11 @@ def untried_hot_reusable_kernels(
         ):
             continue
         if src and src in integrated_sources:
+            continue
+        # A kernel-recipe lane (forge-loop/flydsl/fusion) landed under its own long-form recipe id, which never
+        # equals this row's synthetic kNNN id or its trace source_file -- see _forge_loop_operators_in_optimization_stack.
+        row_name = str(_identity[1] or "")
+        if row_name and normalize_operator_name(row_name) in integrated_operators:
             continue
         stable_attempt = next(
             (

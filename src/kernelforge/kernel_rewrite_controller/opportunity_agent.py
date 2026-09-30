@@ -8,10 +8,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,8 @@ from kernelforge.agent_backends.base import (
     AgentBackend,
     AgentHook,
     AgentHooks,
+    AgentProviderError,
+    AgentRunResult,
     AgentRunSpec,
     AgentToolPolicy,
     with_writable_sandbox,
@@ -30,6 +33,7 @@ from kernelforge.agent_backends.session_resume import (
 )
 from kernelforge.config import Config
 from kernelforge.durable_io import atomic_write_text
+from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.kernel_rewrite_controller.contracts import HandoffBundle
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.scheduler import ANALYSIS_BUDGET_SEC
@@ -40,6 +44,10 @@ from kernelforge.kernel_rewrite_controller.task_publisher import (
 )
 from kernelforge.llm.git import git
 from kernelforge.tracker.usage import UsageAccumulator
+
+_ResumePublications = tuple[TaskPublicationResult, ...]
+
+log = logging.getLogger(__name__)
 
 ANALYSIS_STATUS_COMPLETED = "completed"
 ANALYSIS_STATUS_FAILED = "failed"
@@ -164,8 +172,9 @@ class _AnalysisToolGuard:
                 "The host refused these staged tasks, so they were never published:\n"
                 f"{refusals}\n"
                 "Each refusal is also written to rejection.json inside the draft's own "
-                "directory. Correct the task.json the reason names and the host will "
-                "revalidate it within a few seconds. If the operator should not be "
+                "directory. Correct the task.json the reason names; the host clears a "
+                "refusal once that draft validates on republication. Continue this "
+                "session until every refusal is cleared. If the operator should not be "
                 "published at all, withdraw the draft by rewriting its task.json as "
                 '{"withdrawn": "<why>"} -- you have no tool that can delete a '
                 "directory, so that is how a draft is taken back. Do not stop with a "
@@ -205,6 +214,63 @@ class _AnalysisToolGuard:
                     ),
                 }
             }
+
+
+async def _resume_for_refused_staging_drafts(
+    backend: AgentBackend,
+    spec: AgentRunSpec,
+    guard: _AnalysisToolGuard,
+    result: AgentRunResult,
+    *,
+    layout: ControllerLayout,
+    refused: dict[str, float],
+    deadline_monotonic: float,
+    usage: UsageAccumulator,
+) -> tuple[AgentRunResult, str | None, _ResumePublications]:
+    """Drive Stop refusals from outside the provider when hooks are not executed."""
+    run_result = result
+    resume_publications: list[TaskPublicationResult] = []
+    if backend.capabilities.stop_hooks or not backend.capabilities.resumable:
+        return run_result, None, ()
+    if not hasattr(backend, "resume"):
+        return run_result, None, ()
+    resume_error: str | None = None
+    while True:
+        resume_publications.extend(publish_complete_staged_tasks(layout, quiescent_sec=0.0, refused=refused))
+        decision = await guard._on_stop({}, None, None)
+        if decision.get("decision") != "block":
+            break
+        remaining = deadline_monotonic - time.monotonic()
+        if remaining <= 0:
+            run_result = replace(run_result, end_reason="timeout")
+            resume_error = resume_error or "opportunity analysis exceeded budget during draft recovery"
+            break
+        session_id = str(run_result.session_id or "").strip()
+        if not session_id:
+            break
+        feedback = str(decision.get("reason") or "").strip()
+        if not feedback:
+            break
+        resume_spec = replace(spec, timeout_sec=max(1, int(remaining)))
+        try:
+            run_result = await backend.resume(resume_spec, session_id, feedback, usage=usage)
+            if time.monotonic() >= deadline_monotonic:
+                run_result = replace(run_result, end_reason="timeout")
+                resume_error = resume_error or "opportunity analysis exceeded budget during draft recovery"
+                break
+        except AgentProviderError as exc:
+            log.warning("opportunity analysis resume failed: %s", exc)
+            resume_error = f"opportunity analysis resume failed: {exc}"
+            run_result = replace(run_result, end_reason="resume_error", stderr_tail=str(exc))
+            break
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.exception("opportunity analysis resume failed")
+            resume_error = f"opportunity analysis resume failed: {type(exc).__name__}: {exc}"
+            run_result = replace(run_result, end_reason="resume_error", stderr_tail=str(exc))
+            break
+    return run_result, resume_error, tuple(resume_publications)
 
 
 def _ensure_agent_workspace(path: Path) -> None:
@@ -376,8 +442,7 @@ pull-request search splits that spelling into terms, and a name normalized
 before it arrives has no boundaries left to split on.
 All identity values must use normalized lowercase ASCII. For example, write
 `"gpu": "mi355x"`, never `"MI355X"`. identity.backend describes the
-kernel-building expertise, not the platform; it must be one of `ck`, `flydsl`,
-`triton`, `gluon`, `aiter`, `hip`, `hipblaslt`, or `fusion`. Do not publish an
+kernel-building expertise, not the platform; it must be one of {kernel_backends}. Do not publish an
 operator whose implementation language has no matching registered backend.
 kernel_path and every source_files entry must be tracked, repo-relative files in
 the single repo_root at its current HEAD. Put cross-repository source references
@@ -415,7 +480,7 @@ draft: rewrite its `task.json` as `{"withdrawn": "<why>"}`. You have no way to
 delete a directory, so this is how a draft is taken back, and a withdrawn one
 is neither published nor held against you. You cannot end the session while a
 refused draft is neither fixed nor withdrawn.
-"""
+""".replace("{kernel_backends}", ", ".join(f"`{backend}`" for backend in KERNEL_BACKENDS))
 
 
 def _user_prompt(handoff: HandoffBundle, staging_root: Path) -> str:
@@ -459,8 +524,8 @@ class OpportunityAnalysisAgent:
             raise ValueError("timeout_sec must be greater than zero")
         if max_turns <= 0:
             raise ValueError("max_turns must be greater than zero")
-        if not backend.capabilities.stop_hooks:
-            raise ValueError("opportunity analysis requires a provider with tool hooks")
+        if not (backend.capabilities.stop_hooks or backend.capabilities.resumable):
+            raise ValueError("opportunity analysis requires a provider with tool hooks or a resumable session")
         self.backend = backend
         self.timeout_sec = int(timeout_sec)
         self.max_turns = int(max_turns)
@@ -476,7 +541,9 @@ class OpportunityAnalysisAgent:
         _ensure_agent_workspace(layout.agent_staging_root)
         progress: list[str] = []
         usage = UsageAccumulator()
+        tool_guard = _AnalysisToolGuard(layout.agent_staging_root)
         spec = AgentRunSpec(
+            role="rewrite opportunity",
             system_prompt=_system_prompt(),
             user_prompt=_user_prompt(handoff, layout.agent_staging_root),
             cwd=str(layout.agent_staging_root),
@@ -499,7 +566,7 @@ class OpportunityAnalysisAgent:
                 permission_mode=os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits"),
                 bare=False,
             ),
-            hooks=_AnalysisToolGuard(layout.agent_staging_root).hooks(),
+            hooks=tool_guard.hooks() if self.backend.capabilities.stop_hooks else None,
             progress_log=progress,
         )
 
@@ -534,7 +601,25 @@ class OpportunityAnalysisAgent:
             if not backend_task.cancelled():
                 try:
                     agent_result = await backend_task
+                    agent_result, resume_error, resume_publications = await _resume_for_refused_staging_drafts(
+                        self.backend,
+                        spec,
+                        tool_guard,
+                        agent_result,
+                        layout=layout,
+                        refused=refused,
+                        deadline_monotonic=deadline,
+                        usage=usage,
+                    )
+                    for pub in resume_publications:
+                        publications[pub.source_dir.name] = pub
                     end_reason = str(agent_result.end_reason or "").strip()
+                    if resume_error and status == ANALYSIS_STATUS_COMPLETED:
+                        if end_reason == "timeout" or "exceeded budget" in resume_error:
+                            status = ANALYSIS_STATUS_TIMED_OUT
+                        else:
+                            status = ANALYSIS_STATUS_FAILED
+                        reason = resume_error
                     if end_reason == "timeout":
                         status = ANALYSIS_STATUS_TIMED_OUT
                         reason = agent_result.stderr_tail or "opportunity analysis timed out"
@@ -549,7 +634,7 @@ class OpportunityAnalysisAgent:
                 except asyncio.CancelledError:
                     if status != ANALYSIS_STATUS_TIMED_OUT:
                         raise
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - agent backend failure is not enumerable
                     status = ANALYSIS_STATUS_FAILED
                     reason = f"opportunity analysis failed: {error}"
         finally:
@@ -620,7 +705,7 @@ def run_opportunity_analysis(
             max_turns=config.max_turns if config is not None else 500,
         )
         return asyncio.run(agent.run(handoff=handoff, layout=layout))
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - agent backend failure is not enumerable
         result = OpportunityAnalysisResult(
             status=ANALYSIS_STATUS_FAILED,
             reason=f"opportunity analysis setup failed: {error}",

@@ -20,6 +20,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.llm_config import DEFAULT_CODEX_MODEL
+from hyperloom.common.reasoning_effort import (
+    DEFAULT_REASONING_EFFORT,
+    REASONING_EFFORT_LEVELS,
+    gateway_reasoning_effort,
+)
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentProviderError,
@@ -34,8 +40,6 @@ from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
 log = logging.getLogger(__name__)
 
 _TOML_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
-
-DEFAULT_CODEX_MODEL = "gpt-5.6"
 
 
 class CodexBackendError(AgentProviderError):
@@ -115,12 +119,23 @@ def resolve_codex_model(explicit: str = "") -> str:
 
 
 def resolve_codex_reasoning_effort(explicit: str = "") -> str:
-    """Map the generic maximum effort onto Codex's highest supported level."""
-    effort = (explicit or "high").strip().lower()
-    if effort == "max":
-        return "xhigh"
-    if effort not in {"none", "low", "medium", "high", "xhigh"}:
-        raise CodexExecutionError(f"unsupported Codex reasoning effort: {explicit!r}")
+    """Settle the effort a Codex session runs at, refusing anything off-ladder.
+
+    ``max`` is a level of the shared vocabulary that this protocol cannot be
+    told by name, so it arrives here as ``xhigh`` -- the deepest the gateway
+    has. The projection is shared rather than local to this backend: when it
+    lived here only, the same ``max`` reaching Hyperloom's own chat.completions
+    was a 400.
+
+    Anything off the ladder is refused loudly. An unrecognized effort used to
+    travel into the run and come back a 400 mid-campaign, hours after it
+    started with a typo nobody had a reason to look at.
+    """
+    effort = gateway_reasoning_effort(explicit or DEFAULT_REASONING_EFFORT)
+    if not effort:
+        raise CodexExecutionError(
+            f"unsupported Codex reasoning effort: {explicit!r}; expected one of {', '.join(REASONING_EFFORT_LEVELS)}"
+        )
     return effort
 
 
@@ -637,6 +652,7 @@ class CodexBackend:
             writable=False,
             timeout_sec=timeout_sec,
             reasoning_effort=reasoning_effort,
+            role="startup probe",
         )
         client = None
         turn = None
@@ -647,7 +663,7 @@ class CodexBackend:
             """Run the blocking SDK turn in a bounded daemon thread."""
             try:
                 outcome["result"] = turn.run()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - SDK turn runs in a worker thread
                 outcome["error"] = exc
             finally:
                 completed.set()
@@ -676,7 +692,7 @@ class CodexBackend:
                 )
                 worker.start()
                 if not completed.wait(timeout_sec):
-                    with contextlib.suppress(Exception):
+                    with contextlib.suppress(Exception):  # broad-suppress: interrupt must not shadow the timeout
                         turn.interrupt()
                     raise CodexUnavailableError(f"Codex gateway precheck timed out after {timeout_sec}s")
                 if "error" in outcome:
@@ -699,6 +715,7 @@ class CodexBackend:
             usage.add_usage(
                 result.usage,
                 total_cost_usd=result.usage.get("total_cost_usd"),
+                role=spec.role,
             )
         if not result.text:
             raise CodexUnavailableError("Codex gateway precheck returned an empty SDK response")
@@ -747,19 +764,19 @@ class CodexBackend:
                             timeout=spec.timeout_sec,
                         )
                     except asyncio.CancelledError:
-                        with contextlib.suppress(Exception):
+                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                             await asyncio.wait_for(
                                 turn_handle.interrupt(),
                                 timeout=5,
                             )
                         raise
                     if not completed:
-                        with contextlib.suppress(Exception):
+                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                             await asyncio.wait_for(
                                 turn_handle.interrupt(),
                                 timeout=5,
                             )
-                        with contextlib.suppress(Exception):
+                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                             await asyncio.wait_for(
                                 asyncio.shield(turn_task),
                                 timeout=5,
@@ -786,7 +803,7 @@ class CodexBackend:
         finally:
             if turn_task is not None and not turn_task.done():
                 turn_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
+                with contextlib.suppress(asyncio.CancelledError, Exception):  # broad-suppress: reaping a cancelled task
                     _ = await turn_task
 
         result = _normalize_sdk_result(sdk_result, thread_id)
@@ -795,13 +812,14 @@ class CodexBackend:
             usage.add_usage(
                 result.usage,
                 total_cost_usd=result.usage.get("total_cost_usd"),
+                role=spec.role,
             )
         try:
             actual_changes = guard.verify()
         except Exception:
             # verify() restores the baseline itself before raising a rejection, so this second call only covers the
             # paths that fail before it gets there.
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
                 guard.rollback()
             raise
         result.file_changes = actual_changes
@@ -847,7 +865,6 @@ __all__ = [
     "CodexBackendError",
     "CodexExecutionError",
     "CodexUnavailableError",
-    "DEFAULT_CODEX_MODEL",
     "resolve_codex_cli",
     "resolve_codex_gateway",
     "resolve_codex_model",

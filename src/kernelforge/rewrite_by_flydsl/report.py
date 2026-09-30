@@ -9,7 +9,7 @@ import json
 from dataclasses import asdict, dataclass
 
 from kernelforge.rewrite_by_flydsl import protocol
-from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
+from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET, RewriteBudgetPolicy
 from kernelforge.durable_io import atomic_write_text
 
 # The nested forge-loop sentinel is suppressed while its stdout is streamed by rewrite_by_flydsl.optimize, so this is
@@ -32,6 +32,7 @@ class RewriteResult:
     flydsl_best_ms: float | None
     speedup: float | None
     experiment_id: str | None
+    llm_usage: dict
     port_attempts: int
     # Forge-loop-compatible result view consumed by Hyperloom.
     success: bool
@@ -78,12 +79,20 @@ def build_result(
     optimize_result: dict,
     applyback_result: dict | None = None,
     applyback_required: bool = False,
+    llm_usage: dict | None = None,
     kb_experience: dict | None = None,
     failure_class: str = "",
     failure_detail: str = "",
     temporary_paths: list[str] | None = None,
+    budget_policy: RewriteBudgetPolicy | None = None,
 ) -> RewriteResult:
-    """Combine the port + preflight + optimize outcomes into one result."""
+    """Combine the port + preflight + optimize outcomes into one result.
+
+    ``budget_policy`` is the policy the run actually applied. It is reported
+    rather than assumed because a caller that declines apply-back holds no
+    reserve for it, and a reader comparing the search window against a default
+    would otherwise be told about time the run never set aside.
+    """
     flydsl_best_ms = optimize_result.get("best_ms") if optimize_result else None
     experiment_id = optimize_result.get("experiment_id") if optimize_result else None
     applyback = applyback_result or {}
@@ -93,9 +102,8 @@ def build_result(
     # only as flydsl_best_commit.
     best_commit = str(applyback.get("best_commit") or "") or ("" if applyback_required else flydsl_best_commit)
 
-    speedup = None
-    if port_ok and source_ms and flydsl_best_ms and flydsl_best_ms > 0:
-        speedup = source_ms / flydsl_best_ms
+    mean_case_speedup = optimize_result.get("mean_case_speedup") if optimize_result else None
+    speedup = mean_case_speedup if port_ok else None
 
     return RewriteResult(
         logical_op_name=op_name,
@@ -111,6 +119,7 @@ def build_result(
         flydsl_best_ms=flydsl_best_ms,
         speedup=speedup,
         experiment_id=experiment_id,
+        llm_usage=dict(llm_usage if llm_usage is not None else (optimize_result.get("llm_usage") or {})),
         port_attempts=port_attempts,
         success=bool(
             port_ok and (not applyback_required or (applyback.get("ok") if applyback_result is not None else False))
@@ -142,7 +151,7 @@ def build_result(
         failure_detail=failure_detail,
         temporary_paths=list(temporary_paths or []),
         kb_experience=dict(kb_experience or {}),
-        budget_policy=DEFAULT_REWRITE_BUDGET.to_dict(),
+        budget_policy=(budget_policy or DEFAULT_REWRITE_BUDGET).to_dict(),
     )
 
 

@@ -155,6 +155,27 @@ def test_a_cut_short_session_with_no_proposals_still_fails(tmp_path) -> None:
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize("end_reason", ["sdk_no_result", "sdk_error_during_execution", "api_error"])
+def test_proposals_from_a_session_the_provider_never_finished_are_not_a_discovery_result(
+    tmp_path, end_reason: str
+) -> None:
+    """Parseable text is not an answer when the provider, not the agent, ended the session."""
+    calls: list = []
+    fn = discover_module.registered_agent_llm_fn(
+        _backend_returning([AgentRunResult(text=PROPOSALS, end_reason=end_reason)], calls),
+        model="m",
+        timeout_s=10,
+        workdir=str(tmp_path),
+        attempts=2,
+        base_delay_sec=0,
+        max_delay_sec=0,
+    )
+
+    with pytest.raises(discover_module.LlmUnavailableError):
+        fn("DISCOVERY PROMPT")
+    assert len(calls) == 2, "an API failure is retried, not accepted"
+
+
 def test_a_failed_discovery_leaves_a_transcript(tmp_path) -> None:
     """Without it the end reason is all there is, and it cannot be diagnosed."""
     log_path = tmp_path / "discovery_llm.txt"

@@ -46,9 +46,6 @@ def _args(**overrides):
         plateau_kernel_revert_streak=3,
         plateau_kernel_keep_gain=2.5,
         plateau_kernel_lookback=5,
-        explore_overtime_kill_ratio="bad",
-        explore_variant_timeout_sec="bad",
-        explore_variant_timeout_safety_margin="bad",
         enable_roofline=False,
         no_framework_agent=True,
         research_scout=False,
@@ -58,7 +55,6 @@ def _args(**overrides):
         enable_conc_sweep=True,
         conc_sweep_concs="1, bad, 4,,8",
         conc_sweep_total_budget_sec=120,
-        conc_sweep_timeout_sec=30,
         reference_script="",
     )
     base.update(overrides)
@@ -96,17 +92,13 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
-        lambda _args: (
-            "--block-size 64",
-            {"ENV_A": "1"},
-            "Kimi-K2.6",
-            "/recipes/kimi.sh",
-        ),
+        lambda _args: ("--block-size 64", {"ENV_A": "1"}, "Kimi-K2.6", "/recipes/kimi.sh", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
     state = cb._seed_shared_state(tmp_path, _args(), session_id="session-1")
@@ -130,14 +122,10 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert state.gpu_specialist_capacity == 8
     assert state.plateau_overrides["explore_keep_gain_pct"] == 1.5
     assert state.plateau_overrides["kernel_keep_gain_pct"] == 2.5
-    assert state.explore_overtime_kill_ratio == 2.0
-    assert state.explore_variant_timeout_sec_override == 0
-    assert state.explore_variant_timeout_safety_margin == 0.5
     # One switch for the one phase.
     assert state.framework_agent_phase_enabled is False
     assert state.conc_sweep_concs == [1, 4, 8]
     assert state.conc_sweep_total_budget_sec == 120
-    assert state.conc_sweep_variant_timeout_sec == 30
     assert state.reference_server_args == "--block-size 64"
     assert json.loads((tmp_path / "state.json").read_text())["session_id"] == "session-1"
 
@@ -152,10 +140,11 @@ def test_seed_shared_state_records_custom_workload_paths(
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "", {}))
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 1)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
 
     state = cb._seed_shared_state(tmp_path, _args(framework="custom"), session_id="s-custom")
@@ -168,10 +157,11 @@ def _neutralize_seed_io(monkeypatch):
     """Stub the model/recipe reads so a seed can be asserted on one field."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "", {}))
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 1)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
 
 
@@ -207,7 +197,7 @@ def test_seed_shared_state_exact_forge_records_the_forge_kernel_optimizer(
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "", {}))
 
     state = cb._seed_shared_state(tmp_path, _args(), session_id="session-forge")
 
@@ -236,12 +226,13 @@ def test_seed_shared_state_loads_model_arch_from_session_dir(
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
-        lambda _args: ("", {}, "", ""),
+        lambda _args: ("", {}, "", "", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 1)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
 
     state = cb._seed_shared_state(session_dir, _args(model="/models/Model-A"), session_id="session-arch")
@@ -262,12 +253,13 @@ def test_seed_shared_state_preserves_quantized_model_identity(
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
-        lambda _args: ("", {}, "", ""),
+        lambda _args: ("", {}, "", "", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
     quant_dir = tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized"
@@ -292,12 +284,13 @@ def test_seed_shared_state_falls_back_to_path_basename(
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
-        lambda _args: ("", {}, "", ""),
+        lambda _args: ("", {}, "", "", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
     state = cb._seed_shared_state(
@@ -422,7 +415,7 @@ def test_resolve_reference_recipe_branches_and_final_summary(tmp_path: Path, mon
     import pytest
     from hyperloom.inference_optimizer import reference_script
 
-    assert cb._resolve_reference_recipe(_args(reference_script="")) == ("", {}, "", "")
+    assert cb._resolve_reference_recipe(_args(reference_script="")) == ("", {}, "", "", {})
 
     monkeypatch.setattr(
         reference_script,
@@ -438,6 +431,7 @@ def test_resolve_reference_recipe_branches_and_final_summary(tmp_path: Path, mon
         {"A": "1"},
         "kimi",
         "usable.sh",
+        {},
     )
 
     # Unreadable path raises SystemExit(2) instead of falling back to discovery.
@@ -463,11 +457,11 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     monkeypatch,
     capsys,
 ) -> None:
-    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "robustness": ""})
+    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "critic": ""})
     assert (tmp_path / "agents" / "orch" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "hello"
-    assert (tmp_path / "agents" / "robustness" / "system_prompt.snapshot.md").read_text(
+    assert (tmp_path / "agents" / "critic" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "(empty)"
 
@@ -506,6 +500,18 @@ def test_a_resume_clears_the_previous_leg_terminal_without_touching_the_budget()
     # The budget survives the boundary; only an operator extend can move it.
     assert state.elapsed_charged_sec == 120 * 60.0
     assert state.remaining_minutes() == pytest.approx(60.0, abs=1.0)
+
+
+def test_a_resume_lets_the_new_leg_run_its_own_close_sequence() -> None:
+    """A leg closed by a signal keeps its non-CLOSE phase; the next leg must still close for itself."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", phase="SWEEP")
+    state.set_stop_reason("signal")
+    state.close_sequence_done = True
+
+    cb._begin_resume_leg(state)
+
+    assert state.phase == "SWEEP"
+    assert state.close_sequence_done is False
 
 
 def test_a_killed_leg_and_a_stopped_leg_resume_with_the_same_budget() -> None:
@@ -566,6 +572,20 @@ def test_a_resume_banks_what_the_stopped_leg_spent_in_its_phase() -> None:
     cb._begin_resume_leg(state)
 
     assert state.phase_elapsed_totals["PRELUDE"] == 1800.0
+    assert state.stop_ts == ""
+
+
+def test_a_resume_banks_a_resumable_legs_own_boundary() -> None:
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    state.phase = "PRELUDE"
+    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
+    state.phase_started_unix = 1785_542_400.0
+    state.leg_ended_ts = "2026-08-01T00:30:00+00:00"
+
+    cb._begin_resume_leg(state)
+
+    assert state.phase_elapsed_totals == {"PRELUDE": 1800.0}
+    assert state.leg_ended_ts == ""
     assert state.stop_ts == ""
 
 
@@ -662,7 +682,7 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
     from hyperloom.inference_optimizer import reference_script
 
     args = _args(model="/models/kimi", reference_script="")
-    assert cb._resolve_reference_recipe(args) == ("", {}, "", "")
+    assert cb._resolve_reference_recipe(args) == ("", {}, "", "", {})
 
     monkeypatch.setattr(
         reference_script,
@@ -678,6 +698,7 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
         {"A": "1"},
         "kimi",
         "usable.sh",
+        {},
     )
 
     # Unreadable path → SystemExit(2), no discovery fallback.

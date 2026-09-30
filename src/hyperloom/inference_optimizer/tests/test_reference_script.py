@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
+import sys
 
 import pytest
 from pathlib import Path
@@ -299,6 +301,46 @@ def test_render_quotes_env_values():
     assert "export HL_OPTS='a b; rm -rf /'" in text
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/runs/a table 'quoted' $literal/candidate.csv",
+        '{"path":"$literal", "name":"a b"}',
+        "line one\nline two",
+        "",
+        "$(printf unexpected) `printf unexpected`",
+    ],
+)
+def test_literal_environment_survives_export_child_and_reference_import(tmp_path, value):
+    name = "AITER_CONFIG_GEMM_BF16"
+    text = render_reference_script(framework="sglang", server_args="", envs={name: value})
+    recipe = _write(tmp_path, text)
+    assert parse_reference_script(recipe, framework="sglang").envs[name] == value
+    observer = tmp_path / "observe.py"
+    observer.write_text("import json,os; print(json.dumps(os.environ['AITER_CONFIG_GEMM_BF16']))")
+    wrapper = tmp_path / "run.sh"
+    import shlex
+
+    wrapper.write_text("python3() { " + shlex.join([sys.executable, "-S", str(observer)]) + "; }\n" + text)
+    child = subprocess.run(["bash", str(wrapper)], text=True, capture_output=True, check=True)
+    assert json.loads(child.stdout) == value
+
+
+def test_reference_import_keeps_literal_dollars_and_skips_dynamic_commands(tmp_path):
+    recipe = _write(
+        tmp_path,
+        """export AITER_CONFIG_GEMM_BF16='/tables/$literal file.csv'
+export DYNAMIC=$HOME
+export COMMAND=`printf surprise`
+export DEFAULT=${DEFAULT:-`printf surprise`}
+export CHAIN=value;true
+""",
+    )
+    assert parse_reference_script(recipe, framework="sglang").envs == {
+        "AITER_CONFIG_GEMM_BF16": "/tables/$literal file.csv",
+    }
+
+
 def test_render_redacts_secret_shaped_envs():
     """The script is archived and uploaded, so credentials are named but not written."""
     text = render_reference_script(
@@ -406,14 +448,14 @@ def test_resolve_no_flag_returns_empty(monkeypatch):
     """No --reference-script → empty tuple, nothing attempted."""
     monkeypatch.setenv("FRAMEWORK", "vllm")
     args = SimpleNamespace(reference_script=None)
-    assert _resolve_reference_recipe(args) == ("", {}, "", "")
+    assert _resolve_reference_recipe(args) == ("", {}, "", "", {})
 
 
 def test_resolve_valid_flag_is_used(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "vllm")
     src = _write(tmp_path, _M3_RECIPE, "explicit.sh")
     args = SimpleNamespace(reference_script=src)
-    server_args, envs, model, source = _resolve_reference_recipe(args)
+    server_args, envs, model, source, controls = _resolve_reference_recipe(args)
     assert "--block-size 128" in server_args
     assert source == src
 
@@ -435,3 +477,47 @@ def test_resolve_script_with_no_flags_raises_system_exit(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         _resolve_reference_recipe(args)
     assert exc_info.value.code == 2
+
+
+@pytest.mark.parametrize("invalid", ["missing", "empty_manifest", "bad_manifest", "path_list"])
+def test_export_and_reimport_reject_unloadable_overlay(tmp_path, invalid):
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    if invalid != "missing":
+        (overlay / "sitecustomize.py").write_text("")
+    if invalid == "empty_manifest":
+        (overlay / "_overlay_manifest.json").write_text('{"modules": []}')
+    if invalid == "bad_manifest":
+        (overlay / "_overlay_manifest.json").write_text("invalid")
+    value = str(overlay) + (":/another" if invalid == "path_list" else "")
+    with pytest.raises(ValueError, match="overlay_pythonpath"):
+        render_reference_script(framework="sglang", server_args="", overlay_pythonpath=value)
+    source = _write(tmp_path, "# hyperloom-launch-controls: " + json.dumps({"overlay_pythonpath": value}))
+    with pytest.raises(ValueError, match="overlay_pythonpath"):
+        parse_reference_script(source, framework="sglang")
+
+
+@pytest.mark.parametrize("remote", [False, True])
+def test_untrusted_reference_cannot_enable_loadable_overlay(tmp_path, monkeypatch, remote):
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    (overlay / "sitecustomize.py").write_text("raise RuntimeError('must not be imported')")
+    text = render_reference_script(framework="sglang", server_args="--tp 8", overlay_pythonpath=str(overlay))
+    if remote:
+        source = "https://example.invalid/recipe.sh"
+        monkeypatch.setattr(
+            "hyperloom.inference_optimizer.baseline_comparison.inferencex_client._fetch_raw",
+            lambda _source: text.encode(),
+        )
+    else:
+        source = _write(tmp_path, text)
+    with pytest.raises(ValueError, match="imports executable code"):
+        parse_reference_script(source, framework="sglang")
+
+
+def test_nonexecutable_launch_controls_roundtrip(tmp_path):
+    controls = {"unset_envs": ["SGLANG_USE_AITER"], "remove_args": ["--disable-cuda-graph"], "args_mode": "replace"}
+    text = render_reference_script(framework="sglang", server_args="--tp 8", **controls)
+    recipe = parse_reference_script(_write(tmp_path, text), framework="sglang")
+    assert recipe.launch_controls == controls
+    assert recipe.server_args == "--tp 8"

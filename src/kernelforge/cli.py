@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import subprocess
 import sys
@@ -17,12 +18,10 @@ from typing import TYPE_CHECKING, Iterable
 
 import click
 
+from hyperloom.common.env import env_bool
 from kernelforge.llm.git import git
 from kernelforge.config import Config
-from kernelforge.knowledge.experience_store import (
-    REMOTE_BACKEND_KB_STORE,
-    KnowledgeConfig,
-)
+from kernelforge.knowledge.experience_store import KnowledgeConfig
 from kernelforge.knowledge.experience_integration import (
     WarmStartRollbackError,
     kb_reference_program_md,
@@ -33,6 +32,7 @@ from kernelforge.knowledge.experience_integration import (
 )
 from kernelforge.loop.recovery import (
     atomic_write_json,
+    load_published_best,
     publish_warm_start_recovery,
     rollback_unpublished_warm_start,
 )
@@ -195,12 +195,7 @@ def _pr_kb_enabled(flag: bool | None) -> bool:
     """Resolve the PR KB switch: CLI flag wins, env is the fallback, default off."""
     if flag is not None:
         return bool(flag)
-    return os.environ.get("PR_KB_ENABLE", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return env_bool("PR_KB_ENABLE")
 
 
 def _git_remote_url(workspace: Path) -> str:
@@ -322,6 +317,39 @@ def _forge_session_timeout_sec(max_hours: float, override_sec: int | None) -> in
 def _is_long_horizon(max_hours: float) -> bool:
     """Whether one campaign session enables expensive long-horizon agents."""
     return float(max_hours) > LONG_HORIZON_THRESHOLD_HOURS
+
+
+def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
+    """Read the ``--baseline-json`` scoring anchor, rejecting one that cannot anchor a speedup.
+
+    Every number the run publishes divides by these per-case times, so a malformed or non-positive entry is refused
+    here rather than silently producing ratios no consumer can interpret.
+    """
+    try:
+        payload = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as error:
+        raise click.BadParameter(f"--baseline-json could not be read as JSON: {error}")
+    if not isinstance(payload, dict):
+        raise click.BadParameter("--baseline-json must hold a JSON object")
+    try:
+        wall_ms = float(payload.get("wall_ms"))
+    except (TypeError, ValueError):
+        raise click.BadParameter("--baseline-json needs a numeric 'wall_ms'")
+    if not math.isfinite(wall_ms) or wall_ms <= 0.0:
+        raise click.BadParameter("--baseline-json 'wall_ms' must be finite and positive")
+    raw_cases = payload.get("case_times")
+    if not isinstance(raw_cases, dict) or not raw_cases:
+        raise click.BadParameter("--baseline-json needs a non-empty 'case_times' object")
+    case_times: dict[str, float] = {}
+    for case_id, value in raw_cases.items():
+        try:
+            ms = float(value)
+        except (TypeError, ValueError):
+            raise click.BadParameter(f"--baseline-json case {case_id!r} has a non-numeric time")
+        if not math.isfinite(ms) or ms <= 0.0:
+            raise click.BadParameter(f"--baseline-json case {case_id!r} must be finite and positive")
+        case_times[str(case_id)] = ms
+    return wall_ms, case_times
 
 
 def _validate_agent_provider(ctx, param, value):
@@ -482,13 +510,14 @@ def _assert_lane_session_cwd(*, kernel_path: str, workspace: str, lane_dir: str)
 
 
 # What a lane needs its provider to do, and what a provider that does not do it costs.
+#
+# Refusal is reserved for a guarantee whose absence makes a lane's own
+# measurement meaningless. Every lane compiles a different edit of one kernel,
+# and aiter loads a JIT module by name without checking the binary against the
+# source it was built from, so lanes sharing one build cache measure each
+# other's binaries. Nothing downstream can tell that apart from a real result,
+# which is what makes it a refusal rather than a warning.
 _LANE_PROVIDER_REQUIREMENTS = (
-    (
-        "stop_hooks",
-        "run the callbacks in AgentRunSpec.hooks, which is what denies a lane "
-        "an edit to the driver, harness or oracle while its session can still "
-        "be saved",
-    ),
     (
         "session_env",
         "apply AgentRunSpec.env to the session it spawns, which is what gives "
@@ -497,14 +526,54 @@ _LANE_PROVIDER_REQUIREMENTS = (
     ),
 )
 
+# Guarantees a lane is better off with and can still run without.
+#
+# ``stop_hooks`` used to be a refusal alongside the requirement above. What it
+# buys a lane is in-session denial: the PreToolUse callbacks refuse an edit to
+# the driver, harness or oracle, and refuse a driver run that skips the shared
+# device lock. A provider that ignores ``AgentRunSpec.hooks`` gets neither.
+#
+# It is an advisory rather than a refusal because a campaign's published
+# numbers do not rest on it. A lane candidate that touches the measurement
+# surface is refused by ``IterationRunner._lane_rejection`` on its patch paths,
+# the canonical driver is re-checked byte-for-byte by
+# ``_validate_driver_integrity`` after the patch applies, and every candidate is
+# re-measured one at a time in the canonical tree -- a lane's own timings never
+# decide a KEEP. Unlocked concurrent benchmarking is caught after the fact too,
+# by the lane teardown's contention report, which voids the round out loud.
+#
+# So the cost of running without it is wasted budget, reported when it happens,
+# rather than a result nobody can distinguish from a real one.
+_LANE_PROVIDER_ADVISORIES = (
+    (
+        "stop_hooks",
+        "run the callbacks in AgentRunSpec.hooks, which is what denies a lane "
+        "an edit to the driver, harness or oracle while its session can still "
+        "be saved, and denies a driver run that skips the device lock its "
+        "siblings are queueing on. Without them a lane can lose its whole "
+        "session at the boundary check, and concurrent unlocked benchmarks can "
+        "corrupt their own and their siblings' timings -- the round is voided "
+        "rather than trusted when that happens",
+    ),
+)
+
 
 def _require_lane_provider_capabilities(provider: str, lanes: int) -> None:
-    """Refuse concurrent lanes on a provider that cannot keep a lane's promises."""
+    """Refuse concurrent lanes a provider cannot measure, warn about the rest."""
     if lanes < 2:
         return
     from kernelforge.agent_backends.registry import get_agent_provider
 
     capabilities = get_agent_provider(provider).capabilities
+    # Warned before any refusal below, so one re-run is still enough: an
+    # operator who switches to a provider that clears the refusal has already
+    # been told what that provider will and will not do for a lane. Each is
+    # named so a voided round is a known cost of this provider rather than a
+    # mystery found in the logs months later.
+    for name, detail in _LANE_PROVIDER_ADVISORIES:
+        if getattr(capabilities, name, False):
+            continue
+        print(f"  [lanes] WARNING: agent provider {provider!r} does not declare {name}; it cannot {detail}")
     missing = [
         f"{name} (it must {detail})"
         for name, detail in _LANE_PROVIDER_REQUIREMENTS
@@ -591,10 +660,10 @@ def _make_lane_agent_factory(
     "--snr-threshold",
     default=DEFAULT_SNR_THRESHOLD_DB,
     type=float,
-    help="Fresh campaign: SNR pre-filter threshold in dB (stored "
-    "immutably in the campaign config; ignored on --resume). A "
-    "KEEP is decided by the task's own correctness_command, not "
-    "by this value.",
+    help="Fresh campaign: threshold in dB the driver's correctness "
+    "suite must clear (stored immutably in the campaign config; "
+    "ignored on --resume). A KEEP needs this and a measured gain "
+    "over the incumbent; assembly adds the task's own suite.",
 )
 @click.option(
     "--max-hours",
@@ -722,8 +791,9 @@ def _make_lane_agent_factory(
     "of the round's wall clock, and three is what the three "
     "specialist analyses can be divided into. The partition "
     "returns fewer when the evidence supports fewer. Above 1 "
-    "needs a provider that declares stop_hooks and session_env, "
-    "and is refused on one that does not.",
+    "needs a provider that declares session_env and is refused on "
+    "one that does not; a provider without stop_hooks runs and is "
+    "warned, because it can waste a round but not misreport one.",
 )
 @click.option(
     "--merge-stacking/--no-merge-stacking",
@@ -881,6 +951,18 @@ def _make_lane_agent_factory(
     "or a sibling of the workspace when that would land inside it. Falls "
     "back to FORGE_SPECIALIST_PROBE_SCRATCH_ROOT when unset.",
 )
+@click.option(
+    "--baseline-json",
+    default="",
+    help="JSON file holding a scoring anchor measured outside this loop: "
+    '{"wall_ms": <float>, "case_times": {"<case id>": <ms>}}. Every speedup '
+    "this run reports then divides by those per-case times instead of by the "
+    "kernel the run starts from, which is what a caller wants when that "
+    "kernel already replaced something else (a rewrite's port replacing its "
+    "source). The loop still benches the starting kernel, but as the search "
+    "start rather than the anchor. Omit it and the loop anchors on its own "
+    "first bench, as it always has.",
+)
 @click.option("--resume", is_flag=True, help="Resume the campaign stored in the exact workspace")
 def forge_loop(
     kernel,
@@ -935,6 +1017,7 @@ def forge_loop(
     specialist_probe_budget_sec,
     specialist_probe_scratch_root,
     commit_new_paths,
+    baseline_json,
 ):
     """Run ONE Forge IterationLoop as a standalone subprocess (CLI-ized kernel backend)."""
     long_horizon = _is_long_horizon(max_hours)
@@ -947,6 +1030,8 @@ def forge_loop(
     import dataclasses as _dataclasses
     import hashlib as _hashlib
 
+    if return_after_read_kb and kernel_backend == "assembly":
+        raise click.UsageError("--return-after-read-kb is incompatible with assembly preparation")
     if return_after_read_kb and not experience_kb:
         raise click.UsageError("--return-after-read-kb cannot be used with --no-experience-kb")
     if return_after_read_kb and not kb_warmstart_enabled:
@@ -1140,7 +1225,7 @@ def forge_loop(
         aggregate_regression_detail,
         warm_start_improvement_flags,
     )
-    from kernelforge.tracker import ExperimentTracker, UsageAccumulator
+    from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.orchestrator.agent import make_agent_fn
 
     iter_config = IterationConfig(
@@ -1172,8 +1257,19 @@ def forge_loop(
         # New files a KEEP may carry; a REVERT removes exactly the same set.
         commit_new_paths=commit_new_paths,
     )
+    if baseline_json:
+        # The anchor every speedup divides by, and the wall time published beside it, both come from the caller's
+        # measurement. ``baseline_wall_ms`` is deliberately left unset so the loop still benches the kernel it starts
+        # from -- that bench is the search start and the first incumbent, not the anchor.
+        external_baseline_ms, external_baseline_case_times = _load_external_baseline(baseline_json)
+        iter_config.baseline_case_times = dict(external_baseline_case_times)
+        iter_config.pristine_baseline_wall_ms = external_baseline_ms
     tracker = ExperimentTracker(config.experiments_dir)
-    usage = UsageAccumulator()
+    # Published at a fixed path from the first call onwards, so a caller that never asked for --result-json, or that
+    # loses this process outright, can still read what the run spent.
+    usage_ledger = UsageLedgerFile(config.experiments_dir)
+    usage = UsageAccumulator(on_update=usage_ledger.publish)
+    usage_ledger.publish(usage.totals())
 
     # The caller-owned experiment ID is an EXTERNAL recovery channel, deliberately independent of the internal
     # per-segment experiment identity (each resume segment gets a fresh ID so the campaign parent/child chain stays
@@ -1350,6 +1446,38 @@ def forge_loop(
         except (OSError, ValueError) as error:
             raise click.ClickException(str(error)) from error
 
+    assembly_preparation = None
+    if kernel_backend == "assembly":
+        from kernelforge.assembly.prepare import prepare_assembly, seed_source_baseline
+
+        try:
+            assembly_preparation = asyncio.run(
+                prepare_assembly(
+                    config=config,
+                    kernel=kernel,
+                    driver=driver,
+                    sources=source_files_list,
+                    base_commit=campaign.base_commit,
+                    threshold=snr_threshold,
+                    deadline=deadline_unix - finalize_reserve_sec,
+                    resume=resume,
+                )
+            )
+            if not resume:
+                seed_source_baseline(iter_config, assembly_preparation)
+        except (ValueError, OSError, subprocess.SubprocessError, asyncio.TimeoutError) as error:
+            raise click.ClickException(f"assembly preparation failed; optimization was not started: {error}") from error
+        source_files_list = [str(workspace / assembly_preparation["assembly"])]
+        iter_config.source_files = source_files_list
+        iter_config.commit_new_paths = []
+        # A cached whole-implementation patch could replace the launcher preparation just verified.
+        kb_warmstart_enabled = False
+        program_md += (
+            "\n\nAssembly preparation is complete. Optimize only "
+            + source_files_list[0]
+            + ". The Python launcher, original reference, driver, ABI and specialization are frozen."
+        )
+
     # Construct the loop only after task preparation has resolved the profiling contract; IterationLoop snapshots that
     # readiness in its runtime state.
     loop_runner = IterationLoop(iter_config, tracker, config, resume=resume)
@@ -1387,7 +1515,6 @@ def forge_loop(
                 source_files=source_files_list,
                 operator_name=operator_name,
                 bench_repeat=bench_repeat,
-                canonical_timeout_cap_sec=(iter_config.validate_stage_timeout_sec),
             )
         except WarmStartRollbackError as error:
             failure = click.ClickException(f"warm-start rollback failed; workspace may be inconsistent: {error}")
@@ -1432,7 +1559,7 @@ def forge_loop(
                     "  [warm-start] published recoverable best before iteration 1",
                     flush=True,
                 )
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - translated into a rollback below
                 try:
                     rollback_unpublished_warm_start(
                         workspace_dir,
@@ -1620,6 +1747,7 @@ def forge_loop(
         target_functions=target_functions_list,
         profiling_enabled=profiling_enabled,
         agent_backend=selected_runtime.provider,
+        commit_new_paths=iter_config.commit_new_paths,
         usage=usage,
     )
     effective_implementer = getattr(
@@ -1658,6 +1786,7 @@ def forge_loop(
             "bench_repeat": bench_repeat,
             "permission_mode": permission_mode,
             "task_type": task_type,
+            "commit_new_paths": iter_config.commit_new_paths,
             # Function names, not paths: nothing to rebind onto a lane.
             "target_functions": target_functions_list,
             "agent_backend": selected_runtime.provider,
@@ -1722,7 +1851,11 @@ def forge_loop(
         search_start_ms = getattr(loop_runner.ic, "warm_start_wall_ms", None) or getattr(
             loop_runner.ic, "baseline_wall_ms", None
         )
-        search_start_mean_case_speedup = getattr(loop_runner.ic, "warm_start_mean_case_speedup", None) or 1.0
+        search_start_mean_case_speedup = (
+            getattr(loop_runner.ic, "warm_start_mean_case_speedup", None)
+            or getattr(loop_runner, "search_start_mean_case_speedup", None)
+            or 1.0
+        )
         pristine_ms = (
             getattr(loop_runner.ic, "pristine_baseline_wall_ms", None)
             or getattr(loop_runner.ic, "publication_baseline_wall_ms", None)
@@ -1742,11 +1875,8 @@ def forge_loop(
         best_commit = getattr(state_best, "commit_hash", "")
         # A validated warm-start is published before IterationLoop creates a run-state best.
         if not best_commit:
-            try:
-                published = json.loads((campaign_root / "best_result.json").read_text())
-            except Exception:
-                published = {}
-            if published.get("correctness_passed") is True and int(published.get("iteration", -1)) == 0:
+            published = load_published_best(workspace_dir) or {}
+            if int(published.get("iteration", -1)) == 0:
                 pristine_ms = published.get("pristine_baseline_ms") or published.get("baseline_wall_ms") or pristine_ms
                 search_start_ms = published.get("search_start_ms") or published.get("best_wall_ms") or search_start_ms
                 best = published.get("best_wall_ms")
@@ -1803,15 +1933,18 @@ def forge_loop(
             "agent_model": effective_implementer_model,
             "llm_usage": getattr(loop_runner, "llm_usage", {}) or {},
         }
+        if assembly_preparation is not None:
+            from kernelforge.assembly.prepare import select_result
+
+            select_result(result, assembly_preparation)
         if exp_id:
             try:
                 completed_experiment = tracker.get(exp_id)
-                result["iteration_count"] = len(completed_experiment.iterations)
-                result["checkpoint"] = completed_experiment.checkpoint
-            except Exception:
-                # Tracker metadata is optional on incomplete runs; final result emission must remain available so
-                # callers can reject it cleanly.
-                pass
+            except FileNotFoundError:
+                # An incomplete run has no tracker record; the result must still be emitted so callers can reject it.
+                return result
+            result["iteration_count"] = len(completed_experiment.iterations)
+            result["checkpoint"] = completed_experiment.checkpoint
         return result
 
     def _write_result_json(result: dict) -> None:
@@ -1831,6 +1964,8 @@ def forge_loop(
         snr_db_override: float | None = None,
     ) -> dict:
         """Publish the current durable best idempotently within this process."""
+        if assembly_preparation is not None and not _build_result(None)["improved"]:
+            return {"written": False, "reason": "no_assembly_source_win"}
         if not experience_kb:
             return {"written": False, "reason": "disabled"}
         if _warm_start_publication_covers(remote_publication, commit):
@@ -1908,7 +2043,11 @@ def forge_loop(
         search_start_ms = getattr(loop_runner.ic, "warm_start_wall_ms", None) or getattr(
             loop_runner.ic, "baseline_wall_ms", None
         )
-        search_start_mean_case_speedup = getattr(loop_runner.ic, "warm_start_mean_case_speedup", None) or 1.0
+        search_start_mean_case_speedup = (
+            getattr(loop_runner.ic, "warm_start_mean_case_speedup", None)
+            or getattr(loop_runner, "search_start_mean_case_speedup", None)
+            or 1.0
+        )
         baseline_ms = (
             getattr(loop_runner.ic, "pristine_baseline_wall_ms", None)
             or getattr(loop_runner.ic, "publication_baseline_wall_ms", None)
@@ -2003,14 +2142,14 @@ def forge_loop(
         try:
             if loop_runner.llm_usage.get("calls"):
                 tracker.set_llm_usage(experiment_id, loop_runner.llm_usage)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - usage accounting must not fail the run
             click.echo(
                 f"Warning: failed to record LLM usage for experiment {experiment_id}: {exc}",
                 err=True,
             )
         try:
             tracker.set_kb_experience(experiment_id, kb_experience)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - KB accounting must not fail the run
             click.echo(
                 f"Warning: failed to record KB experience for experiment {experiment_id}: {exc}",
                 err=True,
@@ -2155,9 +2294,18 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
     show_default=True,
     help="Read and publish rewrite recipes.",
 )
-@click.option("--model", default=None, help="LLM model (overrides KERNEL_AGENTS_MODEL)")
+@click.option("--model", default=None, help="LLM model (overrides CLAUDE_MODEL / CODEX_MODEL)")
 @click.option("--permission-mode", default=None, help="Claude permission mode (default: acceptEdits)")
 @click.option("--max-port-attempts", default=3, type=int, help="Max correctness-only port sessions before giving up")
+@click.option(
+    "--applyback/--no-applyback",
+    default=True,
+    show_default=True,
+    help="Integrate the optimized kernel back into the framework repository and "
+    "publish the patch. Disable it to deliver only the standalone kernel: the "
+    "stage is skipped, its 20-minute reserve returns to the search, and the "
+    "run's success no longer depends on a patch the caller did not ask for.",
+)
 @click.option(
     "--max-applyback-attempts",
     default=2,
@@ -2224,6 +2372,7 @@ def forge_rewrite(
     model,
     permission_mode,
     max_port_attempts,
+    applyback,
     max_applyback_attempts,
     max_hours,
     deadline_unix,
@@ -2256,10 +2405,7 @@ def forge_rewrite(
     rewrite_kb_enabled = bool(rewrite_kb)
     # A disabled KB must not validate ambient remote credentials.
     try:
-        rewrite_knowledge_config = KnowledgeConfig.from_env(
-            mode="local" if not rewrite_kb_enabled else None,
-            remote_backend=REMOTE_BACKEND_KB_STORE,
-        )
+        rewrite_knowledge_config = KnowledgeConfig.from_env(mode="local" if not rewrite_kb_enabled else None)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     config = Config.from_env(
@@ -2306,6 +2452,7 @@ def forge_rewrite(
         invocation_spec_file=invocation_spec_file,
         applyback_import_modules=applyback_import_modules,
         max_applyback_attempts=max_applyback_attempts,
+        applyback_enabled=bool(applyback),
         rewrite_kb_enabled=rewrite_kb_enabled,
     )
     # The structured result and sentinel were already emitted for callers to parse.

@@ -25,6 +25,24 @@ def test_ensure_schema_creates_and_reports_version():
     conn.close()
 
 
+def test_ensure_schema_retires_a_priority_column_a_resumed_database_still_has():
+    """``CREATE TABLE IF NOT EXISTS`` leaves it behind, and NOT NULL would refuse every append."""
+    conn = _conn()
+    conn.execute(
+        "CREATE TABLE events ("
+        "seq INTEGER PRIMARY KEY AUTOINCREMENT, msg_id TEXT NOT NULL UNIQUE, "
+        "from_agent TEXT NOT NULL, to_agent TEXT NOT NULL, topic TEXT NOT NULL, "
+        "in_reply_to TEXT, payload TEXT NOT NULL, priority INTEGER NOT NULL, ts TEXT NOT NULL)"
+    )
+    schema.ensure_schema(conn)
+    conn.execute(
+        "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts) "
+        "VALUES ('m1', 'orchestration', '*', 'observation', NULL, '{}', 't')"
+    )
+    assert "priority" not in {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    conn.close()
+
+
 def test_get_lane_capacity_known_and_default():
     conn = _conn()
     schema.ensure_schema(conn)

@@ -30,6 +30,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
 )
 from hyperloom.common.perf_metric import graded_metric_key, is_agentx_mode
+from ..state.shared_state import SharedState
 from . import read_rules_fragment as _read_rules_fragment
 from .agentx_context import corpus_lines, grading_lines
 from .transport import TRANSPORTS, TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
@@ -61,7 +62,7 @@ _PHASE_HEADERS: dict[str, str] = {
 # Phases each scoped prompt module belongs to.
 _KERNEL_REQUEST_PHASES: frozenset[str] = frozenset({"KERNEL_AGENT"})
 _EXPLORE_GRID_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT"})
-_BASELINE_RECOVERY_PHASES: frozenset[str] = frozenset({"PRELUDE"})
+_BASELINE_RECOVERY_PHASES: frozenset[str] = frozenset({"PRELUDE", "ENABLEMENT"})
 
 # ``<!-- phase: A, B -->`` scopes the ``### `` heading that follows it.
 _PHASE_TAG_RE = re.compile(r"^<!--\s*phase:\s*(?P<phases>[A-Za-z_,\s]+?)\s*-->$")
@@ -236,9 +237,11 @@ def _section_phase_semantics(
             "of any action lands in your inbox as a `policy_denied` event.",
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
-            "are: `baseline_tput > 0` exits PRELUDE; the per-phase budget cap",
-            "or a terminal stop_reason exits FRAMEWORK_AGENT / KERNEL_AGENT /",
-            "SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
+            "are: `baseline_tput > 0` (+ revalidation settled + build drain)",
+            "exits ENABLEMENT; `baseline_tput > 0` exits PRELUDE; the per-phase",
+            "budget cap or a terminal stop_reason exits FRAMEWORK_AGENT /",
+            "KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes",
+            "to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
             "'skip_to_kernel' | 'skip_to_sweep'}` directly when you judge the",
             "current phase exhausted; the Coordinator validates the hint vocab",
@@ -246,8 +249,8 @@ def _section_phase_semantics(
             "in that set — see the exception below for when it applies.",
             "`skip_to_close` is reserved, in EVERY phase, for genuine early",
             "abandonment (e.g. infra is dead and the sweep cannot run at all):",
-            "it stamps `robustness_escalated`, so emitting it on a normal finish",
-            "mislabels the run. Running low on budget is not abandonment — the",
+            "it closes the run instead of advancing a phase. Running low on",
+            "budget is not abandonment — the",
             "Coordinator prices the remaining budget itself and exits with an",
             "honest terminal stop_reason (`sweep_done` / `global_converged` /",
             "`time_exhausted`) once a further cycle cannot be funded.",
@@ -567,6 +570,20 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
     Returns:
         list[str]: Markdown lines for the decision framework.
     """
+    from ..phases.machine_state import allowed_actions_for
+
+    # An empty phase renders every phase-scoped block, so it keeps the proposal form.
+    phase_key = (phase or "").strip().upper()
+    if not phase_key or "baseline" in allowed_actions_for(phase_key):
+        measure_lines = [
+            "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
+            "   delegated_result; do NOT re-baseline on a positive result with warnings.",
+        ]
+    else:
+        measure_lines = [
+            "2. **Measure**: `baseline` is Coordinator-dispatched in this phase, so do",
+            "   not propose it; `baseline_tput` is set when that run promotes.",
+        ]
     lines = [
         "## 5. DECISION FRAMEWORK (heuristics + facts — the next action is your call)",
         "",
@@ -575,8 +592,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
         "",
         "1. **Stop**: if `stop_reason` is set OR `cumulative_gain_validated >= target_gain_pct`,",
         "   propose `report` once (if not already done) then send an observation 'goal-reached'.",
-        "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
-        "   delegated_result; do NOT re-baseline on a positive result with warnings.",
+        *measure_lines,
         "3. **Stack-aware grids**: route every grid attempt through",
         "   ``delegate{action_name='explore', params={grid: [...] }}``;",
         "   there is no standalone validation step (see Hard rules).",
@@ -632,8 +648,8 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   phase advance -- see PHASE CONTRACT before emitting it.",
             "",
             "If you cannot move forward, emit",
-            "`send_message{topic='observation', body_md='blocked: <reason>'}` and let",
-            "Robustness escalate. NEVER stay silent.",
+            "`send_message{topic='observation', body_md='blocked: <reason>'}`.",
+            "NEVER stay silent.",
         ]
     )
     lines.extend(_failure_recovery_lines(phase=phase, transport=transport))
@@ -692,8 +708,8 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
     lines.extend(
         [
             "* **RULE F3** — repeated `error_class='subprocess_nonzero'` on `baseline`"
-            " → stop retrying baseline; send observation 'blocked: …' and let Robustness"
-            " intervene. Explore variants may be re-proposed; read the failure log first.",
+            " → stop retrying baseline; send observation 'blocked: …'."
+            " Explore variants may be re-proposed; read the failure log first.",
             "* **RULE F4** — `policy_denial_streak` is information only."
             " Change something substantive; re-emitting the identical intent wastes a tick.",
         ]
@@ -713,19 +729,19 @@ def _idea_generation_lines() -> list[str]:
         "### IDEA GENERATION (apply after EVERY explore round)",
         "",
         "Compose the next `explore` grid from `explore_search` (winners +",
-        "rejected, each with `±x.xx% gain_pct`) and `discovered_flags`:",
+        "rejected, each with `±x.xx% gain_pct`):",
         "",
         "1. **Sibling values** — if `--max-num-seqs 256` won, try 128 / 512;",
         "   sweep a winning boolean's related `*_AITER_*` family.",
-        "2. **Synergy** — combine last round's winners via",
-        "   `synergy_mode='auto'` (deduped against `synergy_attempted`).",
+        "2. **Synergy** — combine last round's winners into one variant. Check",
+        "   `explore_search.winners_history` / `.rejected` first: a combination",
+        "   already measured there carries its result, so re-running it buys a",
+        "   number you already have.",
         "3. **Re-examine rejects** — per `explore_search.rejected` variant, judge",
         "   whether the failure is stale, fixable, or ruled out; re-propose the",
         "   same config to revalidate or change the value (a `-2%` reject is a",
         "   dead flag; `-0.3%` may clear the bar once patched).",
-        "4. **Mine flags** — when winners are empty, pull untested boolean",
-        "   toggles from `discovered_flags.<framework>.backend_flags`.",
-        "5. **Ablate harmful base config** — when a user/base flag or env may",
+        "4. **Ablate harmful base config** — when a user/base flag or env may",
         "   be slowing the workload, emit a variant with `remove_args` and/or",
         "   `unset_envs` instead of only adding more knobs.",
         "",
@@ -739,7 +755,7 @@ def _idea_generation_lines() -> list[str]:
         "(hard maximum 6) once the queue is drained of anything worth running.",
         "",
         "An explore round that produces zero new ideas is a bug — send an observation",
-        "with body_md='idea-pipeline-empty' so Robustness can intervene.",
+        "with body_md='idea-pipeline-empty' and explain which search directions are exhausted.",
     ]
 
 
@@ -874,7 +890,22 @@ def _section_rules(rules_md: str, *, phase: str = "", transport: str = "") -> li
     body = _filter_rules_fragment(rules_md, phase=phase, transport=transport) or (
         "(orchestration.md rules fragment not found — Coordinator will still enforce PolicyGate hard rules at runtime.)"
     )
-    return ["## 7. RULES & OUTPUT PROTOCOL", "", body]
+    update_fields = [f"- `{name}`: `{expected.__name__}`" for name, expected in SharedState.AGENT_UPDATE_FIELDS.items()]
+    return [
+        "## 7. RULES & OUTPUT PROTOCOL",
+        "",
+        body,
+        "",
+        "### UPDATE_STATE",
+        "",
+        "`update_state.payload.changes` must be a non-empty object. Only these fields are agent-writable:",
+        *update_fields,
+        "A Coordinator-owned core field refuses the whole intent before anything is written. Every other",
+        "key -- a non-core field outside the list above, a wrong value type, an unknown name -- is dropped",
+        "on its own, and the rest of that same update still applies. The observation reports what was",
+        "written in `changes` and every dropped key in `rejected`; re-sending a key from `changes` would",
+        "repeat a write that already landed.",
+    ]
 
 
 def _section_cycle_directive(*, macro_cycle: int = 0, cycle_directive: str = "") -> list[str]:
@@ -918,20 +949,35 @@ def _section_cycle_directive(*, macro_cycle: int = 0, cycle_directive: str = "")
 
 
 _WHEN_TAG_RE = re.compile(r"^<!--\s*when:\s*(?P<when>.+?)\s*-->$")
+# Reference docs surfaced only on AgentX runs. Gated here (keyed on the session's
+# benchmark_mode, i.e. HYPERLOOM_AGENTX) rather than by an orchestration.md rule,
+# so a synthetic run never lists a doc it should not act on.
+_AGENTX_ONLY_REFERENCES: frozenset[str] = frozenset({"speculative_decoding"})
 
 
-def _section_reference_index(*, references_dir: Path, phase: str = "") -> list[str]:
+def _section_reference_index(
+    *,
+    references_dir: Path,
+    phase: str = "",
+    benchmark_mode: str = "",
+) -> list[str]:
     """Build ``## 8.`` from the reference docs that apply to *phase*.
 
     Args:
         references_dir: Directory containing the reference markdown files.
         phase: Normalised current pipeline phase; ``""`` includes all entries.
+        benchmark_mode: The session's benchmark mode (i.e. HYPERLOOM_AGENTX);
+            docs in :data:`_AGENTX_ONLY_REFERENCES` are listed only when it names
+            the AgentX workload. ``""`` (unscoped) still lists every doc.
 
     Returns:
         Markdown lines, or ``[]`` when the directory is absent or empty.
     """
     if not references_dir.is_dir():
         return []
+    # Only filter AgentX-only docs when a concrete mode is set; unscoped renders all.
+    mode_set = bool(str(benchmark_mode or "").strip())
+    agentx = is_agentx_mode(benchmark_mode)
     entries: list[tuple[str, str]] = []
     for path in sorted(references_dir.glob("*.md")):
         when_text = ""
@@ -950,6 +996,8 @@ def _section_reference_index(*, references_dir: Path, phase: str = "") -> list[s
                 continue
             break
         if file_phases and not _renders_in(phase, file_phases):
+            continue
+        if path.stem in _AGENTX_ONLY_REFERENCES and mode_set and not agentx:
             continue
         entries.append((path.stem, when_text or "see document"))
     if not entries:
@@ -1084,7 +1132,11 @@ def build_orchestration_prompt(
     # The reference index is an index of documents ``read_reference`` pulls;
     # without that tool it is a list the model cannot act on.
     if transport != TRANSPORT_STRUCTURED_OUTPUT:
-        ref_index = _section_reference_index(references_dir=references_dir, phase=phase_norm)
+        ref_index = _section_reference_index(
+            references_dir=references_dir,
+            phase=phase_norm,
+            benchmark_mode=benchmark_mode,
+        )
         if ref_index:
             sections.append(ref_index)
     sections.append(_section_rules(rules_md, phase=phase_norm, transport=transport))

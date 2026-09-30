@@ -22,6 +22,7 @@ import re
 import subprocess
 import sys
 import uuid
+import zlib
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from collections.abc import Callable
@@ -29,21 +30,23 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from hyperloom.inference_optimizer import framework_registry
+
 try:
-    from hyperloom.orchestrator.framework.paths import (
+    from hyperloom.inference_optimizer.framework_paths import (
         resolve_flydsl_source_roots as _resolve_flydsl_source_roots,
     )
 except ImportError:
     _resolve_flydsl_source_roots = None
 
 try:
-    from hyperloom.orchestrator.framework.paths import (
+    from hyperloom.inference_optimizer.framework_paths import (
         FRAMEWORK_SOURCE_PACKAGES as _FRAMEWORK_SOURCE_PACKAGES,
     )
-    from hyperloom.orchestrator.framework.paths import (
+    from hyperloom.inference_optimizer.framework_paths import (
         resolve_kernel_search_roots as _resolve_kernel_search_roots,
     )
-    from hyperloom.orchestrator.framework.paths import (
+    from hyperloom.inference_optimizer.framework_paths import (
         resolve_known_source_prefixes as _resolve_known_source_prefixes,
     )
 except ImportError:
@@ -67,7 +70,7 @@ from _task_group_contract import _strip_dispatch_decoration
 
 try:
     import aiter.jit.core as _aiter_jit_core  # type: ignore[import-untyped]
-except Exception:
+except ImportError:
     _aiter_jit_core = None
 
 from tracelens_arch_benchmark import normalize_platform, populate_gpu_arch_json
@@ -149,6 +152,13 @@ try:
         _KSC = None  # type: ignore[assignment]
 except ImportError:  # pragma: no cover - standalone invocation
     _KSC = None  # type: ignore[assignment]
+
+try:
+    from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
+except ImportError:  # pragma: no cover - standalone invocation
+    # Without the board table there is no arch to name, which is the same
+    # outcome this tool already produces for an unrecognised platform.
+    gfx_arch_for_gpu_type = lambda _gpu_type: None  # noqa: E731
 
 try:
     from hyperloom.common.kernel_shape_contract import (
@@ -331,13 +341,11 @@ ARCH_BENCHMARK_TIMEOUT_FLOOR_S = 600
 def _is_safe_litellm_gateway() -> bool:
     """True when the Claude SDK targets a strict LiteLLM-style gateway (#574).
 
-    ``LLM_GATEWAY_KEY`` is an explicit gateway signal and wins on its own; a
-    deployment may front the gateway on a hostname with no protocol marker.
-    Otherwise detected via the SDK's ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL``
-    host; other backends are left alone.
+    Detected via the SDK's ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL`` host;
+    other backends are left alone. A deployment fronting the gateway on a
+    hostname with no protocol marker names it in
+    ``HYPERLOOM_STRICT_GATEWAY_MARKERS``.
     """
-    if os.environ.get("LLM_GATEWAY_KEY", "").strip():
-        return True
     base_url = (os.environ.get("ANTHROPIC_BASE_URL", "") or os.environ.get("OPENAI_BASE_URL", "")).lower()
     # Generic protocol markers by default (no operator/brand strings shipped);
     # a specific deployment can add its own gateway host substrings via
@@ -1009,6 +1017,10 @@ def open_json(path: Path) -> dict[str, Any]:
         return json.load(fh)
 
 
+#: What :func:`open_json` raises on a missing, truncated, or corrupt (possibly gzipped) trace.
+UNREADABLE_TRACE_ERRORS: tuple[type[Exception], ...] = (OSError, EOFError, ValueError, zlib.error)
+
+
 def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> int:
     """Count GPU kernel events in a torch_profiler trace.
 
@@ -1024,7 +1036,7 @@ def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> in
     """
     try:
         payload = open_json(trace_file)
-    except Exception:
+    except UNREADABLE_TRACE_ERRORS:
         return 0
     events = payload.get("traceEvents") if isinstance(payload, dict) else None
     if not isinstance(events, list):
@@ -1549,7 +1561,7 @@ def _count_kernels_if_readable(path: Path) -> tuple[bool, int]:
         return True, count
     try:
         payload = open_json(path)
-    except Exception:  # noqa: BLE001 - unreadable is a distinct answer, not a crash
+    except UNREADABLE_TRACE_ERRORS:
         return False, 0
     if not isinstance(payload, dict) or not isinstance(payload.get("traceEvents"), list):
         return False, 0
@@ -2134,7 +2146,7 @@ def is_vendor_dispatch_wrapper(name: str, source_file: str) -> bool:
         if p.stat().st_size > 16 * 1024:
             return False
         text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    except OSError:
         return False
     return any(sig in text for sig in _VENDOR_DISPATCH_SIGS)
 
@@ -2460,7 +2472,7 @@ def _grep_for_keyword(keyword: str, root: Path) -> list[Path]:
     ]
     try:
         proc = subprocess.run(cmd, text=True, capture_output=True, timeout=15)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         _GREP_CACHE[cache_key] = []
         return []
     if proc.returncode not in (0, 1):
@@ -3315,7 +3327,7 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
                     capture_output=True,
                     timeout=15,
                 )
-            except Exception:
+            except (OSError, subprocess.SubprocessError):
                 continue
             if proc.returncode not in (0, 1):
                 continue
@@ -3391,7 +3403,7 @@ def _is_pybind_shim(source_file: str) -> bool:
         if p.stat().st_size > 2048:
             return False
         text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    except OSError:
         return False
     return "PYBIND11_MODULE" in text or "pybind11" in text
 
@@ -3447,7 +3459,7 @@ def upgrade_pybind_shim_source(source_file: str, kernel_name: str, kernel_repo: 
                     if sym in f.read_text(encoding="utf-8", errors="replace"):
                         if f.stat().st_size > 2048:
                             return str(f)
-                except Exception:
+                except OSError:
                     continue
     return source_file
 
@@ -3703,7 +3715,7 @@ def analyze_trace_files(
     for trace_file in trace_files:
         try:
             payload = open_json(trace_file)
-        except Exception:
+        except ValueError:
             continue
 
         if isinstance(payload.get("kernels"), list):
@@ -4809,8 +4821,8 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
         item["patch_strategy"] = "vendor_playbook"
         item["vendor_operator_playbook"] = playbook
         item["vendor_playbook_role"] = playbook.get("role", "")
-        # kernel_optimization.py's CLI gates on a non-empty, path-shaped
-        # source_file before it will dispatch to any backend; a vendor
+        # Coordinator kernel handlers gate dispatch on a non-empty, path-shaped
+        # source_file before they will send work to any backend; a vendor
         # playbook candidate has no rewritable device source, so point that
         # field at the task bundle's anchor file instead of leaving it
         # empty (which would otherwise fall through as "missing_native_source").
@@ -4888,7 +4900,7 @@ def _runtime_server_args_from_config(config_path: str) -> str:
     if not str(config_path or "").strip():
         return ""
     try:
-        import yaml  # type: ignore[import-untyped]  # noqa: PLC0415
+        import yaml  # type: ignore[import-untyped]
 
         payload = yaml.safe_load(Path(config_path).expanduser().read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001 - runtime context is advisory
@@ -5028,7 +5040,7 @@ def _resolve_trace_launchers(
     if not wanted:
         return {}
     try:
-        from _trace_launcher_resolver import resolve_launchers_from_trace  # noqa: PLC0415
+        from _trace_launcher_resolver import resolve_launchers_from_trace
 
         file_errors: list[str] = []
         found = resolve_launchers_from_trace(
@@ -5524,60 +5536,6 @@ def build_notes(candidate: dict[str, Any]) -> str:
     return f"resolved source: {candidate['source_file']}"
 
 
-#: Mirrors of the registry, used only when that package is not importable
-#: (standalone invocation). Kept identical to the bypass route's copies; tests
-#: assert every one of them against the registry.
-_STANDALONE_SCRIPTABLE = frozenset({"xdit", "custom"})
-_STANDALONE_DENOISER_CONFIG = frozenset({"xdit"})
-
-
-def _is_scriptable_framework(framework: str | None) -> bool:
-    """Return whether ``framework`` is a server-less scriptable image framework.
-
-    Scriptable frameworks (e.g. xDiT diffusion) have no LLM decode steady-state
-    phase, so trace analysis uses the plain pytorch perf report + skips the
-    steady-state splitter. Prefers the canonical ``framework_registry``; falls
-    back to a name check so the tool stays usable when run standalone (outside
-    an importable ``inference_optimizer`` package).
-
-    Args:
-        framework: Framework name (matched case-insensitively).
-
-    Returns:
-        bool: ``True`` for scriptable image frameworks.
-    """
-    try:
-        from hyperloom.inference_optimizer.framework_registry import is_scriptable
-
-        return is_scriptable(framework)
-    except ImportError:  # standalone invocation without the package installed.
-        return str(framework or "").strip().lower() in _STANDALONE_SCRIPTABLE
-
-
-def _has_diffusion_ceiling(framework: str | None) -> bool:
-    """Return whether an analytic diffusion ceiling is meaningful for ``framework``.
-
-    Scriptable does not imply diffusion: ``custom`` runs an operator-supplied
-    entrypoint whose model Hyperloom never inspects, so the config-derived
-    geometry the ceiling needs cannot be resolved, and a guessed one is worse
-    than none. Read from the registry rather than matched against a name, so the
-    next framework is classified when it is added rather than when someone
-    remembers this call site.
-
-    Args:
-        framework: Framework name (matched case-insensitively).
-
-    Returns:
-        bool: ``True`` for frameworks shipping a readable denoiser config.
-    """
-    try:
-        from hyperloom.inference_optimizer.framework_registry import has_denoiser_config
-
-        return has_denoiser_config(framework)
-    except ImportError:  # standalone invocation without the package installed.
-        return str(framework or "").strip().lower() in _STANDALONE_DENOISER_CONFIG
-
-
 def _load_gpu_timeline_rows(output_dir: Path) -> list[dict[str, str]]:
     """Read all rows from ``perf_report_csvs/gpu_timeline.csv``, empty if absent."""
     csv_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
@@ -5685,7 +5643,7 @@ def run_command(
 # Defaults kept in sync with src/hyperloom/agents/kernel/scripts/install.sh (TRACELENS_REPO /
 # TRACELENS_REF). Overridable via env so a run can pin its own SHA.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
-_TRACELENS_REF_DEFAULT = "384c362cb0e174ddf4e533e67ae74df30a849dc6"
+_TRACELENS_REF_DEFAULT = "e34b29496936dc8af27c1269138878f1d4b414b3"
 
 
 def _default_tracelens_root() -> Path:
@@ -5853,7 +5811,7 @@ def _import_roofline_csv() -> "Any | None":
     leaf, so importing it is cheap and safe.
     """
     try:
-        from hyperloom.orchestrator.kernel import roofline_csv as _rc
+        from hyperloom.inference_optimizer import roofline_csv as _rc
 
         return _rc
     except ImportError:
@@ -5861,7 +5819,7 @@ def _import_roofline_csv() -> "Any | None":
         if src_root not in sys.path:
             sys.path.insert(0, src_root)
         try:
-            from hyperloom.orchestrator.kernel import roofline_csv as _rc
+            from hyperloom.inference_optimizer import roofline_csv as _rc
 
             return _rc
         except ImportError:
@@ -6287,7 +6245,7 @@ def _candidate_model_config_paths(model_name: str) -> list[Path]:
         _hit = try_to_load_from_cache(repo_id=text, filename="config.json")
         if isinstance(_hit, str):
             candidates.append(Path(_hit))
-    except Exception:
+    except Exception:  # noqa: BLE001 - hub cache probe is optional
         pass
     out: list[Path] = []
     seen: set[str] = set()
@@ -6315,7 +6273,7 @@ def load_model_kernel_params(model_name: str) -> dict[str, Any]:
             continue
         try:
             cfg = json.loads(config_path.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, ValueError):
             continue
         params: dict[str, Any] = {
             "MODEL_CONFIG_PATH": str(config_path),
@@ -6343,12 +6301,6 @@ def load_model_kernel_params(model_name: str) -> dict[str, Any]:
     return {}
 
 
-_FLYDSL_TARGET_ARCH_BY_PLATFORM = {
-    "mi300x": "gfx942",
-    "mi308x": "gfx942",
-    "mi325x": "gfx942",
-    "mi355x": "gfx950",
-}
 _FLYDSL_SMEM_MARKERS = ("SmemAllocator", "SmemPtr", "smem_alloc")
 _FLYDSL_BUFFER_LOAD_MARKERS = (
     "make_buffer_tensor",
@@ -6400,9 +6352,7 @@ def _flydsl_kernel_params(
         The FlyDSL kernel-params dict (possibly partial).
     """
     params: dict[str, Any] = {}
-    arch = _FLYDSL_TARGET_ARCH_BY_PLATFORM.get(
-        (target_platform or "").strip().lower(),
-    )
+    arch = gfx_arch_for_gpu_type(target_platform)
     if arch:
         params["FLYDSL_TARGET_ARCH"] = arch
     cache_dir = os.environ.get("FLYDSL_AUTOTUNE_CACHE_DIR", "").strip()
@@ -6880,7 +6830,7 @@ def write_reports(
     # roofline into an end-to-end workload roofline. Best-effort sidecar; never
     # blocks the per-kernel report.
     diffusion_roofline_path = ""
-    if _is_scriptable_framework(getattr(args, "framework", "")):
+    if framework_registry.is_scriptable(getattr(args, "framework", "")):
         try:
             tools_dir = str(Path(__file__).resolve().parent)
             if tools_dir not in sys.path:
@@ -6903,7 +6853,7 @@ def write_reports(
             # giving the workload roofline an absolute ideal-ms floor. Best-effort,
             # and only for frameworks whose denoiser config Hyperloom can read --
             # the trace-derived totals above need no such config and always ship.
-            if _has_diffusion_ceiling(getattr(args, "framework", "")):
+            if framework_registry.has_denoiser_config(getattr(args, "framework", "")):
                 try:
                     _model_dir = str(getattr(args, "model_path", "") or "").strip()
                     if not _model_dir:
@@ -6985,6 +6935,28 @@ def _default_workspace_path() -> str:
     # Neither env set: route through the shared helper so the one-shot
     # "USER_DATA_PATH unset" warning fires.
     return workspace_root()
+
+
+def _trajectory_scope(args: argparse.Namespace) -> contextlib.AbstractContextManager[Any]:
+    """Scope the SDK run to the launching session's trajectory ledger, when the launcher named one.
+
+    ``asyncio.run`` copies the calling context into its main task, so the scope reaches the run's coroutine.
+    """
+    if not args.trajectory_session_dir:
+        return contextlib.nullcontext()
+    try:
+        from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
+    except ImportError:  # pragma: no cover - an installed hyperloom predating the ledger
+        return contextlib.nullcontext()
+    return trajectory_scope(
+        session_dir=Path(args.trajectory_session_dir),
+        component="tracelens",
+        agent="tracelens",
+        phase=args.trajectory_phase or None,
+        tick=args.trajectory_tick,
+        task_id=args.trajectory_task_id or None,
+        parent_span_id=args.trajectory_parent_span_id or None,
+    )
 
 
 def main() -> int:
@@ -7130,6 +7102,12 @@ def main() -> int:
         ),
     )
     parser.add_argument("--budget-minutes", type=float, default=60.0)
+    # Join keys of the launching Hyperloom session's trajectory ledger; unset outside a session.
+    parser.add_argument("--trajectory-session-dir", default="")
+    parser.add_argument("--trajectory-phase", default="")
+    parser.add_argument("--trajectory-tick", type=int, default=None)
+    parser.add_argument("--trajectory-task-id", default="")
+    parser.add_argument("--trajectory-parent-span-id", default="")
     parser.add_argument("--dry-run", action="store_true")
     default_llm_orchestrator = os.environ.get(
         "KERNEL_AGENT_USE_LLM_ORCHESTRATOR",
@@ -7171,8 +7149,7 @@ def main() -> int:
         default=int(os.environ.get("TRACELENS_SPLIT_NUM_STEPS", "32") or 32),
         help=(
             "Number of steady-state iterations for the splitter to extract "
-            "(#127). Maps to --num-steps on TraceLens.TraceUtils."
-            "split_inference_trace_annotation."
+            "(#127). Maps to --num-steps on TraceLens.TraceUtils.split_trace.main."
         ),
     )
     parser.add_argument(
@@ -7190,7 +7167,7 @@ def main() -> int:
         default=(os.environ.get("TRACELENS_SPLIT_R", "") or os.environ.get("RANDOM_RANGE_RATIO", "")),
         help=(
             "OSL window ratio R for the splitter (#194 §3). Maps to "
-            "--R on TraceLens.TraceUtils.split_inference_trace_annotation. "
+            "--R on TraceLens.TraceUtils.split_trace.main. "
             "Pairs with --CONC / --OSL so mixed-window selection uses the "
             "benchmark-contract PD ratio instead of an empirical default. "
             "Defaults to $RANDOM_RANGE_RATIO when set; leave empty to let "
@@ -7504,7 +7481,7 @@ def main() -> int:
             update_status(
                 status_path,
                 state="running",
-                current_step="install_tracelens",
+                current_step="check_tracelens_dependencies",
                 log_path=log_path,
                 artifact_paths=artifacts,
                 run_id=run_id,
@@ -7550,12 +7527,22 @@ def main() -> int:
                     "TraceLens-internal: not provided (open-source-only; set TRACELENS_INTERNAL_ROOT to enable)",
                 )
                 os.environ.pop("TL_EXTENSION", None)
-            run_command(
-                [sys.executable, "-m", "pip", "install", "-e", "."],
+            dependency_rc = run_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import TraceLens; import TraceLens.TraceUtils.split_trace.main",
+                ],
                 cwd=tl_root,
                 log_path=log_path,
                 timeout_s=max(60, int(args.budget_minutes * 60)),
             )
+            if dependency_rc != 0:
+                raise RuntimeError(
+                    f"tracelens_dependency_error: TraceLens/splitter import failed in {sys.executable} "
+                    f"(exit {dependency_rc}); install TraceLens dependencies in this interpreter before analysis. "
+                    f"See {log_path} for subprocess output."
+                )
             # Read and follow the analysis-orchestrator skill entry point.
             skill = tl_root / "TraceLens/Agent/Analysis/skills/analysis-orchestrator/SKILL.md"
             if not skill.exists():
@@ -7697,7 +7684,7 @@ def main() -> int:
                 split_cmd = [
                     sys.executable,
                     "-m",
-                    "TraceLens.TraceUtils.split_inference_trace_annotation",
+                    "TraceLens.TraceUtils.split_trace.main",
                     str(split_input_path),
                     "-o",
                     str(split_dir),
@@ -7733,6 +7720,12 @@ def main() -> int:
                     log_path=log_path,
                     timeout_s=max(60, int(args.budget_minutes * 60)),
                 )
+
+                if split_rc != 0:
+                    raise RuntimeError(
+                        f"trace_split_failed: TraceLens splitter exited with code {split_rc}; "
+                        f"see {log_path} for subprocess output."
+                    )
 
                 # The three chunks are parallel views; the consumer picks ONE via
                 # --steady-state-mode and we hard-fail when it is missing/empty.
@@ -7985,22 +7978,23 @@ def main() -> int:
                     started_at=started_at,
                 )
                 try:
-                    skill_result = asyncio.run(
-                        run_tracelens_skill(
-                            skill_path=skill,
-                            trace_path=cli_trace_path,
-                            output_dir=tracelens_dir,
-                            tracelens_root=tl_root,
-                            tracelens_internal_root=tl_internal_root,
-                            platform=args.target_platform,
-                            framework=args.framework,
-                            analysis_mode=args.analysis_mode,
-                            capture_folder=capture_folder,
-                            budget_minutes=args.budget_minutes,
-                            model=_resolve_tracelens_model(),
-                            log=lambda msg: append_log(log_path, msg),
+                    with _trajectory_scope(args):
+                        skill_result = asyncio.run(
+                            run_tracelens_skill(
+                                skill_path=skill,
+                                trace_path=cli_trace_path,
+                                output_dir=tracelens_dir,
+                                tracelens_root=tl_root,
+                                tracelens_internal_root=tl_internal_root,
+                                platform=args.target_platform,
+                                framework=args.framework,
+                                analysis_mode=args.analysis_mode,
+                                capture_folder=capture_folder,
+                                budget_minutes=args.budget_minutes,
+                                model=_resolve_tracelens_model(),
+                                log=lambda msg: append_log(log_path, msg),
+                            )
                         )
-                    )
                     artifacts.update(skill_result.artifact_paths)
                     agent_report_path = skill_result.report_path
                     orchestrator_mode = skill_result.runner
@@ -8309,7 +8303,7 @@ def main() -> int:
         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - top-level barrier; logged and reported
         append_log(log_path, f"[error] {type(exc).__name__}: {exc}")
         update_status(
             status_path,

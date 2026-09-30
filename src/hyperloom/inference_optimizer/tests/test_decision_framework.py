@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -29,7 +30,6 @@ def _silent_backends() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="o"),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
 
 
@@ -42,10 +42,10 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     # Stub the interpreter resolver to avoid a real Magpie import probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
-    from hyperloom.orchestrator.actions.executors import _grid_runner
+    from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
 
     monkeypatch.setattr(
-        _grid_runner,
+        _benchmark_interpreter,
         "_resolve_magpie_python",
         lambda: "/usr/bin/python3",
     )
@@ -191,7 +191,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
             lambda _self, _env_var, env_value: env_value,
         )
 
-        await c._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
+        await c._run_kernel_agent(SimpleNamespace(task=SimpleNamespace(params={"from_phase": "FRAMEWORK_AGENT"})))
 
         assert calls
         assert c.shared_state.gemm_tuning_attempts

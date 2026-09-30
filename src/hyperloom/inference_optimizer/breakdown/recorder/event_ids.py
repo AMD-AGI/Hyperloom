@@ -11,6 +11,7 @@ from typing import NamedTuple
 __all__ = [
     "EVENT_ID_SEGMENTS",
     "EVENT_ID_SEPARATOR",
+    "INLINE_EVENT_PARAM",
     "EventId",
     "event_id",
     "fragment_key",
@@ -22,6 +23,19 @@ EVENT_ID_SEPARATOR = ":"
 
 #: How many segments an event id has, for callers validating one they parsed.
 EVENT_ID_SEGMENTS = 3
+
+#: Task param naming the event an inline measurement's rows belong to. A phase
+#: that owns a timeline event puts its event id here when it dispatches a
+#: measurement that is a sub-step of that event, and that one string is the
+#: whole of the difference between the inline and standalone modes: with it the
+#: rows join the enclosing event, which lifts them into its own ``ext``, and
+#: without it the measurement leaves an event of its own.
+#:
+#: It is a param the caller sets rather than something the executor infers,
+#: because whether a run is a sub-step is a property of the caller and nothing
+#: on the task says it: these arrive as tasks indistinguishable from a
+#: dispatched one.
+INLINE_EVENT_PARAM = "sbd_event_id"
 
 # Author-time tokens: phase names, component names, row-type names.
 _TOKEN = re.compile(r"^[a-z0-9][a-z0-9_]*$")
@@ -36,7 +50,13 @@ class EventId(NamedTuple):
 
 
 def _token(value: str, *, label: str) -> str:
-    """Normalize and validate one author-time id segment."""
+    """Normalize and validate one author-time id segment.
+
+    Raises:
+        ValueError: If the segment is empty or holds anything outside
+            ``[a-z0-9_]`` once lowercased -- which includes the separator, so a
+            segment can never split an id it is placed into.
+    """
     token = str(value or "").strip().lower()
     if not _TOKEN.fullmatch(token):
         raise ValueError(f"{label} must match [a-z0-9][a-z0-9_]*, got {value!r}")
@@ -61,7 +81,13 @@ def event_id(phase: str, macro_cycle: int, component: str) -> str:
 
 
 def parse_event_id(value: str) -> EventId:
-    """Split an event id back into its segments."""
+    """Split an event id built by :func:`event_id` back into its segments.
+
+    Raises:
+        ValueError: If ``value`` is not three separator-joined segments, or a
+            segment does not survive the same validation :func:`event_id`
+            applies.
+    """
     parts = str(value or "").split(EVENT_ID_SEPARATOR)
     if len(parts) != EVENT_ID_SEGMENTS:
         raise ValueError(f"event id must have {EVENT_ID_SEGMENTS} segments, got {value!r}")

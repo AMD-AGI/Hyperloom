@@ -1,5 +1,5 @@
 <!-- when: an action just failed and you are about to re-propose it -->
-<!-- phase: PRELUDE, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, CLOSE -->
+<!-- phase: PRELUDE, ENABLEMENT, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, CLOSE -->
 # Failure recovery surfaces
 
 Consult these SharedState surfaces in order before re-proposing:
@@ -73,8 +73,7 @@ measurement, NOT a failure — do not retry it.
   so the next attempt salvages the leak.
 * **RULE F3 — repeated `error_class='subprocess_nonzero'` on `baseline`
   ⇒ stop retrying baseline.** `send_message` with `body_md='blocked: subprocess
-  repeatedly nonzero baseline'` and let Robustness intervene, whose
-  escalation policy needs that message to fire its RCA. Explore variants
+  repeatedly nonzero baseline'`. Explore variants
   may be re-proposed; read the failure log first.
 * **RULE F4 — `policy_denial_streak` is a pure fact, not a lock.** The
   `why_denied` context tool (and the `Recent policy denials` block in the

@@ -36,6 +36,101 @@ def test_empty_result_is_not_eval_rooted_and_does_not_raise():
     assert ex._is_eval_rooted_failure({}) is False
 
 
+def test_a_refused_connection_marks_the_eval_failure_as_an_unreachable_server():
+    """The shape that killed the real run: the server went away mid-eval, so the client's next request was refused."""
+    ex = _bare_executor()
+    err = (
+        "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host 0.0.0.0:41099 "
+        "ssl:default [Connect call failed ('0.0.0.0', 41099)]\n"
+        "ERROR: run_eval failed with exit code 1\n"
+    )
+    # Still eval-rooted -- the run_eval marker is genuinely there.
+    assert ex._is_eval_rooted_failure({"error": err}) is True
+    # But the cause is the measurement apparatus, not the model or the framework.
+    assert ex._is_server_unreachable_eval_failure({"error": err}) is True
+
+
+def test_an_eval_that_ran_to_a_verdict_is_not_an_unreachable_server():
+    """A reachable server that simply scored badly must keep routing to enablement."""
+    ex = _bare_executor()
+    err = "accuracy 0.21 below floor 0.5\nERROR: run_eval failed with exit code 1\n"
+    assert ex._is_eval_rooted_failure({"error": err}) is True
+    assert ex._is_server_unreachable_eval_failure({"error": err}) is False
+
+
+def test_the_rejected_eval_flag_is_not_an_unreachable_server():
+    """``--concurrent-requests`` is an argument-contract break, not a vanished server."""
+    ex = _bare_executor()
+    assert ex._is_server_unreachable_eval_failure({"error": "Unknown parameter: --concurrent-requests"}) is False
+
+
+def test_unreachable_server_evidence_is_read_from_warnings_too():
+    ex = _bare_executor()
+    result = {"error": "", "nonfatal_warnings": ["Cannot connect to host 0.0.0.0:8888"]}
+    assert ex._is_server_unreachable_eval_failure(result) is True
+
+
+def test_empty_result_is_not_an_unreachable_server_and_does_not_raise():
+    ex = _bare_executor()
+    assert ex._is_server_unreachable_eval_failure({}) is False
+
+
+def test_a_sibling_round_s_connection_noise_does_not_demote_a_real_accuracy_failure(tmp_path):
+    """The evidence has to be about *this* failure, not about a log left by another round.
+
+    ``_failure_carries_markers`` climbs out of a round directory to the shared task root
+    and scans every log under it. Reading the unreachable-server markers that way lets a
+    warmup round whose server crashed decide the classification of a measure round that
+    ran its eval to a real verdict -- which would keep a genuine capability gap out of
+    the enablement lane, the exact inverse of what this check is for.
+    """
+    task_root = tmp_path / "task"
+    warmup = task_root / "warmup_round" / "benchmark_atom_1"
+    measure = task_root / "measure_round" / "benchmark_atom_2"
+    warmup.mkdir(parents=True)
+    measure.mkdir(parents=True)
+    # The warmup round's server died, so its log is full of refused connections.
+    (warmup / "server.log").write_text(
+        "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host 0.0.0.0:41099\n",
+        encoding="utf-8",
+    )
+    # The measure round reached a verdict and failed on accuracy.
+    # The executor is handed the round directory, which is the name that makes
+    # ``_failure_carries_markers`` climb to the shared task root.
+    result = {
+        "status": "failed",
+        "output_dir": str(task_root / "measure_round"),
+        "error": "accuracy 0.21 below floor 0.5\nERROR: run_eval failed with exit code 1\n",
+    }
+    ex = _bare_executor()
+    assert ex._is_eval_rooted_failure(result) is True
+    assert ex._is_server_unreachable_eval_failure(result) is False
+
+
+def test_evidence_that_lives_only_in_this_round_s_log_still_classifies(tmp_path):
+    """The markers are frequently absent from ``result['error']``.
+
+    That is the whole reason ``_is_eval_rooted_failure`` scans logs at all. When the
+    eval-rooted verdict came from a log, the connection refusal that caused it sits in
+    the same log -- so reading only ``result`` leaves the torn-down server routed to the
+    enablement lane, which is the failure this classification exists to prevent. Scan
+    this round's own directory: near enough to see its evidence, narrow enough not to
+    inherit a sibling round's.
+    """
+    round_dir = tmp_path / "task" / "measure_round"
+    (round_dir / "benchmark_atom_1").mkdir(parents=True)
+    (round_dir / "benchmark_atom_1" / "benchmark_stderr.log").write_text(
+        "ERROR: run_eval failed with exit code 1\n"
+        "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host 0.0.0.0:41099 "
+        "ssl:default [Connect call failed ('0.0.0.0', 41099)]\n",
+        encoding="utf-8",
+    )
+    result = {"status": "failed", "output_dir": str(round_dir), "error": "benchmark exited 1"}
+    ex = _bare_executor()
+    assert ex._is_eval_rooted_failure(result) is True
+    assert ex._is_server_unreachable_eval_failure(result) is True
+
+
 def test_only_a_genuine_baseline_may_establish_the_quality_reference():
     assert baseline_mod._should_establish_quality_ref("baseline") is True
     # replay_warm_recipe reuses this executor but is a candidate: letting it redefine the reference would mask its own

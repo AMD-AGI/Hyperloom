@@ -9,8 +9,10 @@ import os
 import subprocess
 import sys
 
+import pytest
 import yaml
 
+from hyperloom.common.env import EnvValueError
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
 _AGENTX_ENV_KEYS = (
@@ -73,7 +75,8 @@ def test_switch_on_authoritative_overwrite(tmp_path, monkeypatch):
     # gpu_type pre-pins vllm_mi300x.sh; the switch must overwrite it.
     bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
     assert bench["benchmark_script"] == "aiperf_client.sh"
-    assert bench["envs"]["AGENTX_PHASE_WAIT_TIMEOUT_S"] == str(bench["timeout_seconds"])
+    assert "timeout_seconds" not in bench
+    assert "AGENTX_PHASE_WAIT_TIMEOUT_S" not in bench["envs"]
 
 
 def test_persisted_agentx_mode_switches_without_ambient_env(tmp_path, monkeypatch):
@@ -113,6 +116,33 @@ def test_switch_on_passes_agentx_env(tmp_path, monkeypatch):
     assert envs["AIPERF_BIN"] == "/venv/bin/aiperf"
 
 
+def test_switch_on_materializes_workload_spec(tmp_path, monkeypatch):
+    """AgentX ON must stamp a self-describing workload_spec into the recipe."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("CONC", "8")
+    monkeypatch.setenv("AGENTX_DURATION", "3600")
+    src = _write(tmp_path / "base.yaml")
+    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/models/Kimi-K3")
+    spec = bench.get("workload_spec") or {}
+    assert spec.get("kind") == "agentx_trace_replay"
+    assert spec.get("client") == "aiperf"
+    assert spec.get("scenario") == "inferencex-agentx-mvp"
+    assert spec.get("corpus") == "semianalysis_cc_traces_weka_062126"
+    assert spec.get("duration_s") == 3600
+    assert spec.get("geak_loop_duration_s") == 900
+    assert spec.get("concurrency") == 8
+    placeholder = spec.get("isl_osl_placeholder") or {}
+    assert placeholder.get("note")
+
+
+def test_switch_off_omits_workload_spec(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    src = _write(tmp_path / "base.yaml")
+    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
+    assert "workload_spec" not in bench
+
+
 def test_switch_forwards_weka_loader_override(tmp_path, monkeypatch):
     """Upstream's own corpus pin has no ``AGENTX_`` prefix."""
     _clear_env(monkeypatch)
@@ -132,13 +162,23 @@ def test_switch_off_does_not_leak_weka_loader_override(tmp_path, monkeypatch):
     assert "WEKA_LOADER_OVERRIDE" not in (bench.get("envs") or {})
 
 
-# ── A3: defensive parsing ────────────────────────────────────────────────────
-def test_switch_unrecognized_value_is_off_no_raise(tmp_path, monkeypatch):
+# ── A3: parsing ──────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("raw", ["0", "false", "no", "off", ""])
+def test_switch_off_tokens_keep_the_synthetic_script(tmp_path, monkeypatch, raw):
     _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "ture")  # typo -> OFF, must not raise
+    monkeypatch.setenv("HYPERLOOM_AGENTX", raw)
     src = _write(tmp_path / "base.yaml")
     bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
     assert bench["benchmark_script"] == "vllm_mi300x.sh"
+
+
+def test_an_unreadable_switch_does_not_materialize_the_synthetic_workload(tmp_path, monkeypatch):
+    """A typo used to read as OFF here, benchmarking the run the operator did not ask for."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "ture")
+    src = _write(tmp_path / "base.yaml")
+    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
+        _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
 
 
 def test_switch_only_serving_frameworks(tmp_path, monkeypatch):
@@ -155,7 +195,7 @@ def test_runtime_overrides_honor_agentx_on(monkeypatch):
     """apply_runtime_benchmark_overrides must apply the switch, else the gpu_type-derived synthetic script silently reverts a materialize-time swap (the exact defect E1 caught: run_grid rebuilt to vllm_mi300x.sh)."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    from hyperloom.orchestrator.actions.executors._grid_server_args import (
+    from hyperloom.orchestrator.actions.executors._benchmark_runtime import (
         apply_runtime_benchmark_overrides,
     )
 
@@ -167,7 +207,7 @@ def test_runtime_overrides_honor_agentx_on(monkeypatch):
 
 def test_runtime_overrides_off_keeps_synthetic(monkeypatch):
     _clear_env(monkeypatch)  # HYPERLOOM_AGENTX cleared => OFF
-    from hyperloom.orchestrator.actions.executors._grid_server_args import (
+    from hyperloom.orchestrator.actions.executors._benchmark_runtime import (
         apply_runtime_benchmark_overrides,
     )
 
@@ -178,7 +218,7 @@ def test_runtime_overrides_off_keeps_synthetic(monkeypatch):
 
 def test_runtime_overrides_preserve_materialized_agentx_without_env(monkeypatch):
     _clear_env(monkeypatch)
-    from hyperloom.orchestrator.actions.executors._grid_server_args import (
+    from hyperloom.orchestrator.actions.executors._benchmark_runtime import (
         apply_runtime_benchmark_overrides,
     )
 

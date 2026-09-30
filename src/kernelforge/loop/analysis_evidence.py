@@ -238,6 +238,10 @@ class AnalysisEvidenceMixin:
                     root,
                     language=language,
                     include_aiter=include_aiter,
+                    # The orchestration context is inlined into every specialist
+                    # and analysis prompt, so the ablation has to reach it too or
+                    # it only measures half the knowledge block's cost.
+                    defer_all=bool(getattr(self.config, "defer_knowledge_maps", False)),
                 )
             except Exception:
                 log.debug("failed to build orchestration knowledge index", exc_info=True)

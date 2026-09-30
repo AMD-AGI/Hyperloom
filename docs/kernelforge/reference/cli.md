@@ -90,8 +90,9 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--framework <name>` | inferred | Framework identity for the experience KB slug: `vllm`, `sglang`, `aiter`, or `standalone` for a framework-less file. Authoritative when given. |
 | `--kernel-backend <name>` | inferred | Kernel backend override. An unsupported backend falls back to `flydsl`. |
 | `--commit-new-path <glob>` | none | Workspace-relative path or glob naming a file the agent may CREATE and still have committed with a KEEP. Repeatable. Untracked files are otherwise never staged and never removed by a REVERT. `*` does not cross a directory separator and `**` is rejected; name each level. Protected measurement paths are never admitted. Immutable per campaign. |
-| `--snr-threshold <dB>` | `30.0` | SNR pre-filter threshold, stored immutably. A KEEP is decided by the task's own `correctness_command`, not by this value. |
+| `--snr-threshold <dB>` | `30.0` | Threshold the driver's correctness suite must clear, stored immutably. A KEEP needs this and a measured gain over the incumbent; the assembly backend adds the task's own acceptance suite on top. |
 | `--prepare-task` / `--no-prepare-task` | on | Pre-loop preflight of the driver against the loop's stdout contract; on failure one agent authors or repairs the measurement driver (never the kernel), then it is re-checked. Skipped on `--resume`. |
+| `--baseline-json <file>` | none | JSON file holding a scoring anchor measured outside this loop: `{"wall_ms": <float>, "case_times": {"<case id>": <ms>}}`. Every speedup the run reports then divides by those per-case times, and they are the wall time published beside it. The loop still benches the kernel it starts from, but as the search start and first incumbent rather than as the anchor — so the KEEP bar begins at that kernel's own score, not at 1.0x. Use it when the starting kernel already replaced something else and the run should be graded against the original: `forge-rewrite` passes its source kernel's timings this way. Omitted, the loop anchors on its own first bench. |
 
 ### Budget and deadlines
 
@@ -118,7 +119,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--lanes <n>` | `3` | Implementer lanes per round (1–8). Above 1 the round's analysis is partitioned into that many non-overlapping plans, each run concurrently in its own workspace copy and measured on its own. Lanes run concurrently, so a lane costs a session rather than a share of the round's wall clock, and three is what the three specialist analyses divide into. The partition returns fewer when the evidence supports fewer. Needs a provider declaring `stop_hooks` and `session_env`; refused on one that does not. |
+| `--lanes <n>` | `3` | Implementer lanes per round (1–8). Above 1 the round's analysis is partitioned into that many non-overlapping plans, each run concurrently in its own workspace copy and measured on its own. Lanes run concurrently, so a lane costs a session rather than a share of the round's wall clock, and three is what the three specialist analyses divide into. The partition returns fewer when the evidence supports fewer. Needs a provider declaring `session_env`; refused on one that does not, because lanes sharing a build cache measure each other's binaries. A provider without `stop_hooks` runs and is warned: it loses in-session denial, so a lane can waste its session or void the round, but it cannot misreport one. |
 | `--merge-stacking` / `--no-merge-stacking` | on | Once consecutive iterations stop producing a new best, spend one iteration measuring two archived rejected gains applied together, chosen for winning on different cases. Costs a measurement but no Implementer session. Applies at every `--lanes` setting; turn it off to compare against a run that predates it. |
 | `--specialist-probe` / `--no-specialist-probe` | on | Let the read-only planning specialists measure one variant per probe in a scratch tree instead of only arguing about a dispatch constant. Each probe re-runs the workspace driver for one case with declared constants overridden, queues on the same device lock the fan-out lanes take, and never touches the canonical tree. Falls back to `FORGE_SPECIALIST_PROBE`. |
 | `--specialist-probe-max <n>` | `6` | Probes ONE analysis round may make in total, shared across every specialist it dispatches. Every call counts, including a refused one. Falls back to `FORGE_SPECIALIST_PROBE_MAX`. |
@@ -204,6 +205,7 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 |:--|:--|:--|
 | `--framework <name>` | inferred | Apply-back target: `aiter`, `vllm` or `sglang`. Inferred from the source path when omitted. |
 | `--applyback-import-module <mod>` | inferred | Import target required to load before and after apply-back. Repeatable; defaults to the source module inferred from its package. |
+| `--applyback` / `--no-applyback` | on | Integrate the optimized kernel back into the framework repository and publish the patch. Disabling it delivers only the standalone kernel: the stage is skipped, its 20-minute reserve returns to the search, and `success` no longer depends on a patch the caller did not ask for. `applyback_required` is then `false`, and `best_commit` names the standalone selection instead of an apply-back commit. |
 | `--max-applyback-attempts <n>` | `2` | Maximum clean-room framework integration sessions. |
 
 ### Hardware, provider and output
@@ -212,7 +214,7 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 |:--|:--|:--|
 | `--gpu-target <arch>` | none | ROCm compilation architecture, e.g. `gfx950`. Also exported to the environment. |
 | `--gpu-type <sku>` | `mi355x` | Hardware SKU for rewrite KB identities. |
-| `--model <name>` | provider default | LLM model; overrides `KERNEL_AGENTS_MODEL`. |
+| `--model <name>` | provider default | LLM model; overrides `CLAUDE_MODEL`/`CODEX_MODEL`. |
 | `--permission-mode <v>` | `acceptEdits` | Claude permission mode. |
 | `--supervisor-backend <name>` | `codex` | OPTIMIZE supervisor backend on stall: `codex` or `claude`. |
 | `--rewrite-kb` / `--no-rewrite-kb` | on | Read and publish rewrite recipes. |
@@ -234,6 +236,11 @@ authors one fused Triton kernel that survives CUDA-graph capture, A/B-validated
 against the framework's own eager op. Writes `fusion_manifest.json` and exits 3
 when no fusion is found.
 
+Which chain is fused is chosen from the trace by default. `--fuse-kernel` fixes it
+instead: name one GPU kernel and the fusion is built around that kernel and its
+trace neighbours. With `--dry-run` this resolves and writes `fusion_anchor.json`
+without reaching an agent, so the selection can be checked before anything is spent.
+
 ### Inputs
 
 | Option | Default | Meaning |
@@ -245,12 +252,15 @@ when no fusion is found.
 | `--framework-root <dir>` | auto-detect | Explicit framework source root, else the installed package is located. |
 | `--decode-batch <n>` | `16` | Representative decode batch size (T) for shapes. |
 | `--decode-steps <n>` | `0` | Decode steps captured in the trace, used to normalize kernels/step. |
+| `--attn-tp <n>` | `1` | Attention tensor-parallel size, mirroring the model's `attn_tp_size`. Local shape dims are divided by it, e.g. `n_local_heads = num_attention_heads // attn_tp`, and for DeepSeek-V4 `n_local_groups = o_groups // attn_tp`. With `--enable-dp-attention` the workload's serving `--tp` is DP, so `attn_tp` is `1`; without it, set `attn_tp` to the attention shard count. |
 
 ### Discovery and authoring
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--discover <mode>` | `patterns` | `patterns` (template library) or `llm` (the LLM reads trace and source, autonomous). |
+| `--discover <mode>` | `patterns` | `patterns` (template library), `llm` (the LLM reads trace and source, autonomous), or `anchored` (fuse around the kernel `--fuse-kernel` names). |
+| `--repo-scope` / `--no-repo-scope` | off | Give discovery and authoring the whole framework repository instead of one resolved file. Discovery embeds no source, explores the tree with its own read/search tools, and may return a fusion whose call sites span several files; authoring may edit all of them. Use when the chain is not in the arch-class model file and you do not want to name its location. Requires `--discover llm` or `--discover anchored`. |
+| `--fuse-kernel <name>` | `''` | Full GPU kernel name, exactly as the trace spells it. Fusion is then built around that kernel and whatever the trace shows running beside it, instead of a ranked guess. Implies `--discover anchored`. A name the trace does not contain is a usage error listing the closest ones; a fragment is not a name. |
 | `--dry-run` | off | Diagnose and locate only; emit a manifest with a recipe skeleton, no authoring or validation. |
 | `--author` / `--no-author` | on | Author the fused kernel via the LLM. Non-dry-run only. |
 | `--fuse-all-confirmed` | off | Author ALL source-confirmed patterns together rather than only the top one, and A/B all their flags. A compile-pass candidate cannot be authored with them, so it is claimed alone and the rest wait for a later round. |

@@ -15,7 +15,7 @@ _TOOL_DIR = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents"
 if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 
-import diffusion_roofline as dr  # noqa: E402
+import diffusion_roofline as dr
 
 
 def _write_csvs(csv_dir: Path, *, with_timeline: bool = True) -> None:

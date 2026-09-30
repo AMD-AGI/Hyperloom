@@ -10,10 +10,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-class DeliverableRefused(ValueError):
-    """A declared deliverable cannot be trusted and must not be integrated."""
-
-
 @dataclass(frozen=True)
 class Artifact:
     """One whole-file deliverable.
@@ -129,6 +125,5 @@ def parse_deliverable(payload: Mapping[str, Any], *, default_tree_id: str) -> De
 __all__ = [
     "Artifact",
     "Deliverable",
-    "DeliverableRefused",
     "parse_deliverable",
 ]

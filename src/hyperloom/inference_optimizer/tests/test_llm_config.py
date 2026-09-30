@@ -38,10 +38,12 @@ from hyperloom.common.llm_config import (
     get_async_openai_client,
     get_openai_client,
     openai_client_kwargs,
-    parse_custom_headers,
+    DEFAULT_CLAUDE_MODEL,
+    DEFAULT_CODEX_MODEL,
     provider_model_defaults,
     resolve_forge_llm_model,
 )
+from hyperloom.common.llm_headers import parse_custom_headers
 
 _LEGACY_KEY = "_".join(("DEEPSEEK", "API", "KEY"))
 _OPENAI_KEY = "_".join(("OPENAI", "API", "KEY"))
@@ -61,8 +63,26 @@ def test_apply_reasoning_effort_injects_recognized_value():
     assert out2["reasoning_effort"] == "high"
 
 
-def test_apply_reasoning_effort_ignores_unknown_value():
-    out = apply_reasoning_effort({"model": "m"}, env={"HYPERLOOM_REASONING_EFFORT": "turbo"})
+def test_apply_reasoning_effort_accepts_the_top_of_the_ladder():
+    out = apply_reasoning_effort({"model": "m"}, env={"HYPERLOOM_REASONING_EFFORT": " XHigh "})
+    assert out["reasoning_effort"] == "xhigh"
+
+
+def test_apply_reasoning_effort_sends_max_as_the_gateway_level():
+    """``max`` is a Claude level this gateway 400s on, so it goes as ``xhigh``."""
+    out = apply_reasoning_effort({"model": "m"}, env={"HYPERLOOM_REASONING_EFFORT": "max"})
+    assert out["reasoning_effort"] == "xhigh"
+
+
+@pytest.mark.parametrize("value", ["turbo", "minimal", "none"])
+def test_apply_reasoning_effort_ignores_off_ladder_value(value):
+    """Only the shared four levels are injected; the rest are no-ops.
+
+    This gateway accepts ``minimal`` and ``none``, but the Claude CLI does not
+    know either and there is no Claude level below ``low`` to project them
+    onto, so neither is a level of the shared vocabulary.
+    """
+    out = apply_reasoning_effort({"model": "m"}, env={"HYPERLOOM_REASONING_EFFORT": value})
     assert "reasoning_effort" not in out
 
 
@@ -182,9 +202,10 @@ def test_explicit_openai_side_wins_key_and_url_independently():
     assert url_only["base_url"] == "https://explicit.example.invalid/v1"
 
 
-def test_llm_gateway_key_still_outranks_the_anthropic_fallback():
+def test_retired_gateway_key_loses_to_the_anthropic_fallback():
+    """``LLM_GATEWAY_KEY`` is no longer a credential, so the Anthropic side answers instead."""
     env = {**_ANTHROPIC_ONLY_ENV, "LLM_GATEWAY_KEY": "gw-key"}
-    assert openai_client_kwargs(env=env)["api_key"] == "gw-key"
+    assert openai_client_kwargs(env=env)["api_key"] == "gateway-token"
 
 
 _SUBSCRIPTION_HEADER = "Ocp-Apim-Subscription-Key"
@@ -233,6 +254,59 @@ def test_shape_predicates_ignore_the_retired_deepseek_variables():
     assert is_openai_only({**legacy, **_CODEX_ONLY_ENV})
 
 
+def test_openai_agent_credential_requires_a_key_not_a_bare_base_url():
+    assert not llm_config.openai_agent_credentialed({"OPENAI_BASE_URL": "https://gw/v1"})
+    assert llm_config.openai_agent_credentialed({"OPENAI_API_KEY": "sk-test"})
+
+
+def test_a_retired_gateway_key_does_not_credential_the_openai_side():
+    """`_validate_credentials` admits a run on OPENAI_API_KEY alone, so the ranking names the same one name."""
+    assert not llm_config.openai_agent_credentialed({"LLM_GATEWAY_KEY": "gw-test"})
+
+
+@pytest.mark.parametrize("gateway", ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"])
+def test_a_managed_gateway_drives_the_claude_cli_without_naming_a_key(gateway):
+    """It authenticates the CLI, but hands no key to the callers that need one."""
+    env = {gateway: "1"}
+    assert llm_config.anthropic_agent_credentialed(env)
+    assert not llm_config.has_anthropic_credential(env)
+    assert not llm_config.has_anthropic_side(env)
+
+
+@pytest.mark.parametrize(
+    ("claude_sdk", "codex_sdk", "env", "expected"),
+    [
+        (False, True, {}, llm_config.AGENT_BACKEND_CODEX),
+        (True, False, {}, llm_config.AGENT_BACKEND_CLAUDE),
+        (True, True, {}, llm_config.AGENT_BACKEND_CLAUDE),
+        (True, True, {"OPENAI_API_KEY": "sk"}, llm_config.AGENT_BACKEND_CODEX),
+        (True, True, {"ANTHROPIC_API_KEY": "sk"}, llm_config.AGENT_BACKEND_CLAUDE),
+        (True, False, {"OPENAI_API_KEY": "sk"}, llm_config.AGENT_BACKEND_CODEX),
+        (False, True, {"OPENAI_BASE_URL": "https://gw/v1"}, llm_config.AGENT_BACKEND_CODEX),
+        # A retired key names no credential on either side, so the tie falls back to the SDK and Claude keeps it.
+        (True, True, {"OPENAI_BASE_URL": "https://gw/v1", "LLM_GATEWAY_KEY": "gw"}, llm_config.AGENT_BACKEND_CLAUDE),
+        # The one shape a managed gateway decides: it holds the Anthropic side
+        # against a real OpenAI key that would otherwise win on its own.
+        (
+            True,
+            True,
+            {"CLAUDE_CODE_USE_BEDROCK": "1", "OPENAI_API_KEY": "sk"},
+            llm_config.AGENT_BACKEND_CLAUDE,
+        ),
+    ],
+)
+def test_preferred_agent_backend_ranks_credentials_then_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    claude_sdk: bool,
+    codex_sdk: bool,
+    env: dict[str, str],
+    expected: str,
+) -> None:
+    monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: claude_sdk)
+    monkeypatch.setattr(llm_config, "codex_agent_sdk_installed", lambda: codex_sdk)
+    assert llm_config.preferred_agent_backend(env) == expected
+
+
 def test_derived_base_url_carries_the_anthropic_gateway_headers():
     """An anthropic-only deployment must still send the gateway's subscription key."""
     kwargs = openai_client_kwargs(env=dict(_ANTHROPIC_ONLY_ENV))
@@ -260,7 +334,7 @@ def test_openai_kwargs_error_names_every_searched_key():
     with pytest.raises(LLMConfigError) as excinfo:
         openai_client_kwargs(env={"ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic"})
     message = str(excinfo.value)
-    for name in ("OPENAI_API_KEY", "LLM_GATEWAY_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
         assert name in message
 
 
@@ -455,24 +529,26 @@ def test_deepseek_compat_env_geak_model_follows_explicit_claude_model():
     assert updates["GEAK_CLAUDE_MODEL"] == "claude-opus-5"
 
 
-def test_resolve_forge_llm_model_prefers_forge_env_over_orchestration():
+def test_resolve_forge_llm_model_ignores_the_removed_forge_env():
+    """Forge reads the platform's model variables and has none of its own."""
     env = {
         "CLAUDE_MODEL": "claude-orchestration",
         "FORGE_CLAUDE_MODEL": "claude-forge-only",
         "CODEX_MODEL": "gpt-orchestration",
         "FORGE_CODEX_MODEL": "gpt-forge-only",
     }
-    assert resolve_forge_llm_model("claude", env=env) == "claude-forge-only"
-    assert resolve_forge_llm_model("codex", env=env) == "gpt-forge-only"
+    assert resolve_forge_llm_model("claude", env=env) == "claude-orchestration"
+    assert resolve_forge_llm_model("codex", env=env) == "gpt-orchestration"
 
 
 def test_resolve_forge_llm_model_falls_back_to_orchestration_and_default():
     assert resolve_forge_llm_model("claude", env={"CLAUDE_MODEL": "claude-orch"}) == "claude-orch"
-    assert resolve_forge_llm_model("codex", env={}, default="gpt-default") == "gpt-default"
+    assert resolve_forge_llm_model("codex", env={}) == DEFAULT_CODEX_MODEL
+    assert resolve_forge_llm_model("claude", env={}) == DEFAULT_CLAUDE_MODEL
     assert (
         resolve_forge_llm_model(
             "claude",
-            env={"FORGE_CLAUDE_MODEL": "claude-forge-only"},
+            env={"CLAUDE_MODEL": "claude-orchestration"},
             explicit="claude-payload",
         )
         == "claude-payload"

@@ -20,7 +20,6 @@ endpoint. Framework Doc, GEMM tuning, Read A, and Read C are unchanged.
 | `KNOWLEDGE_LOCAL_ROOT` | Local knowledge root. Defaults to `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` |
 | `KB_STORE_URL` | KB Service endpoint. Local Recipe mode defaults to `https://global.primus-safe.amd.com/knowledge-base` for PR Monitor only. Remote Recipe mode requires an explicit value. PR REST and MCP are derived as `/pr-monitor/v1` and `/pr-monitor/mcp/`. |
 | `KB_STORE_TOKEN` | Required only in `remote` mode |
-| `GBRAIN_BASE_URL` / `GBRAIN_TOKEN` | Optional GBrain credentials for Framework PR capabilities |
 
 Unknown modes fail configuration. Remote mode fails before use if either
 credential is missing. `--degraded-kb` remains a complete Recipe KB opt-out; it
@@ -93,10 +92,8 @@ Hyperloom's `KernelExperienceBridge` only:
    the bearer token in local mode;
 3. forwards the KB Service URL for PR Monitor in either mode, using the global
    default when local mode has no explicit URL and IR-3 can reach it;
-4. keeps optional GBrain credentials in the Hyperloom parent for Framework PR
-   clients, but never forwards them to KernelForge children;
-5. forces the legacy `KERNELFORGE_GBRAIN_ENABLED` Recipe-derived flag off; and
-6. collects bounded capability/result provenance returned by KernelForge.
+4. never forwards GBrain credentials to KernelForge children; and
+5. collects bounded capability/result provenance returned by KernelForge.
 
 KernelForge continues to own local knowledge. Hyperloom does not implement
 kernel-experience CRUD or ranking.

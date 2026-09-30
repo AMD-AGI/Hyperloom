@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.kernel_rewrite_controller import (
     ControllerLayout,
     TaskStateStore,
@@ -163,14 +164,39 @@ def test_an_operator_name_that_normalizes_to_nothing_is_refused(
         parse_task_payload(task_payload, task_dir=task_dir, enforce_directory_identity=False)
 
 
-def test_an_unregistered_backend_is_accepted(task_dir: Path, task_payload: dict) -> None:
-    """It picks a prompt layer, and forge-loop answers an unknown one with none."""
+def test_an_unregistered_backend_is_refused_rather_than_silently_substituted(
+    task_dir: Path,
+    task_payload: dict,
+) -> None:
+    """An unregistered backend does not reach forge-loop as itself.
+
+    Campaign setup resolves ``--kernel-backend`` against this same registry and
+    substitutes the fallback, warning on stderr and continuing. The run then
+    builds with one technology while the task directory, the experience id and
+    the published pointer all say another -- two addresses for one run, which is
+    the defect this module exists to prevent rather than one to create.
+    """
     task_payload["identity"]["backend"] = "tilelang"
 
-    task = parse_task_payload(task_payload, task_dir=task_dir, enforce_directory_identity=False)
+    with pytest.raises(ValueError, match="registered kernel backend"):
+        parse_task_payload(task_payload, task_dir=task_dir, enforce_directory_identity=False)
 
-    assert task.identity.backend == "tilelang"
-    assert task.operator_id.split(":")[5] == "tilelang"
+
+def test_every_backend_the_agent_is_offered_is_one_it_may_declare(
+    task_dir: Path,
+    task_payload: dict,
+) -> None:
+    """The refusal is only fair because the list reaching the agent is this one.
+
+    Its prompt is built from the same registry, so a name it can read there is a
+    name that survives here, and the rule costs no analysis budget to learn.
+    """
+    for backend in KERNEL_BACKENDS:
+        task_payload["identity"]["backend"] = backend
+
+        task = parse_task_payload(task_payload, task_dir=task_dir, enforce_directory_identity=False)
+
+        assert task.operator_id.split(":")[5] == backend
 
 
 def test_bool_priority_is_rejected(task_dir: Path, task_payload: dict) -> None:

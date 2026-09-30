@@ -60,7 +60,7 @@ _DEFAULT_TIMEOUT_SEC = 60.0
 def _load_sdk() -> Any:
     """Import ``claude_agent_sdk`` and check the attributes this module uses."""
     try:
-        import claude_agent_sdk as sdk  # type: ignore[import-not-found]  # noqa: PLC0415
+        import claude_agent_sdk as sdk  # type: ignore[import-not-found]
     except ImportError as exc:
         raise RuntimeError("claude_agent_sdk is not installed") from exc
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):

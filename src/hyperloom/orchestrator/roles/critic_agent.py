@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+from hyperloom.common.framework_arm import review_row_id
 from hyperloom.common.llm_config import (
+    DEFAULT_CODEX_MODEL,
     LLMConfigError,
     aanthropic_completion,
     achat_completion,
@@ -24,7 +26,7 @@ from hyperloom.common.llm_config import (
     build_http_timeout,
     get_async_openai_client,
 )
-from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_ENABLEMENT,
     LEVER_SOURCE_PATCH,
@@ -38,9 +40,12 @@ from hyperloom.inference_optimizer.protocol.intent import (
     validate_envelope,
 )
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
-from ..trace.conversation_trace import ConversationRecord, append_conversation
-from ..trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
-from ..trace.parse_usage import reasoning_output_tokens
+from hyperloom.common.token_usage import uncached_input_tokens
+from hyperloom.inference_optimizer.trace._row_utils import coerce_optional_int
+from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens
+from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
 from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
@@ -202,6 +207,33 @@ def _proposal_scope_literal(proposal: dict[str, Any]) -> str:
     return ""
 
 
+def _review_subjects(judge_bundle: dict[str, Any]) -> dict[str, str]:
+    """Map each reviewed proposal's message id to the row it is recorded under.
+
+    The two arms identify a proposal differently -- a configuration grid by the
+    bus message that raised it, an upstream candidate by its candidate id --
+    and evidence filed under the wrong one opens a second, near-empty row
+    beside the proposal it was about.
+
+    Args:
+        judge_bundle (dict[str, Any]): The bundle of proposals reviewed.
+
+    Returns:
+        dict[str, str]: ``{msg_id: row_id}``, holding only the proposals whose
+            row id is not their message id.
+    """
+    out: dict[str, str] = {}
+    for proposal in judge_bundle.get("proposals") or []:
+        if not isinstance(proposal, dict):
+            continue
+        msg_id = str(proposal.get("msg_id") or "")
+        payload = proposal.get("payload") if isinstance(proposal.get("payload"), dict) else {}
+        row_id = review_row_id(payload)
+        if msg_id and row_id:
+            out[msg_id] = row_id
+    return out
+
+
 def _verdict_references_kb(review: dict[str, Any] | None) -> bool:
     """Whether any final review verdict cites KB evidence."""
     if not isinstance(review, dict):
@@ -218,6 +250,15 @@ _PHASE_ORIENTATION: dict[str, str] = {
         "Typical proposals are `target_analysis` and `baseline`. If something "
         "else slips through (PolicyGate R1 should already have blocked it), "
         "`advise` with a phase hint rather than reject."
+    ),
+    "ENABLEMENT": (
+        "Typical proposals are `specialist` and `integrate_patch`. "
+        "The gate is runnability plus the accuracy floor, not throughput: a patch "
+        "that boots the model and holds accuracy is a legitimate KEEP even with "
+        "no throughput gain. The before/after benchmark gate does not apply — a "
+        "booting baseline does not yet exist. `approve` when the patch clearly "
+        "makes the combo runnable; `reject` if it worsens the crash or lowers "
+        "accuracy below the floor; `advise` otherwise."
     ),
     "FRAMEWORK_AGENT": (
         "Typical proposals are `explore`, `specialist` and `integrate_patch`. "
@@ -343,7 +384,7 @@ class CriticAgentBackend:
 
     critic_agent_root: Path
     session_dir: Path
-    codex_model: str = "gpt-5.6-sol"
+    codex_model: str = DEFAULT_CODEX_MODEL
     codex_client_factory: Callable[[], Any] | None = None
     kb_mode: Literal["inmemory", "live"] = "inmemory"
     kb_env: dict[str, str] | None = None
@@ -645,9 +686,9 @@ class CriticAgentBackend:
 
         # Record this critic iteration before the workdir can be pruned.
         try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+            from hyperloom.inference_optimizer.breakdown.recorder import critic_out
 
-            instrument.record_critic_iteration(
+            critic_out.record_critic_iteration(
                 self.session_dir,
                 iter_n=turn_idx,
                 request=request,
@@ -659,6 +700,19 @@ class CriticAgentBackend:
             )
         except Exception:  # noqa: BLE001
             pass
+
+        # Attach what each ruling was grounded in to the ruling itself, on the
+        # proposal it judged. Done here because these are the turn's own facts:
+        # the artifacts are this runtime's files, and a KB write's result only
+        # comes back on the emit.
+        self._record_review_evidence(
+            request=request,
+            judge_bundle=judge_bundle,
+            review=review,
+            emit=emit,
+            workdir=workdir,
+            kb_priors=kb_priors_trace,
+        )
 
         # Mirror the KB integration trace into Langfuse (opt-in, best-effort).
         self._mirror_kb_trace_to_langfuse(
@@ -764,7 +818,7 @@ class CriticAgentBackend:
     ) -> None:
         """Mirror the per-iteration KB trace into Langfuse (best-effort)."""
         try:
-            from ..trace.langfuse_emitter import get_emitter
+            from hyperloom.inference_optimizer.trace.langfuse_emitter import get_emitter
 
             emitter = get_emitter(self.session_dir)
             if not emitter.enabled:
@@ -781,8 +835,85 @@ class CriticAgentBackend:
                         "referenced_in_verdict": bool(kb_priors.get("referenced_in_verdict")),
                     },
                 )
-        except Exception:  # noqa: BLE001 — trace must never break the review
+        except Exception:
             log.debug("critic_agent: langfuse kb mirror failed", exc_info=True)
+
+    def _record_review_evidence(
+        self,
+        *,
+        request: dict[str, Any],
+        judge_bundle: dict[str, Any],
+        review: dict[str, Any] | None,
+        emit: dict[str, Any],
+        workdir: Path,
+        kb_priors: dict[str, Any],
+    ) -> None:
+        """Record what each of this turn's rulings was grounded in.
+
+        Written onto the proposal each verdict targets, because a ruling and
+        its grounds are one fact about one proposal: the alternative is a
+        per-turn stream a reader has to join back to the proposals, keyed on a
+        turn index that resume reuses.
+
+        The KB write is matched to its verdict by target, not spread across
+        them: the Critic asks for a lesson to be persisted per verdict, and a
+        turn that reviewed six proposals and wrote one lesson would otherwise
+        report the write six times.
+
+        Args:
+            request (dict[str, Any]): The review request, read for the cycle.
+            judge_bundle (dict[str, Any]): The bundle reviewed, read for the
+                row each verdict's target is recorded under.
+            review (dict[str, Any] | None): The parsed review object.
+            emit (dict[str, Any]): The commit emit, read for the KB writes.
+            workdir (Path): This turn's workdir, holding the artifacts.
+            kb_priors (dict[str, Any]): The priors trace for the turn.
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import record_review_evidence
+
+        context = request.get("context") if isinstance(request.get("context"), dict) else {}
+        macro_cycle = context.get("macro_cycle")
+        if macro_cycle is None:
+            return
+        subjects = _review_subjects(judge_bundle)
+        writes: dict[str, dict[str, Any]] = {}
+        for write in emit.get("kb_writes") or []:
+            if not isinstance(write, dict):
+                continue
+            target = str(write.get("target_proposal_msg_id") or "")
+            result = write.get("result") if isinstance(write.get("result"), dict) else {}
+            if target:
+                writes[target] = {
+                    "trigger": str(write.get("trigger") or ""),
+                    "status": str(result.get("status") or ""),
+                    "detail": str(result.get("detail") or result.get("error") or ""),
+                }
+        artifacts = {
+            name: str(workdir / filename)
+            for name, filename in (
+                ("request_path", "request.json"),
+                ("judge_bundle_path", "judge_bundle.json"),
+                ("review_path", "review.json"),
+                ("emit_path", "emit.json"),
+            )
+        }
+        for verdict in (review or {}).get("review_verdicts") or []:
+            if not isinstance(verdict, dict):
+                continue
+            target = str(verdict.get("target_proposal_msg_id") or "")
+            if not target:
+                continue
+            kb: dict[str, Any] = {"persist_requested": bool(verdict.get("persist_to_kb"))}
+            if kb_priors:
+                kb["priors"] = kb_priors
+            if target in writes:
+                kb["write"] = writes[target]
+            record_review_evidence(
+                macro_cycle=macro_cycle,
+                proposal_id=subjects.get(target) or target,
+                artifacts=artifacts,
+                kb=kb,
+            )
 
     @staticmethod
     def _build_kb_priors_trace(
@@ -840,8 +971,8 @@ class CriticAgentBackend:
         )
         max_tokens = self._resolve_max_completion_tokens()
         # One id per review call, shared by its token row and its conversation row so the two halves pair on the call
-        # rather than on a ts second.
-        call_id = new_call_id()
+        # rather than on a ts second. A caller that opened an ``llm.call`` trajectory span owns the id.
+        call_id = current_context().call_id or new_call_id()
         text, finish = await self._run_reasoning_loop(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -948,10 +1079,11 @@ class CriticAgentBackend:
                 operation="review",
                 **kwargs,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise self._llm_call_failed(
                 f"Codex API call failed (critic-agent reasoning): {exc!r}",
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
+                call_id=call_id,
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._accumulate_usage(usage_acc, result.usage)
@@ -980,10 +1112,11 @@ class CriticAgentBackend:
                 timeout=build_http_timeout(connect=connect_timeout_s, read=rw_timeout_s),
                 timeout_s=rw_timeout_s,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise self._llm_call_failed(
                 f"Anthropic completion failed (critic-agent reasoning): {exc!r}",
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
+                call_id=call_id,
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         usage_acc = {"input_tokens": 0, "output_tokens": 0}
@@ -1015,10 +1148,11 @@ class CriticAgentBackend:
         """Fold one OpenAI ``resp.usage`` into the running token accumulator."""
         if usage is None:
             return
-        try:
-            acc["input_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
-        except (TypeError, ValueError):
-            pass
+        cached = coerce_optional_int(getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", None))
+        prompt = coerce_optional_int(getattr(usage, "prompt_tokens", None))
+        acc["input_tokens"] += uncached_input_tokens(prompt, cached) or 0
+        if cached is not None:
+            acc["cache_read_input_tokens"] = acc.get("cache_read_input_tokens", 0) + cached
         try:
             acc["output_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
         except (TypeError, ValueError):
@@ -1069,7 +1203,7 @@ class CriticAgentBackend:
                 reviewed_msg_ids=self._trace_reviewed_msg_ids,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break review
+        except Exception:
             log.debug(
                 "full-trace: critic llm_call append failed",
                 exc_info=True,
@@ -1080,10 +1214,11 @@ class CriticAgentBackend:
         message: str,
         *,
         latency_ms: int | None = None,
+        call_id: str | None = None,
     ) -> LLMCallFailed:
         """Record a failed review-model call and return the error to raise."""
         error = LLMCallFailed(message)
-        self._trace_llm_failure(error, latency_ms=latency_ms)
+        self._trace_llm_failure(error, latency_ms=latency_ms, call_id=call_id)
         return error
 
     def _trace_llm_failure(
@@ -1091,6 +1226,7 @@ class CriticAgentBackend:
         error: BaseException,
         *,
         latency_ms: int | None = None,
+        call_id: str | None = None,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a call that never returned."""
         try:
@@ -1099,13 +1235,14 @@ class CriticAgentBackend:
                 component="critic",
                 role="critic",
                 error=error,
+                call_id=call_id,
                 model=self._review_model,
                 tick=self._trace_tick,
                 phase=self._trace_phase,
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break review
+        except Exception:
             log.debug(
                 "full-trace: critic llm_call failure append failed",
                 exc_info=True,
@@ -1120,25 +1257,19 @@ class CriticAgentBackend:
         call_id: str | None = None,
     ) -> None:
         """Append one ``conversations.jsonl`` row for a critic reasoning loop."""
-        try:
-            prompt = f"{system_prompt}\n---\n{user_prompt}" if system_prompt else user_prompt
-            if not prompt and not response:
-                return
-            record = ConversationRecord(
-                session_id=self.session_dir.name,
-                component="critic",
-                role="critic",
-                call_id=call_id,
-                model=self._review_model,
-                prompt=prompt or "",
-                response=response or "",
-            )
-            append_conversation(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break review
-            log.debug(
-                "full-trace: critic conversation append failed",
-                exc_info=True,
-            )
+        prompt = f"{system_prompt}\n---\n{user_prompt}" if system_prompt else user_prompt
+        if not prompt and not response:
+            return
+        record = ConversationRecord(
+            session_id=self.session_dir.name,
+            component="critic",
+            role="critic",
+            call_id=call_id,
+            model=self._review_model,
+            prompt=prompt or "",
+            response=response or "",
+        )
+        append_conversation(session_dir=self.session_dir, record=record)
 
     def _load_skill_preamble(self) -> str:
         """Load and cache the critic-agent skill/action markdown preamble."""

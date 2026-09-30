@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-import hyperloom.orchestrator.kernel.roofline_csv as rc
-from hyperloom.orchestrator.kernel.roofline_ceiling import (
+import hyperloom.inference_optimizer.roofline_csv as rc
+from hyperloom.inference_optimizer.roofline_ceiling import (
     RooflineBreakdown,
     ceiling_config_columns,
     ceiling_config_key,
@@ -110,10 +110,11 @@ def test_external_strict_missing_arm_raises(tmp_path: Path) -> None:
 # A consumer — arch-peak swap from gpu_arch_peaks.csv (case-insensitive).
 # --------------------------------------------------------------------------- #
 
-from hyperloom.orchestrator.kernel.roofline_ceiling import (  # noqa: E402
+from hyperloom.inference_optimizer.roofline_ceiling import (  # noqa: E402
     _arch_peak_resolver,
     _hbm_bw_gbps,
     _resolve_achievable_tflops,
+    _resolve_peak_tflops,
 )
 
 
@@ -137,8 +138,10 @@ def test_achievable_tflops_peak_swaps_when_resolver_has_device(tmp_path: Path) -
     res = rc.RooflineResolver(tmp_path)
     # CSV value wins over the hardcoded HW_SPECS_ACHIEVABLE table.
     assert _resolve_achievable_tflops("mi355x", "bf16", res) == 1234.0
-    # No resolver -> falls back to the table (non-zero for a known device/precision).
-    assert _resolve_achievable_tflops("mi355x", "bf16", None) > 0
+    # No resolver -> native path. main #1602 removed the MI355X *achievable* table, so the
+    # direct achievable is 0.0; the ceiling's `achievable or vendor` fallback supplies the peak.
+    assert _resolve_achievable_tflops("mi355x", "bf16", None) == 0.0
+    assert _resolve_peak_tflops("mi355x", "bf16") > 0
     # hbm swap likewise.
     spec = {"hbm_bw_gbps": 5300.0}
     assert _hbm_bw_gbps(spec, "mi355x", res) == 8000.0

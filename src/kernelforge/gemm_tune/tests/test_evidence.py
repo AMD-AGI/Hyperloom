@@ -227,3 +227,68 @@ class TestRobustness:
         d = ev.parse_log(line)["demands"][0]
         assert d["table"] == "brand_new.csv"
         assert d["tuner"] is None and d["key_schema"] == ["M", "N", "K"]
+
+
+class TestDeployedTableNamesResolveToTheirOwner:
+    """Resolve deployed and merged table names to their owning tuner."""
+
+    @staticmethod
+    def _miss(table: str) -> str:
+        return f"[aiter] shape is M:512, N:1536, K:7168, not found tuned config in {table}"
+
+    def test_deployed_dense_bf16_is_owned(self):
+        d = ev.parse_log(self._miss("/tmp/aiter_configs/merged_tuned_dense_bf16.csv"))["demands"][0]
+        assert d["table"] == "bf16_tuned_gemm.csv"
+        assert d["tuner"] == "sglang_dense_bf16"
+        assert d["env_var"] == "AITER_CONFIG_GEMM_BF16"
+
+    def test_undeployed_artifact_name_is_owned_too(self):
+        d = ev.parse_log(self._miss("/work/tuned_dense_bf16.csv"))["demands"][0]
+        assert d["table"] == "bf16_tuned_gemm.csv" and d["tuner"] == "sglang_dense_bf16"
+
+    def test_runtime_name_is_unchanged(self):
+        d = ev.parse_log(self._miss("/tmp/aiter_configs/bf16_tuned_gemm.csv"))["demands"][0]
+        assert d["table"] == "bf16_tuned_gemm.csv" and d["tuner"] == "sglang_dense_bf16"
+
+    def test_deployed_and_runtime_names_are_one_demand(self):
+        rep = ev.parse_log(
+            "\n".join(
+                [
+                    self._miss("/tmp/aiter_configs/bf16_tuned_gemm.csv"),
+                    self._miss("/tmp/aiter_configs/merged_tuned_dense_bf16.csv"),
+                ]
+            )
+        )
+        assert len(rep["demands"]) == 1
+        assert rep["demands"][0]["miss_count"] == 2
+
+    def test_key_schema_follows_the_resolved_table(self):
+        # Under the old basename lookup this fell back to bare M,N,K.
+        d = ev.parse_log(self._miss("merged_tuned_dense_bf16.csv"))["demands"][0]
+        assert d["key_schema"] == list(ev.TABLE_KEY_SCHEMA["bf16_tuned_gemm.csv"])
+
+    def test_fmoe_artifact_needs_no_alias(self):
+        d = ev.parse_log(self._miss("/tmp/merged_tuned_fmoe.csv"))["demands"][0]
+        assert d["table"] == "tuned_fmoe.csv" and d["tuner"] == "fmoe_ck"
+
+    def test_genuinely_unknown_table_stays_ownerless(self):
+        d = ev.parse_log(self._miss("/tmp/merged_brand_new.csv"))["demands"][0]
+        assert d["table"] == "brand_new.csv" and d["tuner"] is None
+
+
+class TestCanonicalTableName:
+    def test_every_alias_target_has_an_owner(self):
+        # An alias pointing at a table nobody owns would be worse than none:
+        # it renames the miss and still reports it as a coverage hole.
+        for artifact, table in ev.ARTIFACT_TABLE_ALIASES.items():
+            assert table in ev.TABLE_TO_TUNER, artifact
+
+    def test_every_owned_table_is_its_own_canonical_form(self):
+        for table in ev.TABLE_TO_TUNER:
+            assert ev.canonical_table_name(table) == table
+
+    def test_windows_separators_and_whitespace(self):
+        assert ev.canonical_table_name(r"  C:\aiter\merged_tuned_dense_bf16.csv ") == "bf16_tuned_gemm.csv"
+
+    def test_empty_is_empty_not_a_crash(self):
+        assert ev.canonical_table_name("") == ""

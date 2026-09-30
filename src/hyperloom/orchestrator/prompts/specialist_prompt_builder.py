@@ -76,12 +76,6 @@ _TASK_KIND_BRIEFS: dict[str, str] = {
         "A previous patch failed to apply against the live source tree."
         " Study the apply errors in the notes, produce a corrected patch."
     ),
-    "framework_config_generation": (
-        "Propose a GRID of runtime config variants (server flags and/or env vars)"
-        " that may raise throughput WITHOUT changing source. Return a"
-        " ``proposal_set`` — each entry with ``name``, ``extra_args`` or"
-        " ``extra_envs``, and a one-line ``reason``. You do not benchmark."
-    ),
 }
 
 
@@ -602,31 +596,27 @@ def _focus_static_recon_specialist(
     model_info_line = ""
     shared_expert_advisory: list[str] = []
     if inp.model_info:
-        try:
-            attn = str(inp.model_info.get("attention_type") or "").strip()
-            is_moe = bool(inp.model_info.get("is_moe"))
-            quant = str(inp.model_info.get("quantization") or "").strip()
-            has_shared = bool(inp.model_info.get("has_shared_expert"))
-            num_shared = inp.model_info.get("num_shared_experts")
-            features = f"attention={attn or '?'} moe={is_moe}"
-            if has_shared:
-                n_str = str(int(num_shared)) if num_shared is not None else "?"
-                features += f" shared_expert=True n_shared={n_str}"
-            features += f" quant={quant or '?'}."
-            model_info_line = f"Model features: {features}"
-            if has_shared:
-                shared_expert_advisory = [
-                    "**Shared-expert fusion advisory**: this model has always-on shared "
-                    + "experts. Confirm whether the shared expert still runs as a separate "
-                    + "dense MLP per layer. If yes, investigate folding it into the routed "
-                    + "grouped-GEMM path as an always-selected extra expert slot (code-path "
-                    + "bridge, not just an env flag). Known caveat: expert parallelism (EP) "
-                    + "is unsupported until the expert-map behaviour is explicitly handled.",
-                    "",
-                ]
-        except Exception:  # noqa: BLE001 — advisory rendering only
-            model_info_line = ""
-            shared_expert_advisory = []
+        attn = str(inp.model_info.get("attention_type") or "").strip()
+        is_moe = bool(inp.model_info.get("is_moe"))
+        quant = str(inp.model_info.get("quantization") or "").strip()
+        has_shared = bool(inp.model_info.get("has_shared_expert"))
+        num_shared = inp.model_info.get("num_shared_experts")
+        features = f"attention={attn or '?'} moe={is_moe}"
+        if has_shared:
+            n_str = str(int(num_shared)) if num_shared is not None else "?"
+            features += f" shared_expert=True n_shared={n_str}"
+        features += f" quant={quant or '?'}."
+        model_info_line = f"Model features: {features}"
+        if has_shared:
+            shared_expert_advisory = [
+                "**Shared-expert fusion advisory**: this model has always-on shared "
+                + "experts. Confirm whether the shared expert still runs as a separate "
+                + "dense MLP per layer. If yes, investigate folding it into the routed "
+                + "grouped-GEMM path as an always-selected extra expert slot (code-path "
+                + "bridge, not just an env flag). Known caveat: expert parallelism (EP) "
+                + "is unsupported until the expert-map behaviour is explicitly handled.",
+                "",
+            ]
     return [
         "You are the **static-recon specialist** — a read-only reconnaissance",
         "agent. You do NOT benchmark, apply patches, build a worktree, or",
@@ -1766,8 +1756,12 @@ def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 5b — Related lessons (positive priors from prior KEEPs)
 def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
-    """Render KB ``kind=lesson`` points from prior KEEPs, compactly
+    """Render the recipe row's ``lessons`` from prior KEEPs, compactly
     (statement + measured_impact).
+
+    Rows are the flat shape ``Recipe.to_dict`` / ``_normalise_lessons`` write —
+    ``{statement, measured_impact, ...}`` — normalised by ``recipe_kb_t0``
+    before they land on ``warm_start_lessons``.
 
     Args:
         inp: The specialist prompt inputs (reads ``warm_start_lessons``).
@@ -1789,29 +1783,28 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
             continue
         if not isinstance(point, dict):
             continue
-        attrs = point.get("attrs") or {}
-        statement = str(attrs.get("statement") or "").strip()
+        statement = str(point.get("statement") or "").strip()
         if not statement:
             continue
-        impact_str = _render_measured_impact(attrs.get("measured_impact"))
+        impact_str = _render_measured_impact(point.get("measured_impact"))
         conf = point.get("confidence")
         meta_bits: list[str] = []
         if isinstance(conf, (int, float)) and conf > 0:
             meta_bits.append(f"conf={float(conf):.2f}")
         # validated_count is the strongest cross-session signal; fall back to source_session_id.
-        vc = attrs.get("validated_count")
+        vc = point.get("validated_count")
         if isinstance(vc, int) and vc > 1:
             meta_bits.append(f"validated={vc}")
-        recent_ids = attrs.get("source_session_ids")
+        recent_ids = point.get("source_session_ids")
         if isinstance(recent_ids, list) and recent_ids:
             meta_bits.append(f"recent={recent_ids[-1]}")
         else:
-            src_sid = str(attrs.get("source_session_id") or "").strip()
+            src_sid = str(point.get("source_session_id") or "").strip()
             if src_sid:
                 meta_bits.append(f"src={src_sid}")
         meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
         # Version-mismatch annotation; the LLM gets the final call.
-        version_note = _format_version_note(inp, attrs)
+        version_note = _format_version_note(inp, point)
         rows.append(f"- **{defang_prompt_structure(statement)}**{meta}{version_note}")
         if impact_str:
             rows.append(f"    impact: {impact_str}")
@@ -1822,21 +1815,21 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
 
 def _format_version_note(
     inp: SpecialistPromptInputs,
-    lesson_attrs: dict[str, Any],
+    row: dict[str, Any],
 ) -> str:
     """Render a ``[from sglang@X.Y, you're on A.B]`` annotation when
-    the lesson's framework_version differs; empty when either side is
+    the row's framework_version differs; empty when either side is
     unknown or they match.
 
     Args:
         inp: The specialist prompt inputs (reads ``framework`` /
             ``framework_version``).
-        lesson_attrs: The lesson's attrs (reads ``framework_version``).
+        row: The lesson or pitfall row (reads ``framework_version``).
 
     Returns:
         The version-mismatch annotation, or "" when unknown or matching.
     """
-    lesson_fv = str(lesson_attrs.get("framework_version") or "").strip()
+    lesson_fv = str(row.get("framework_version") or "").strip()
     current_fv = (inp.framework_version or "").strip()
     if not lesson_fv or not current_fv:
         return ""
@@ -1847,7 +1840,7 @@ def _format_version_note(
 
 
 def _render_measured_impact(raw: Any) -> str:
-    """Back-compat renderer for ``attrs.measured_impact`` (dict, legacy
+    """Back-compat renderer for a row's ``measured_impact`` (dict, legacy
     string, or other).
 
     Args:
@@ -1880,8 +1873,11 @@ def _render_measured_impact(raw: Any) -> str:
 
 # Section 5c — Known pitfalls (anti-priors from prior REVERTs)
 def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
-    """Render KB ``kind=pitfall`` points from prior REVERTs (description +
+    """Render the recipe row's ``pitfalls`` from prior REVERTs (description +
     severity); framed as forbidden paths, not suggestions.
+
+    Rows are the flat ``{description, severity, ...}`` shape ``Recipe.to_dict`` /
+    ``_normalise_str_dicts`` write, normalised by ``recipe_kb_t0``.
 
     Args:
         inp: The specialist prompt inputs (reads ``warm_start_pitfalls``).
@@ -1902,29 +1898,28 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
             continue
         if not isinstance(point, dict):
             continue
-        attrs = point.get("attrs") or {}
-        description = str(attrs.get("description") or "").strip()
+        description = str(point.get("description") or "").strip()
         if not description:
             continue
-        severity = str(attrs.get("severity") or "").strip()
+        severity = str(point.get("severity") or "").strip()
         conf = point.get("confidence")
         meta_bits: list[str] = []
         if severity:
             meta_bits.append(f"severity={severity}")
         if isinstance(conf, (int, float)) and conf > 0:
             meta_bits.append(f"conf={float(conf):.2f}")
-        vc = attrs.get("validated_count")
+        vc = point.get("validated_count")
         if isinstance(vc, int) and vc > 1:
             meta_bits.append(f"observed={vc}")
-        recent_ids = attrs.get("source_session_ids")
+        recent_ids = point.get("source_session_ids")
         if isinstance(recent_ids, list) and recent_ids:
             meta_bits.append(f"recent={recent_ids[-1]}")
         else:
-            src_sid = str(attrs.get("source_session_id") or "").strip()
+            src_sid = str(point.get("source_session_id") or "").strip()
             if src_sid:
                 meta_bits.append(f"src={src_sid}")
         meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
-        version_note = _format_version_note(inp, attrs)
+        version_note = _format_version_note(inp, point)
         rows.append(f"- **{description}**{meta}{version_note}")
     if len(rows) == 2:  # only the header + blank line, all pitfalls filtered out
         rows.append(_NONE_PLACEHOLDER)
@@ -2238,10 +2233,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         '``{"ts": "<iso8601>", "status": "running", "note": "<short>"}``.',
         "Going silent past 5 minutes kills your subprocess.",
         "",
-        (
-            f"Hard cap: at most **{inp.max_turns}** LLM turns. Silence past "
-            "the cap = stale (robustness will synthesize an empty done)."
-        ),
+        (f"Hard cap: at most **{inp.max_turns}** LLM turns. Emit specialist_done before the cap."),
     ]
 
 
@@ -2330,8 +2322,8 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     Returns:
         list[str]: The enablement-playbook section lines.
     """
-    from hyperloom.agents.framework.enablement import EnablementRequest
-    from hyperloom.agents.framework.enablement_ops import build_mandate
+    from hyperloom.common.failure_signature import EnablementRequest
+    from hyperloom.orchestrator.enablement.mandate import build_mandate
 
     model = str((inp.gap_evidence or {}).get("model") or "").strip()
     req = EnablementRequest(
@@ -2382,14 +2374,11 @@ def _section_pd_disaggregation(inp: SpecialistPromptInputs) -> list[str]:
         list[str]: The PD-disaggregation section lines, or ``[]`` when not
         disaggregated.
     """
-    try:
-        from hyperloom.orchestrator.actions.executors._multi_node_env import (
-            pd_topology_from_state,
-        )
+    from hyperloom.orchestrator.actions.executors._multi_node_env import (
+        pd_topology_from_state,
+    )
 
-        pd = pd_topology_from_state()
-    except Exception:
-        return []
+    pd = pd_topology_from_state()
     if not pd:
         return []
     tb = pd.get("transfer_backend") or "the KV transfer backend"
