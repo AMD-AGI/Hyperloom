@@ -132,7 +132,7 @@ The backend runs `install_baremetal.sh` in five phases:
 
 1. **Base preflight**: Checks ROCm, GPU arch, ROCm torch, torch/triton alignment,
    and serving framework imports.
-2. **Framework install**: Optionally installs the SGLang or vLLM framework layer.
+2. **Framework install**: Optionally installs the SGLang, vLLM or ATOM framework layer.
 3. **ROCm hotfix**: Applies the profiler hotfix when the ROCm stack is eligible,
    covering both `/opt/rocm/lib` and PyTorch's bundled `torch/lib/`.
 4. **Credentials**: Resolves LLM gateway credentials into `.env`.
@@ -396,7 +396,7 @@ set of accepted shapes, including split entrypoints and self-hosted gateways.
 Make sure the host already provides the required base environment:
 
 - ROCm runtime and a ROCm-built torch.
-- A serving framework (SGLang or vLLM) importable in the active Python.
+- A serving framework (SGLang, vLLM or ATOM) importable in the active Python.
 - `git` for the dependency checkouts the optimization skill performs.
 
 With that in place, open the repository root in the agent and paste a launch

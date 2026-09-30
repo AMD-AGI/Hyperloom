@@ -26,7 +26,7 @@ Whether to generate or run a Docker container is decided later by the example
 
 - `baremetal`: run directly in the current development environment, even if that
   environment is itself a container. It provides ROCm and ROCm torch; setup can
-  reuse preinstalled SGLang, vLLM, or ATOM, or optionally install SGLang/vLLM.
+  reuse preinstalled SGLang, vLLM, or ATOM, or optionally install SGLang/vLLM/ATOM.
   Do not start another Docker container or require a physical host OS.
 - `docker`: writes `.env` and records the run mode; the example (workload) skill
   starts the container and runs setup inside it.
@@ -163,7 +163,7 @@ value.
 
 7. Only when the user chose `baremetal`, ask whether to install a serving
    framework (used as the `--install-framework` value in Step 4). Present exactly
-   these three option labels in this order and do not reorder them by
+   these four option labels in this order and do not reorder them by
    recommendation:
    1. `none`: use an already-installed vLLM/SGLang/ATOM stack in the selected
       Python environment. This skips framework installation, not setup's
@@ -173,13 +173,23 @@ value.
       torch/SGLang stack untouched. On ROCm 7.2.x the ROCm wheel brings its own
       torch; on ROCm 10 vLLM is built from source in a venv that reuses the host
       ROCm torch.
-   - Do not mark any option as recommended. Present the three options in the exact
+   4. `atom`: install ATOM and its AITER dependency from source (shared with the
+      host torch). The ATOM commit defaults to the one `rocm/atom-dev:v0.1.7-rc0`
+      was built from.
+   - ATOM never shares a Python with SGLang or vLLM: ATOM registers vLLM and
+     SGLang plugins that both engines load by default, so a later SGLang or
+     vLLM run there would execute ATOM's platform, model and loader code. Setup
+     therefore refuses `atom` when SGLang or vLLM imports from the selected
+     Python (including a ROCm 10 vLLM venv built over it), and refuses `sglang`
+     or a shared/ROCm 10 `vllm` when ATOM imports there. The ROCm 7.2.x
+     `vllm (isolated)` venv is self-contained and unaffected. When the user wants
+     ATOM beside another engine, put ATOM in a separate container.
+   - Do not mark any option as recommended. Present the four options in the exact
      order above without a default selection.
-   - ATOM must already be installed; there is no `--install-framework atom`.
-     For an ATOM workload, use `none` and explicitly verify/select it with
-     `--frameworks atom --require-frameworks`, especially when multiple serving
-     frameworks are installed. Do not change global framework defaults or choose
-     whichever other framework happens to import first.
+   - For an ATOM that is already installed, use `none` and explicitly
+     verify/select it with `--frameworks atom --require-frameworks`, especially
+     when multiple serving frameworks are installed. Do not change global
+     framework defaults or choose whichever other framework happens to import first.
 
 8. Only when the user chose `baremetal` **and** `vllm (isolated)` in Step 7,
    briefly note that on ROCm 7.2.x the installer enforces the vLLM 0.28.0+
@@ -261,7 +271,7 @@ If any required secret is missing or still a placeholder, stop and ask the user 
 ## Step 4: Run Setup Backend
 
 In `baremetal` mode, run the backend on the host. The `--install-framework` value
-is the framework the user chose in Step 2 (`none` / `vllm` / `sglang`). In
+is the framework the user chose in Step 2 (`none` / `vllm` / `sglang` / `atom`). In
 `docker` mode, skip the backend on the host (see below).
 
 ### `baremetal`
@@ -335,10 +345,18 @@ export REPO_ROOT="$(pwd -P)"
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
 ```
 
+For `atom` (installs AITER, then ATOM at `ATOM_REF` as an editable checkout under
+the dependency root, and verifies that `atom` and its server module import):
+
+```bash
+export REPO_ROOT="$(pwd -P)"
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework atom --yes
+```
+
 `none` reuses a preinstalled framework; it does not remove it. If no serving
 framework is importable, report the missing prerequisite. For ATOM, select an
-existing compatible ATOM environment or prepare one separately with approval;
-do not bypass the check or install a different framework as a substitute.
+existing compatible ATOM environment or install it with `--install-framework atom`
+after approval; do not bypass the check or install a different framework as a substitute.
 `BENCHMARK_BASE_URL` and `HYPERLOOM_SKIP_FRAMEWORK_CHECK` remain available for
 other existing remote/special workflows, not to bypass checks in this local ATOM example.
 
@@ -374,9 +392,8 @@ the demo skill runs setup inside the container. Read
 - If `HYPERLOOM_RUN_MODE` is `baremetal` and `FRAMEWORK` is missing or empty,
   setup did not detect a serving framework (for example, `none` without an
   importable SGLang/vLLM/ATOM stack). Check the selected interpreter and report
-  the failure. Offer SGLang/vLLM installation only if that is the user's intended
-  framework; ATOM users need a preinstalled compatible ATOM stack. Do not invent
-  a `FRAMEWORK` value or silently switch frameworks.
+  the failure. Offer SGLang/vLLM/ATOM installation only for the framework the user
+  intends to run. Do not invent a `FRAMEWORK` value or silently switch frameworks.
 
 ## Step 6: Report Result
 
@@ -398,8 +415,9 @@ mode, ask the user whether they want to run a demo optimization now, and if so
 which option:
 
 - `3h` — short, no-kernel run. Best for a first end-to-end check.
-- `12h` — medium-length Qwen3-14B-FP8 run; use the ATOM variant when ATOM is
-  detected or explicitly selected (including a Docker run awaiting detection).
+- `12h` — medium-length Qwen3-14B-FP8 run on SGLang, vLLM or ATOM; the demo
+  follows its ATOM section when ATOM is detected or explicitly selected
+  (including a Docker run awaiting detection).
 - `custom advanced` — user-selected model, framework, workload, budget, phase
   toggles, and advanced CLI flags.
 
@@ -410,9 +428,9 @@ structured UI: which kernel optimization backend the KERNEL_AGENT phase should
 use. Do not ask this for `3h` (it runs `--no-kernel`, so there is no kernel
 phase to route) or for `custom advanced` (that skill collects its own flags).
 
-When `FRAMEWORK=atom`, or the user selected the ATOM demo in Docker mode before
-container-side detection, ask the same backend question and route to the ATOM
-pair instead of the SGLang/vLLM one. If no backend was selected, write nothing
+When `FRAMEWORK=atom`, or the user selected ATOM in Docker mode before
+container-side detection, ask the same backend question; the same two demo
+skills cover ATOM. If no backend was selected, write nothing
 to `.env`. Preserve an explicit shell or `.env` value; if it is non-empty and
 does not opt in, report the original value and ask whether to keep it or
 explicitly switch before launch. Never silently unset or delete it.
@@ -428,12 +446,10 @@ kernel backend differs, so the two runs stay directly comparable.
 The choice selects which demo skill to load and sets
 `KERNEL_OPT_BACKEND_ORDER`:
 
-- `geak` → load `hyperloom-qwen3-14b-fp8-12h`, or
-  `hyperloom-qwen3-14b-fp8-12h-atom` when `FRAMEWORK=atom`. Leave
+- `geak` → load `hyperloom-qwen3-14b-fp8-12h`. Leave
   `KERNEL_OPT_BACKEND_ORDER` unset, or write `geak`; anything that does not opt
   in means GEAK.
-- `forge` → load `hyperloom-qwen3-14b-fp8-12h-forge`, or
-  `hyperloom-qwen3-14b-fp8-12h-atom-forge` when `FRAMEWORK=atom`, and write
+- `forge` → load `hyperloom-qwen3-14b-fp8-12h-forge`, and write
   `KERNEL_OPT_BACKEND_ORDER=forge` to `.env` so a `--resume-from` relaunch keeps
   the same backend.
 
@@ -469,10 +485,8 @@ The demo skills are installed under each agent's discovery dir (`.agents/skills/
 `.claude/skills/`, `.cursor/skills/`); load the matching one by name:
 
 - `3h` → `hyperloom-qwen3-8b-3h`
-- `12h` + `geak` → `hyperloom-qwen3-14b-fp8-12h`
-- `12h` + `forge` → `hyperloom-qwen3-14b-fp8-12h-forge`
-- `12h` + `FRAMEWORK=atom` + `geak` → `hyperloom-qwen3-14b-fp8-12h-atom`
-- `12h` + `FRAMEWORK=atom` + `forge` → `hyperloom-qwen3-14b-fp8-12h-atom-forge`
+- `12h` + `geak` → `hyperloom-qwen3-14b-fp8-12h` (SGLang, vLLM or ATOM)
+- `12h` + `forge` → `hyperloom-qwen3-14b-fp8-12h-forge` (SGLang, vLLM or ATOM)
 - `custom advanced` → `hyperloom-custom-advanced`
 
 The demo skill reads the values already in `.env` (LLM keys/base URLs,

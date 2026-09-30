@@ -5353,11 +5353,16 @@ def _candidate_resolution_method(item: dict[str, Any]) -> str:
 
     The candidate carries the method only when a tier stamped one; a path that
     arrived from grep has none, and an absent path means nothing resolved it.
+    A tier that ruled on the kernel without locating it (the active finder's
+    non-patchable verdict) is not a location method, so it maps to unresolved;
+    its verdict survives in ``reason`` and ``reason_class``.
     """
     stamped = str(item.get("source_resolution_method") or "").strip()
-    if stamped in getattr(_KSC, "KNOWN_METHODS", frozenset()):
+    has_source = bool(str(item.get("source_file") or "").strip())
+    pathless = {getattr(_KSC, "METHOD_UNRESOLVED", "unresolved"), getattr(_KSC, "METHOD_REJECTED", "")}
+    if stamped in getattr(_KSC, "KNOWN_METHODS", frozenset()) and (has_source or stamped in pathless):
         return stamped
-    if str(item.get("source_file") or "").strip():
+    if has_source:
         # No tier claimed it but a path is present: grep is the only tier that
         # resolves without stamping.
         return getattr(_KSC, "METHOD_GREP", "name_grep")
