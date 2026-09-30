@@ -1255,9 +1255,9 @@ class TestThePumpStopsWorkItCannotWaitFor:
         finish = threading.Event()
         worker_done = threading.Event()
         promoted = AsyncMock()
-        monkeypatch.setattr(coord.dispatcher, "_is_promotable_result", lambda *_args: True)
-        monkeypatch.setattr(coord.dispatcher, "_promote_to_shared_state", promoted)
-        monkeypatch.setattr(coord.dispatcher, "_fact_write_hook", AsyncMock())
+        monkeypatch.setattr(coord.writeback, "_is_promotable_result", lambda *_args: True)
+        monkeypatch.setattr(coord.writeback, "_promote_to_shared_state", promoted)
+        monkeypatch.setattr(coord.writeback, "_fact_write_hook", AsyncMock())
 
         def work():
             entered.set()
@@ -1359,7 +1359,7 @@ class TestATickCannotOutliveTheSessionBound:
         coord: Coordinator,
         monkeypatch,
     ):
-        monkeypatch.setattr(coord, "_advance_phase_if_needed", _idle)
+        monkeypatch.setattr(coord.phase_machine, "_advance_phase_if_needed", _idle)
         monkeypatch.setattr(coord, "_reactor_pass", _hang_forever)
         monkeypatch.setattr(coord.dispatcher, "_pump_dispatcher_once", _idle)
         started = time.monotonic()
@@ -1379,7 +1379,7 @@ class TestATickCannotOutliveTheSessionBound:
         coord: Coordinator,
         monkeypatch,
     ):
-        monkeypatch.setattr(coord, "_advance_phase_if_needed", _hang_forever)
+        monkeypatch.setattr(coord.phase_machine, "_advance_phase_if_needed", _hang_forever)
         monkeypatch.setattr(coord, "_reactor_pass", _idle)
         monkeypatch.setattr(coord.dispatcher, "_pump_dispatcher_once", _idle)
         started = time.monotonic()
