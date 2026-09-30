@@ -434,22 +434,12 @@ class EnablementLane(CoordinatorCollaborator):
         """
         state = self.shared_state
         lane = state.enablement
-        enablement_event.finish(
+        _finish_lane_event(
+            lane,
+            state,
             outcome=outcome,
             reason=reason,
-            recipe=recipe_for(
-                lane,
-                session_dir=str(self.session_dir or ""),
-                mode=str(getattr(state, "enablement_mode", "") or ""),
-            ),
-            kept_patches=lane.kept_patches,
-            kept_artifacts=lane.kept_artifacts,
-            setup_commands=lane.setup_commands,
-            accepted_config=lane.accepted_config,
-            accepted_config_path=str(lane.accepted_config_path or ""),
-            active_runtime=lane.active_runtime,
-            attempt_runtimes=lane.attempt_runtimes,
-            framework_root=str(lane.framework_root or ""),
+            session_dir=str(self.session_dir or ""),
             stall_streak=await self.rounds.consecutive_stalled(),
         )
 
@@ -844,6 +834,38 @@ def _rearm_on_advanced(state: Any, res: dict[str, Any]) -> None:
     _reset_baseline_failure_backstop(state)
 
 
+def _finish_lane_event(
+    lane: Any,
+    state: Any,
+    *,
+    outcome: str,
+    reason: str,
+    session_dir: str,
+    stall_streak: int,
+    setting_script: str = "",
+) -> None:
+    """Assemble and emit the terminal enablement_event.finish call."""
+    enablement_event.finish(
+        outcome=outcome,
+        reason=reason,
+        recipe=recipe_for(
+            lane,
+            session_dir=str(session_dir or ""),
+            mode=str(state.enablement_mode or ""),
+        ),
+        kept_patches=lane.kept_patches,
+        kept_artifacts=lane.kept_artifacts,
+        setup_commands=lane.setup_commands,
+        accepted_config=lane.accepted_config,
+        accepted_config_path=str(lane.accepted_config_path or ""),
+        setting_script=setting_script,
+        active_runtime=lane.active_runtime,
+        attempt_runtimes=lane.attempt_runtimes,
+        framework_root=str(lane.framework_root or ""),
+        stall_streak=stall_streak,
+    )
+
+
 def _round_task_id(state: Any, res: dict[str, Any]) -> str:
     """The specialist task id every row of one round is keyed by.
 
@@ -889,24 +911,12 @@ def _record_enablement_round(
         outcome, reason = enablement_event.OUTCOME_STALLED, stop_reason
     else:
         return
-    enablement_event.finish(
+    _finish_lane_event(
+        lane,
+        state,
         outcome=outcome,
         reason=reason,
-        kept_patches=lane.kept_patches,
-        kept_artifacts=lane.kept_artifacts,
-        setup_commands=lane.setup_commands,
-        accepted_config=lane.accepted_config,
-        accepted_config_path=str(lane.accepted_config_path or ""),
-        setting_script=setting_script,
-        active_runtime=lane.active_runtime,
-        attempt_runtimes=lane.attempt_runtimes,
-        framework_root=str(lane.framework_root or ""),
+        session_dir=str(session_dir or ""),
         stall_streak=int(stall_streak or 0),
-        # The replay contract is judged at the terminal, which is here: the
-        # accepted stack is complete only once the lane has closed on one.
-        recipe=recipe_for(
-            lane,
-            session_dir=str(session_dir or ""),
-            mode=str(getattr(state, "enablement_mode", "") or ""),
-        ),
+        setting_script=setting_script,
     )

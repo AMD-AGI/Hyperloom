@@ -83,10 +83,11 @@ unbounded runs use the fixed per-cycle budget window.
 Whether another cycle is feasible is surfaced as `cycle_reloop_feasible` in
 the ``=== Phase ===`` block for the five middle phases.
 
-`machine_state.PHASE_ALLOWED_ACTIONS` defines which actions the LLM may
-propose in each phase; the prompt exposes only that subset. Coordinator-owned
-actions such as analysis refreshes and close sequencing may be enqueued
-internally even when the LLM is not allowed to propose them.
+`machine_state.PHASE_ALLOWED_ACTIONS` is a cross-phase transition survival
+filter, not the set the LLM can propose. The LLM-proposable set is
+`allowed_actions_for(phase)`. Coordinator-owned actions such as analysis
+refreshes and close sequencing may be enqueued internally even when the LLM
+is not allowed to propose them.
 
 Every phase transition is a GPU barrier: the Coordinator stops every running
 action and drops queued work the next phase does not support, and commits the
@@ -275,13 +276,15 @@ look very different from Orchestration's side:
 See [Kernel optimization execution path](../reference/kernel-execution-path.md) for the
 entry-hook branch order.
 
-The phase action set (`machine_state.PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`)
-covers these LLM-proposable actions:
+The LLM-proposable actions for KERNEL_AGENT phase (`allowed_actions_for(KERNEL_AGENT)`)
+are:
 
 - `integrate`
 - `roofline`
 - `profile`
-- `kernel_agent` (Coordinator-internal; the phase's whole pipeline as one task)
+
+`kernel_agent` is Coordinator-internal; PolicyGate rejects it with
+`rule="coordinator_managed_action"` if an LLM proposes it.
 
 Within the kernel-agent request channel, the handler dispatches request kinds
 such as `trace_analyze` and `integrate`

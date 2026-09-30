@@ -63,7 +63,8 @@ def phase_index(phase: str) -> int:
     return PHASE_INDEX.get((phase or "").strip().upper(), -1)
 
 
-# Phase ↔ allowed action set: drives the LLM-proposable action list shown in the prompt; Coordinator-auto actions
+# Phase transition survival filter: actions that survive across phase boundaries.
+# Not the LLM-proposable set (that is allowed_actions_for(phase)); Coordinator-auto actions
 # stay out of PROPOSABLE so the prompt does not invite LLM proposals for them.
 PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_PRELUDE: frozenset(
@@ -548,7 +549,7 @@ def phase_cumulative_seconds(
     now_unix: float | None = None,
 ) -> float:
     """Return wall-clock seconds spent in ``phase``, summed over EVERY entry."""
-    current = (getattr(state, "phase", "") or "").strip().upper()
+    current = (state.phase or "").strip().upper()
     target = (phase or current or "").strip().upper()
     if not target:
         return 0.0
@@ -572,8 +573,8 @@ def _phase_budget_total_seconds(
     now_unix: float | None = None,
 ) -> float | None:
     """Effective TOTAL budget (seconds) allotted to the current phase."""
-    budget = normalize_budget_pct(state.phase_budget_pct)
-    phase = (getattr(state, "phase", "") or "").strip().upper()
+    budget = state.phase_budget_pct
+    phase = (state.phase or "").strip().upper()
     if phase not in budget:
         return None
     pct = float(budget[phase])
@@ -629,8 +630,8 @@ def effective_max_minutes(state: Any) -> float:
 
 def phase_cap_seconds(state: Any) -> float | None:
     """Absolute wall-clock ceiling (seconds) for the current phase."""
-    budget = normalize_budget_pct(state.phase_budget_pct)
-    phase = (getattr(state, "phase", "") or "").upper()
+    budget = state.phase_budget_pct
+    phase = (state.phase or "").upper()
     if phase not in budget:
         return None
     pct = float(budget[phase])
