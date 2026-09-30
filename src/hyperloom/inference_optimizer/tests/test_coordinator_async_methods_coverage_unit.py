@@ -794,6 +794,7 @@ def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coor
 async def test_compose_prompt_orchestration_gain_objective(coord: Coordinator) -> None:
     coord._current_objective = TargetGainObjective(target_gain_pct=20.0)
     coord.shared_state.cumulative_gain_validated = 5.0
+    coord.conversation._refresh_target_gap_pct()
     await coord.conversation._compose_prompt("orchestration")
     assert coord.shared_state.target_gap_pct == pytest.approx(15.0)
 
@@ -803,6 +804,7 @@ async def test_compose_prompt_renders_the_gap_it_just_computed(coord: Coordinato
     """The first SEED must carry the live gap, not the value left from a prior tick."""
     coord._current_objective = TargetGainObjective(target_gain_pct=20.0)
     coord.shared_state.cumulative_gain_validated = 5.0
+    coord.conversation._refresh_target_gap_pct()
     text = await coord.conversation._compose_prompt("orchestration")
     assert "target_gap_pct=15.00" in text
     assert "target_gap_pct=0.00" not in text
@@ -812,6 +814,7 @@ async def test_compose_prompt_renders_the_gap_it_just_computed(coord: Coordinato
 async def test_compose_prompt_time_only_objective_leaves_no_gap(coord: Coordinator) -> None:
     coord._current_objective = TimeOnlyObjective()
     coord.shared_state.cumulative_gain_validated = 5.0
+    coord.conversation._refresh_target_gap_pct()
     await coord.conversation._compose_prompt("orchestration")
     assert coord.shared_state.target_gap_pct == 0.0
 

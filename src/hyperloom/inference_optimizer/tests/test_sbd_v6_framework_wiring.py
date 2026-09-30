@@ -166,7 +166,7 @@ def test_advisory_plateau_snapshots_both_arms(session_dir: Path):
     state.phase = "FRAMEWORK_AGENT"
     coord.phase_framework._open_framework_timeline()
 
-    coord.conversation._plateau_advisory_block()
+    coord.conversation._record_advisory_plateau_from_state()
     coord.phase_framework._close_framework_timeline(exit_reason="optimize_budget_cap")
 
     advisory = [row for row in _events(session_dir)[0]["ext"]["plateau"] if row["path"] == "advisory"]
