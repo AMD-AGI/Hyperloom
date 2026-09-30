@@ -709,7 +709,7 @@ async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordin
 
     assert st.geak_result["revalidation_status"] == "no_material"
     assert not (
-        st.resume_pending_revalidation is False and st.cumulative_gain_validated_stack_len < len(st.optimization_stack)
+        not st.optimization_stack_has_unvalidated_keeps() and st.cumulative_gain_validated_stack_len < len(st.optimization_stack)
     ), "no_material cleared the revalidation flag without reconciling the validation watermark"
 
 
