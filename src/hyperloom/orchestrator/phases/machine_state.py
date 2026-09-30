@@ -63,7 +63,8 @@ def phase_index(phase: str) -> int:
     return PHASE_INDEX.get((phase or "").strip().upper(), -1)
 
 
-# Phase ↔ allowed action set: drives the LLM-proposable action list shown in the prompt; Coordinator-auto actions
+# Phase transition survival filter: actions that survive across phase boundaries.
+# LLM-proposable set is allowed_actions_for(phase); Coordinator-auto actions
 # stay out of PROPOSABLE so the prompt does not invite LLM proposals for them.
 PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_PRELUDE: frozenset(
@@ -695,7 +696,7 @@ def phase_status_summary(
     elapsed = int(phase_elapsed_seconds(state, now_unix=now_unix))
     # ``remaining`` paces this entry; the absolute cap reads ``cumulative``.
     cumulative = int(phase_cumulative_seconds(state, now_unix=now_unix))
-    budget_pct_for_phase = normalize_budget_pct(state.phase_budget_pct).get(phase, 0.0)
+    budget_pct_for_phase = state.phase_budget_pct.get(phase, 0.0)
     remaining = phase_budget_remaining_seconds(state, now_unix=now_unix)
     budget_line: str
     if remaining is None:
