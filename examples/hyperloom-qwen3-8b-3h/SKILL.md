@@ -116,8 +116,8 @@ Required optimize CLI flags:
 - `--precision bf16`
 - `--target-gain 30`
 - `--max-hours 3`
-- `--max-minutes-framework-pct 0.50`
-- `--max-minutes-sweep-pct 0.01`
+- `--phase-budget-framework-pct 0.50`
+- `--phase-budget-sweep-pct 0.01`
 - `--no-kernel`
 - `--no-enable-conc-sweep`
 - `--no-enable-roofline`
@@ -225,7 +225,7 @@ and the stop reason. Never print API keys, tokens, or custom header values.
    critic subprocesses can import `hyperloom.agents` after changing cwd.
 3. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the optimizer command to it with `run_in_background=true`, without shell-level detachment (`setsid`, `nohup`, or a trailing `&`); otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends. In Docker mode that launch still runs inside one attached `docker exec … bash -lc`; never `docker exec -d`.
 4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
-5. Include `--max-minutes-framework-pct 0.50` and `--max-minutes-sweep-pct 0.01`
+5. Include `--phase-budget-framework-pct 0.50` and `--phase-budget-sweep-pct 0.01`
    in the optimize command. These are the value *before* redistribution: with
    `--no-kernel`, KERNEL_AGENT is disabled and its freed share is added on top,
    so `0.50` becomes ~0.99 of wall clock for FRAMEWORK_AGENT. Raising `0.50`

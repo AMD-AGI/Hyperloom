@@ -1113,7 +1113,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     # phase budget percentages: each phase claims a fraction of the wall-clock budget (caps; may exit earlier).
     opt.add_argument(
-        "--max-minutes-prelude-pct",
         "--phase-budget-prelude-pct",
         dest="phase_budget_prelude_pct",
         type=float,
@@ -1121,19 +1120,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Wall-clock budget cap for PRELUDE as a fraction of --max-hours. Default: 0.03.",
     )
     opt.add_argument(
-        "--max-minutes-framework-pct",
         "--phase-budget-framework-pct",
-        # The EXPLORE spellings land on the same option: configuration search and source landing are two arms of one
-        # phase with one budget, so a separate share for either would be a number nothing reads.
-        "--max-minutes-explore-pct",
-        "--phase-budget-explore-pct",
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.38.",
+        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase, which covers both configuration search "
+        "and source landing. Default: 0.38.",
     )
     opt.add_argument(
-        "--max-minutes-kernel-pct",
         "--phase-budget-kernel-pct",
         dest="phase_budget_kernel_pct",
         type=float,
@@ -1141,7 +1135,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47.",
     )
     opt.add_argument(
-        "--max-minutes-sweep-pct",
         "--phase-budget-sweep-pct",
         dest="phase_budget_sweep_pct",
         type=float,
@@ -1149,7 +1142,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Wall-clock budget cap for SWEEP. Default: 0.05.",
     )
     opt.add_argument(
-        "--max-minutes-close-pct",
         "--phase-budget-close-pct",
         dest="phase_budget_close_pct",
         type=float,

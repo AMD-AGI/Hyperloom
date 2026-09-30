@@ -246,8 +246,8 @@ docker() {
         "--precision": "fp8",
         "--target-gain": "50",
         "--max-hours": "12",
-        "--max-minutes-framework-pct": "0.43",
-        "--max-minutes-kernel-pct": "0.42",
+        "--phase-budget-framework-pct": "0.43",
+        "--phase-budget-kernel-pct": "0.42",
         "--launch-info-file": launch_info.as_posix(),
     }
     assert len(argv[4:]) == 2 * len(expected_flags)

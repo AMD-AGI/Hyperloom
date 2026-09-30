@@ -272,7 +272,7 @@ set -e
   --tp 1 --conc 64 --isl 1024 --osl 1024 \
   --precision fp8 \
   --target-gain 50 --max-hours 12 \
-  --max-minutes-framework-pct 0.43 --max-minutes-kernel-pct 0.42 \
+  --phase-budget-framework-pct 0.43 --phase-budget-kernel-pct 0.42 \
   --launch-info-file "$LAUNCH_INFO_FILE" \
   > "$RUN_LOG" 2>&1 < /dev/null
 ```
