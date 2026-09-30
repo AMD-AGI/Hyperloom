@@ -27,7 +27,7 @@ def _conc_sweep_lease_ttl_sec(clamped_budget: int | None) -> int:
 
 
 class SweepPhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """SWEEP phase handler: drives concurrency sweep and roofline analysis."""
 
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
         """Auto-enqueue the ``conc_sweep`` task on SWEEP entry."""
@@ -176,8 +176,9 @@ class SweepPhase(CoordinatorCollaborator):
         last = self.shared_state.last_conc_sweep or {}
         if str(last.get("status") or "").strip():
             return
-        self._record_terminal_conc_sweep_skip(
-            skip_reason="session_time_budget",
+        self._record_terminal_conc_sweep(
+            "skipped",
+            "session_time_budget",
             auto_conc_sweep_skipped="session_time_budget",
             auto_conc_sweep_denied=str(denied),
         )
@@ -189,12 +190,18 @@ class SweepPhase(CoordinatorCollaborator):
         **evidence: Any,
     ) -> None:
         """Record an auto-conc-sweep skip as terminal so SWEEP can close cleanly."""
+        self._record_terminal_conc_sweep("skipped", skip_reason, **evidence)
+
+    def _record_terminal_conc_sweep(
+        self,
+        status: str,
+        reason: str,
+        **evidence: Any,
+    ) -> None:
+        """Record a terminal conc-sweep outcome and persist state."""
         self._coord.phase_machine._record_phase_entry_evidence(**evidence)
-        self.shared_state.record_conc_sweep(
-            {
-                "status": "skipped",
-                "skip_reason": skip_reason,
-                "was_skipped": True,
-            }
-        )
+        record: dict[str, Any] = {"status": status, "skip_reason": reason}
+        if status == "skipped":
+            record["was_skipped"] = True
+        self.shared_state.record_conc_sweep(record)
         self.shared_state.save(self.session_dir)

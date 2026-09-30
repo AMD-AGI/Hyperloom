@@ -65,7 +65,7 @@ def _task_is_dead(task: Task | None) -> bool:
 
 
 class ClosePhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """CLOSE phase sequencer: runs the fixed 7-step shutdown sequence and marks close_sequence_done."""
 
     CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
     CLOSE_STACK_REVALIDATION_TIMEOUT_SEC: float = 600.0
