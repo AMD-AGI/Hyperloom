@@ -962,8 +962,8 @@ async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir,
     s.pending_integrate = {"task_id": "t-enable"}
     validate = Mock()
     watermark = AsyncMock()
-    monkeypatch.setattr(coord.writeback, "_update_cumulative_gain_validated", validate)
-    monkeypatch.setattr(coord.writeback, "_maybe_enqueue_watermark_roofline", watermark)
+    monkeypatch.setattr(coord.writeback, "validate", validate)
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_enqueue_watermark_roofline", watermark)
 
     await coord.writeback._promote_to_shared_state(
         "integrate_patch",
@@ -1528,7 +1528,7 @@ async def test_promote_explore_resume_revalidate_keeps_pending_on_empty_rebench(
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
-    s.resume_pending_revalidation = True
+    _set_resume_pending(s, True)
 
     await coord.writeback._promote_to_shared_state(
         "explore",
@@ -1546,7 +1546,7 @@ async def test_promote_explore_resume_revalidate_keeps_pending_on_empty_rebench(
     )
 
     # No valid measurement -> the flag stays set so reports keep warning.
-    assert s.resume_pending_revalidation is True
+    assert _resume_pending(s) is True
 
 
 # GAP 10: every _PROMOTE_HANDLERS value resolves to a callable on the class, so a typo or unregistered handler is
@@ -2152,7 +2152,7 @@ class TestWritebackRequiredAxes:
         record = Mock()
         monkeypatch.setattr(stack_event, "record_validation", record)
 
-        coord.writeback._update_cumulative_gain_validated(150.0, candidate, ts="2026-01-02T00:00:00+00:00")
+        coord.writeback.validate(150.0, candidate, ts="2026-01-02T00:00:00+00:00")
 
         assert state.to_dict() == before
         record.assert_not_called()
@@ -2173,7 +2173,7 @@ class TestWritebackRequiredAxes:
         record = Mock()
         watermark = AsyncMock()
         monkeypatch.setattr(stack_event, "record_validation", record)
-        monkeypatch.setattr(coord.writeback, "_maybe_enqueue_watermark_roofline", watermark)
+        monkeypatch.setattr(coord.phase_kernel, "_maybe_enqueue_watermark_roofline", watermark)
         candidate = self._candidate()
         outcome = wb._PromoteOutcome()
         if lane == "integrate":
@@ -2240,7 +2240,7 @@ class TestWritebackRequiredAxes:
         from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
         state = coord.shared_state
-        state.resume_pending_revalidation = True
+        _set_resume_pending(state, True)
         prior_validation = self._validation_state(state)
         prior_best = deepcopy(state.current_best)
         prior_measurement = deepcopy(state.current_best_measurement)
@@ -2256,7 +2256,7 @@ class TestWritebackRequiredAxes:
             wb._PromoteOutcome(),
         )
 
-        assert state.resume_pending_revalidation is True
+        assert _resume_pending(state) is True
         assert self._validation_state(state) == prior_validation
         assert state.current_best == prior_best
         assert state.current_best_measurement == prior_measurement
@@ -2286,7 +2286,7 @@ class TestWritebackRequiredAxes:
                 "request_error_rate": 0.0,
             }
             assert coord.writeback._lift_to_current_best("explore", 150.0, candidate)
-            assert coord.writeback._update_cumulative_gain_validated(150.0, candidate)
+            assert coord.writeback.validate(150.0, candidate)
             assert state.cumulative_gain_validated == pytest.approx(intvty - 100.0)
             assert not state.optimization_stack_has_unvalidated_keeps()
         assert total < state.baseline_perf["total_throughput"] * 0.95
@@ -2305,7 +2305,7 @@ class TestWritebackRequiredAxes:
         monkeypatch.setattr(stack_event, "record_validation", record)
 
         lifted = coord.writeback._lift_to_current_best("explore", 150.0, candidate)
-        coord.writeback._update_cumulative_gain_validated(150.0, candidate, ts="2026-01-02T00:00:00+00:00")
+        coord.writeback.validate(150.0, candidate, ts="2026-01-02T00:00:00+00:00")
 
         assert lifted is True
         assert state.current_best["tput"] == 150.0

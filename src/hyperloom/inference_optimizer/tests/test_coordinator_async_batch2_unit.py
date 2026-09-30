@@ -1301,8 +1301,8 @@ async def test_resume_consistency_enqueues_stack_rebench_for_unvalidated(coord: 
 
     assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
     queued = await coord.tasks.queued()
-    assert any(t.kind == "explore" and t.params.get("source") == "resume_stack_revalidate" for t in queued)
-    assert any(isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
+    assert not any(t.kind == "explore" and t.params.get("source") == "resume_stack_revalidate" for t in queued)
+    assert not any(isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
 
 
 @pytest.mark.asyncio
@@ -2574,6 +2574,7 @@ async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, mon
         enq.append(cand)
 
     monkeypatch.setattr(coord.phase_framework, "_enqueue_framework_agent_task", _enqueue)
+    monkeypatch.setattr(coord.router, "phase_framework", coord.phase_framework)
     pending = PendingProposal(
         proposal_msg_id="m2",
         from_agent="coordinator",

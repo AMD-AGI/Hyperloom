@@ -19,6 +19,7 @@ from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.inference_optimizer.session.session_paths import reports_dir
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -171,7 +172,7 @@ async def test_handle_request_emits_start_and_end(session_dir, monkeypatch, tmp_
                 "params": {"trace_input": "/tmp/trace-A.json.gz"},
             },
         )
-        await c._handle_intent("orchestration", intent)
+        await c.router._handle_intent("orchestration", intent)
 
         ta_events = [e for e in c.shared_state.lifecycle if e["step"] == "trace_analyze"]
         assert len(ta_events) == 2, f"expected START + END, got {ta_events}"
@@ -604,9 +605,14 @@ async def test_on_enter_close_emits_report_error_for_exception(
             state = "succeeded"
 
         # run_task_registered forwards the lease and per-task extras.
+        class _Failed:
+            state = "failed"
+
+        # sub.run_task catches executor exceptions and returns state="failed";
+        # simulating that here exercises the same lifecycle error path.
         async def fake_run_task(task, **_kwargs):
             if task.kind == "report":
-                raise RuntimeError("report boom")
+                return _Failed()
             return _Succeeded()
 
         monkeypatch.setattr(
@@ -626,10 +632,10 @@ async def test_on_enter_close_emits_report_error_for_exception(
             lambda: None,
         )
 
-        await c._on_enter_close(from_phase="SWEEP")
+        await c.phase_close._on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}, loopback=False))
 
         rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
         assert [e["status"] for e in rpt] == ["START", "ERROR"]
-        assert "report boom" in rpt[-1]["detail"]
+        assert "task_state" in rpt[-1]["detail"]
     finally:
         await c.stop()

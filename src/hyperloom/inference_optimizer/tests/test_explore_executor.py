@@ -375,14 +375,14 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
             "output_dir": str(tmp_path / "axis-rejection"),
             "base_tput": 110.0,
             "grid": [{"name": "candidate", "extra_args": "--test-flag"}],
-            "source": "resume_stack_revalidate",
+            "source": "stack_revalidate",
             "geak_fallback": True,
             "expected_cfg_hash": fingerprint,
         },
         idempotency_key="geak-axis-rejection",
     )
     state.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
-    state.resume_pending_revalidation = True
+    # resume_pending_revalidation removed; unvalidated keeps tracked via optimization_stack
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
 
     def fake_measure(cmd, *args, **kwargs):
@@ -1089,7 +1089,7 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
     ("source", "expected_base_tput", "expected_outcome", "has_winner"),
     [
         (None, 2358.80, "REVERT", False),
-        ("resume_stack_revalidate", 2192.52, "KEEP", True),
+        ("stack_revalidate", 2192.52, "KEEP", True),
     ],
 )
 async def test_explore_executor_supersedes_stale_params_base_tput(
