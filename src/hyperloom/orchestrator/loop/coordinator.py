@@ -687,13 +687,6 @@ class Coordinator:
         """Finalize or retry on graceful teardown/Ctrl-C."""
         if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
             return
-        finalize_status = str(getattr(self.shared_state, "recipe_finalize_status", "") or "")
-        if getattr(self.shared_state, "close_sequence_done", False) and finalize_status in {
-            "written",
-            "skipped",
-            "disabled",
-        }:
-            return
         config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
         if config.mode is KnowledgeStoreMode.LOCAL:
             if self.recipe_kb is None:
@@ -708,7 +701,7 @@ class Coordinator:
             log.exception("recipe KB T4 SharedState.save failed")
 
     async def tick(self, n: int = 1) -> None:
-        """Run ``n`` loop-body ticks of :meth:`run` without its stop checks or teardown; replays a resume first."""
+        """Run ``n`` ticks of the run() loop body without its deadline or teardown."""
         await self.writeback._replay_resume_if_needed()
         for _ in range(n):
             await self._tick_once()
@@ -727,7 +720,7 @@ class Coordinator:
                 self.phase_machine._advance_phase_if_needed,
                 stage="advance_phase_pre_reactor",
             )
-            if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():
+            if self.shared_state.pending_escalate_hint.strip():
                 await self._await_within_session_bound(
                     self.phase_machine._advance_phase_if_needed,
                     stage="advance_phase_hint",
