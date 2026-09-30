@@ -353,6 +353,7 @@ def _skip_to_sweep_state(phase: str) -> SimpleNamespace:
         stop_reason="",
         plateau_overrides={},
         framework_agent_phase_done=False,
+        kernel_optimizer="",
     )
 
 
