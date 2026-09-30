@@ -23,9 +23,13 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import subprocess
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
+
+from hyperloom.common.git_safety import safe_directory_args
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +67,9 @@ FRAMEWORK_SOURCE_PACKAGES: tuple[str, ...] = (
 
 #: Backwards-compatible private alias.
 _FRAMEWORK_PACKAGES: tuple[str, ...] = FRAMEWORK_SOURCE_PACKAGES
+
+#: Frameworks whose Python package is not named after them.
+_FRAMEWORK_IMPORT_NAMES: dict[str, str] = {"xdit": "xfuser"}
 
 #: Packages an isolated vLLM venv may hold. Deliberately narrower than
 #: :data:`FRAMEWORK_SOURCE_PACKAGES`: that tree exists because vLLM needs its
@@ -427,16 +434,6 @@ def _discover_inferencex_root() -> tuple[str, ...]:
     return _env_named_root("INFERENCEX_PATH")
 
 
-def resolve_inferencex_root() -> str:
-    """The InferenceX benchmark checkout named by ``$INFERENCEX_PATH``, or ``""``.
-
-    Returns:
-        str: The normalised checkout root, or ``""`` when unset or absent.
-    """
-    roots = _discover_inferencex_root()
-    return roots[0] if roots else ""
-
-
 def resolve_session_framework_root() -> str:
     """The one source tree this session was explicitly pointed at, or ``""``.
 
@@ -499,6 +496,71 @@ def enclosing_checkout(path: str) -> Path | None:
     return None
 
 
+@dataclass(frozen=True)
+class FrameworkTree:
+    """The tree a session optimises, and where an edit to it lands.
+
+    Attributes:
+        tree: The tree as the session names it: a checkout, or a package dir.
+        root: Where patches against the tree apply: the checkout that tracks
+            ``tree``, or ``tree`` itself when no checkout does, as for a
+            pip-installed package. The latter is the form the framework source
+            roots already name such a package in.
+        checkout: Whether ``root`` is a git checkout tracking ``tree``.
+    """
+
+    tree: Path
+    root: Path
+    checkout: bool
+
+
+def _tracks(checkout: Path, tree: Path) -> bool:
+    """Whether ``checkout`` tracks any file under ``tree``.
+
+    A venv inside some unrelated repository sits under that repository's
+    ``.git`` without being part of it, so a ``.git`` above the tree is not
+    enough.
+    """
+    try:
+        rel = tree.resolve().relative_to(checkout.resolve()).as_posix() or "."
+    except (OSError, ValueError):
+        return False
+    try:
+        cp = subprocess.run(
+            ["git", *safe_directory_args(["-C", str(checkout), "ls-files", "--error-unmatch", "--", rel])],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return cp.returncode == 0
+
+
+def framework_apply_tree(tree: str) -> FrameworkTree | None:
+    """Classify the tree a session optimises by where an edit to it lands.
+
+    Args:
+        tree: The tree as named by :func:`resolve_framework_tree`, a session
+            root or an explicit declaration.
+
+    Returns:
+        FrameworkTree | None: The classification, or ``None`` when ``tree`` is
+        unset or not a directory here.
+    """
+    text = str(tree or "").strip().rstrip("/")
+    if not text:
+        return None
+    path = Path(text)
+    if not path.is_dir():
+        return None
+    checkout = enclosing_checkout(text)
+    if checkout is not None and _tracks(checkout, path):
+        return FrameworkTree(tree=path, root=checkout, checkout=True)
+    return FrameworkTree(tree=path, root=path, checkout=False)
+
+
 def resolve_framework_tree(framework: str) -> str:
     """Return the source tree belonging to ``framework``, or ``""``.
 
@@ -513,18 +575,18 @@ def resolve_framework_tree(framework: str) -> str:
     Returns:
         str: The normalised tree root, or ``""`` when the framework has none.
     """
-    pkg = str(framework or "").strip().lower()
-    if not pkg:
+    name = str(framework or "").strip().lower()
+    if not name:
         return ""
-    for key in (f"{pkg.upper()}_REPO_PATH", f"{pkg.upper()}_DIR", GENERIC_FRAMEWORK_ROOT_ENV):
+    for key in (f"{name.upper()}_REPO_PATH", f"{name.upper()}_DIR", GENERIC_FRAMEWORK_ROOT_ENV):
         candidate = os.environ.get(key, "").strip()
         if candidate and Path(candidate).is_dir():
             return _normalize_root(candidate)
-    origin = _find_spec_origin(pkg)
+    origin = _find_spec_origin(_FRAMEWORK_IMPORT_NAMES.get(name, name))
     if origin is not None:
         return _normalize_root(str(origin))
     for default in _DEFAULT_SOURCE_ROOTS:
-        if default.rstrip("/").endswith(f"/{pkg}") and Path(default).is_dir():
+        if Path(default).name.lower() == name and Path(default).is_dir():
             return _normalize_root(default)
     return ""
 
@@ -673,6 +735,8 @@ def resolved_within(value: str, root: str) -> bool:
 
 __all__ = [
     "FRAMEWORK_SOURCE_PACKAGES",
+    "FrameworkTree",
+    "framework_apply_tree",
     "probe_framework_source_roots_for_env",
     "resolve_framework_tree",
     "resolve_kernel_search_roots",

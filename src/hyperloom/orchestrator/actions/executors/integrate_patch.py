@@ -36,9 +36,8 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.inference_optimizer.framework_paths import (
-    enclosing_checkout,
+    framework_apply_tree,
     resolve_framework_tree,
-    resolve_inferencex_root,
     resolve_kernel_search_roots,
     resolve_session_framework_root,
 )
@@ -985,7 +984,9 @@ def _resolve_framework_root(
 
     Without a recorded root, the decision falls through to
     :func:`~...specialists.patch_safety.resolve_patch_apply_root`. Without any
-    patches to place, the session's declared root wins.
+    patches to place, the declared root wins, then the session's root, then
+    the root the session's framework tree is edited at: its checkout, or the
+    install root of a pip-installed package.
 
     Args:
         explicit: Declared framework root.
@@ -997,8 +998,6 @@ def _resolve_framework_root(
     Returns:
         The resolved root, or ``None`` when the patches name no single tree.
     """
-    roots = [Path(root) for root in resolve_kernel_search_roots()]
-
     if recorded_root:
         return resolved_explicit_root(recorded_root)
 
@@ -1019,7 +1018,8 @@ def _resolve_framework_root(
         # tree under optimisation into a non-candidate, and default_root cannot
         # stand in -- that is consulted only for a create-only set, which has no
         # pre-image to match.
-        candidates = [Path(session_root), *roots] if session_root else list(roots)
+        roots = [Path(root) for root in resolve_kernel_search_roots()]
+        candidates = [Path(session_root), *roots] if session_root else roots
         resolution = resolve_patch_apply_root(
             texts,
             explicit_root=explicit_path,
@@ -1039,22 +1039,8 @@ def _resolve_framework_root(
     session_root = resolve_session_framework_root()
     if session_root and Path(session_root).is_dir():
         return Path(session_root)
-    # The first git root in discovery order can be the InferenceX benchmark
-    # checkout, which the benchmark's runtime patcher dirties between stash and pop.
-    framework_checkout = enclosing_checkout(resolve_framework_tree(os.environ.get("FRAMEWORK", "")))
-    if framework_checkout is not None:
-        return framework_checkout
-    # A pip-installed framework has no checkout, and the benchmark tree is never the one under optimisation.
-    benchmark_root = resolve_inferencex_root()
-    if benchmark_root:
-        roots = [root for root in roots if os.path.realpath(root) != os.path.realpath(benchmark_root)]
-    for root in roots:
-        if root.is_dir() and (root / ".git").exists():
-            return root
-    for root in roots:
-        if root.is_dir():
-            return root
-    return None
+    tree = framework_apply_tree(resolve_framework_tree(os.environ.get("FRAMEWORK", "")))
+    return tree.root if tree is not None else None
 
 
 def _run_git_apply(

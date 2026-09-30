@@ -19,9 +19,9 @@ from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
-    _pick_worktree_base,
     _setup_worktree,
 )
+from hyperloom.orchestrator.specialists.tree_snapshot import snapshot_tree
 
 
 class _CP:
@@ -29,41 +29,6 @@ class _CP:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
-
-
-# -- _pick_worktree_base ---------------------------------------------------
-def test_pick_worktree_base_none(tmp_path: Path) -> None:
-    # directory without .git yields None
-    (tmp_path / "plain").mkdir()
-    assert _pick_worktree_base((str(tmp_path / "plain"), str(tmp_path / "absent"))) is None
-
-
-def test_pick_worktree_base_finds_git(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / ".git").mkdir()
-    assert _pick_worktree_base(("/nonexistent", str(repo))) == repo
-
-
-def test_pick_worktree_base_prefers_the_checkout_holding_the_package(tmp_path: Path) -> None:
-    """The session names the framework's package dir; the worktree must come off the checkout around it."""
-    harness = tmp_path / "InferenceX"
-    (harness / ".git").mkdir(parents=True)
-    checkout = tmp_path / "sglang"
-    (checkout / ".git").mkdir(parents=True)
-    package = checkout / "python" / "sglang"
-    package.mkdir(parents=True)
-
-    assert _pick_worktree_base((str(harness), str(checkout)), preferred=str(package)) == checkout
-
-
-def test_pick_worktree_base_ignores_a_preferred_path_outside_any_checkout(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    (repo / ".git").mkdir(parents=True)
-    pip_install = tmp_path / "site-packages" / "vllm"
-    pip_install.mkdir(parents=True)
-
-    assert _pick_worktree_base((str(repo),), preferred=str(pip_install)) == repo
 
 
 # -- _setup_worktree -------------------------------------------------------
@@ -309,24 +274,68 @@ def test_collect_patches_fallback_cannot_deliver_work_artifact_patch(tmp_path: P
     assert manual.read_text(encoding="utf-8") == diff
 
 
-def test_collect_patches_does_not_deliver_a_harvest_off_the_inferencex_checkout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A pip-installed framework has no checkout, so the worktree can be cut from the benchmark harness instead."""
-    base, wt = _make_harvest_worktree(tmp_path)
-    monkeypatch.setenv("INFERENCEX_PATH", str(base))
-    tune = wt / "scratch" / "custom_tune.py"
-    tune.parent.mkdir(parents=True)
-    tune.write_text("print('tune the gemm table')\n", encoding="utf-8")
-    manual = wt / "patches" / "manual.patch"
-    manual.parent.mkdir()
-    manual.write_text("p", encoding="utf-8")
+def _installed_package(tmp_path: Path) -> Path:
+    """A pip-installed package: source, a shared object and a bytecode cache, no git anywhere."""
+    package = tmp_path / "site-packages" / "vllm"
+    (package / "model_executor" / "models").mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "envs.py").write_text("VLLM_USE_X = 0\n", encoding="utf-8")
+    (package / "model_executor" / "models" / "qwen3.py").write_text("BLOCK = 64\n", encoding="utf-8")
+    (package / "_C.abi3.so").write_bytes(b"\x7fELF shared object")
+    (package / "__pycache__").mkdir()
+    (package / "__pycache__" / "envs.cpython-314.pyc").write_bytes(b"\x00bytecode")
+    return package
 
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
 
-    assert patches == [str(manual)]
-    assert roots == {}
-    assert not (wt / "patches" / "_worktree_diff.patch").exists()
+def test_harvest_off_an_installed_package_snapshot_applies_to_the_package(tmp_path: Path) -> None:
+    """The worktree of a pip-installed framework holds the package itself, so its diff lands where the server imports."""
+    package = _installed_package(tmp_path)
+    repo, err = snapshot_tree(package, tmp_path / "session" / "tree_snapshots" / "vllm.git", refresh=True)
+    assert err == "" and repo is not None
+    wt, err = _setup_worktree(repo, tmp_path / "ws" / "worktree", "specialist-t1")
+    assert err == "" and wt is not None
+    assert (wt / "model_executor" / "models" / "qwen3.py").read_text(encoding="utf-8") == "BLOCK = 64\n"
+    assert not (wt / "_C.abi3.so").exists()
+    assert not (wt / "__pycache__").exists()
+
+    (wt / "model_executor" / "models" / "qwen3.py").write_text("BLOCK = 128\n", encoding="utf-8")
+    (wt / "envs.py").write_text("VLLM_USE_X = 1\n", encoding="utf-8")
+    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+        wt, tmp_path / "ws", worktree_base=package, worktree_base_commit=ss.head_commit(wt)
+    )
+
+    assert len(patches) == 1
+    assert roots == {patches[0]: str(package)}
+    patch_text = Path(patches[0]).read_text(encoding="utf-8")
+    assert set(ps.parse_patch_targets(patch_text).all) == {"envs.py", "model_executor/models/qwen3.py"}
+    assert ps.ground_patch_text(patch_text, base_checkout=None, explicit_root=package).verdict == ps.GROUND_APPLIES
+    assert not (package / ".git").exists()
+    assert (package / "model_executor" / "models" / "qwen3.py").read_text(encoding="utf-8") == "BLOCK = 64\n"
+
+
+def test_snapshot_refresh_follows_the_package_and_a_held_snapshot_does_not(tmp_path: Path) -> None:
+    """A KEEP lands in the package between dispatches; an integrate still deciding on a candidate must not."""
+    package = _installed_package(tmp_path)
+    repo = tmp_path / "session" / "tree_snapshots" / "vllm.git"
+    snapshot_tree(package, repo, refresh=True)
+    first = ss.head_commit(repo)
+
+    (package / "envs.py").write_text("VLLM_USE_X = 2\n", encoding="utf-8")
+    held, err = snapshot_tree(package, repo, refresh=False)
+    assert err == "" and held == repo
+    assert ss.head_commit(repo) == first
+
+    snapshot_tree(package, repo, refresh=True)
+    assert ss.head_commit(repo) != first
+    wt, _ = _setup_worktree(repo, tmp_path / "ws" / "worktree", "specialist-t2")
+    assert wt is not None and (wt / "envs.py").read_text(encoding="utf-8") == "VLLM_USE_X = 2\n"
+
+
+def test_snapshot_is_not_invented_while_the_package_is_mid_integrate(tmp_path: Path) -> None:
+    package = _installed_package(tmp_path)
+    repo, err = snapshot_tree(package, tmp_path / "session" / "tree_snapshots" / "vllm.git", refresh=False)
+    assert repo is None
+    assert "being integrated into" in err
 
 
 def test_collect_patches_does_not_rediscover_an_obsolete_harvest(tmp_path: Path) -> None:

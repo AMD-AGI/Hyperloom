@@ -64,7 +64,6 @@ from hyperloom.common.proctree import collect_tree, kill_tree
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
 from ..bringup.trees import head_commit
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
-from hyperloom.inference_optimizer.framework_paths import enclosing_checkout, resolve_inferencex_root
 from hyperloom.inference_optimizer.trace.parse_usage import (
     parse_claude_stream_json_response,
     parse_claude_stream_json_tool_calls,
@@ -645,49 +644,6 @@ def _declared_targets(done_payload: Mapping[str, Any] | None) -> tuple[str, ...]
 
 
 # Worktree management
-def _pick_worktree_base(
-    roots: tuple[str, ...],
-    *,
-    preferred: str = "",
-) -> Path | None:
-    """Return the checkout to branch the specialist's worktree off.
-
-    ``preferred`` wins whenever it lies in a checkout. It names the framework the
-    session is actually optimising, which ``roots`` cannot express: their order
-    records only how they were discovered. Selecting by position worked while
-    exactly one root happened to be a git checkout; when a pod started shipping
-    aiter as one it sorted first, so WorldPlay specialists were handed an aiter
-    worktree and the ``hyvideo/`` patches they wrote grounded against nothing.
-
-    Falls back to None when nothing qualifies — the runner then runs the
-    specialist without an isolated worktree.
-
-    Args:
-        roots: Candidate root paths to probe for a ``.git`` marker.
-        preferred: Checkout of the framework under optimisation, if any. Skipped
-            when it is absent or not a checkout, so a pip-installed framework
-            costs the specialist nothing.
-
-    Returns:
-        The chosen checkout root, or ``None`` when none qualify.
-    """
-
-    def _is_checkout(path: str) -> Path | None:
-        p = Path(path)
-        # ``.git`` may be a file (worktree) or a dir (repo).
-        return p if p.is_dir() and (p / ".git").exists() else None
-
-    if preferred:
-        chosen = enclosing_checkout(preferred)
-        if chosen is not None:
-            return chosen
-    for r in roots:
-        chosen = _is_checkout(r)
-        if chosen is not None:
-            return chosen
-    return None
-
-
 def _setup_worktree(
     base: Path,
     worktree_path: Path,
@@ -1730,8 +1686,9 @@ class SpecialistSubprocessDispatcher:
         Args:
             worktree: Per-task worktree, or None.
             workspace: Task workspace.
-            worktree_base: Checkout the worktree was branched off, which is the
-                apply root of anything harvested from it.
+            worktree_base: The tree the worktree stands for -- the checkout it
+                was branched off, or the directory it holds a snapshot of --
+                which is the apply root of anything harvested from it.
             worktree_base_commit: The commit recorded when the worktree was
                 created, so the harvest stays anchored to the pre-round state
                 even if the specialist committed.
@@ -1741,15 +1698,7 @@ class SpecialistSubprocessDispatcher:
         Returns:
             ``(patch_paths, patch_roots)``; the latter is empty for scanned files.
         """
-        benchmark_root = resolve_inferencex_root()
-        # A pip-installed framework has no checkout, so the worktree may be cut from the benchmark
-        # harness; edits there are the specialist's scratch, never a change to the tree under optimisation.
-        off_benchmark = bool(
-            benchmark_root
-            and worktree_base is not None
-            and os.path.realpath(worktree_base) == os.path.realpath(benchmark_root)
-        )
-        if worktree is not None and (worktree / ".git").exists() and not off_benchmark:
+        if worktree is not None and (worktree / ".git").exists():
             harvested_diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(
                 worktree,
                 base=worktree_base_commit or "HEAD",
@@ -1832,7 +1781,6 @@ __all__ = [
     "SpecialistSubprocessConfig",
     "SpecialistSubprocessDispatcher",
     "SpecialistSubprocessResult",
-    "_pick_worktree_base",
     "_setup_worktree",
     "resolve_codex_executable",
 ]
