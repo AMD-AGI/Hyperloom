@@ -101,6 +101,12 @@ log = logging.getLogger(__name__)
 
 _now_iso = functools.partial(now_iso, "auto")
 
+STACK_REVALIDATE_SOURCE: str = "stack_revalidate"
+
+
+def is_stack_revalidation(params: dict | None) -> bool:
+    return str((params or {}).get("source") or "") == STACK_REVALIDATE_SOURCE
+
 
 # Audit/provenance metadata stashed on a GridVariant that must survive being rebuilt into a derived variant.
 _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (

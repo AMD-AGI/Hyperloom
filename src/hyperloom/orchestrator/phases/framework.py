@@ -650,14 +650,15 @@ class FrameworkPhase(CoordinatorCollaborator):
             thresholds={"no_keep_streak_threshold": evidence.get("source_threshold")},
         )
 
-    async def _on_enter_framework(self, *, from_phase: str) -> None:
+    async def _on_enter_framework(self, tr: "Transition") -> None:
         """FRAMEWORK entry hook: trigger the per-batch pump once on entry; later batches are driven from the main tick."""
+        from .machine import Transition  # noqa: F401 — type reference only
         log.info(
             "OPTIMIZE entry (from=%s): pumping initial batch",
-            from_phase or "<unknown>",
+            tr.from_phase or "<unknown>",
         )
         # A reopened macro-cycle re-measures before either arm spends anything.
-        await self._coord.phase_macro_cycle._on_cycle_start_reprofile(from_phase=from_phase)
+        await self._coord.phase_macro_cycle._on_cycle_start_reprofile(from_phase=tr.from_phase)
         # Opened after the reprofile so the policy reads the settled anchor,
         # and before the pump so the entry's first dispatch is inside the event.
         self._open_framework_timeline()

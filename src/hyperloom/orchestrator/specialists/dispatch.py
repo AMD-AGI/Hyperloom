@@ -489,7 +489,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 raise
             pending.append(sub_intent)
         for sub_intent in pending:
-            await self._coord.router._handle_delegate(source, sub_intent)
+            await self._coord.router.handle_delegate(source, sub_intent)
 
     async def _maybe_force_stalled_domain_specialist(self) -> None:
         """Force-dispatch a domain specialist for a domain untouched for too many
@@ -584,7 +584,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             )
             # Zero the counter up-front so a slow enqueue can't re-fire next tick.
             state.note_specialist_dispatched(anchor)
-            await self._coord.router._handle_intent("orchestration", intent)
+            await self._coord.router.handle_intent("orchestration", intent)
             try:
                 state.save(self.session_dir)
             except Exception:

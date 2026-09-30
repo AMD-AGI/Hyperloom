@@ -1102,7 +1102,7 @@ class Coordinator:
         # Full-trace: persist the redacted prompt+response for this turn.
         self.conversation._record_reactor_conversation(agent_name, result)
         for intent in result.intents:
-            await self.router._handle_intent(agent_name, intent)
+            await self.router.handle_intent(agent_name, intent)
         await self.conversation._advance_rendered_cursor(agent_name)
         self.shared_state.agent_last_active[agent_name] = time.time()
 

@@ -1459,3 +1459,11 @@ class IntentRouter(CoordinatorCollaborator):
                 dict(intent.payload),
             )
         )
+
+    async def handle_intent(self, source: str, intent: Intent) -> None:
+        """Public entry point for intent routing; delegates to :meth:`_handle_intent`."""
+        await self._handle_intent(source, intent)
+
+    async def handle_delegate(self, source: str, intent: Intent) -> None:
+        """Public entry point for delegate routing; delegates to :meth:`_handle_delegate`."""
+        await self._handle_delegate(source, intent)

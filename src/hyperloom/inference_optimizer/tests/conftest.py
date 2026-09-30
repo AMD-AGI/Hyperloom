@@ -224,75 +224,16 @@ def git_commit_all(path: Path, message: str) -> None:
     )
 
 
-class _BuildFakeCoordinator:
-    """Minimal coordinator surface for off-loop targeted-build tests."""
-
-    def __init__(self, session_dir: Path, db) -> None:
-        from hyperloom.orchestrator.bus.resource_lock import (
-            ResourceLockManager,
-            SqliteLeaseBackend,
-        )
-        from hyperloom.orchestrator.state.shared_state import SharedState
-        from hyperloom.orchestrator.state.task_registry import TaskRegistry
-
-        self.session_dir = session_dir
-        self.tasks = TaskRegistry(db)
-        self.locks = ResourceLockManager(SqliteLeaseBackend(db))
-        self.shared_state = SharedState()
-        # Collaborator back-reference so methods bound directly to this fake coordinator can still reach
-        # peer collaborators via self._coord.<collab>.
-        self._coord = self
-
-    @property
-    def enablement_revalidation(self):
-        from hyperloom.orchestrator.enablement.revalidation import EnablementRevalidation
-
-        obj = self.__dict__.get("_enablement_revalidation")
-        if obj is None:
-            obj = EnablementRevalidation(self)
-            self.__dict__["_enablement_revalidation"] = obj
-        return obj
-
-    @property
-    def gpu_lanes(self):
-        from hyperloom.orchestrator.gpu_lanes import GpuLanes
-
-        obj = self.__dict__.get("_gpu_lanes")
-        if obj is None:
-            obj = GpuLanes(self)
-            self.__dict__["_gpu_lanes"] = obj
-        return obj
-
-    @property
-    def build_lifecycle(self):
-        from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
-
-        obj = self.__dict__.get("_build_lifecycle_collab")
-        if obj is None:
-            obj = BuildLifecycleCollaborator(self)
-            self.__dict__["_build_lifecycle_collab"] = obj
-        return obj
-
-
 @pytest.fixture
 def build_coord(tmp_path):
-    """Fake coordinator backed by a temp DB for targeted-build lifecycle tests."""
-    from hyperloom.orchestrator.bus.storage import SqliteConnection
-    from hyperloom.orchestrator.bus.storage.schema import ensure_schema
-
-    db = SqliteConnection(tmp_path / "coordinator.db")
-    ensure_schema(db.raw)
-    fc = _BuildFakeCoordinator(tmp_path, db)
-    yield fc
-    db.close()
+    """Real Coordinator for targeted-build lifecycle tests."""
+    return make_coordinator(tmp_path)
 
 
 @pytest.fixture
 def build_lifecycle(build_coord):
-    """``BuildLifecycleCollaborator`` bound to the ``build_coord`` fixture."""
-    from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
-
-    return BuildLifecycleCollaborator(build_coord)
+    """``BuildLifecycleCollaborator`` from the ``build_coord`` coordinator."""
+    return build_coord.build_lifecycle
 
 
 def patch_integrate_patch_roots(monkeypatch, tmp_path: Path) -> None:
