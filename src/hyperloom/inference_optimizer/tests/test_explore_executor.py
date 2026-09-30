@@ -168,16 +168,21 @@ _TUNED_ENV = "HICACHE_IO_BACKEND"
 _RECIPE_ENV = {"KV_OFFLOADING": "1"}
 # The argv the base config carries before any variant overlays it.
 _BASE_ARGS_ENV = {"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"}
-# The stack pins chunked-prefill at 32768, so a variant naming 65536 is a real
-# change however the stack came to hold that value.
-_CHUNKED_STACK = {
-    "observed_server_launch_flags": "--mem-fraction-static 0.9 --chunked-prefill-size 32768",
-}
 
 
 def _stack_env(**changes: str) -> dict[str, str]:
     """The env the stack stamped: the recipe's, plus its own tuning."""
     return {**_RECIPE_ENV, **changes}
+
+
+def _stack_config(**changes: object) -> dict[str, object]:
+    """What the running engine resolved, typed as SGLang reports it."""
+    return {"mem_fraction_static": 0.9, "max_running_requests": 512, **changes}
+
+
+# The stack pins chunked-prefill at 32768, so a variant naming 65536 is a real
+# change however the stack came to hold that value.
+_CHUNKED_STACK = {"observed_server_config": _stack_config(chunked_prefill_size=32768)}
 
 
 def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
@@ -197,7 +202,7 @@ def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
         "model_path": None,
         "gpu_type": None,
         "benchmark_script": None,
-        "observed_server_launch_flags": "--mem-fraction-static 0.9 --max-running-requests 512",
+        "observed_server_config": _stack_config(),
         "observed_server_env": _stack_env(),
     }
     kwargs.update(overrides)
@@ -225,6 +230,18 @@ _ALREADY_THE_STACK = (
         [_variant(extra_envs={_TUNED_ENV: "kernel"})],
         {"observed_server_env": _stack_env(HICACHE_IO_BACKEND="kernel")},
     ),
+    (
+        # 3600 and 3600.0 are one value; the engine reports the float.
+        "a_value_the_engine_reports_as_a_float",
+        [_variant("--watchdog-timeout 3600")],
+        {"observed_server_config": _stack_config(watchdog_timeout=3600.0)},
+    ),
+    (
+        # A bare flag asks for the feature on, which is what the engine resolved.
+        "a_bare_flag_the_engine_resolved_true",
+        [_variant("--enable-dp-attention")],
+        {"observed_server_config": _stack_config(enable_dp_attention=True)},
+    ),
 )
 
 # Merged launch differs from the stack, or the stack is not known well enough
@@ -244,22 +261,35 @@ _MUST_RUN = (
         {"observed_server_env": _stack_env(HICACHE_IO_BACKEND="kernel")},
     ),
     # One half of the stack is unrecorded, so no match can be proven either way.
-    # The argv case restates the stack exactly: only the missing evidence keeps it.
-    ("stack_argv_is_unknown", [_variant()], {"observed_server_launch_flags": ""}),
+    # The config case restates the stack exactly: only the missing evidence keeps it.
+    ("stack_config_is_unknown", [_variant()], {"observed_server_config": {}}),
     ("stack_env_is_unknown", [_variant(extra_envs={_TUNED_ENV: "kernel"})], {"observed_server_env": {}}),
     (
-        # split_launch_flags drops the parallelism family, so a dp change read as
-        # no change. The stack says --dp, the variant --dp-size: one knob, two spellings.
+        # A dp change the old string comparison could not see, because
+        # split_launch_flags dropped the parallelism family from both sides.
         "different_parallelism_value",
         [_variant("--dp-size 4")],
-        {"observed_server_launch_flags": "--mem-fraction-static 0.9 --enable-dp-attention --dp 8"},
+        {"observed_server_config": _stack_config(dp_size=8)},
     ),
     (
-        # _args_pairs keeps a flag's first value and scatters the rest, so two
-        # lists sharing a prefix collapse to the same pairs. Not comparable.
+        # _args_pairs kept a flag's first value and scattered the rest, so two
+        # lists sharing a prefix compared equal. Exempt rather than compared.
         "multi_value_flag_is_not_comparable",
         [_variant("--cuda-graph-bs 1 2 4 8")],
-        {"observed_server_launch_flags": "--mem-fraction-static 0.9 --cuda-graph-bs 1 2 4 8 16"},
+        {"observed_server_config": _stack_config(cuda_graph_bs=[1, 2, 4, 8, 16])},
+    ),
+    (
+        # The engine resolved the feature off, so asking for it on is a change.
+        "a_bare_flag_the_engine_resolved_false",
+        [_variant("--enable-dp-attention")],
+        {"observed_server_config": _stack_config(enable_dp_attention=False)},
+    ),
+    (
+        # A setting absent from the resolved config is unknown, not equal: the
+        # engine reports every setting it has, so absence is not a match.
+        "a_setting_the_engine_never_reported",
+        [_variant("--stream-interval 20")],
+        {},
     ),
     # A removal changes the launch by subtraction, which the materialized
     # config cannot express, so the comparison reads it as proposing nothing.
@@ -295,22 +325,25 @@ def test_variant_that_is_not_known_to_be_the_stack_is_kept(tmp_path, grid, overr
     assert dropped == []
 
 
-def _measurement(flags: str, env: dict[str, str]) -> dict:
-    return {"launch_evidence": {"observed_server_launch_flags": flags, "observed_server_env": env}}
+def _measurement(config: dict[str, object], env: dict[str, str]) -> dict:
+    return {"launch_evidence": {"observed_server_config": config, "observed_server_env": env}}
 
 
 _OBSERVED_LAUNCH_CASES = (
     (
         "current_best_carries_both_halves",
-        SimpleNamespace(current_best_measurement=_measurement("--tp 2", {_TUNED_ENV: "kernel"})),
-        ("--tp 2", {_TUNED_ENV: "kernel"}),
+        SimpleNamespace(current_best_measurement=_measurement({"tp_size": 2}, {_TUNED_ENV: "kernel"})),
+        ({"tp_size": 2}, {_TUNED_ENV: "kernel"}),
     ),
     (
         # last_baseline is an attempt entry and never carries launch_evidence,
         # so a stack without a current best is simply unknown.
         "no_current_best_means_no_evidence",
-        SimpleNamespace(current_best_measurement={}, last_baseline=_measurement("--tp 1", {_TUNED_ENV: "direct"})),
-        ("", {}),
+        SimpleNamespace(
+            current_best_measurement={},
+            last_baseline=_measurement({"tp_size": 1}, {_TUNED_ENV: "direct"}),
+        ),
+        ({}, {}),
     ),
 )
 
@@ -323,6 +356,44 @@ _OBSERVED_LAUNCH_CASES = (
 def test_observed_launch_from_state_reads_only_the_current_stack(state, expected):
     """Only current_best carries evidence; nothing else is consulted for it."""
     assert observed_launch_from_state(state) == expected
+
+
+def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
+    """End to end on the only launch account SGLang gives: the resolved settings it logs.
+
+    No argv is echoed anywhere, so ``observed_server_launch_flags`` stays empty
+    and every earlier form of this gate filtered nothing.
+    """
+    config = tmp_path / "stack.yaml"
+    config.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
+        encoding="utf-8",
+    )
+    log = tmp_path / "server.log"
+    log.write_text(
+        "[2026-09-21 21:14:33] Attention backend not explicitly specified.\n"
+        "[2026-09-21 21:14:34] server_args="
+        f"{ {'mem_fraction_static': 0.9, 'max_running_requests': 512, 'dp_size': 8}!r}\n",
+        encoding="utf-8",
+    )
+    evidence = build_launch_evidence(
+        config_path=config, actual_server_log=str(log), framework="sglang", slot=tmp_path
+    )
+    assert evidence["observed_server_launch_flags"] == ""
+    assert evidence["observed_server_config"]["max_running_requests"] == 512
+
+    state = SimpleNamespace(current_best_measurement={"launch_evidence": evidence})
+    observed_config, observed_env = observed_launch_from_state(state)
+    kwargs = _noop_filter_kwargs(
+        tmp_path, observed_server_config=observed_config, observed_server_env=observed_env
+    )
+
+    _, dropped = filter_baseline_noop_variants([_variant(_RESTATES_ARGV)], **kwargs)
+    assert [name for name, _ in dropped] == [_CANDIDATE]
+
+    kept, none_dropped = filter_baseline_noop_variants([_variant("--max-running-requests 128")], **kwargs)
+    assert [gv.name for gv in kept] == [_CANDIDATE]
+    assert none_dropped == []
 
 
 def test_a_measurement_stamps_its_env_and_the_filter_drops_a_restatement_of_it(tmp_path):

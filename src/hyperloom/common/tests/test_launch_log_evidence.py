@@ -227,6 +227,102 @@ def test_missing_log_is_unavailable(tmp_path: Path) -> None:
     assert evidence.observed_sglang_server_identity_from_log(str(tmp_path / "missing.log")) == {}
 
 
+@pytest.mark.parametrize(
+    ("framework", "line", "record", "identity"),
+    [
+        (
+            "sglang",
+            "[2026-09-17 00:00:00] server_args={record}",
+            {"tp_size": 8, "enable_hierarchical_cache": True, "hicache_ratio": 1.5, "cuda_graph_bs": [1, 2, 4]},
+            {"tp_size": 8},
+        ),
+        (
+            "vllm",
+            "INFO 09-17 00:00:00 non-default args: {record}",
+            {"tensor_parallel_size": 8, "enable_prefix_caching": True, "moe_backend": "aiter"},
+            {"tensor_parallel_size": 8},
+        ),
+    ],
+    ids=["sglang", "vllm"],
+)
+def test_the_config_read_keeps_the_settings_identity_discards(
+    tmp_path: Path, framework: str, line: str, record: dict[str, object], identity: dict[str, object]
+) -> None:
+    """The filter needs the tuned knobs, which the identity allowlist drops."""
+    log = tmp_path / "server.log"
+    log.write_text(line.format(record=repr(record)) + "\n", encoding="utf-8")
+
+    assert evidence.observed_server_config_from_log(str(log), framework) == record
+    # The same record through the identity read keeps only its allowlisted key.
+    assert evidence.observed_server_identity_from_log(str(log), framework) == identity
+
+
+def test_a_non_literal_value_does_not_cost_the_rest_of_the_config(tmp_path: Path) -> None:
+    """An object repr among 500 settings skips its key, not the whole record."""
+    log = tmp_path / "server.log"
+    log.write_text(
+        "[2026-09-17 00:00:00] server_args={'tp_size': 8, 'sampling': Config(x=1), 'dp_size': 4}\n",
+        encoding="utf-8",
+    )
+
+    assert evidence.observed_server_config_from_log(str(log), "sglang") == {"dp_size": 4, "tp_size": 8}
+
+
+@pytest.mark.parametrize("flag", ["--dp", "--dp-size", "--data-parallel-size"])
+def test_every_spelling_of_one_knob_names_one_setting(flag: str) -> None:
+    """SGLang launches with ``--dp`` where a variant proposes ``--dp-size``."""
+    assert evidence.launch_flag_setting_name(flag, "sglang") == "dp_size"
+
+
+def test_each_engine_names_parallelism_the_way_it_reports_it() -> None:
+    """One flag, two keys: folding it to SGLang's name hides it from a vLLM record."""
+    assert evidence.launch_flag_setting_name("--tensor-parallel-size", "sglang") == "tp_size"
+    assert evidence.launch_flag_setting_name("--tensor-parallel-size", "vllm") == "tensor_parallel_size"
+
+
+@pytest.mark.parametrize(
+    ("framework", "marker"),
+    [("sglang", "server_args={'tp_size': 99}"), ("vllm", "non-default args: {'tensor_parallel_size': 99}")],
+)
+def test_a_marker_echoed_inside_a_quoted_string_is_not_a_launch(tmp_path: Path, framework: str, marker: str) -> None:
+    """A log may quote the marker while recording no launch, and that is not evidence.
+
+    User- or attacker-supplied text echoed into a log would otherwise hand the
+    decision an identity the server never ran with.
+    """
+    log = tmp_path / "server.log"
+    log.write_text(f'WARNING ignored user text: "{marker}"\n', encoding="utf-8")
+
+    assert evidence.observed_server_identity_from_log(str(log), framework) == {}
+    assert evidence.observed_server_config_from_log(str(log), framework) == {}
+
+
+@pytest.mark.parametrize(
+    ("framework", "line", "expected"),
+    [
+        ("sglang", "context={'a': 1} server_args={'tp_size': 8}", {"tp_size": 8}),
+        ("vllm", "context={'a': 1} non-default args: {'tensor_parallel_size': 8}", {"tensor_parallel_size": 8}),
+    ],
+)
+def test_an_unrelated_dict_earlier_on_the_line_is_not_the_record(
+    tmp_path: Path, framework: str, line: str, expected: dict[str, object]
+) -> None:
+    """The payload is anchored at the marker, not at the first delimiter on the line."""
+    log = tmp_path / "server.log"
+    log.write_text(line + "\n", encoding="utf-8")
+
+    assert evidence.observed_server_identity_from_log(str(log), framework) == expected
+
+
+def test_an_engine_that_records_nothing_leaves_the_launch_unobserved(tmp_path: Path) -> None:
+    """A workload with no row reads as unknown rather than as a misparsed record."""
+    log = tmp_path / "server.log"
+    log.write_text("server_args={'tp_size': 8}\n", encoding="utf-8")
+
+    assert evidence.observed_server_identity_from_log(str(log), "atom") == {}
+    assert evidence.observed_server_config_from_log(str(log), "custom") == {}
+
+
 def test_an_sglang_log_yields_no_argv(tmp_path: Path) -> None:
     """The only ``launch_server`` token an SGLang log carries names no model, so it is rejected."""
     log = tmp_path / "server.log"

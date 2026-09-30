@@ -8,6 +8,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import shlex
 import tempfile
 import time
 from collections.abc import Mapping
@@ -19,7 +20,7 @@ import yaml
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
-from hyperloom.common.launch_log_evidence import identity_launch_flags
+from hyperloom.common.launch_log_evidence import launch_flag_setting_name
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
@@ -58,7 +59,7 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
-from hyperloom.inference_optimizer.canonical_fingerprint import _args_pairs, workload_signature
+from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import effective_fingerprint, normalize_proposal
 from ._grid_base import (
     TS_FAILED,
@@ -91,7 +92,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 )
 from ._ray_serving import maybe_serving_lease
 
-from ._server_argv import config_server_argv, seal_server_argv
+from ._server_argv import config_server_argv
 from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
@@ -374,36 +375,21 @@ def _is_config_replay_variant(variant: Any) -> bool:
     return str(getattr(variant, "provenance", "") or "").strip() in _CONFIG_REPLAY_PROVENANCE
 
 
-def observed_launch_from_state(state: Any) -> tuple[str, dict[str, str]]:
-    """Observed launch flags and env of the current stack, empty unless ``current_best`` observed them."""
+def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, str]]:
+    """The running server's resolved config and env, empty unless ``current_best`` observed them."""
     measurement = getattr(state, "current_best_measurement", None)
     if not isinstance(measurement, dict) or not measurement:
-        return "", {}
+        return {}, {}
     evidence = measurement.get("launch_evidence")
     if not isinstance(evidence, Mapping):
-        return "", {}
+        return {}, {}
 
+    raw_config = evidence.get("observed_server_config")
+    config = dict(raw_config) if isinstance(raw_config, Mapping) else {}
     raw_env = evidence.get("observed_server_env")
     # Same shape as a variant's extra_envs, so the two compare directly.
     env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, Mapping) else {}
-    return str(evidence.get("observed_server_launch_flags") or "").strip(), env
-
-
-def _seal_raw_argv(text: str, *, framework: str) -> str | None:
-    """Seal a raw argv string through the real per-framework sealer, or ``None`` if it refuses."""
-    try:
-        return seal_server_argv({server_args_env_name(framework): text}, framework).text
-    except ValueError:
-        return None
-
-
-def _canonical_launch_pairs(argv_text: str) -> list[list[str]]:
-    """Sorted last-wins ``[flag, value]`` pairs, normalized for a same-launch test.
-
-    Not ``split_launch_flags``: it strips the parallelism family, so two
-    launches differing only in ``--dp-size`` compared equal.
-    """
-    return _args_pairs(identity_launch_flags(argv_text))
+    return config, env
 
 
 def _config_envs(config_path: Path) -> dict[str, str]:
@@ -422,19 +408,104 @@ def _config_envs(config_path: Path) -> dict[str, str]:
     return {str(k): str(v) for k, v in envs.items() if str(k) != args_env}
 
 
+def _named_settings(argv_text: str, framework: str) -> dict[str, list[str]]:
+    """Map each setting ``argv_text`` names to its value tokens, last occurrence winning like the engine."""
+    try:
+        tokens = shlex.split(argv_text)
+    except ValueError:
+        return {}
+    settings: dict[str, list[str]] = {}
+    current = ""
+    for token in tokens:
+        if token.startswith("-"):
+            name, separator, attached = token.partition("=")
+            current = launch_flag_setting_name(name, framework)
+            settings[current] = [attached] if separator else []
+        elif current:
+            settings[current].append(token)
+    return settings
+
+
+def _setting_already_holds(proposed: list[str], observed: Any) -> bool:
+    """Whether ``observed`` is already the value ``proposed`` asks for."""
+    if not proposed:
+        # A bare flag asks for the feature on; anything else is a change.
+        return observed is True
+    if isinstance(observed, (list, tuple)):
+        return [str(item) for item in observed] == proposed
+    if len(proposed) != 1:
+        return False
+    text = proposed[0]
+    if isinstance(observed, bool):
+        return text.lower() == str(observed).lower()
+    if isinstance(observed, (int, float)):
+        try:
+            return float(text) == float(observed)
+        except ValueError:
+            return False
+    if observed is None:
+        return False
+    return text == str(observed)
+
+
+def _launch_delta(
+    variant_argv: str,
+    variant_envs: Mapping[str, str],
+    base_argv: str,
+    base_envs: Mapping[str, str],
+    framework: str,
+) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """What a variant changes about the baseline launch, in argv settings and envs alike.
+
+    Only the delta is comparable to the running server. The rest is the
+    baseline's own request, which materialization, the recipe and the engine all
+    rewrite on the way to a launch -- a requested ``--watchdog-timeout 1800``
+    resolves to ``3600.0`` -- so weighing it would reject every variant. Those
+    rewrites hit base and variant alike, so the delta cancels them.
+    """
+    base_settings = _named_settings(base_argv, framework)
+    settings = {
+        name: values
+        for name, values in _named_settings(variant_argv, framework).items()
+        if base_settings.get(name) != values
+    }
+    envs = {name: value for name, value in variant_envs.items() if base_envs.get(name) != value}
+    return settings, envs
+
+
+def _settings_already_hold(settings: Mapping[str, list[str]], observed_config: Mapping[str, Any]) -> bool:
+    """Whether every named setting already holds that value in the running server.
+
+    Checked setting by setting rather than as one argv string: the observed side
+    is the engine's whole resolved config, which no config's argv can equal.
+    """
+    return all(
+        name in observed_config and _setting_already_holds(values, observed_config[name])
+        for name, values in settings.items()
+    )
+
+
+def _envs_already_hold(envs: Mapping[str, str], observed_env: Mapping[str, str]) -> bool:
+    """Whether every named env already carries that value in the running server."""
+    return all(observed_env.get(name) == value for name, value in envs.items())
+
+
 def _subtracts_from_the_launch(variant: GridVariant) -> bool:
     """Whether ``variant`` removes something, which the probe's config cannot show."""
     return bool(getattr(variant, "remove_args", None) or getattr(variant, "unset_envs", None))
 
 
 def _touches_a_multi_value_flag(argv_text: str) -> bool:
-    """Whether ``argv_text`` names a list-valued flag, which ``_args_pairs`` cannot represent."""
+    """Whether ``argv_text`` names a list-valued flag, whose ordering the merged config does not preserve."""
     return any(flag in argv_text for flag in _MULTI_VALUE_FLAGS)
 
 
 # Separate from _CONFIG_REPLAY_PROVENANCE (shared with filter_operator_pinned_envs):
 # a revalidation re-measures its own config, so it must always run.
 _NOOP_FILTER_ALWAYS_RUNS = frozenset({"resume_stack_revalidate"})
+
+#: Names the throwaway variant that materializes the unchanged baseline to diff against.
+_NOOP_PROBE_BASE_NAME = "__baseline_noop_probe_base__"
 
 
 def _is_noop_filter_exempt(variant: GridVariant) -> bool:
@@ -457,35 +528,52 @@ def filter_baseline_noop_variants(
     model_path: str | None,
     gpu_type: str | None,
     benchmark_script: str | None,
-    observed_server_launch_flags: str,
+    observed_server_config: Mapping[str, Any] | None = None,
     observed_server_env: Mapping[str, str] | None = None,
 ) -> tuple[list[GridVariant], list[tuple[str, str]]]:
     """Drop variants that would launch the server the stack is already running.
 
-    Each variant is materialized through ``_build_variant_yaml`` into a throwaway
-    config, whose server argv and ``benchmark.envs`` are then compared against the
-    ``observed_server_launch_flags`` and ``observed_server_env`` recorded on the
-    stack's own measurement. A variant is dropped only when both halves match.
+    The baseline and each variant are materialized through ``_build_variant_yaml``
+    into throwaway configs, and only what the variant *changes* about the baseline
+    is judged: those settings against ``observed_server_config`` -- the engine's
+    own resolved settings -- and those envs against ``observed_server_env``. A
+    variant is dropped only when both halves are already in effect.
 
     A variant that removes something, or names a list-valued flag, is exempt:
     neither is visible here, so both would read as a restatement of the stack.
 
     Returns the variants still to run, plus ``(name, reason)`` for each drop.
-    Filters nothing when the stack has no observed launch flags.
+    Filters nothing when the stack's launch was never observed.
     """
-    observed = str(observed_server_launch_flags or "").strip()
-    if not observed or not grid:
+    observed_config = dict(observed_server_config or {})
+    if not observed_config or not grid:
         return list(grid), []
-    sealed_observed = _seal_raw_argv(observed, framework=str(framework or "").strip().lower())
-    if sealed_observed is None:
-        log.warning("explore: baseline-noop filter could not seal the observed launch flags; filtering nothing")
-        return list(grid), []
-    observed_pairs = _canonical_launch_pairs(sealed_observed)
     observed_env = dict(observed_server_env or {})
     kept: list[GridVariant] = []
     dropped: list[tuple[str, str]] = []
     with tempfile.TemporaryDirectory(prefix="explore_noop_probe_") as tmp_dir:
         tmp_root = Path(tmp_dir)
+        try:
+            base_path = _build_variant_yaml(
+                base_yaml_path,
+                base_extra_args,
+                GridVariant(_NOOP_PROBE_BASE_NAME),
+                output_subdir=tmp_root / "base",
+                model_path=model_path,
+                gpu_type=gpu_type,
+                benchmark_script=benchmark_script,
+                base_args_mode=base_args_mode,
+                base_extra_envs=base_extra_envs,
+                base_remove_args=base_remove_args,
+                base_unset_envs=base_unset_envs,
+            )
+            base_argv = config_server_argv(base_path).text
+            base_envs = _config_envs(base_path)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            log.warning(
+                "explore: baseline-noop probe could not materialize the baseline (%s); keeping every variant", exc
+            )
+            return list(grid), []
         for idx, gv in enumerate(grid):
             if _is_noop_filter_exempt(gv) or _subtracts_from_the_launch(gv):
                 kept.append(gv)
@@ -513,7 +601,15 @@ def filter_baseline_noop_variants(
                 log.warning("explore: baseline-noop probe failed for variant %s (%s); keeping it", gv.name, exc)
                 kept.append(gv)
                 continue
-            if _canonical_launch_pairs(variant_argv) == observed_pairs and variant_envs == observed_env:
+            delta_settings, delta_envs = _launch_delta(variant_argv, variant_envs, base_argv, base_envs, framework)
+            if not delta_settings and not delta_envs:
+                # A change the merged config does not express leaves no delta, and
+                # so does a variant that only restates the baseline. The two are
+                # indistinguishable here, so the variant runs rather than risk
+                # dropping a real experiment for a missed drop.
+                kept.append(gv)
+                continue
+            if _settings_already_hold(delta_settings, observed_config) and _envs_already_hold(delta_envs, observed_env):
                 dropped.append((gv.name, "merged launch already active in the observed server (baseline noop)"))
                 continue
             kept.append(gv)
@@ -811,7 +907,7 @@ class ExploreExecutor:
 
         # Drop variants that already match the current stack's observed launch.
         _pre_noop_grid_len = len(grid)
-        observed_flags, observed_env = observed_launch_from_state(ss)
+        observed_config, observed_env = observed_launch_from_state(ss)
         grid, _noop_dropped = filter_baseline_noop_variants(
             grid,
             framework=framework,
@@ -824,7 +920,7 @@ class ExploreExecutor:
             model_path=resolved_model,
             gpu_type=resolved_gpu,
             benchmark_script=override_script,
-            observed_server_launch_flags=observed_flags,
+            observed_server_config=observed_config,
             observed_server_env=observed_env,
         )
 
