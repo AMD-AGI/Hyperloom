@@ -45,8 +45,9 @@ declared in `breakdown/schema.py` (`V6FrameworkAttempt`, `V6FrameworkProposal`).
 
 Configuration variants preserve their authored action-time `reasoning` (and
 record which payload field supplied it in `reasoning_origin`) on the measured
-attempt. Their materialized tasks retain the proposal message id so attempts
-join the right proposal. Source candidates preserve discovery reasoning. Gap
+attempt. Every explore grid the orchestration agent emits, whether proposed
+for review or delegated to run directly, records one proposal, and its task
+carries that proposal's id so its attempts join it. Source candidates preserve discovery reasoning. Gap
 context and post-action result text are recorded when present but are not
 accepted as original decision reasoning, and a provenance label such as
 `llm_direct` is not a substitute for reasoning.
@@ -58,7 +59,12 @@ agent says it relied on is `experience_citations`: per variant for the
 orchestration agent, per proposal or per written patch for a specialist, each
 `{id, stance, claim}` with `stance` one of `adopt`, `adapt`, `avoid`, or
 `contrast`. A citation of an Experience that agent was not shown, or with
-another stance, is dropped where the agent's output enters the loop. The
+another stance, is dropped where the agent's output enters the loop. A grid
+variant that asks for exactly the change a specialist proposed in the same
+macro-cycle also carries that specialist's proposal citations; one that changes
+the proposal carries only the orchestration agent's own. Proposal citations do
+not yet reach an attempt from a multi-node auto-materialized grid or from an
+upstream PR candidate. The
 Experience carries its citations in `provenance.extra.experience_citations`;
 how often a cited Experience worked out is not stored on any record but
 derived by the KB that holds both.

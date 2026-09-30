@@ -593,8 +593,8 @@ synthetic one.
 
 Every complete measured attempt is written idempotently when the session
 breakdown is written. Rendered Experience references from an orchestration
-proposal are carried through to the measured Experience. A network write
-failure is spooled for retry.
+grid, proposed or delegated, are carried through to the measured Experience. A
+network write failure is spooled for retry.
 
 Each injection appends one entry to `state.json` `experience_kb_injections`
 (latest last, capped at 20); an orchestration entry is added only when its

@@ -38,4 +38,17 @@ def normalize_citations(raw: Any, shown: frozenset[str]) -> list[dict[str, str]]
     return citations
 
 
-__all__ = ["MAX_CLAIM_CHARS", "STANCES", "normalize_citations", "shown_ids"]
+def merge_citations(*groups: Iterable[Mapping[str, str]]) -> list[dict[str, str]]:
+    """Join citations each already checked against its own agent's read, keeping the first per ``(id, stance)``."""
+    merged: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for group in groups:
+        for citation in group:
+            key = (str(citation.get("id") or ""), str(citation.get("stance") or ""))
+            if key not in seen:
+                seen.add(key)
+                merged.append(dict(citation))
+    return merged
+
+
+__all__ = ["MAX_CLAIM_CHARS", "STANCES", "merge_citations", "normalize_citations", "shown_ids"]

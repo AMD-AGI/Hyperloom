@@ -343,19 +343,11 @@ class _RenderMixin:
         """Executable proposals from this cycle that no explore round has benched."""
         from hyperloom.common.coerce import to_int
 
-        from ...actions.executors._proposal_identity import (
-            controls_of,
-            effective_fingerprint,
-            is_executable,
-            normalize_proposal,
-        )
-
-        def content_fingerprint(fields: dict[str, Any]) -> str:
-            return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields))
+        from ...actions.executors._proposal_identity import content_fingerprint, is_executable, normalize_proposal
 
         cycle = to_int(self.macro_cycle, default=0)
         benched = {
-            content_fingerprint(normalize_proposal(row))
+            content_fingerprint(row)
             for row in ((self.explore_search or {}).get("tested") or {}).values()
             if isinstance(row, dict)
         }
