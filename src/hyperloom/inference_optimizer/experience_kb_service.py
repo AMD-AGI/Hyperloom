@@ -13,7 +13,7 @@ import secrets
 import sys
 from pathlib import Path
 
-from hyperloom.common.env import env_bool
+from hyperloom.common.env import EnvValueError, env_bool
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom_kb import (
@@ -102,10 +102,23 @@ def sync_with_global(direction: str) -> dict[str, JsonValue]:
     return client.push()
 
 
+def check_auto_push() -> bool:
+    """Whether a run pushes at its end; a switch or global KB it cannot use is a warning, never a failed run."""
+
+    try:
+        enabled = env_bool(AUTO_PUSH_ENV)
+        if enabled and global_config_from_env(os.environ) is None:
+            raise SyncUnavailable(f"{AUTO_PUSH_ENV} is on but {GLOBAL_URL_ENV} is not configured")
+    except (EnvValueError, SyncUnavailable) as exc:
+        log.warning("Experience KB auto push is off for this run: %s", exc)
+        return False
+    return enabled
+
+
 def auto_push() -> None:
     """Push a run's newly written Experiences when the workspace opted in; a failed push never fails the run."""
 
-    if not env_bool(AUTO_PUSH_ENV):
+    if not check_auto_push():
         return
     try:
         report = sync_with_global("push")
@@ -176,6 +189,7 @@ __all__ = [
     "main",
     "service_home",
     "spool_root",
+    "check_auto_push",
     "sync_with_global",
 ]
 

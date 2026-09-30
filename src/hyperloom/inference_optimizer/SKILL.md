@@ -573,7 +573,9 @@ Report the one summary line each prints (global URL; `created`, `unchanged`,
 `skipped`, `rejected`) and never the token. A push resumes where an earlier one
 stopped and never sends back what was pulled. With `HYPERLOOM_KB_AUTO_PUSH=1`,
 every run pushes after its Experiences are written locally; a failed automatic
-push is only a warning, and the next push sends what it missed.
+push is only a warning, and the next push sends what it missed. An unusable
+switch value or a missing global KB is a launch warning, and that run does not
+push.
 
 During FRAMEWORK_AGENT the service is read at two points and the returned block
 is injected into the prompt:

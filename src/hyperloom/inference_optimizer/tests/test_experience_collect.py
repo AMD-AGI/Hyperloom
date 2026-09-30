@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import signal
 import socket
@@ -110,6 +111,8 @@ def _configured_kb(monkeypatch, *, collect: Any, schema_ref: str | None = None) 
     monkeypatch.setattr(experience_collect, "collect", collect)
     monkeypatch.setattr(experience_collect, "experience_kb_from_env", lambda **_kwargs: target)
     monkeypatch.setenv("HYPERLOOM_KB_URL", "http://kb.invalid")
+    for key in ("HYPERLOOM_KB_AUTO_PUSH", "HYPERLOOM_GLOBAL_KB_URL", "HYPERLOOM_GLOBAL_KB_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
     return target
 
 
@@ -151,6 +154,60 @@ def test_startup_rejects_a_kb_that_validates_another_declaration(monkeypatch) ->
 
     with pytest.raises(ConfigurationError, match="hyperloom-sbd-v6 produces"):
         experience_collect.validate_config()
+
+
+# A dotenv value keeps an inline comment, which is how a first run once lost its push after three hours.
+_UNREADABLE_SWITCH = {"HYPERLOOM_KB_AUTO_PUSH": "1        # push after every run"}
+_NO_GLOBAL_KB = {"HYPERLOOM_KB_AUTO_PUSH": "1"}
+
+
+@pytest.mark.parametrize(
+    ("env", "reason"),
+    [(_UNREADABLE_SWITCH, "is not a boolean"), (_NO_GLOBAL_KB, "HYPERLOOM_GLOBAL_KB_URL is not configured")],
+)
+def test_an_unusable_auto_push_setting_is_a_warning_at_launch(monkeypatch, caplog, env, reason) -> None:
+    _configured_kb(monkeypatch, collect=_unexpected_collect)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    with caplog.at_level(logging.WARNING):
+        experience_collect.validate_config()
+
+    assert "auto push is off for this run" in caplog.text
+    assert reason in caplog.text
+
+
+def test_a_run_with_an_unusable_auto_push_setting_still_exports_and_collects(
+    monkeypatch, caplog, session_dir: Path
+) -> None:
+    collected: list[str] = []
+
+    def collect(mapping: str, *_args: Any, **_kwargs: Any) -> Any:
+        collected.append(mapping)
+        return SimpleNamespace(to_dict=lambda: {"counts": {"collected": 0}})
+
+    _configured_kb(monkeypatch, collect=collect)
+    monkeypatch.setattr(experience_kb_service, "sync_with_global", _unexpected_collect)
+    monkeypatch.setenv(*next(iter(_UNREADABLE_SWITCH.items())))
+
+    with caplog.at_level(logging.WARNING):
+        written = exporter.write_breakdown_json(session_dir)
+
+    assert written.is_file()
+    assert collected == ["hyperloom-sbd-v6"]
+    assert "auto push is off for this run" in caplog.text
+
+
+def test_auto_push_with_a_global_kb_is_quiet_at_launch(monkeypatch, caplog) -> None:
+    _configured_kb(monkeypatch, collect=_unexpected_collect)
+    monkeypatch.setenv("HYPERLOOM_KB_AUTO_PUSH", "1")
+    monkeypatch.setenv("HYPERLOOM_GLOBAL_KB_URL", "http://global.invalid")
+    monkeypatch.setenv("HYPERLOOM_GLOBAL_KB_TOKEN", "global-token")
+
+    with caplog.at_level(logging.WARNING):
+        experience_collect.validate_config()
+
+    assert "auto push" not in caplog.text
 
 
 def _record_framework_attempts(session_dir: Path) -> list[dict[str, Any]]:

@@ -146,6 +146,12 @@ def _push_report(**overrides: Any) -> dict[str, Any]:
     }
 
 
+def _opt_into_auto_push(monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_KB_AUTO_PUSH", "1")
+    monkeypatch.setenv("HYPERLOOM_GLOBAL_KB_URL", "https://global.example")
+    monkeypatch.setenv("HYPERLOOM_GLOBAL_KB_TOKEN", "global-token")
+
+
 def test_auto_push_is_off_until_the_workspace_opts_in(monkeypatch, caplog) -> None:
     pushed: list[str] = []
     monkeypatch.setattr(experience_kb_service, "sync_with_global", lambda direction: pushed.append(direction))
@@ -154,7 +160,7 @@ def test_auto_push_is_off_until_the_workspace_opts_in(monkeypatch, caplog) -> No
     assert pushed == []
 
     monkeypatch.setattr(experience_kb_service, "sync_with_global", lambda direction: _push_report())
-    monkeypatch.setenv("HYPERLOOM_KB_AUTO_PUSH", "1")
+    _opt_into_auto_push(monkeypatch)
     with caplog.at_level(logging.INFO):
         experience_kb_service.auto_push()
     assert "push with https://global.example: 2 created, 0 unchanged, 0 skipped, 0 rejected" in caplog.text
@@ -174,7 +180,7 @@ def test_a_failed_auto_push_is_logged_and_never_fails_the_run(monkeypatch, caplo
         return outcome
 
     monkeypatch.setattr(experience_kb_service, "sync_with_global", push)
-    monkeypatch.setenv("HYPERLOOM_KB_AUTO_PUSH", "1")
+    _opt_into_auto_push(monkeypatch)
 
     with caplog.at_level(logging.WARNING):
         experience_kb_service.auto_push()
