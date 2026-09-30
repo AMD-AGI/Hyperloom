@@ -109,7 +109,7 @@ def _record_config_proposal(router: Any, pending: Any) -> None:
     proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
     if not proposal_id:
         return
-    recorder = router.phase_framework.timeline()
+    recorder = router._coord.phase_framework.timeline()
     if recorder is None:
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
@@ -301,7 +301,7 @@ def _record_critic_review(
     proposal_id = review_row_id(pending.payload or {}, fallback_msg_id=pending.proposal_msg_id)
     if not proposal_id:
         return
-    recorder = router.phase_framework.timeline()
+    recorder = router._coord.phase_framework.timeline()
     if recorder is None:
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
@@ -369,7 +369,7 @@ def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
     proposal_id = review_row_id(pending.payload or {}, fallback_msg_id=pending.proposal_msg_id)
     if not proposal_id:
         return
-    recorder = router.phase_framework.timeline()
+    recorder = router._coord.phase_framework.timeline()
     if recorder is None:
         return
     recorder.record_proposal_review_outcome(proposal_id, **outcome)

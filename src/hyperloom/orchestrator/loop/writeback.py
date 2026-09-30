@@ -430,7 +430,7 @@ def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any])
     that measured nothing still lands, which is the case
     :func:`_record_config_attempts` never sees.
     """
-    recorder = coord.phase_framework.timeline()
+    recorder = coord._coord.phase_framework.timeline()
     if recorder is None:
         return
     from hyperloom.common.timeutil import now_iso
@@ -472,7 +472,7 @@ def _record_config_attempts(
     unlike the journal beside it, which collapses ``KEEP_UNSTABLE`` and
     ``KILLED_OVERTIME`` into a plain revert.
     """
-    recorder = coord.phase_framework.timeline()
+    recorder = coord._coord.phase_framework.timeline()
     if recorder is None:
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG
