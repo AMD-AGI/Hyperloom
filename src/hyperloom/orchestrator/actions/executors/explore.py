@@ -693,7 +693,7 @@ class ExploreExecutor:
             # Honour an operator-pinned SGLANG_USE_AITER=0: drop variants that would re-enable the (hang-prone) aiter
             # MoE runner.
             runnable, _aiter_dropped = apply_aiter_moe_pin_filter(runnable)
-            # xDiT do-not-set list, plus flags the model class or the installed server does not support.
+            # xDiT do-not-set list, plus flags the model class does not support.
             runnable, _compat_dropped = apply_compatibility_filter(
                 runnable,
                 framework=framework,
