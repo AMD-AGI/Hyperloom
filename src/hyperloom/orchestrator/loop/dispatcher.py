@@ -856,7 +856,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 because it registers its handle before this coroutine starts;
                 other callers leave it ``None`` and are registered here.
             on_complete: Completion owned by the execution, independent of its
-                caller's lifetime. Inline and unjoined tasks retain their own policies.
+                caller's lifetime. Unjoined tasks retain their own policies.
 
         Returns:
             The runner's result, or ``None`` when the task's lanes were busy, in
@@ -1409,7 +1409,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         catalogue-anchored gate admits arms a real model cannot pay for.
 
         Args:
-            action_name: The proposed/delegated/inline action name.
+            action_name: The proposed/delegated action name.
             fallback_cost_minutes: What to price the action at when the
                 catalogue does not carry it. Without it, a kind deliberately
                 kept out of the catalogue is admitted at any remaining budget.
@@ -1457,11 +1457,11 @@ class DispatcherCollaborator(CoordinatorCollaborator):
     ) -> PolicyDenied | None:
         """Run every pre-dispatch gate for an action name, first denial wins.
 
-        The single entry point the intent handlers and the inline runner share,
-        so a new gate reaches all three paths at once.
+        The single entry point the intent handlers share, so a new gate
+        reaches all paths at once.
 
         Args:
-            action_name: The proposed/delegated/inline action name.
+            action_name: The proposed/delegated action name.
 
         Returns:
             The first :class:`PolicyDenied` that fires, else ``None``.

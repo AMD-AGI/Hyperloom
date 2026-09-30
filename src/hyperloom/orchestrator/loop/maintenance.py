@@ -6,7 +6,7 @@
 from __future__ import annotations
 from typing import Any
 from ..state.shared_state import SharedState
-from hyperloom.orchestrator.collaborator import CoordinatorCollaborator
+from ..collaborator import CoordinatorCollaborator
 
 import logging as _logging
 

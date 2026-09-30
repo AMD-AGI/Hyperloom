@@ -144,7 +144,7 @@ def _matching_stack_entries(
 
 
 class KernelStackPhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """KERNEL_STACK phase handler: manages kernel stack revalidation and stack-level decisions."""
 
     def __init__(self, coordinator) -> None:
         """Initialise the phase with its own in-flight integrate guard."""

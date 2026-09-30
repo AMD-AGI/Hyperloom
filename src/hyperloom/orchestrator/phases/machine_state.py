@@ -282,7 +282,7 @@ def target_was_reached(state: Any) -> bool:
 
 def _cycle_reloop_min_remaining_sec(
     state: Any,
-    min_remaining_sec: float = DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC,
+    min_remaining_sec: float | None = None,
 ) -> float:
     """Session-scaled floor on the seconds that must remain to justify a new cycle.
 
@@ -296,7 +296,7 @@ def _cycle_reloop_min_remaining_sec(
 
     Args:
         state (Any): Frozen SharedState view exposing ``max_minutes``.
-        min_remaining_sec (float): Absolute floor before session scaling.
+        min_remaining_sec (float | None): Absolute floor before session scaling; defaults to env-resolved value.
 
     Returns:
         float: The effective floor in seconds.
