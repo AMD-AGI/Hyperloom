@@ -2286,9 +2286,7 @@ class KernelPhase(CoordinatorCollaborator):
             return
 
         record_geak_attempts(
-            event=str(
-                result.get("kernel_event_id") or kernel_event_id(int(self.shared_state.macro_cycle or 0))
-            ),
+            event=str(result.get("kernel_event_id") or kernel_event_id(int(self.shared_state.macro_cycle or 0))),
             journey=journey,
         )
 
@@ -2313,9 +2311,7 @@ class KernelPhase(CoordinatorCollaborator):
     ) -> None:
         """Revoke the persisted provisional GEAK KEEPs after a final rebench."""
         reject_geak_attempts(
-            event=str(
-                result.get("kernel_event_id") or kernel_event_id(int(self.shared_state.macro_cycle or 0))
-            ),
+            event=str(result.get("kernel_event_id") or kernel_event_id(int(self.shared_state.macro_cycle or 0))),
             measured_tput=measured_tput,
             current_best_tput=current_best_tput,
             provenance=provenance,
@@ -3353,8 +3349,7 @@ class KernelPhase(CoordinatorCollaborator):
                 continue
             extra_server_args = (
                 "--moe-runner-backend aiter"
-                if tuner_name == "fmoe_ck"
-                and str(self.shared_state.framework or "").lower() == "sglang"
+                if tuner_name == "fmoe_ck" and str(self.shared_state.framework or "").lower() == "sglang"
                 else ""
             )
             # Merge with previously KEEP'd envs.

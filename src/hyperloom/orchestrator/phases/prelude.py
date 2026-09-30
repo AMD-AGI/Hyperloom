@@ -189,7 +189,7 @@ class PreludePhase(CoordinatorCollaborator):
         return (
             "roofline"
             if bool(
-                getattr(self.shared_state, "enable_roofline", True),
+                self.shared_state.enable_roofline,
             )
             else "profile"
         )
@@ -227,7 +227,7 @@ class PreludePhase(CoordinatorCollaborator):
     def _warm_recipe_proven_items(self) -> list[dict[str, str]]:
         """Summarise warm-start ``what_worked`` items the scout can skip ({name, source}); fail-soft."""
         state = self.shared_state
-        warm = getattr(state, "warm_start_recipe", None) or {}
+        warm = state.warm_start_recipe or {}
         if not isinstance(warm, dict) or not warm:
             return []
         recipe = warm.get("recipe") or {}
@@ -251,7 +251,7 @@ class PreludePhase(CoordinatorCollaborator):
     def _inject_warm_recipe_history_into_ledger(self) -> int:
         """Pre-fill ``explore_search.rejected`` with the warm recipe's ``what_failed`` rows (fingerprinted so the dedup gate denies re-tests). Idempotent via warm_history_injected; returns rows added."""
         state = self.shared_state
-        if getattr(state, "warm_history_injected", False):
+        if state.warm_history_injected:
             return 0
         warm = state.warm_start_recipe or {}
         if not isinstance(warm, dict) or not warm:
@@ -272,7 +272,7 @@ class PreludePhase(CoordinatorCollaborator):
             canonical_fingerprint,
         )
 
-        es_raw = getattr(state, "explore_search", None) or {}
+        es_raw = state.explore_search or {}
         es = dict(es_raw) if isinstance(es_raw, dict) else {}
         rejected = list(es.get("rejected") or [])
         existing_fps = {str(r.get("fingerprint") or "") for r in rejected if isinstance(r, dict)}
@@ -648,7 +648,7 @@ class PreludePhase(CoordinatorCollaborator):
         state: Any,
     ) -> dict[str, Any] | None:
         """Skip combined warm replay when a kernel item's recorded root is unusable."""
-        for entry in getattr(state, "warm_kernel_kb_plan", []) or []:
+        for entry in state.warm_kernel_kb_plan or []:
             if not isinstance(entry, dict):
                 continue
             # gemm is parameter-shaped: it re-points env vars at downloaded files and never patches a checkout, so it
@@ -676,7 +676,7 @@ class PreludePhase(CoordinatorCollaborator):
         kernel_outcome: dict[str, Any],
     ) -> dict[str, Any]:
         """Store kernel diagnostics inside the combined warm replay outcome."""
-        combined = dict(getattr(self.shared_state, "warm_replay_outcome", {}) or {})
+        combined = dict(self.shared_state.warm_replay_outcome or {})
         combined["kernel"] = dict(kernel_outcome)
         self.shared_state.warm_replay_outcome = combined
         return kernel_outcome
@@ -708,7 +708,7 @@ class PreludePhase(CoordinatorCollaborator):
     async def _prepare_warm_kernel_kb(self, kb: Any = None) -> dict[str, Any]:
         """Prepare the Recipe's kernel section for the combined replay benchmark."""
         state = self.shared_state
-        if getattr(state, "warm_kernel_kb_attempted", False):
+        if state.warm_kernel_kb_attempted:
             return {"status": "skipped", "reason": "already_attempted"}
         gated = self._warm_kernel_gate_reason()
         if gated:
@@ -784,7 +784,7 @@ class PreludePhase(CoordinatorCollaborator):
             )
         kernel_args, merged_envs = _merge_named_current_recipe_configs(kernel_configs)
         state.warm_replay_pending = {
-            **dict(getattr(state, "warm_replay_pending", {}) or {}),
+            **dict(state.warm_replay_pending or {}),
             "status": "preparing_kernel",
             "kernel_apply_results": [],
             "kernel_snapshots": [],
@@ -1128,7 +1128,7 @@ class PreludePhase(CoordinatorCollaborator):
                 "errors": 1,
                 "reason": f"{type(exc).__name__}: {exc}"[:300],
             }
-        preparation_pending = dict(getattr(state, "warm_replay_pending", {}) or {})
+        preparation_pending = dict(state.warm_replay_pending or {})
         preparation_dirty = bool(
             kernel.get("dirty")
             or preparation_pending.get("kernel_snapshots")
@@ -1203,7 +1203,7 @@ class PreludePhase(CoordinatorCollaborator):
             recipe = {}
         # best_config/sessions may be top-level or nested under attrs.
         recipe_attrs = recipe.get("attrs") or recipe
-        wsc = getattr(state, "warm_start_context", None) or {}
+        wsc = state.warm_start_context or {}
         replay = wsc.get("recommended_replay") if not current_remote and isinstance(wsc, dict) else {}
         replay = replay if isinstance(replay, dict) else {}
         rep_args = str(replay.get("extra_server_args") or "").strip()
@@ -1307,7 +1307,7 @@ class PreludePhase(CoordinatorCollaborator):
                     state.warm_replay_pending = {}
                 else:
                     state.warm_replay_pending = {
-                        **dict(getattr(state, "warm_replay_pending", {}) or {}),
+                        **dict(state.warm_replay_pending or {}),
                         "status": "rollback_failed",
                         "rollback_errors": list(rollback.get("errors") or []),
                     }
@@ -1387,10 +1387,10 @@ class PreludePhase(CoordinatorCollaborator):
 
             validated_args, workload_compatibility = validate_warm_replay_context_length(
                 combined_args,
-                getattr(state, "framework", ""),
-                int(getattr(state, "isl", 0) or 0),
-                int(getattr(state, "osl", 0) or 0),
-                getattr(state, "max_model_len", None),
+                state.framework,
+                int(state.isl or 0),
+                int(state.osl or 0),
+                state.max_model_len or None,
             )
             if validated_args != combined_args:
                 raise RuntimeError("warm replay context preflight must not mutate config")
@@ -1407,16 +1407,16 @@ class PreludePhase(CoordinatorCollaborator):
                 state.warm_replay_pending = {}
             else:
                 state.warm_replay_pending = {
-                    **dict(getattr(state, "warm_replay_pending", {}) or {}),
+                    **dict(state.warm_replay_pending or {}),
                     "status": "rollback_failed",
                     "rollback_errors": list(rollback.get("errors") or []),
                 }
                 if hasattr(state, "set_stop_reason"):
                     state.set_stop_reason("warm_replay_rollback_failed")
             target_workload_shape = {
-                "conc": int(getattr(state, "conc", 0) or 0),
-                "isl": int(getattr(state, "isl", 0) or 0),
-                "osl": int(getattr(state, "osl", 0) or 0),
+                "conc": int(state.conc or 0),
+                "isl": int(state.isl or 0),
+                "osl": int(state.osl or 0),
             }
             self._skip_warm_replay(
                 code=SKIP_WORKLOAD_CONFIG_INCOMPATIBLE,
@@ -1480,7 +1480,7 @@ class PreludePhase(CoordinatorCollaborator):
                 state.warm_replay_pending = {}
             else:
                 state.warm_replay_pending = {
-                    **dict(getattr(state, "warm_replay_pending", {}) or {}),
+                    **dict(state.warm_replay_pending or {}),
                     "status": "rollback_failed",
                     "rollback_errors": list(rollback.get("errors") or []),
                 }
@@ -1522,7 +1522,7 @@ class PreludePhase(CoordinatorCollaborator):
             **donor_metadata,
         }
         state.warm_replay_pending = {
-            **dict(getattr(state, "warm_replay_pending", {}) or {}),
+            **dict(state.warm_replay_pending or {}),
             "status": "in_flight",
             "task_id": task.task_id,
             "kernel_apply_results": kernel_applied,
@@ -1608,7 +1608,7 @@ class PreludePhase(CoordinatorCollaborator):
     ) -> dict[str, Any]:
         """Restore both Recipe and Kernel halves of a combined replay."""
         restores: list[dict[str, Any]] = []
-        pending = getattr(self.shared_state, "warm_replay_pending", {}) or {}
+        pending = self.shared_state.warm_replay_pending or {}
         trees = [
             tree
             for tree in (result.get("warm_patch_trees") or pending.get("recipe_patch_trees") or [])
@@ -1782,7 +1782,7 @@ class PreludePhase(CoordinatorCollaborator):
 
         state = self.shared_state
         try:
-            baseline_accuracy = float(getattr(state, "baseline_accuracy", 0.0) or 0.0)
+            baseline_accuracy = float(state.baseline_accuracy or 0.0)
         except (TypeError, ValueError):
             baseline_accuracy = 0.0
 
@@ -1907,7 +1907,7 @@ class PreludePhase(CoordinatorCollaborator):
 
         recorder = make_warm_replay_recorder(
             phase=_WARM_REPLAY_EVENT_PHASE,
-            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            macro_cycle=int(self.shared_state.macro_cycle or 0),
             task_id=str(getattr(task, "task_id", "") or ""),
             tier=str(params.get("warm_recipe_tier") or ""),
             config_source=str(params.get("config_source") or ""),
@@ -1936,7 +1936,7 @@ class PreludePhase(CoordinatorCollaborator):
         """
         from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import APPLY_KERNEL
 
-        for position, entry in enumerate(getattr(self.shared_state, "warm_kernel_kb_plan", None) or []):
+        for position, entry in enumerate(self.shared_state.warm_kernel_kb_plan or []):
             if not isinstance(entry, Mapping) or not str(entry.get("decision") or ""):
                 continue
             outcome = entry.get("apply_result") if isinstance(entry.get("apply_result"), Mapping) else {}
@@ -1988,14 +1988,14 @@ class PreludePhase(CoordinatorCollaborator):
         measurement the promote seam is here to record.
         """
         params = dict(getattr(task, "params", None) or {})
-        outcome = dict(getattr(self.shared_state, "warm_replay_outcome", None) or {})
+        outcome = dict(self.shared_state.warm_replay_outcome or {})
         from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
             make_warm_replay_recorder,
         )
 
         return make_warm_replay_recorder(
             phase=_WARM_REPLAY_EVENT_PHASE,
-            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            macro_cycle=int(self.shared_state.macro_cycle or 0),
             task_id=str(getattr(task, "task_id", "") or outcome.get("replay_task_id") or ""),
             tier=str(params.get("warm_recipe_tier") or outcome.get("warm_recipe_tier") or ""),
             config_source=str(params.get("config_source") or outcome.get("config_source") or ""),
@@ -2003,7 +2003,7 @@ class PreludePhase(CoordinatorCollaborator):
             donor=self._warm_replay_donor(outcome) or None,
             expected_gain_pct=params.get("warm_expected_gain_pct", outcome.get("expected_gain_pct")),
             confidence=params.get("warm_recipe_conf", outcome.get("warm_recipe_conf")),
-            session_baseline_tput=getattr(self.shared_state, "baseline_tput", None),
+            session_baseline_tput=self.shared_state.baseline_tput or None,
             kernel_count=len(list(params.get("warm_kernel_plan") or [])),
             # Rebinding, not opening: the enqueue seam already put this event
             # on the timeline, and opening it twice would restate its start.
@@ -2054,7 +2054,7 @@ class PreludePhase(CoordinatorCollaborator):
 
         recorder = make_warm_replay_recorder(
             phase=_WARM_REPLAY_EVENT_PHASE,
-            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            macro_cycle=int(self.shared_state.macro_cycle or 0),
             tier=str(outcome.get("warm_recipe_tier") or ""),
             config_source=str(outcome.get("config_source") or ""),
             config_donor_tier=str(outcome.get("config_donor_tier") or ""),
@@ -2496,7 +2496,7 @@ class PreludePhase(CoordinatorCollaborator):
                 journal = self._coord.writeback._ensure_journal()
                 journal.append_entry(
                     JournalEntry(
-                        phase=str(getattr(state, "phase", "PRELUDE")).upper() or "PRELUDE",
+                        phase=(state.phase or "PRELUDE").upper() or "PRELUDE",
                         iter=int(state.tick or 0),
                         kind=KIND_OTHER,
                         change=f"warm_replay({outcome.get('warm_recipe_tier', '?')}): {warm_args}",
@@ -2615,7 +2615,7 @@ class PreludePhase(CoordinatorCollaborator):
         if kind != "roofline":
             return ""
         try:
-            streak = int(getattr(self.shared_state, "roofline_failure_streak", 0) or 0)
+            streak = int(self.shared_state.roofline_failure_streak or 0)
         except (TypeError, ValueError):
             streak = 0
         return f"-a{streak}" if streak > 0 else ""
@@ -2653,7 +2653,7 @@ class PreludePhase(CoordinatorCollaborator):
         from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 
         state = self.shared_state
-        unsupported = str(getattr(state, "gpu_trace_unsupported_reason", "") or "")
+        unsupported = str(state.gpu_trace_unsupported_reason or "")
         if unsupported:
             log.error(
                 "internal-analysis (%s): not run -- %s; relying on static-source evidence for the rest of the session",

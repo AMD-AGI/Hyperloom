@@ -198,7 +198,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Returns:
             ``"-c<cycle>"`` for macro-cycle > 0, else an empty string.
         """
-        cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        cycle = int(self.shared_state.macro_cycle or 0)
         return f"-c{cycle}" if cycle > 0 else ""
 
     def _dispatch_paused_for_phase_budget(self) -> bool:
@@ -215,7 +215,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             ``True`` when new phase-scoped dispatch should pause for budget.
         """
         state = self.shared_state
-        phase = (getattr(state, "phase", "") or "").upper()
+        phase = (state.phase or "").upper()
         if phase not in self._BUDGET_GATED_DISPATCH_PHASES:
             return False
         remaining = _phase_state.phase_budget_remaining_seconds(state)
@@ -337,8 +337,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             is what cancels the rows it can no longer fit, and the closing
             actions it exempts still have their reserve to run in.
         """
-        stop_event = getattr(self, "_stop", None)
-        if stop_event is not None and stop_event.is_set():
+        if self._stop.is_set():
             await self.cancel_inflight_actions(reason="shutdown_requested")
             return True
         usable_sec = self.shared_state.session_budget_usable_sec()
@@ -1034,7 +1033,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             float: A positive wall-clock budget in seconds.
         """
         base_min = 60.0 if needs_gpu else 10.0
-        macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        macro_cycle = int(self.shared_state.macro_cycle or 0)
         budget_min = min(base_min * (macro_cycle + 1), 240.0)
         budget_sec = budget_min * 60.0
         from ..specialists.profile import resolve_specialist_profile
@@ -1078,8 +1077,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Returns:
             int: The serving TP size, or ``0`` when unknown.
         """
-        tp = int(getattr(self.shared_state, "tp", 0) or 0)
-        return tp
+        return int(self.shared_state.tp or 0)
 
     def _gpu_lease_ttl_sec(
         self,
@@ -1266,8 +1264,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             error_class=result_payload.get("error_class") or result.error_class,
             workspace=result_payload.get("workspace"),
             settled_unix=time.time(),
-            phase=str(getattr(self.shared_state, "phase", "") or ""),
-            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            phase=str(self.shared_state.phase or ""),
+            macro_cycle=int(self.shared_state.macro_cycle or 0),
             action=str(task.kind or ""),
         )
         if task.kind in ("explore", "integrate_patch"):
@@ -1346,7 +1344,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             ``None``.
         """
         action = str(action_name or "").strip()
-        phase = str(getattr(self.shared_state, "phase", "") or "").strip().upper()
+        phase = str(self.shared_state.phase or "").strip().upper()
         if not _phase_state.coordinator_reserved_in_phase(action, phase):
             return None
         return PolicyDenied(
@@ -1593,8 +1591,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         if self._skip_gemm_tuning():
             return False
         ss = self.shared_state
-        precision = str(getattr(ss, "precision", "") or "").strip().lower()
-        framework = str(getattr(ss, "framework", "") or "").strip().lower()
+        precision = str(ss.precision or "").strip().lower()
+        framework = str(ss.framework or "").strip().lower()
 
         from ..kernel.request_handlers import _resolve_gemm_tuning_backend
 
@@ -1614,7 +1612,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
 
         if not eligible:
             return False
-        last = getattr(ss, "last_gemm_tuning", {}) or {}
+        last = ss.last_gemm_tuning or {}
         status = str(last.get("status") or "").strip().lower()
         # The fp8 -> bf16 dense retry now runs inside a single gemm call (the
         # tuner router selects the bf16 pass as a fallback), so a completed run's

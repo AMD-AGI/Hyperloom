@@ -267,6 +267,10 @@ class CoordinatorCollaborator:
         return self._coord._stop
 
     @property
+    def _cycle_soft_restart(self) -> bool:
+        return self._coord._cycle_soft_restart
+
+    @property
     def reconciler(self):
         return self._coord.reconciler
 

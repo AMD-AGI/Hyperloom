@@ -68,8 +68,8 @@ class CycleMemoryCollaborator(CoordinatorCollaborator):
         if rebuild is None:
             return False
         state = self.shared_state
-        cycle = int(getattr(state, "macro_cycle", 0) or 0)
-        directive = str((dict(getattr(state, "orchestration_memory", {}) or {})).get("next_cycle_directive", "") or "")
+        cycle = int(state.macro_cycle or 0)
+        directive = str((dict(state.orchestration_memory or {})).get("next_cycle_directive", "") or "")
         new_prompt = rebuild(
             macro_cycle=cycle,
             cycle_directive=directive,

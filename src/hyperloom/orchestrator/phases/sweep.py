@@ -40,7 +40,7 @@ class SweepPhase(CoordinatorCollaborator):
             await self._coord.phase_kernel_stack._drain_pending_keep_integrates()
         # Validate the stack for positive NEEDS_REVIEW kernels.
         await self._coord.phase_kernel_stack._maybe_validate_positive_needs_review_stack()
-        if not getattr(state, "conc_sweep_enabled", False):
+        if not state.conc_sweep_enabled:
             log.info(
                 "SWEEP entry (from=%s): conc_sweep disabled; recording terminal skip.",
                 from_phase or "<unknown>",
@@ -50,10 +50,10 @@ class SweepPhase(CoordinatorCollaborator):
                 auto_conc_sweep_skipped="disabled",
             )
             return
-        prev_conc = getattr(state, "last_conc_sweep_watermark", None)
+        prev_conc = state.last_conc_sweep_watermark
         prev_conc = prev_conc if isinstance(prev_conc, dict) else {}
         prev_validated = prev_conc.get("cumulative_gain_validated_at_record")
-        cur_validated = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+        cur_validated = float(state.cumulative_gain_validated or 0.0)
         if prev_conc and isinstance(prev_validated, (int, float)) and cur_validated <= float(prev_validated) + 1e-6:
             log.info(
                 "SWEEP entry (from=%s): skipping auto-conc-sweep — no validated gain since last "
@@ -176,7 +176,7 @@ class SweepPhase(CoordinatorCollaborator):
 
     def _record_session_budget_conc_sweep_skip(self, *, denied: object) -> None:
         """Stamp last_conc_sweep skipped when the session clock refused conc_sweep."""
-        last = getattr(self.shared_state, "last_conc_sweep", None) or {}
+        last = self.shared_state.last_conc_sweep or {}
         if str(last.get("status") or "").strip():
             return
         self._record_terminal_conc_sweep_skip(

@@ -570,7 +570,7 @@ class KernelStackPhase(CoordinatorCollaborator):
                     "quality_ref_exempt": True,
                     # A sub-step of the KERNEL phase's own event, not a dispatched measurement, so it records into
                     # that event rather than leaving a baseline event of its own.
-                    INLINE_EVENT_PARAM: kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0)),
+                    INLINE_EVENT_PARAM: kernel_event_id(int(self.shared_state.macro_cycle or 0)),
                 },
                 idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
             )
