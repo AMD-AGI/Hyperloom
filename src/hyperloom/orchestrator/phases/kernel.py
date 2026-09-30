@@ -1224,9 +1224,6 @@ class KernelPhase(CoordinatorCollaborator):
             "observed_server_identity": observed_server_identity,
             "measurement_evidence": launch_evidence,
             "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
-            # Serving-launch fidelity defaults; overwritten by _serving_fidelity.update() below.
-            "max_model_len": int(state.max_model_len or 0),
-            "mem_fraction": 0.0,
             "exp_root": str(self.session_dir / "geak"),
             # Macro-cycle-scoped eval_dir so a same-cycle resume reuses the in-progress on-disk artifacts while a new
             # cycle gets a fresh dir.

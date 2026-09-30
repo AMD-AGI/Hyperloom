@@ -445,24 +445,8 @@ class ClosePhase(CoordinatorCollaborator):
             )
 
     async def _on_enter_close(self, *, from_phase: str) -> None:
-        """CLOSE sequencer (fixed order): stack revalidation → post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done + stop_reason. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons."""
+        """CLOSE sequencer (fixed order): stack revalidation → post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons."""
         log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
-        # Derive stop_reason from the phase transition that entered CLOSE when not already set.
-        if not self.shared_state.stop_reason:
-            history = self.shared_state.phase_history or []
-            entry_reason = ""
-            entry_evidence: dict = {}
-            if history and isinstance(history[-1], dict):
-                entry_reason = str(history[-1].get("reason") or "")
-                entry_evidence = dict(history[-1].get("evidence") or {})
-            # A budgeted sweep that exhausted its time without producing a comparable pair is a failure.
-            if (
-                entry_reason == "sweep_done"
-                and entry_evidence.get("sweep_skip_budget_exhausted")
-                and entry_evidence.get("sweep_status") not in ("succeeded", None, "")
-            ):
-                entry_reason = "sweep_failed"
-            self.shared_state.set_stop_reason(entry_reason or "time_exhausted")
         # Opened before anything can record a step into it. It stands at
         # ``running`` until the verdict below, so a session killed mid-sequence
         # is reported as interrupted rather than judged on the steps it reached.
