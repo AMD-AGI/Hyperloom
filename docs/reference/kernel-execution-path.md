@@ -53,7 +53,7 @@ and PolicyGate rejects an orchestration-issued REQUEST for either
 `inference_optimizer/protocol/action_surfaces.py`, raised as
 `rule="phase_incompatible"`) because they run once at phase entry from a lane
 budget. PolicyGate validates the REQUEST payload from orchestration
-(path-sandbox, phase-action gate) but never sees the RESPONSE.
+(path-sandbox) but never sees the RESPONSE.
 
 A request whose kind maps to a catalogued action runs under that action's
 lanes: `integrate` takes `server_lifecycle`, `workspace_mutation` and

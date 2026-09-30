@@ -25,28 +25,14 @@ class MachinePhase(CoordinatorCollaborator):
     def _ensure_phase_initialised(self, budget_pct: dict[str, float] | None) -> None:
         """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent).
 
-        Args:
-            budget_pct: Explicit CLI per-phase share overrides.  When non-empty,
-                the budget is renormalised, redistributed, and written to state
-                unconditionally — this lets an operator override a resumed
-                session's LLM-adjusted budget.  When absent (None or empty),
-                state is left as-is on resume; a fresh session still writes the
-                library defaults so state is never left without a budget.
+        When *budget_pct* is given, or when state has no budget yet (fresh session),
+        the budget is redistributed and written; on resume without explicit overrides the
+        prior budget is kept.
         """
         state = self.shared_state
-        if budget_pct:
-            # Explicit CLI args: overwrite state unconditionally (renormalise +
-            # redistribute), so resume picks up the operator-supplied share.
+        if budget_pct or not state.phase_budget_pct:
             state.phase_budget_pct = _phase_state.redistribute_budget_pct(
                 _phase_state.normalize_budget_pct(budget_pct),
-                optimize_enabled=self._optimize_enabled(),
-                kernel_enabled=self._kernel_enabled(),
-            )
-        elif not state.phase_budget_pct:
-            # No explicit args and state carries no budget (fresh session):
-            # seed the library defaults so every phase has a cap from the start.
-            state.phase_budget_pct = _phase_state.redistribute_budget_pct(
-                _phase_state.normalize_budget_pct(None),
                 optimize_enabled=self._optimize_enabled(),
                 kernel_enabled=self._kernel_enabled(),
             )

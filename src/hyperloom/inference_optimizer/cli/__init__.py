@@ -1021,7 +1021,7 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
         ("phase_budget_sweep_pct", PHASE_SWEEP),
         ("phase_budget_close_pct", PHASE_CLOSE),
     ):
-        val = getattr(args, cli_field, None)
+        val = getattr(args, cli_field)
         if val is not None:
             phase_budget_pct[phase_name] = float(val)
     return phase_budget_pct
