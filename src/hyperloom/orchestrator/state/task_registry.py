@@ -514,16 +514,13 @@ class TaskRegistry:
             history.append({"ts": now_iso(), "evidence": evidence or {}})
             cur.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
 
-    async def integrate_reconcile_child_exists(self, base_key: str, *, states: tuple[str, ...]) -> bool:
-        """Return whether an integrate-patch reconcile child exists in these states."""
-        if not states:
-            return False
-        prefix = f"{base_key}-reconcile%"
+    async def exists_with_key_prefix(self, kind: str, key_prefix: str, *, states: tuple[str, ...]) -> bool:
+        """Return whether a task of ``kind`` in one of ``states`` has this key prefix."""
         placeholders = ",".join("?" for _ in states)
         row = await self.db.fetchone(
-            "SELECT 1 FROM tasks WHERE kind='integrate_patch' "
-            f"AND idempotency_key LIKE ? AND state IN ({placeholders}) LIMIT 1",  # nosec B608 - generated placeholders only.
-            (prefix, *states),
+            "SELECT 1 FROM tasks WHERE kind=? AND substr(idempotency_key, 1, ?)=? "
+            f"AND state IN ({placeholders}) LIMIT 1",  # nosec B608 - generated placeholders only.
+            (kind, len(key_prefix), key_prefix, *states),
         )
         return row is not None
 

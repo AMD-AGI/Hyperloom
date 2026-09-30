@@ -484,13 +484,7 @@ class DispatcherCollaborator:
             return []
 
         created: list[str] = []
-        try:
-            cancelled = await self.tasks.by_state("cancelled")
-        except Exception:
-            log.exception("dispatcher: reconcile could not list cancelled tasks")
-            return []
-
-        for task in cancelled:
+        for task in await self.tasks.by_state("cancelled"):
             if task.kind != "integrate_patch":
                 continue
             evidence = _dispatch_policy_denied_evidence(task)
@@ -510,18 +504,15 @@ class DispatcherCollaborator:
             except PolicyDenied:
                 continue
             base_key = str(task.idempotency_key or f"integrate-{task.task_id}").strip()
-            if await self.tasks.integrate_reconcile_child_exists(
-                base_key,
-                states=("succeeded",),
-            ):
-                continue
-            if await self.tasks.integrate_reconcile_child_exists(
-                base_key,
-                states=("queued", "running"),
+            child_key_prefix = f"{base_key}-reconcile"
+            if await self.tasks.exists_with_key_prefix(
+                task.kind,
+                child_key_prefix,
+                states=("succeeded", "queued", "running"),
             ):
                 continue
             for attempt in range(1, 6):
-                new_key = f"{base_key}-reconcile{attempt}"
+                new_key = f"{child_key_prefix}{attempt}"
                 new_task, was_existing = await self.tasks.create_or_return_existing(
                     kind=task.kind,
                     params=params,
@@ -538,8 +529,6 @@ class DispatcherCollaborator:
                         new_task.task_id,
                         new_key,
                     )
-                    break
-                if new_task.state in ("queued", "running", "succeeded"):
                     break
         return created
 
