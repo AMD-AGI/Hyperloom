@@ -256,31 +256,16 @@ def _confirmed_task_outcome(task: Task) -> dict[str, Any] | None:
 
 
 def _integrate_stack_fields(result: Mapping[str, Any], state: SharedState) -> dict[str, Any]:
-    """Validate kernel membership before promotion and copy its independent evidence."""
+    """Validate kernel membership against the ledger before promotion and return the members."""
     from ..phases.kernel_stack import resolve_stack_members
 
     raw_members = result.get("stack_kernel_ids")
-    inferred_stack = (
-        (isinstance(raw_members, list) and len(raw_members) > 1)
-        or "stack_validation_started_at" in result
-        or "stack_member_identities" in result
-    )
-    membership = {"stack_validation": inferred_stack, **result}
+    membership = {"stack_validation": isinstance(raw_members, list) and len(raw_members) > 1, **result}
     members = resolve_stack_members(
         membership,
         entries=state.kernel_integrate_attempts if membership["stack_validation"] is True else None,
     )
-    fields: dict[str, Any] = {
-        "stack_kernel_ids": list(members),
-        "stack_validation": membership["stack_validation"],
-    }
-    if membership["stack_validation"] is True:
-        fields["stack_validation_started_at"] = membership["stack_validation_started_at"]
-        fields["stack_member_identities"] = [
-            {key: entry[key] for key in ("kernel_id", "patch_path", "target_file")}
-            for entry in membership["stack_member_identities"]
-        ]
-    return fields
+    return {"stack_kernel_ids": list(members), "stack_validation": membership["stack_validation"]}
 
 
 def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
@@ -5659,11 +5644,8 @@ class WritebackCollaborator:
         try:
             recovered = await self._recover_interrupted_stack_validation()
         except ValueError as exc:
-            # The checkpoint cannot be bound to the ledger rows it was written
-            # from, so which patches are on the tree is unknown. Halting says
-            # that and keeps the evidence; raising would leave the resume above
-            # ``Coordinator.run``'s own guard, ending the process with the
-            # patches applied and no stop reason naming why.
+            # What is on the tree is unknown; a raise here would escape
+            # ``Coordinator.run``'s guard with no stop reason naming why.
             self.shared_state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
             self.shared_state.save(self.session_dir)
             report["warnings"].append({"kind": "interrupted_stack_validation_unbindable", "error": repr(exc)})

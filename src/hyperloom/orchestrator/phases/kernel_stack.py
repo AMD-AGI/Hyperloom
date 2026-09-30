@@ -56,62 +56,24 @@ def resolve_stack_members(
             raise ValueError("stack membership is unavailable; a display id is not member evidence")
         members = (kid,)
     if entries is not None:
-        _matching_stack_entries(members, entries, validation=record if flag is True else None)
+        identities = (record.get("stack_member_identities") or ()) if flag is True else None
+        _matching_stack_entries(members, entries, identities=identities)
     return members
-
-
-def _stack_validation_stamp(
-    record: Mapping[str, Any],
-    entries: Mapping[str, Any],
-    stack_id: str,
-) -> str:
-    """Return the attempt's start stamp, from the record or from the rows it marked.
-
-    A checkpoint written before the stamp was persisted on the record still
-    carries it on every ledger row the attempt marked, from the same machine
-    step. Reading it back from there is what lets a session interrupted on an
-    earlier release finish its unwind instead of refusing its own evidence.
-    """
-    recorded = record.get("stack_validation_started_at")
-    if isinstance(recorded, str) and recorded:
-        return recorded
-    stamps = {
-        entry["stack_validation_started_at"]
-        for entry in entries.values()
-        if isinstance(entry, dict)
-        and entry.get("stack_validation_kernel_id") == stack_id
-        and isinstance(entry.get("stack_validation_started_at"), str)
-        and entry["stack_validation_started_at"]
-    }
-    if len(stamps) != 1:
-        raise ValueError("stack members lack matching validation evidence")
-    return stamps.pop()
 
 
 def _matching_stack_entries(
     members: tuple[str, ...],
     entries: Mapping[str, Any],
     *,
-    identities: list[dict[str, Any]] | None = None,
-    validation: Mapping[str, Any] | None = None,
+    identities: Any = None,
 ) -> list[dict[str, Any]]:
     """Bind members by independent patch identities before testing ledger ambiguity."""
     identity_keys = ("kernel_id", "patch_path", "target_file")
-    if validation is not None:
-        stack_id = validation.get("kernel_id")
-        if not isinstance(stack_id, str) or not stack_id:
-            raise ValueError("stack members lack matching validation evidence")
-        started = _stack_validation_stamp(validation, entries, stack_id)
-        # A checkpoint predating the identity list still names its members
-        # explicitly and carries the stamp on every row. Binding on that pair
-        # is weaker, so the duplicate-entry check below is what refuses to
-        # guess when it does not single a member's row out.
-        recorded_identities = validation.get("stack_member_identities")
-        identities = recorded_identities if isinstance(recorded_identities, list) else None
     expected = None
     if identities is not None:
         if (
-            any(
+            not isinstance(identities, list)
+            or any(
                 not isinstance(row, dict)
                 or any(not isinstance(row.get(key), str) or not row[key].strip() for key in identity_keys)
                 for row in identities
@@ -126,10 +88,6 @@ def _matching_stack_entries(
             continue
         kid = entry["kernel_id"]
         if expected is not None and tuple(entry.get(key) for key in identity_keys) != expected[kid]:
-            continue
-        if validation is not None and (
-            entry.get("stack_validation_kernel_id") != stack_id or entry.get("stack_validation_started_at") != started
-        ):
             continue
         if kid in found:
             raise ValueError(f"stack member {kid!r} matches multiple ledger entries")
@@ -308,7 +266,6 @@ class KernelStackPhase(CoordinatorCollaborator):
             if identity not in wanted:
                 continue
             entry["stack_resolved"] = True
-            entry["stack_validation_kernel_id"] = stack_id
             entry["stack_decision"] = decision
             entry["stack_resolved_at"] = now
             entry.pop("stack_validation_in_progress", None)
@@ -334,7 +291,6 @@ class KernelStackPhase(CoordinatorCollaborator):
         stack_id: str,
     ) -> None:
         """Persist an in-flight stack guard before applying patches."""
-        now = datetime.now(timezone.utc).isoformat()
         wanted = self._stack_component_identities(entries)
         for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
             if not isinstance(entry, dict):
@@ -347,36 +303,26 @@ class KernelStackPhase(CoordinatorCollaborator):
             if identity not in wanted:
                 continue
             entry["stack_validation_in_progress"] = True
-            entry["stack_validation_kernel_id"] = stack_id
-            entry["stack_validation_started_at"] = now
         self.shared_state.pending_stack_validation_result = {
             "kernel_id": stack_id,
             "stack_validation": True,
             "stack_kernel_ids": [entry["kernel_id"] for entry in entries],
-            "stack_validation_started_at": now,
             "stack_member_identities": [
                 {key: entry[key] for key in ("kernel_id", "patch_path", "target_file")} for entry in entries
             ],
         }
         self.shared_state.pending_stack_validation_apply_results = []
 
-    def _clear_stack_validation_in_progress(
-        self,
-        entries: list[dict[str, Any]],
-    ) -> None:
-        """Clear the in-flight stack guard for component integrate entries."""
-        wanted = self._stack_component_identities(entries)
+    def _clear_stack_validation_in_progress(self) -> None:
+        """Clear the in-flight stack guard from every ledger row.
+
+        One checkpoint slot means one attempt in flight, so once it is over no
+        row is in flight, including any a crash left marked that this attempt's
+        record can no longer be bound to.
+        """
         for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
-            if not isinstance(entry, dict):
-                continue
-            identity = (
-                str(entry.get("kernel_id") or ""),
-                str(entry.get("patch_path") or ""),
-                str(entry.get("target_file") or ""),
-            )
-            if identity not in wanted:
-                continue
-            entry.pop("stack_validation_in_progress", None)
+            if isinstance(entry, dict):
+                entry.pop("stack_validation_in_progress", None)
 
     def _clear_pending_stack_validation_checkpoints(self) -> None:
         """Drop crash-recovery checkpoints once a stack attempt is finished."""
@@ -384,49 +330,52 @@ class KernelStackPhase(CoordinatorCollaborator):
         self.shared_state.pending_stack_validation_apply_results = []
 
     async def _recover_interrupted_stack_validation(self) -> bool:
-        """Resume or abort a stack validation interrupted by crash."""
-        self._stack_resolved_kernel_ids()
-        members = self._pending_stack_members()
-        if not members:
-            return False
+        """Settle a stack validation interrupted by crash; return whether there was one."""
         pending = self.shared_state.pending_stack_validation_result
-        stack = _matching_stack_entries(members, self.shared_state.kernel_integrate_attempts, validation=pending)
+        if pending and not isinstance(pending, dict):
+            raise ValueError("stack recovery checkpoint must be a mapping")
+        if not pending and not self.shared_state.pending_stack_validation_apply_results:
+            return False
         if pending.get("decision") and not revert_owed(pending):
-            await self._finalize_stack_validation_outcome(stack, pending)
+            # Only a KEEP goes on to promote its members, so only a KEEP needs them bound; a settled REVERT has
+            # already left the tree as it found it.
+            keep = str(pending["decision"]).upper() == "KEEP"
+            await self._finalize_stack_validation_outcome(self._settled_stack_members(pending) if keep else [], pending)
             return True
 
         # Either the attempt never reached a decision, or its decision's revert did not finish: the members are
         # still on the tree, so tear them down before anything else measures it.
-        self._unwind_stack_patches(stack)
-        self._clear_stack_validation_in_progress(stack)
+        self._unwind_stack_patches()
+        self._clear_stack_validation_in_progress()
         self._clear_pending_stack_validation_checkpoints()
         self.shared_state.save(self.session_dir)
         return True
 
-    def _unwind_stack_patches(self, stack: list[dict[str, Any]]) -> None:
-        """Revert every checkpointed apply in reverse order, or halt with the checkpoints intact."""
+    def _settled_stack_members(self, pending: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """Bind a record whose decision is already carried out to the rows its attempt marked.
+
+        A KEEP has finalized its patches and left no backup to roll back to, so an unbindable record can only halt.
+        """
+        return _matching_stack_entries(
+            resolve_stack_members(pending),
+            self.shared_state.kernel_integrate_attempts,
+            identities=pending.get("stack_member_identities") or (),
+        )
+
+    def _unwind_stack_patches(self) -> None:
+        """Revert every checkpointed apply in reverse order, or halt with the checkpoints intact.
+
+        The apply rows alone record what reached the tree, so a record that no longer binds still unwinds.
+        """
         from ..actions.executors._kernel_agent_tool import _maybe_revert_kernel_patch
 
-        pending = self.shared_state.pending_stack_validation_result
-        partial_applies = self.shared_state.pending_stack_validation_apply_results
-        if not isinstance(partial_applies, list) or len(partial_applies) > len(stack):
-            raise ValueError("stack apply checkpoints do not match its members")
-        started = pending.get("stack_validation_started_at")
-        # An apply row from a checkpoint predating the stamp carries none
-        # either, and the identity triple is what binds those to their member.
-        stamped = isinstance(started, str) and bool(started)
-        for entry, applied in zip(stack, partial_applies):
-            if (
-                not isinstance(applied, dict)
-                or any(applied.get(key) != entry[key] for key in ("kernel_id", "patch_path", "target_file"))
-                or (stamped and applied.get("stack_validation_started_at") != started)
-                or not isinstance(applied.get("manifest_path"), str)
-                or not applied["manifest_path"]
-            ):
-                raise ValueError("stack apply checkpoint lacks matching member evidence")
+        partial_applies = self.shared_state.pending_stack_validation_apply_results or []
+        if not isinstance(partial_applies, list) or any(not isinstance(row, dict) for row in partial_applies):
+            raise ValueError("stack apply checkpoints must be a list of apply results")
         for applied in reversed(partial_applies):
             if not lifecycle_complete(_maybe_revert_kernel_patch(applied)):
-                self._halt_on_owed_revert(str(pending.get("kernel_id") or ""))
+                stack_id = str((self.shared_state.pending_stack_validation_result or {}).get("kernel_id") or "")
+                self._halt_on_owed_revert(stack_id)
 
     def _halt_on_owed_revert(self, stack_id: str) -> NoReturn:
         """Stop the session on a patched tree, keeping the evidence the next resume retries from.
@@ -454,20 +403,22 @@ class KernelStackPhase(CoordinatorCollaborator):
     ) -> None:
         """Record stack validation, promote KEEP, and clear recovery checkpoints."""
         self._stack_resolved_kernel_ids()
-        self._stack_component_identities(stack)
-        members = resolve_stack_members(result, entries=self.shared_state.kernel_integrate_attempts)
-        if result.get("stack_validation") is not True or members != tuple(entry["kernel_id"] for entry in stack):
-            raise ValueError("stack result does not describe the validated members")
+        decision = str(result.get("decision") or "").upper()
+        if decision == "KEEP":
+            self._stack_component_identities(stack)
+            members = resolve_stack_members(result, entries=self.shared_state.kernel_integrate_attempts)
+            if result.get("stack_validation") is not True or members != tuple(entry["kernel_id"] for entry in stack):
+                raise ValueError("stack result does not describe the validated members")
         self.shared_state.record_kernel_integrate_result(result)
         if revert_owed(result):
             self._halt_on_owed_revert(str(result.get("kernel_id") or ""))
-        decision = str(result.get("decision") or "").upper()
         if decision == "KEEP":
-            self._mark_stack_validation_entries_resolved(stack, result)
-            self.shared_state.save(self.session_dir)
+            # Marked only once promoted, so a KEEP that dies on the way leaves no
+            # row claiming a stack that never reached the stack.
             await self._record_integrate_keep(result)
+            self._mark_stack_validation_entries_resolved(stack, result)
         else:
-            self._clear_stack_validation_in_progress(stack)
+            self._clear_stack_validation_in_progress()
         self._clear_pending_stack_validation_checkpoints()
         self.shared_state.save(self.session_dir)
 
@@ -496,11 +447,7 @@ class KernelStackPhase(CoordinatorCollaborator):
         if not isinstance(result, dict):
             raise ValueError("stack validation produced no result; checkpoints retained")
         checkpoint = self.shared_state.pending_stack_validation_result
-        result = {
-            **result,
-            "stack_validation_started_at": checkpoint["stack_validation_started_at"],
-            "stack_member_identities": checkpoint["stack_member_identities"],
-        }
+        result = {**result, "stack_member_identities": checkpoint["stack_member_identities"]}
         resolve_stack_members(result, entries=self.shared_state.kernel_integrate_attempts)
         self.shared_state.pending_stack_validation_result = result
         self.shared_state.save(self.session_dir)
@@ -544,9 +491,7 @@ class KernelStackPhase(CoordinatorCollaborator):
         if not pending_members:
             self._mark_stack_validation_in_progress(entries, stack_id)
             self.shared_state.save(self.session_dir)
-        checkpoint = self.shared_state.pending_stack_validation_result
-        started = checkpoint["stack_validation_started_at"]
-        identities = checkpoint["stack_member_identities"]
+        identities = self.shared_state.pending_stack_validation_result["stack_member_identities"]
         apply_results: list[dict[str, Any]] = []
         try:
             for entry in entries:
@@ -560,7 +505,7 @@ class KernelStackPhase(CoordinatorCollaborator):
                     session_dir=self.session_dir,
                     kernel_id=str(entry.get("kernel_id") or ""),
                 )
-                applied = {**applied, **payload, "stack_validation_started_at": started}
+                applied = {**applied, **payload}
                 apply_results.append(applied)
                 self.shared_state.pending_stack_validation_apply_results = list(
                     apply_results,
@@ -713,7 +658,6 @@ class KernelStackPhase(CoordinatorCollaborator):
                 "finalize_results": finalize_results,
                 "stack_kernel_ids": kernel_ids,
                 "stack_validation": True,
-                "stack_validation_started_at": started,
                 "stack_member_identities": identities,
             }
             if graded is not None and not graded.comparable:
@@ -740,7 +684,6 @@ class KernelStackPhase(CoordinatorCollaborator):
                 "revert_result": {"status": revert_status, "stack_reverts": reverts},
                 "stack_kernel_ids": kernel_ids,
                 "stack_validation": True,
-                "stack_validation_started_at": started,
                 "stack_member_identities": identities,
             }
 
