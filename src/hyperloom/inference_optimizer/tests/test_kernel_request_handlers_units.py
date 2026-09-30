@@ -1158,10 +1158,10 @@ class TestForgeGemmHelperCoverage:
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
         monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
         monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path(name))
-        calls: list[int] = []
+        calls: list[tuple[str, int]] = []
 
         async def _fake_subprocess(cmd, *, timeout_sec):
-            calls.append(timeout_sec)
+            calls.append((cmd[0], timeout_sec))
             result = {"status": "complete", "decision": "REVERT", "kept": False}
             return (
                 0,
@@ -1174,7 +1174,7 @@ class TestForgeGemmHelperCoverage:
         result = await krh._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
 
         assert result["status"] == "complete"
-        assert calls == [krh._forge_fusion_wrapper_timeout_sec(7200)]
+        assert calls == [(krh.sys.executable, krh._forge_fusion_wrapper_timeout_sec(7200))]
         input_payload = json.loads(
             (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(encoding="utf-8")
         )
@@ -3771,6 +3771,7 @@ class TestRunGemmTuningHandler:
         assert "run_sglang_test" not in cmd_text
         assert "gemm_a8w8_blockscale_tune" not in cmd_text
         assert "--input-json" in captured["cmd"]  # type: ignore[operator]
+        assert captured["cmd"][2] == krh.sys.executable  # type: ignore[index]
 
     def test_generates_isolated_benchmark_script_when_missing(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
@@ -4684,6 +4685,7 @@ class TestBuildTraceAnalyzeCmd:
             analysis_mode="",
         )
         # bypass tool name; no --tracelens-root and no --skip-split.
+        assert cmd[0] == krh.sys.executable
         assert cmd[1] == "/tools/bypass_trace_analysis.py"
         assert "--tracelens-root" not in cmd
         assert "--skip-split" not in cmd
