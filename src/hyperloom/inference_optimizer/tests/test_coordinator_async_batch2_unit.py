@@ -2175,8 +2175,9 @@ def test_forward_integrate_source_has_no_current_phase_fallback() -> None:
 
 
 @pytest.mark.asyncio
-async def test_materialize_explore_filters_grid(coord: Coordinator) -> None:
+async def test_materialize_explore_filters_grid(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
+    monkeypatch.setattr(coord.proposals, "phase_framework", coord.phase_framework, raising=False)
     pending = _pending(
         "explore",
         {

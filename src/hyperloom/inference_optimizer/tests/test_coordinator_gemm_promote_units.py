@@ -50,6 +50,10 @@ def _coord(tmp_path: Path, **state_kwargs) -> Coordinator:
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = SharedState(**state_kwargs)
+    coord._journal = None
+    coord.knowledge_plane = None
+    coord.recipe_kb = None
+    coord._proposal_scorer = None
     return coord
 
 
@@ -1628,13 +1632,13 @@ class TestKernelE2EMeasurementPromotion:
         result = self._result()
         phase = KernelPhase(coord)
         lifted_variants = []
-        real_lift = phase._lift_to_current_best
+        real_lift = coord.writeback._lift_to_current_best
 
         def capture_lift(action, tput, variant, **kwargs):
             lifted_variants.append(variant)
             return real_lift(action, tput, variant, **kwargs)
 
-        monkeypatch.setattr(phase, "_lift_to_current_best", capture_lift)
+        monkeypatch.setattr(coord.writeback, "_lift_to_current_best", capture_lift)
         await phase._validate_gemm_tuning_e2e(result)
 
         assert result["decision"] == "KEEP"
@@ -2080,7 +2084,7 @@ class TestKernelE2EMeasurementPromotion:
         fake = _make_integrate([{"decision": "KEEP", "new_tput": 130.0, "gain_pct": 20.0, "bench_result": bench}])
         monkeypatch.setattr(krh_mod, "integrate_handler", fake)
         phase = KernelPhase(coord)
-        real_lift = phase._lift_to_current_best
+        real_lift = coord.writeback._lift_to_current_best
         lifts = []
 
         def capture_lift(*args, **kwargs):
@@ -2088,7 +2092,7 @@ class TestKernelE2EMeasurementPromotion:
             lifts.append(lifted)
             return lifted
 
-        monkeypatch.setattr(phase, "_lift_to_current_best", capture_lift)
+        monkeypatch.setattr(coord.writeback, "_lift_to_current_best", capture_lift)
         result = self._result()
         result["e2e_norm_intvty_p90"] = 50.0
         anchor = dict(coord.shared_state.current_best)
