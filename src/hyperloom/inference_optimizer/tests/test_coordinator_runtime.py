@@ -633,7 +633,8 @@ async def test_backend_error_streak_resets_after_successful_turn(
 
 
 @pytest.mark.asyncio
-async def test_run_does_not_call_a_failing_backend_before_its_retry(session_dir):
+async def test_run_does_not_call_a_failing_backend_before_its_retry(session_dir, monkeypatch):
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 3600)
     backends = _build_backends({})
     failing = _AlwaysFailingBackend("critic")
     backends["critic"] = failing
