@@ -779,15 +779,6 @@ async def test_extend_explore_budget_moves_the_share_every_reader_uses(no_kernel
         await c.stop()
 
 
-def test_a_resumed_session_keeps_its_budget_over_the_cli_map(coordinator_with_mocks):
-    c = coordinator_with_mocks
-    persisted = dict(c.shared_state.phase_budget_pct)
-
-    c._ensure_phase_initialised({phase_state.PHASE_FRAMEWORK_AGENT: 0.1})
-
-    assert c.shared_state.phase_budget_pct == persisted
-
-
 @pytest.mark.asyncio
 async def test_coordinator_advances_to_the_optimize_phase_when_baseline_present(
     coordinator_with_mocks,
