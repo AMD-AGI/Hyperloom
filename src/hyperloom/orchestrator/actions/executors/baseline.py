@@ -3176,6 +3176,7 @@ class BenchmarkRunExecutor:
             result = await self._run_single_benchmark(
                 config_path=config_path,
                 output_dir=output_dir,
+                single_round=label == ROUND_SINGLE,
                 **common,
             )
         except BaseException as exc:
@@ -3398,6 +3399,7 @@ class BenchmarkRunExecutor:
         ctx: RunnerContext,
         run_eval_disabled: bool = False,
         serving_lease: Any = None,
+        single_round: bool = False,
         server_already_ready: bool = False,
     ) -> dict[str, Any]:
         """Run one Magpie benchmark subprocess and parse its result."""
@@ -3579,7 +3581,8 @@ class BenchmarkRunExecutor:
         if refusal is not None:
             return refusal
 
-        if self.benchmark_watchdog and not (server_already_ready or ctx_extra.get("server_already_ready") or _mn_imn()):
+        server_already_ready = bool(server_already_ready or ctx_extra.get("server_already_ready") or _mn_imn())
+        if self.benchmark_watchdog and not server_already_ready:
             from ._aiter_jit import sweep_stale_aiter_locks_if_dead
 
             lock_sweep = await asyncio.to_thread(sweep_stale_aiter_locks_if_dead)
@@ -3611,14 +3614,21 @@ class BenchmarkRunExecutor:
                     cwd=str(output_dir),
                     timeout=timeout_sec,
                     silence_timeout_sec=silence_timeout_sec,
-                    server_already_ready=bool(
-                        server_already_ready or ctx_extra.get("server_already_ready") or _mn_imn()
-                    ),
+                    server_already_ready=server_already_ready,
                     server_log_path=watchdog_server_log,
                     session_remaining_sec=session_deadline_to_remaining_sec(session_deadline_sec),
+                    single_round_configs=(str(ray_config_path), str(materialized_config_path))
+                    if single_round
+                    else None,
                 )
                 subprocess_runtime_sec = max(0.0, time.time() - subprocess_started_unix)
             else:
+                if single_round and not server_already_ready:
+                    _lifecycle.prepare_single_round_port(
+                        (str(config_path), str(materialized_config_path)),
+                        env,
+                        session_deadline_sec=session_deadline_sec,
+                    )
                 async with heartbeat_while_output_flows(
                     unit="baseline_round",
                     label="benchmark",
@@ -3630,9 +3640,7 @@ class BenchmarkRunExecutor:
                         cwd=str(output_dir),
                         timeout=timeout_sec,
                         silence_timeout_sec=silence_timeout_sec,
-                        server_already_ready=bool(
-                            server_already_ready or ctx_extra.get("server_already_ready") or _mn_imn()
-                        ),
+                        server_already_ready=server_already_ready,
                         server_log_path=watchdog_server_log,
                         on_output=activity.note,
                         session_deadline_sec=session_deadline_sec,
