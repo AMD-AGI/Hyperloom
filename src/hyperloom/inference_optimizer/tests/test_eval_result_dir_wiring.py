@@ -477,7 +477,10 @@ def test_agentx_baseline_grades_requests_with_run_eval_off(tmp_path, rate, expec
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coordinator = object.__new__(Coordinator)
-    assert coordinator._is_promotable_result("baseline", result) is (expected == 1.0)
+    coordinator.knowledge_plane = None
+    coordinator._journal = None
+    coordinator._proposal_scorer = None
+    assert coordinator.writeback._is_promotable_result("baseline", result) is (expected == 1.0)
 
 
 def test_baseline_skips_accuracy_when_run_eval_disabled(tmp_path):
