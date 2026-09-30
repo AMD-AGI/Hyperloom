@@ -479,14 +479,13 @@ def deliverable(session_dir: Path | str, expected: Iterable[tuple[str, str]]) ->
     it.
 
     Judged against what this session would actually ship, by running the same
-    selection and the same caps the packer runs. Each payload used to be judged
-    alone, against the per-file ceiling only, on the argument that charging it
-    for unrelated files sorted ahead of it would refuse a recipe over content it
-    does not name. But the budget is spent in selection order and those files do
-    consume it: a payload the cap drops is a payload the consumer will not have,
-    and reporting it deliverable is how a ``sufficient`` recipe came to ship
-    with its own evidence missing. A refusal here is not over content the recipe
-    does not name -- it is over bytes it names and will not get.
+    selection and the same caps the packer runs, not against the per-file
+    ceiling alone. The budget is spent in selection order and unrelated files
+    sorted ahead of a payload do consume it: a payload the cap drops is a
+    payload the consumer will not have, and reporting it deliverable would ship
+    a ``sufficient`` recipe with its own evidence missing. A refusal here is not
+    over content the recipe does not name -- it is over bytes it names and will
+    not get.
     """
     try:
         sd = Path(session_dir).resolve()

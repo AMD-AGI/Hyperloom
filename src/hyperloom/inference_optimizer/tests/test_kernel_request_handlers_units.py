@@ -75,9 +75,6 @@ _AITER_LINE = (
 class TestForgeGemmHelperCoverage:
     def test_resolve_backend_requires_exact_kernel_order_forge(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        monkeypatch.delenv("GEMM_TUNING_BACKEND", raising=False)
-        assert krh._resolve_gemm_tuning_backend({}) == "geak"
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         assert krh._resolve_gemm_tuning_backend({}) == "geak"
         assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "forge"}) == "geak"
         assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "unknown"}) == "geak"
@@ -3697,10 +3694,8 @@ class TestRunGemmTuningHandler:
         assert result["status"] == "ok"
 
     def test_handler_passes_non_fp8_geak_to_next_hyperloom_prereq(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
-        # The backend is chosen by KERNEL_OPT_BACKEND_ORDER, not by GEMM_TUNING_BACKEND, so
-        # leaving it to the ambient environment sends this down the forge branch instead --
-        # which reports model_path_missing, a prerequisite this test is not about.
+        # An ambient KERNEL_OPT_BACKEND_ORDER=forge sends this down the forge branch instead -- which
+        # reports model_path_missing, a prerequisite this test is not about.
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
         state = SharedState(precision="bf16", framework="sglang")
@@ -3712,7 +3707,7 @@ class TestRunGemmTuningHandler:
         assert result["error_class"] == "kernel_agent_root_missing"
 
     def test_builds_task_file_input_not_task_argv(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         root = tmp_path / "kernel-agent"
         tool = root / "tools" / "gemm_tuning.py"
         tool.parent.mkdir(parents=True)
@@ -3773,7 +3768,7 @@ class TestRunGemmTuningHandler:
         assert "--input-json" in captured["cmd"]  # type: ignore[operator]
 
     def test_generates_isolated_benchmark_script_when_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         root = tmp_path / "kernel-agent"
         tool = root / "tools" / "gemm_tuning.py"
         tool.parent.mkdir(parents=True)
@@ -3827,7 +3822,7 @@ class TestRunGemmTuningHandler:
         assert result["status"] == "ok"
 
     def test_geak_without_config_does_not_fall_back_to_forge(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("GEAK_CONFIG", raising=False)
         root = tmp_path / "kernel-agent"
         root.mkdir()
@@ -3859,7 +3854,6 @@ class TestRunGemmTuningHandler:
 
     def test_forge_uses_runtime_fp8_blockscale_for_aiter_backend(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         model_dir = tmp_path / "qwen"
         model_dir.mkdir()
         state = SharedState(
@@ -3913,7 +3907,6 @@ class TestRunGemmTuningHandler:
         from hyperloom.inference_optimizer.session.session_paths import gemm_tuning_steps_path
 
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         model_dir = tmp_path / "qwen"
         model_dir.mkdir()
         state = SharedState(
@@ -3964,7 +3957,6 @@ class TestRunGemmTuningHandler:
 
     def test_forge_uses_per_token_only_for_explicit_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         model_dir = tmp_path / "qwen"
         model_dir.mkdir()
         state = SharedState(
@@ -4012,7 +4004,6 @@ class TestRunGemmTuningHandler:
     def test_forge_fallback_to_session_precision_when_no_quantization(self, tmp_path, monkeypatch):
         """When current_best has no --quantization, fall back to state.precision."""
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         model_dir = tmp_path / "moe"
         model_dir.mkdir()
         state = SharedState(
@@ -4718,6 +4709,42 @@ class TestBuildTraceAnalyzeCmd:
         )
         assert "--require-single-rank" in cmd
         assert cmd[cmd.index("--tensor-parallel-size") + 1] == "8"
+
+    def test_tracelens_cmd_carries_the_ambient_trajectory_scope(self, monkeypatch, tmp_path):
+        from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
+
+        state, session_dir = self._common(monkeypatch, tmp_path)
+        kwargs = dict(
+            session_dir=session_dir,
+            state=state,
+            workspace_path="/ws",
+            trace_input="/t/trace",
+            workload={},
+            model_name="",
+            framework="",
+            target_platform="",
+            analysis_mode="",
+            scriptable=False,
+        )
+        with trajectory_scope(
+            session_dir=session_dir,
+            component="coordinator",
+            phase_tick_source=lambda: ("roofline", 3),
+            task_id="t-roof",
+            parent_span_id="span-roof",
+        ):
+            cmd, _steady = ta._build_trace_analyze_cmd(
+                {"trace_input": "/t/trace"}, tracelens_root=Path("/tl"), is_bypass=False, **kwargs
+            )
+            bypass_cmd, _steady = ta._build_trace_analyze_cmd(
+                {"trace_input": "/t/trace"}, tracelens_root=None, is_bypass=True, **kwargs
+            )
+        assert cmd[cmd.index("--trajectory-session-dir") + 1] == str(session_dir)
+        assert cmd[cmd.index("--trajectory-phase") + 1] == "roofline"
+        assert cmd[cmd.index("--trajectory-tick") + 1] == "3"
+        assert cmd[cmd.index("--trajectory-task-id") + 1] == "t-roof"
+        assert cmd[cmd.index("--trajectory-parent-span-id") + 1] == "span-roof"
+        assert not [arg for arg in bypass_cmd if arg.startswith("--trajectory-")]
 
     def test_steady_state_mode_from_env(self, monkeypatch, tmp_path):
         state, session_dir = self._common(monkeypatch, tmp_path)

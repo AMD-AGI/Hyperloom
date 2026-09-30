@@ -285,35 +285,26 @@ def _cumulative_gain_validated(state: Any) -> float:
         return 0.0
 
 
-def target_was_reached(state: Any) -> bool:
-    """Whether the run objective has been met."""
-    return bool(str(getattr(state, "target_reached_at", "") or "").strip())
-
-
-def _cycle_reloop_min_remaining_sec(
-    state: Any,
-    min_remaining_sec: float = DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC,
-) -> float:
+def _cycle_reloop_min_remaining_sec(state: Any) -> float:
     """Session-scaled floor on the seconds that must remain to justify a new cycle.
 
-    The session-scaled share keeps a short run from being blocked by a threshold
-    it can never satisfy, but that share can fall below the cost of the cheapest
-    unit of work in a cycle. The floor is therefore raised back to one granted
-    variant round, so a cycle is never opened with budget it cannot spend. That
-    raise is itself capped at :data:`_CYCLE_RELOOP_MAX_BUDGET_SHARE` of the
-    session so a run too short to fund a round does not read as exhausted from
-    its first tick.
+    The session-scaled share of :data:`DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC`
+    keeps a short run from being blocked by a threshold it can never satisfy,
+    but that share can fall below the cost of the cheapest unit of work in a
+    cycle. The floor is therefore raised back to one granted variant round, so
+    a cycle is never opened with budget it cannot spend. That raise is itself
+    capped at :data:`_CYCLE_RELOOP_MAX_BUDGET_SHARE` of the session so a run
+    too short to fund a round does not read as exhausted from its first tick.
 
     Args:
         state (Any): Frozen SharedState view exposing ``max_minutes``.
-        min_remaining_sec (float): Absolute floor before session scaling.
 
     Returns:
         float: The effective floor in seconds.
     """
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
-    effective = float(min_remaining_sec)
+    effective = DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC
     max_minutes = _max_minutes(state)
     if max_minutes > 0:
         budget_sec = max_minutes * 60.0
@@ -321,69 +312,6 @@ def _cycle_reloop_min_remaining_sec(
         grant = min(resolve_benchmark_timeouts()[1], budget_sec * _CYCLE_RELOOP_MAX_BUDGET_SHARE)
         effective = max(effective, grant)
     return effective
-
-
-def should_reloop_to_explore(
-    state: Any,
-    *,
-    now_unix: float | None = None,
-    max_cycles: int = DEFAULT_MAX_MACRO_CYCLES,
-    min_remaining_sec: float = DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC,
-    no_gain_cycles: int = DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES,
-    min_gain_pct: float | None = None,
-) -> tuple[bool, dict[str, Any]]:
-    """Decide whether SWEEP should open a new macro-cycle (R1) or wind to CLOSE."""
-    cycle = int(getattr(state, "macro_cycle", 0) or 0)
-    evidence: dict[str, Any] = {"macro_cycle": cycle}
-
-    # Per-cycle gain since this cycle started → effective no-gain streak.
-    effective_min_gain = decaying_keep_threshold_pct(cycle) if min_gain_pct is None else float(min_gain_pct)
-    cur_gain = _cumulative_gain_validated(state)
-    start_gain = float(getattr(state, "gain_at_cycle_start", 0.0) or 0.0)
-    cycle_gained = (cur_gain - start_gain) > effective_min_gain
-    evidence["min_gain_pct"] = round(effective_min_gain, 6)
-    prior_streak = int(getattr(state, "no_gain_cycle_streak", 0) or 0)
-    effective_streak = 0 if cycle_gained else prior_streak + 1
-    evidence["cycle_gain_delta"] = round(cur_gain - start_gain, 6)
-    evidence["cycle_gained"] = cycle_gained
-    evidence["no_gain_cycle_streak_effective"] = effective_streak
-
-    if target_was_reached(state):
-        evidence["reloop_blocked"] = "target_reached"
-        return False, evidence
-
-    # Safety cap on macro-cycles.
-    if (cycle + 1) >= int(max_cycles):
-        evidence["reloop_blocked"] = "max_cycles"
-        return False, evidence
-
-    # Physical ceiling convergence: if every roofline family that dominated is now within its saturation threshold,
-    # stop cleanly.
-    sat = getattr(state, "saturated_directions", {}) or {}
-    if isinstance(sat, dict) and sat:
-        rows = [v for v in sat.values() if isinstance(v, dict)]
-        if rows and all(bool(v.get("saturated")) for v in rows):
-            evidence["reloop_blocked"] = "all_directions_saturated"
-            evidence["saturated_directions"] = sorted(str(k) for k in sat.keys())
-            return False, evidence
-
-    # R7 global convergence.
-    if effective_streak >= int(no_gain_cycles):
-        evidence["reloop_blocked"] = "global_converged"
-        return False, evidence
-
-    # Require a session-scaled floor that can still fund one variant round.
-    effective_min_remaining = _cycle_reloop_min_remaining_sec(state, min_remaining_sec)
-    evidence["min_remaining_sec_effective"] = round(effective_min_remaining, 2)
-    remaining = session_remaining_seconds(state, now_unix=now_unix)
-    if remaining is not None and remaining < effective_min_remaining:
-        evidence["reloop_blocked"] = "insufficient_remaining"
-        evidence["session_remaining_seconds"] = round(remaining, 2)
-        return False, evidence
-
-    evidence["reloop"] = True
-    evidence["next_cycle"] = cycle + 1
-    return True, evidence
 
 
 def _kernel_idle_max_ticks() -> int:
@@ -823,7 +751,11 @@ def phase_status_summary(
     ]
     # Whether deferring work to a later cycle is still a real option.
     if phase in (PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
-        reloop, evidence = should_reloop_to_explore(state, now_unix=now_unix)
+        reloop, evidence = _reloop_decision(
+            _reloop_facts(state, now_unix=now_unix),
+            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            target_reached_at=str(getattr(state, "target_reached_at", "") or ""),
+        )
         feasible = reloop and state.framework_agent_phase_enabled
         reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
         threshold = evidence.get("min_remaining_sec_effective")
@@ -1681,8 +1613,10 @@ def _budget_predicate_inputs(
     now_unix: float,
 ) -> dict[str, Any]:
     """Normalize the clocks compared by phase budget predicates."""
+    remaining_sec = phase_budget_remaining_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
     return {
-        "remaining_sec": phase_budget_remaining_seconds(state, budget_pct=budget_pct, now_unix=now_unix),
+        "remaining_sec": remaining_sec,
+        "current_balance": remaining_sec,
         "cap_sec": phase_cap_seconds(state, budget_pct=budget_pct),
         "entry_elapsed_sec": phase_elapsed_seconds(state, now_unix=now_unix),
         "cumulative_elapsed_sec": phase_cumulative_seconds(state, now_unix=now_unix),
@@ -1813,13 +1747,6 @@ def _sweep_predicate_inputs(
     if not isinstance(last_conc, dict):
         last_conc = {}
     summary = last_conc.get("summary") if isinstance(last_conc.get("summary"), dict) else {}
-    cycle = int(getattr(state, "macro_cycle", 0) or 0)
-    saturated = getattr(state, "saturated_directions", None) or {}
-    saturated_facts = (
-        {str(key): bool(value.get("saturated")) for key, value in saturated.items() if isinstance(value, dict)}
-        if isinstance(saturated, dict)
-        else {}
-    )
     result = {
         "status": str(last_conc.get("status") or "").lower(),
         "was_skipped": bool(last_conc.get("was_skipped")),
@@ -1827,19 +1754,31 @@ def _sweep_predicate_inputs(
         "skip_reason": str(last_conc.get("skip_reason") or ""),
         "successful_pairs": int(summary.get("successful_pairs") or 0),
         "summary_present": bool(summary),
-        "reloop": {
-            "current_gain_pct": _cumulative_gain_validated(state),
-            "gain_at_cycle_start_pct": _number(getattr(state, "gain_at_cycle_start", 0.0)) or 0.0,
-            "min_gain_pct": decaying_keep_threshold_pct(cycle),
-            "prior_no_gain_cycle_streak": int(getattr(state, "no_gain_cycle_streak", 0) or 0),
-            "max_cycles": DEFAULT_MAX_MACRO_CYCLES,
-            "no_gain_cycles": DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES,
-            "saturated_directions": saturated_facts,
-            "session_remaining_sec": session_remaining_seconds(state, now_unix=now_unix),
-            "min_remaining_sec": _cycle_reloop_min_remaining_sec(state),
-        },
+        "reloop": _reloop_facts(state, now_unix=now_unix),
     }
     return result, _budget_predicate_inputs(state, budget_pct=budget_pct, now_unix=now_unix)
+
+
+def _reloop_facts(state: Any, *, now_unix: float | None) -> dict[str, Any]:
+    """Freeze the facts :func:`_reloop_decision` weighs when SWEEP considers another macro-cycle."""
+    cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    saturated = getattr(state, "saturated_directions", None) or {}
+    saturated_facts = (
+        {str(key): bool(value.get("saturated")) for key, value in saturated.items() if isinstance(value, dict)}
+        if isinstance(saturated, dict)
+        else {}
+    )
+    return {
+        "current_gain_pct": _cumulative_gain_validated(state),
+        "gain_at_cycle_start_pct": _number(getattr(state, "gain_at_cycle_start", 0.0)) or 0.0,
+        "min_gain_pct": decaying_keep_threshold_pct(cycle),
+        "prior_no_gain_cycle_streak": int(getattr(state, "no_gain_cycle_streak", 0) or 0),
+        "max_cycles": DEFAULT_MAX_MACRO_CYCLES,
+        "no_gain_cycles": DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES,
+        "saturated_directions": saturated_facts,
+        "session_remaining_sec": session_remaining_seconds(state, now_unix=now_unix),
+        "min_remaining_sec": _cycle_reloop_min_remaining_sec(state),
+    }
 
 
 def workflow_predicate_inputs(
@@ -2078,27 +2017,29 @@ def _sweep_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     )
 
 
-def _reloop_decision(inputs: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-    sweep = dict(inputs.get("sweep_result") or {})
-    facts = dict(sweep.get("reloop") or {})
-    cycle = int(inputs.get("macro_cycle") or 0)
+def _reloop_decision(
+    facts: dict[str, Any],
+    *,
+    macro_cycle: int,
+    target_reached_at: str,
+) -> tuple[bool, dict[str, Any]]:
+    """Decide whether SWEEP loops back into another macro-cycle, from :func:`_reloop_facts`."""
     current_gain = _number(facts.get("current_gain_pct")) or 0.0
     start_gain = _number(facts.get("gain_at_cycle_start_pct")) or 0.0
     threshold = _number(facts.get("min_gain_pct")) or 0.0
     gained = (current_gain - start_gain) > threshold
     streak = 0 if gained else int(facts.get("prior_no_gain_cycle_streak") or 0) + 1
     evidence: dict[str, Any] = {
-        "macro_cycle": cycle,
+        "macro_cycle": macro_cycle,
         "min_gain_pct": round(threshold, 6),
         "cycle_gain_delta": round(current_gain - start_gain, 6),
         "cycle_gained": gained,
         "no_gain_cycle_streak_effective": streak,
     }
-    global_inputs = dict(inputs.get("global") or {})
-    if str(global_inputs.get("target_reached_at") or ""):
+    if target_reached_at:
         evidence["reloop_blocked"] = "target_reached"
         return False, evidence
-    if cycle + 1 >= int(facts.get("max_cycles") or 0):
+    if macro_cycle + 1 >= int(facts.get("max_cycles") or 0):
         evidence["reloop_blocked"] = "max_cycles"
         return False, evidence
     saturated = dict(facts.get("saturated_directions") or {})
@@ -2116,7 +2057,7 @@ def _reloop_decision(inputs: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         evidence["reloop_blocked"] = "insufficient_remaining"
         evidence["session_remaining_seconds"] = round(remaining, 2)
         return False, evidence
-    evidence.update(reloop=True, next_cycle=cycle + 1)
+    evidence.update(reloop=True, next_cycle=macro_cycle + 1)
     return True, evidence
 
 
@@ -2284,7 +2225,11 @@ def replay_next_phase(inputs: dict[str, Any]) -> tuple[str, str, dict[str, Any]]
         exit_reason, exit_evidence = normal
         if exit_reason == "sweep_failed":
             return _transition_result(PHASE_CLOSE, exit_reason, exit_evidence, inputs)
-        reloop, reloop_evidence = _reloop_decision(inputs)
+        reloop, reloop_evidence = _reloop_decision(
+            dict(dict(inputs.get("sweep_result") or {}).get("reloop") or {}),
+            macro_cycle=int(inputs.get("macro_cycle") or 0),
+            target_reached_at=target_at,
+        )
         if reloop and optimize_enabled:
             return _transition_result(
                 PHASE_FRAMEWORK_AGENT,
@@ -2435,7 +2380,7 @@ def record_phase_transition(
     ts: str | None = None,
     ts_unix: float | None = None,
 ) -> dict[str, Any]:
-    """Append a phase_history row and atomically update ``phase`` fields; ``phase``/``phase_history`` are CORE_STATE_FIELDS so LLM update_state is rejected. Returns the inserted row."""
+    """Append a phase_history row and atomically update ``phase`` fields; these are Coordinator-only, so LLM update_state cannot drive the machine. Returns the inserted row."""
     from datetime import datetime as _dt, timezone as _tz
     import time as _time
 
@@ -2471,8 +2416,23 @@ def record_phase_transition(
     from hyperloom.common.llm_attribution import set_current_phase
 
     set_current_phase(str(row["to_phase"] or ""))
+    from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PHASE, record_event
+
+    record_event(
+        EVENT_PHASE,
+        phase=str(row["to_phase"] or "") or None,
+        attributes={
+            "name": row["to_phase"],
+            "from_phase": from_phase or None,
+            "to_phase": row["to_phase"],
+            "reason": reason,
+            "macro_cycle": int(getattr(state, "macro_cycle", 0) or 0),
+        },
+    )
     try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached
+        from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import PHASE_STAGES
+        from hyperloom.inference_optimizer.session.session_binding import bound_session
 
         # The phase itself, as a timeline event: close the span being left on
         # the exit that ended it, and open the one being entered. Recorded here
@@ -2499,6 +2459,9 @@ def record_phase_transition(
             entered_at=str(row.get("ts") or ""),
             entered_unix=now_unix,
         )
+        stage = PHASE_STAGES.get(str(row.get("to_phase") or ""))
+        if stage:
+            record_stage_reached(bound_session(), stage)
     except Exception:  # noqa: BLE001 -- telemetry must never block phase changes
         pass
     return row
@@ -2620,8 +2583,6 @@ __all__ = [
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_long_run",
     "resolve_keep_threshold",
-    "should_reloop_to_explore",
-    "target_was_reached",
     "allowed_actions_for",
     "apply_escalate_budget_bump",
     "bank_phase_segment",

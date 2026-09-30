@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from ..state.task_registry import Task
 
 import logging as _logging
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class PendingProposal:
     payload: dict[str, Any]
     decided: bool = False
     verdict: str | None = None  # approve / reject / redirect / advise / needs_review
+    task_id: str | None = None
 
 
 def apply_critic_grid_filter(
@@ -154,14 +156,10 @@ def _extra_server_args(payload: Mapping[str, Any]) -> str:
     return str(value)
 
 
-class ProposalsCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+class ProposalsCollaborator(CoordinatorCollaborator):
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
+    _local_recipe_cache: tuple[int, dict[str, Any]] | None
 
     def _workload_canonical_id(self) -> str:
         """Return the workload's canonical seven-dimension Recipe identity."""
@@ -205,7 +203,7 @@ class ProposalsCollaborator:
             )
         except Exception:  # noqa: BLE001 - the recipe store may be remote
             row = {}
-        self._coord._local_recipe_cache = (tick, row)
+        self._local_recipe_cache = (tick, row)
         return row
 
     @staticmethod
@@ -408,7 +406,7 @@ class ProposalsCollaborator:
         }
         try:
             self.recipe_kb.put_recipe(**put_kwargs)
-            self._coord._local_recipe_cache = None
+            self._local_recipe_cache = None
         except Exception:
             log.exception(
                 "_kb_amend_recipe: put_recipe failed for cid=%s",
@@ -495,6 +493,10 @@ class ProposalsCollaborator:
         # Content-addressed so a batch of proposals that would launch identical work collapses to one task; a
         # terminated twin still gets a fresh key so a legitimate retry after failure is never locked out.
         raw_key = approved_proposal_idempotency_key(pending.action_name, params)
+        # Preserve the authoritative config-proposal join on the materialized task. Keep this out of the
+        # content-addressed idempotency key above so two proposals for identical grids still collapse to one task.
+        if pending.action_name == "explore" and pending.proposal_msg_id:
+            params["proposal_msg_id"] = str(pending.proposal_msg_id)
         task = None
         was_existing = False
         for attempt in range(_MAX_IDEMPOTENCY_ATTEMPTS):
@@ -558,6 +560,7 @@ class ProposalsCollaborator:
         )
         # Trace attribution: record proposal_msg_id -> task_id for the decision-trace collector.
         self._record_proposal_task_map(pending.proposal_msg_id, task.task_id)
+        pending.task_id = task.task_id
         _record_proposal_materialized(pending.proposal_msg_id, task.task_id)
         _record_config_routed(self, pending, task_id=task.task_id)
 

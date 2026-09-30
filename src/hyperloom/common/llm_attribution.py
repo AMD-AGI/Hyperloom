@@ -172,8 +172,9 @@ _PARSERS: dict[str, Callable[[Sequence[str], str], dict[str, str]]] = {
 }
 
 #: Fields a child may take from the tag its parent wrote. They describe *where*
-#: a call happens rather than what makes it: ``session`` identifies the run, and
-#: ``phase`` and ``type`` are ambient state that lives in one process only --
+#: a call happens rather than what makes it: ``session`` identifies the run,
+#: ``task`` the dispatched task a specialist process works on, and ``phase`` and
+#: ``type`` are ambient state that lives in one process only --
 #: :data:`_current_phase` is a module global and :data:`_current_action` a
 #: context variable, so a spawned child starts with both empty and could not
 #: restate them if it wanted to. ``application`` is absent because this module
@@ -181,7 +182,7 @@ _PARSERS: dict[str, Callable[[Sequence[str], str], dict[str, str]]] = {
 #: and ``operation`` are absent by intent: a call site that names itself is
 #: declaring a new producer, and inheriting the parent's purpose would label its
 #: calls with work they are not doing.
-_INHERITED_FIELDS = ("session", "phase", "type")
+_INHERITED_FIELDS = ("session", "phase", "type", "task")
 
 #: The inherited fields describing the *running process* rather than the run's
 #: identity. Only a genuinely different process may take these; see
@@ -205,7 +206,7 @@ PRESETS: dict[str, tuple[AttributionHeader, ...]] = {
         AttributionHeader(
             "x-litellm-tags",
             "combined",
-            ("application", "session", "component", "phase", "type", "operation"),
+            ("application", "session", "component", "phase", "type", "operation", "task"),
         ),
         # Sets the spend log's session_id column and propagates to nested MCP and A2A calls, so it is the column a
         # per-session reconciliation joins on.

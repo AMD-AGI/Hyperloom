@@ -527,7 +527,7 @@ class EnablementLane(CoordinatorCollaborator):
         # A round that bought no ground gets no branch of its own: it is charged
         # by the FAILED settle below, which the pre-hoc ``consecutive_stalled``
         # cap reads off the durable ledger. Counting it in state again here
-        # would double-charge it, and the field that used to hold it is gone.
+        # would double-charge it.
         #
         # Stamped on the executions this round actually performed, and only when
         # the round has an id of its own: leaving a row ``unreported`` states

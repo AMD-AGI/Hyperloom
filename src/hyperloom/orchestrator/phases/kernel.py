@@ -200,7 +200,7 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
 
 
 class KernelPhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     @staticmethod
     def _serving_config_signature(serving_config: Any) -> str:

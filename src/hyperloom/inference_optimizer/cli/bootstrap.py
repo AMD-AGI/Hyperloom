@@ -18,6 +18,7 @@ from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.timeutil import now_iso
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
 )
@@ -297,7 +298,9 @@ def _seed_shared_state(
         # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each
         # rung is a 3600s window and the session grades at a fixed CONC.
         # Pass --enable-conc-sweep explicitly to override.
-        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", not _agentx_enabled())),
+        conc_sweep_enabled=(
+            not is_agentx_mode(benchmark_mode) if args.enable_conc_sweep is None else args.enable_conc_sweep
+        ),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
         grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
@@ -339,7 +342,7 @@ def _print_session_skeleton(session_dir: Path) -> None:
 def _print_final_summary(
     state: SharedState,
     stop_reason: str,
-    session_dir: Path | None = None,
+    session_dir: Path,
 ) -> None:
     """Print the end-of-run summary block to stdout."""
     print()
@@ -352,7 +355,7 @@ def _print_final_summary(
     print(
         f"  baseline             : {framework_registry.format_primary_metric(getattr(state, 'framework', ''), state.baseline_tput)}"
     )
-    if session_dir is not None and stop_reason == "baseline_failed":
+    if stop_reason == "baseline_failed":
         failure_summary = _read_failure_summary(session_dir)
         if failure_summary and failure_summary.get("root_cause"):
             print(
@@ -374,7 +377,6 @@ def _print_final_summary(
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")
-    _print_kernel_opt_summary_line(state)
     print("===============================================")
 
 
@@ -470,34 +472,6 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 
 
-def _print_kernel_opt_summary_line(state: SharedState) -> None:
-    """One-line forensic readout of kernel_opt attempts at session end (matches the on-disk report; best-effort)."""
-    try:
-        from hyperloom.orchestrator.kernel.attempt_summary import (
-            build_kernel_optimization_summary,
-        )
-
-        session_dir = _resolve_session_dir_for_summary(state)
-        if session_dir is None:
-            return
-        summary = build_kernel_optimization_summary(state, session_dir)
-        totals = summary.get("totals") or {}
-        attempted = int(totals.get("attempted") or 0)
-        if attempted == 0:
-            return
-        integrated = int(totals.get("integrated") or 0)
-        rejected = int(totals.get("rejected") or 0)
-        print(f"  kernel_opt           : {attempted} attempted ({integrated} integrated, {rejected} rejected)")
-        takeaways = summary.get("top_takeaways") or []
-        if len(takeaways) >= 2:
-            print(f"  kernel_opt_top_cause : {takeaways[1]}")
-        report_path = Path(session_dir) / "reports" / "kernel_optimization_summary.json"
-        if report_path.is_file():
-            print(f"  kernel_opt_report    : {report_path}")
-    except Exception:  # noqa: BLE001 — stdout print must never fail the run
-        pass
-
-
 def _default_target_summary(args: argparse.Namespace) -> str:
     """Compose a human-readable objective summary from the CLI target flags."""
     roofline = getattr(args, "target_roofline", None)
@@ -581,13 +555,3 @@ def _resolve_reference_recipe(
 
     print(f"Reference script: {source} ({len(recipe.server_args.split())} arg tokens, {len(recipe.envs)} env(s))")
     return (recipe.server_args, dict(recipe.envs), recipe.model or "", source, dict(controls))
-
-
-def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
-    """Best-effort session_dir lookup ($HYPERLOOM_SESSION_DIR) for the stdout kernel_opt line; ``None`` if unresolved."""
-    env_sd = os.environ.get("HYPERLOOM_SESSION_DIR", "").strip()
-    if env_sd:
-        p = Path(env_sd).expanduser()
-        if p.is_dir():
-            return p
-    return None

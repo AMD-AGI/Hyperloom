@@ -181,6 +181,7 @@ def generation_metadata(
         "phase": phase,
         "tick": row.get("tick"),
         "turn": row.get("turn"),
+        "call_id": row.get("call_id"),
         "task_id": row.get("task_id"),
         "dyn_id": row.get("dyn_id"),
         "role": row.get("role"),

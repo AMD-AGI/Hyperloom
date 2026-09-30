@@ -509,7 +509,7 @@ async def test_kernel_handoff_prepares_source_or_stops_before_delegation(
     coord.shared_state = SharedState(
         current_best=best, baseline_tput=100.0, model_path="/models/fixture", gpu_type="mi355x", isl=1, osl=1, conc=1
     )
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    coord._record_geak_kernel_journey = lambda _result: None
 
     def prepare_source(snapshot: dict, output: Path) -> dict:
         assert source_state != "absent", "no-source handoffs must not assemble source"
