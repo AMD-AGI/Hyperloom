@@ -63,8 +63,7 @@ def phase_index(phase: str) -> int:
     return PHASE_INDEX.get((phase or "").strip().upper(), -1)
 
 
-# Phase transition survival filter: actions that survive across phase boundaries.
-# Not the LLM-proposable set (that is allowed_actions_for(phase)); Coordinator-auto actions
+# Phase ↔ allowed action set: drives the LLM-proposable action list shown in the prompt; Coordinator-auto actions
 # stay out of PROPOSABLE so the prompt does not invite LLM proposals for them.
 PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_PRELUDE: frozenset(
@@ -1275,7 +1274,7 @@ def _base_workflow_predicate_inputs(
             "enablement_enabled": bool(enablement_enabled),
         },
         "enablement_in_flight": bool(enablement_in_flight),
-        "phase_budget_pct": normalize_budget_pct(state.phase_budget_pct),
+        "phase_budget_pct": state.phase_budget_pct,
     }
 
 
