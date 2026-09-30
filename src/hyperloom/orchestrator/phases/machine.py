@@ -324,10 +324,7 @@ class MachinePhase(CoordinatorCollaborator):
             phase=target,
             detail=f"reason={reason}" if reason else "",
         )
-        try:
-            state.save(self.session_dir)
-        except Exception:
-            log.exception("Coordinator: save after phase transition failed")
+        state.save(self.session_dir)
         log.info(
             "Coordinator.phase: %s → %s (reason=%s)",
             prior or "<unset>",
@@ -401,10 +398,7 @@ class MachinePhase(CoordinatorCollaborator):
         }
         hook = _exit_hooks.get((from_phase or "").upper())
         if hook:
-            try:
-                hook()
-            except Exception:
-                log.debug("Coordinator: timeline close failed for phase=%s", from_phase, exc_info=True)
+            hook()
 
         target = (to_phase or "").upper()
         _entry_hooks: dict[str, Any] = {
@@ -456,10 +450,4 @@ class MachinePhase(CoordinatorCollaborator):
             row["evidence"] = evidence
         for k, v in kvs.items():
             evidence[k] = v
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:
-            log.exception(
-                "phase entry evidence: SharedState.save failed for kvs=%r",
-                kvs,
-            )
+        self.shared_state.save(self.session_dir)

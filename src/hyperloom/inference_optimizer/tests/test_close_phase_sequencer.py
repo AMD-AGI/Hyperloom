@@ -34,31 +34,36 @@ from hyperloom.orchestrator.phases.close import (
 from hyperloom.orchestrator.state.shared_state import effective_closing_grace_sec
 
 
-@dataclass
 class _BareState:
-    """SharedState stand-in covering every attribute the CLOSE sequencer reads/writes."""
+    """SharedState stand-in for CLOSE sequencer tests.
 
-    closing_report_task_id: str = ""
-    recipe_kb_session_id: str = ""
-    recipe_kb_session_summary: dict[str, Any] = field(default_factory=dict)
-    stop_reason: str = ""
-    close_sequence_done: bool = False
-    recipe_finalize_status: str = ""
-    recipe_finalize_attempts: int = 0
-    recipe_finalize_outcome: dict[str, Any] = field(default_factory=dict)
-    phase_history: list[dict[str, Any]] = field(default_factory=list)
-    max_minutes: int = 0
-    closing_grace_sec: float | None = None
-    save_count: int = 0
+    Extends SharedState with test helpers (save counter, set_stop_reason).
+    """
+
+    def __init__(self, **kwargs):
+        from hyperloom.orchestrator.state.shared_state import SharedState
+
+        self._ss = SharedState(phase="CLOSE", **kwargs)
+        self.save_count = 0
+        self.closing_grace_sec: float | None = None
+
+    def __getattr__(self, name: str):
+        return getattr(self._ss, name)
+
+    def __setattr__(self, name: str, value) -> None:
+        if name in ("save_count", "closing_grace_sec", "_ss"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._ss, name, value)
 
     def save(self, _session_dir: Path | None) -> None:
         self.save_count += 1
 
     def set_stop_reason(self, reason: str) -> None:
-        self.stop_reason = reason
+        self._ss.stop_reason = reason
 
     def closing_reserve_sec(self) -> float:
-        return effective_closing_grace_sec(self.max_minutes, self.closing_grace_sec)
+        return effective_closing_grace_sec(int(self._ss.max_minutes), self.closing_grace_sec)
 
 
 @dataclass
@@ -149,6 +154,12 @@ class _StubRecipeKB:
 
     def update_recipe(self, **kwargs) -> dict:
         return {"status": "auto_accepted"}
+
+    def put_recipe(self, **kwargs) -> dict:
+        return {"status": "written", "canonical_id": kwargs.get("canonical_id", "")}
+
+    def get_authoritative_recipe(self, *, canonical_id: str) -> dict:
+        return {}
 
 
 class _StubSubResult:
