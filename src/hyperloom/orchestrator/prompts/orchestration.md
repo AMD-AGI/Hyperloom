@@ -79,12 +79,6 @@ Five tools close the act->observe loop without waiting for the next tick
   leased GPU ids and last-progress age. `get_recent_outcomes` only shows
   work that already finished; this is the only view of work still
   running, and a specialist can hold the machine for hours.
-- **`run_action_now{action_name, params}`** — run a CHEAP, lane-light
-  action synchronously and get its result back IN THIS TURN. Only a
-  small whitelist of fast, non-GPU / non-serving actions is eligible
-  (the tool tells you which); anything heavy (benchmarks, sweeps, kernel
-  work) must still go through a `delegate` intent so it runs async and
-  preemptibly. PolicyGate still gates the run (phase / role / paths).
 - **`get_failure{failure_id}`** — pull the structured evidence packet for
   one variant failure: stage, error_class, error_excerpt,
   server_log_path, workspace. The failure_id appears in inbox failure

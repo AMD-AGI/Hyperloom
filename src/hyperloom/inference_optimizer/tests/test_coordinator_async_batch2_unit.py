@@ -1937,33 +1937,6 @@ async def test_recipe_kb_finalize_amends_recipe(coord: Coordinator, monkeypatch)
     assert amends and "recipe_overrides" in amends[0]
 
 
-# -- _run_action_now_sync ---------------------------------------------------
-def test_run_action_now_sync_disabled(coord: Coordinator) -> None:
-    coord._inline_fast_actions_enabled = False
-    out = coord.dispatcher._run_action_now_sync("report")
-    assert "disabled" in out
-
-
-def test_run_action_now_sync_requires_name(coord: Coordinator) -> None:
-    coord._inline_fast_actions_enabled = True
-    assert "action_name required" in coord.dispatcher._run_action_now_sync("")
-
-
-def test_run_action_now_sync_not_whitelisted(coord: Coordinator, monkeypatch) -> None:
-    coord._inline_fast_actions_enabled = True
-    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"report"})
-    out = coord.dispatcher._run_action_now_sync("explore")
-    assert "not inline-eligible" in out
-
-
-def test_run_action_now_sync_no_loop(coord: Coordinator, monkeypatch) -> None:
-    coord._inline_fast_actions_enabled = True
-    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"report"})
-    coord._coordinator_loop = None
-    out = coord.dispatcher._run_action_now_sync("report")
-    assert "coordinator loop not running" in out
-
-
 # -- _handle_intent routing -------------------------------------------------
 @pytest.mark.asyncio
 async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> None:
@@ -2653,59 +2626,6 @@ def test_post_opt_roofline_gate_ignores_non_dict_entries(coord: Coordinator) -> 
     """Malformed (non-dict) stack entries are skipped without raising."""
     coord.shared_state.optimization_stack = ["bad", {"action": "gemm_tuning"}]
     assert coord.phase_close._session_integrated_kernel_patch() is True
-
-
-@pytest.mark.asyncio
-async def test_run_action_now_async_does_not_starve_database_executor(coord: Coordinator, monkeypatch) -> None:
-    import asyncio
-    from concurrent.futures import ThreadPoolExecutor
-
-    loop = asyncio.get_running_loop()
-    previous_executor = loop._default_executor
-    pool = ThreadPoolExecutor(max_workers=1)
-    loop.set_default_executor(pool)
-    coord._inline_fast_actions_enabled = True
-    coord._coordinator_loop = loop
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S", "0.5")
-    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"inline_probe"})
-    calls = []
-
-    async def action(name, params):
-        row = await coord.db.fetchone("SELECT 1 AS value")
-        calls.append(params["index"])
-        return f"done:{row['value']}"
-
-    monkeypatch.setattr(coord.dispatcher, "_run_action_now", action)
-    try:
-        results = await asyncio.wait_for(
-            asyncio.gather(*(coord.dispatcher._run_action_now_wait("inline_probe", {"index": i}) for i in range(8))),
-            2.0,
-        )
-        assert results == ["done:1"] * 8
-        assert sorted(calls) == list(range(8))
-    finally:
-        loop._default_executor = previous_executor
-        pool.shutdown(wait=True)
-
-
-@pytest.mark.asyncio
-async def test_run_action_now_sync_on_loop_thread_rejects_without_scheduling(coord: Coordinator, monkeypatch) -> None:
-    import asyncio
-    from unittest.mock import Mock
-
-    coord._inline_fast_actions_enabled = True
-    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"inline_probe"})
-    coord._coordinator_loop = asyncio.get_running_loop()
-    create_action = Mock(side_effect=AssertionError("same-loop sync calls must not create an action coroutine"))
-    schedule = Mock(side_effect=AssertionError("same-loop sync calls must not schedule work"))
-    monkeypatch.setattr(coord.dispatcher, "_run_action_now", create_action)
-    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", schedule)
-
-    out = coord.dispatcher._run_action_now_sync("inline_probe")
-
-    assert "unavailable" in out and "coordinator loop thread" in out
-    create_action.assert_not_called()
-    schedule.assert_not_called()
 
 
 # -- atomic config levers ride with the patch they are inseparable from -----
