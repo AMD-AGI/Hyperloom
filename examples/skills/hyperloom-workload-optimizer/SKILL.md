@@ -34,7 +34,7 @@ runtime, so they always match the installed version.
 
 ## Out of scope for this skill
 
-- Do not run `python -m hyperloom.inference_optimizer.cli optimize` yourself.
+- Do not run `python -m hyperloom optimize` yourself.
 - Do not implement a GPU preflight, launcher gate, or background launch here. The
   installed skills own those, including the Iron Rules and the resume path.
 - Do not ask for workload values (model, TP/EP, concurrency, ISL/OSL, precision,

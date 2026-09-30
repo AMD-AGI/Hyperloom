@@ -329,15 +329,15 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
     )
     monkeypatch.setattr(emitter, "flush_session", lambda s: calls.append("flush"))
     monkeypatch.setattr(emitter, "record_session_breakdown", lambda s: calls.append("record"))
-    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True, backfill_trace=False))
+    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True))
     assert rc == 0
     assert calls == ["write", "flush", "patch", "record", "package"]
 
     monkeypatch.setattr(breakdown_mod, "write_breakdown_json", lambda _s: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert recover._run_recover_session(argparse.Namespace(session_dir=session, force=True, backfill_trace=False)) == 1
+    assert recover._run_recover_session(argparse.Namespace(session_dir=session, force=True)) == 1
 
 
-def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_recover_session_nonfatal_langfuse_and_package_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
     import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
@@ -364,17 +364,9 @@ def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, mo
         breakdown_mod, "package_session_artifacts", lambda _s: (_ for _ in ()).throw(RuntimeError("zip failed"))
     )
 
-    fake_backfill = SimpleNamespace(
-        build_plan=lambda s: calls.append("plan") or {"session": str(s)},
-        ingest=lambda plan: calls.append("ingest") or 0,
-    )
-    monkeypatch.setitem(
-        __import__("sys").modules, "hyperloom.inference_optimizer.tools.backfill_langfuse", fake_backfill
-    )
-
-    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True, backfill_trace=True))
+    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True))
     assert rc == 0
-    assert calls == ["write", "plan", "ingest"]
+    assert calls == ["write"]
 
 
 def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -410,7 +402,7 @@ def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monke
     monkeypatch.setattr(emitter, "flush_session", lambda _s: None)
     monkeypatch.setattr(emitter, "record_session_breakdown", lambda _s: None)
 
-    assert recover._run_recover_session(argparse.Namespace(session_dir=session, force=False, backfill_trace=False)) == 0
+    assert recover._run_recover_session(argparse.Namespace(session_dir=session, force=False)) == 0
     assert rebuilt == [session]
 
 
@@ -449,7 +441,7 @@ def test_cli_multi_node_gc_backend_and_replay(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(mn, "_session_dir_resolve", lambda: session)
     monkeypatch.setattr(mn.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or _Completed(returncode=0))
     mn._replay_kernel_patches_for_multi_node(argparse.Namespace(nodes=2))
-    assert calls and calls[0][2:4] == ["hyperloom.inference_optimizer.multi_node", "apply-patch"]
+    assert calls and calls[0][1:5] == ["-m", "hyperloom", "multi-node", "apply-patch"]
 
 
 def _patch_infera_state(monkeypatch: pytest.MonkeyPatch, state: dict) -> list[dict]:

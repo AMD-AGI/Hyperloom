@@ -140,11 +140,11 @@ Always prefer `manifest.json` / `state.json` / `coordinator.db` under the
 
 SKILL-level constraints the launcher MUST satisfy before `Coordinator`
 is allowed to boot. These IronRULEs are the gate
-that runs **before** `python -m hyperloom.inference_optimizer.cli optimize` is even spawned.
+that runs **before** `python -m hyperloom optimize` is even spawned.
 
 ### IR-1 — GPU MUST be unoccupied before every launch
 
-Before every `python -m hyperloom.inference_optimizer.cli optimize` invocation (fresh start OR
+Before every `python -m hyperloom optimize` invocation (fresh start OR
 `--resume-from`), verify that every visible GPU on this pod has **zero
 foreign serving PIDs and VRAM usage below 1% of each card's total capacity**. A leftover
 `sglang.launch_server` / `vllm.entrypoints` / `Magpie` from a previous
@@ -215,7 +215,7 @@ echo "prior_session=${PRIOR_SESSION:-none}"
 # VLLM::Worker_TP<n>, which no `vllm\.entrypoints` scan can see. An orphan that
 # is still loading weights also holds no VRAM yet, so the VRAM check below does
 # not cover for a missed process match.
-pgrep -af 'hyperloom\.inference_optimizer\.cli.*optimize' || true
+pgrep -af 'hyperloom optimize' || true
 pgrep -af 'sglang\.launch_server|sglang::|vllm\.entrypoints|vllm serve|VLLM::|Magpie' || true
 
 # VRAM — stdlib-only rocm-smi parse (must run on docker host; no hyperloom import)
@@ -619,7 +619,7 @@ when the file is absent, invalid, or stale.
 **Multi-node (`nodes >= 2`):** [`multi_node/SKILL.md`](multi_node/SKILL.md).
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
   --model "$MODEL_PATH" \
   --framework vllm \           # sglang (default) / vllm / atom / xdit / custom
   --gpu-type MI300X \          # or omit for rocm-smi auto-detect
@@ -671,7 +671,7 @@ prompt, then rewrites `--model` to the exported quantized model so the entire
 optimization loop runs on the quantized model.
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
   --model "$MODEL_PATH" \
   --framework vllm \
   --quantize "fp8 global scheme, fp8 kv_cache, exclude lm_head; accept up to 5% relative eval gap" \
@@ -695,7 +695,7 @@ python3 -m hyperloom.inference_optimizer.cli optimize \
   operator-supplied precision label (e.g. `fp8`/`bf16`) and **mislabel** an
   actually-quantized model. Never leave a conflicting precision when quantizing.
 - Behavior: one-shot, **never runs on a resume**. On a failed/unusable
-  quantization the run **hard-stops (`SystemExit(3)`)** — it never silently
+  quantization the run **hard-stops (`SystemExit(4)`)** — it never silently
   optimizes the un-quantized source after an explicit `--quantize`.
   The one exception is a **pre-flight scheme/GPU mismatch** via
   `--quantize-scheme` (e.g. `mxfp4` on a non-MI355X target): this is **skipped**
@@ -732,7 +732,7 @@ export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
 bash "$INSTALL_SH"
-"$PYTHON" -m hyperloom.inference_optimizer.cli --help
+"$PYTHON" -m hyperloom optimize --help
 ```
 
 Quirks: with `set -u`, assign dependent vars on separate lines (chained
@@ -766,7 +766,7 @@ signals. There is no automatic supervision or restart. After inspecting the
 failure and confirming that the old process is gone, explicitly resume the same
 session with `--resume-from "$SESSION_DIR"` when appropriate. Historical stop
 reasons remain readable; they are not instructions to restart automatically.
-`recover-session` remains an offline artifact-reconstruction tool, not a runtime
+`recover` remains an offline artifact-reconstruction tool, not a runtime
 recovery action.
 
 If the CLI exits with `Claude SDK exit code 1` or `Primus.00009 token not present`,
@@ -815,11 +815,11 @@ IR-2 must complete first so `torch` is available. Run the preflight tool
 and abort on any non-zero exit before spawning the optimizer:
 
 ```bash
-"$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/preflight_optimizer.py" "$MODEL_PATH"
+"$PYTHON" -m hyperloom check "$MODEL_PATH"
 ```
 
 A non-zero exit means the GPU state is unknown or a violation was detected;
-do not continue to `python -m hyperloom.inference_optimizer.cli optimize`.
+do not continue to `python -m hyperloom optimize`.
 
 ## Benchmark Config
 
@@ -978,9 +978,9 @@ A session is single-framework. Pick `sglang` (default), `vllm`, or
 `atom` via `--framework` or `$FRAMEWORK`:
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
-FRAMEWORK=vllm python3 -m hyperloom.inference_optimizer.cli optimize --model "$MODEL_PATH" --max-hours 2
-python3 -m hyperloom.inference_optimizer.cli optimize --framework atom --model "$MODEL_PATH" --max-hours 2  # IR-8 single-node only
+python3 -m hyperloom optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
+FRAMEWORK=vllm python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
+python3 -m hyperloom optimize --framework atom --model "$MODEL_PATH" --max-hours 2  # IR-8 single-node only
 ```
 
 Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
@@ -1057,8 +1057,8 @@ either, the optimizer auto-detects via `rocm-smi --showproductname`
 (falling back to `torch.cuda.get_device_properties(0).gcnArchName`).
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
-GPU_TYPE=mi300x python3 -m hyperloom.inference_optimizer.cli optimize --model "$MODEL_PATH" --max-hours 2
+python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
+GPU_TYPE=mi300x python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
 Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`. **`mi308x` and
@@ -1115,7 +1115,7 @@ fill in the workload block, and `.` it each call.
 sessions on different pods share `$USER_DATA_PATH` via WekaFS; a single file
 causes MODEL_PATH race conditions where sessions launch the wrong model.
 After launching, locate the optimizer via
-`pgrep -af 'hyperloom.inference_optimizer.*optimize'` — `$!` may be a wrapper PID.
+`pgrep -af 'hyperloom optimize'` — `$!` may be a wrapper PID.
 
 **How you launch depends on the harness.** Two things have to hold before the
 bash tool's `run_in_background=true` is the right form: `$CLAW_SESSION_ID` must
@@ -1165,7 +1165,7 @@ export RUN_ENV="$RUN_DIR/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh"
 printf 'export RUN_TAG=%q RUN_DIR=%q RUN_LOG=%q PID_FILE=%q LAUNCH_INFO_FILE=%q\n' \
   "$RUN_TAG" "$RUN_DIR" "$RUN_LOG" "$PID_FILE" "$LAUNCH_INFO_FILE" > "$RUN_ENV"
 
-python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
+python3 -m hyperloom optimize --verbose \
   --model "$MODEL_PATH" \
   --framework "${FRAMEWORK:-sglang}" \
   --target-gain "${TARGET_GAIN:-10}" \
@@ -1211,7 +1211,7 @@ it. Under Claw, hand that attached exec to the bash tool with
 `run_in_background=true` and no `setsid`, `nohup`, or trailing `&`. Everywhere
 else, the command inside the exec is the `setsid nohup … > "$RUN_LOG" 2>&1 <
 /dev/null &` recipe (plus `--launch-info-file`). Confirm with
-`pgrep -af 'hyperloom.inference_optimizer.*optimize'`. If launch-info has no
+`pgrep -af 'hyperloom optimize'`. If launch-info has no
 `.session_dir`, read `$RUN_LOG` and fix that error; do not retry with a
 different backgrounding trick.
 
@@ -1371,7 +1371,7 @@ which is the workspace root, not the session dir.
 RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
 . "$RUN_ENV"
 export SESSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_dir"])' "$LAUNCH_INFO_FILE")"
-python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state.py" "$SESSION"
+python3 -m hyperloom session state "$SESSION"
 ```
 
 It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_best`,
@@ -1386,7 +1386,7 @@ Recent action counts from SQLite (last 500 events grouped by category):
 RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
 . "$RUN_ENV"
 export SESSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_dir"])' "$LAUNCH_INFO_FILE")"
-python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/event_counts.py" "$SESSION"
+python3 -m hyperloom session events "$SESSION"
 ```
 
 ## Expected Flow

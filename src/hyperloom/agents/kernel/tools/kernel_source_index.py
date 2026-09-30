@@ -380,33 +380,4 @@ def load_or_build(frameworks: dict[str, source_env.FrameworkRoot] | None = None)
     return index
 
 
-def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - standalone CLI driver
-    """CLI: build the index for this container and print its stats."""
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Build/verify the kernel source index.")
-    parser.add_argument("--rebuild", action="store_true", help="Ignore cache and rebuild.")
-    args = parser.parse_args(argv)
-
-    fw = source_env.discover_frameworks()
-    if not fw:
-        print("No frameworks (vllm/sglang/aiter) discovered.")
-        return 1
-    print(f"Frameworks: {source_env.version_tag(fw)}")
-    for name, fr in sorted(fw.items()):
-        print(f"  {name} v{fr.version or '?'} @ {fr.root}")
-        for cr in fr.csrc_roots:
-            print(f"      csrc: {cr}")
-    index = build_index(fw) if args.rebuild else load_or_build(fw)
-    print(
-        f"Index: {index.symbol_count} symbols across {index.file_count} files "
-        f"(build_ms={index.build_ms}, fingerprint={index.fingerprint})"
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(_main())
-
-
 __all__ = ["SourceIndex", "build_index", "is_editable_source", "load_or_build", "triton_def_line"]

@@ -309,49 +309,6 @@ def test_unet_int_transformer_layers_per_block():
     assert df.forward_flops(g, 512, 512)["forward_flops"] > 0
 
 
-# ---- _fmt + CLI ----------------------------------------------------------
-def test_fmt_with_and_without_ideal_ms(tmp_path):
-    cfg = {
-        "_class_name": "SD3Transformer2DModel",
-        "num_layers": 4,
-        "num_attention_heads": 8,
-        "attention_head_dim": 8,
-        "patch_size": 2,
-    }
-    d = _write_denoiser(tmp_path / "m", cfg)
-    est = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16")
-    line = df._fmt(est)
-    assert "TFLOP/img" in line and "ideal=" in line
-    # unknown gpu -> peak 0 -> no "ideal=" suffix.
-    est_no_peak = df.analytic_ceiling(d, gpu_type="unknown", precision="bf16")
-    assert "ideal=" not in df._fmt(est_no_peak)
-
-
-def test_main_text_and_json_and_failure(tmp_path, monkeypatch, capsys):
-    cfg = {
-        "_class_name": "SD3Transformer2DModel",
-        "num_layers": 4,
-        "num_attention_heads": 8,
-        "attention_head_dim": 8,
-        "patch_size": 2,
-    }
-    d = _write_denoiser(tmp_path / "m", cfg)
-
-    monkeypatch.setattr(sys, "argv", ["diffusion_flops", "--model-dir", str(d)])
-    assert df.main() == 0
-    assert "TFLOP/img" in capsys.readouterr().out
-
-    monkeypatch.setattr(sys, "argv", ["diffusion_flops", "--model-dir", str(d), "--json"])
-    assert df.main() == 0
-    assert '"total_flops"' in capsys.readouterr().out
-
-    bad = tmp_path / "empty"
-    bad.mkdir()
-    monkeypatch.setattr(sys, "argv", ["diffusion_flops", "--model-dir", str(bad)])
-    assert df.main() == 1
-    assert "could not resolve" in capsys.readouterr().out
-
-
 # ---- FLUX.2 -------------------------------------------------------------- Verbatim from the shipped
 # black-forest-labs/FLUX.2-dev transformer config, so the test protects the production path (notably mlp_ratio=3.0,
 # not the 4.0 default).

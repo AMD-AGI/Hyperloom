@@ -1254,7 +1254,7 @@ write_env_file() {
     [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && _emit_credential_fallback CLAUDE_CODE_OAUTH_TOKEN "${CLAUDE_CODE_OAUTH_TOKEN}"
     # Pin TRACELENS_ROOT and TRACELENS_INTERNAL_ROOT to the (possibly
     # mirrored) values resolved by ensure_tracelens(). This is what lets
-    # setsid nohup python -m hyperloom.inference_optimizer.cli optimize →
+    # setsid nohup python -m hyperloom optimize →
     # src/hyperloom/agents/kernel/tools/tracelens_analysis.py inherit the writable
     # mirrors instead of falling back to the read-only /path defaults.
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"

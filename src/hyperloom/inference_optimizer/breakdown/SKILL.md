@@ -88,18 +88,18 @@ breakdown = build("/workspace/hyperloom")
 out_path = write_breakdown_json("/workspace/hyperloom")
 ```
 
-### CLI / offline (`hyperloom.inference_optimizer.tools.dump_session_breakdown`)
+### CLI / offline (`hyperloom session breakdown`)
 
 ```bash
 # Live session in this sandbox
-python -m hyperloom.inference_optimizer.tools.dump_session_breakdown
+python -m hyperloom session breakdown
 
 # Historical session on a shared filesystem
-python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
+python -m hyperloom session breakdown \
     --session-dir /shared/hyperloom-sessions/<user>/<sid>
 
 # Override output path (e.g. write to a staging area)
-python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
+python -m hyperloom session breakdown \
     --session-dir <SD> --output /tmp/breakdown.json
 ```
 
@@ -108,7 +108,7 @@ python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
 ```bash
 for d in /shared/hyperloom-sessions/*/*; do
     [ -d "$d" ] || continue
-    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
+    python -m hyperloom session breakdown \
         --session-dir "$d" > /dev/null
 done
 ```

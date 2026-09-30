@@ -43,6 +43,54 @@ host the CLI defaults to `session/` under the current directory instead. Prefer
 
 ---
 
+## Upgrading from 1.1.x
+
+### Required: launch through `hyperloom <command>`
+
+Every command now runs under one entry point, `hyperloom <command>`, or
+`python -m hyperloom <command>` where no console script is installed. Update
+launchers, skills and scripts:
+
+| Before | After |
+|---|---|
+| `python -m hyperloom.inference_optimizer.cli --verbose optimize ...` | `python -m hyperloom optimize --verbose ...` |
+| `inference_optimizer optimize ...` | `hyperloom optimize ...` |
+| `... recover-session --session-dir S` | `hyperloom recover --session-dir S` |
+| `python -m hyperloom.inference_optimizer.setup ...` / `hyperloom --check-only` | `hyperloom setup ...` / `hyperloom setup --check-only` |
+| `quantization-agent ...` | `hyperloom quantize ...` |
+| `python -m hyperloom.inference_optimizer.multi_node SUB ...` | `hyperloom multi-node SUB ...` |
+| `python -m hyperloom.inference_optimizer.tools.dump_session_breakdown` | `hyperloom session breakdown` |
+| `python -m hyperloom.inference_optimizer.tools.dump_session_report` | `hyperloom session report` |
+| `python -m hyperloom.inference_optimizer.tools.backfill_langfuse` | `hyperloom session backfill` |
+| `.../tools/event_counts.py` | `hyperloom session events` |
+| `.../tools/read_optimizer_state.py` | `hyperloom session state` |
+| `.../tools/preflight_optimizer.py MODEL_PATH` | `hyperloom check MODEL_PATH` |
+
+`--verbose` now follows the command name. `hyperloom` without a command prints
+its usage and exits 2 instead of running setup.
+
+### Required: removed flags
+
+These flags are rejected with `unrecognized arguments`:
+
+* `--kernel-codex`, `--kernel-claude`, `--kernel-prompt` (no-ops since the
+  kernel LLM role was retired): drop them.
+* `--max-minutes-{prelude,framework,explore,kernel,sweep,close}-pct` and
+  `--phase-budget-explore-pct`: use `--phase-budget-<phase>-pct`
+  (`--phase-budget-framework-pct` covers what the explore spelling set).
+* `recover --backfill-trace`: run `hyperloom session backfill --session-dir S`.
+* On the rayjob backend, `--pd-prefill-ep`, `--pd-decode-ep` and
+  `--pd-*-extra-args` now fail the server restart instead of being ignored;
+  they are supported on infera only.
+
+### Required: quantization failure exits 4
+
+A failed `--quantize` prelude now exits 4 instead of 3; exit 3 means only
+that another optimizer holds the session lock. Launchers that branch on the
+exit code should treat 4 as a non-retryable failure.
+
+---
+
 ## Upgrading from 0.5.x → 0.6.0
 
 Apply the following changes in order. Required steps must be completed before running; recommended and optional steps improve behavior or unlock new features.
@@ -78,7 +126,7 @@ when possible, but launchers that know the class should pass it explicitly to
 avoid a generic fallback:
 
 ```diff
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
     --model /path/to/GLM-5-FP8 \
     --framework sglang \
     --gpu-type mi355x \
@@ -111,7 +159,7 @@ the "vs B200" comparison number).
 
 Earlier launchers might have waited for the Coordinator to emit a
 `setup` action. Move all setup work to **before** the
-`python -m hyperloom.inference_optimizer.cli optimize` call:
+`python -m hyperloom optimize` call:
 
 ```diff
 # launcher.sh
@@ -119,7 +167,7 @@ Earlier launchers might have waited for the Coordinator to emit a
 + bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
 + . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 + ray stop --force; ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true; ray start --head --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
-+ python3 -m hyperloom.inference_optimizer.cli optimize ...
++ python3 -m hyperloom optimize ...
 ```
 
 ### Recommended: review the `KERNEL_OPT_BACKEND_ORDER` default
@@ -238,7 +286,7 @@ For any minor or patch upgrade:
    ```
 4. If you have ongoing sessions you want to resume across the upgrade,
    verify `manifest.json` and `state.json` are intact, then run
-   `python -m hyperloom.inference_optimizer.cli optimize --resume-from "$SESSION_DIR"`.
+   `python -m hyperloom optimize --resume-from "$SESSION_DIR"`.
 
 Upgrades do not rewrite explicit `HYPERLOOM_LOCAL_KB_ROOT` paths or historical
 sessions. The one-time implicit Recipe-root migration described above is the

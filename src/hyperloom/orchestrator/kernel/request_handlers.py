@@ -3814,7 +3814,7 @@ async def _run_geak_gemm_tuning(
     cmd = [
         "env",
         f"E2E_METRIC={_geak_e2e_metric}",
-        "python3",
+        sys.executable,
         str(_kernel_agent_tool_path("gemm_tuning.py")),
         "--input-json",
         str(input_json),
@@ -4181,7 +4181,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     input_json = workspace / "forge_fusion_input.json"
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
 
-    cmd = ["python3", str(_kernel_agent_tool_path("forge_fusion.py")), "--input-json", str(input_json)]
+    cmd = [sys.executable, str(_kernel_agent_tool_path("forge_fusion.py")), "--input-json", str(input_json)]
 
     wrapper_timeout = _forge_fusion_wrapper_timeout_sec(timeout)
     try:
