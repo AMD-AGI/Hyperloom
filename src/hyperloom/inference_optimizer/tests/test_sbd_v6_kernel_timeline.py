@@ -48,7 +48,6 @@ def _forge_recorder():
         macro_cycle=3,
         route=ROUTE_FORGE,
         route_reason="kernel_opt_backend_order=forge",
-        code_revision="abc1234",
     )
     assert recorder is not None
     recorder.begin(

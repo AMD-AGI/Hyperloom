@@ -326,7 +326,7 @@ async def test_record_explore_round_gaps_falls_back_to_anchor(coord):
             ]
         },
     )
-    anchor = coord.conversation._workload_canonical_id()
+    anchor = coord.proposals._workload_canonical_id()
     gap = s.find_gap(anchor)
     assert gap is not None
     assert any(a["variant_name"] == "v1" for a in gap["attempts"])
