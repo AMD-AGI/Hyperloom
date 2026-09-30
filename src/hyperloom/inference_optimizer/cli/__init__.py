@@ -91,6 +91,7 @@ from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
 from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.collaborator import OrchestrationPrompt as _OrchestrationPrompt
 from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree, resolve_kernel_search_roots
 from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
 from hyperloom.orchestrator.state.shared_state import SharedState, timed_teardown_step
@@ -2271,22 +2272,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
-    coordinator.system_prompt_overrides = prompts
-    # Cache a pure rebuild closure so the macro-cycle boundary can re-focus the orchestration prompt without reaching
-    # back into argparse.
     import functools as _functools
 
-    coordinator._orch_prompt_is_user_supplied = bool(args.orch_prompt)
-    coordinator._rebuild_orch_prompt = _functools.partial(
-        _build_orchestration_prompt,
-        no_kernel=no_kernel,
-        no_framework_agent=no_framework_agent,
-        framework=framework_for_prompt,
-        objective=objective,
-        max_minutes=max_minutes_for_prompt,
-        transport=_orch_transport,
-        benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
-        agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+    coordinator.orch_prompt = _OrchestrationPrompt(
+        overrides=prompts,
+        is_user_supplied=bool(args.orch_prompt),
+        rebuild=_functools.partial(
+            _build_orchestration_prompt,
+            no_kernel=no_kernel,
+            no_framework_agent=no_framework_agent,
+            framework=framework_for_prompt,
+            objective=objective,
+            max_minutes=max_minutes_for_prompt,
+            transport=_orch_transport,
+            benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
+            agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+        ),
     )
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
@@ -2304,7 +2305,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         specialist_executor=specialist_executor,
     )
     # Persist effective system prompts for resume / drift inspection.
-    _snapshot_system_prompts(session_dir, prompts=prompts, orchestration_phase=_initial_phase)
+    _snapshot_system_prompts(session_dir, prompts=prompts, orchestration_phase=_initial_phase, macro_cycle=_initial_macro_cycle)
 
     def _backend_kind(role: str) -> str:
         backend = backends.get(role)

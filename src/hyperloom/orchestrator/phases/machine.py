@@ -416,11 +416,11 @@ class MachinePhase(CoordinatorCollaborator):
     def _reseed_orch_prompt_for_phase(self, to_phase: str) -> bool:
         """Re-scope the orchestration system prompt to the phase being entered."""
         phase = (to_phase or "").strip().upper()
-        if not phase or getattr(self, "_orch_prompt_is_user_supplied", False):
+        orch_prompt = self._coord.orch_prompt
+        if not phase or orch_prompt.is_user_supplied:
             return False
-        rebuild = getattr(self, "_rebuild_orch_prompt", None)
-        overrides = getattr(self, "system_prompt_overrides", None)
-        if rebuild is None or not isinstance(overrides, dict):
+        rebuild = orch_prompt.rebuild
+        if rebuild is None:
             return False
         state = self.shared_state
         cycle = int(state.macro_cycle or 0)
@@ -434,7 +434,7 @@ class MachinePhase(CoordinatorCollaborator):
             cycle_strategy=focus_plan,
             phase=phase,
         )
-        overrides["orchestration"] = scoped
+        orch_prompt.set("orchestration", scoped)
         _write_prompt_snapshot(
             self.session_dir, "orchestration", scoped, phase=phase, macro_cycle=int(state.macro_cycle or 0)
         )
