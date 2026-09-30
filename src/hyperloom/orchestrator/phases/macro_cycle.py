@@ -209,7 +209,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             A summary dict of the restart steps performed, or ``None`` when the
             soft restart is disabled.
         """
-        if not self._cycle_soft_restart:
+        if not self._coord._cycle_soft_restart:
             return None
         summary: dict[str, Any] = {
             "prior_cycle": int(prior_cycle),
@@ -247,7 +247,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             from_phase: The phase being left; only a SWEEP origin starts a cycle.
         """
         if (from_phase or "").upper() == _phase_state.PHASE_SWEEP and int(
-            getattr(self.shared_state, "macro_cycle", 0) or 0
+            self.shared_state.macro_cycle or 0
         ) > 0:
             task = await self._coord.phase_prelude._enqueue_internal_analysis_task(
                 reason="cycle_start",
@@ -257,6 +257,6 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             self.shared_state.auto_roofline_pending_task_id = task.task_id
             log.info(
                 "cycle %d start: forced reprofile task=%s",
-                int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                int(self.shared_state.macro_cycle or 0),
                 task.task_id,
             )

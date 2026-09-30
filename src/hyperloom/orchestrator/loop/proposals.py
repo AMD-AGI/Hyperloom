@@ -204,7 +204,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         """Return the workload's canonical seven-dimension Recipe identity."""
         ss = self.shared_state
         workload = ss.model_name or "unknown_model"
-        hw = self._kb_hardware_slug()
+        hw = self._coord._kb_hardware_slug()
         framework = str(ss.framework or "")
         framework_version = str(ss.framework_version or "")
         if not framework_version and framework:
@@ -395,7 +395,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         put_kwargs: dict[str, Any] = {
             "canonical_id": cid,
             "model": ss.model_name or "unknown_model",
-            "hardware": self._kb_hardware_slug(),
+            "hardware": self._coord._kb_hardware_slug(),
             "framework_name": framework,
             "framework_version": framework_version,
             "precision": precision,
@@ -479,7 +479,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
     ) -> None:
         """Promote an approved proposal into a TaskRegistry entry. Stack-aware actions get current_best's anchor and the base config it was measured on; approved_variant_names filters the explore grid (None keeps full)."""
         if is_upstream_pr_prescreen(pending.action_name, pending.payload):
-            await self.phase_framework.materialize_candidate(pending)
+            await self._coord.phase_framework.materialize_candidate(pending)
             return
         params = dict(pending.payload.get("params") or {})
         # Carry the proposer's predicted gain onto the task for predicted-vs-realized calibration.

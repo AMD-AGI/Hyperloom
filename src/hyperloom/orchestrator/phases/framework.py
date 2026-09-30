@@ -2064,14 +2064,14 @@ class FrameworkPhase(CoordinatorCollaborator):
             await self._pump_framework_agent_phase()
         except Exception as exc:
             log.exception("FRAMEWORK pump failed")
-            self._record_coordinator_exception(stage="framework_pump", exc=exc)
+            self._coord._record_coordinator_exception(stage="framework_pump", exc=exc)
         state = self.shared_state
         if (getattr(state, "phase", "") or "").strip().upper() == "FRAMEWORK_AGENT":
             try:
                 self._coord.conversation._record_advisory_plateau_from_state()
             except Exception as exc:
                 log.exception("FRAMEWORK pump: plateau snapshot failed")
-                self._record_coordinator_exception(stage="framework_pump", exc=exc)
+                self._coord._record_coordinator_exception(stage="framework_pump", exc=exc)
 
     def _record_framework_agent_authored_outcome(
         self,

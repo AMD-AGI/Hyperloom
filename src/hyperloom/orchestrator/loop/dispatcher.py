@@ -337,7 +337,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             is what cancels the rows it can no longer fit, and the closing
             actions it exempts still have their reserve to run in.
         """
-        if self._stop.is_set():
+        if self._coord._stop.is_set():
             await self.cancel_inflight_actions(reason="shutdown_requested")
             return True
         usable_sec = self.shared_state.session_budget_usable_sec()
@@ -428,7 +428,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     return
                 done, _pending = await asyncio.wait(
                     [atask for _, atask, _ in inflight],
-                    timeout=self._dispatcher_poll_sec,
+                    timeout=self._coord._dispatcher_poll_sec,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if not done:
@@ -1194,7 +1194,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 "dispatcher: failed to append delegated_result for task=%s",
                 task.task_id,
             )
-            self._record_coordinator_exception(
+            self._coord._record_coordinator_exception(
                 stage="dispatcher_result",
                 exc=exc,
             )
@@ -1210,7 +1210,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
                     run_error=str(result.error or ""),
                 )
-                self.phase_framework.on_specialist_settled(task, done_payload, run_error=str(result.error or ""))
+                self._coord.phase_framework.on_specialist_settled(task, done_payload, run_error=str(result.error or ""))
         # Auto-promote succeeded results (Coordinator-only writer).  Warm replay
         # is deliberately routed through its promote handler even when dispatch
         # itself failed: that handler owns rollback of pre-applied framework
@@ -1248,7 +1248,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     "dispatcher: promotion/unpromotable handling failed for task=%s",
                     task.task_id,
                 )
-                self._record_coordinator_exception(
+                self._coord._record_coordinator_exception(
                     stage="dispatcher_promote",
                     exc=exc,
                 )
@@ -1273,7 +1273,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         if result.state == "cancelled" or promotion_raised:
             return
         if task.kind == "integrate_patch":
-            await self.phase_framework.on_integrate_patch_settled(task, result, verdict)
+            await self._coord.phase_framework.on_integrate_patch_settled(task, result, verdict)
         # Fact-write hook: lands the verdict in the journal + optional KB
         # write. replay_warm_recipe is excluded (verification, not a fact).
         if task.kind != "replay_warm_recipe":
@@ -1289,7 +1289,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     "dispatcher: fact-write hook failed for task=%s",
                     task.task_id,
                 )
-                self._record_coordinator_exception(
+                self._coord._record_coordinator_exception(
                     stage="dispatcher_fact_write",
                     exc=exc,
                 )

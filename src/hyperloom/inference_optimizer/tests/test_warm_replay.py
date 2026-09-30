@@ -44,6 +44,7 @@ class _StubSharedState:
     warm_replay_outcome: dict = field(default_factory=dict)
     warm_replay_pending: dict = field(default_factory=dict)
     warm_kernel_kb_attempted: bool = False
+    warm_kernel_kb_plan: list = field(default_factory=list)
     warm_history_injected: bool = False
     auto_roofline_pending_task_id: str = ""
     stop_reason: str = ""
@@ -166,6 +167,8 @@ def _make_coord(
     coord.shared_state.warm_replay_min_confidence = warm_replay_min_confidence
     coord.tasks = _StubTaskRegistry()
     coord._journal = None
+    coord.knowledge_plane = None
+    coord.recipe_kb = None
     return coord
 
 

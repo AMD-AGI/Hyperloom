@@ -990,7 +990,7 @@ class KernelPhase(CoordinatorCollaborator):
         """Resolve the GEAK e2e timeouts from the live run budget."""
         # Standalone fallback ONLY: the 12h (43200s) default applies when no run deadline is set (budget_known=False).
         env_default_timeout = env_int("GEAK_E2E_TIMEOUT_S", default=43200)
-        deadline = self._run_deadline
+        deadline = self._coord._run_deadline
         if deadline is None:
             return env_default_timeout, env_default_timeout + 600, False
         remaining = deadline.remaining()

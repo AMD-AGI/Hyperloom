@@ -380,7 +380,7 @@ class MachinePhase(CoordinatorCollaborator):
             log.exception("Coordinator: _on_phase_entered hook failed")
             # This hook is also what closes the left phase's event, so a raise here is the case where that event never
             # got its exit evidence.
-            self._record_coordinator_exception(stage="phase_entered", exc=exc)
+            self._coord._record_coordinator_exception(stage="phase_entered", exc=exc)
 
     async def _on_phase_entered(
         self,
