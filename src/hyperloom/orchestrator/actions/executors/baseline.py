@@ -121,6 +121,7 @@ from ._patch_snapshot import (
     _restore_patch_snapshot,
 )
 from .benchmark_result import (
+    double_run_requested,
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
     select_run_workspace,

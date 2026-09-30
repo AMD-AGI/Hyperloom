@@ -66,7 +66,7 @@ lean on async delegation and track how dispatched specialists land.
 <!-- transport: tools -->
 ### Closing the act->observe loop in-turn
 
-Five tools close the act->observe loop without waiting for the next tick
+Four tools close the act->observe loop without waiting for the next tick
 (plus `Read` for any file under SESSION_DIR):
 
 - **`get_recent_outcomes`** — pull the most recent `delegated_result`

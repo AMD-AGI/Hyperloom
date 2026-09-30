@@ -187,7 +187,7 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
 
 
 class ConversationCollaborator(CoordinatorCollaborator):
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+    """Manages conversation rounds: context tools, prompt injection, and round history."""
 
     def _attach_orchestration_context_tools(self) -> None:
         """Bind a read-only ContextProvider to the orchestration backend (no-op without setter)."""

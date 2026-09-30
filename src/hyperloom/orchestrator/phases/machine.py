@@ -20,7 +20,7 @@ log = _logging.getLogger(__name__)
 
 
 class MachinePhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """Phase transition machine: validates, records, and dispatches phase transitions."""
 
     def _ensure_phase_initialised(self, budget_pct: dict[str, float] | None) -> None:
         """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent).

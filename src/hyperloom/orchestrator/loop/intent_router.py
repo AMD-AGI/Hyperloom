@@ -540,9 +540,9 @@ class IntentRouter(CoordinatorCollaborator):
                 )
                 return
             payload["params"] = params
-        from .proposals import _record_proposal
+        from .proposals import record_proposal
 
-        await _record_proposal(
+        await record_proposal(
             self,
             from_agent=source,
             action_name=action_name,

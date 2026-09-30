@@ -202,7 +202,7 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
 
 
 class KernelPhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """KERNEL_AGENT phase handler: drives kernel-level optimization tasks."""
 
     _REPROFILE_CHANGE_TOL: float = 1e-5
     _kernel_timeline_recorder: "KernelEventRecorder | None" = None
