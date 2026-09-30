@@ -1059,7 +1059,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
         return True
 
-    async def validate(
+    def validate(
         self,
         new_tput: float,
         measurement: Mapping[str, Any],
@@ -1067,10 +1067,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
         source: str = "writeback",
         measurement_basis: str = "e2e_rebench",
     ) -> bool:
-        """Validate cumulative gain and trigger the watermark roofline.
+        """Validate cumulative gain, guarding that a baseline is established.
 
-        Wraps :meth:`_update_cumulative_gain_validated` with the baseline guard
-        and a watermark roofline enqueue on success.
+        Wraps :meth:`_update_cumulative_gain_validated` with the baseline guard.
 
         Args:
             new_tput: The newly measured output throughput.
@@ -1079,16 +1078,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
             measurement_basis: How the reading was obtained.
 
         Returns:
-            Whether the watermark was updated.
+            Whether a comparable measurement updated the validation watermark.
         """
         if self.shared_state.baseline_tput <= 0:
             return False
-        updated = self._update_cumulative_gain_validated(new_tput, measurement, source=source, measurement_basis=measurement_basis)
-        if updated:
-            await self._coord.phase_kernel._maybe_enqueue_watermark_roofline(
-                reason=f"{source}_watermark",
-            )
-        return updated
+        return self._update_cumulative_gain_validated(
+            new_tput, measurement, source=source, measurement_basis=measurement_basis
+        )
 
     async def _record_integrate_keep(self, result: dict[str, Any]) -> None:
         """Promote a kernel integrate KEEP into the optimization stack.
@@ -1156,7 +1152,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if is_fusion:
             self.shared_state.last_fusion_integrate = {**result, "decision": "KEEP"}
         self._journal_integrate_keep(result, lift_kind=lift_kind, new_tput=float(new_tput))
-        await self.validate(new_tput, measurement, source="integrate_keep")
+        if self.validate(new_tput, measurement, source="integrate_keep"):
+            await self._coord.phase_kernel._maybe_enqueue_watermark_roofline(
+                reason="integrate_keep_watermark",
+            )
 
     def _journal_integrate_keep(self, result: dict[str, Any], *, lift_kind: str, new_tput: float) -> None:
         """Mirror an adopted kernel-recipe-lane (forge-loop/fusion) KEEP as an ``optimization_journal`` row.
@@ -4620,8 +4619,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 outcome.changed = True
                 return
             else:
-                if measured_ok and self.shared_state.baseline_tput > 0 and not stale_measurement:
-                    self._update_cumulative_gain_validated(measured, result)
+                if measured_ok and not stale_measurement:
+                    self.validate(measured, result, source="stack_revalidate")
                     cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
                     recorded = cb_rec.get("tput")
                     floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
@@ -4688,12 +4687,15 @@ class WritebackCollaborator(CoordinatorCollaborator):
             self.shared_state.gain_gated_action_count += 1
         if last_lifted_winner is not None:
             # The last successful lift owns every axis of the validated measurement.
-            await self.validate(
+            if self.validate(
                 float(last_lifted_winner["tput"]),
                 last_lifted_winner,
                 source="explore_keep",
                 measurement_basis="e2e_decision_round",
-            )
+            ):
+                await self._coord.phase_kernel._maybe_enqueue_watermark_roofline(
+                    reason="explore_keep_watermark",
+                )
         else:
             changed = True
         if promoted:
@@ -4865,13 +4867,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     lift,
                     gap_canonical_id=gap_canonical_id,
                 )
-                if (
-                    lifted
-                    and self.shared_state.baseline_tput > 0
-                    and self._update_cumulative_gain_validated(new_tput, measurement)
-                ):
+                if lifted and self.validate(new_tput, measurement, source="integrate_patch_keep"):
                     await self._coord.phase_kernel._maybe_enqueue_watermark_roofline(
-                        reason="integrate_keep_watermark",
+                        reason="integrate_patch_keep_watermark",
                     )
             changed = True
         if completed_pending is not None and self.shared_state.pending_integrate is completed_pending:
