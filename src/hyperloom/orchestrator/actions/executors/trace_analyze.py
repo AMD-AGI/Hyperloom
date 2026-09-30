@@ -645,9 +645,9 @@ async def trace_analyze_handler(
     if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
         analysis_mode = "inference"
 
-    # Analysis route: default ``agent`` (TraceLens); ``bypass`` (TraceLens-free)
-    # is the explicit route via payload ``analysis_route`` /
-    # ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. Coerce to str.
+    # Analysis route: default ``agent`` (TraceLens SDK/LLM); ``bypass`` (no-LLM,
+    # but still imports TraceLens for source mapping) is the explicit route via
+    # payload ``analysis_route`` / ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. Coerce to str.
     # Only an absent or blank payload value defers to the env var. A non-blank
     # value is kept even when unrecognized, so it reaches the check below rather
     # than silently overriding the env with the ``agent`` default.

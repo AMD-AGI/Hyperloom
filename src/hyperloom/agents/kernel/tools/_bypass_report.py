@@ -25,7 +25,7 @@ from _kernel_partition import build_kernel_candidates_document
 
 # Source path mapping delegates to TraceLens' independent kernel_source
 # path-identifier (path mapping only); the bypass analysis is otherwise
-# TraceLens-free. Bypass route is slated for removal.
+# TraceLens-free, but importing this makes the route depend on TraceLens.
 from _kernel_source import resolve_source_verdict
 from _idle_gate import resolve_idle_pct_threshold
 from _roofline_source import PLACEHOLDER as _RL_PLACEHOLDER

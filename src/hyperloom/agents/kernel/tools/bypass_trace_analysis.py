@@ -11,7 +11,7 @@
 The analysis itself (trace reading, roofline, classification) is TraceLens-free.
 Source path mapping is the one exception: it delegates to TraceLens' independent
 ``kernel_source`` path-identifier (path identification only, not TraceLens'
-analysis layer). The bypass route is slated for removal.
+analysis layer), so the route needs an importable TraceLens checkout.
 """
 
 from __future__ import annotations
@@ -504,7 +504,7 @@ def main(argv: list[str] | None = None) -> int:
     for _skipped_step, _skip_reason in (
         (
             "install_tracelens",
-            "the bypass reader/analysis need no TraceLens checkout; source path mapping uses TraceLens' importable kernel_source module",
+            "the orchestrator provisions the TraceLens checkout upstream; the bypass reader/analysis installs nothing but needs TraceLens importable for source path mapping",
         ),
         ("split_trace", "the reader windows the trace in memory and writes no split chunks"),
         ("select_chunk", "no split chunks exist to select from"),
