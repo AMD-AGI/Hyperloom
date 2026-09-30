@@ -438,11 +438,11 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 await asyncio.gather(*done, return_exceptions=True)
                 inflight = [entry for entry in inflight if entry[1] not in done]
         finally:
-            # ``_inflight_actions`` is dispatcher-wide: the inline path registers
-            # a handle there too, and that action is meant to outlive the caller
-            # that started it. The pump owns exactly the entries still in its own
-            # ``inflight``, so leaving by any door other than the drained one --
-            # cancelled at shutdown, or a raise from the bookkeeping -- takes
+            # ``_inflight_actions`` is dispatcher-wide: an action is meant to
+            # outlive the caller that started it. The pump owns exactly the
+            # entries still in its own ``inflight``, so leaving by any door
+            # other than the drained one -- cancelled at shutdown, or a raise
+            # from the bookkeeping -- takes
             # those and nothing else. A drained pump has nothing left to cancel.
             await self.cancel_inflight_actions(
                 reason="dispatcher_pump_exit",

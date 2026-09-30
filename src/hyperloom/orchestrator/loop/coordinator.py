@@ -685,9 +685,9 @@ class Coordinator:
 
     async def _recipe_kb_t4_hook(self) -> None:
         """Finalize or retry on graceful teardown/Ctrl-C."""
-        if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
+        if bool(getattr(self.knowledge_plane, "kb_disabled", False)):
             return
-        config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
+        config = getattr(self.knowledge_plane, "config", None) or KnowledgeConfig.from_env()
         if config.mode is KnowledgeStoreMode.LOCAL:
             if self.recipe_kb is None:
                 return
