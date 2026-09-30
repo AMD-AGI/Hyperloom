@@ -267,18 +267,6 @@ class Coordinator:
     # ``__getattr__`` back to this coordinator).
     _DELEGATED = {
         # router
-        "_handle_intent": "router",
-        "_handle_propose_action": "router",
-        "_handle_review_verdict": "router",
-        "_handle_single_verdict": "router",
-        "_handle_delegate": "router",
-        "_handle_request": "router",
-        "_handle_extend_lease": "router",
-        "_deliver_specialist_inbox": "router",
-        "_handle_prune_branch": "router",
-        "_handle_escalate_strategy_change": "router",
-        "_handle_send_message": "router",
-        "_handle_alert": "router",
         "_handle_update_state": "router",
         # recorder (folded into writeback)
         "_aggregate_research_evidence": "writeback",
@@ -1144,7 +1132,7 @@ class Coordinator:
         # Full-trace: persist the redacted prompt+response for this turn.
         self.conversation._record_reactor_conversation(agent_name, result)
         for intent in result.intents:
-            await self._handle_intent(agent_name, intent)
+            await self.router._handle_intent(agent_name, intent)
         await self.conversation._advance_rendered_cursor(agent_name)
         self.shared_state.agent_last_active[agent_name] = time.time()
 
