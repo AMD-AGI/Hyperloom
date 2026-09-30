@@ -534,6 +534,7 @@ class TestE2EValidationFailsOpen:
             shared_state=state,
             _sync_profile_state_after_gemm_roofline=lambda _r: None,
             _validate_gemm_tuning_e2e=validate,
+            _kernel_timeline_recorder=None,  # no recorder: timeline() returns None without writing
         )
         # ``record_gemm_tuning`` stores a shallow copy, so the neutralising rewrites on the exception path only reach
         # state (and result.json) through these two. The timeline pair comes along because the handler always records
