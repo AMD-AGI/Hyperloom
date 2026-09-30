@@ -1425,7 +1425,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return hint
 
     def bump_phase_budget(self, hint: str) -> None:
-        """Apply an ``extend_*_budget`` hint to its phase's ``phase_budget_pct`` share and record it as consumed."""
+        """Raise the phase share an ``extend_*_budget`` hint names."""
         from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, apply_escalate_budget_bump
 
         phase = {
