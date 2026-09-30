@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
 import struct
@@ -542,48 +541,3 @@ def analytic_ceiling(
         est["ideal_ms"] = est["total_flops"] / (pk * 1e12) * 1e3
         est["ideal_ms_per_step"] = est["per_step_flops"] / (pk * 1e12) * 1e3
     return est
-
-
-def _fmt(est: dict[str, Any]) -> str:
-    tf = est["total_flops"] / 1e12
-    line = (
-        f"{est['model_class']:<34} {est['family']:<10} "
-        f"h={est['hidden']:<5} L={est['layers']:<3} "
-        f"tok={est['image_tokens']:<5}+{est['text_tokens']:<4} "
-        f"steps={est['num_steps']:<3}x{est['cfg_batch']} "
-        f"{tf:8.1f} TFLOP/img"
-    )
-    if "ideal_ms" in est:
-        line += f"  ideal={est['ideal_ms']:8.1f} ms ({est['peak_tflops']:.0f} TFLOPS)"
-    return line
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Per-architecture diffusion FLOPs / compute ceiling")
-    ap.add_argument("--model-dir", required=True, help="Local diffusers model directory.")
-    ap.add_argument("--gpu-type", default="mi355x")
-    ap.add_argument("--precision", default="bf16")
-    ap.add_argument("--height", type=int, default=1024)
-    ap.add_argument("--width", type=int, default=1024)
-    ap.add_argument("--steps", type=int, default=0, help="Override denoise steps (0 = family default).")
-    ap.add_argument("--cfg-batch", type=int, default=0, help="Override forwards/step (0 = family default).")
-    ap.add_argument("--json", action="store_true")
-    args = ap.parse_args()
-    est = analytic_ceiling(
-        args.model_dir,
-        gpu_type=args.gpu_type,
-        precision=args.precision,
-        height=args.height,
-        width=args.width,
-        num_steps=args.steps or None,
-        cfg_batch=args.cfg_batch or None,
-    )
-    if est is None:
-        print(f"could not resolve denoiser geometry for {args.model_dir}")
-        return 1
-    print(json.dumps(est, indent=2) if args.json else _fmt(est))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -31,7 +31,6 @@ can be measured directly.
 from __future__ import annotations
 
 import functools
-import json
 import logging
 import os
 import re
@@ -45,11 +44,10 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 try:  # package import (TraceLens route / tests)
-    from . import kernel_source_index, source_env
+    from . import kernel_source_index
     from .kernel_source_index import is_editable_source
 except ImportError:  # flat top-level import (tools/ on sys.path)
     import kernel_source_index  # type: ignore[no-redef]
-    import source_env  # type: ignore[no-redef]
     from kernel_source_index import is_editable_source  # type: ignore[no-redef]
 
 __all__ = [
@@ -420,71 +418,3 @@ def resolve_source(
     ``"symbol_index"`` on a hit, else ``"unresolved"`` / ``"non_patchable"``.
     """
     return resolve(op_name, framework=framework, device_kernel_name=device_kernel_name).as_legacy_tuple()
-
-
-# ----------------------------------------------------------------------------
-# Latency benchmark CLI
-# ----------------------------------------------------------------------------
-def _sample_candidates(index: kernel_source_index.SourceIndex, top_k: int) -> list[dict[str, str]]:
-    """Build sample candidates from the live index's base kernel symbols."""
-    out: list[dict[str, str]] = []
-    for sym in index.symbol_index:
-        out.append({"op_name": "", "device_kernel_name": sym})
-        if top_k and len(out) >= top_k:
-            break
-    return out
-
-
-def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - standalone CLI driver
-    """CLI: ``--bench`` times the finder over sample kernel candidates."""
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Benchmark the v2 source finder latency.")
-    parser.add_argument("--bench", action="store_true", help="Run the latency benchmark.")
-    parser.add_argument("--top-k", type=int, default=15, help="Number of candidates to resolve.")
-    parser.add_argument("--framework", default="vllm", help="Framework hint (vllm/sglang).")
-    parser.add_argument("--candidates", default="", help="Optional JSON file: [{op_name, device_kernel_name}].")
-    args = parser.parse_args(argv)
-
-    reset_latency()
-    fw = source_env.discover_frameworks()
-    if not fw:
-        print("No frameworks (vllm/sglang/aiter) discovered; cannot benchmark.")
-        return 1
-
-    t0 = time.perf_counter()
-    index = kernel_source_index.build_index(fw)
-    index_ms = round((time.perf_counter() - t0) * 1000.0, 2)
-    _LATENCY.setdefault(index.version_tag, _LatencyBucket(version_tag=index.version_tag)).index_build_ms = index_ms
-
-    if args.candidates:
-        try:
-            cands = json.loads(Path(args.candidates).read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            print(f"Failed to read candidates: {exc}")
-            return 1
-    else:
-        cands = _sample_candidates(index, args.top_k)
-
-    resolved = 0
-    for c in cands:
-        res = resolve(
-            c.get("op_name", ""),
-            framework=args.framework,
-            device_kernel_name=c.get("device_kernel_name", ""),
-            index=index,
-        )
-        if res.source_file:
-            resolved += 1
-
-    report = latency_report()
-    print(f"Version: {index.version_tag}")
-    print(f"Index build: {index_ms} ms ({index.symbol_count} symbols / {index.file_count} files)")
-    print(f"Candidates: {len(cands)} | resolved: {resolved}")
-    for tag, stats in report.items():
-        print(f"Latency[{tag}]: {json.dumps(stats)}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(_main())
