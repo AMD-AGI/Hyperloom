@@ -372,7 +372,7 @@ class KernelPhase(CoordinatorCollaborator):
 
     def timeline(self) -> Any:
         """The in-flight kernel timeline recorder, or ``None``."""
-        return getattr(self, "_kernel_timeline_recorder", None)
+        return self._kernel_timeline_recorder if hasattr(self, "_kernel_timeline_recorder") else None
 
     def _open_kernel_timeline(self, *, route: str, route_reason: str, from_phase: str) -> None:
         """Open the kernel timeline event for this KERNEL entry."""
@@ -1722,7 +1722,7 @@ class KernelPhase(CoordinatorCollaborator):
         """Validate the return and record any measured claim without a headline gain."""
         if not isinstance(result, dict):
             return False
-        result.setdefault("kernel_event_id", kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0)))
+        result.setdefault("kernel_event_id", kernel_event_id(int(self.shared_state.macro_cycle or 0)))
         try:
             accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
         except ValueError as exc:
@@ -2077,7 +2077,7 @@ class KernelPhase(CoordinatorCollaborator):
                 rejection_reason="overlay_not_proven_loaded",
             )
         if base > 0:
-            self._coord.writeback._update_cumulative_gain_validated(
+            self._coord.writeback.validate(
                 measured,
                 graded_measurement,
                 source="geak_e2e_promote",
@@ -2168,7 +2168,7 @@ class KernelPhase(CoordinatorCollaborator):
                     "decision_reason": provenance,
                     "artifact_kind": str(spec.get("kind") or "authored"),
                     "ts": ts,
-                    "cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    "cycle": int(self.shared_state.macro_cycle or 0),
                 }
             )
             # Max over attempts, matching the canonical ledger writer in ``_kernel_decisions.py`` -- ``by_kernel`` and
@@ -2208,7 +2208,7 @@ class KernelPhase(CoordinatorCollaborator):
             _record_geak_integration(
                 entry,
                 kernel_id=kid,
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                macro_cycle=int(self.shared_state.macro_cycle or 0),
             )
         self.shared_state.kernel_integrate_attempts = ledger
         log.info(
@@ -2287,7 +2287,7 @@ class KernelPhase(CoordinatorCollaborator):
 
         record_geak_attempts(
             event=str(
-                result.get("kernel_event_id") or kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0))
+                result.get("kernel_event_id") or kernel_event_id(int(self.shared_state.macro_cycle or 0))
             ),
             journey=journey,
         )
@@ -2314,7 +2314,7 @@ class KernelPhase(CoordinatorCollaborator):
         """Revoke the persisted provisional GEAK KEEPs after a final rebench."""
         reject_geak_attempts(
             event=str(
-                result.get("kernel_event_id") or kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0))
+                result.get("kernel_event_id") or kernel_event_id(int(self.shared_state.macro_cycle or 0))
             ),
             measured_tput=measured_tput,
             current_best_tput=current_best_tput,
@@ -2948,7 +2948,7 @@ class KernelPhase(CoordinatorCollaborator):
         backend = str(result.get("backend") or _resolve_gemm_tuning_backend({})).strip().lower()
         if backend != "forge":
             return False
-        framework = str(getattr(self.shared_state, "framework", "") or "").strip().lower()
+        framework = str(self.shared_state.framework or "").strip().lower()
         if framework != "sglang":
             return False
         if not self._ck_switch_precision_is_fp8(result):
@@ -2957,19 +2957,19 @@ class KernelPhase(CoordinatorCollaborator):
         from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
         from ..actions.executors._workload_envs import _GFX942_GPU_TYPES
 
-        gpu = _resolve_amd_gpu_type(getattr(self.shared_state, "gpu_type", "") or "")
+        gpu = _resolve_amd_gpu_type(self.shared_state.gpu_type or "")
         if gpu not in _GFX942_GPU_TYPES:
             return False
 
         # Block-scale fp8 only, asserted positively via ``weight_block_size``.
         from hyperloom.inference_optimizer.model_config_utils import _fp8_is_block_scale
 
-        model_path = str(getattr(self.shared_state, "model_path", "") or os.environ.get("MODEL_PATH", ""))
+        model_path = str(self.shared_state.model_path or os.environ.get("MODEL_PATH", ""))
         return _fp8_is_block_scale(model_path)
 
     def _ck_switch_precision_is_fp8(self, result: dict[str, Any]) -> bool:
         """Whether the workload runs fp8, resolved from any available signal."""
-        if str(getattr(self.shared_state, "precision", "") or "").strip().lower() == "fp8":
+        if str(self.shared_state.precision or "").strip().lower() == "fp8":
             return True
         if isinstance(result, dict) and str(result.get("precision") or "").strip().lower() == "fp8":
             return True
@@ -3117,7 +3117,7 @@ class KernelPhase(CoordinatorCollaborator):
         if not isinstance(result, dict):
             return
         entry = dict(result)
-        attempts = list(getattr(self.shared_state, "gemm_tuning_attempts", []) or [])
+        attempts = list(self.shared_state.gemm_tuning_attempts or [])
         if attempts and isinstance(attempts[-1], dict):
             entry.setdefault("ts", attempts[-1].get("ts"))
             attempts[-1] = entry
@@ -3303,14 +3303,14 @@ class KernelPhase(CoordinatorCollaborator):
                 reverted.append({**cand, "reason": "aiter_moe_runtime_triton_config_inert"})
                 continue
             if tuner_name == "fmoe_ck" and not model_supports_aiter_ck_fused_moe(
-                str(getattr(self.shared_state, "model_path", "") or ""),
-                int(getattr(self.shared_state, "tp", 0) or 0),
+                str(self.shared_state.model_path or ""),
+                int(self.shared_state.tp or 0),
             ):
                 log.info(
                     "gemm E2E: skipping %s — aiter CK fused-MoE cannot serve "
                     "this model at tp=%s (intermediate size is not 128-aligned)",
                     tuner_name,
-                    getattr(self.shared_state, "tp", 0),
+                    self.shared_state.tp or 0,
                 )
                 reverted.append({**cand, "reason": "aiter_ck_moe_shape_unsupported"})
                 continue
@@ -3354,7 +3354,7 @@ class KernelPhase(CoordinatorCollaborator):
             extra_server_args = (
                 "--moe-runner-backend aiter"
                 if tuner_name == "fmoe_ck"
-                and str(getattr(self.shared_state, "framework", "") or "").lower() == "sglang"
+                and str(self.shared_state.framework or "").lower() == "sglang"
                 else ""
             )
             # Merge with previously KEEP'd envs.
@@ -3385,7 +3385,7 @@ class KernelPhase(CoordinatorCollaborator):
                 "source": "forge_gemm_tuning",
                 "base_tput": running_tput,
                 "model_path": resolve_session_model_path(
-                    state_model_path=str(getattr(self.shared_state, "model_path", "") or ""),
+                    state_model_path=str(self.shared_state.model_path or ""),
                     for_serving=True,
                 ),
                 "extra_server_args": extra_server_args,
@@ -3602,7 +3602,7 @@ class KernelPhase(CoordinatorCollaborator):
                 config_path=paired_config_path,
                 budget_minutes=per_tuner_budget_minutes,
             )
-            if baseline_tput > 0 and self._coord.writeback._update_cumulative_gain_validated(
+            if self._coord.writeback.validate(
                 running_tput,
                 accepted_measurement,
                 source="forge_gemm_tuning_e2e",
@@ -3680,7 +3680,7 @@ class KernelPhase(CoordinatorCollaborator):
         # already initialized, and the handoff rides inside it so each attempt keeps the evidence it was given.
         attempt_dir = next_forge_attempt_dir(
             self.session_dir,
-            int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            int(self.shared_state.macro_cycle or 0),
         )
         handoff_dir = attempt_dir / "handoff"
         # Sealed before the handoff is written and before the controller starts,
@@ -3695,8 +3695,8 @@ class KernelPhase(CoordinatorCollaborator):
 
             baselines = seal_campaign_baseline(
                 self.shared_state,
-                session_id=str(getattr(self.shared_state, "session_id", "") or self.session_dir.name),
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                session_id=str(self.shared_state.session_id or self.session_dir.name),
+                macro_cycle=int(self.shared_state.macro_cycle or 0),
             )
             if baselines:
                 log.info(
@@ -3733,7 +3733,7 @@ class KernelPhase(CoordinatorCollaborator):
             run_controller_subprocess,
         )
 
-        cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        cycle = int(self.shared_state.macro_cycle or 0)
         controller_budget_sec, hard_timeout_sec = self._kernel_rewrite_controller_timeouts()
 
         if controller_budget_sec <= 0 or hard_timeout_sec <= 0:
@@ -3858,20 +3858,20 @@ class KernelPhase(CoordinatorCollaborator):
         framework = str(getattr(self.shared_state, "framework", "") or "sglang").strip().lower()
         if framework not in ("sglang", "vllm", "vllm-aiter"):
             return False
-        trace = str(getattr(self.shared_state, "last_profile_trace", "") or "").strip()
+        trace = str(self.shared_state.last_profile_trace or "").strip()
         if not trace:
             log.info("KERNEL entry: skip forge-fusion (no decode trace yet)")
             return False
-        last = getattr(self.shared_state, "last_fusion", None)
+        last = self.shared_state.last_fusion
         if isinstance(last, dict) and str(last.get("status") or "").strip() in ("ok", "complete", "kept"):
             # A round that kept nothing and left targets unfunded answers only for the ones it ran, so it re-arms
             # fusion until the retry cap is spent.
             if not last.get("kept") and _withheld_targets(last) > 0:
-                return _as_int(getattr(self.shared_state, "fusion_withheld_retries", 0)) < MAX_FUSION_WITHHELD_RETRIES
+                return _as_int(self.shared_state.fusion_withheld_retries) < MAX_FUSION_WITHHELD_RETRIES
             return False
         if isinstance(last, dict) and last.get("infrastructure_abort"):
             # An abort judged nothing, so it must stay retryable -- but not forever.
-            spent = _as_int(getattr(self.shared_state, "fusion_infra_aborts", 0))
+            spent = _as_int(self.shared_state.fusion_infra_aborts)
             if spent >= MAX_FUSION_INFRA_RETRIES:
                 log.info(
                     "KERNEL entry: skip forge-fusion (aborted on infrastructure %d time(s): %s)",
@@ -3928,15 +3928,15 @@ class KernelPhase(CoordinatorCollaborator):
             # Counted on the session, not on the record: ``last_fusion`` is replaced by every run, so a timeout or a
             # handler crash landing between two aborts would carry no count forward and hand the cap back a clean
             # slate on every other entry.
-            spent = _as_int(getattr(self.shared_state, "fusion_infra_aborts", 0))
+            spent = _as_int(self.shared_state.fusion_infra_aborts)
             self.shared_state.fusion_infra_aborts = spent + 1
         if isinstance(result, dict) and not result.get("kept") and _withheld_targets(result) > 0:
             # Counted on the session for the same reason as the aborts above.
-            withheld_spent = _as_int(getattr(self.shared_state, "fusion_withheld_retries", 0))
+            withheld_spent = _as_int(self.shared_state.fusion_withheld_retries)
             self.shared_state.fusion_withheld_retries = withheld_spent + 1
         try:
             if isinstance(result, dict) and not str(result.get("fusion_run_id") or "").strip():
-                cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+                cycle = int(self.shared_state.macro_cycle or 0)
                 result["fusion_run_id"] = f"fusion-c{cycle}-{time.time_ns():x}"
             self.shared_state.last_fusion = result if isinstance(result, dict) else {"status": status}
             self.shared_state.save(self.session_dir)
@@ -4030,7 +4030,7 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _last_measured_roofline_tput(self) -> float:
         """Measured tok/s of the most recent roofline snapshot; 0.0 when none."""
-        snaps = getattr(self.shared_state, "roofline_snapshots", None) or []
+        snaps = self.shared_state.roofline_snapshots or []
         for snap in reversed(snaps):
             if not isinstance(snap, dict):
                 continue
@@ -4045,7 +4045,7 @@ class KernelPhase(CoordinatorCollaborator):
     def _needs_roofline_for_watermark(self) -> bool:
         """True iff projected tput crossed the watermark over ``last_roofline_tput`` (False until PRELUDE roofline ran, or while auto_roofline_pending_task_id is in-flight)."""
         state = self.shared_state
-        if str(getattr(state, "gpu_trace_unsupported_reason", "") or ""):
+        if str(state.gpu_trace_unsupported_reason or ""):
             return False
         try:
             last_rl = float(state.last_roofline_tput or 0.0)
@@ -4055,7 +4055,7 @@ class KernelPhase(CoordinatorCollaborator):
             return False
         if last_rl <= 0:
             try:
-                failure_streak = int(getattr(state, "roofline_failure_streak", 0) or 0)
+                failure_streak = int(state.roofline_failure_streak or 0)
             except (TypeError, ValueError):
                 failure_streak = 0
             if failure_streak <= 0:

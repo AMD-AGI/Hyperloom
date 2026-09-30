@@ -2485,8 +2485,7 @@ class PreludePhase(CoordinatorCollaborator):
             # if the lift raises, the outcome stays in_flight and both the stack
             # and the post-ruling mirror agree there is nothing adopted.
             state.warm_replay_outcome = outcome
-            if baseline_tput > 0:
-                self._coord.writeback._update_cumulative_gain_validated(single_round_tput, result)
+            self._coord.writeback.validate(single_round_tput, result, source="warm_replay")
             log.info(
                 "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%); pushed warm_replay onto stack",
                 measured_gain,
