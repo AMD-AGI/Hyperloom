@@ -32,16 +32,15 @@ class SweepPhase(CoordinatorCollaborator):
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
         """Auto-enqueue the ``conc_sweep`` task on SWEEP entry."""
         state = self.shared_state
-        # An unwind a previous leg left owed still has the stack's patches on the
-        # tree, so settle it before the drain below applies anything on top.
-        settled = await self._recover_interrupted_stack_validation()
+        # A stack attempt an earlier entry or leg left behind may still have its
+        # members on the tree, so settle it before the drain below applies
+        # anything on top; the recovery halts the session if it cannot.
+        await self._recover_interrupted_stack_validation()
         # Drain pending KEEP integrates so sweep measures full current_best.
         if getattr(state, "has_keep_pending_integrate", False):
             await self._drain_pending_keep_integrates()
-        if not settled:
-            # One stack operation per SWEEP entry: a settled recovery has already
-            # moved the tree, so a new validation waits for the next entry.
-            await self._maybe_validate_positive_needs_review_stack()
+        # Validate the stack for positive NEEDS_REVIEW kernels.
+        await self._maybe_validate_positive_needs_review_stack()
         if not state.conc_sweep_enabled:
             log.info(
                 "SWEEP entry (from=%s): conc_sweep disabled; recording terminal skip.",

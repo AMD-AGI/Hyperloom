@@ -91,6 +91,11 @@ def _matching_stack_entries(
     return ordered
 
 
+def _revert_incomplete(stack_id: str) -> RuntimeError:
+    """The error a stack whose revert did not finish halts with."""
+    return RuntimeError(f"stack {stack_id} revert incomplete; checkpoints retained for the next resume")
+
+
 class KernelStackPhase(CoordinatorCollaborator):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
@@ -211,30 +216,24 @@ class KernelStackPhase(CoordinatorCollaborator):
         entries: list[dict[str, Any]],
         result: dict[str, Any],
     ) -> None:
-        """Mark component NEEDS_REVIEW entries as handled by a kept stack."""
+        """Mark the kept stack's bound ledger rows as handled by it."""
         decision = str(result.get("decision") or "").upper()
         now = datetime.now(timezone.utc).isoformat()
-        for entry in self._stack_component_identities(entries):
+        for entry in entries:
             entry.update(stack_resolved=True, stack_decision=decision, stack_resolved_at=now)
-
-    def _stack_component_identities(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Return the live ledger rows the members' patch identities bind to.
-
-        Looked up afresh on every call: recording an integrate result replaces the row objects a caller may hold.
-        """
-        members = resolve_stack_members(
-            {"stack_validation": True, "stack_kernel_ids": [e.get("kernel_id") for e in entries]}
-        )
-        return _matching_stack_entries(members, self.shared_state.kernel_integrate_attempts, identities=entries)
 
     def _mark_stack_validation_in_progress(
         self,
         entries: list[dict[str, Any]],
         stack_id: str,
-    ) -> None:
-        """Persist an in-flight stack guard before applying patches."""
-        for entry in self._stack_component_identities(entries):
-            entry["stack_validation_in_progress"] = True
+    ) -> list[dict[str, Any]]:
+        """Persist an in-flight stack guard before applying patches; return the ledger rows the members bind to."""
+        members = resolve_stack_members(
+            {"stack_validation": True, "stack_kernel_ids": [e.get("kernel_id") for e in entries]}
+        )
+        rows = _matching_stack_entries(members, self.shared_state.kernel_integrate_attempts, identities=entries)
+        for row in rows:
+            row["stack_validation_in_progress"] = True
         self.shared_state.pending_stack_validation_result = {
             "kernel_id": stack_id,
             "stack_validation": True,
@@ -244,6 +243,7 @@ class KernelStackPhase(CoordinatorCollaborator):
             ],
         }
         self.shared_state.pending_stack_validation_apply_results = []
+        return rows
 
     def _clear_pending_stack_validation_checkpoints(self) -> None:
         """Drop crash-recovery checkpoints and every in-flight guard once a stack attempt is finished.
@@ -257,24 +257,37 @@ class KernelStackPhase(CoordinatorCollaborator):
         self.shared_state.pending_stack_validation_apply_results = []
 
     async def _recover_interrupted_stack_validation(self) -> bool:
-        """Settle a stack validation interrupted by crash; return whether there was one."""
-        pending = self.shared_state.pending_stack_validation_result
-        if pending and not isinstance(pending, dict):
-            raise ValueError("stack recovery checkpoint must be a mapping")
-        if not pending and not self.shared_state.pending_stack_validation_apply_results:
-            return False
-        if pending.get("decision") and not revert_owed(pending):
-            # Only a KEEP goes on to promote its members, so only a KEEP needs them bound; a settled REVERT has
-            # already left the tree as it found it.
-            keep = str(pending["decision"]).upper() == "KEEP"
-            await self._finalize_stack_validation_outcome(self._settled_stack_members(pending) if keep else [], pending)
-            return True
+        """Settle a stack attempt a crash or halt left behind; return whether there was one.
 
-        # Either the attempt never reached a decision, or its decision's revert did not finish: the members are
-        # still on the tree, so tear them down before anything else measures it.
-        self._unwind_stack_patches()
+        The record, an apply row and a ledger row's in-flight guard each mean an attempt started. A guard alone is
+        what v1.1.2 left when it crashed before its first apply checkpoint; with no apply row there is nothing to
+        revert, so recovery only releases the members.
+        """
+        state = self.shared_state
+        pending = state.pending_stack_validation_result
+        guarded = any(
+            isinstance(entry, dict) and entry.get("stack_validation_in_progress")
+            for entry in (state.kernel_integrate_attempts or {}).values()
+        )
+        if not (pending or state.pending_stack_validation_apply_results or guarded):
+            return False
+        try:
+            if pending and not isinstance(pending, dict):
+                raise ValueError("stack recovery checkpoint must be a mapping")
+            if pending.get("decision") and not revert_owed(pending):
+                # Only a KEEP goes on to promote its members, so only a KEEP needs them bound; a settled REVERT has
+                # already left the tree as it found it.
+                keep = str(pending["decision"]).upper() == "KEEP"
+                stack = self._settled_stack_members(pending) if keep else []
+                await self._finalize_stack_validation_outcome(stack, pending)
+                return True
+            # Either the attempt never reached a decision, or its decision's revert did not finish: the members are
+            # still on the tree, so tear them down before anything else measures it.
+            self._unwind_stack_patches()
+        except ValueError as exc:
+            self._halt_stack_recovery(exc)
         self._clear_pending_stack_validation_checkpoints()
-        self.shared_state.save(self.session_dir)
+        state.save(self.session_dir)
         return True
 
     def _settled_stack_members(self, pending: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -301,18 +314,19 @@ class KernelStackPhase(CoordinatorCollaborator):
         for applied in reversed(partial_applies):
             if not lifecycle_complete(_maybe_revert_kernel_patch(applied)):
                 stack_id = str((self.shared_state.pending_stack_validation_result or {}).get("kernel_id") or "")
-                self._halt_on_owed_revert(stack_id)
+                self._halt_stack_recovery(_revert_incomplete(stack_id))
 
-    def _halt_on_owed_revert(self, stack_id: str) -> NoReturn:
-        """Stop the session on a patched tree, keeping the evidence the next resume retries from.
+    def _halt_stack_recovery(self, error: Exception) -> NoReturn:
+        """Stop the session on stack state no resume can account for, keeping the evidence, then raise ``error``.
 
         ``_on_phase_entered`` logs and swallows whatever a phase hook raises, so the raise alone would let SWEEP
-        benchmark the patched tree. The stop reason is what actually ends the run, and it is deliberately not an
+        benchmark the tree. The stop reason is what actually ends the run, and it is deliberately not an
         infrastructure one: a tree that no longer matches the ledger is a failed session, not an aborted one.
         """
         self.shared_state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
         self.shared_state.save(self.session_dir)
-        raise RuntimeError(f"stack {stack_id} revert incomplete; checkpoints retained for the next resume")
+        log.error("stack recovery halted the session: %r", error)
+        raise error
 
     async def _finalize_stack_validation_outcome(
         self,
@@ -323,7 +337,7 @@ class KernelStackPhase(CoordinatorCollaborator):
         decision = str(result.get("decision") or "").upper()
         self.shared_state.record_kernel_integrate_result(result)
         if revert_owed(result):
-            self._halt_on_owed_revert(str(result.get("kernel_id") or ""))
+            self._halt_stack_recovery(_revert_incomplete(str(result.get("kernel_id") or "")))
         if decision == "KEEP":
             # Marked only once promoted, so a KEEP that dies on the way leaves no
             # row claiming a promotion that never happened.
@@ -349,7 +363,7 @@ class KernelStackPhase(CoordinatorCollaborator):
         if len(stack) < 2:
             return
         stack_id = "+".join(str(e.get("kernel_id") or "") for e in stack)
-        self._mark_stack_validation_in_progress(stack, stack_id)
+        stack = self._mark_stack_validation_in_progress(stack, stack_id)
         self.shared_state.save(self.session_dir)
         result = await self._run_kernel_stack_validation_e2e(stack)
         self.shared_state.pending_stack_validation_result = result

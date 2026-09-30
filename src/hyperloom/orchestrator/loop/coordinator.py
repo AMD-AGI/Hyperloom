@@ -419,6 +419,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_stack_resolved_kernel_ids": "phase_kernel_stack",
         "_mark_stack_validation_in_progress": "phase_kernel_stack",
         "_recover_interrupted_stack_validation": "phase_kernel_stack",
+        "_halt_stack_recovery": "phase_kernel_stack",
         "_maybe_validate_positive_needs_review_stack": "phase_kernel_stack",
         "_run_kernel_stack_validation_e2e": "phase_kernel_stack",
         "_auto_enqueue_pending_integrations": "phase_kernel_stack",

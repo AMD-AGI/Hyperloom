@@ -1577,6 +1577,17 @@ async def test_conc_sweep_task_carries_catalogue_lanes(coord):
     assert sorted(task.requires_lanes or []) == expected_lanes
 
 
+def _assert_halted_with_nothing_else_changed(after: dict[str, Any], before: dict[str, Any]) -> None:
+    """The recovery refused: it recorded the halt and left every checkpoint and ledger row as it found them."""
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+
+    assert after["stop_reason"] == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    halt_fields = ("stop_reason", "stop_ts")
+    assert {k: v for k, v in after.items() if k not in halt_fields} == {
+        k: v for k, v in before.items() if k not in halt_fields
+    }
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "members",
@@ -1649,8 +1660,8 @@ async def test_stack_members_invalid_recovery_preserves_pending_evidence(tmp_pat
 
     revert.assert_not_called()
     c._maybe_enqueue_watermark_roofline.assert_not_called()
-    assert c.shared_state.to_dict() == before
-    assert state_path.read_bytes() == original
+    _assert_halted_with_nothing_else_changed(c.shared_state.to_dict(), before)
+    _assert_halted_with_nothing_else_changed(json.loads(state_path.read_bytes()), json.loads(original))
     assert manifest.read_bytes() == original_manifest
 
 
@@ -1798,7 +1809,7 @@ async def test_stack_members_recovery_rejects_changed_patch(tmp_path, monkeypatc
     with pytest.raises(ValueError, match="(?i)stack|member"):
         await c._recover_interrupted_stack_validation()
 
-    assert c.shared_state.to_dict() == before
+    _assert_halted_with_nothing_else_changed(c.shared_state.to_dict(), before)
     c._maybe_enqueue_watermark_roofline.assert_not_called()
 
 
@@ -1985,24 +1996,50 @@ async def test_stack_revert_recovery_retries_the_unwind_and_clears(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_sweep_entry_settles_the_owed_unwind_instead_of_starting_another_stack(tmp_path: Path, monkeypatch):
-    """One stack operation per SWEEP entry; the members it freed wait for the next one.
+async def test_a_sweep_entry_that_settles_an_owed_unwind_still_validates(tmp_path: Path, monkeypatch):
+    """The members an unwind frees are validated in the same SWEEP entry.
 
-    A settled recovery hands its members back as selectable, so a validation
-    started in the same entry would apply patches to a tree the entry has
-    already moved once.
+    SWEEP can exit straight to CLOSE, which never validates, so a validation
+    deferred to the next entry may never run.
     """
     from hyperloom.inference_optimizer.session.session_binding import session_scope
 
     stuck = await _halt_a_stack_revert(tmp_path, monkeypatch)
     c = _resumed_stack_coordinator(tmp_path)
+    del c.phase_kernel_stack._run_kernel_stack_validation_e2e
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
+    _stub_stack_benchmark(monkeypatch, new_tput=105.0)
 
     with session_scope(tmp_path):
         await c._on_enter_sweep(from_phase="KERNEL")
 
     assert stuck.read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
+    stack_rows = [row for row in c.shared_state.kernel_integrate_attempts.values() if row["kernel_id"] == "k004+k001"]
+    assert [row["attempt_count"] for row in stack_rows] == [2]
+    assert {entry["kernel_id"] for entry in c._positive_needs_review_integrates()} == {"k001", "k004"}
+
+
+@pytest.mark.asyncio
+async def test_a_guard_only_attempt_recovers_and_frees_its_members(tmp_path: Path, monkeypatch):
+    """A guard with no record and no apply row still names an interrupted attempt.
+
+    v1.1.2 cleared the record when it marked the rows, so a crash before
+    the first apply checkpoint left only the guards. Nothing
+    reached the tree, so recovery releases the members.
+    """
+    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
+    c = _stack_validation_coordinator(tmp_path)
+    for row in _ledger_rows(c, ["k001", "k004"]):
+        row["stack_validation_in_progress"] = True
+    c.shared_state.save(tmp_path)
+    c = _resumed_stack_coordinator(tmp_path)
+    report: dict[str, Any] = {"fixes": [], "warnings": []}
+
+    await c.writeback._resume_recover_interrupted_stack(report)
+
+    assert [f["kind"] for f in report["fixes"]] == ["interrupted_stack_validation_recovered"]
+    assert _stack_member_guards(SharedState.load_or_init(tmp_path)) == {"k001": False, "k004": False}
     assert {entry["kernel_id"] for entry in c._positive_needs_review_integrates()} == {"k001", "k004"}
 
 
@@ -2120,14 +2157,25 @@ async def test_a_record_only_checkpoint_unwinds_instead_of_halting(tmp_path: Pat
     assert _stack_member_guards(reloaded) == {"k001": False, "k004": False}
 
 
+async def _enter_at_resume(c: Coordinator, report: dict[str, Any]) -> None:
+    await c.writeback._resume_recover_interrupted_stack(report)
+
+
+async def _enter_at_sweep(c: Coordinator, report: dict[str, Any]) -> None:
+    c.tasks = _StubTaskRegistry()
+    c.knowledge_plane = None
+    await c._on_enter_sweep(from_phase="KERNEL")
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enter", [_enter_at_resume, _enter_at_sweep], ids=["resume", "sweep_entry"])
 @pytest.mark.parametrize(
     "corrupt", [_drop_attempt_evidence, _duplicate_a_member_row], ids=["no_identities", "duplicate_row"]
 )
-async def test_an_unbindable_keep_records_the_halt_then_raises(tmp_path: Path, monkeypatch, corrupt):
+async def test_an_unbindable_keep_records_the_halt_then_raises(tmp_path: Path, monkeypatch, corrupt, enter):
     """A KEEP has finalized its patches with no backup left, so a record bound to no single row can only halt.
 
-    The stop reason is durable before the raise, and nothing is promoted or marked resolved.
+    The stop reason is durable before the raise, from either entry, and nothing is promoted or marked resolved.
     """
     from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
     from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -2139,7 +2187,7 @@ async def test_an_unbindable_keep_records_the_halt_then_raises(tmp_path: Path, m
     report: dict[str, Any] = {"fixes": [], "warnings": []}
 
     with session_scope(tmp_path), pytest.raises(ValueError, match="(?i)stack|member"):
-        await c.writeback._resume_recover_interrupted_stack(report)
+        await enter(c, report)
 
     assert report["fixes"] == []
     assert all(path.read_text(encoding="utf-8") == _STACK_PATCHED_SOURCE for path in targets)
@@ -2156,8 +2204,10 @@ async def test_a_stack_row_that_names_no_members_fails_the_resume_pass(tmp_path:
 
     Every reader below derives kept kernel ids from those rows, so a row that
     cannot say what it integrated is a corrupt state file rather than a finding
-    for whichever hot path reaches it first.
+    for whichever hot path reaches it first. The stop reason is durable before the raise.
     """
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+
     monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
     c = _stack_validation_coordinator(tmp_path)
     c.shared_state.optimization_stack = [{"action": "integrate", "kernel_id": "k001+k004", "tput": 120.0}]
@@ -2165,6 +2215,8 @@ async def test_a_stack_row_that_names_no_members_fails_the_resume_pass(tmp_path:
 
     with pytest.raises(ValueError, match="(?i)stack|member"):
         await c.writeback._resume_consistency_pass()
+
+    assert SharedState.load_or_init(tmp_path).stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 
 
 @pytest.mark.asyncio
