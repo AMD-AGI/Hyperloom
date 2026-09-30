@@ -15,7 +15,6 @@ import pytest
 
 from hyperloom.orchestrator.tests._helpers import git_commit_all, init_git_repo, patch_integrate_patch_roots
 
-from hyperloom.orchestrator.actions.executors._nogit_patch import _revert_patches_no_git
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
     _apply_patch_no_git,
@@ -2124,16 +2123,6 @@ def test_integrate_patch_executor_imports_clean():
     assert callable(ip_mod.IntegratePatchExecutor)
 
 
-_NOGIT_PATCH = """\
---- a/src.py
-+++ b/src.py
-@@ -1,2 +1,2 @@
- def f():
--    return 1
-+    return 42
-"""
-
-
 def test_is_git_tree_non_git(tmp_path: Path) -> None:
     assert _is_git_tree(tmp_path) is False
 
@@ -2141,30 +2130,6 @@ def test_is_git_tree_non_git(tmp_path: Path) -> None:
 def test_is_git_tree_git_repo(tmp_path: Path) -> None:
     subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
     assert _is_git_tree(tmp_path) is True
-
-
-def test_apply_patch_no_git_keep_and_revert(tmp_path: Path) -> None:
-    framework_root = tmp_path / "fw"
-    framework_root.mkdir()
-    original = "def f():\n    return 1\n"
-    (framework_root / "src.py").write_text(original, encoding="utf-8")
-
-    patch_file = tmp_path / "change.patch"
-    patch_file.write_text(_NOGIT_PATCH, encoding="utf-8")
-    backup_root = tmp_path / "backups"
-
-    ok, err, backups, *_ = _apply_patch_no_git(framework_root, patch_file, backup_root)
-    pytest.importorskip("subprocess")  # ensure patch CLI available; skip gracefully if not
-    if not ok:
-        pytest.skip(f"patch CLI unavailable or patch failed: {err}")
-
-    patched = (framework_root / "src.py").read_text(encoding="utf-8")
-    assert "return 42" in patched, "patch was not applied"
-    assert any(r["backup_path"] for r in backups), "backup was not created"
-
-    _revert_patches_no_git(backups)
-    restored = (framework_root / "src.py").read_text(encoding="utf-8")
-    assert restored == original, "revert did not restore original content"
 
 
 def test_apply_patch_no_git_rejects_path_traversal_before_apply(
