@@ -79,7 +79,9 @@ hyperloom-kb-collect --mapping hyperloom-sbd-v6 \
 ```
 
 AgentX sessions are skipped until the Experience declaration can represent
-their benchmark mode and workload identity.
+their benchmark mode and workload identity. For the same reason an AgentX run
+reads no Experience: every one it could be shown was measured on the synthetic
+workload.
 
 ## Configuration
 

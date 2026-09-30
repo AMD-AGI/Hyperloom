@@ -14,6 +14,7 @@ from hyperloom.inference_optimizer.experience_kb import (
     CONTENT_INLINE_LIMIT,
     ExperienceKBEvidence,
     ExperienceKBIntegration,
+    integration_for,
 )
 from hyperloom.orchestrator.loop.conversation import ConversationCollaborator
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -446,6 +447,28 @@ def test_specialist_dispatch_reads_only_in_framework_agent_and_fails_open(tmp_pa
         SpecialistPromptInputs(task_id="t-2", domain=get_domain("serving_specialist"), gap_canonical_id="gap.y")
     )
     assert "EXPERIENCE KB" not in user
+
+
+def test_an_agentx_run_reads_no_experience_since_none_of_its_own_is_published(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.setenv("HYPERLOOM_KB_URL", "https://kb.example")
+    monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "service-token")
+    synthetic = SimpleNamespace(shared_state=SharedState(phase="FRAMEWORK_AGENT"))
+    assert isinstance(integration_for(synthetic, tmp_path), ExperienceKBIntegration)
+
+    state = SharedState(tick=4, phase="FRAMEWORK_AGENT", benchmark_mode="agentx")
+    coordinator = Coordinator.__new__(Coordinator)
+    coordinator.session_dir = tmp_path
+    coordinator.shared_state = state
+    coordinator.knowledge_plane = None
+    params = {"domain": "serving_specialist"}
+
+    assert asyncio.run(ConversationCollaborator(coordinator)._kb_prompt_block("proposal")) == ""
+    asyncio.run(coordinator._warm_specialist_params(params))
+
+    assert coordinator._kb_integration is None
+    assert not {"experience_kb_block", "kb_read_id", "kb_rendered_refs"} & set(params)
+    assert state.experience_kb_injections == []
 
 
 def test_proposal_exposure_only_uses_current_orchestration_tick() -> None:
