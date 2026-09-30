@@ -889,7 +889,7 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
     coord.shared_state.phase = "SWEEP"
     coord.shared_state.phase_history = [
         {"to_phase": "EXPLORE", "evidence": {}, "reason": "prelude_done"},
-        {"to_phase": "SWEEP", "evidence": {}, "reason": "plateau_kernel"},
+        {"to_phase": "SWEEP", "evidence": {}, "reason": "kernel_no_more_leverage"},
     ]
     machine_state.record_phase_transition(
         coord.shared_state,
@@ -1027,7 +1027,7 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
         knowledge_plane=None,
     )
     coord.shared_state.phase = "SWEEP"
-    coord.shared_state.phase_history = [{"to_phase": "SWEEP", "evidence": {}, "reason": "plateau_kernel"}]
+    coord.shared_state.phase_history = [{"to_phase": "SWEEP", "evidence": {}, "reason": "kernel_no_more_leverage"}]
     machine_state.record_phase_transition(coord.shared_state, to_phase="CLOSE", reason="sweep_done", evidence={})
 
     await coord.phase_machine._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
