@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 import asyncio
+import collections
 import hashlib
 import json
 import math
@@ -152,6 +153,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # themselves in :meth:`run_task_registered`.
         self._inflight_actions: dict[str, _InflightAction] = {}
         self._executions: set[asyncio.Task[Any]] = set()
+        # Completions waiting to be booked. Appended by on_complete under asyncio.shield;
+        # drained serially by the pump so bookkeeping never interleaves with reactor turns.
+        self._completion_queue: "collections.deque[tuple[Task, Any]]" = collections.deque()
 
     async def close_db_after_executions(self) -> None:
         """Drain physical cleanup and completion before the entry-point loop exits.
@@ -178,7 +182,21 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 len(unconfirmed),
             )
             return
+        await self._drain_completions()
         self.db.close()
+
+    async def _queue_completion(self, task: "Task", gpu_lease: Any, maybe_result: Any) -> None:
+        """Append a completed task to the completion queue for deferred bookkeeping."""
+        self._completion_queue.append((task, maybe_result, gpu_lease))
+
+    async def _drain_completions(self) -> None:
+        """Book all pending completions from the queue, in order."""
+        while self._completion_queue:
+            task, result, gpu_lease = self._completion_queue.popleft()
+            try:
+                await self._reap_dispatched_task(task, result, gpu_lease)
+            except Exception:
+                log.exception("dispatcher: bookkeeping failed for task=%s", task.task_id)
 
     def _registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
         """Resolve ``(requires_lanes, lease_ttl_sec)`` from the action catalogue; lanes filtered to KNOWN_LANES.
@@ -423,6 +441,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         dispatched_ids: set[str] = set()
         try:
             while True:
+                # Drain completed tasks before spawning new ones.
+                await self._drain_completions()
                 # Wall-clock guard: a spent session budget (or a shutdown
                 # request) stops the actions already running, because waiting
                 # for them is what the budget no longer allows.
@@ -792,7 +812,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     gpu_lease=gpu_lease,
                     gpu_specialist_lease=gpu_specialist_lease,
                     cancel_scope=cancel_scope,
-                    on_complete=partial(self._reap_dispatched_task, task, gpu_lease=gpu_lease)
+                    on_complete=partial(self._queue_completion, task, gpu_lease)
                     if join_in_pump
                     else None,
                 ),
