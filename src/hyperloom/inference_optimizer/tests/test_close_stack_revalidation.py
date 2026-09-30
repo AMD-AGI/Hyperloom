@@ -66,7 +66,7 @@ async def test_a_validated_stack_is_not_rebenched(coordinator) -> None:
     calls: list = []
     c.dispatcher.run_task_registered = _run_rebench(c, measured=1100.0, calls=calls)
 
-    await c._revalidate_stack_for_close()
+    await c.phase_close._revalidate_stack_for_close()
 
     assert calls == []
 
@@ -78,7 +78,7 @@ async def test_a_successful_rebench_validates_the_stack_close_then_publishes(coo
     calls: list = []
     c.dispatcher.run_task_registered = _run_rebench(c, measured=1120.0, calls=calls)
 
-    await c._revalidate_stack_for_close()
+    await c.phase_close._revalidate_stack_for_close()
 
     [task] = calls
     assert task.idempotency_key == "close-stack-revalidate-g1"
@@ -123,7 +123,7 @@ async def test_a_failed_rebench_leaves_close_publishing_nothing(coordinator) -> 
     calls: list = []
     c.dispatcher.run_task_registered = _run_rebench(c, measured=None, calls=calls)
 
-    await c._revalidate_stack_for_close()
+    await c.phase_close._revalidate_stack_for_close()
 
     assert len(calls) == 1
     assert c.shared_state.optimization_stack_has_unvalidated_keeps()
@@ -139,7 +139,7 @@ async def test_an_interrupted_run_is_not_rebenched(coordinator, stop_reason) -> 
     calls: list = []
     c.dispatcher.run_task_registered = _run_rebench(c, measured=1100.0, calls=calls)
 
-    await c._revalidate_stack_for_close()
+    await c.phase_close._revalidate_stack_for_close()
 
     assert calls == []
     assert _steps(c)[-1]["status"] == "skipped"
@@ -153,7 +153,7 @@ async def test_a_budget_that_cannot_fit_one_measurement_is_not_rebenched(coordin
     calls: list = []
     c.dispatcher.run_task_registered = _run_rebench(c, measured=1100.0, calls=calls)
 
-    await c._revalidate_stack_for_close()
+    await c.phase_close._revalidate_stack_for_close()
 
     assert calls == []
     assert _steps(c)[-1]["detail"].startswith("session_budget")
@@ -170,7 +170,7 @@ async def test_busy_lanes_cancel_the_rebench_instead_of_leaving_it_queued(coordi
 
     c.dispatcher.run_task_registered = _lanes_busy
 
-    await c._revalidate_stack_for_close()
+    await c.phase_close._revalidate_stack_for_close()
 
     [task] = seen
     assert (await c.tasks.get(task.task_id)).state == "cancelled"
@@ -190,7 +190,7 @@ async def test_a_rebench_that_outlives_its_bound_is_abandoned(coordinator) -> No
 
     c.dispatcher.run_task_registered = _hang
 
-    await c._revalidate_stack_for_close()
+    await c.phase_close._revalidate_stack_for_close()
 
     [task] = seen
     assert (await c.tasks.get(task.task_id)).state == "failed"
