@@ -68,7 +68,7 @@ class SweepPhase(CoordinatorCollaborator):
                 auto_conc_sweep_skipped_validated_gain=cur_validated,
             )
             return
-        denied = self._time_budget_denial_for_action("conc_sweep")
+        denied = self._coord.dispatcher._time_budget_denial_for_action("conc_sweep")
         if denied is not None:
             log.info(
                 "SWEEP entry (from=%s): conc_sweep cannot fit the session budget (%s); recording terminal skip.",
@@ -149,12 +149,12 @@ class SweepPhase(CoordinatorCollaborator):
             "concs": list(state.conc_sweep_concs) if state.conc_sweep_concs else None,
             "total_budget_sec": clamped_budget,
         }
-        lanes, _ = self._registry_lanes_ttl("conc_sweep")
+        lanes, _ = self._coord.dispatcher._registry_lanes_ttl("conc_sweep")
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="conc_sweep",
             params=params,
             requires_lanes=lanes,
-            idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
+            idempotency_key=f"internal-conc_sweep-{reason}{self._coord.dispatcher._cycle_idem_suffix()}",
             lease_ttl_sec=_conc_sweep_lease_ttl_sec(clamped_budget),
             dispatch_class="coordinator",
         )

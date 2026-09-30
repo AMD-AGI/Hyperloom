@@ -39,9 +39,8 @@ def _silent_plan() -> ScriptedPlan:
 def test_stale_delegated_method_raises_attribute_error(monkeypatch: pytest.MonkeyPatch) -> None:
     coord = Coordinator.__new__(Coordinator)
     stale_name = "_stale_delegated_for_test"
-    monkeypatch.setitem(Coordinator._DELEGATED, stale_name, "phase_kernel")
-
-    with pytest.raises(AttributeError, match="does not define"):
+    # _DELEGATED no longer exists; unknown attributes raise AttributeError directly.
+    with pytest.raises(AttributeError):
         getattr(coord, stale_name)
 
 
@@ -51,10 +50,8 @@ def _build_backends() -> dict[str, Backend]:
 
 def test_delegated_missing_attr_raises_attribute_error_not_recursion(monkeypatch) -> None:
     coord = object.__new__(Coordinator)
-    coord.__dict__["dummy_owner"] = object()
-    monkeypatch.setitem(Coordinator._DELEGATED, "_deleted_delegate", "dummy_owner")
-
-    with pytest.raises(AttributeError, match="delegates '_deleted_delegate'"):
+    # All cross-collaborator calls are now explicit; unknown attributes raise immediately.
+    with pytest.raises(AttributeError):
         getattr(coord, "_deleted_delegate")
 
 
@@ -168,14 +165,12 @@ def coord(session_dir) -> Coordinator:
 
 
 def test_every_delegated_name_resolves_on_its_collaborator(coord: Coordinator) -> None:
-    """A map entry naming a method its collaborator never defined is a crash at first call, not at import."""
-    unresolved = []
-    for name in Coordinator._DELEGATED:
-        try:
-            getattr(coord, name)
-        except AttributeError as exc:
-            unresolved.append(f"{name}: {exc}")
-    assert unresolved == []
+    """All cross-collaborator methods live on their explicit collaborator property."""
+    # Spot-check a selection of previously-delegated methods to confirm they
+    # are reachable through the owning collaborator, not through the coordinator.
+    assert callable(getattr(coord.writeback, "_record_observation", None))
+    assert callable(getattr(coord.dispatcher, "_pump_dispatcher_once", None))
+    assert callable(getattr(coord.phase_kernel, "timeline", None))
 
 
 # -- _context_inbox_reader --------------------------------------------------
@@ -1568,7 +1563,7 @@ async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatc
     async def _fake_delegate(source, intent):
         seen.append(dict(intent.payload.get("params") or {}))
 
-    monkeypatch.setattr(coord, "_handle_delegate", _fake_delegate)
+    monkeypatch.setattr(coord.router, "_handle_delegate", _fake_delegate)
     intent = Intent(
         type=IntentType.DELEGATE,
         payload={"idempotency_key": "wave", "action_name": "specialist"},
@@ -1865,7 +1860,7 @@ async def test_record_specialist_result_harvests_findings(coord: Coordinator, mo
     async def harvest(done_payload):
         harvested.append(done_payload)
 
-    monkeypatch.setattr(coord, "_harvest_specialist_findings", harvest)
+    monkeypatch.setattr(coord.writeback, "_harvest_specialist_findings", harvest)
     await coord.writeback._record_specialist_result(
         task=task,
         done_payload={
@@ -2131,7 +2126,7 @@ async def test_direct_integrate_proposal_inherits_specialist_owner(
         idempotency_key="owner-source",
     )
     monkeypatch.setattr(
-        coord.router,
+        coord.dispatcher,
         "_admission_denial_for_action",
         lambda _action: None,
     )

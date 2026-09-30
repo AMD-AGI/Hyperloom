@@ -187,7 +187,7 @@ class KernelStackPhase(CoordinatorCollaborator):
                 if isinstance(result, dict) and result.get("status") != "skipped":
                     state.record_kernel_integrate_result(result)
                     if str(result.get("decision") or "").upper() == "KEEP":
-                        await self._record_integrate_keep(result)
+                        await self._coord.writeback._record_integrate_keep(result)
                 state.save(self.session_dir)
             except Exception as exc:
                 log.exception(
@@ -451,7 +451,7 @@ class KernelStackPhase(CoordinatorCollaborator):
         if decision == "KEEP":
             self._mark_stack_validation_entries_resolved(stack, result)
             self.shared_state.save(self.session_dir)
-            await self._record_integrate_keep(result)
+            await self._coord.writeback._record_integrate_keep(result)
         else:
             self._clear_stack_validation_in_progress(stack)
         self._clear_pending_stack_validation_checkpoints()

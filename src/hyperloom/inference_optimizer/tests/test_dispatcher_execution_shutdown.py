@@ -36,6 +36,15 @@ def _dispatcher(tmp_path):
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tasks = TaskRegistry(db)
     state = SimpleNamespace(phase="PRELUDE", macro_cycle=0, tick=0, session_budget_usable_sec=lambda: None)
+    writeback_ns = SimpleNamespace(
+        _promote_to_shared_state=AsyncMock(),
+        _fact_write_hook=AsyncMock(),
+        _is_promotable_result=lambda *_args: True,
+        _handle_unpromotable_result=AsyncMock(),
+        _record_specialist_result=AsyncMock(),
+        _record_intervention_for_task=lambda *_args: None,
+        _record_observation=AsyncMock(),
+    )
     coord = SimpleNamespace(
         db=db,
         locks=locks,
@@ -46,9 +55,7 @@ def _dispatcher(tmp_path):
         _stop=asyncio.Event(),
         _dispatcher_poll_sec=0.01,
         _BUDGET_GATED_DISPATCH_PHASES=frozenset(),
-        _promote_to_shared_state=AsyncMock(),
-        _fact_write_hook=AsyncMock(),
-        _is_promotable_result=lambda *_args: True,
+        writeback=writeback_ns,
     )
     dispatcher = DispatcherCollaborator(coord)
     dispatcher._cancel_queued_task_over_budget = AsyncMock(return_value=False)
@@ -112,7 +119,7 @@ def test_asyncio_run_shutdown_waits_for_execution_and_completion(tmp_path, monke
             rows = db.execute("SELECT payload FROM events WHERE topic='delegated_result'").fetchall()
         assert len(rows) == 1
         assert json.loads(rows[0][0])["task_id"] == task_id
-        assert dispatcher._promote_to_shared_state.await_count == 1
+        assert dispatcher._coord.writeback._promote_to_shared_state.await_count == 1
     finally:
         stop_worker.set()
         real_close()
@@ -144,7 +151,7 @@ def test_cancelled_pump_late_success_is_reaped_once(tmp_path, monkeypatch):
         await dispatcher._pump_dispatcher_once()
         events = await dispatcher.db.fetchall("SELECT payload FROM events WHERE topic='delegated_result'")
         assert len(events) == 1
-        assert dispatcher._promote_to_shared_state.await_count == 1
+        assert dispatcher._coord.writeback._promote_to_shared_state.await_count == 1
         await _close(dispatcher)
 
     try:
@@ -203,7 +210,7 @@ def test_normal_pump_completion_is_not_reaped_twice(tmp_path, monkeypatch):
         await dispatcher._pump_dispatcher_once()
         events = await dispatcher.db.fetchall("SELECT payload FROM events WHERE topic='delegated_result'")
         assert len(events) == 1
-        assert dispatcher._promote_to_shared_state.await_count == 1
+        assert dispatcher._coord.writeback._promote_to_shared_state.await_count == 1
         assert not dispatcher._executions
         await _close(dispatcher)
 
@@ -444,8 +451,8 @@ def test_cleanup_unconfirmed_preserves_outcome_without_completion(tmp_path, clea
         assert evidence["cleanup_error"]
         assert completed.await_count == 0
         assert dispatcher.gpu_specialist_pool.release.await_count == 0
-        assert dispatcher._promote_to_shared_state.await_count == 0
-        assert dispatcher._fact_write_hook.await_count == 0
+        assert dispatcher._coord.writeback._promote_to_shared_state.await_count == 0
+        assert dispatcher._coord.writeback._fact_write_hook.await_count == 0
         assert await dispatcher.locks.lane_holders() == {"research_lane": 1}
         assert not await dispatcher.bus.tail(topic="delegated_result")
         await _close(dispatcher)
@@ -571,8 +578,8 @@ def test_confirmed_cleanup_unregisters_even_when_completion_raises(tmp_path, out
 def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path):
     dispatcher = _dispatcher(tmp_path)
     dispatcher._maybe_auto_retry_specialist = AsyncMock(return_value=True)
-    dispatcher._record_specialist_result = AsyncMock()
-    dispatcher._handle_unpromotable_result = AsyncMock()
+    dispatcher._coord.writeback._record_specialist_result = AsyncMock()
+    dispatcher._coord.writeback._handle_unpromotable_result = AsyncMock()
     dispatcher._coord.phase_framework = SimpleNamespace(on_specialist_settled=Mock())
 
     async def run():
@@ -586,10 +593,10 @@ def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path
         events = await dispatcher.bus.tail(topic="delegated_result")
         assert len(events) == 1 and events[0].payload["state"] == "cancelled"
         assert dispatcher._maybe_auto_retry_specialist.await_count == 0
-        assert dispatcher._record_specialist_result.await_count == 1
+        assert dispatcher._coord.writeback._record_specialist_result.await_count == 1
         assert dispatcher._coord.phase_framework.on_specialist_settled.call_count == 1
-        assert dispatcher._promote_to_shared_state.await_count == 0
-        assert dispatcher._fact_write_hook.await_count == 0
+        assert dispatcher._coord.writeback._promote_to_shared_state.await_count == 0
+        assert dispatcher._coord.writeback._fact_write_hook.await_count == 0
         assert not dispatcher._executions and not dispatcher._inflight_actions
         assert not await dispatcher.locks.lane_holders()
 

@@ -670,7 +670,7 @@ class KernelPhase(CoordinatorCollaborator):
             route_reason=f"kernel_optimizer={str(getattr(state, 'kernel_optimizer', '') or '')}",
             from_phase=from_phase,
         )
-        lanes, catalogue_ttl = self._registry_lanes_ttl("kernel_agent")
+        lanes, catalogue_ttl = self._coord.dispatcher._registry_lanes_ttl("kernel_agent")
         # Leases do not expire on their TTL, so it only records how long the holder expects to keep the lanes.
         remaining = _phase_state.phase_budget_remaining_seconds(state)
         ttl = int(remaining) if remaining is not None and remaining > 0 else catalogue_ttl
@@ -707,7 +707,7 @@ class KernelPhase(CoordinatorCollaborator):
             # hand straight to SWEEP.
             await self._run_geak_kernel_phase(from_phase=from_phase)
             return {"status": "ok", "route": "geak"}
-        if not self._gemm_tuning_required_before_kernel_opt():
+        if not self._coord.dispatcher._gemm_tuning_required_before_kernel_opt():
             await self._finish_kernel_entry()
             return {"status": "ok", "route": "forge_no_gemm"}
 
@@ -1073,7 +1073,7 @@ class KernelPhase(CoordinatorCollaborator):
 
         cb = state.current_best or {}
         try:
-            env_spec = self.build_env_spec()
+            env_spec = self._coord.writeback.build_env_spec()
         except (OSError, TypeError, ValueError) as exc:
             log.exception("geak: cannot serialize the accepted launch configuration")
             recorder = self.timeline()
@@ -1644,7 +1644,7 @@ class KernelPhase(CoordinatorCollaborator):
         GEAK-harness replay (2a) instead.
         """
         state = self.shared_state
-        params = self._geak_rebench_params(reason=reason)
+        params = self._coord.writeback._geak_rebench_params(reason=reason)
         skip_reason = params.get("reason") if params.get("skipped") else None
         if skip_reason == "geak_invalid_config":
             return
@@ -1670,16 +1670,16 @@ class KernelPhase(CoordinatorCollaborator):
             }
             state.save(self.session_dir)
             raise
-        if self._is_promotable_result("explore", result):
-            await self._promote_to_shared_state("explore", result, task=task)
+        if self._coord.writeback._is_promotable_result("explore", result):
+            await self._coord.writeback._promote_to_shared_state("explore", result, task=task)
         else:
-            await self._handle_unpromotable_result(task, result)
+            await self._coord.writeback._handle_unpromotable_result(task, result)
 
     async def _revalidate_on_geak_harness(self, *, decline_reason: str) -> None:
         """Replay the candidate through GEAK's own harness (2a); record the decline when it does not validate."""
         state = self.shared_state
         log.warning("geak: 2b declined (%s); validating through the GEAK harness instead", decline_reason)
-        fb = await self._validate_geak_via_geak_harness(reason=decline_reason)
+        fb = await self._coord.writeback._validate_geak_via_geak_harness(reason=decline_reason)
         # Both are verdicts 2a has already recorded.
         if fb.get("validated") or fb.get("status") == "no_promote":
             return
@@ -2038,7 +2038,7 @@ class KernelPhase(CoordinatorCollaborator):
                 promotion_measurement["extra_envs"] = launch_envs
                 promotion_measurement.update(launch_controls)
                 promotion_measurement["args_mode"] = "replace"
-        lifted = self._lift_to_current_best(
+        lifted = self._coord.writeback._lift_to_current_best(
             "geak_e2e",
             measured,
             promotion_measurement,
@@ -2076,7 +2076,7 @@ class KernelPhase(CoordinatorCollaborator):
                 rejection_reason="overlay_not_proven_loaded",
             )
         if base > 0:
-            self._update_cumulative_gain_validated(
+            self._coord.writeback._update_cumulative_gain_validated(
                 measured,
                 graded_measurement,
                 source="geak_e2e_promote",
@@ -3065,7 +3065,7 @@ class KernelPhase(CoordinatorCollaborator):
     ) -> None:
         """Mirror an adopted GEMM-tuning stack entry as an optimization_journal KEEP row."""
         try:
-            journal = self._ensure_journal()
+            journal = self._coord.writeback._ensure_journal()
             variant_name = str(entry.get("variant_name") or "gemm_tuning")
             backend = str(entry.get("backend") or "").strip().lower()
             try:
@@ -3081,7 +3081,7 @@ class KernelPhase(CoordinatorCollaborator):
                 metrics["tuned_file"] = str(entry.get("tuned_file"))
             journal.append_entry(
                 JournalEntry(
-                    phase=self._journal_entry_phase(),
+                    phase=self._coord.writeback._journal_entry_phase(),
                     iter=int(self.shared_state.tick or 0),
                     kind=KIND_GEMM_TUNING,
                     change=variant_name,
@@ -3549,7 +3549,7 @@ class KernelPhase(CoordinatorCollaborator):
 
             if decision == "KEEP" and new_tput > 0 and not apply_blockers:
                 tuned_file = _candidate_tuned_file(env, cand.get("env_var", ""))
-                lifted = self._lift_to_current_best(
+                lifted = self._coord.writeback._lift_to_current_best(
                     "gemm_tuning",
                     new_tput,
                     {
@@ -3602,7 +3602,7 @@ class KernelPhase(CoordinatorCollaborator):
                 config_path=paired_config_path,
                 budget_minutes=per_tuner_budget_minutes,
             )
-            if baseline_tput > 0 and self._update_cumulative_gain_validated(
+            if baseline_tput > 0 and self._coord.writeback._update_cumulative_gain_validated(
                 running_tput,
                 accepted_measurement,
                 source="forge_gemm_tuning_e2e",
@@ -3708,7 +3708,7 @@ class KernelPhase(CoordinatorCollaborator):
         try:
             from ..kernel.forge_handoff import write_forge_handoff
 
-            env_spec = self.build_env_spec()
+            env_spec = self._coord.writeback.build_env_spec()
             handoff_dir = write_forge_handoff(
                 self.session_dir,
                 self.shared_state,
@@ -3796,7 +3796,7 @@ class KernelPhase(CoordinatorCollaborator):
                     patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
                     session_dir=self.session_dir,
                     shared_state=self.shared_state,
-                    record_keep=self._record_integrate_keep,
+                    record_keep=self._coord.writeback._record_integrate_keep,
                 )
                 result["integration"] = integration.to_dict()
             except Exception as error:

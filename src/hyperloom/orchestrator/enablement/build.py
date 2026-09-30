@@ -495,7 +495,7 @@ class EnablementBuild(CoordinatorCollaborator):
             The probe ``task_id`` and the generation it sits on; the id is empty
             when nothing was enqueued.
         """
-        denied = self._time_budget_denial_for_action("integrate_patch")
+        denied = self._coord.dispatcher._time_budget_denial_for_action("integrate_patch")
         if denied is not None:
             log.info(
                 "ENABLEMENT: build launch probe held for build=%s, not enqueued -- %s",
@@ -525,7 +525,7 @@ class EnablementBuild(CoordinatorCollaborator):
             params["config_path"] = cfg
         # The probe boots a server and mutates the tree, so it takes the lanes its own kind declares rather than a
         # specialist's research lane.
-        lanes, ttl = self._registry_lanes_ttl("integrate_patch")
+        lanes, ttl = self._coord.dispatcher._registry_lanes_ttl("integrate_patch")
         if not lanes:
             raise RuntimeError("integrate_patch resolved to no lanes; the launch probe would run unserialised.")
         probe_task, generation = await self._coord.enablement_revalidation._open_row_past_spent_generations(
