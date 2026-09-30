@@ -13,10 +13,7 @@ from typing import Any
 from hyperloom.common.deadline import Deadline
 import logging as _logging
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
-from hyperloom.inference_optimizer.breakdown.stop_reasons import (
-    PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
-    is_valid_stop_reason,
-)
+from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
@@ -73,29 +70,6 @@ class ClosePhase(CoordinatorCollaborator):
     CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
     CLOSE_STACK_REVALIDATION_TIMEOUT_SEC: float = 600.0
     _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
-
-    def _derive_close_stop_reason(self) -> str:
-        """Best-effort ``stop_reason`` for a CLOSE reached blank: recover from the newest CLOSE-bound phase_history row, else time_exhausted."""
-        history = self.shared_state.phase_history or []
-        for row in reversed(history):
-            if not isinstance(row, dict):
-                continue
-            if (row.get("to_phase") or "").strip().upper() != _phase_state.PHASE_CLOSE:
-                continue
-            reason = (row.get("reason") or "").strip()
-            evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
-            if (
-                reason == "sweep_done"
-                and evidence.get("sweep_was_skipped")
-                and evidence.get("sweep_skip_budget_exhausted")
-                and str(evidence.get("sweep_skip_reason") or "") == "budget_exhausted_no_successful_pairs"
-            ):
-                return "sweep_failed"
-            if reason and is_valid_stop_reason(reason):
-                return reason
-            # Newest CLOSE-bound row had no usable reason — stop rather than use a stale older one.
-            break
-        return "time_exhausted"
 
     def _session_integrated_kernel_patch(self) -> bool:
         """True iff this session landed a kernel-level optimization (optimization_stack has an integrate/gemm_tuning/geak_e2e entry). Gates the CLOSE post-opt roofline so pure param-search sessions skip the extra profile."""
@@ -472,15 +446,6 @@ class ClosePhase(CoordinatorCollaborator):
         _close_out.record_close_opened(self.session_dir)
         await self._record_close_step("sequencer_started", status="running")
 
-        # stop_reason must persist before step 2's breakdown (collector derives it from state.json); fill only when blank.
-        if not self.shared_state.stop_reason:
-            derived = self._derive_close_stop_reason()
-            self.shared_state.set_stop_reason(derived)
-            try:
-                self.shared_state.save(self.session_dir)
-            except Exception:
-                log.exception("CLOSE: early stop_reason persist failed; step 5 will retry")
-
         # Ahead of the roofline and every close-section record, so they all
         # describe the stack after its last validation settled.
         await self._run_close_step("stack_revalidation", self._do_stack_revalidation())
@@ -522,9 +487,6 @@ class ClosePhase(CoordinatorCollaborator):
 
         # Mark done.
         self.shared_state.close_sequence_done = True
-        # Set stop_reason so the main run loop terminates next tick (idempotent backstop to the early persist).
-        if not self.shared_state.stop_reason:
-            self.shared_state.set_stop_reason(self._derive_close_stop_reason())
         try:
             self.shared_state.save(self.session_dir)
         except Exception:
