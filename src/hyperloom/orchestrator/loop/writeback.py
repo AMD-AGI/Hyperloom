@@ -10,6 +10,7 @@ import json
 import os
 import shlex
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -3305,6 +3306,7 @@ class WritebackCollaborator:
                         variant_name,
                     )
                 stack_entry: dict[str, Any] = {
+                    "stack_entry_id": uuid.uuid4().hex,
                     "action": task_kind,
                     "variant_name": variant_name,
                     "candidate_extra_server_args": candidate_args,

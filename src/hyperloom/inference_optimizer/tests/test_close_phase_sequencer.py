@@ -597,6 +597,7 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
         "fact_finalize",
         "report",
         "session_breakdown",
+        "langfuse_flush",
         "artifact_package",
         "ndjson_drain",
         "done",
@@ -604,6 +605,7 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     by_step = {r["step"]: r for r in rows}
     assert by_step["report"]["status"] == "done"
     assert by_step["session_breakdown"]["status"] == "done"
+    assert by_step["langfuse_flush"]["status"] == "done"
     # fact_finalize now runs first and writes optimization_journal.json, so the artifact package has a curated file to
     # include.
     assert by_step["artifact_package"]["status"] == "done"
@@ -649,6 +651,7 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
         "fact_finalize",
         "report",
         "session_breakdown",
+        "langfuse_flush",
         "artifact_package",
         "ndjson_drain",
         "done",
