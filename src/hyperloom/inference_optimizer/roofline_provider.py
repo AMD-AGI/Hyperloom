@@ -8,9 +8,10 @@ The five read methods mirror the shapes the native math already exposes, so ``Na
 is a thin delegate — the default provider runs the identical stock computation with no CSV, which
 keeps a no-external-CSV run byte-identical by construction.
 
-Milestone 1: this module is additive — nothing is wired to it yet, so it changes no behavior. The
-choke points are switched to ``make_roofline_provider(state).X(...)`` in Milestone 2, and
-``CsvRooflineProvider`` / ``CsvWritingProvider`` land there too.
+The provider is read-only (per design): Hyperloom's existing producers own CSV *writes*; the provider
+only decides, per read, between native compute and an external CSV value. The ceiling choke point
+(:func:`compute_roofline_breakdown_from_state`) consumes it today; the other read methods are the
+stable read surface for the remaining consume sites.
 """
 
 from __future__ import annotations
@@ -154,45 +155,14 @@ class CsvRooflineProvider:
         return self._resolver.kernel(name)
 
 
-class CsvWritingProvider:
-    """Transparent decorator over ``inner`` that also persists to ``out_dir`` (durable artifacts).
-
-    Opt-in — only where a downstream reader needs the CSVs on disk; never changes the value ``inner``
-    returns. In the current design the existing ``publish_*_csv`` producers already write the CSVs at
-    the subprocess boundary, so this wrapper is a pass-through placeholder that a later milestone can
-    extend if a durable-artifact writer is needed beyond those producers.
-    """
-
-    def __init__(self, inner: "RooflineProvider", out_dir: "str | Path | None"):
-        self._inner = inner
-        self._out_dir = out_dir
-
-    def arch_peak(self, device: str, dtype: str) -> float | None:
-        return self._inner.arch_peak(device, dtype)
-
-    def mem_bw(self, device: str) -> float | None:
-        return self._inner.mem_bw(device)
-
-    def ceiling(self, state: Any, *, arm: str | None = None) -> "RooflineBreakdown | None":
-        return self._inner.ceiling(state, arm=arm)
-
-    def model_meta(
-        self, state: Any, model_path: "str | Path", *, precision_hint: str = ""
-    ) -> "ModelMeta | None":
-        return self._inner.model_meta(state, model_path, precision_hint=precision_hint)
-
-    def kernel(self, name: str) -> dict | None:
-        return self._inner.kernel(name)
-
-
 def make_roofline_provider(state: Any) -> RooflineProvider:
     """Pick the provider for this run from the roofline-csv flags (the single decision point).
 
     - ``--roofline-csv-dir`` set -> external: read the MAIDAS CSVs, native fallback (``CsvRooflineProvider``).
     - otherwise (default or ``--no-roofline-csv``) -> pure native.
 
-    CSV *persistence* (durable artifacts) is a separate opt-in ``CsvWritingProvider`` wrap applied only
-    where a downstream reader needs the files; it is never required for correctness in the default run.
+    The provider is read-only: Hyperloom's existing ``publish_*_csv`` producers own CSV persistence, so
+    consuming through the provider never writes.
     """
     native = NativeRooflineProvider()
     csv_dir = str(getattr(state, "roofline_csv_dir", "") or "").strip()
