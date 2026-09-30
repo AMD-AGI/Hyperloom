@@ -22,6 +22,24 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 
 
+def _resume_pending(state) -> bool:
+    """Compute resume_pending_revalidation the same way session_facts.py does."""
+    stack_len = len(state.optimization_stack)
+    validated_len = int(state.cumulative_gain_validated_stack_len or 0)
+    working_gen = int(getattr(state, "working_recipe_generation", 0) or 0)
+    validated_gen = int(state.validated_recipe_generation or 0)
+    return stack_len > validated_len or working_gen != validated_gen
+
+
+def _set_resume_pending(state, value: bool) -> None:
+    """Drive the underlying fields that session_facts reads to produce ``value``."""
+    if value:
+        state.working_recipe_generation = int(state.validated_recipe_generation or 0) + 1
+    else:
+        state.validated_recipe_generation = int(getattr(state, "working_recipe_generation", 0) or 0)
+        state.cumulative_gain_validated_stack_len = len(state.optimization_stack)
+
+
 def integrated_count(ext: dict) -> int:
     """How many of the visit's candidates the timeline shows as integrated."""
     return sum(1 for row in ext["attempts"] if (row.get("e2e") or {}).get("integrated"))
@@ -134,7 +152,7 @@ async def test_geak_acceptance_requires_native_retention(
     result["request_error_rate"] = 0.0
     state.geak_result = deepcopy(result)
     coord.phase_kernel._record_geak_candidate(result)
-    state.resume_pending_revalidation = True
+    _set_resume_pending(state, True)
     before_best = deepcopy(state.current_best)
     before_stack = deepcopy(state.optimization_stack)
     before_gain = state.cumulative_gain_validated
@@ -215,7 +233,7 @@ async def test_fallback_rejection_is_conclusive_and_not_validated(promotion, mon
     state = coord.shared_state
     state.geak_result = deepcopy(result)
     coord.phase_kernel._record_geak_candidate(result)
-    state.resume_pending_revalidation = True
+    _set_resume_pending(state, True)
     before = deepcopy(state.current_best)
     before_gain = state.cumulative_gain_validated
 
