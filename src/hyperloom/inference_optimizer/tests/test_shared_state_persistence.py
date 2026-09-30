@@ -20,11 +20,6 @@ from hyperloom.orchestrator.roles import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.bus.message_bus import MessageBus
-from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
-from hyperloom.orchestrator.policy.gate import PolicyGate
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
-from hyperloom.inference_optimizer.session.session_binding import bind_session
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
@@ -34,23 +29,6 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     return make_session_dir()
-
-
-@pytest.fixture
-def update_state_coordinator(session_dir, monkeypatch):
-    """Wire the real update route without boot-time GPU, source-tree or process work."""
-    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
-    bind_session(session_dir)
-    c = Coordinator.__new__(Coordinator)
-    c.session_dir = session_dir
-    c.shared_state = SharedState(current_action="before", target_summary="original")
-    c.db = SqliteConnection(session_dir / "coordinator.db", journal_mode="DELETE")
-    c.bus = MessageBus(c.db)
-    c.policy = PolicyGate(role_registry=default_role_registry(), shared_state=c.shared_state)
-    try:
-        yield c
-    finally:
-        c.db.close()
 
 
 def _heartbeat() -> Intent:
@@ -173,8 +151,6 @@ def test_save_is_atomic(tmp_path):
         {"crash_count": "bad"},
         {"crash_timestamps": "bad"},
         {"crash_timestamps": [100.0, "bad"]},
-        {"current_action": None},
-        {"target_summary": []},
     ],
 )
 def test_load_rejects_corrupt_state_without_rewriting_evidence(tmp_path, invalid):
@@ -202,8 +178,6 @@ def test_load_legacy_state_keeps_defaults_without_rewriting_file(tmp_path):
     assert state.session_id == "legacy"
     assert state.crash_count == 0
     assert state.crash_timestamps == []
-    assert state.current_action == ""
-    assert state.target_summary == ""
     assert not hasattr(state, "unknown_future_field")
     assert path.read_bytes() == original
 
@@ -215,65 +189,6 @@ def test_from_dict_drops_unknown_fields():
     assert s.baseline_tput == 100.0
     assert s.last_tick_exception == {}
     assert not hasattr(s, "unknown_future_field")
-
-
-def test_apply_changes_only_known_fields():
-    s = SharedState()
-    applied = s.apply_changes(
-        {"current_action": "baseline", "bogus": 1, "cumulative_gain_validated": 5.0},
-        allow_core=True,
-    )
-    assert applied == {"current_action": "baseline", "cumulative_gain_validated": 5.0}
-    assert s.current_action == "baseline"
-    assert s.cumulative_gain_validated == 5.0
-
-
-def test_apply_changes_untrusted_only_applies_allowed_text():
-    s = SharedState(current_action="before")
-    applied = s.apply_changes(
-        {
-            "current_action": "baseline",
-            "target_summary": "GEMM-bound",
-            "crash_timestamps": "bad",
-            "policy_denial_streak": "bad",
-            "pending_targeted_build": "bad",
-            "agent_last_active": "bad",
-            "bogus": 1,
-        },
-        allow_core=False,
-    )
-    assert applied == {"current_action": "baseline", "target_summary": "GEMM-bound"}
-    assert s.crash_timestamps == []
-    assert s.policy_denial_streak == {}
-    assert s.pending_targeted_build == {}
-    assert s.agent_last_active == {}
-    assert not hasattr(s, "bogus")
-
-
-@pytest.mark.parametrize("field_name", ["current_action", "target_summary"])
-@pytest.mark.parametrize("value", [None, False, 1, [], {}])
-def test_apply_changes_untrusted_drops_wrong_text_types(field_name, value):
-    s = SharedState(current_action="before", target_summary="original")
-    assert s.apply_changes({field_name: value}, allow_core=False) == {}
-    assert s.current_action == "before"
-    assert s.target_summary == "original"
-
-
-def test_apply_changes_trusted_can_update_runtime_fields():
-    s = SharedState()
-    changes = {"crash_timestamps": [100.0], "agent_last_active": {"orchestration": 100.0}}
-    assert s.apply_changes(changes, allow_core=True) == changes
-    assert s.crash_timestamps == [100.0]
-    assert s.agent_last_active == {"orchestration": 100.0}
-
-
-def test_agent_update_schema_is_not_persisted_or_instance_writable():
-    s = SharedState()
-    assert "AGENT_UPDATE_FIELDS" not in s.to_dict()
-    assert s.apply_changes({"AGENT_UPDATE_FIELDS": {"crash_timestamps": str}}, allow_core=True) == {}
-    restored = SharedState.from_dict({"AGENT_UPDATE_FIELDS": {"crash_timestamps": "str"}})
-    assert "AGENT_UPDATE_FIELDS" not in restored.__dict__
-    assert restored.AGENT_UPDATE_FIELDS == {"current_action": str, "target_summary": str}
 
 
 def test_add_pruned_family_idempotent():
@@ -302,7 +217,6 @@ def test_to_prompt_summary_contains_key_fields():
         model_name="Llama-3",
         baseline_tput=1840.0,
         cumulative_gain_validated=10.0,
-        current_action="backends",
         pruned_families=["deep_kernel"],
     )
     summary = s.to_prompt_summary()
@@ -310,7 +224,6 @@ def test_to_prompt_summary_contains_key_fields():
     assert "Llama-3" in summary
     assert "1840" in summary
     assert "10.0" in summary
-    assert "backends" in summary
     assert "deep_kernel" in summary
 
 
@@ -377,59 +290,6 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
         assert any(m.payload.get("kind") == "proposal_pruned_advisory" for m in obs)
     finally:
         await c2.stop()
-
-
-@pytest.mark.asyncio
-async def test_coordinator_update_state_persists_known_fields(update_state_coordinator):
-    """Orchestration may persist the two text fields advertised by its prompt."""
-    c = update_state_coordinator
-    await c._handle_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.UPDATE_STATE,
-            payload={"changes": {"current_action": "baseline", "target_summary": "GEMM-bound 8B model"}},
-        ),
-    )
-    assert c.shared_state.current_action == "baseline"
-    assert c.shared_state.target_summary == "GEMM-bound 8B model"
-    on_disk = json.loads((c.session_dir / "state.json").read_text())
-    assert on_disk["current_action"] == "baseline"
-    assert on_disk["target_summary"] == "GEMM-bound 8B model"
-    obs = await c.bus.tail(topic="observation")
-    assert obs[0].payload == {
-        "kind": "update_state",
-        "changes": {"current_action": "baseline", "target_summary": "GEMM-bound 8B model"},
-        "rejected": [],
-    }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("include_allowed", [False, True])
-async def test_coordinator_update_state_drops_unknown_fields(update_state_coordinator, include_allowed):
-    c = update_state_coordinator
-    changes = {"future_unknown_key": 42}
-    if include_allowed:
-        changes["current_action"] = "baseline"
-    await c._handle_intent(
-        "orchestration",
-        Intent(type=IntentType.UPDATE_STATE, payload={"changes": changes}),
-    )
-    assert c.shared_state.current_action == ("baseline" if include_allowed else "before")
-    assert not hasattr(c.shared_state, "future_unknown_key")
-    obs = await c.bus.tail(topic="observation")
-    assert len(obs) == 1
-    assert obs[0].payload == {
-        "kind": "update_state",
-        "changes": {"current_action": "baseline"} if include_allowed else {},
-        "rejected": ["future_unknown_key"],
-    }
-    state_path = c.session_dir / "state.json"
-    if include_allowed:
-        on_disk = json.loads(state_path.read_text())
-        assert on_disk["current_action"] == "baseline"
-        assert "future_unknown_key" not in on_disk
-    else:
-        assert not state_path.exists()
 
 
 def test_reference_fields_survive_resume(tmp_path):

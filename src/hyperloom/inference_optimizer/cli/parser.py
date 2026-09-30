@@ -603,7 +603,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "is injected into prompts but drives no gating."
         ),
     )
-    opt.add_argument("--target-summary", type=str, default=None, help="Free-text goal summary surfaced in prompts")
     opt.add_argument(
         "--compare-against-gpu",
         type=str,

@@ -85,7 +85,6 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     args = SimpleNamespace(
         model="/models/Qwen3",
         model_class="",
-        target_summary="",
         max_hours=1,
         no_kernel=False,
         gpu_type="mi325x",
@@ -115,7 +114,6 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     args = SimpleNamespace(
         model="/models/Qwen3",
         model_class="",
-        target_summary="",
         max_hours=1,
         no_kernel=False,
         gpu_type="mi308x",

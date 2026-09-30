@@ -2003,7 +2003,6 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
     routes = {
         IntentType.PRUNE_BRANCH: "_handle_prune_branch",
         IntentType.ALERT: "_handle_alert",
-        IntentType.UPDATE_STATE: "_handle_update_state",
     }
     for it, attr in routes.items():
 

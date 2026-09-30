@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""SharedState — single-writer (Coordinator) persisted session state, backed by atomic JSON at ``$SESSION_DIR/state.json``; enforces CORE_STATE_FIELDS guards."""
+"""SharedState — single-writer (Coordinator) persisted session state, backed by atomic JSON at ``$SESSION_DIR/state.json``."""
 
 from __future__ import annotations
 
@@ -374,7 +374,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     conc_sweep_concs: list[int] = field(default_factory=list)
     # Total wall-clock budget (s) for conc_sweep. 0 disables the gate.
     conc_sweep_total_budget_sec: int = 9000
-    target_summary: str = ""
     baseline_tput: float = 0.0
     # AgentX corpus shape: written at seed from canonical constants, overwritten with measured values after every
     # AgentX measurement. Read by semantic consumers (prompts, manifest, reports) instead of the inert state.isl /
@@ -511,7 +510,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     close_sequence_done: bool = False
     # Auto-roofline gate (optimisation-phase entry): pending roofline task_id; blocks first-round specialist dispatch until snapshot lands.
     auto_roofline_pending_task_id: str = ""
-    current_action: str = ""
     crash_count: int = 0
     # Unix timestamps of recent crashes (bounded), used for the trailing-window emergency-stop rate so old crashes age
     # out instead of accumulating forever.
@@ -723,7 +721,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     target_gap_pct: float = 0.0
 
     # Phase state machine fields ``phase`` — run-level pipeline phase
-    # (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/CLOSE); Coordinator-only (CORE_STATE_FIELDS).
+    # (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/CLOSE); Coordinator-only writer.
     phase: str = ""
     # ISO UTC timestamp the current phase was entered (breakdown.phase_segments + budget judge).
     phase_started_ts: str = ""
@@ -770,7 +768,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Model-facing advisory context built by ``recipe_kb_t0``.
     warm_start_context: dict[str, Any] = field(default_factory=dict)
 
-    # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only _refresh_gaps; CORE_STATE_FIELDS); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
+    # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only _refresh_gaps); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
     gaps: list[dict[str, Any]] = field(default_factory=list)
 
     # Orchestration working memory — macro-cycle handoff summary; only ``next_cycle_directive`` is read back (into the next cycle's CYCLE DIRECTIVE section), the rest is run-report evidence. Coordinator-only writer.
@@ -790,12 +788,10 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     #:
     #: ``ClassVar`` because a bare annotation would make this constant a
     #: dataclass field: it would be written into every ``state.json``, accepted
-    #: back from disk, and writable through ``apply_changes`` since a constant
-    #: is not something ``CORE_STATE_FIELDS`` thinks to lock. None of that
-    #: changes behaviour while the sole reader goes through ``cls``, which is
-    #: exactly what makes it worth closing -- it decides trace staleness, so an
-    #: instance-scoped read added later would let a stored value govern whether
-    #: a profile is reused or re-run.
+    #: back from disk. None of that changes behaviour while the sole reader goes
+    #: through ``cls``, which is exactly what makes it worth closing -- it
+    #: decides trace staleness, so an instance-scoped read added later would let
+    #: a stored value govern whether a profile is reused or re-run.
     PROFILE_WORKLOAD_IDENTITY_KEYS: ClassVar[tuple[str, ...]] = (
         "benchmark_mode",
         "framework",
@@ -1032,10 +1028,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
     @classmethod
     def _validate_resume_fields(cls, raw: Mapping[str, Any]) -> None:
-        """Reject damaged crash evidence and agent text before migrating a persisted state."""
-        for name, expected in cls.AGENT_UPDATE_FIELDS.items():
-            if name in raw and not isinstance(raw[name], expected):
-                raise ValueError(f"state.json.{name} must be {expected.__name__}, got {type(raw[name]).__name__}")
+        """Reject damaged crash evidence before migrating a persisted state."""
         if "crash_count" in raw:
             count = raw["crash_count"]
             if not isinstance(count, int) or isinstance(count, bool):
@@ -1560,60 +1553,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         }
         self.last_tick_exception = entry
         return entry
-
-    AGENT_UPDATE_FIELDS: ClassVar[dict[str, type]] = {
-        "current_action": str,
-        "target_summary": str,
-    }
-
-    @classmethod
-    def agent_update_errors(cls, changes: Mapping[str, Any]) -> dict[str, str]:
-        """Describe forbidden fields and invalid types; unknown keys remain soft rejections.
-
-        The untrusted path serves one caller -- an agent's UPDATE_STATE intent --
-        and the prompt advertises exactly the fields in
-        :data:`AGENT_UPDATE_FIELDS`. Everything else on the state is the
-        Coordinator's to write through its own actions, so a field outside that
-        set is refused by name rather than landing and surfacing later as a
-        confusing failure in the loop; an advertised field is refused when its
-        type is wrong.
-        """
-        known = {f.name for f in fields(cls)}
-        errors: dict[str, str] = {}
-        for key, value in changes.items():
-            if key not in known:
-                continue
-            expected = cls.AGENT_UPDATE_FIELDS.get(key)
-            if expected is None:
-                errors[key] = "Coordinator-owned field"
-            elif not isinstance(value, expected):
-                errors[key] = f"must be {expected.__name__}, got {type(value).__name__}"
-        return errors
-
-    def apply_changes(self, changes: dict[str, Any], *, allow_core: bool) -> dict[str, Any]:
-        """Apply known fields, dropping each write an untrusted caller may not make.
-
-        A core field never reaches here: PolicyGate refuses that whole intent
-        upstream. Everything this method refuses -- a non-core field outside
-        :data:`AGENT_UPDATE_FIELDS`, a wrong value type -- is dropped per key
-        while the rest of the same call is applied, and the caller reports the
-        difference as ``rejected``.
-        """
-        if not changes:
-            return {}
-        errors = {} if allow_core else self.agent_update_errors(changes)
-        applied: dict[str, Any] = {}
-        # ``fields()`` excludes ClassVar pseudo-fields, so a class constant is not writable here.
-        writable = {f.name for f in fields(self)}
-        for key, value in changes.items():
-            if key not in writable:
-                continue
-            if key in errors:
-                log.warning("apply_changes: dropping state field %r (allow_core=False): %s", key, errors[key])
-                continue
-            setattr(self, key, value)
-            applied[key] = value
-        return applied
 
     def _resolve_kernel_patch_identity(
         self,

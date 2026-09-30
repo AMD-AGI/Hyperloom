@@ -41,7 +41,7 @@ class GapsStateMixin:
         return None
 
     def upsert_gap(self, entry: dict[str, Any]) -> dict[str, Any]:
-        """Insert or update one gap row, keyed by ``canonical_id``. Coordinator-only writer (Inv-1 single-writer + CORE_STATE_FIELDS lock). Returns the merged entry."""
+        """Insert or update one gap row, keyed by ``canonical_id``. Coordinator-only writer. Returns the merged entry."""
         if not isinstance(entry, dict):
             return {}
         cid = str(entry.get("canonical_id") or "").strip()

@@ -269,7 +269,12 @@ def test_kernel_does_not_exit_on_plateau():
         max_minutes=0,
         phase_budget_pct={},
         kernel_opt_task_attempts={
-            "k0": {"last_decision": "REVERT", "last_status": "ok", "rejected_reason": "revert_decision", "failure_count": 0},
+            "k0": {
+                "last_decision": "REVERT",
+                "last_status": "ok",
+                "rejected_reason": "revert_decision",
+                "failure_count": 0,
+            },
             "k1": {"last_decision": "PARTIAL", "last_status": "ok", "rejected_reason": "", "failure_count": 0},
         },
         rejected_kernel_ids=[],
