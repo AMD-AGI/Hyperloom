@@ -69,9 +69,9 @@ def _expected_cid() -> str:
 def test_workload_canonical_id_defined_and_consistent(tmp_path: Path) -> None:
     """``_workload_canonical_id`` exists and agrees with ``recipe_canonical_id``."""
     coord = _make_coordinator(tmp_path)
-    assert hasattr(coord, "_workload_canonical_id")
-    assert coord.conversation._workload_canonical_id() == _expected_cid()
-    assert coord.conversation._workload_canonical_id() == _expected_cid()
+    assert hasattr(coord.proposals, "_workload_canonical_id")
+    assert coord.proposals._workload_canonical_id() == _expected_cid()
+    assert coord.proposals._workload_canonical_id() == _expected_cid()
 
 
 def test_kb_amend_recipe_persists_lesson(tmp_path: Path) -> None:
@@ -214,7 +214,7 @@ def test_kb_amend_recipe_stamps_architecture_tags(tmp_path: Path) -> None:
     coord.proposals._kb_amend_recipe(
         append_lesson={"statement": "raise tp to 8", "measured_impact": "+12%"},
     )
-    row = coord.recipe_kb.get_recipe(canonical_id=coord.conversation._workload_canonical_id())
+    row = coord.recipe_kb.get_recipe(canonical_id=coord.proposals._workload_canonical_id())
     assert row is not None
     assert row.get("architectures") == ["LlamaForCausalLM"]
     assert row.get("model_type") == "llama"
@@ -561,7 +561,7 @@ def test_lift_then_validation_leaves_the_recipe_publishable(tmp_path: Path) -> N
     assert (state.working_recipe_generation, state.validated_recipe_generation) == (1, 0)
     assert state.optimization_stack_has_unvalidated_keeps()
 
-    assert coord.writeback._update_cumulative_gain_validated(1100.0, {"output_throughput": 1100.0})
+    assert coord.writeback.validate(1100.0, {"output_throughput": 1100.0})
     assert state.validated_recipe_generation == state.working_recipe_generation == 1
 
     outcome = coord.writeback.finalize_recipe_and_journal()

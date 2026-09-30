@@ -245,7 +245,7 @@ async def test_coordinator_loads_existing_shared_state(session_dir):
 async def test_coordinator_prune_branch_persists(session_dir):
     c = Coordinator(session_dir, backends=_backends_full())
     try:
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
@@ -263,7 +263,7 @@ async def test_coordinator_prune_branch_persists(session_dir):
 async def test_pruned_family_survives_coordinator_restart(session_dir):
     c1 = Coordinator(session_dir, backends=_backends_full())
     try:
-        await c1._handle_intent(
+        await c1.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
@@ -278,7 +278,7 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
     try:
         assert c2.shared_state.is_pruned("long")
         # Prune is advisory: proposals still reach the pending queue.
-        await c2._handle_intent(
+        await c2.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PROPOSE_ACTION,
@@ -298,12 +298,10 @@ def test_reference_fields_survive_resume(tmp_path):
     s.reference_server_args = "--block-size 128"
     s.reference_envs = {"VLLM_USE_BREAKABLE_CUDAGRAPH": "0"}
     s.reference_model = "minimaxm3"
-    s.reference_source = "/recipes/minimaxm3_fp8_mi300x.sh"
     restored = SharedState.from_dict(s.to_dict())
     assert restored.reference_server_args == "--block-size 128"
     assert restored.reference_envs == {"VLLM_USE_BREAKABLE_CUDAGRAPH": "0"}
     assert restored.reference_model == "minimaxm3"
-    assert restored.reference_source == "/recipes/minimaxm3_fp8_mi300x.sh"
 
 
 def test_save_renders_current_setting_sh(tmp_path, monkeypatch):

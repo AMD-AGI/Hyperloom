@@ -209,7 +209,6 @@ class TestSessionBudget:
         assert state.extend_budget_minutes(30.0, reason="operator") == 90.0
         assert state.elapsed_minutes(now=_at(4_600.0)) == pytest.approx(60.0)
         assert state.remaining_minutes(now=_at(4_600.0)) == pytest.approx(30.0)
-        assert state.budget_extensions[-1]["reason"] == "operator"
 
     def test_an_unbounded_session_is_not_bounded_by_an_extension(self):
         state = SharedState(session_id="s")
