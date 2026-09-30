@@ -327,7 +327,7 @@ class TestTheTickItself:
         _fake_usage(monkeypatch, free_gb=500.0, used_frac=0.10)
         c = _maintenance(tmp_path)
 
-        got = await c._run_maintenance(tick=11)
+        got = await c.run(tick=11)
 
         assert got["tick"] == 11
         assert got["disk"]["free_gb"] == 500.0

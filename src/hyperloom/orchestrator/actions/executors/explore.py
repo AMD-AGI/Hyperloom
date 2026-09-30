@@ -513,7 +513,7 @@ class ExploreExecutor:
         # Revalidation reproduces the saved stack, so it never re-anchors.
         anchor, anchor_drifted = (
             (snapshot_tput, False)
-            if params.get("source") == "stack_revalidate"
+            if params.get("source") == STACK_REVALIDATE_SOURCE
             else resolve_anchor_with_drift(snapshot_tput, ss)
         )
         if anchor > snapshot_tput:

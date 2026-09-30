@@ -47,6 +47,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     summarize_change,
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..actions.executors.explore import STACK_REVALIDATE_SOURCE, is_stack_revalidation
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from hyperloom.inference_optimizer.breakdown.stop_reasons import (
@@ -4242,9 +4243,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # Reconcile the validation watermark from the measured tput — but
         # ONLY when the rebench actually produced a valid measurement, so a
         # failed/empty rebench leaves the watermark and reports keep warning.
-        is_revalidation_task = task is not None and str((task.params or {}).get("source") or "") in {
-            "stack_revalidate",
-        }
+        is_revalidation_task = task is not None and is_stack_revalidation(task.params)
         if is_revalidation_task:
             measured = result.get("output_throughput")
             measured_ok = isinstance(measured, (int, float)) and measured > 0
@@ -4602,7 +4601,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 return
             else:
                 if measured_ok and not stale_measurement:
-                    self.validate(measured, result, source="stack_revalidate")
+                    self.validate(measured, result, source=STACK_REVALIDATE_SOURCE)
                     cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
                     recorded = cb_rec.get("tput")
                     floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT

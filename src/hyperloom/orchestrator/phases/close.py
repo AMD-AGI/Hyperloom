@@ -444,8 +444,10 @@ class ClosePhase(CoordinatorCollaborator):
                 "artifact_package", status="skipped", detail="no artifacts matched or dest unwritable"
             )
 
-    async def _on_enter_close(self, *, from_phase: str) -> None:
+    async def _on_enter_close(self, tr: "Transition") -> None:
         """CLOSE sequencer (fixed order): stack revalidation → post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons."""
+        from .machine import Transition  # noqa: F401 — type reference only
+        from_phase = tr.from_phase
         log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
         # Opened before anything can record a step into it. It stands at
         # ``running`` until the verdict below, so a session killed mid-sequence

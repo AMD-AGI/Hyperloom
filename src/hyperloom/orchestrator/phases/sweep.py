@@ -29,8 +29,10 @@ def _conc_sweep_lease_ttl_sec(clamped_budget: int | None) -> int:
 class SweepPhase(CoordinatorCollaborator):
     """SWEEP phase handler: drives concurrency sweep and roofline analysis."""
 
-    async def _on_enter_sweep(self, *, from_phase: str) -> None:
+    async def _on_enter_sweep(self, tr: "Transition") -> None:
         """Auto-enqueue the ``conc_sweep`` task on SWEEP entry."""
+        from .machine import Transition  # noqa: F401 — type reference only
+        from_phase = tr.from_phase
         state = self.shared_state
         # An unwind a previous leg left owed still has the stack's patches on the
         # tree, so settle it before the drain below applies anything on top.

@@ -739,7 +739,7 @@ class Coordinator:
         # Periodic reaper + DB retention; time-gated.
         now = time.monotonic()
         if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
-            await self.maintenance._run_maintenance(tick=self.shared_state.tick)
+            await self.maintenance.run(tick=self.shared_state.tick)
             self._last_maintenance_ts = now
         return in_closing
 

@@ -2188,7 +2188,10 @@ def test_close_neither_rebenches_nor_profiles_a_tree_it_refused_to_trust():
                 closing_phase=False,
                 stop_reason=PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
                 optimization_stack=[{"action": "integrate"}],
+                phase_history=[],
+                save=lambda _: None,
             ),
+            session_dir=None,
             _internal_analysis_kind=lambda: seen.append("analysis_kind") or "roofline",
             _enqueue_internal_analysis_task=lambda **_kw: seen.append("enqueued"),
             _POST_OPT_ROOFLINE_ACTIONS=frozenset({"integrate"}),
@@ -2198,6 +2201,7 @@ def test_close_neither_rebenches_nor_profiles_a_tree_it_refused_to_trust():
     asyncio.run(phase._maybe_run_close_post_opt_roofline())
 
     assert seen == []
+    assert not any("roofline" in str(s) for s in seen)
 
 
 def test_a_revert_that_already_completed_is_not_run_again(tmp_path: Path):

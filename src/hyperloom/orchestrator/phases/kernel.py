@@ -633,8 +633,10 @@ class KernelPhase(CoordinatorCollaborator):
         if agent_backend:
             tool_versions.record_tool_version(self.session_dir, tool=agent_backend)
 
-    def _close_kernel_timeline(self, *, exit_reason: str = "") -> None:
+    def _close_kernel_timeline(self, tr: "Transition") -> None:
         """Close the kernel timeline event when the phase is left."""
+        from .machine import Transition  # noqa: F401 — type reference only
+        exit_reason = tr.reason
         recorder = self.timeline()
         if recorder is None:
             return
@@ -658,19 +660,20 @@ class KernelPhase(CoordinatorCollaborator):
             stack_removed=stack_removed,
         )
 
-    async def _on_enter_kernel(self, *, from_phase: str) -> None:
+    async def _on_enter_kernel(self, tr: "Transition") -> None:
         """Open the KERNEL timeline and enqueue the ``kernel_agent`` task that carries the phase's work."""
+        from .machine import Transition  # noqa: F401 — type reference only
         state = self.shared_state
         if not self._coord.phase_machine._kernel_enabled():
             log.info(
                 "KERNEL entry hook fired with kernel_enabled=False (from=%s)",
-                from_phase or "<unknown>",
+                tr.from_phase or "<unknown>",
             )
             return
         self._open_kernel_timeline(
             route=ROUTE_GEAK if self._geak_enabled() else ROUTE_FORGE,
             route_reason=f"kernel_optimizer={str(getattr(state, 'kernel_optimizer', '') or '')}",
-            from_phase=from_phase,
+            from_phase=tr.from_phase,
         )
         lanes, catalogue_ttl = self._coord.dispatcher._registry_lanes_ttl("kernel_agent")
         # Leases do not expire on their TTL, so it only records how long the holder expects to keep the lanes.
