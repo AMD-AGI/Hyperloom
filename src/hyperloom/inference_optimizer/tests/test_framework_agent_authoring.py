@@ -115,19 +115,26 @@ class _Stub:
         coord.state = SimpleNamespace(pending_proposals={})
         coord.framework_agent_discover_timeout_sec = 0.0
         coord.framework_gpu_pool = None
+        coord.knowledge_plane = None
+        coord._journal = None
+        coord._proposal_scorer = None
         # Override methods the FrameworkPhase calls back through the coordinator.
         coord._record_observation = self._record_observation  # type: ignore[method-assign]
-        coord._warm_specialist_params = self._warm_specialist_params  # type: ignore[method-assign]
         object.__setattr__(self, "_coord", coord)
 
     def __getattr__(self, name: str) -> Any:
-        # Delegate to the inner coordinator first, then to phase_framework for
-        # framework-specific methods not on the coordinator surface.
+        # Delegate to the inner coordinator first, then to phase_framework,
+        # then to specialist_dispatch for methods that moved collaborators.
         coord = object.__getattribute__(self, "_coord")
         try:
             return getattr(coord, name)
         except AttributeError:
+            pass
+        try:
             return getattr(coord.phase_framework, name)
+        except AttributeError:
+            pass
+        return getattr(coord.specialist_dispatch, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
         if name == "_coord":
