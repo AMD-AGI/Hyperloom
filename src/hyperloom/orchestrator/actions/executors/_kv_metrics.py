@@ -281,18 +281,31 @@ def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, An
     if not isinstance(payload, dict):
         return []
 
-    blocks: list[tuple[str, Any]] = []
+    phase_ranges = (
+        ((payload.get("summary") or {}).get("phase_time_ranges") or {})
+        if isinstance(payload.get("summary"), dict)
+        else {}
+    )
+
+    def bounds(name: str) -> tuple[int, int]:
+        value = phase_ranges.get(name)
+        if not isinstance(value, dict):
+            return 0, 0
+        return int(_number(value.get("start_ns")) or 0), int(_number(value.get("end_ns")) or 0)
+
+    blocks: list[tuple[str, Any, tuple[int, int]]] = []
     warmup = payload.get("warmup_metrics")
     if isinstance(warmup, dict):
-        blocks.append(("warmup", warmup))
+        blocks.append(("warmup", warmup, bounds("warmup")))
     measured = payload.get("metrics")
     if isinstance(measured, dict):
-        phase = _CREDIT_PHASE_NAMES.get(str(payload.get("metrics_phase") or "").lower(), "measured")
-        blocks.append((phase, measured))
+        metrics_phase = str(payload.get("metrics_phase") or "").lower()
+        phase = _CREDIT_PHASE_NAMES.get(metrics_phase, "measured")
+        blocks.append((phase, measured, bounds(metrics_phase)))
 
     cumulative: dict[tuple[str, str], float] = {}
     rows: list[tuple[int, int, str, str, dict[str, str], float]] = []
-    for phase, metrics in blocks:
+    for phase, metrics, (phase_start, phase_end) in blocks:
         for name, metric in metrics.items():
             if not isinstance(metric, dict):
                 continue
@@ -304,7 +317,13 @@ def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, An
                 label_map = {str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}
                 series_key = (str(name), canonical_label_key(label_map))
                 running = cumulative.get(series_key, 0.0)
-                timeslices = [item for item in (series.get("timeslices") or []) if isinstance(item, dict)]
+                timeslices = [
+                    item
+                    for item in (series.get("timeslices") or [])
+                    if isinstance(item, dict)
+                    and (not phase_start or int(_number(item.get("end_ns")) or 0) > phase_start)
+                    and (not phase_end or int(_number(item.get("start_ns")) or 0) < phase_end)
+                ]
                 if metric_type == "counter" and timeslices:
                     start = int(_number(timeslices[0].get("start_ns")) or 0)
                     if start > 0:
