@@ -333,7 +333,7 @@ async def test_compose_prompt_emits_phase_block_for_every_role(
     c = coordinator_with_mocks
     try:
         for role in ("orchestration", "critic"):
-            prompt = await c._compose_prompt(role)
+            prompt = await c.conversation._compose_prompt(role)
             assert "=== Phase ===" in prompt, f"{role}: phase block missing"
             assert "phase     : PRELUDE" in prompt, f"{role}: phase value missing"
             assert "allowed" in prompt, f"{role}: allowed-actions line missing"
@@ -358,7 +358,7 @@ async def test_compose_prompt_orchestration_renders_warm_start_when_set(
             },
         }
         c.shared_state.save(session_dir)
-        prompt = await c._compose_prompt("orchestration")
+        prompt = await c.conversation._compose_prompt("orchestration")
         assert "=== Warm start (Recipe KB T0) ===" in prompt
         assert "tier=exact" in prompt
         assert "best_throughput=2100" in prompt
@@ -372,7 +372,7 @@ async def test_compose_prompt_orchestration_omits_warm_start_when_empty(
 ):
     c = coordinator_with_mocks
     try:
-        prompt = await c._compose_prompt("orchestration")
+        prompt = await c.conversation._compose_prompt("orchestration")
         assert "=== Warm start" not in prompt
     finally:
         await c.stop()
@@ -387,7 +387,7 @@ async def test_compose_prompt_omits_specialist_health_block(
     """The periodic specialist block is intentionally gone (see conversation.py)."""
     c = coordinator_with_mocks
     try:
-        prompt = await c._compose_prompt(agent_name)
+        prompt = await c.conversation._compose_prompt(agent_name)
         assert "Specialist health" not in prompt
         assert "stale" not in prompt.lower()
     finally:
@@ -441,7 +441,7 @@ async def test_running_tasks_reader_reports_held_resources(coordinator_with_mock
             )
         c.bus.db.raw.commit()
 
-        out = c._context_running_tasks_reader()
+        out = c.conversation._context_running_tasks_reader()
         assert "lanes=['gpu_research_lane', 'research_lane']" in out
         assert "gpu_ids=[1, 3]" in out
         # Soonest expiry wins: reclaim starts at the FIRST lane to lapse, so reporting the latest would overstate the
@@ -473,12 +473,12 @@ async def test_running_tasks_reader_reports_heartbeat_age(
         )
         await c.tasks.transition(task.task_id, "running")
         # No workspace yet: the field is omitted rather than reported as zero.
-        assert "heartbeat_age_sec=" not in c._context_running_tasks_reader()
+        assert "heartbeat_age_sec=" not in c.conversation._context_running_tasks_reader()
 
         ws = runs_dir(c.session_dir, "specialist", task.task_id)
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "process.log").write_text("benchmarking\n", encoding="utf-8")
-        out = c._context_running_tasks_reader()
+        out = c.conversation._context_running_tasks_reader()
         assert "heartbeat_age_sec=" in out
     finally:
         await c.stop()
@@ -505,7 +505,7 @@ async def test_running_tasks_reader_skips_heartbeat_for_non_specialist(
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "heartbeat.json").write_text("{}", encoding="utf-8")
 
-        out = c._context_running_tasks_reader()
+        out = c.conversation._context_running_tasks_reader()
         assert task.task_id in out
         assert "kind='explore'" in out
         assert "heartbeat_age_sec=" not in out
@@ -523,7 +523,7 @@ async def test_running_tasks_reader_survives_db_failure(coordinator_with_mocks):
             raise RuntimeError("db gone")
 
         c.bus.db.fetchall_sync = _boom
-        out = c._context_running_tasks_reader()
+        out = c.conversation._context_running_tasks_reader()
         assert "running tasks unavailable" in out
         assert "db gone" in out
     finally:
@@ -535,7 +535,7 @@ async def test_running_tasks_reader_reports_in_flight_task(coordinator_with_mock
     """A running task is visible with its elapsed time and idempotency key."""
     c = coordinator_with_mocks
     try:
-        assert "no tasks in flight" in c._context_running_tasks_reader()
+        assert "no tasks in flight" in c.conversation._context_running_tasks_reader()
         task = await c.tasks.create(
             kind="specialist",
             params={"domain": "serving_specialist", "gap_canonical_id": "gap.x"},
@@ -543,7 +543,7 @@ async def test_running_tasks_reader_reports_in_flight_task(coordinator_with_mock
             lease_ttl_sec=1800,
         )
         await c.tasks.transition(task.task_id, "running")
-        out = c._context_running_tasks_reader()
+        out = c.conversation._context_running_tasks_reader()
         assert "=== Tasks in flight ===" in out
         assert task.task_id in out
         assert "kind='specialist'" in out
@@ -581,7 +581,7 @@ async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
         assert lease is not None
         before = await c.tasks.get(task.task_id)
 
-        await c._handle_intent(
+        await c.router._handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -635,7 +635,7 @@ async def test_extend_lease_does_not_regrant_elapsed_time(coordinator_with_mocks
             (started_iso, task.task_id),
         )
 
-        await c._handle_intent(
+        await c.router._handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -686,7 +686,7 @@ async def test_extend_lease_late_grant_keeps_new_increment_for_lanes_and_gpus(co
         started_iso = datetime.fromtimestamp(time.time() - 3000, tz=timezone.utc).isoformat()
         await c.db.execute("UPDATE tasks SET updated_at=? WHERE task_id=?", (started_iso, task.task_id))
 
-        await c._handle_intent(
+        await c.router._handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -733,7 +733,7 @@ async def test_extend_lease_reports_degraded_when_gpu_refresh_fails(coordinator_
 
         c.writeback._record_observation = _capture  # type: ignore[method-assign]
 
-        await c._handle_intent(
+        await c.router._handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -767,7 +767,7 @@ async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mo
         await c.tasks.transition(task.task_id, "running")
         _sub.clear_wall_budget_extension(task.task_id)
 
-        await c._handle_intent(
+        await c.router._handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -777,7 +777,7 @@ async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mo
         assert _sub.wall_budget_extension(task.task_id) == 600.0
 
         # Repeated extensions accumulate on the live deadline.
-        await c._handle_intent(
+        await c.router._handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -820,7 +820,7 @@ async def test_extend_lease_survives_wall_budget_grant_failure(coordinator_with_
 
         c.writeback._record_observation = _capture  # type: ignore[method-assign]
         try:
-            await c._handle_intent(
+            await c.router._handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.EXTEND_LEASE,
@@ -874,7 +874,7 @@ async def test_extend_lease_survives_unreadable_running_age(coordinator_with_moc
 
         c.tasks.get = _get  # type: ignore[method-assign]
 
-        await c._handle_intent(
+        await c.router._handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -906,7 +906,7 @@ async def test_extend_lease_rejects_non_running_task(coordinator_with_mocks):
             idempotency_key="k-extend-2",
             lease_ttl_sec=1800,
         )
-        await c._handle_intent(
+        await c.router._handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -929,7 +929,7 @@ async def test_send_message_to_specialist_writes_inbox(coordinator_with_mocks):
 
     c = coordinator_with_mocks
     try:
-        await c._handle_intent(
+        await c.router._handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.SEND_MESSAGE,
@@ -963,7 +963,7 @@ async def test_send_message_to_specialist_prefers_worktree_inbox(coordinator_wit
         workspace = runs_dir(c.session_dir, "specialist", "task-wt")
         (workspace / "worktree").mkdir(parents=True, exist_ok=True)
 
-        await c._handle_intent(
+        await c.router._handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.SEND_MESSAGE,
@@ -1012,7 +1012,7 @@ async def test_extend_lease_also_pushes_gpu_rows(coordinator_with_mocks):
             ),
         )
 
-        await c._handle_intent(
+        await c.router._handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
