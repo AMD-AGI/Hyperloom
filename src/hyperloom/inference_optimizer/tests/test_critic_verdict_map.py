@@ -231,9 +231,17 @@ class _BareSharedState:
     save_count: int = 0
     # Empty string means "nothing in flight"; the auto-roofline dispatch gate is a no-op.
     auto_roofline_pending_task_id: str = ""
+    # Fields read by _inject_explore_runtime_params and related helpers.
+    baseline_runtime_sec: float = 0.0
+    baseline_accuracy: float = 0.0
+    baseline_warm_runtime_sec: float = 0.0
+    explore_search: dict = field(default_factory=dict)
 
     def save(self, _session_dir: Path | None) -> None:
         self.save_count += 1
+
+    def record_specialist_patch_verdict(self, specialist_task_id: str, verdict: str) -> None:
+        """No-op stub; tests that care about this use _PatchVerdictSharedState."""
 
 
 @dataclass
@@ -246,23 +254,42 @@ class _BusMessage:
     msg_id: str = ""
 
 
-class _StubBus:
-    """MessageBus double — captures every appended message."""
+class _TrackingProposalDict(dict):
+    """pending_proposals dict that sets ``.decided = True`` on popped proposals and caches them so the bus can set ``.verdict``."""
 
     def __init__(self) -> None:
+        super().__init__()
+        self._decided: dict[str, Any] = {}
+
+    def pop(self, key: Any, *default: Any) -> Any:
+        val = super().pop(key, *default)
+        if val is not None and key not in self._decided:
+            val.decided = True
+            self._decided[key] = val
+        return val
+
+
+class _StubBus:
+    """MessageBus double — captures every appended message and mirrors verdicts onto pending proposals."""
+
+    def __init__(self, pending_decided: "_TrackingProposalDict | None" = None) -> None:
         self.messages: list[_BusMessage] = []
+        self._pending_decided = pending_decided
 
     async def append_and_seq(self, msg: Any) -> Any:
-        self.messages.append(
-            _BusMessage(
-                from_agent=getattr(msg, "from_agent", ""),
-                to_agent=getattr(msg, "to_agent", ""),
-                topic=getattr(msg, "topic", ""),
-                payload=dict(getattr(msg, "payload", {}) or {}),
-                in_reply_to=getattr(msg, "in_reply_to", "") or "",
-                msg_id=getattr(msg, "msg_id", ""),
-            )
+        bm = _BusMessage(
+            from_agent=getattr(msg, "from_agent", ""),
+            to_agent=getattr(msg, "to_agent", ""),
+            topic=getattr(msg, "topic", ""),
+            payload=dict(getattr(msg, "payload", {}) or {}),
+            in_reply_to=getattr(msg, "in_reply_to", "") or "",
+            msg_id=getattr(msg, "msg_id", ""),
         )
+        self.messages.append(bm)
+        if bm.topic == "review_verdict" and self._pending_decided is not None:
+            pending = self._pending_decided._decided.get(bm.in_reply_to)
+            if pending is not None:
+                pending.verdict = bm.payload.get("verdict", "")
         return None
 
 
@@ -282,9 +309,11 @@ def coord(tmp_path: Path):
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = _BareSharedState()
+    tracking_proposals: _TrackingProposalDict = _TrackingProposalDict()
     c.state = CoordinatorState()
+    c.state.pending_proposals = tracking_proposals  # type: ignore[assignment]
     c.recipe_kb = _StubRecipeKB()
-    c.bus = _StubBus()
+    c.bus = _StubBus(pending_decided=tracking_proposals)
     c.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
     materialise_calls: list[tuple[PendingProposal, set[str] | None]] = []
     c._materialise_calls = materialise_calls  # type: ignore[attr-defined]
@@ -296,7 +325,7 @@ def coord(tmp_path: Path):
     ) -> None:
         materialise_calls.append((pending, approved_variant_names))
 
-    c._materialize_approved_proposal = _mat  # type: ignore[method-assign]
+    c.proposals._materialize_approved_proposal = _mat  # type: ignore[method-assign]
     return c
 
 

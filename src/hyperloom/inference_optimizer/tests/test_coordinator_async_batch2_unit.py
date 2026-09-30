@@ -2214,7 +2214,7 @@ async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator,
     # Regression: explore must inherit current_best.extra_envs as its env base, else the accepted stack's envs
     # collapse to the last variant's delta.
     coord.shared_state.baseline_tput = 800.0
-    monkeypatch.setattr(coord.proposals, "phase_framework", coord.phase_framework)
+    monkeypatch.setattr(coord.proposals, "phase_framework", coord.phase_framework, raising=False)
     coord.shared_state.current_best = {
         "tput": 900.0,
         "extra_server_args": "--kv-cache-dtype fp8",
@@ -2446,6 +2446,7 @@ async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch
 
     monkeypatch.setattr(coord.sub, "run_task", _fake_run)
     from hyperloom.orchestrator.phases.machine import Transition
+    coord.shared_state.set_stop_reason("target_reached")
     await coord.phase_close._on_enter_close(
         Transition(from_phase="SWEEP", to_phase="CLOSE", reason="SWEEP", evidence={}, loopback=False)
     )
@@ -2546,7 +2547,7 @@ async def test_pump_framework_agent_dedup_does_not_resubmit(coord: Coordinator, 
 @pytest.mark.asyncio
 async def test_framework_agent_reject_records_critic_denied(coord: Coordinator, monkeypatch) -> None:
     """A reject verdict on a framework_agent candidate proposal writes a critic_denied progress row."""
-    monkeypatch.setattr(coord.router, "phase_framework", coord.phase_framework)
+    monkeypatch.setattr(coord.router, "phase_framework", coord.phase_framework, raising=False)
     from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     pending = PendingProposal(
@@ -2578,7 +2579,7 @@ async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, mon
         enq.append(cand)
 
     monkeypatch.setattr(coord.phase_framework, "_enqueue_framework_agent_task", _enqueue)
-    monkeypatch.setattr(coord.router, "phase_framework", coord.phase_framework)
+    monkeypatch.setattr(coord.router, "phase_framework", coord.phase_framework, raising=False)
     pending = PendingProposal(
         proposal_msg_id="m2",
         from_agent="coordinator",
