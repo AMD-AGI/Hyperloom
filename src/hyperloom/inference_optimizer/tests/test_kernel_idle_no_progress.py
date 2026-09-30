@@ -8,7 +8,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from hyperloom.orchestrator.phases import machine_state as ms
-from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 
 
 def _state(idle_ticks, *, idle_seconds=ms.KERNEL_IDLE_MIN_SECONDS):
@@ -25,16 +24,15 @@ def _state(idle_ticks, *, idle_seconds=ms.KERNEL_IDLE_MIN_SECONDS):
     )
 
 
-def _patch(monkeypatch, *, work_pending, hint=""):
+def _patch(monkeypatch, *, work_pending):
     monkeypatch.setattr(ms, "kernel_work_pending", lambda s: work_pending)
-    monkeypatch.setattr(ms, "_pending_escalate_hint", lambda s: hint)
     # Keep the hard budget/cap exits inert so only the idle logic decides.
     monkeypatch.setattr(ms, "phase_budget_remaining_seconds", lambda s, **k: 9_999.0)
     monkeypatch.setattr(ms, "phase_cap_seconds", lambda s: None)
 
 
 def test_idle_at_threshold_winds_down_to_sweep(monkeypatch):
-    _patch(monkeypatch, work_pending=False)
+    _patch(monkeypatch, work_pending=True)
     state = _state(ms.KERNEL_IDLE_MAX_TICKS)
     result = ms.compute_next_phase(state, now_unix=10_000.0)
     assert result is not None
@@ -48,7 +46,7 @@ def test_idle_at_threshold_winds_down_to_sweep(monkeypatch):
 
 
 def test_idle_below_tick_threshold_does_not_exit(monkeypatch):
-    _patch(monkeypatch, work_pending=False)
+    _patch(monkeypatch, work_pending=True)
     state = _state(ms.KERNEL_IDLE_MAX_TICKS - 1)
     # Below the tick threshold and budget healthy -> KERNEL keeps running.
     assert ms.compute_next_phase(state, now_unix=10_000.0) is None
@@ -58,7 +56,7 @@ def test_idle_below_wall_clock_floor_does_not_exit(monkeypatch):
     # Ticks are cheap (a few seconds each, and the phase machine is scanned more than once per tick), so the tick
     # threshold alone must not wind the phase down: a healthy gap between a kernel result landing and the next
     # dispatch would otherwise look like a stall.
-    _patch(monkeypatch, work_pending=False)
+    _patch(monkeypatch, work_pending=True)
     state = _state(
         ms.KERNEL_IDLE_MAX_TICKS * 100,
         idle_seconds=ms.KERNEL_IDLE_MIN_SECONDS - 1.0,
@@ -69,7 +67,7 @@ def test_idle_below_wall_clock_floor_does_not_exit(monkeypatch):
 def test_unstamped_streak_start_does_not_exit(monkeypatch):
     # A hand-built or partially-initialised state has no measured idle window; the guard must refuse to act on a tick
     # count it did not observe itself.
-    _patch(monkeypatch, work_pending=False)
+    _patch(monkeypatch, work_pending=True)
     state = _state(ms.KERNEL_IDLE_MAX_TICKS)
     state.kernel_idle_since_unix = 0.0
     assert ms.compute_next_phase(state, now_unix=10_000.0) is None
@@ -85,17 +83,6 @@ def test_work_pending_no_longer_blocks_idle_exit(monkeypatch):
     _target, reason, evidence = result
     assert reason == "kernel_no_more_leverage"
     assert evidence["evidence"] == "kernel_idle_no_progress"
-
-
-def test_skip_to_sweep_hint_still_exits_when_no_work(monkeypatch):
-    # The explicit escalate-hint path (when available) still yields the non-terminal leverage exit.
-    _patch(monkeypatch, work_pending=False, hint=ESCALATE_HINT_SKIP_TO_SWEEP)
-    state = _state(0)
-    result = ms.compute_next_phase(state, now_unix=10_000.0)
-    assert result is not None
-    _target, reason, evidence = result
-    assert reason == "kernel_no_more_leverage"
-    assert evidence["hint"] == ESCALATE_HINT_SKIP_TO_SWEEP
 
 
 def test_default_idle_max_ticks_is_three(monkeypatch):

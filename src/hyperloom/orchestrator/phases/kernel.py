@@ -46,7 +46,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     JournalEntry,
 )
-from ..state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, resolve_graded_comparison
+from ..state.shared_state import resolve_graded_comparison
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound
 from ..bus.message_bus import Message
 from ..loop.coordinator_helpers import (
@@ -1069,8 +1069,6 @@ class KernelPhase(CoordinatorCollaborator):
                     "error": (str(result.get("error") or "")[:500] or None),
                 }
             )
-            # Persist the wind-down hint durably.
-            state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
 
         cb = state.current_best or {}
@@ -1352,8 +1350,6 @@ class KernelPhase(CoordinatorCollaborator):
             if runner_timeout_s is not None:
                 evidence["runner_timeout_s"] = runner_timeout_s
             self._coord.phase_machine._record_phase_entry_evidence(geak=evidence)
-            # Set the wind-down hint BEFORE the durable save (it is in-memory only).
-            state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
             return True
 
@@ -1637,8 +1633,6 @@ class KernelPhase(CoordinatorCollaborator):
                 },
             )
         )
-        # KERNEL is a one-shot under GEAK: wind down to SWEEP (persist the hint).
-        state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
         state.save(self.session_dir)
 
     async def _revalidate_geak_candidate(self, *, reason: str) -> None:
@@ -3841,9 +3835,6 @@ class KernelPhase(CoordinatorCollaborator):
                         "error": "; ".join(x for x in ([str(_integration.get("reason") or "")] + _skipped) if x)[:800],
                     },
                 )
-        self.shared_state.set_pending_escalate_hint(
-            ESCALATE_HINT_SKIP_TO_SWEEP,
-        )
         self.shared_state.save(self.session_dir)
         await self.bus.append_and_seq(
             Message.new(

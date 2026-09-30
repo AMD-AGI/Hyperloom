@@ -59,7 +59,7 @@ from ..bringup import ARGV_INVALID
 from ..framework.artifacts import candidate_key
 from ..state.attempt_ledger import record_config_attempt
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
-from ..state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, SharedState, resolve_graded_comparison, stack_base_params
+from ..state.shared_state import SharedState, resolve_graded_comparison, stack_base_params
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
 from .coordinator_helpers import (
@@ -6525,19 +6525,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
         completed_this_phase = isinstance(evidence, dict) and isinstance(evidence.get("geak"), dict)
         if completed_this_phase:
             # The delegation landed during this phase but the SWEEP transition
-            # never persisted (crash between the hook and the next tick). Re-arm
-            # the wind-down hint + persist so the phase machine advances.
-            cur = str(getattr(state, "pending_escalate_hint", "") or "").strip()
-            if cur != ESCALATE_HINT_SKIP_TO_SWEEP:
-                state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
-                try:
-                    state.save(self.session_dir)
-                except Exception:
-                    log.exception("resume: save after re-arming skip_to_sweep failed")
-                log.info(
-                    "resume: KERNEL GEAK already completed this phase; "
-                    "re-armed skip_to_sweep hint (lost before SWEEP transition)."
-                )
+            # never persisted (crash between hook and the next tick). The exit
+            # rule sees geak_result set (terminal) and no work pending, so the
+            # machine advances on the next tick without any hint.
+            log.info("resume: KERNEL GEAK already completed this phase; machine will exit on next tick.")
             return
         log.info(
             "resume: re-entering KERNEL GEAK delegation (no completion "
