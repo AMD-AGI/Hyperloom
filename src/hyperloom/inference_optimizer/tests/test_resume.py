@@ -390,9 +390,9 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        assert c2.resumed_from["rebuilt"] is False
+        assert c2.writeback.resumed_from["rebuilt"] is False
         await c2.tick(1)
-        assert c2.resumed_from["rebuilt"] is True
+        assert c2.writeback.resumed_from["rebuilt"] is True
         assert len(c2.state.pending_proposals) == 1
     finally:
         await c2.stop()

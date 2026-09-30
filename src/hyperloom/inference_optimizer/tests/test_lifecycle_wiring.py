@@ -420,7 +420,7 @@ async def test_advance_phase_emits_enter_marker(session_dir, monkeypatch):
 
         monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _noop)
 
-        await c._advance_phase_if_needed()
+        await c.phase_machine._advance_phase_if_needed()
 
         enter = [e for e in c.shared_state.lifecycle if e["status"] == "ENTER"]
         assert len(enter) == 1, f"want one ENTER, got {c.shared_state.lifecycle}"
