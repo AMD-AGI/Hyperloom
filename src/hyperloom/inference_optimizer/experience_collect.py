@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.experience_kb_service import auto_push, spool_root
+from hyperloom.inference_optimizer.experience_kb_service import auto_push, check_auto_push, spool_root
 from hyperloom_kb import ConfigurationError, RemoteClientError, experience_kb_from_env
 from hyperloom_kb.collect import MappingError, SourceDocumentError, collect, load_mapping
 
@@ -50,6 +50,8 @@ def validate_config() -> None:
         raise ConfigurationError(
             f"{MAPPING} produces {expected}, but the configured Experience KB validates {target.schema_ref}"
         )
+    # Surfaces an unusable auto-push setting at launch rather than three hours later; it never stops the run.
+    check_auto_push()
 
 
 def collect_session(session_dir: Path, breakdown: Mapping[str, Any]) -> None:

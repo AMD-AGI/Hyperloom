@@ -114,7 +114,9 @@ global KB. Pulled Experiences are readable immediately.
 
 Both run in bounded batches; the client repeats them until nothing is left.
 With `HYPERLOOM_KB_AUTO_PUSH=1`, the end of every run pushes; a failed automatic
-push is logged as a warning and never fails the run.
+push is logged as a warning and never fails the run. A switch value that is not
+a boolean, or auto push without a global KB, is a warning at launch, and that
+run does not push.
 
 ## Deploying a global KB
 
