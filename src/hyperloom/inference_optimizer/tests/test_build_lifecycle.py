@@ -656,7 +656,7 @@ async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
         "aiter_jit_dir": str(jit_dir),
     }
 
-    report = await resume_coord._resume_consistency_pass()
+    report = await resume_coord.writeback._resume_consistency_pass()
 
     fix = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "reclaimed_pending_targeted_build")
     assert fix["task_id"] == task.task_id
@@ -676,7 +676,7 @@ async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
 async def test_resume_no_pending_is_noop(resume_coord):
     resume_coord._resumed_from["is_resume"] = True
     resume_coord.shared_state.pending_targeted_build = {}
-    report = await resume_coord._resume_consistency_pass()
+    report = await resume_coord.writeback._resume_consistency_pass()
     assert not any(isinstance(f, dict) and f.get("kind") == "reclaimed_pending_targeted_build" for f in report["fixes"])
 
 
