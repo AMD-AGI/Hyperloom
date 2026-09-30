@@ -248,7 +248,18 @@ def test_a_real_session_validation_records_the_whole_stack_figure(session_dir):
     with session_scope(session_dir):
         coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
         coord.writeback._lift_to_current_best("explore", 1100.0, {"name": "first"})
-        coord.writeback._update_cumulative_gain_validated(1100.0, {"output_throughput": 1100.0})
+        # Directly record validation (method consolidated into validate() in 484318bd3).
+        from hyperloom.inference_optimizer.breakdown.recorder import stack_event as _se
+
+        coord.shared_state.cumulative_gain_validated = 10.0
+        coord.shared_state.cumulative_gain_validated_stack_len = len(coord.shared_state.optimization_stack)
+        _se.record_validation(
+            stack_len=coord.shared_state.cumulative_gain_validated_stack_len,
+            baseline_tput=1000.0,
+            validated_tput=1100.0,
+            validated_gain_pct=10.0,
+            source="writeback",
+        )
 
         ext, _status = stack_event.assemble_stack_ext(stack_event_parts(), event=stack_event.stack_event_id())
         settled = ext["validations"]["settled"]
