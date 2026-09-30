@@ -436,7 +436,9 @@ class MachinePhase(CoordinatorCollaborator):
             phase=phase,
         )
         overrides["orchestration"] = scoped
-        _write_prompt_snapshot(self.session_dir, "orchestration", scoped, phase=phase)
+        _write_prompt_snapshot(
+            self.session_dir, "orchestration", scoped, phase=phase, macro_cycle=int(state.macro_cycle or 0)
+        )
         log.info("orchestration prompt re-scoped for phase=%s", phase)
         return True
 

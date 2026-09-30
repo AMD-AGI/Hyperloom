@@ -351,13 +351,13 @@ def test_phase_seam_snapshots_the_scope_it_installed(tmp_path):
 
     assert handler._reseed_orch_prompt_for_phase("EXPLORE") is True
 
-    snapshot = tmp_path / "agents" / "orchestration" / "system_prompt.EXPLORE.snapshot.md"
+    snapshot = tmp_path / "agents" / "orchestration" / "system_prompt.c0.EXPLORE.snapshot.md"
     assert snapshot.read_text(encoding="utf-8") == "PROMPT[phase=EXPLORE]"
 
 
 def test_phase_seam_snapshot_never_overwrites_the_boot_file(tmp_path):
     """The unsuffixed file stays the boot scope so existing readers keep working."""
-    boot = tmp_path / "agents" / "orchestration" / "system_prompt.snapshot.md"
+    boot = tmp_path / "agents" / "orchestration" / "system_prompt.c0.snapshot.md"
     boot.parent.mkdir(parents=True, exist_ok=True)
     boot.write_text("BOOT", encoding="utf-8")
     handler, _coord, _calls = _machine_with_stub_coordinator(tmp_path)
@@ -388,11 +388,11 @@ def test_reseed_for_phase_is_reachable_through_the_coordinator_delegation_map():
 def test_prompt_snapshot_path_is_phase_suffixed(tmp_path):
     from hyperloom.inference_optimizer.session.session_paths import agent_prompt_snapshot
 
-    assert agent_prompt_snapshot(tmp_path, "orchestration").name == "system_prompt.snapshot.md"
+    assert agent_prompt_snapshot(tmp_path, "orchestration").name == "system_prompt.c0.snapshot.md"
     scoped = agent_prompt_snapshot(tmp_path, "orchestration", phase="explore")
-    assert scoped.name == "system_prompt.EXPLORE.snapshot.md"
+    assert scoped.name == "system_prompt.c0.EXPLORE.snapshot.md"
     # A blank phase must not produce a stray dot in the stem.
-    assert agent_prompt_snapshot(tmp_path, "orchestration", phase="  ").name == "system_prompt.snapshot.md"
+    assert agent_prompt_snapshot(tmp_path, "orchestration", phase="  ").name == "system_prompt.c0.snapshot.md"
 
 
 def test_boot_snapshot_records_the_phase_it_was_scoped_to(tmp_path):
@@ -406,12 +406,12 @@ def test_boot_snapshot_records_the_phase_it_was_scoped_to(tmp_path):
     )
 
     agents = tmp_path / "agents"
-    assert (agents / "orchestration" / "system_prompt.snapshot.md").read_text(encoding="utf-8") == "BOOT PROMPT"
-    assert (agents / "orchestration" / "system_prompt.PRELUDE.snapshot.md").read_text(
+    assert (agents / "orchestration" / "system_prompt.c0.snapshot.md").read_text(encoding="utf-8") == "BOOT PROMPT"
+    assert (agents / "orchestration" / "system_prompt.c0.PRELUDE.snapshot.md").read_text(
         encoding="utf-8",
     ) == "BOOT PROMPT"
     # Critic is not phase-scoped at the system-prompt level.
-    assert not (agents / "critic" / "system_prompt.PRELUDE.snapshot.md").exists()
+    assert not (agents / "critic" / "system_prompt.c0.PRELUDE.snapshot.md").exists()
 
 
 def test_boot_snapshot_without_a_phase_keeps_the_legacy_layout(tmp_path):
@@ -420,8 +420,8 @@ def test_boot_snapshot_without_a_phase_keeps_the_legacy_layout(tmp_path):
     _snapshot_system_prompts(tmp_path, prompts={"orchestration": "BOOT"})
 
     orch = tmp_path / "agents" / "orchestration"
-    assert (orch / "system_prompt.snapshot.md").read_text(encoding="utf-8") == "BOOT"
-    assert list(orch.glob("system_prompt.*.snapshot.md")) == []
+    assert (orch / "system_prompt.c0.snapshot.md").read_text(encoding="utf-8") == "BOOT"
+    assert list(orch.glob("system_prompt.c0.*.snapshot.md")) == []
 
 
 # Critic: phase is structurally deliverable and injected one phase at a time

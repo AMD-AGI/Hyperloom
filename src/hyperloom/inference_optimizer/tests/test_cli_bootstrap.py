@@ -34,7 +34,6 @@ def _args(**overrides):
         max_model_len=13312,
         no_kernel=False,
         auto_kernel_opt=True,
-        target_summary="",
         target_gain=60.0,
         target_tput=None,
         max_hours=30,
@@ -328,16 +327,7 @@ def test_resolve_model_display_name_helper() -> None:
     assert cb.resolve_model_display_name(empty_override) == "Foo"
 
 
-def test_target_summary_and_conc_sweep_parser(caplog) -> None:
-    assert ">= 12.5%" in cb._default_target_summary(
-        _args(model="/m/foo", target_gain=12.5, target_tput=None, max_hours=4)
-    )
-    assert "123.0 tok/s/GPU" in cb._default_target_summary(
-        _args(model="/m/foo", target_gain=None, target_tput=123.0, max_hours=4)
-    )
-    assert "no target" in cb._default_target_summary(
-        _args(model="/m/foo", target_gain=None, target_tput=None, max_hours=4)
-    )
+def test_conc_sweep_parser(caplog) -> None:
     assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs=""), "synthetic") == [
         256,
         128,
@@ -454,10 +444,10 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     capsys,
 ) -> None:
     cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "critic": ""})
-    assert (tmp_path / "agents" / "orch" / "system_prompt.snapshot.md").read_text(
+    assert (tmp_path / "agents" / "orch" / "system_prompt.c0.snapshot.md").read_text(
         encoding="utf-8",
     ) == "hello"
-    assert (tmp_path / "agents" / "critic" / "system_prompt.snapshot.md").read_text(
+    assert (tmp_path / "agents" / "critic" / "system_prompt.c0.snapshot.md").read_text(
         encoding="utf-8",
     ) == "(empty)"
 
