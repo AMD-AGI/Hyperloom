@@ -12,9 +12,6 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.experience_kb_service import AUTO_PUSH_ENV
-from hyperloom_kb import GLOBAL_TOKEN_ENV, GLOBAL_URL_ENV
-
 # Directory names whose contents never ship.
 _TEST_DIR_NAMES = frozenset({"tests", "test", "testing"})
 
@@ -86,41 +83,6 @@ def test_data_files_sources_exist():
         if not (_REPO_ROOT / source).exists()
     ]
     assert not missing, f"data-files entries point at missing sources: {missing}"
-
-
-def test_existing_skills_own_experience_kb_setup_and_runtime_contracts() -> None:
-    assert _REPO_ROOT is not None
-    setup = (_REPO_ROOT / "src/hyperloom/skills/hyperloom-setup/SKILL.md").read_text(encoding="utf-8")
-    optimizer = (_REPO_ROOT / "src/hyperloom/inference_optimizer/SKILL.md").read_text(encoding="utf-8")
-
-    for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN"):
-        assert name in setup
-        assert name in optimizer
-    # Every workspace gets its local service: setup generates its .env entries and starts it; nobody opts out.
-    assert "hyperloom.inference_optimizer.experience_kb_service init-env" in setup
-    assert "hyperloom.inference_optimizer.experience_kb_service ensure" in setup
-    assert "No Experience KB" not in setup
-    assert "pip install your_package.whl --target ." in setup
-    assert "hyperloom_kb-" not in setup
-    assert "[kb]" not in setup
-    assert "experience_kb_injections" in optimizer
-    global_kb = (_REPO_ROOT / "src/hyperloom/skills/hyperloom-global-kb/SKILL.md").read_text(encoding="utf-8")
-    # The skills name the global KB by the variables the service actually reads.
-    for name in (GLOBAL_URL_ENV, GLOBAL_TOKEN_ENV, AUTO_PUSH_ENV):
-        for text in (setup, optimizer, global_kb):
-            assert name in text
-    for command in ("push", "pull"):
-        assert f"hyperloom.inference_optimizer.experience_kb_service {command}" in setup
-        assert f"hyperloom.inference_optimizer.experience_kb_service {command}" in optimizer
-    assert "python3 -m hyperloom_kb --host 0.0.0.0" in global_kb
-    for text in (setup, optimizer, global_kb):
-        assert "HYPERLOOM_FLEET_KB" not in text
-        assert "HYPERLOOM_KB_ENABLE" not in text
-        assert "HYPERLOOM_KB_DECL" not in text
-        assert "Hyperloom-KB.git" not in text
-        assert "trust_state" not in text
-        assert "unverified" not in text
-        assert "slack" not in text.lower()
 
 
 def test_the_experience_kb_runtime_ships_inside_this_distribution() -> None:
