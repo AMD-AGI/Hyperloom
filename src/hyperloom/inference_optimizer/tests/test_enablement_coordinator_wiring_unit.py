@@ -1035,7 +1035,7 @@ async def test_enqueue_noop_when_not_in_enablement_phase(monkeypatch):
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     fake = _enqueue_self(phase="PRELUDE")
-    assert await EnablementLane._pump_enablement_safely(fake, caller="test") is None
+    assert await EnablementLane._pump_enablement_safely(fake) is None
     assert await _queued_of_kind(fake, "specialist") == []
 
 
