@@ -111,11 +111,6 @@ def request_baseline_accuracy_stop(shared_state: Any, *, context: str, cause: st
     return True
 
 
-def require_framework_accuracy_default() -> bool:
-    """Default for the framework source-patch accuracy-KEEP gate."""
-    return env_flag("INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY", default=True)
-
-
 def require_kernel_accuracy_default() -> bool:
     """Default for the kernel-patch accuracy-KEEP gate."""
     return env_flag("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", default=True)
@@ -573,7 +568,6 @@ __all__ = [
     "request_baseline_accuracy_stop",
     "resolve_enablement_mode",
     "resolve_served_context",
-    "require_framework_accuracy_default",
     "require_kernel_accuracy_default",
     "served_context_hosts_eval",
 ]

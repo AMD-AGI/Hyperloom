@@ -194,7 +194,6 @@ def test_gate_orchestration_propose_action_ok(gate):
 @pytest.mark.parametrize("backend_order", [None, "forge"])
 def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, backend_order):
     """Refused by channel, not by applicability."""
-    monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
     if backend_order:
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend_order)
     state = SharedState(phase="KERNEL_AGENT", precision=precision, framework="sglang")
