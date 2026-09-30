@@ -115,7 +115,7 @@ def test_pump_returns_after_first_completion_not_after_all(tmp_path: Path):
         # Slow task was dispatched (inflight by kind).
         assert any(v.kind == "slow_action" for v in coord._inflight_actions.values())
 
-    asyncio.get_event_loop().run_until_complete(_run())
+    asyncio.run(_run())
 
 
 def test_no_task_dispatched_twice_across_pump_calls(tmp_path: Path):
@@ -145,7 +145,7 @@ def test_no_task_dispatched_twice_across_pump_calls(tmp_path: Path):
         assert call_count_after_first_pump == 1, "should have been dispatched once"
         assert call_count_after_second_pump == 1, "must not be dispatched again while inflight"
 
-    asyncio.get_event_loop().run_until_complete(_run())
+    asyncio.run(_run())
 
 
 def test_gpu_specialist_stays_exclusive_with_explore_across_pumps(tmp_path: Path):
@@ -186,7 +186,7 @@ def test_gpu_specialist_stays_exclusive_with_explore_across_pumps(tmp_path: Path
         await coord._pump_dispatcher_once()
         assert not gpu_spec.calls, "GPU specialist must not run while explore holds benchmark_lane"
 
-    asyncio.get_event_loop().run_until_complete(_run())
+    asyncio.run(_run())
 
 
 def test_barrier_admission_freeze_prevents_new_spawns(tmp_path: Path):
@@ -214,7 +214,7 @@ def test_barrier_admission_freeze_prevents_new_spawns(tmp_path: Path):
         await coord._pump_dispatcher_once()
         assert fast.calls, "pump must spawn after _admit_frozen is cleared"
 
-    asyncio.get_event_loop().run_until_complete(_run())
+    asyncio.run(_run())
 
 
 def test_unbooked_completion_counts_as_running_in_barrier(tmp_path: Path):
@@ -237,10 +237,8 @@ def test_unbooked_completion_counts_as_running_in_barrier(tmp_path: Path):
         prior_phase = coord.shared_state.phase
         await coord._advance_phase_if_needed()
         # Phase must not have advanced while there is a pending completion.
-        assert coord.shared_state.phase == prior_phase, (
-            "phase must not advance while completion queue is non-empty"
-        )
+        assert coord.shared_state.phase == prior_phase, "phase must not advance while completion queue is non-empty"
         # _admit_frozen should be set (barrier entered but held due to pending bookkeeping).
         assert coord._admit_frozen, "_admit_frozen must be set during barrier hold"
 
-    asyncio.get_event_loop().run_until_complete(_run())
+    asyncio.run(_run())

@@ -535,7 +535,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         for t in (*queued, *running):
             if getattr(t, "kind", "") == "specialist":
                 p = getattr(t, "params", None) or {}
-                for tag in (p.get("tags") or []):
+                for tag in p.get("tags") or []:
                     in_flight_domains.add(str(tag))
                 d = str(p.get("domain") or "").strip()
                 if d:

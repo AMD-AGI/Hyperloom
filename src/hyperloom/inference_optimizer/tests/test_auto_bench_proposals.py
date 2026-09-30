@@ -25,9 +25,7 @@ class _FakeTasks:
         return list(self._running)
 
     async def create_or_return_existing(self, *, kind, params, idempotency_key, **kwargs):
-        self.calls.append(
-            {"kind": kind, "params": dict(params), "idempotency_key": idempotency_key, **kwargs}
-        )
+        self.calls.append({"kind": kind, "params": dict(params), "idempotency_key": idempotency_key, **kwargs})
         return SimpleNamespace(task_id="auto-explore-1"), False
 
 
@@ -170,9 +168,7 @@ def test_auto_bench_cuts_at_grid_cap(tmp_path):
     """The auto bench grid is cut at _AUTO_EXPLORE_GRID_CAP (4)."""
     from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
-    proposals = [
-        _proposal_row(f"v{i}", f"--flag {i}") for i in range(10)
-    ]
+    proposals = [_proposal_row(f"v{i}", f"--flag {i}") for i in range(10)]
     fp, tasks = _build_fake(proposals=proposals)
 
     asyncio.run(fp._maybe_bench_untested_proposals())

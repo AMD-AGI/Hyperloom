@@ -685,9 +685,7 @@ class FrameworkPhase:
             payload = getattr(p, "payload", None) or {}
             iparams = payload.get("params") or {}
             cand_id = str(
-                payload.get("framework_agent_candidate_id")
-                or iparams.get("framework_agent_candidate_id")
-                or ""
+                payload.get("framework_agent_candidate_id") or iparams.get("framework_agent_candidate_id") or ""
             ).strip()
             if cand_id and getattr(p, "action_name", "") == "integrate_patch":
                 in_flight.add(cand_id)

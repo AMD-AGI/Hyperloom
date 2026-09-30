@@ -926,6 +926,7 @@ async def test_perf_explore_retry_stamps_immutable_explore_owner(
 
 # ── Parallel authoring ───────────────────────────────────────────────────────
 
+
 def _make_stub_for_parallel(tmp_path, num_candidates=3, research_lane_capacity=3):
     """Minimal FrameworkPhase stub for parallel-authoring tests."""
     from hyperloom.orchestrator.phases.framework import FrameworkPhase
@@ -986,9 +987,11 @@ def test_parallel_authoring_submits_up_to_capacity(tmp_path):
     async def _fake_submit(self_inner, candidate, *, audit=None, audit_step=None):
         submitted.append(dict(candidate))
 
-    with patch.object(FrameworkPhase, "_submit_framework_agent_candidate_for_review", _fake_submit), \
-         patch.object(FrameworkPhase, "_maybe_enqueue_candidate_discovery", AsyncMock(return_value=False)), \
-         patch.object(FrameworkPhase, "_framework_agent_authoring_inflight", AsyncMock(return_value=False)):
+    with (
+        patch.object(FrameworkPhase, "_submit_framework_agent_candidate_for_review", _fake_submit),
+        patch.object(FrameworkPhase, "_maybe_enqueue_candidate_discovery", AsyncMock(return_value=False)),
+        patch.object(FrameworkPhase, "_framework_agent_authoring_inflight", AsyncMock(return_value=False)),
+    ):
         asyncio.run(stub._pump_framework_agent_phase())
 
     assert len(submitted) == 3, f"expected 3 (capacity), got {len(submitted)}"
@@ -1006,9 +1009,11 @@ def test_parallel_authoring_no_duplicate_candidate(tmp_path):
     async def _fake_submit(self_inner, candidate, *, audit=None, audit_step=None):
         submitted.append(dict(candidate))
 
-    with patch.object(FrameworkPhase, "_submit_framework_agent_candidate_for_review", _fake_submit), \
-         patch.object(FrameworkPhase, "_maybe_enqueue_candidate_discovery", AsyncMock(return_value=False)), \
-         patch.object(FrameworkPhase, "_framework_agent_authoring_inflight", AsyncMock(return_value=False)):
+    with (
+        patch.object(FrameworkPhase, "_submit_framework_agent_candidate_for_review", _fake_submit),
+        patch.object(FrameworkPhase, "_maybe_enqueue_candidate_discovery", AsyncMock(return_value=False)),
+        patch.object(FrameworkPhase, "_framework_agent_authoring_inflight", AsyncMock(return_value=False)),
+    ):
         asyncio.run(stub._pump_framework_agent_phase())
 
     urls = [s.get("pr_url") for s in submitted]
@@ -1030,9 +1035,11 @@ def test_parallel_authoring_fallback_when_no_candidates(tmp_path):
         discovery_called.append(reason)
         return False
 
-    with patch.object(FrameworkPhase, "_submit_framework_agent_candidate_for_review", AsyncMock()), \
-         patch.object(FrameworkPhase, "_maybe_enqueue_candidate_discovery", _fake_discover), \
-         patch.object(FrameworkPhase, "_framework_agent_authoring_inflight", AsyncMock(return_value=False)):
+    with (
+        patch.object(FrameworkPhase, "_submit_framework_agent_candidate_for_review", AsyncMock()),
+        patch.object(FrameworkPhase, "_maybe_enqueue_candidate_discovery", _fake_discover),
+        patch.object(FrameworkPhase, "_framework_agent_authoring_inflight", AsyncMock(return_value=False)),
+    ):
         asyncio.run(stub._pump_framework_agent_phase())
 
     assert not submitted

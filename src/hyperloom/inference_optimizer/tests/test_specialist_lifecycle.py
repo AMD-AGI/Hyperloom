@@ -585,7 +585,7 @@ def test_force_stalled_skips_anchor_with_inflight_specialist(tmp_path: Path):
     from unittest.mock import patch
 
     with patch.object(SpecialistDispatchCollaborator, "_warm_specialist_params", new=AsyncMock()):
-        asyncio.get_event_loop().run_until_complete(c._maybe_force_stalled_domain_specialist())
+        asyncio.run(c._maybe_force_stalled_domain_specialist())
 
     c._handle_intent.assert_not_awaited()
 

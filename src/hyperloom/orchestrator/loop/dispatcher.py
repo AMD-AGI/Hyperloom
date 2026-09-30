@@ -791,9 +791,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     gpu_lease=gpu_lease,
                     gpu_specialist_lease=gpu_specialist_lease,
                     cancel_scope=cancel_scope,
-                    on_complete=partial(self._queue_completion, task, gpu_lease)
-                    if not self_settling
-                    else None,
+                    on_complete=partial(self._queue_completion, task, gpu_lease) if not self_settling else None,
                 ),
             )
             self._inflight_actions[task.task_id] = _InflightAction(task.kind, atask, cancel_scope)

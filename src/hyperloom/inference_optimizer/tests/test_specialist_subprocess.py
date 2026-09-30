@@ -1500,7 +1500,7 @@ def test_cpu_specialist_env_hides_all_gpus_and_uses_private_caches(
         except Exception:
             pass
 
-    asyncio.get_event_loop().run_until_complete(_call())
+    asyncio.run(_call())
 
     env = captured.get("env", {})
     for var in GPU_MASK_ENV_NAMES:
@@ -1557,7 +1557,7 @@ def test_gpu_specialist_env_is_unaffected_by_cpu_isolation(
         except Exception:
             pass
 
-    asyncio.get_event_loop().run_until_complete(_call())
+    asyncio.run(_call())
 
     env = captured.get("env", {})
     assert env.get("HIP_VISIBLE_DEVICES") == "0,1"

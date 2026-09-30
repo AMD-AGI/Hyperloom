@@ -117,7 +117,9 @@ def run_selfcheck(
     rc, out = _run([str(python), "-c", "import importlib; importlib.import_module('sglang')"], cwd=worktree)
     if rc != 0:
         package_name = project_dir.name
-        rc, out = _run([str(python), "-c", f"import importlib; importlib.import_module({package_name!r})"], cwd=worktree)
+        rc, out = _run(
+            [str(python), "-c", f"import importlib; importlib.import_module({package_name!r})"], cwd=worktree
+        )
     steps.append({"step": "import_check", "ok": rc == 0, "output_tail": out})
 
     diff_rc, diff_out = _run(["git", "diff", "--name-only", "HEAD"], cwd=worktree, timeout_sec=30)
