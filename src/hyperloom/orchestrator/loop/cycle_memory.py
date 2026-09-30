@@ -17,7 +17,7 @@ __all__ = ["CycleMemoryCollaborator"]
 
 
 class CycleMemoryCollaborator(CoordinatorCollaborator):
-    """Orchestration-memory capture, directive fallback, and cycle prompt reseeding."""
+    """Orchestration-memory capture and cycle prompt reseeding."""
 
     async def _capture_cycle_memory(self) -> bool:
         """Ask Orchestration for the finished cycle's working memory and persist it.

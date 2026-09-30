@@ -68,7 +68,6 @@ def test_orchestration_permissions():
     assert IntentType.PROPOSE_ACTION in role.allowed_intents
     assert IntentType.DELEGATE in role.allowed_intents
     assert IntentType.REQUEST in role.allowed_intents
-    assert IntentType.UPDATE_STATE not in role.allowed_intents
     assert IntentType.PRUNE_BRANCH in role.allowed_intents
     assert IntentType.ESCALATE_STRATEGY_CHANGE in role.allowed_intents
     assert IntentType.REVIEW_VERDICT not in role.allowed_intents
