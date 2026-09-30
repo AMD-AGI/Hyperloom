@@ -129,9 +129,9 @@ A docs-, CI- or test-only diff touches nothing under `src/`: write one
 
 Tiers come from [`references/tiers.md`](references/tiers.md): a table of the backbone files, and
 Q1–Q4 for anything not in it, including new files. Q1b is the one that bites — `Coordinator`
-resolves its 21 collaborators by string through a metaclass `__getattr__`, so a rename passes
-every import check, passes lint, passes collection, and fails only hours into a session when
-that phase is entered. Grep the string, not the symbol.
+holds 24 collaborators as explicit attributes, so a rename passes every import check, passes
+lint, passes collection, and fails only hours into a session when that phase is entered.
+Grep the string, not the symbol.
 
 ## Step 4 — Rule checklist
 

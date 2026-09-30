@@ -923,7 +923,7 @@ async def test_drain_uses_current_best_tput_not_baseline(
 async def test_on_enter_sweep_enqueues_and_stamps_evidence(coord):
     """Happy path: the hook enqueues conc_sweep and stamps phase evidence."""
     coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
@@ -946,7 +946,7 @@ async def test_on_enter_sweep_ignores_full_sweep_recipe_for_auto_path(coord):
         },
     }
     coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
@@ -960,7 +960,7 @@ async def test_on_enter_sweep_ignores_full_sweep_recipe_for_auto_path(coord):
 async def test_a_state_with_no_ladder_lets_the_workload_pick(coord):
     """An unseeded ladder must reach the engine as \"unset\", not as \"none wanted\"."""
     coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     coord.shared_state.conc_sweep_concs = []
     await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
@@ -975,7 +975,7 @@ async def test_a_state_with_no_ladder_lets_the_workload_pick(coord):
 async def test_on_enter_sweep_idempotent_on_reentry(coord):
     """Re-entering SWEEP twice hits the same conc_sweep idempotency_key."""
     coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     task1 = coord.tasks._tasks["internal-conc_sweep-phase_entry"]
@@ -997,7 +997,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
 
     monkeypatch.setattr(coord.phase_sweep, "_enqueue_internal_conc_sweep_task", _boom)
     coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     # Should not raise
     await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
@@ -1015,7 +1015,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
 async def test_on_enter_sweep_keeps_the_declines_own_skip_reason(coord):
     """The helper's budget decline is terminal; the hook must not restate it."""
     coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     coord.shared_state.remaining_minutes = lambda: 1.0
 
@@ -1029,7 +1029,7 @@ async def test_on_enter_sweep_keeps_the_declines_own_skip_reason(coord):
 async def test_enqueue_conc_sweep_declines_when_clamp_leaves_no_time(coord):
     """A clamp that leaves nothing declines: a 0 budget would read as unbounded."""
     coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     # 1 minute left, minus the 120 s CLOSE reserve, is a negative budget.
     coord.shared_state.remaining_minutes = lambda: 1.0
@@ -1045,7 +1045,7 @@ async def test_enqueue_conc_sweep_declines_when_clamp_leaves_no_time(coord):
 async def test_conc_sweep_lease_follows_the_clamped_budget(coord):
     """The lease must bound the task that runs, not the configured value."""
     coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     coord.shared_state.conc_sweep_total_budget_sec = 0
     coord.shared_state.remaining_minutes = lambda: 300.0  # 5 h
@@ -1061,7 +1061,7 @@ async def test_conc_sweep_lease_follows_the_clamped_budget(coord):
 async def test_conc_sweep_unbounded_budget_opts_out_of_the_lease(coord):
     """An unbounded sweep has no deadline, so it must not carry a finite lease."""
     coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     coord.shared_state.conc_sweep_total_budget_sec = 0
 
@@ -1075,7 +1075,7 @@ async def test_conc_sweep_unbounded_budget_opts_out_of_the_lease(coord):
 async def test_enqueue_conc_sweep_unbounded_budget_is_none(coord):
     """A non-positive configured budget means "no gate" and travels as None."""
     coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     coord.shared_state.conc_sweep_total_budget_sec = 0
 
@@ -1089,7 +1089,7 @@ async def test_enqueue_conc_sweep_unbounded_budget_is_none(coord):
 async def test_enqueue_conc_sweep_clamps_to_remaining_session_time(coord):
     """With a session cap, the budget is the remaining time minus the CLOSE reserve."""
     coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     coord.shared_state.conc_sweep_total_budget_sec = 9000
     coord.shared_state.remaining_minutes = lambda: 5.0
@@ -1144,7 +1144,7 @@ async def test_on_enter_sweep_skips_when_the_session_budget_cannot_fit_conc_swee
     """A conc_sweep the clock cannot pay for must not be enqueued, or SWEEP idles."""
     coord.shared_state.usable_sec = 14 * 60.0
     coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     assert coord.tasks._tasks == {}
@@ -1160,7 +1160,7 @@ async def test_on_enter_sweep_still_enqueues_when_the_session_budget_fits(coord)
     """The session-budget skip must not fire when the catalogue cost still fits."""
     coord.shared_state.usable_sec = 60 * 60.0
     coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
@@ -1190,7 +1190,7 @@ async def test_on_enter_sweep_first_sweep_runs_without_prior_watermark(coord):
     coord.shared_state.cumulative_gain_validated = 0.0
     coord.shared_state.last_conc_sweep = {}
     coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
@@ -1213,7 +1213,7 @@ async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Pat
         role_registry=default_role_registry(),
         knowledge_plane=None,
     )
-    # Seed state at KERNEL boundary as if a plateau_kernel just fired
+    # Seed state at KERNEL boundary as if a kernel_no_more_leverage just fired
     coord.shared_state.phase = "KERNEL"
     coord.shared_state.kernel_enabled = True
     coord.shared_state.baseline_tput = 100.0
@@ -1566,7 +1566,7 @@ async def test_conc_sweep_task_carries_catalogue_lanes(coord):
     from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 
     coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     coord.shared_state.remaining_minutes = lambda: 300.0
 
