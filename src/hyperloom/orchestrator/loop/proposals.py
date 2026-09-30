@@ -113,7 +113,7 @@ def _framework_recorder(coll: Any, pending: Any) -> Any:
         return None
     if not str(getattr(pending, "proposal_msg_id", "") or ""):
         return None
-    return coll.phase_framework.timeline()
+    return coll._coord.phase_framework.timeline()
 
 
 def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
