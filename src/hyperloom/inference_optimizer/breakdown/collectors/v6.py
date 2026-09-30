@@ -136,7 +136,12 @@ def collect_v6_metadata(
                 "crash_count": int(recovery.get("crash_count") or 0),
                 "crash_timestamps": list(recovery.get("crash_timestamps") or []),
                 "degraded_mode": bool(recovery.get("degraded_mode")),
-                "resume_pending_revalidation": bool(recovery.get("resume_pending_revalidation")),
+                "resume_pending_revalidation": bool(
+                    len(state.get("optimization_stack") or [])
+                    > int(state.get("cumulative_gain_validated_stack_len") or 0)
+                    or int(state.get("working_recipe_generation") or 0)
+                    != int(state.get("validated_recipe_generation") or 0)
+                ),
                 "last_tick_exception": recovery.get("last_tick_exception"),
             },
         },
