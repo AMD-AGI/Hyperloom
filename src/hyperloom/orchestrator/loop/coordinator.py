@@ -63,14 +63,145 @@ from hyperloom.common.deadline import Deadline
 from hyperloom.inference_optimizer.trace.orchestration_trace import (
     write_mcp_setup_once,
 )
-from .coordinator_helpers import (
-    _infer_model_class_from_config,
-    format_exc_brief,
-    resolve_reactor_turn_timeout_sec,
-)
+from hyperloom.common.timeutil import format_exc_brief
 
 
 log = logging.getLogger(__name__)
+
+import math as _math
+
+REACTOR_TURN_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC"
+DEFAULT_REACTOR_TURN_TIMEOUT_SEC = 1800.0
+
+
+def resolve_reactor_turn_timeout_sec(env: Mapping[str, str] | None = None) -> float:
+    """Resolve the reactor turn's total wall-clock timeout."""
+    if env is not None:
+        raw = env.get(REACTOR_TURN_TIMEOUT_ENV, "").strip()
+        if not raw:
+            return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.0
+        if value > 0.0 and _math.isfinite(value):
+            return value
+        log.warning(
+            "%s=%r is not a positive finite number; using default %.1fs",
+            REACTOR_TURN_TIMEOUT_ENV,
+            raw,
+            DEFAULT_REACTOR_TURN_TIMEOUT_SEC,
+        )
+        return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
+    value = env_float(REACTOR_TURN_TIMEOUT_ENV, default=DEFAULT_REACTOR_TURN_TIMEOUT_SEC)
+    if value > 0.0 and _math.isfinite(value):
+        return value
+    log.warning(
+        "%s=%.1f is not a positive finite number; using default %.1fs",
+        REACTOR_TURN_TIMEOUT_ENV,
+        value,
+        DEFAULT_REACTOR_TURN_TIMEOUT_SEC,
+    )
+    return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
+
+
+def _infer_model_class_from_config(model_path: str) -> str:
+    """Infer a deterministic model_class from local model metadata."""
+    import json as _json
+
+    raw_path = (model_path or "").strip()
+    payload: dict[str, Any] = {}
+    if raw_path:
+        from hyperloom.inference_optimizer.model_config_utils import (
+            resolve_local_model_dir,
+        )
+
+        _resolved = resolve_local_model_dir(raw_path)
+        cfg = (_resolved / "config.json") if _resolved is not None else Path(raw_path) / "config.json"
+        try:
+            if cfg.is_file():
+                data = _json.loads(cfg.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    payload = data
+        except Exception:
+            log.debug("model_class inference: failed to read %s", cfg, exc_info=True)
+
+    payloads: list[dict[str, Any]] = [payload]
+    for nested_key in ("text_config", "llm_config", "language_config"):
+        nested = payload.get(nested_key)
+        if isinstance(nested, dict):
+            payloads.append(nested)
+
+    text_parts: list[str] = [raw_path.lower()]
+    for scope in payloads:
+        arch = scope.get("architectures")
+        if isinstance(arch, list):
+            text_parts.extend(str(x).lower() for x in arch if x)
+        elif arch:
+            text_parts.append(str(arch).lower())
+        for key in ("model_type", "attention_type", "attn_type"):
+            if scope.get(key):
+                text_parts.append(str(scope[key]).lower())
+    text = " ".join(text_parts)
+
+    def _positive_int(*keys: str) -> bool:
+        for scope in payloads:
+            for key in keys:
+                val = scope.get(key)
+                if isinstance(val, bool):
+                    continue
+                try:
+                    if val is not None and int(val) > 0:
+                        return True
+                except (TypeError, ValueError):
+                    continue
+        return False
+
+    is_moe = _positive_int(
+        "num_experts",
+        "n_routed_experts",
+        "num_local_experts",
+        "moe_num_experts",
+    ) or any(
+        k in text
+        for k in (
+            "moe",
+            "mixtral",
+            "deepseek-v2",
+            "deepseek-v3",
+            "deepseek-r1",
+            "kimi",
+            "glm-5",
+            "glm5",
+        )
+    )
+    is_mla = any(
+        k in text
+        for k in (
+            "mla",
+            "multi-head latent",
+            "deepseek",
+            "kimi",
+            "glm-5",
+            "glm5",
+        )
+    )
+    is_nsa = any(
+        k in text
+        for k in (
+            "nsa",
+            "native sparse attention",
+            "glm-5",
+            "glm5",
+        )
+    )
+    if is_moe and is_mla and is_nsa:
+        return "moe_mla_nsa"
+    if is_moe and is_mla:
+        return "moe_mla"
+    if is_moe:
+        return "moe_swa"
+    return "dense"
 
 
 if TYPE_CHECKING:
@@ -1119,7 +1250,7 @@ __all__ = [
     "Coordinator",
     "CoordinatorState",
     "SharedState",
-    # Re-exported from coordinator_helpers / state.shared_state for callers/tests.
+    # Re-exported for callers/tests.
     "_infer_model_class_from_config",
     "effective_closing_grace_sec",
     # Re-exported from policy.gate; referenced via ``coordinator.<name>`` in tests.

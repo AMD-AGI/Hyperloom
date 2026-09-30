@@ -16,7 +16,8 @@ from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
-from .coordinator_helpers import _parse_iso_unix, serialize_verdict_advisory
+from hyperloom.common.timeutil import _parse_iso_unix
+from .verdicts import serialize_verdict_advisory
 from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.orchestrator.collaborator import CoordinatorCollaborator

@@ -1185,7 +1185,7 @@ class KernelPhase(CoordinatorCollaborator):
             )
         _serving_fidelity = _resolve_serving_fidelity(
             baseline_server_args=_current_best_server_args,
-            state_max_model_len=int(getattr(state, "max_model_len", 0) or 0),
+            state_max_model_len=int(state.max_model_len or 0),
         )
 
         # GEAK's E2E_METRIC and the workload spec's metric_basis are the same
@@ -1193,22 +1193,22 @@ class KernelPhase(CoordinatorCollaborator):
         # different axis than the one KEEP is decided on would have GEAK searching
         # against a reference it was never measured against.
         e2e_metric, _ = geak_metric_axis(
-            benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
-            grading=getattr(state, "grading", None),
+            benchmark_mode=str(state.benchmark_mode or ""),
+            grading=state.grading or None,
         )
         handoff = {
             # v2 adds baseline_env_spec; v3 adds actual GPU-pinning metadata.
             "schema_version": 3,
-            "model_path": str(getattr(state, "model_path", "") or os.environ.get("MODEL_PATH", "")),
-            "framework": str(getattr(state, "framework", "") or os.environ.get("FRAMEWORK", "") or "sglang"),
-            "gpu_type": str(getattr(state, "gpu_type", "") or os.environ.get("GPU_TYPE", "")),
+            "model_path": str(state.model_path or os.environ.get("MODEL_PATH", "")),
+            "framework": str(state.framework or os.environ.get("FRAMEWORK", "") or "sglang"),
+            "gpu_type": str(state.gpu_type or os.environ.get("GPU_TYPE", "")),
             "tp": _tp,
             "workload": workload,
             "accepted_flags": accepted_flags,
             "accepted_env": accepted_env,
-            "launch_recipe": str(getattr(state, "baseline_config_path", "") or ""),
+            "launch_recipe": str(state.baseline_config_path or ""),
             # AgentX canonical throughput is not a reference for GEAK's proxy workload.
-            "raw_baseline_tput": 0.0 if agentx else float(getattr(state, "baseline_tput", 0.0) or 0.0),
+            "raw_baseline_tput": 0.0 if agentx else float(state.baseline_tput or 0.0),
             # Zero means no verified same-config reference.
             "orchestrator_best_tput_same_config": same_config_tput,
             "same_config_reference_status": "verified" if reference_verified else "unverified",
@@ -1225,12 +1225,12 @@ class KernelPhase(CoordinatorCollaborator):
             "measurement_evidence": launch_evidence,
             "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
             # Serving-launch fidelity defaults; overwritten by _serving_fidelity.update() below.
-            "max_model_len": int(getattr(state, "max_model_len", 0) or 0),
+            "max_model_len": int(state.max_model_len or 0),
             "mem_fraction": 0.0,
             "exp_root": str(self.session_dir / "geak"),
             # Macro-cycle-scoped eval_dir so a same-cycle resume reuses the in-progress on-disk artifacts while a new
             # cycle gets a fresh dir.
-            "eval_dir": str(self.session_dir / "geak" / f"e2e_cycle{int(getattr(state, 'macro_cycle', 0) or 0)}"),
+            "eval_dir": str(self.session_dir / "geak" / f"e2e_cycle{int(state.macro_cycle or 0)}"),
             # GEAK owns client selection; AgentX results are proposal proxies.
             "bench_client": "auto",
             "e2e_metric": e2e_metric,
@@ -1256,12 +1256,12 @@ class KernelPhase(CoordinatorCollaborator):
             handoff["bench_protocol"] = bench_protocol
         # Parsed once for both resolvers below: they read the same recipe, so a
         # second read could only disagree with the first.
-        recipe_bench = self._recipe_benchmark(str(getattr(state, "baseline_config_path", "") or ""))
+        recipe_bench = self._recipe_benchmark(str(state.baseline_config_path or ""))
         workload_spec = self._resolve_workload_spec(recipe_bench)
         if workload_spec:
             # Give the kernel agents the shape they must actually optimize for;
             # absence leaves GEAK on the handoff's synthetic isl/osl.
-            observed = self._observed_replay_shape(float(getattr(state, "baseline_tput", 0.0) or 0.0))
+            observed = self._observed_replay_shape(float(state.baseline_tput or 0.0))
             if observed:
                 workload_spec = {**workload_spec, **observed}
                 log.info(
@@ -1431,8 +1431,8 @@ class KernelPhase(CoordinatorCollaborator):
         # output figure need not help the prefill-dominated total by the same
         # margin. Synthetic runs resolve to "output" and are unaffected.
         _geak_e2e_metric, _ = geak_metric_axis(
-            benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
-            grading=getattr(state, "grading", None),
+            benchmark_mode=str(state.benchmark_mode or ""),
+            grading=state.grading or None,
         )
 
         def _run() -> subprocess.CompletedProcess:

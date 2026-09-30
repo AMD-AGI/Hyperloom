@@ -7,26 +7,37 @@ from __future__ import annotations
 
 import json
 
-from hyperloom.orchestrator.loop import coordinator_helpers as ch
+from hyperloom.orchestrator.loop.coordinator import _infer_model_class_from_config
+from hyperloom.common.timeutil import _parse_iso_unix
+from hyperloom.orchestrator.loop.proposal_utils import (
+    _baseline_params_fingerprint,
+    _parse_baseline_workload_extra,
+)
+from hyperloom.orchestrator.kernel.geak_config import ROOFLINE_WATERMARK_RATIO
+from hyperloom.orchestrator.loop.server_args import (
+    _dedupe_extra_server_args,
+    _merge_cumulative_extra_server_args,
+)
+from hyperloom.orchestrator.loop.verdicts import serialize_verdict_advisory
 
 
 # ---- _infer_model_class_from_config ----
 
 
 def test_infer_model_class_dense_empty():
-    assert ch._infer_model_class_from_config("") == "dense"
+    assert _infer_model_class_from_config("") == "dense"
 
 
 def test_infer_model_class_moe_from_text():
-    assert ch._infer_model_class_from_config("/models/Mixtral-8x7B") == "moe_swa"
+    assert _infer_model_class_from_config("/models/Mixtral-8x7B") == "moe_swa"
 
 
 def test_infer_model_class_moe_mla_nsa_from_text():
-    assert ch._infer_model_class_from_config("/models/GLM-5-air") == "moe_mla_nsa"
+    assert _infer_model_class_from_config("/models/GLM-5-air") == "moe_mla_nsa"
 
 
 def test_infer_model_class_moe_mla_from_text():
-    assert ch._infer_model_class_from_config("/models/DeepSeek-V3") == "moe_mla"
+    assert _infer_model_class_from_config("/models/DeepSeek-V3") == "moe_mla"
 
 
 def test_infer_model_class_reads_config_json(tmp_path):
@@ -35,7 +46,7 @@ def test_infer_model_class_reads_config_json(tmp_path):
         encoding="utf-8",
     )
     # num_experts > 0 -> MoE; no MLA/NSA text -> moe_swa.
-    assert ch._infer_model_class_from_config(str(tmp_path)) == "moe_swa"
+    assert _infer_model_class_from_config(str(tmp_path)) == "moe_swa"
 
 
 def test_infer_model_class_ignores_bool_experts(tmp_path):
@@ -43,24 +54,24 @@ def test_infer_model_class_ignores_bool_experts(tmp_path):
         json.dumps({"num_experts": True, "model_type": "llama"}),
         encoding="utf-8",
     )
-    assert ch._infer_model_class_from_config(str(tmp_path)) == "dense"
+    assert _infer_model_class_from_config(str(tmp_path)) == "dense"
 
 
 # ---- _parse_iso_unix ----
 
 
 def test_parse_iso_unix():
-    assert ch._parse_iso_unix("") == 0.0
-    assert ch._parse_iso_unix("not-a-date") == 0.0
-    assert ch._parse_iso_unix("2025-01-01T00:00:00Z") > 0
-    assert ch._parse_iso_unix("2025-01-01T00:00:00") > 0
+    assert _parse_iso_unix("") == 0.0
+    assert _parse_iso_unix("not-a-date") == 0.0
+    assert _parse_iso_unix("2025-01-01T00:00:00Z") > 0
+    assert _parse_iso_unix("2025-01-01T00:00:00") > 0
 
 
 # ---- _parse_baseline_workload_extra ----
 
 
 def test_parse_baseline_workload_extra_missing(tmp_path):
-    assert ch._parse_baseline_workload_extra(str(tmp_path / "nope.yaml")) == {}
+    assert _parse_baseline_workload_extra(str(tmp_path / "nope.yaml")) == {}
 
 
 def test_parse_baseline_workload_extra_full(tmp_path):
@@ -70,11 +81,11 @@ def test_parse_baseline_workload_extra_full(tmp_path):
         "  workload_mode: serving\n"
         "  quant_scheme: fp8\n"
         "  envs:\n"
-        "    EXTRA_SGLANG_ARGS: '--max-running-requests 256 --enable-chunked-prefill "
-        "--enable-torch-compile'\n",
+        "    EXTRA_SGLANG_ARGS: '--max-running-requests 256 --enable-chunked-prefill"
+        " --enable-torch-compile'\n",
         encoding="utf-8",
     )
-    out = ch._parse_baseline_workload_extra(str(yaml_path))
+    out = _parse_baseline_workload_extra(str(yaml_path))
     assert out["workload_mode"] == "serving"
     assert out["quant_scheme"] == "fp8"
     assert out["max_running_requests"] == 256
@@ -91,7 +102,7 @@ def test_parse_baseline_workload_extra_torch_compile_env(tmp_path):
         "    EXTRA_SGLANG_ARGS: '--disable-chunked-prefill --max-num-seqs 32'\n",
         encoding="utf-8",
     )
-    out = ch._parse_baseline_workload_extra(str(yaml_path))
+    out = _parse_baseline_workload_extra(str(yaml_path))
     assert out["enable_torch_compile"] is True
     assert out["chunked_prefill_enabled"] is False
     assert out["max_num_seqs"] == 32
@@ -100,14 +111,14 @@ def test_parse_baseline_workload_extra_torch_compile_env(tmp_path):
 def test_parse_baseline_workload_extra_non_dict_benchmark(tmp_path):
     yaml_path = tmp_path / "base.yaml"
     yaml_path.write_text("benchmark: not-a-dict\n", encoding="utf-8")
-    assert ch._parse_baseline_workload_extra(str(yaml_path)) == {}
+    assert _parse_baseline_workload_extra(str(yaml_path)) == {}
 
 
 # ---- _baseline_params_fingerprint ----
 
 
 def test_baseline_params_fingerprint():
-    out = ch._baseline_params_fingerprint(
+    out = _baseline_params_fingerprint(
         {
             "benchmark_script": "b.sh",
             "extra_envs": {"B": "2", "A": "1"},
@@ -119,39 +130,39 @@ def test_baseline_params_fingerprint():
 
 
 def test_baseline_params_fingerprint_bad_envs():
-    out = ch._baseline_params_fingerprint({"extra_envs": "oops"})
+    out = _baseline_params_fingerprint({"extra_envs": "oops"})
     assert out["extra_envs"] is None
 
 
 def test_roofline_watermark_ratio():
-    assert ch.ROOFLINE_WATERMARK_RATIO == 1.10
+    assert ROOFLINE_WATERMARK_RATIO == 1.10
 
 
 # ---- _dedupe_extra_server_args ----
 
 
 def test_dedupe_empty():
-    assert ch._dedupe_extra_server_args("") == ""
+    assert _dedupe_extra_server_args("") == ""
 
 
 def test_dedupe_keeps_last_value():
-    out = ch._dedupe_extra_server_args("--tp 1 --tp 8")
+    out = _dedupe_extra_server_args("--tp 1 --tp 8")
     assert out == "--tp 8"
 
 
 def test_dedupe_multi_value_flag():
-    out = ch._dedupe_extra_server_args("--cuda-graph-bs 1 2 4 --tp 8")
+    out = _dedupe_extra_server_args("--cuda-graph-bs 1 2 4 --tp 8")
     assert "--cuda-graph-bs 1 2 4" in out
     assert "--tp 8" in out
 
 
 def test_dedupe_positional_token():
-    out = ch._dedupe_extra_server_args("foo --tp 8")
+    out = _dedupe_extra_server_args("foo --tp 8")
     assert out == "foo --tp 8"
 
 
 def test_dedupe_normalizes_equals_form():
-    out = ch._dedupe_extra_server_args("--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA")
+    out = _dedupe_extra_server_args("--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA")
     assert out == "--attention-backend ROCM_AITER_FA"
 
 
@@ -160,18 +171,18 @@ def test_dedupe_preserves_json_and_collapses_other_flags():
         '--json-model-override-args {"rope_scaling":null} '
         "--attention-backend ROCM_ATTN --attention-backend ROCM_AITER_FA"
     )
-    assert ch._dedupe_extra_server_args(args) == (
+    assert _dedupe_extra_server_args(args) == (
         '--json-model-override-args {"rope_scaling":null} --attention-backend ROCM_AITER_FA'
     )
 
 
 def test_dedupe_warm_replay_json_flags_without_skipping_other_dedup():
     args = (
-        """--speculative-config '{"method":"ngram","num_speculative_tokens":7}' """
-        """--compilation-config '{"pass_config":{"enable_sp":true}}' """
+        '--speculative-config \'{"method":"ngram","num_speculative_tokens":7}\' '
+        '--compilation-config \'{"pass_config":{"enable_sp":true}}\' '
         "--max-num-seqs 512 --max-num-seqs 1024"
     )
-    out = ch._dedupe_extra_server_args(args)
+    out = _dedupe_extra_server_args(args)
     assert out == (
         '--speculative-config {"method":"ngram","num_speculative_tokens":7} '
         '--compilation-config {"pass_config":{"enable_sp":true}} '
@@ -181,7 +192,7 @@ def test_dedupe_warm_replay_json_flags_without_skipping_other_dedup():
 
 # ---- _merge_cumulative_extra_server_args ----
 
-_merge = ch._merge_cumulative_extra_server_args
+_merge = _merge_cumulative_extra_server_args
 
 
 def test_merge_prefers_full():
@@ -225,7 +236,7 @@ def test_merge_preserves_json_while_deduping_other_flags():
 
 
 def test_serialize_verdict_advisory_full_fieldset():
-    out = ch.serialize_verdict_advisory(
+    out = serialize_verdict_advisory(
         {
             "target_proposal_msg_id": "p1",
             "verdict": "advise",
@@ -253,7 +264,7 @@ def test_serialize_verdict_advisory_full_fieldset():
 
 
 def test_serialize_verdict_advisory_drops_empty_and_blank():
-    out = ch.serialize_verdict_advisory(
+    out = serialize_verdict_advisory(
         {
             "required_evidence": ["keep", "", None],
             "risks": [],
@@ -266,10 +277,10 @@ def test_serialize_verdict_advisory_drops_empty_and_blank():
 
 
 def test_serialize_verdict_advisory_coerces_scalar_to_list():
-    out = ch.serialize_verdict_advisory({"required_evidence": "single"})
+    out = serialize_verdict_advisory({"required_evidence": "single"})
     assert out == {"required_evidence": ["single"]}
 
 
 def test_serialize_verdict_advisory_non_dict_is_empty():
-    assert ch.serialize_verdict_advisory(None) == {}  # type: ignore[arg-type]
-    assert ch.serialize_verdict_advisory("nope") == {}  # type: ignore[arg-type]
+    assert serialize_verdict_advisory(None) == {}  # type: ignore[arg-type]
+    assert serialize_verdict_advisory("nope") == {}  # type: ignore[arg-type]

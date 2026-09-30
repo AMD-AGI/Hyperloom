@@ -45,7 +45,7 @@ from ..bus.resource_lock import (
 )
 from .sub_agent_runner import SubAgentResult
 from ..state.task_registry import Task, TaskNotFound
-from .coordinator_helpers import (
+from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
     expected_action_cost_minutes,

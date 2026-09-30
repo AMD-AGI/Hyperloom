@@ -12,7 +12,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
-from .coordinator_helpers import approved_proposal_idempotency_key
+from .proposal_utils import approved_proposal_idempotency_key
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import TERMINAL_STATES
 from hyperloom.orchestrator.collaborator import CoordinatorCollaborator

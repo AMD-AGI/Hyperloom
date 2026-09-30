@@ -13,7 +13,7 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES
-from hyperloom.orchestrator.loop.coordinator_helpers import _parse_iso_unix
+from hyperloom.common.timeutil import _parse_iso_unix
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts.prompt_builder import (

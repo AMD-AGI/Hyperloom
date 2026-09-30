@@ -264,7 +264,7 @@ async def test_watermark_gate_reopens_exactly_when_the_roofline_it_names_finishe
 
 def test_watermark_stops_re_arming_once_retries_are_spent(coord: Coordinator):
     """A roofline leg costs the better part of an hour, so a collector that is broken rather than flaky must not be allowed to spend the session on it."""
-    from hyperloom.orchestrator.loop.coordinator_helpers import (
+    from hyperloom.orchestrator.kernel.geak_config import (
         _MAX_ROOFLINE_FAILURE_RETRIES,
     )
 

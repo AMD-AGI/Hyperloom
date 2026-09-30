@@ -53,7 +53,7 @@ from hyperloom.inference_optimizer.roofline_ceiling import (
     select_peak_and_bound,
 )
 from ..state.shared_state import SharedState
-from ..loop.coordinator_helpers import baseline_benchmark_script
+from ..loop.proposal_utils import baseline_benchmark_script
 
 
 log = logging.getLogger(__name__)
@@ -1286,7 +1286,7 @@ async def run_conc_sweep(
     opt_overlay = str((state.current_best or {}).get("final_overlay") or "").strip()
     if opt_overlay:
         from ..actions.executors._grid_runner import _is_safe_path_entry
-        from ..loop.coordinator_helpers import _geak_overlay_is_loadable
+        from ..kernel.geak_config import _geak_overlay_is_loadable
 
         if not _is_safe_path_entry(opt_overlay) or not _geak_overlay_is_loadable(opt_overlay):
             return _declined(recorder, "optimized_overlay_unavailable", final_overlay=opt_overlay)

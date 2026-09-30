@@ -15,7 +15,7 @@ import pytest
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_event_parts
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render as render_final
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.coordinator_helpers import (
+from hyperloom.orchestrator.kernel.geak_config import (
     _geak_result_has_material,
     _geak_revalidation_decision,
     _normalize_geak_overlay_dir,

@@ -39,4 +39,26 @@ def iso_z(ts: Any) -> str:
     return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-__all__ = ["now_iso", "utc_now_compact", "iso_z"]
+def _parse_iso_unix(ts: str) -> float:
+    """Parse an ISO 8601 UTC timestamp into unix seconds; ``0.0`` on failure."""
+    s = (ts or "").strip()
+    if not s:
+        return 0.0
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def format_exc_brief(exc: "BaseException", limit: "int | None" = None) -> str:
+    """Render an exception as ``"TypeName: message"``, optionally truncated."""
+    msg = str(exc)
+    if limit is not None:
+        msg = msg[:limit]
+    return f"{type(exc).__name__}: {msg}"
+
+
+__all__ = ["now_iso", "utc_now_compact", "iso_z", "_parse_iso_unix", "format_exc_brief"]
