@@ -155,7 +155,7 @@ async def test_recent_outcomes_reader_projects_delegated_results(session_dir):
                 {"note": "ignored_obs"},
             )
         )
-        out = c._context_recent_outcomes_reader(top_k=5)
+        out = c.conversation._context_recent_outcomes_reader(top_k=5)
         assert "Recent action outcomes" in out
         assert "kind='explore'" in out
         assert "gain=4.0" in out
@@ -169,7 +169,7 @@ async def test_recent_outcomes_reader_projects_delegated_results(session_dir):
 async def test_recent_outcomes_reader_empty(session_dir):
     c = _silent_coordinator(session_dir)
     try:
-        assert "no recent outcomes" in c._context_recent_outcomes_reader()
+        assert "no recent outcomes" in c.conversation._context_recent_outcomes_reader()
     finally:
         await c.stop()
 
@@ -369,7 +369,7 @@ async def test_compose_prompt_orchestration_receives_failure_rows(session_dir):
                 },
             )
         )
-        prompt = await c._compose_prompt("orchestration")
+        prompt = await c.conversation._compose_prompt("orchestration")
         assert "failure:" in prompt
     finally:
         await c.stop()
@@ -403,7 +403,7 @@ async def test_compose_prompt_critic_does_not_receive_failure_rows(session_dir):
                 },
             )
         )
-        prompt = await c._compose_prompt("critic")
+        prompt = await c.conversation._compose_prompt("critic")
         assert "failure:" not in prompt
     finally:
         await c.stop()
