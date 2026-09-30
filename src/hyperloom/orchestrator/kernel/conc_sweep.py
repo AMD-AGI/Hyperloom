@@ -50,7 +50,7 @@ from ..actions.executors._proposal_identity import controls_of, is_executable, n
 from hyperloom.inference_optimizer.roofline_ceiling import (
     compute_compute_bound_ceiling_tok_per_sec,
     compute_theoretical_peak_output_tok_per_sec,
-    load_model_meta,
+    resolve_model_meta,
     select_peak_and_bound,
 )
 from ..state.shared_state import SharedState
@@ -255,7 +255,7 @@ def _build_roofline_ceiling(
     """Per-conc decode roofline alongside the measured curves."""
     model_path = str(getattr(state, "model_path", "") or "")
     precision = str(getattr(state, "precision", "") or "") or "bf16"
-    meta = load_model_meta(model_path, precision_hint=precision)
+    meta = resolve_model_meta(state, model_path, precision_hint=precision)
     if meta is None:
         return None
     gpu_type = str(getattr(state, "gpu_type", "") or "")

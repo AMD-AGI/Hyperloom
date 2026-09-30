@@ -658,6 +658,33 @@ def _build_parser() -> argparse.ArgumentParser:
         "quick-win parameter path. Default: kernel enabled.",
     )
     opt.add_argument(
+        "--roofline-csv-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Directory of externally-authored analytical roofline CSVs "
+        "(kernel_roofline.csv / roofline_ceiling.csv / gpu_arch_peaks.csv). "
+        "When set, Hyperloom READS the analytical roofline from these files and "
+        "writes none (external-CSV mode: an external program authors them). "
+        "Unset: native mode writes them under reports/ and reads them back. "
+        "Measured (trace) and derived fields are always computed by Hyperloom.",
+    )
+    opt.add_argument(
+        "--roofline-csv-strict",
+        action="store_true",
+        default=False,
+        help="In --roofline-csv-dir (external) mode, fail instead of falling back "
+        "to native compute when an expected external roofline CSV is missing.",
+    )
+    opt.add_argument(
+        "--no-roofline-csv",
+        action="store_true",
+        default=False,
+        help="Rollback valve: bypass the roofline-CSV interface entirely and use "
+        "the stock JSON/state path (byte-identical to the pre-refactor behavior). "
+        "For A/B comparison and safety.",
+    )
+    opt.add_argument(
         "--no-eval",
         action="store_true",
         default=False,

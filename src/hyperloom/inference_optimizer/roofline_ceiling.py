@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.model_config_utils import _merge_config_scopes
+from . import roofline_csv
 
 log = logging.getLogger(__name__)
 
@@ -417,6 +418,196 @@ def resolve_runtime_dtype(
     )
 
 
+#: Parallelism args that map to a keyed ceiling axis (vLLM + SGLang spellings).
+_CEILING_INT_ARG_ALIASES: dict[str, tuple[str, ...]] = {
+    "pp": ("--pipeline-parallel-size", "--pp"),
+    "ep": ("--ep", "--ep-size", "--expert-parallel-size"),
+    "dcp": ("--decode-context-parallel-size", "--dcp-size"),
+    "pcp": ("--prefill-context-parallel-size", "--attn-cp-size"),
+}
+#: Boolean flags that turn expert-parallel MODE on (the keyed ``tep`` layout axis).
+_CEILING_TEP_FLAGS: tuple[str, ...] = ("--enable-expert-parallel", "--enable-ep-moe")
+#: Server-arg flags that map to a KEYED ceiling axis (all vLLM+SGLang spellings) — recognized.
+_CEILING_KEYED_FLAGS: frozenset[str] = frozenset(
+    {
+        "--quantization", "--dtype", "--kv-cache-dtype",
+        "--tensor-parallel-size", "-tp", "--tp",
+        "--pipeline-parallel-size", "--pp",
+        "--ep", "--ep-size", "--expert-parallel-size", "--enable-expert-parallel", "--enable-ep-moe",
+        "--decode-context-parallel-size", "--dcp-size",
+        "--prefill-context-parallel-size", "--attn-cp-size", "--enable-prefill-cp",
+    }
+)
+#: Server-arg flags verified ceiling-IRRELEVANT (scheduling/memory/runtime) — safely ignored.
+_CEILING_NEUTRAL_FLAGS: frozenset[str] = frozenset(
+    {
+        "--data-parallel-size", "--dp-size", "--dp",
+        "--enable-chunked-prefill", "--disable-chunked-prefill", "--chunked-prefill-size",
+        "--max-num-batched-tokens", "--max-num-seqs", "--max-model-len", "--max-seq-len",
+        "--block-size", "--gpu-memory-utilization", "--mem-fraction-static", "--swap-space",
+        "--enforce-eager", "--enable-prefix-caching", "--disable-log-requests", "--disable-log-stats",
+        "--port", "--host", "--trust-remote-code", "--served-model-name", "--model", "--tokenizer",
+        "--seed", "--distributed-executor-backend", "--disable-custom-all-reduce", "--attention-backend",
+        "--compilation-config", "--cuda-graph-sizes", "--num-scheduler-steps", "--load-format",
+        "--download-dir", "--revision",
+    }
+)
+
+
+def _ceiling_untrusted_flag(args: str) -> str | None:
+    """DEFAULT-DENY guard (§7): the FIRST server_args flag that is neither a keyed axis nor a verified
+    ceiling-neutral flag (spec-decode, dynamic-chunking, a future knob), or ``None`` when every flag is
+    known. Naming the offending flag (instead of a bare bool) lets the consumer log exactly why it fell
+    back to native compute. An incomplete neutral list only causes more SAFE fallbacks, never a wrong read.
+    """
+    for tok in str(args).split():
+        if not tok.startswith("-"):
+            continue
+        flag = tok.split("=", 1)[0]
+        if flag not in _CEILING_KEYED_FLAGS and flag not in _CEILING_NEUTRAL_FLAGS:
+            return flag
+    return None
+
+
+def _ceiling_int_arg(args: str, names: tuple[str, ...], default: int = 1) -> int:
+    """First integer value among ``names`` in ``args``; ``default`` when absent/unparseable."""
+    for name in names:
+        raw = _parse_server_arg(args, name)
+        if raw:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                continue
+    return default
+
+
+def _ceiling_config(state: Any, arm: str | None) -> tuple[dict, bool, str | None]:
+    """Build the ceiling-key config dict + a ``trusted`` flag + an ``untrust_reason`` from the RESOLVED runtime.
+
+    Sourced from the SAME ``resolve_runtime_workload`` the value math uses (so key inputs ==
+    value inputs — no env-vs-state drift). ``trusted`` is False when the run carries a
+    ceiling-affecting arg that is not keyed → an external ceiling must not be read for it.
+    """
+    runtime = resolve_runtime_workload(state, arm=arm)
+    args = runtime.server_args or ""
+    fw = (runtime.framework or "").strip().lower()
+    quant = _parse_server_arg(args, "--quantization")
+    dtype = _parse_server_arg(args, "--dtype")
+    prec = quant or dtype or (runtime.precision or "")
+    pcp = _ceiling_int_arg(args, _CEILING_INT_ARG_ALIASES["pcp"])
+    # Expert parallelism — derive the REALIZED degree AUTHORITATIVELY, not from the flag-less
+    # server_args (`--enable-expert-parallel` is appended downstream and never appears in these args).
+    # HL's `--ep N` (N>=2) requests EP: vLLM realizes it as boolean `--enable-expert-parallel` whose
+    # degree is the topology `tp * dp` (vLLM EP group size = data_parallel * tensor_parallel); SGLang
+    # realizes it as an explicit `--expert-parallel-size N`. `ep` records that REALIZED degree (so an EP
+    # config keys the same as MAIDAS's), and `tep=1` iff experts are actually EP-sharded (degree > 1).
+    ep_mode = any(f in args for f in _CEILING_TEP_FLAGS)
+    explicit_ep = _ceiling_int_arg(args, _CEILING_INT_ARG_ALIASES["ep"], default=0)  # --ep / --ep-size / --expert-parallel-size in args
+    try:
+        requested_ep = int(getattr(state, "ep", 1) or 1)  # HL's --ep value (authoritative)
+    except (TypeError, ValueError):
+        requested_ep = 1
+    ep_requested = explicit_ep > 1 or requested_ep > 1 or ep_mode
+    if explicit_ep > 1:
+        ep = explicit_ep  # an explicit expert-parallel size in the args wins (either framework)
+    elif fw == "sglang" and requested_ep > 1:
+        ep = requested_ep  # SGLang realizes --ep N as --expert-parallel-size N → EP degree = N
+    elif requested_ep > 1 or ep_mode:
+        dp = _ceiling_int_arg(args, ("--data-parallel-size", "--dp-size", "--dp"), default=1)
+        ep = max(int(runtime.tp or 1) * dp, 1)  # vLLM boolean EP: EP group = tp * dp (topology)
+    else:
+        ep = 1
+    tep = 1 if ep > 1 else 0
+    cfg: dict = {
+        "fw": fw,
+        "prec": prec,
+        # Activation dtype: the explicit `--dtype` (an override like w4a8) else bf16 — the effective
+        # compute dtype for weight-only quant, matching native's `act_bpe=max(weight_bytes,2.0)` floor
+        # and an external author's default. An explicit override still distinguishes w4a16 vs w4a8.
+        "act": dtype or "bf16",
+        "kv": _parse_server_arg(args, "--kv-cache-dtype") or "bf16",
+        "tp": runtime.tp,
+        "conc": runtime.concurrency,
+        "isl": runtime.isl,
+        "osl": runtime.osl,
+        "ep": ep,
+        "tep": tep,
+        "pp": _ceiling_int_arg(args, _CEILING_INT_ARG_ALIASES["pp"]),
+        "dcp": _ceiling_int_arg(args, _CEILING_INT_ARG_ALIASES["dcp"]),
+        "pcp": pcp,
+    }
+    if fw == "xdit":
+        height, width = _read_diffusion_resolution(state)
+        cfg.update(num_steps=_read_diffusion_num_steps(state), height=height, width=width)
+    # WHY an external ceiling must NOT be read for this config (None = trusted). Named reasons so the
+    # consumer logs exactly what defeated the external read instead of falling back silently.
+    untrust_reason: str | None = None
+    bad_flag = _ceiling_untrusted_flag(args)
+    if bad_flag is not None:
+        untrust_reason = f"un-keyed ceiling-affecting server-arg {bad_flag!r} (the content key cannot distinguish it)"
+    # EP was requested but a real degree (>1) could not be derived from the resolved config → don't
+    # trust an external EP-aware row for it; fall back to native compute (safe).
+    elif ep_requested and ep <= 1:
+        untrust_reason = "expert parallelism requested but a real degree (>1) could not be derived from the resolved config"
+    # Prefill context-parallel MODE flag with no explicit size → degree underivable → untrust.
+    elif "--enable-prefill-cp" in args and pcp <= 1:
+        untrust_reason = "prefill context-parallel enabled without an explicit size flag"
+    return cfg, (untrust_reason is None), untrust_reason
+
+
+def ceiling_config_key(state: Any, arm: str | None) -> tuple[tuple, bool, str | None]:
+    """``(config identity tuple, trusted, untrust_reason)`` for the arm's config.
+
+    The identity (the key columns) replaces the symbolic arm as the ceiling-CSV row identity, so
+    distinct configs never overwrite each other. ``trusted`` False → external readers fall back to
+    native compute (never a silent wrong external read); ``untrust_reason`` names why (else ``None``),
+    so the consumer can log exactly what defeated the external read.
+    """
+    cfg, trusted, untrust_reason = _ceiling_config(state, arm)
+    return roofline_csv.ceiling_key(cfg), trusted, untrust_reason
+
+
+def ceiling_config_columns(state: Any, arm: str | None) -> dict[str, str]:
+    """The arm's content key in per-column form (``key_version``/``fw``/determinants), stamped onto
+    a ceiling row so each determinant occupies its own CSV column — these columns are the row's sole
+    identity. Built from the same ``cfg`` as :func:`ceiling_config_key`, so they agree exactly.
+    """
+    cfg, _, _ = _ceiling_config(state, arm)
+    return roofline_csv.ceiling_key_columns(cfg)
+
+
+def _external_store_mismatch(state: Any, read_dir: Any) -> str | None:
+    """WHY the external store is authored for a DIFFERENT run than this one (``None`` = it matches).
+
+    ``model``/``gpu`` are per-run constants (not key fields), but a shared/reused external CSV is not
+    model/gpu-constant — so validate here and fail-closed (→ native fallback) on a mismatch, guarding
+    against a wrong-model/gpu ceiling read under a coincidentally-matching config key. Absence of an
+    identifying column is not a mismatch (backward-compatible). The returned string names the specific
+    mismatch so the consumer can log exactly why it fell back.
+    """
+    from pathlib import Path as _Path
+
+    read_dir = _Path(read_dir)
+    runtime = resolve_runtime_workload(state)
+    gpu = (runtime.gpu_type or "").strip().lower()
+    if gpu:
+        arch = roofline_csv.read_arch_peaks(read_dir / "gpu_arch_peaks.csv")
+        if arch and not any(str(name).strip().lower() == gpu for name in arch):
+            return f"store gpu_arch_peaks {sorted(str(n) for n in arch)} has no entry for this run's gpu {gpu!r}"
+    meta = roofline_csv.read_model_meta(read_dir / "model_roofline_meta.csv")
+    store_model = (meta or {}).get("model_id")
+    if store_model:
+        # Compare alphanumeric-only + lowercased so `gpt_oss_120b` (MAIDAS workload) matches a
+        # `gpt-oss-120b` checkpoint dir. Mismatch → fail-closed (native fallback), never a wrong read.
+        def _norm_model(s: str) -> str:
+            return "".join(c for c in str(s).lower() if c.isalnum())
+
+        run_base = os.path.basename(str(runtime.model_path or "").rstrip("/"))
+        if _norm_model(store_model) not in (_norm_model(runtime.model_path), _norm_model(run_base)):
+            return f"store model_id {store_model!r} != this run's model {(run_base or runtime.model_path)!r}"
+    return None
+
+
 def _compute_tag_for_bytes(weight_bytes: float) -> str:
     """Map weight bytes-per-element to a HW_SPECS compute precision key."""
     if weight_bytes <= 0.5:
@@ -473,6 +664,47 @@ def _resolve_tflops(specs: dict[str, dict[str, Any]], gpu_type: str | None, prec
 def _resolve_peak_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
     """``(gpu, precision)`` → vendor dense peak TFLOPS; 0.0 on miss (safe-degrade signal → T_cmp unavailable, fall back to T_mem)."""
     return _resolve_tflops(HW_SPECS, gpu_type, precision_tag)
+
+
+def _hbm_bw_gbps(spec: dict[str, Any], gpu_type: str | None, resolver: Any = None) -> float:
+    """HBM bandwidth (GB/s) for the device.
+
+    CSV interface (A consumer, §6.3b peak-swap): when a :class:`roofline_csv.RooflineResolver`
+    is supplied and carries this device, the ANALYTICAL peak comes from
+    ``gpu_arch_peaks.csv`` (externally authored or a native cycle's published spec); otherwise
+    the vendor table value is used. Non-positive CSV cell → table fallback.
+    """
+    if resolver is not None:
+        bw = resolver.mem_bw(gpu_type or "")
+        if isinstance(bw, (int, float)) and bw > 0:
+            return float(bw)
+    return float(spec["hbm_bw_gbps"])
+
+
+def _arch_peak_resolver(state: Any) -> Any:
+    """A :class:`roofline_csv.RooflineResolver` over an EXTERNAL ``gpu_arch_peaks.csv``, or ``None``.
+
+    The arch peak-swap is **external-mode only** (``state.roofline_csv_dir`` set = an external
+    author supplied authoritative peaks). In native mode the arch peaks ARE the hardcoded
+    tables / measured microbench — that is the native analytical source, so the ceiling keeps
+    using it and never peak-swaps a *self-written* CSV. Reading self-published native peaks
+    back would risk a baseline(table)-vs-per-cycle(CSV) denominator drift for zero benefit
+    (unlike R/K, whose native round-trips are byte-identical). ``None`` disables the swap.
+    """
+    if not getattr(state, "roofline_csv_dir", ""):
+        # Native/disabled: no external authoritative peaks. Reached-but-inert; logged so the
+        # run shows the A consumer ran and correctly used the hardcoded peak tables.
+        log.debug("[roofline-csv] CONSUME A skip: native mode (no external peaks CSV) -> hardcoded peak tables")
+        return None
+    read_dir = state.roofline_csv_read_dir() if hasattr(state, "roofline_csv_read_dir") else None
+    if read_dir is None or not (read_dir / "gpu_arch_peaks.csv").exists():
+        log.debug("[roofline-csv] CONSUME A skip: external mode but no gpu_arch_peaks.csv present -> tables")
+        return None
+    log.debug(
+        "[roofline-csv] CONSUME A gpu_arch_peaks.csv peak-swap active (external) <- %s",
+        read_dir / "gpu_arch_peaks.csv",
+    )
+    return roofline_csv.RooflineResolver(read_dir)
 
 
 @dataclass(frozen=True)
@@ -731,6 +963,63 @@ def load_model_meta(
     )
 
 
+#: ModelMeta float fields (all others are integer byte-counts / dims).
+_MODEL_META_FLOAT_FIELDS = frozenset({"weight_dtype_bytes", "expert_weight_dtype_bytes"})
+
+
+def _model_meta_to_row(meta: "ModelMeta") -> dict[str, Any]:
+    """Project a :class:`ModelMeta` to a ``model_roofline_meta.csv`` row.
+
+    ``model_id`` is store metadata (not a ``ModelMeta`` field) → ``getattr`` default; the caller
+    (:func:`resolve_model_meta`) fills it from the model path.
+    """
+    return {c: getattr(meta, c, "") for c in roofline_csv.MODEL_META_COLUMNS}
+
+
+def _model_meta_from_row(row: dict[str, Any]) -> "ModelMeta":
+    """Build a :class:`ModelMeta` from a CSV row (numerics already coerced to float/None)."""
+    kw: dict[str, Any] = {}
+    for c in roofline_csv.MODEL_META_COLUMNS:
+        if c == "model_id":  # store metadata, not a ModelMeta field
+            continue
+        v = row.get(c)
+        if c in _MODEL_META_FLOAT_FIELDS:
+            kw[c] = float(v) if isinstance(v, (int, float)) else 0.0
+        else:
+            kw[c] = int(v) if isinstance(v, (int, float)) else 0
+    return ModelMeta(**kw)
+
+
+def resolve_model_meta(state: Any, model_path: str | Path, *, precision_hint: str = "") -> "ModelMeta | None":
+    """CSV-aware :class:`ModelMeta`: external mode reads ``model_roofline_meta.csv`` (MAIDAS /
+    external author); native mode builds from the HF dir and writes the CSV (so the memory sizes
+    round-trip and are available to a CSV consumer).
+
+    The external read is gated on ``state.roofline_csv_dir`` (mirrors :func:`_arch_peak_resolver`):
+    a native run never re-reads its own model-meta CSV. Falls back to the HF computation whenever
+    the external CSV is absent/empty, so behaviour is unchanged when no external author supplies it.
+    """
+    if getattr(state, "roofline_csv_dir", ""):
+        read_dir = state.roofline_csv_read_dir() if hasattr(state, "roofline_csv_read_dir") else None
+        if read_dir is not None:
+            row = roofline_csv.read_model_meta(read_dir / "model_roofline_meta.csv")
+            if row:
+                log.debug("[roofline-csv] CONSUME M model_roofline_meta.csv READ <- %s", read_dir)
+                return _model_meta_from_row(row)
+    meta = load_model_meta(model_path, precision_hint=precision_hint)
+    if meta is not None:
+        write_dir = state.roofline_csv_write_dir() if hasattr(state, "roofline_csv_write_dir") else None
+        if write_dir is not None:
+            try:
+                row = _model_meta_to_row(meta)
+                row["model_id"] = os.path.basename(str(model_path or "").rstrip("/"))
+                roofline_csv.write_model_meta(row, write_dir / "model_roofline_meta.csv")
+                log.debug("[roofline-csv] PRODUCE M model_roofline_meta.csv WROTE -> %s", write_dir)
+            except Exception:  # noqa: BLE001 — best-effort producer
+                log.debug("[roofline-csv] PRODUCE M model_roofline_meta.csv write failed", exc_info=True)
+    return meta
+
+
 def compute_kv_bytes_per_token(
     *,
     num_layers: int,
@@ -758,12 +1047,13 @@ def compute_theoretical_peak_output_tok_per_sec(
     num_experts: int = 0,
     experts_per_tok: int = 0,
     expert_weight_bytes: int = 0,
+    resolver: Any = None,
 ) -> float:
     """Decode-only memory-bound ceiling for ``output_throughput`` (returns 0.0, never raises, on unknown gpu_type / degenerate divisor). ``active_weight_bytes`` shrinks per-token IO for MoE."""
     spec = HW_SPECS.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
-    bw_total_bytes_per_sec = spec["hbm_bw_gbps"] * 1e9 * max(num_gpus, 1)
+    bw_total_bytes_per_sec = _hbm_bw_gbps(spec, gpu_type, resolver) * 1e9 * max(num_gpus, 1)
     batch = max(concurrency, 1)
     kv_bytes = compute_kv_bytes_per_token(
         num_layers=num_layers,
@@ -797,9 +1087,12 @@ def compute_compute_bound_ceiling_tok_per_sec(
     active_weight_bytes: int,
     weight_bytes: int,
     weight_dtype_bytes: float,
+    resolver: Any = None,
 ) -> float:
     """Decode-only compute-bound ceiling for ``output_throughput``."""
-    peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag) or _resolve_peak_tflops(gpu_type, precision_tag)
+    peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag, resolver) or _resolve_peak_tflops(
+        gpu_type, precision_tag
+    )
     if peak_tflops <= 0 or weight_dtype_bytes <= 0:
         return 0.0
     # B=1 per-token figure; fall back to dense weight_bytes when active is missing.
@@ -875,12 +1168,19 @@ def _read_vae_geometry(model_path: str) -> tuple[int, int]:
     return vae_scale, latent_channels
 
 
-def compute_diffusion_mem_img_per_sec(*, gpu_type: str, num_gpus: int, weight_bytes: int, num_steps: int) -> float:
-    """Memory-roofline ceiling for diffusion image throughput (images/sec)."""
+def compute_diffusion_mem_img_per_sec(
+    *, gpu_type: str, num_gpus: int, weight_bytes: int, num_steps: int, resolver: Any = None
+) -> float:
+    """Memory-roofline ceiling for diffusion image throughput (images/sec).
+
+    CSV interface (A consumer, §6.3b peak-swap): the HBM bandwidth peak-swaps to
+    ``gpu_arch_peaks.csv`` via :func:`_hbm_bw_gbps` when a resolver is supplied (external-CSV
+    mode); native/disabled → ``None`` resolver → the vendor ``HW_SPECS`` table, unchanged.
+    """
     spec = HW_SPECS.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
-    bw = spec["hbm_bw_gbps"] * 1e9 * max(num_gpus, 1)
+    bw = _hbm_bw_gbps(spec, gpu_type, resolver) * 1e9 * max(num_gpus, 1)
     if weight_bytes <= 0 or num_steps <= 0 or bw <= 0:
         return 0.0
     per_step_s = weight_bytes / bw
@@ -970,9 +1270,17 @@ def compute_diffusion_compute_img_per_sec(
     num_layers: int,
     hidden_size: int,
     num_steps: int,
+    resolver: Any = None,
 ) -> float:
-    """Compute-roofline ceiling for diffusion image throughput (images/sec)."""
-    peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag) or _resolve_peak_tflops(gpu_type, precision_tag)
+    """Compute-roofline ceiling for diffusion image throughput (images/sec).
+
+    CSV interface (A consumer, §6.3b peak-swap): the achievable TFLOPS peak-swaps to
+    ``gpu_arch_peaks.csv`` when a resolver is supplied (external-CSV mode); native/disabled →
+    ``None`` resolver → ``HW_SPECS_ACHIEVABLE``, then the dense-vendor fallback, unchanged.
+    """
+    peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag, resolver) or _resolve_peak_tflops(
+        gpu_type, precision_tag
+    )
     if peak_tflops <= 0 or dit_params <= 0 or latent_tokens <= 0 or num_steps <= 0:
         return 0.0
     linear = 2.0 * dit_params * latent_tokens
@@ -1002,13 +1310,19 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
     dit = _read_diffusion_dit_meta(model_dir, height=height, width=width)
 
     # Need at least one weight source: DiT geometry OR the full-checkpoint size; bail only when both are missing.
-    meta = load_model_meta(model_dir, precision_hint=runtime.precision)
+    meta = resolve_model_meta(state, model_dir, precision_hint=runtime.precision)
     meta_bytes = int(meta.weight_bytes) if (meta is not None and meta.weight_bytes > 0) else 0
     if dit is None and meta_bytes <= 0:
         return _EMPTY_BREAKDOWN
 
     # Per step only the DiT runs, so per-step memory IO is the DiT-only weight bytes; fall back to the full checkpoint
     # when DiT geometry is unavailable.
+    # CSV interface (A consumer): peak-swap the diffusion ceilings' HBM bw + achievable TFLOPS
+    # from gpu_arch_peaks.csv in external-CSV mode. Built here because the xDiT branch in
+    # _compute_roofline_breakdown_native returns before that function builds its own resolver, so
+    # diffusion ceilings would otherwise never honor MAIDAS-authored peaks. Native/disabled →
+    # None → the vendor tables, byte-identical to prior behavior.
+    resolver = _arch_peak_resolver(state)
     cmp_img_s = 0.0
     mem_bytes = meta_bytes
     if dit is not None:
@@ -1028,12 +1342,14 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
                 num_layers=num_layers,
                 hidden_size=hidden,
                 num_steps=num_steps,
+                resolver=resolver,
             )
     mem_img_s = compute_diffusion_mem_img_per_sec(
         gpu_type=runtime.gpu_type,
         num_gpus=runtime.tp,
         weight_bytes=mem_bytes,
         num_steps=num_steps,
+        resolver=resolver,
     )
     if mem_img_s <= 0 and cmp_img_s <= 0:
         return _EMPTY_BREAKDOWN
@@ -1046,15 +1362,313 @@ def compute_roofline_breakdown_from_state(
     *,
     arm: str | None = None,
 ) -> RooflineBreakdown:
-    """Primary decode ceiling + T_mem/T_cmp side projections."""
+    """Primary decode ceiling + T_mem/T_cmp side projections.
+
+    CSV interface (CSV_INTERFACE_REFACTOR_PLAN.md §6.3): in external-CSV mode
+    (``--roofline-csv-dir`` external) the composed ceiling arms are read from that
+    external ``roofline_ceiling.csv`` in place of the native computation below —
+    this is where an external Excel-composed ceiling enters. Native/disabled
+    modes compute the arms here as before; the native CSV *write* happens at the
+    two assembly sites (``shared_state`` baseline + per-cycle) via
+    :func:`write_ceiling_arm`, not on every call.
+
+    The external-vs-native dispatch is owned by the :class:`RooflineProvider` seam
+    (:func:`make_roofline_provider`): its ``ceiling`` reads the external arm and falls back to
+    the native compute, so this call is byte-identical to the prior inline branch while routing
+    every ceiling read through the single provider choke point.
+    """
+    from .roofline_provider import make_roofline_provider
+
+    return make_roofline_provider(state).ceiling(state, arm=arm)
+
+
+def _external_ceiling_breakdown(state: Any, arm: str | None) -> RooflineBreakdown | None:
+    """Read a composed ceiling arm from an external (externally authored) CSV, or ``None``.
+
+    Active only in external-CSV mode (``state.roofline_csv_dir`` set) and when the arm row is
+    present with a usable ``peak_tok_per_sec``. Otherwise returns ``None`` so the caller
+    falls back to native compute (``--roofline-csv-strict`` turns a missing row into a
+    hard failure instead).
+    """
+    if not arm or not getattr(state, "roofline_csv_dir", ""):
+        return None
+    read_dir = state.roofline_csv_read_dir()
+    if read_dir is None:
+        return None
+    key, trusted, untrust_reason = ceiling_config_key(state, arm)
+    # Two DISTINCT reasons to skip the external row and compute natively, logged separately so an
+    # ignored (MAIDAS-authored) ceiling is never silent: (1) UNTRUSTED — the config carries a
+    # ceiling-affecting knob the key can't express; (2) WRONG STORE — the CSV is for another model/gpu.
+    if not trusted:
+        log.info(
+            "[roofline-csv] CONSUME R skip — UNTRUSTED config: %s; arm=%s -> native fallback (external ceiling NOT read)",
+            untrust_reason, arm,
+        )
+        return None
+    store_mismatch = _external_store_mismatch(state, read_dir)
+    if store_mismatch:
+        log.info(
+            "[roofline-csv] CONSUME R skip — WRONG STORE: %s; arm=%s dir=%s -> native fallback (external ceiling NOT read)",
+            store_mismatch, arm, read_dir,
+        )
+        return None
+    row = roofline_csv.read_ceiling(read_dir / "roofline_ceiling.csv").get(key)
+    peak = row.get("peak_tok_per_sec") if row else None
+    if not row or not isinstance(peak, (int, float)) or peak <= 0:
+        if getattr(state, "roofline_csv_strict", False):
+            raise FileNotFoundError(
+                f"roofline-csv-strict: no usable ceiling row {key!r} in {read_dir}/roofline_ceiling.csv"
+            )
+        return None
+    mem = row.get("mem_tok_per_sec")
+    cmp = row.get("cmp_tok_per_sec")
+    bound_kind = row.get("bound_kind") or select_peak_and_bound(
+        float(mem or 0.0), float(cmp or 0.0)
+    )[1]
+    log.debug(
+        "[roofline-csv] CONSUME R (external) roofline_ceiling.csv READ arm=%s peak=%.3f bound=%s <- %s",
+        arm,
+        float(peak),
+        bound_kind,
+        read_dir / "roofline_ceiling.csv",
+    )
+    return RooflineBreakdown(float(mem or 0.0), float(cmp or 0.0), float(peak), str(bound_kind))
+
+
+def write_ceiling_arm(state: Any, arm: str | None, breakdown: RooflineBreakdown) -> None:
+    """Native-mode: upsert one composed ceiling arm into ``roofline_ceiling.csv``.
+
+    No-op when there is no native write dir (external-CSV mode: the external author writes it;
+    ``--no-roofline-csv``: stock path). Called from the two assembly sites so the CSV is
+    written once per authoritative snapshot, not on every ``compute_*`` query.
+    """
+    if not arm:
+        return
+    write_dir = state.roofline_csv_write_dir()
+    if write_dir is None:
+        log.debug("[roofline-csv] PRODUCE R skip: external/disabled mode (HL writes no ceiling CSV) arm=%s", arm)
+        return
+    path = write_dir / "roofline_ceiling.csv"
+    roofline_csv.write_ceiling(
+        [
+            {
+                "row_type": "arm",
+                **ceiling_config_columns(state, arm),
+                "mem_tok_per_sec": breakdown.mem_tok_per_sec,
+                "cmp_tok_per_sec": breakdown.cmp_tok_per_sec,
+                "peak_tok_per_sec": breakdown.peak_tok_per_sec,
+                "bound_kind": breakdown.bound_kind,
+            }
+        ],
+        path,
+    )
+    log.debug(
+        "[roofline-csv] PRODUCE R roofline_ceiling.csv WROTE arm=%s peak=%.3f mem=%.3f cmp=%.3f bound=%s -> %s",
+        arm,
+        breakdown.peak_tok_per_sec or 0.0,
+        breakdown.mem_tok_per_sec or 0.0,
+        breakdown.cmp_tok_per_sec or 0.0,
+        breakdown.bound_kind,
+        path,
+    )
+
+
+def _read_ceiling_arm(state: Any, arm: str | None) -> RooflineBreakdown | None:
+    """Read one composed ceiling arm back from ``roofline_ceiling.csv``, or ``None``.
+
+    Reads from the run's read dir (native: the ``roofline_csv`` subfolder just written;
+    external: the external dir). Returns ``None`` when the arm/peak is absent so the caller
+    keeps the in-memory value.
+    """
+    if not arm:
+        return None
+    read_dir = state.roofline_csv_read_dir()
+    if read_dir is None:
+        return None
+    key, _, _ = ceiling_config_key(state, arm)
+    path = read_dir / "roofline_ceiling.csv"
+    row = roofline_csv.read_ceiling(path).get(key)
+    peak = row.get("peak_tok_per_sec") if row else None
+    if not row or not isinstance(peak, (int, float)) or peak <= 0:
+        return None
+    mem = row.get("mem_tok_per_sec")
+    cmp = row.get("cmp_tok_per_sec")
+    bound_kind = row.get("bound_kind") or select_peak_and_bound(float(mem or 0.0), float(cmp or 0.0))[1]
+    log.debug(
+        "[roofline-csv] CONSUME R roofline_ceiling.csv READ arm=%s peak=%.3f bound=%s <- %s",
+        arm,
+        float(peak),
+        bound_kind,
+        path,
+    )
+    return RooflineBreakdown(float(mem or 0.0), float(cmp or 0.0), float(peak), str(bound_kind))
+
+
+def publish_and_read_ceiling_arm(state: Any, arm: str | None, breakdown: RooflineBreakdown) -> RooflineBreakdown:
+    """Round-trip the ceiling arm through the CSV so the snapshot/consumers are CSV-sourced.
+
+    Native mode: WRITE ``breakdown`` to ``roofline_ceiling.csv`` then READ it back — the
+    returned value comes from the CSV, so there is no in-memory producer->consumer bypass.
+    external-CSV mode: ``breakdown`` is already CSV-sourced (read from the external CSV by
+    :func:`compute_roofline_breakdown_from_state`), and the native write is a no-op, so it
+    is returned unchanged. Disabled (``--no-roofline-csv``): pass-through (stock path).
+    Called once per authoritative snapshot at the two assembly sites.
+    """
+    write_dir = state.roofline_csv_write_dir() if hasattr(state, "roofline_csv_write_dir") else None
+    if write_dir is None:
+        # external (already CSV-sourced) or disabled (stock) — no native round-trip.
+        log.debug("[roofline-csv] R round-trip skip: external/disabled mode arm=%s (breakdown returned as-is)", arm)
+        return breakdown
+    write_ceiling_arm(state, arm, breakdown)
+    csv_bd = _read_ceiling_arm(state, arm)
+    log.debug("[roofline-csv] R round-trip done: arm=%s CSV-sourced=%s", arm, csv_bd is not None)
+    return csv_bd if csv_bd is not None else breakdown
+
+
+#: CSV ``pct_time`` op-column convention is PERCENT (0-100), matching the column name and the
+#: external MAIDAS author; ``OpBreakdown.pct_time`` is an internal FRACTION (0-1), so convert at
+#: the write/read boundary.
+_PCT_TIME_SCALE = 100.0
+
+
+def write_ceiling_perfmodel(state: Any, arm: str | None, pm_bd: Any, provenance: dict[str, Any]) -> None:
+    """Native-mode: upsert the arm's per-op breakdown + arm-extra columns into ``roofline_ceiling.csv``.
+
+    Writes the full arm row (the ``mem/cmp/peak/bound`` base — identical to the value
+    :func:`write_ceiling_arm` published, since both derive from the same ``pm_bd`` — plus
+    ``prefill``/``theoretical``/``hbm_bw``/``peak_achievable_tflops``/compute-peak provenance) and one
+    ``row_type="op"`` row per :class:`OpBreakdown`. No-op in external/disabled mode. Best-effort:
+    a write failure must never break snapshot assembly.
+
+    Op rows are scoped by the arm's CONFIG key (``('op', key, op_name)``), so per-config op
+    breakdowns of different arms never clobber one another. This never affects a native SNAPSHOT
+    (native snapshots serialize the in-memory ``pm_bd.ops`` and never read the op rows back —
+    :func:`read_ceiling_perfmodel` fires only in external mode, where it filters op rows to the
+    requested arm's config key).
+    """
+    if not arm or pm_bd is None:
+        return
+    write_dir = state.roofline_csv_write_dir() if hasattr(state, "roofline_csv_write_dir") else None
+    if write_dir is None:
+        return
+    cols = ceiling_config_columns(state, arm)
+    mem = pm_bd.decode_mem_tok_per_s
+    cmp = pm_bd.decode_cmp_tok_per_s
+    positive = [v for v in (mem, cmp) if isinstance(v, (int, float)) and v > 0]
+    theoretical = min(positive) if positive else pm_bd.decode_tok_per_s
+    rows: list[dict] = [
+        {
+            "row_type": "arm",
+            **cols,
+            "mem_tok_per_sec": mem,
+            "cmp_tok_per_sec": cmp,
+            "peak_tok_per_sec": pm_bd.decode_tok_per_s,
+            "prefill_tok_per_sec": pm_bd.prefill_tok_per_s,
+            "bound_kind": pm_bd.bound_kind,
+            "theoretical_peak_tok_per_sec": theoretical,
+            "hbm_bw_gbps": pm_bd.hbm_bw_gbps,
+            "peak_achievable_tflops": pm_bd.peak_achievable_tflops,
+            "compute_peak_convention": provenance.get("compute_peak_convention"),
+            "compute_peak_source": provenance.get("compute_peak_source"),
+        }
+    ]
+    for op in pm_bd.ops:
+        rows.append(
+            {
+                "row_type": "op",
+                **cols,
+                "op_name": op.name,
+                "flops": op.flops,
+                "bytes_moved": op.bytes_moved,
+                "ai": op.ai,
+                "time_s": op.time_s,
+                "pct_time": (op.pct_time or 0.0) * _PCT_TIME_SCALE,
+                "bound_kind": op.bound,
+            }
+        )
+    try:
+        roofline_csv.write_ceiling(rows, write_dir / "roofline_ceiling.csv")
+        log.debug("[roofline-csv] PRODUCE R op-rows/extras WROTE arm=%s ops=%d", arm, len(pm_bd.ops))
+    except Exception:  # noqa: BLE001 — best-effort producer, must not break snapshot assembly
+        log.debug("[roofline-csv] PRODUCE R op-rows/extras write failed arm=%s", arm, exc_info=True)
+
+
+def read_ceiling_perfmodel(state: Any, arm: str | None) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """external-CSV mode: read the arm's per-op breakdown + arm-extras from the external
+    ``roofline_ceiling.csv``, returning ``(peak_provenance, perfmodel_breakdown)`` or ``None``.
+
+    Fires ONLY in external mode (``state.roofline_csv_dir`` set), mirroring
+    :func:`_arch_peak_resolver` — a native run keeps recomputing the PerfModel and never re-reads
+    its own CSV. Returns ``None`` when there is no external arm row to source.
+    """
+    if not arm or not getattr(state, "roofline_csv_dir", ""):
+        return None
+    read_dir = state.roofline_csv_read_dir() if hasattr(state, "roofline_csv_read_dir") else None
+    if read_dir is None:
+        return None
+    key, trusted, untrust_reason = ceiling_config_key(state, arm)
+    if not trusted:
+        log.info(
+            "[roofline-csv] CONSUME R (perfmodel) skip — UNTRUSTED config: %s; arm=%s -> native fallback (external ceiling NOT read)",
+            untrust_reason, arm,
+        )
+        return None
+    store_mismatch = _external_store_mismatch(state, read_dir)
+    if store_mismatch:
+        log.info(
+            "[roofline-csv] CONSUME R (perfmodel) skip — WRONG STORE: %s; arm=%s dir=%s -> native fallback (external ceiling NOT read)",
+            store_mismatch, arm, read_dir,
+        )
+        return None
+    all_rows = roofline_csv.read_ceiling(read_dir / "roofline_ceiling.csv")
+    arm_row = all_rows.get(key)
+    if not arm_row:
+        return None
+    ops: list[dict[str, Any]] = []
+    for rk, row in all_rows.items():
+        if isinstance(rk, tuple) and len(rk) == 3 and rk[0] == "op" and rk[1] == key:
+            pct = row.get("pct_time")
+            ops.append(
+                {
+                    "name": row.get("op_name") or rk[2],
+                    "flops": row.get("flops"),
+                    "bytes_moved": row.get("bytes_moved"),
+                    "ai": row.get("ai"),
+                    "time_s": row.get("time_s"),
+                    "bound": row.get("bound_kind"),
+                    "pct_time": (float(pct) / _PCT_TIME_SCALE) if isinstance(pct, (int, float)) else None,
+                }
+            )
+    peak_prov = {
+        k: arm_row[k]
+        for k in ("compute_peak_convention", "compute_peak_source")
+        if arm_row.get(k) not in (None, "")
+    }
+    perfmodel = {
+        "decode_tok_per_s": arm_row.get("peak_tok_per_sec"),
+        "prefill_tok_per_s": arm_row.get("prefill_tok_per_sec"),
+        "decode_mem_tok_per_s": arm_row.get("mem_tok_per_sec"),
+        "decode_cmp_tok_per_s": arm_row.get("cmp_tok_per_sec"),
+        "bound_kind": arm_row.get("bound_kind"),
+        "hbm_bw_gbps": arm_row.get("hbm_bw_gbps"),
+        "peak_achievable_tflops": arm_row.get("peak_achievable_tflops"),
+        "ops": ops,
+    }
+    log.debug("[roofline-csv] CONSUME R op-rows/extras READ arm=%s ops=%d", arm, len(ops))
+    return peak_prov, perfmodel
+
+
+def _compute_roofline_breakdown_native(
+    state: Any,
+    *,
+    arm: str | None = None,
+) -> RooflineBreakdown:
+    """Native decode ceiling + T_mem/T_cmp side projections (the stock computation)."""
     runtime = resolve_runtime_workload(state, arm=arm)
     # Diffusion (xDiT) uses a distinct images/sec ceiling.
     if (runtime.framework or "").strip().lower() == "xdit":
         return _compute_diffusion_breakdown_from_state(state, runtime)
-    meta = load_model_meta(
-        runtime.model_path,
-        precision_hint=runtime.precision,
-    )
+    meta = resolve_model_meta(state, runtime.model_path, precision_hint=runtime.precision)
     if meta is None:
         return _EMPTY_BREAKDOWN
     gpu_type = runtime.gpu_type
@@ -1064,6 +1678,10 @@ def compute_roofline_breakdown_from_state(
     rt = resolve_runtime_dtype(state, meta, arm=arm)
     meta = apply_runtime_dtype(meta, rt)
     precision_tag = rt.compute_precision_tag or runtime.precision or "bf16"
+    # CSV interface (A consumer): peak-swap the achievable TFLOPS + HBM bandwidth from
+    # gpu_arch_peaks.csv when the run has one (externally authored, or a native cycle's spec).
+    # Native without a CSV -> resolver is inert and the hardcoded tables are used.
+    resolver = _arch_peak_resolver(state)
     mem = compute_theoretical_peak_output_tok_per_sec(
         gpu_type=gpu_type,
         num_gpus=num_gpus,
@@ -1079,6 +1697,7 @@ def compute_roofline_breakdown_from_state(
         isl=runtime.isl,
         osl=runtime.osl,
         concurrency=concurrency,
+        resolver=resolver,
     )
     cmp = compute_compute_bound_ceiling_tok_per_sec(
         gpu_type=gpu_type,
@@ -1087,6 +1706,7 @@ def compute_roofline_breakdown_from_state(
         active_weight_bytes=meta.active_weight_bytes,
         weight_bytes=meta.weight_bytes,
         weight_dtype_bytes=meta.weight_dtype_bytes,
+        resolver=resolver,
     )
     if mem <= 0 and cmp <= 0:
         return _EMPTY_BREAKDOWN
@@ -1094,22 +1714,26 @@ def compute_roofline_breakdown_from_state(
     legacy = RooflineBreakdown(mem, cmp, peak, bound_kind)
 
     # Prefer the bottom-up PerfModel peak; legacy is the fallback.
-    pm_bd = compute_roofline_from_perfmodel(
-        meta=meta,
-        gpu_type=gpu_type,
-        concurrency=concurrency,
-        isl=runtime.isl,
-        osl=runtime.osl,
-        num_gpus=num_gpus,
-        precision_tag=precision_tag,
-    )
-    if pm_bd is not None and pm_bd.decode_tok_per_s > 0:
-        return RooflineBreakdown(
-            mem_tok_per_sec=pm_bd.decode_mem_tok_per_s,
-            cmp_tok_per_sec=pm_bd.decode_cmp_tok_per_s,
-            peak_tok_per_sec=pm_bd.decode_tok_per_s,
-            bound_kind=pm_bd.bound_kind,
+    try:
+        pm_bd = compute_roofline_from_perfmodel(
+            meta=meta,
+            gpu_type=gpu_type,
+            concurrency=concurrency,
+            isl=runtime.isl,
+            osl=runtime.osl,
+            num_gpus=num_gpus,
+            precision_tag=precision_tag,
+            resolver=resolver,
         )
+        if pm_bd is not None and pm_bd.decode_tok_per_s > 0:
+            return RooflineBreakdown(
+                mem_tok_per_sec=pm_bd.decode_mem_tok_per_s,
+                cmp_tok_per_sec=pm_bd.decode_cmp_tok_per_s,
+                peak_tok_per_sec=pm_bd.decode_tok_per_s,
+                bound_kind=pm_bd.bound_kind,
+            )
+    except Exception:  # noqa: BLE001 — PerfModel is best-effort
+        pass
 
     return legacy
 
@@ -1165,8 +1789,13 @@ HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
 }
 
 
-def _resolve_achievable_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
-    """Max-achievable TFLOPS from ``HW_SPECS_ACHIEVABLE``; 0.0 on miss."""
+def _resolve_achievable_tflops(gpu_type: str | None, precision_tag: str | None, resolver: Any = None) -> float:
+    """Max-achievable TFLOPS: ``gpu_arch_peaks.csv`` (A consumer peak-swap) when a resolver
+    carries the device/precision, else ``HW_SPECS_ACHIEVABLE``; 0.0 on miss."""
+    if resolver is not None:
+        peak = resolver.arch_peak(gpu_type or "", precision_tag or "")
+        if isinstance(peak, (int, float)) and peak > 0:
+            return float(peak)
     return _resolve_tflops(HW_SPECS_ACHIEVABLE, gpu_type, precision_tag)
 
 
@@ -1311,6 +1940,7 @@ def compute_roofline_from_perfmodel(
     osl: int,
     num_gpus: int = 1,
     precision_tag: str = "bf16",
+    resolver: Any = None,
 ) -> "PerfModelBreakdown | None":
     """Bottom-up decode + prefill roofline using inlined GEMM/SDPA formulas."""
     if meta is None:
@@ -1322,10 +1952,10 @@ def compute_roofline_from_perfmodel(
     if spec is None:
         return None
 
-    bw_gbps = spec["hbm_bw_gbps"] * max(num_gpus, 1)
+    bw_gbps = _hbm_bw_gbps(spec, gpu_type, resolver) * max(num_gpus, 1)
     bw_bps = bw_gbps * 1e9
     tag = (precision_tag or "bf16").strip().lower()
-    f_peak_tflops = (_resolve_achievable_tflops(gpu_type, tag) or _resolve_peak_tflops(gpu_type, tag)) * max(
+    f_peak_tflops = (_resolve_achievable_tflops(gpu_type, tag, resolver) or _resolve_peak_tflops(gpu_type, tag)) * max(
         num_gpus, 1
     )
     if f_peak_tflops <= 0:

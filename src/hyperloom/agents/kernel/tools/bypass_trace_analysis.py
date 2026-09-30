@@ -387,6 +387,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--height", type=int, default=0)
     p.add_argument("--width", type=int, default=0)
     p.add_argument("--cfg-batch", type=int, default=0)
+    # External gpu_arch_peaks.csv dir (external-CSV mode): the per-kernel bypass roofline peak-swaps
+    # to authoritative (MAIDAS-authored) peaks instead of the hardcoded _HW_SPECS tables.
+    p.add_argument("--roofline-csv-read-dir", default="")
     p.add_argument("--dry-run", action="store_true")
     return p
 
@@ -657,6 +660,18 @@ def main(argv: list[str] | None = None) -> int:
     if analyze.get("kernels"):
         _emit_quality_warnings(analyze, trace_health_warnings)
 
+    # External arch-peak resolver (external-CSV mode only): the per-kernel roofline peak-swaps to
+    # the authoritative gpu_arch_peaks.csv (MAIDAS-authored) when one is present; else the bypass
+    # keeps the hardcoded _HW_SPECS tables.
+    _arch_resolver = None
+    if args.roofline_csv_read_dir:
+        try:
+            from hyperloom.inference_optimizer import roofline_csv as _rc
+
+            _arch_resolver = _rc.RooflineResolver(args.roofline_csv_read_dir)
+        except Exception:  # noqa: BLE001 — a resolver import/build failure must not break analysis
+            _arch_resolver = None
+
     # --- build downstream artifacts from classified device kernels ---
     candidates = _report.build_candidates(
         analyze,
@@ -664,6 +679,7 @@ def main(argv: list[str] | None = None) -> int:
         target_platform=args.target_platform,
         top_k=top_k,
         discover_benchmarks=False,
+        resolver=_arch_resolver,
     )
 
     analysis_md_path = bypass_dir / "analysis.md"
@@ -790,7 +806,9 @@ def main(argv: list[str] | None = None) -> int:
                 inferred_steps=inferred_denoise_steps,
             )
             # Workload totals cover all analyzed device kernels (not just top-k).
-            _workload_totals = _report.build_workload_roofline_totals(analyze, target_platform=args.target_platform)
+            _workload_totals = _report.build_workload_roofline_totals(
+                analyze, target_platform=args.target_platform, resolver=_arch_resolver
+            )
             _all_kernels = [k for k in (analyze.get("kernels") or []) if float(k.get("gpu_time_us") or 0.0) > 0]
             _diff_report = build_report_from_bypass(
                 candidates.get("hot_kernels", []),

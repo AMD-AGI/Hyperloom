@@ -193,6 +193,17 @@ def _kernel_roofline_row(entry: Mapping[str, Any]) -> dict[str, Any] | None:
         "bound_type": _text_or_none(entry.get("bound_type")),
         "arithmetic_intensity": _float_or_none(intensity),
         "flops_per_byte": _float_or_none(entry.get("flops_per_byte")),
+        # Analytical magnitude columns (CSV-sourced when an external author / MAIDAS supplies
+        # them): preserve None when absent so a blank cell never fabricates a 0-flops kernel.
+        "flops": _float_or_none(entry.get("flops")),
+        "bytes_moved": _float_or_none(entry.get("bytes_moved")),
+        "ideal_us": _float_or_none(entry.get("ideal_us")),
+        "compute_us": _float_or_none(entry.get("compute_us")),
+        "read_us": _float_or_none(entry.get("read_us")),
+        "write_us": _float_or_none(entry.get("write_us")),
+        "peak_tflops": _float_or_none(entry.get("peak_tflops")),
+        "hbm_bw_gbps": _float_or_none(entry.get("hbm_bw_gbps")),
+        "precision": _text_or_none(entry.get("precision")),
         "efficiency_percent": _float_or_none(entry.get("efficiency_percent")),
         "compute_utilization_pct": _float_or_none(entry.get("compute_utilization_pct")),
         "bandwidth_utilization_pct": _float_or_none(entry.get("bandwidth_utilization_pct")),

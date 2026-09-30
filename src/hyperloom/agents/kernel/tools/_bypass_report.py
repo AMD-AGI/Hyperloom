@@ -346,8 +346,13 @@ def build_candidates(
     target_platform: str,
     top_k: int = 15,
     discover_benchmarks: bool = False,
+    resolver: Any = None,
 ) -> dict[str, Any]:
-    """Turn classified top device kernels into the candidate payload."""
+    """Turn classified top device kernels into the candidate payload.
+
+    ``resolver``: optional external ``gpu_arch_peaks.csv`` resolver — the per-kernel roofline
+    peak-swaps to authoritative (MAIDAS-authored) peaks when it carries them (external-CSV mode).
+    """
     kernels = analyze_out.get("kernels") or []
     hot_kernels: list[dict[str, Any]] = []
     for idx, k in enumerate(kernels[: top_k if top_k and top_k > 0 else len(kernels)], start=1):
@@ -503,6 +508,7 @@ def build_candidates(
             gpu_time_us=float(cand["duration_us"] or 0.0),
             call_count=int(cand["call_count"] or 1),
             gpu_type=target_platform,
+            resolver=resolver,
         )
         if rl:
             cand.update(rl)
@@ -1147,8 +1153,12 @@ def build_workload_roofline_totals(
     analyze_out: dict[str, Any],
     *,
     target_platform: str,
+    resolver: Any = None,
 ) -> dict[str, Any]:
-    """Aggregate the analytical roofline over ALL analyzed device kernels."""
+    """Aggregate the analytical roofline over ALL analyzed device kernels.
+
+    ``resolver``: optional external ``gpu_arch_peaks.csv`` resolver for the per-kernel peak-swap.
+    """
     sigma_actual = 0.0
     sigma_ideal = 0.0
     compute_us = 0.0
@@ -1173,6 +1183,7 @@ def build_workload_roofline_totals(
                 gpu_time_us=dur,
                 call_count=int(k.get("count") or 1),
                 gpu_type=target_platform,
+                resolver=resolver,
             )
             if shape_entries
             else None
@@ -1233,6 +1244,17 @@ def build_kernel_roofline(
                 "source_file": c["source_file"],
                 "rocprof_roofline": c["rocprof_roofline"],
                 "flops_per_byte": c.get("flops_per_byte"),
+                # Analytical magnitude columns from compute_roofline (see _bypass_roofline);
+                # pass through so kernel_row_from_view projects them into kernel_roofline.csv.
+                "flops": c.get("flops"),
+                "bytes_moved": c.get("bytes_moved"),
+                "ideal_us": c.get("ideal_us"),
+                "compute_us": c.get("compute_us"),
+                "read_us": c.get("read_us"),
+                "write_us": c.get("write_us"),
+                "peak_tflops": c.get("peak_tflops"),
+                "hbm_bw_gbps": c.get("hbm_bw_gbps"),
+                "precision": c.get("precision"),
                 # roofline_source is how the bound was derived.
                 "roofline_measured": c.get("roofline_measured", False),
                 "roofline_source": c.get("roofline_source", _RL_PLACEHOLDER),

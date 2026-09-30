@@ -349,6 +349,17 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     profile_osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
+    # Roofline CSV interface (CSV_INTERFACE_REFACTOR_PLAN.md §7). When ``roofline_csv_dir`` is set
+    # (``--roofline-csv-dir``), the analytical roofline CSVs are READ from that external directory
+    # (authored by an external program) and Hyperloom writes none — external-CSV mode. Unset ⇒
+    # native-CSV mode: producers write the CSVs under ``<session_dir>/reports`` and read them there.
+    # ``roofline_csv_disabled`` (``--no-roofline-csv``) forces the stock JSON/state path (byte-identical
+    # rollback, no CSV involved).
+    roofline_csv_dir: str = ""
+    roofline_csv_disabled: bool = False
+    # In external-CSV mode (``--roofline-csv-strict``), fail instead of falling back to native compute when an
+    # expected external roofline CSV is missing.
+    roofline_csv_strict: bool = False
     # KERNEL-phase optimizer: "geak" (default, one-shot whole-pipeline e2e) or "native" (per-kernel loop when
     # explicitly requested).
     kernel_optimizer: str = "geak"
@@ -1984,6 +1995,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             from hyperloom.inference_optimizer.roofline_ceiling import (
                 RooflineBreakdown,
                 compute_roofline_breakdown_from_state,
+                publish_and_read_ceiling_arm,
             )
             from hyperloom.inference_optimizer.roofline_snapshot import (
                 attach_perfmodel_breakdown,
@@ -1994,10 +2006,17 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
         achieved = self._resolve_baseline_achieved_tput()
         breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
-        breakdown = compute_roofline_breakdown_from_state(
-            self,
-            arm="baseline",
-        )
+        try:
+            breakdown = compute_roofline_breakdown_from_state(
+                self,
+                arm="baseline",
+            )
+        except Exception:  # noqa: BLE001 — ceiling is best-effort
+            pass
+        # CSV interface: round-trip the arms through roofline_ceiling.csv (native writes +
+        # reads back) so the snapshot below is CSV-sourced — no in-memory producer->consumer
+        # bypass. external-CSV mode already read the arms from the external CSV; disabled = stock.
+        breakdown = publish_and_read_ceiling_arm(self, "baseline", breakdown)
         peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
         if peak_tput <= 0:
             return {}
@@ -2142,6 +2161,32 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             kernel_roofline_path=kernel_roofline_path,
         )
 
+    def roofline_csv_read_dir(self) -> "Path | None":
+        """Directory to READ analytical roofline CSVs from, or ``None`` when disabled.
+
+        external-CSV mode: the external ``roofline_csv_dir`` (used as-is). Native mode: the
+        dedicated ``<session_dir>/roofline_csv`` subfolder where this run's producers
+        wrote all three CSVs. ``None`` when ``--no-roofline-csv`` selects the stock path.
+        """
+        if self.roofline_csv_disabled:
+            return None
+        if self.roofline_csv_dir:
+            return Path(self.roofline_csv_dir)
+        session_dir = getattr(self, "_session_dir", None)
+        return (Path(session_dir) / "roofline_csv") if session_dir else None
+
+    def roofline_csv_write_dir(self) -> "Path | None":
+        """Directory to WRITE analytical roofline CSVs to in native mode, else ``None``.
+
+        All three CSVs live under one dedicated ``<session_dir>/roofline_csv`` subfolder.
+        ``None`` in external-CSV mode (the external author writes them) and when disabled — a
+        ``None`` return is the producers' signal to skip the CSV write.
+        """
+        if self.roofline_csv_disabled or self.roofline_csv_dir:
+            return None
+        session_dir = getattr(self, "_session_dir", None)
+        return (Path(session_dir) / "roofline_csv") if session_dir else None
+
     def _read_session_roofline_report(
         self,
         payload: dict[str, Any],
@@ -2275,6 +2320,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             from hyperloom.inference_optimizer.roofline_ceiling import (
                 RooflineBreakdown,
                 compute_roofline_breakdown_from_state,
+                publish_and_read_ceiling_arm,
             )
 
             # Resolve which arm this snapshot measures first so the ceiling is anchored to the same arm as achieved.
@@ -2303,10 +2349,16 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 achieved_tput = self._resolve_baseline_achieved_tput()
             # Primary decode ceiling plus memory/compute sides (PerfModel bottom-up).
             breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
-            breakdown = compute_roofline_breakdown_from_state(
-                self,
-                arm=snapshot_arm,
-            )
+            try:
+                breakdown = compute_roofline_breakdown_from_state(
+                    self,
+                    arm=snapshot_arm,
+                )
+            except Exception:  # noqa: BLE001 — ceiling is best-effort
+                pass
+            # CSV interface: round-trip this arm through roofline_ceiling.csv (native writes +
+            # reads back) so the snapshot is CSV-sourced — no in-memory producer->consumer bypass.
+            breakdown = publish_and_read_ceiling_arm(self, snapshot_arm, breakdown)
             peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
             # Scriptable/diffusion has no tok/s decode ceiling; surface the compute-latency roofline (measured
             # per-image e2e latency vs the ideal floor from the sidecar).

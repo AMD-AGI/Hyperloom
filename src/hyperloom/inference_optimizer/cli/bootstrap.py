@@ -252,6 +252,9 @@ def _seed_shared_state(
         profile_osl=_int_arg("profile_osl", 0),
         max_model_len=_int_arg("max_model_len", 0),
         kernel_enabled=not getattr(args, "no_kernel", False),
+        roofline_csv_dir=str(getattr(args, "roofline_csv_dir", None) or ""),
+        roofline_csv_disabled=bool(getattr(args, "no_roofline_csv", False)),
+        roofline_csv_strict=bool(getattr(args, "roofline_csv_strict", False)),
         kernel_optimizer=_kernel_optimizer_record,
         target_summary=args.target_summary or _default_target_summary(args),
         # AgentX corpus shape: seeded from canonical constants if AgentX is on;
