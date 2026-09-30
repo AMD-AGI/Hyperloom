@@ -686,8 +686,6 @@ class IntentRouter(CoordinatorCollaborator):
         of ``verdict`` and defaults to it. ``approved_variant_names`` restricts
         an explore grid to the named variants; ``None`` keeps the full proposal.
         """
-        pending.decided = True
-        pending.verdict = verdict
         self.state.pending_proposals.pop(pending.proposal_msg_id, None)
         if is_upstream_pr_prescreen(pending.action_name, pending.payload):
             await self._coord.writeback._record_observation(

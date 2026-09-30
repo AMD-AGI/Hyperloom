@@ -130,7 +130,7 @@ class _InflightAction(NamedTuple):
 
 
 class DispatcherCollaborator(CoordinatorCollaborator):
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+    """Handles specialist dispatch: budget gating, action routing, and task enqueue."""
 
     _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT", "KERNEL_AGENT"})
 

@@ -3109,11 +3109,7 @@ class BenchmarkRunExecutor:
         ctx_extra: dict[str, Any] | None = None,
     ) -> bool:
         """Whether baseline double-run is enabled; task param can disable it, default on."""
-        if "baseline_double_run" in (params or {}):
-            return is_truthy((params or {}).get("baseline_double_run"))
-        if hasattr(self, "_baseline_double_run_default"):
-            return bool(self._baseline_double_run_default)
-        return True
+        return double_run_requested(params)
 
     def _write_lifecycle_config(
         self,

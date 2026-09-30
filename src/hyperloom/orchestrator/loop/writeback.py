@@ -582,7 +582,7 @@ def _record_config_attempts(
 
 
 class WritebackCollaborator(CoordinatorCollaborator):
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+    """Handles result writeback: benchmark scoring, recipe finalization, and bus observations."""
 
     PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0
 

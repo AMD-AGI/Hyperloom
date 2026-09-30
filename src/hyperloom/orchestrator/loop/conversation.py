@@ -527,7 +527,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     async def _augment_critic_inbox_with_pending(self, rendered: list["Message"]) -> list["Message"]:
         """Ensure every undecided proposal awaiting a Critic verdict is present."""
-        pending = [p for p in self.state.pending_proposals.values() if not getattr(p, "decided", False)]
+        pending = list(self.state.pending_proposals.values())
         if not pending:
             return rendered
         seen = {getattr(m, "msg_id", None) for m in rendered}
