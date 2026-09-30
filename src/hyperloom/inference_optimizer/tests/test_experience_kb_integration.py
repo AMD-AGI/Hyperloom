@@ -449,6 +449,25 @@ def test_specialist_dispatch_reads_only_in_framework_agent_and_fails_open(tmp_pa
     assert "EXPERIENCE KB" not in user
 
 
+def test_a_specialist_read_that_matched_nothing_still_travels_with_the_dispatch(tmp_path) -> None:
+    state = SharedState(tick=5, phase="FRAMEWORK_AGENT")
+    empty = ExperienceKBEvidence(
+        tick=5, read_id="read-empty", status="completed", prompt_block="", rendered_refs=(), warnings=()
+    )
+    integration = _Integration(empty)
+    coordinator = _dispatch_coordinator(tmp_path, state, integration)
+    params = {"domain": "serving_specialist"}
+
+    asyncio.run(coordinator._warm_specialist_params(params))
+    asyncio.run(coordinator._warm_specialist_params(params))
+
+    assert params["kb_read_id"] == "read-empty"
+    assert params["kb_rendered_refs"] == []
+    assert "experience_kb_block" not in params
+    assert len(integration.specialist_params) == 1
+    assert state.experience_kb_injections == []
+
+
 def test_an_agentx_run_reads_no_experience_since_none_of_its_own_is_published(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.setenv("HYPERLOOM_KB_URL", "https://kb.example")

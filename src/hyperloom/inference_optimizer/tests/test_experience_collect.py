@@ -239,6 +239,10 @@ def test_recorded_framework_rows_only_carry_declared_fields(session_dir: Path) -
 
 
 def _breakdown(session_dir: Path) -> dict[str, Any]:
+    return _document(_record_framework_attempts(session_dir))
+
+
+def _document(timeline: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "metadata": {
             "session": {"session_id": "session-42"},
@@ -252,7 +256,7 @@ def _breakdown(session_dir: Path) -> dict[str, Any]:
             },
             "grading": {"benchmark_mode": "synthetic"},
         },
-        "timeline": _record_framework_attempts(session_dir),
+        "timeline": timeline,
     }
 
 
@@ -385,3 +389,81 @@ def test_recorded_framework_attempts_satisfy_the_packaged_mapping(session_dir: P
     assert config["change"]["kind"] == "config_variant"
     assert config["outcome"]["decision"] == "revert"
     assert '"extra_server_args":"--already-kept 1"' in config["preconditions"][2]
+
+
+def test_a_specialists_config_only_deliverable_is_published_as_a_config_experience(session_dir: Path) -> None:
+    import asyncio
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.phase_framework._open_framework_timeline()
+    discovery_reasoning = "The PR routes MoE through the fused kernel this profile shows idle."
+    coord.phase_framework._ingest_candidate_discovery(
+        task=SimpleNamespace(
+            task_id="t-disc-7", params={"candidate_discovery": True, "domain": "candidate_discovery_specialist"}
+        ),
+        done_payload={
+            "proposal_set": [
+                {
+                    "pr_url": "https://x/pr/7",
+                    "title": "Route MoE through the fused kernel",
+                    "repo": "vllm",
+                    "verdict": "worth_a_bench",
+                    "reasoning": discovery_reasoning,
+                }
+            ]
+        },
+    )
+    authoring = SimpleNamespace(
+        task_id="t-auth-7",
+        params={
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "https://x/pr/7",
+            "domain": "serving_specialist",
+            "kb_read_id": "read-authoring",
+            "kb_rendered_refs": [],
+        },
+    )
+    asyncio.run(
+        coord._maybe_autosubmit_framework_config(
+            task=authoring,
+            done_payload={
+                "proposal_set": [
+                    {
+                        "name": "fused-moe-routing",
+                        "extra_args": "--enable-fused-moe",
+                        "extra_envs": {"VLLM_FUSED_MOE": "1"},
+                        "reason": "The PR reduces to this server flag on the installed version.",
+                    }
+                ]
+            },
+        )
+    )
+    [pending] = coord.state.pending_proposals.values()
+    coord.phase_framework._record_framework_agent_authored_outcome(
+        task=SimpleNamespace(task_id="t-int-7", kind="integrate_patch", params=dict(pending.payload["params"])),
+        result={
+            "status": "kept",
+            "base_tput": 100.0,
+            "output_throughput": 106.0,
+            "delta_pct": 6.0,
+            "keep_threshold_pct": 3.0,
+            "patches_applied": [],
+            "measured_against": {"throughput": 100.0, "extra_server_args": "--already-kept 1"},
+        },
+    )
+    coord._close_framework_timeline(exit_reason="optimize_no_more_leverage")
+    timeline = [event for event in read_timeline_events(session_dir) if event.get("type") == "framework_agent"]
+
+    report = kb_collect.collect(experience_collect.MAPPING, _document(timeline), dry_run=True).to_dict()
+
+    assert report["skipped"] == []
+    [row] = report["collected"]
+    experience = row["experience"]
+    assert experience["change"]["kind"] == "config_variant"
+    assert json.loads(experience["change"]["content"])["extra_server_args"] == "--enable-fused-moe"
+    assert json.loads(experience["change"]["content"])["extra_envs"] == {"VLLM_FUSED_MOE": "1"}
+    assert experience["outcome"]["decision"] == "keep"
+    assert experience["reasoning"] == discovery_reasoning
+    assert experience["provenance"]["extra"]["arm"] == "source"
+    assert experience["provenance"]["extra"]["kb_read_id"] == "read-authoring"

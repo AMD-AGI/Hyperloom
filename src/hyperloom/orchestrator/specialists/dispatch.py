@@ -266,7 +266,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     async def _warm_experience_kb(self, params: dict[str, Any]) -> None:
         """Inject this dispatch's Experience KB block into a FRAMEWORK_AGENT specialist and record the injection."""
         state = self.shared_state
-        if "experience_kb_block" in params:
+        if "kb_read_id" in params:
             return
         if str(getattr(state, "phase", "") or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
@@ -276,12 +276,14 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if integration is None:
             return
         evidence = await asyncio.to_thread(integration.read_for_specialist, state, params)
+        # The exposure travels with everything this specialist authors, under the keys orchestration proposals use;
+        # a read that matched nothing is recorded too, so it stays distinguishable from no read at all.
+        if evidence.read_id:
+            params["kb_read_id"] = evidence.read_id
+            params["kb_rendered_refs"] = [dict(ref) for ref in evidence.rendered_refs]
         if evidence.status != "completed" or not evidence.prompt_block:
             return
         params["experience_kb_block"] = evidence.prompt_block
-        # The exposure travels with everything this specialist authors, under the keys orchestration proposals use.
-        params["kb_read_id"] = evidence.read_id
-        params["kb_rendered_refs"] = [dict(ref) for ref in evidence.rendered_refs]
         state.record_experience_kb_injection(
             consumer="specialist",
             domain=str(params.get("domain") or ""),
