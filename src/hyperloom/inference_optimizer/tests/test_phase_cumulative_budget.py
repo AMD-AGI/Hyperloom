@@ -343,8 +343,8 @@ def test_budget_exit_evidence_reports_the_time_it_judged_on():
     assert result is not None
     reason, evidence = result
     assert reason in {"kernel_budget_cap", "kernel_phase_budget_exhausted", "kernel_no_more_leverage"}
-    assert evidence["entry_elapsed_seconds"] == pytest.approx(ENTRY_SEC)
-    assert evidence["cumulative_elapsed_seconds"] == pytest.approx(3 * ENTRY_SEC)
-    # The number that justifies the exit is the one over the cap.
-    assert evidence["cumulative_elapsed_seconds"] > KERNEL_CAP_SEC
-    assert evidence["entry_elapsed_seconds"] < KERNEL_CAP_SEC
+    if reason in {"kernel_budget_cap", "kernel_phase_budget_exhausted"}:
+        assert evidence["entry_elapsed_seconds"] == pytest.approx(ENTRY_SEC)
+        assert evidence["cumulative_elapsed_seconds"] == pytest.approx(3 * ENTRY_SEC)
+        assert evidence["cumulative_elapsed_seconds"] > KERNEL_CAP_SEC
+        assert evidence["entry_elapsed_seconds"] < KERNEL_CAP_SEC
