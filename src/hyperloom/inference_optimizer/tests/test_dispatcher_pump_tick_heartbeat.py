@@ -47,9 +47,9 @@ async def test_pump_joins_long_work_without_a_supervisor_stamp(tmp_path, monkeyp
     assert not hasattr(coord.reconciler, "stamp_progress")
     reaped = AsyncMock(wraps=coord.dispatcher._reap_dispatched_task)
     monkeypatch.setattr(coord.dispatcher, "_reap_dispatched_task", reaped)
-    monkeypatch.setattr(coord.dispatcher, "_is_promotable_result", lambda *_args: True)
-    monkeypatch.setattr(coord.dispatcher, "_promote_to_shared_state", AsyncMock())
-    monkeypatch.setattr(coord.dispatcher, "_fact_write_hook", AsyncMock())
+    monkeypatch.setattr(coord.writeback, "_is_promotable_result", lambda *_args: True)
+    monkeypatch.setattr(coord.writeback, "_promote_to_shared_state", AsyncMock())
+    monkeypatch.setattr(coord.writeback, "_fact_write_hook", AsyncMock())
     calls = []
 
     async def execute(ctx):

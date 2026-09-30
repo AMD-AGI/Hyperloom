@@ -22,6 +22,7 @@ from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.enablement.build import EnablementBuild
 from hyperloom.orchestrator.enablement.lane import EnablementLane
+from hyperloom.orchestrator.enablement.params import EnablementParams
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
@@ -173,13 +174,17 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         _framework_gpu_params=lambda: {},
         _framework_authoring_lanes_ttl=lambda _params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
         _time_budget_denial_for_action=lambda _action: None,
+        # Attributes exposed by CoordinatorCollaborator properties; set directly
+        # on the shim since property descriptors don't apply to SimpleNamespace.
+        knowledge_plane=None,
+        recipe_kb=None,
+        _proposal_scorer=None,
     )
     for owner, name in (
-        (Coordinator, "_build_enablement_specialist_params"),
-        (Coordinator, "_discover_enablement_candidate_refs"),
-        (Coordinator, "_registry_lanes_ttl"),
-        (Coordinator, "_maybe_record_enablement_human_review"),
-        (Coordinator, "_maybe_rearm_enablement"),
+        (EnablementParams, "_build_enablement_specialist_params"),
+        (EnablementParams, "_discover_enablement_candidate_refs"),
+        (EnablementLane, "_maybe_record_enablement_human_review"),
+        (EnablementLane, "_maybe_rearm_enablement"),
         (EnablementLane, "_maybe_enqueue_enablement_specialist"),
         (EnablementLane, "_enablement_admitted"),
         (EnablementLane, "_check_argv_terminal"),
@@ -195,6 +200,14 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         (EnablementBuild, "_maybe_escalate_to_targeted_build"),
     ):
         setattr(shim, name, types.MethodType(getattr(owner, name), shim))
+    # EnablementLane methods now access collaborators via self._coord; route them back to the shim.
+    shim._coord = types.SimpleNamespace(
+        _run_deadline=None,
+        enablement_params=shim,
+        enablement_build=shim,
+        specialist_dispatch=shim,
+        gpu_lanes=shim,
+    )
     return shim
 
 
@@ -384,7 +397,7 @@ async def _settle_failures(coordinator, session, slot, scenario_len: int) -> lis
     for index in range(scenario_len):
         result = await _bringup_attempt(session, slot, task_id=f"baseline-{index}")
         played.append(result)
-        await coordinator._handle_unpromotable_result(_baseline_task(f"baseline-{index}"), result)
+        await coordinator.writeback._handle_unpromotable_result(_baseline_task(f"baseline-{index}"), result)
         if coordinator.shared_state.stop_reason:
             break
     return played
