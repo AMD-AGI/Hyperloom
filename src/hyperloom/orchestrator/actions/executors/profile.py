@@ -139,13 +139,13 @@ def _instrumentation_preflight_row(bench: Any, patchers: Mapping[str, Any] | Non
     """State, before the run, whether the annotations the trace checks look for can land at all.
 
     When the TraceLens runtime patch is unavailable the env layer turns ``detailed_annotations`` and
-    ``shape_discovery`` off, which makes checks 3 and 5 certain to fail. That decision was previously read back one
-    line later and then discarded, so the post-hoc failures arrived without their cause. This only reports it --
-    the run proceeds exactly as before, because a trace without annotations is still a trace.
+    ``shape_discovery`` off, which makes checks 3 and 5 certain to fail. Recording that decision here gives the
+    post-hoc failures their cause. This only reports it -- the run proceeds unchanged, because a trace without
+    annotations is still a trace.
 
     ``patchers`` carries each patcher's own outcome. The env block records what the patch results *caused*, which
-    is not the same as which patcher ran and what it returned: a successful patch previously wrote nothing at all,
-    so "instrumentation was fine" and "nobody looked" were the same record.
+    is not the same as which patcher ran and what it returned: a successful patch records its outcome too, so
+    "instrumentation was fine" and "nobody looked" are different records.
     """
     envs = (bench or {}).get("envs") if isinstance(bench, dict) else None
     if not isinstance(envs, dict):

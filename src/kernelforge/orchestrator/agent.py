@@ -184,10 +184,8 @@ def make_agent_fn(
         )
 
     # The backend prompts name the STEPS (build, run the driver, profile) but not the mechanism, because only this
-    # loop knows it: this agent has Bash and the driver documented above, and no build/test/bench/pmc tools. They used
-    # to name those four as tools and this framing spent a sentence translating them back into shell -- prompt tokens
-    # paid, every session, to correct the prompt sitting directly beneath them. The backend prompts name the mechanism
-    # now, so only the framing that is actually about this loop is left.
+    # loop knows it: this agent has Bash and the driver documented above, and no build/test/bench/pmc tools. So this
+    # framing covers only what is specific to this loop.
     kernel_backend_section = ""
     if kernel_backend_context:
         # Profiling off means the loop hands the session no profiler, so this framing must not promise one. (The loaded

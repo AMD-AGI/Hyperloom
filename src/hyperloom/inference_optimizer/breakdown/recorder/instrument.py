@@ -186,6 +186,7 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any]) -> None:
                 correctness=correctness_passed,
                 artifact_path=artifact_path,
                 micro_decision=decision,
+                integrate_ref=str(result.get("integration_id") or "") if is_adopted else "",
                 started_at=str(att.get("started_at") or att.get("created_at") or att.get("ts") or ""),
                 ended_at=str(att.get("ended_at") or ""),
                 duration_sec=to_float(att.get("duration_sec") or att.get("elapsed_sec") or att.get("elapsed_s")),

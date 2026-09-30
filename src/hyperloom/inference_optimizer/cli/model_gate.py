@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Model / GPU gate for the CLI: GPU-type resolution, arch / config loading, unsupported-model detection, and the
+"""Model / GPU gate for the CLI: arch / config loading, unsupported-model detection, and the
 pre-flight gates that run before a session is born.
 """
 
@@ -54,30 +54,6 @@ __all__ = [
 ]
 
 log = logging.getLogger(__name__)
-
-# GPU-type resolution.
-_AMD_GPU_TYPES = _gpu_types._AMD_GPU_TYPES
-_GFX_TO_RUNNER = _gpu_types._GFX_TO_RUNNER
-_gpu_runner_type = _gpu_types._gpu_runner_type
-_resolve_gpu_type = _gpu_types._resolve_gpu_type
-
-
-def _autodetect_gpu_type() -> str | None:
-    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort)."""
-    return _gpu_types._autodetect_gpu_type()
-
-
-def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
-    """Resolve the current AMD GPU type, or None when not on AMD/unknown."""
-    explicit_norm = str(explicit or "").strip().lower()
-    if explicit_norm:
-        return explicit_norm if explicit_norm in _AMD_GPU_TYPES else None
-    env_norm = os.environ.get("GPU_TYPE", "").strip().lower()
-    if env_norm:
-        return env_norm if env_norm in _AMD_GPU_TYPES else None
-    detected = (_autodetect_gpu_type() or "").strip().lower()
-    return detected if detected in _AMD_GPU_TYPES else None
-
 
 _SUPPORTED_ARCH_MARKERS = (
     "ForCausalLM",
@@ -1142,7 +1118,7 @@ def _detect_incompatible_model_config(
             f"at config load."
         )
     # Steps 3-15: run the ordered registry, first non-None reason wins.
-    is_amd = bool(_resolve_amd_gpu_type(gpu_type))
+    is_amd = bool(_gpu_types._resolve_amd_gpu_type(gpu_type))
     for spec in _COMPAT_DETECTORS:
         if spec.amd_only and not is_amd:
             continue
@@ -1461,6 +1437,11 @@ def _persist_gate_stop_report(session_dir: Path, *, stop_reason: str, reason: st
         state = SharedState.load_or_init(session_dir)
         # Validated writer keeps the vocab-closed invariant Inv-8.3.
         state.set_stop_reason(stop_reason)
+        from ..breakdown.recorder.close_out import record_close_safety_net
+        from ..breakdown.recorder import record_stage_reached
+
+        record_close_safety_net(session_dir)
+        record_stage_reached(session_dir, "model_gate")
         state.closing_phase = True
         state.save(session_dir)
         write_stop_report(session_dir, state, stop_detail=reason)

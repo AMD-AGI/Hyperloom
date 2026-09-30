@@ -432,12 +432,10 @@ class EnablementBuild(CoordinatorCollaborator):
     def _note_build_routed(self, build_task_id: str, **fields: Any) -> None:
         """Record that a build's outcome has been routed, and to what.
 
-        ``routed`` is stamped on both paths. The append path always carried it;
-        the merge path took only the caller's fields, so routing a build with
-        nothing to say about it left a row that named the build and no longer
-        said it had been routed. That was legible only because the reader
-        matched on the id alone -- which is what made an attempt row's id, had
-        it ever carried one, answer for a build nobody had routed.
+        ``routed`` is stamped on both the append and the merge path, so a build
+        routed with no fields of its own still says it was routed. A reader
+        matching on the id alone could not tell that row from an attempt row
+        that happens to carry the same id.
         """
         manifest = list(self.shared_state.enablement.build_manifest or [])
         for idx, entry in enumerate(manifest):

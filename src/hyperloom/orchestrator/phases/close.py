@@ -5,14 +5,17 @@
 
 from __future__ import annotations
 import asyncio
+import hashlib
 import time
 import uuid
 from datetime import datetime, timezone
 from functools import partial
+from pathlib import Path
 from typing import Any
 from hyperloom.common.deadline import Deadline
 import logging as _logging
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
+from hyperloom.inference_optimizer.breakdown.workflow_contract import workflow_contract
 from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
     is_valid_stop_reason,
@@ -43,6 +46,10 @@ _CLOSE_STEP_WAIT_FLOOR_SEC: float = 60.0
 # Ceiling on the same wait.
 _CLOSE_STEP_WAIT_CEILING_SEC: float = 600.0
 
+_OPTIONAL_CLOSE_STEPS = frozenset(
+    row["step"] for row in workflow_contract()["close_sequence"]["steps"] if row["optional"]
+)
+
 # Stops that ask the process to go away now. A full-stack benchmark would outlive the request, so CLOSE publishes
 # nothing for an unvalidated stack instead of measuring it.
 _NO_REVALIDATION_STOP_REASONS: frozenset[str] = frozenset(
@@ -68,7 +75,7 @@ def _task_is_dead(task: Task | None) -> bool:
 
 
 class ClosePhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     def _derive_close_stop_reason(self) -> str:
         """Best-effort ``stop_reason`` for a CLOSE reached blank: recover from the newest CLOSE-bound phase_history row, else time_exhausted."""
@@ -103,26 +110,26 @@ class ClosePhase(CoordinatorCollaborator):
                 return True
         return False
 
-    async def _maybe_run_close_post_opt_roofline(self) -> None:
+    async def _maybe_run_close_post_opt_roofline(self) -> str | None:
         """Best-effort: run one final post-opt roofline at CLOSE when a kernel/source patch was integrated."""
         if not self._session_integrated_kernel_patch():
-            return
+            return None
         # Skip on the wall-clock-deadline close path (its grace window is too short for a full profile+TraceLens);
         # only run on a normal converged close.
         if bool(getattr(self.shared_state, "closing_phase", False)):
             log.info("CLOSE step 0: skipped post-opt roofline (wall-clock closing grace window)")
-            return
+            return None
         if str(getattr(self.shared_state, "stop_reason", "") or "") == PATCH_RECOVERY_INCOMPLETE_STOP_REASON:
             # Profiling the tree the run just refused to trust would attribute
             # the reading to a baseline that is not on disk.
             log.info("CLOSE step 0: skipped post-opt roofline (patch recovery incomplete)")
-            return
+            return None
         if self._internal_analysis_kind() != "roofline":
             # Roofline disabled for this run; nothing to profile.
-            return
+            return None
         task = await self._enqueue_internal_analysis_task(reason="close_post_opt")
         if task is None:
-            return
+            return None
         log.info(
             "CLOSE step 0: running post-opt roofline task=%s (timeout=%.0fs)",
             task.task_id,
@@ -159,9 +166,10 @@ class ClosePhase(CoordinatorCollaborator):
                     "CLOSE step 0: failed to mark timed-out post-opt roofline task",
                     exc_info=True,
                 )
-            return
+            return "failed"
         state = getattr(result, "state", None)
         log.info("CLOSE step 0: post-opt roofline finished (state=%s)", state)
+        return "done" if state == "succeeded" else "failed"
 
     def _close_stack_revalidation_timeout_sec(self) -> float:
         """How long CLOSE waits for its full-stack revalidation to settle."""
@@ -367,9 +375,12 @@ class ClosePhase(CoordinatorCollaborator):
         # Post-optimization roofline (best-effort): profile the final optimized service once so the before/after
         # kernel roofline chart has its "after" column.
         try:
-            await self._maybe_run_close_post_opt_roofline()
+            roofline_status = await self._maybe_run_close_post_opt_roofline()
+            if roofline_status is not None:
+                await self._record_close_step("post_opt_roofline", status=roofline_status)
         except Exception as exc:  # noqa: BLE001
             log.warning("CLOSE step 0 (post-opt roofline) failed: %r", exc)
+            await self._record_close_step("post_opt_roofline", status="failed", detail=repr(exc)[:240])
 
         # Recorded here rather than derived by the exporter: this is the first
         # moment each of these is final, and the snapshot history the exporter
@@ -426,11 +437,6 @@ class ClosePhase(CoordinatorCollaborator):
             )
             terminal_state = await self._run_close_task(report_task, step="1 (report)")
             if terminal_state in {"succeeded", None}:
-                await self._record_close_step(
-                    "report",
-                    status="done",
-                    task_id=report_task.task_id,
-                )
                 # Surface the final report location; advertise whichever of final.{json,md} exist under
                 # reports_dir(session_dir).
                 from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
@@ -438,6 +444,14 @@ class ClosePhase(CoordinatorCollaborator):
                 _rd = _reports_dir(self.session_dir)
                 _json_path = _rd / "final.json" if (_rd / "final.json").exists() else None
                 _md_path = _rd / "final.md" if (_rd / "final.md").exists() else None
+                _receipt_path = _json_path or _md_path
+                await self._record_close_step(
+                    "report",
+                    status="done",
+                    task_id=report_task.task_id,
+                    artifact_path=str(_receipt_path.relative_to(Path(self.session_dir))) if _receipt_path else "",
+                    artifact_digest=hashlib.sha256(_receipt_path.read_bytes()).hexdigest() if _receipt_path else "",
+                )
                 # Recorded where the step that wrote the files knows which of
                 # them landed, so the export need not probe the filesystem.
                 _close_out.record_close_artifacts(
@@ -492,6 +506,7 @@ class ClosePhase(CoordinatorCollaborator):
                     "session_breakdown",
                     status="done",
                     task_id=bd_task.task_id,
+                    artifact_path=_close_out.SESSION_BREAKDOWN_PATH,
                 )
             else:
                 await self._record_close_step(
@@ -524,6 +539,7 @@ class ClosePhase(CoordinatorCollaborator):
             # Attach the final breakdown JSON to the trace as a ``session_breakdown`` observation (no-op when live
             # push is disabled).
             record_session_breakdown(self.session_dir)
+            await self._record_close_step("langfuse_flush", status="done")
         except Exception as exc:
             log.debug("CLOSE step 2.5 (langfuse flush) failed", exc_info=True)
             await self._record_close_step(
@@ -550,12 +566,14 @@ class ClosePhase(CoordinatorCollaborator):
             if pkg_path is not None:
                 # A field rather than something the export parses back out of
                 # the step's free-text ``detail``, which also carries the skip
-                # and failure reasons.
+                # and failure reasons. The ZIP digest cannot live inside the
+                # SBD bundled by that same ZIP without a self-reference.
                 _close_out.record_close_artifacts(self.session_dir, artifact_package_path=pkg_path)
                 await self._record_close_step(
                     "artifact_package",
                     status="done",
                     detail=str(pkg_path),
+                    artifact_path=str(pkg_path),
                 )
             else:
                 await self._record_close_step(
@@ -594,6 +612,9 @@ class ClosePhase(CoordinatorCollaborator):
             self.session_dir,
             stop_reason=str(getattr(self.shared_state, "stop_reason", "") or ""),
         )
+        from hyperloom.inference_optimizer.breakdown.recorder import record_stage_reached
+
+        record_stage_reached(self.session_dir, "close")
 
         # Refresh the breakdown's ``close`` key now that the sequence is on
         # disk: step 2 wrote the breakdown, so the copy it produced describes
@@ -842,6 +863,8 @@ class ClosePhase(CoordinatorCollaborator):
         status: str,
         task_id: str = "",
         detail: str = "",
+        artifact_path: str = "",
+        artifact_digest: str = "",
     ) -> None:
         """Record one settled close step (best-effort, per-step persist).
 
@@ -859,6 +882,10 @@ class ClosePhase(CoordinatorCollaborator):
             ts=ts,
             task_id=task_id,
             detail=detail,
+            optional=step in _OPTIONAL_CLOSE_STEPS,
+            artifact_path=artifact_path,
+            artifact_digest=artifact_digest,
+            error=detail if status == "failed" else "",
         )
         entry: dict[str, Any] = {
             "step": step,

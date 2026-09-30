@@ -61,6 +61,7 @@ from .coordinator_helpers import (
 
 from .conversation import _format_inbox_event
 import logging as _logging
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -136,25 +137,21 @@ class _InflightAction(NamedTuple):
     scope: CancelScope
 
 
-class DispatcherCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+class DispatcherCollaborator(CoordinatorCollaborator):
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
+    def _init_dispatch_state(self) -> None:
         # Task ids already charged a failure by the dead-holder reclaim path, so
         # a late normal result for the same task cannot double-count it.
         self._dead_holder_accounted: set[str] = set()
         # Handles on the actions currently running, ``task_id -> _InflightAction``.
-        # Kept on the collaborator and not only in the pump's frame: an action
+        # Kept on the coordinator and not only in the pump's frame: an action
         # whose handle lives in a frame can only be stopped by the frame that is
         # already blocked awaiting it, which is precisely the situation shutdown
         # and an exhausted wall-clock budget have to break. Entries remove
         # themselves in :meth:`run_task_registered`.
         self._inflight_actions: dict[str, _InflightAction] = {}
         self._executions: set[asyncio.Task[Any]] = set()
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
 
     async def close_db_after_executions(self) -> None:
         """Drain physical cleanup and completion before the entry-point loop exits.
@@ -484,13 +481,7 @@ class DispatcherCollaborator:
             return []
 
         created: list[str] = []
-        try:
-            cancelled = await self.tasks.by_state("cancelled")
-        except Exception:
-            log.exception("dispatcher: reconcile could not list cancelled tasks")
-            return []
-
-        for task in cancelled:
+        for task in await self.tasks.by_state("cancelled"):
             if task.kind != "integrate_patch":
                 continue
             evidence = _dispatch_policy_denied_evidence(task)
@@ -510,18 +501,15 @@ class DispatcherCollaborator:
             except PolicyDenied:
                 continue
             base_key = str(task.idempotency_key or f"integrate-{task.task_id}").strip()
-            if await self.tasks.integrate_reconcile_child_exists(
-                base_key,
-                states=("succeeded",),
-            ):
-                continue
-            if await self.tasks.integrate_reconcile_child_exists(
-                base_key,
-                states=("queued", "running"),
+            child_key_prefix = f"{base_key}-reconcile"
+            if await self.tasks.exists_with_key_prefix(
+                task.kind,
+                child_key_prefix,
+                states=("succeeded", "queued", "running"),
             ):
                 continue
             for attempt in range(1, 6):
-                new_key = f"{base_key}-reconcile{attempt}"
+                new_key = f"{child_key_prefix}{attempt}"
                 new_task, was_existing = await self.tasks.create_or_return_existing(
                     kind=task.kind,
                     params=params,
@@ -538,8 +526,6 @@ class DispatcherCollaborator:
                         new_task.task_id,
                         new_key,
                     )
-                    break
-                if new_task.state in ("queued", "running", "succeeded"):
                     break
         return created
 
@@ -783,11 +769,9 @@ class DispatcherCollaborator:
             # no registered executor. Kernel-owned kinds are legitimately
             # unregistered under --no-kernel, so they are excluded to avoid a
             # false positive. Dispatch is unchanged.
-            _coord = object.__getattribute__(self, "_coord")
-            _execs = getattr(getattr(_coord, "sub", None), "executor_registry", None)
+            _execs = self.sub.executor_registry
             if (
-                isinstance(_execs, dict)
-                and _execs
+                _execs
                 and task.kind not in _execs
                 and task.kind != "specialist"
                 and task.kind not in KERNEL_AGENT_OWNED_ACTIONS
@@ -1264,11 +1248,10 @@ class DispatcherCollaborator:
         # integrate_patch completion handling.
         if task.kind == "integrate_patch" and result.state != "cancelled":
             await self.phase_framework.on_integrate_patch_settled(task, result)
-        # Auto-promote succeeded results into CORE_STATE_FIELDS
-        # (Coordinator-only writer).  Warm replay is deliberately routed
-        # through its promote handler even when dispatch itself failed:
-        # that handler owns rollback of pre-applied framework patches and
-        # clears the PRELUDE ``in_flight`` gate.
+        # Auto-promote succeeded results (Coordinator-only writer).  Warm
+        # replay is deliberately routed through its promote handler even when
+        # dispatch itself failed: that handler owns rollback of pre-applied
+        # framework patches and clears the PRELUDE ``in_flight`` gate.
         result_payload = dict(result.result or {})
         replay_needs_cleanup = task.kind == "replay_warm_recipe" and result.state == "failed"
         if replay_needs_cleanup:
@@ -1685,10 +1668,9 @@ class DispatcherCollaborator:
         Returns:
             A frozenset of action names eligible for inline execution.
         """
-        coord = object.__getattribute__(self, "_coord")
-        executors = getattr(coord.sub, "executor_registry", {}) or {}
+        executors = self.sub.executor_registry
         allowed: set[str] = set()
-        for name in coord.action_registry:
+        for name in self.action_registry:
             if name in self._INLINE_ACTION_DENY:
                 continue
             if name not in executors:

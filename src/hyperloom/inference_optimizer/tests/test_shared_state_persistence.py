@@ -43,7 +43,8 @@ def update_state_coordinator(session_dir, monkeypatch):
     bind_session(session_dir)
     c = Coordinator.__new__(Coordinator)
     c.session_dir = session_dir
-    c.shared_state = SharedState(current_action="before", target_summary="original")
+    # A phase is required: recording a denial stamps the breakdown event id with it.
+    c.shared_state = SharedState(current_action="before", target_summary="original", phase="PRELUDE")
     c.db = SqliteConnection(session_dir / "coordinator.db", journal_mode="DELETE")
     c.bus = MessageBus(c.db)
     c.policy = PolicyGate(role_registry=default_role_registry(), shared_state=c.shared_state)
@@ -167,31 +168,6 @@ def test_save_is_atomic(tmp_path):
     assert leftovers == []
 
 
-@pytest.mark.parametrize(
-    "invalid",
-    [
-        {"crash_count": "bad"},
-        {"crash_timestamps": "bad"},
-        {"crash_timestamps": [100.0, "bad"]},
-        {"current_action": None},
-        {"target_summary": []},
-    ],
-)
-def test_load_rejects_corrupt_state_without_rewriting_evidence(tmp_path, invalid):
-    path = tmp_path / "state.json"
-    raw = {"session_id": "damaged", "schema_version": 1, "incident_evidence": {"traceback": "original"}, **invalid}
-    original = json.dumps(raw, indent=2).encode("utf-8") + b"\n"
-    path.write_bytes(original)
-    modified_ns = path.stat().st_mtime_ns
-
-    with pytest.raises(ValueError, match=next(iter(invalid))):
-        SharedState.load_or_init(tmp_path)
-
-    assert path.read_bytes() == original
-    assert path.stat().st_mtime_ns == modified_ns
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]
-
-
 def test_load_legacy_state_keeps_defaults_without_rewriting_file(tmp_path):
     path = tmp_path / "state.json"
     original = b'{"session_id": "legacy", "unknown_future_field": 42}\n'
@@ -217,60 +193,9 @@ def test_from_dict_drops_unknown_fields():
     assert not hasattr(s, "unknown_future_field")
 
 
-def test_apply_changes_only_known_fields():
-    s = SharedState()
-    applied = s.apply_changes(
-        {"current_action": "baseline", "bogus": 1, "cumulative_gain_validated": 5.0},
-        allow_core=True,
-    )
-    assert applied == {"current_action": "baseline", "cumulative_gain_validated": 5.0}
-    assert s.current_action == "baseline"
-    assert s.cumulative_gain_validated == 5.0
-
-
-def test_apply_changes_untrusted_only_applies_allowed_text():
-    s = SharedState(current_action="before")
-    applied = s.apply_changes(
-        {
-            "current_action": "baseline",
-            "target_summary": "GEMM-bound",
-            "crash_timestamps": "bad",
-            "policy_denial_streak": "bad",
-            "pending_targeted_build": "bad",
-            "agent_last_active": "bad",
-            "bogus": 1,
-        },
-        allow_core=False,
-    )
-    assert applied == {"current_action": "baseline", "target_summary": "GEMM-bound"}
-    assert s.crash_timestamps == []
-    assert s.policy_denial_streak == {}
-    assert s.pending_targeted_build == {}
-    assert s.agent_last_active == {}
-    assert not hasattr(s, "bogus")
-
-
-@pytest.mark.parametrize("field_name", ["current_action", "target_summary"])
-@pytest.mark.parametrize("value", [None, False, 1, [], {}])
-def test_apply_changes_untrusted_drops_wrong_text_types(field_name, value):
-    s = SharedState(current_action="before", target_summary="original")
-    assert s.apply_changes({field_name: value}, allow_core=False) == {}
-    assert s.current_action == "before"
-    assert s.target_summary == "original"
-
-
-def test_apply_changes_trusted_can_update_runtime_fields():
-    s = SharedState()
-    changes = {"crash_timestamps": [100.0], "agent_last_active": {"orchestration": 100.0}}
-    assert s.apply_changes(changes, allow_core=True) == changes
-    assert s.crash_timestamps == [100.0]
-    assert s.agent_last_active == {"orchestration": 100.0}
-
-
-def test_agent_update_schema_is_not_persisted_or_instance_writable():
+def test_agent_update_schema_is_not_persisted():
     s = SharedState()
     assert "AGENT_UPDATE_FIELDS" not in s.to_dict()
-    assert s.apply_changes({"AGENT_UPDATE_FIELDS": {"crash_timestamps": str}}, allow_core=True) == {}
     restored = SharedState.from_dict({"AGENT_UPDATE_FIELDS": {"crash_timestamps": "str"}})
     assert "AGENT_UPDATE_FIELDS" not in restored.__dict__
     assert restored.AGENT_UPDATE_FIELDS == {"current_action": str, "target_summary": str}
@@ -399,37 +324,45 @@ async def test_coordinator_update_state_persists_known_fields(update_state_coord
     assert obs[0].payload == {
         "kind": "update_state",
         "changes": {"current_action": "baseline", "target_summary": "GEMM-bound 8B model"},
-        "rejected": [],
     }
 
 
+@pytest.mark.parametrize(
+    "bad_field, bad_value",
+    [
+        ("future_unknown_key", 42),
+        ("phase", "CLOSE"),
+        ("crash_timestamps", [1.0]),
+        # A writable name carrying the wrong type refuses the update too.
+        ("current_action", 42),
+        ("target_summary", None),
+    ],
+)
 @pytest.mark.asyncio
-@pytest.mark.parametrize("include_allowed", [False, True])
-async def test_coordinator_update_state_drops_unknown_fields(update_state_coordinator, include_allowed):
+async def test_coordinator_update_state_refuses_a_whole_intent_with_one_bad_key(
+    update_state_coordinator,
+    bad_field,
+    bad_value,
+):
+    """One unwritable key refuses the update outright, so the writable field beside it does not land either."""
     c = update_state_coordinator
-    changes = {"future_unknown_key": 42}
-    if include_allowed:
-        changes["current_action"] = "baseline"
-    await c._handle_intent(
-        "orchestration",
-        Intent(type=IntentType.UPDATE_STATE, payload={"changes": changes}),
-    )
-    assert c.shared_state.current_action == ("baseline" if include_allowed else "before")
-    assert not hasattr(c.shared_state, "future_unknown_key")
+    writable = next(name for name in SharedState.AGENT_UPDATE_FIELDS if name != bad_field)
+    changes = {writable: "GEMM-bound 8B model", bad_field: bad_value}
+    intent = Intent(type=IntentType.UPDATE_STATE, payload={"changes": changes})
+    before = c.shared_state.to_dict()
+
+    await c._handle_intent("orchestration", intent)
+
+    # Not one field of the refused update landed, including the writable one.
+    after = c.shared_state.to_dict()
+    assert after["target_summary"] == before["target_summary"] == "original"
+    assert after["current_action"] == before["current_action"] == "before"
+    assert after.get(bad_field) == before.get(bad_field)
+    assert not (c.session_dir / "state.json").exists()
     obs = await c.bus.tail(topic="observation")
-    assert len(obs) == 1
-    assert obs[0].payload == {
-        "kind": "update_state",
-        "changes": {"current_action": "baseline"} if include_allowed else {},
-        "rejected": ["future_unknown_key"],
-    }
-    state_path = c.session_dir / "state.json"
-    if include_allowed:
-        on_disk = json.loads(state_path.read_text())
-        assert on_disk["current_action"] == "baseline"
-        assert "future_unknown_key" not in on_disk
-    else:
-        assert not state_path.exists()
+    assert [m.payload["kind"] for m in obs] == ["policy_denied"]
+    assert obs[0].payload["rule"] == "state_field"
+    assert repr(bad_field) in obs[0].payload["reason"]
 
 
 def test_reference_fields_survive_resume(tmp_path):
