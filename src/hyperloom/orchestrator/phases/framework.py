@@ -7,7 +7,8 @@ from __future__ import annotations
 import logging as _logging
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
+from hashlib import sha1
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.coerce import to_float
@@ -667,86 +668,58 @@ class FrameworkPhase:
         self._open_framework_timeline()
         await self._pump_framework_agent_phase()
 
-    def _authoring_inflight_candidate_ids(
-        self,
-        queued: list[Any],
-        running: list[Any],
-    ) -> set[str]:
-        """Collect candidate ids that are currently in flight or awaiting a Critic verdict."""
-        in_flight: set[str] = set()
-        for t in (*queued, *running):
-            params = getattr(t, "params", None) or {}
-            cand_id = str(params.get("framework_agent_candidate_id") or "").strip()
-            if cand_id and getattr(t, "kind", "") in ("specialist", "integrate_patch"):
-                in_flight.add(cand_id)
+    def _authoring_inflight_candidate_ids(self, queued: list[Any], running: list[Any]) -> set[str]:
+        """Candidate ids with a live specialist / integrate_patch task or an undecided review proposal."""
+        in_flight = {
+            str(t.params.get("framework_agent_candidate_id") or "")
+            for t in (*queued, *running)
+            if t.kind in ("specialist", "integrate_patch") and t.params
+        }
         for p in self._coord.state.pending_proposals.values():
-            if getattr(p, "decided", False):
+            if p.decided or p.action_name != "integrate_patch":
                 continue
-            payload = getattr(p, "payload", None) or {}
-            iparams = payload.get("params") or {}
-            cand_id = str(
-                payload.get("framework_agent_candidate_id") or iparams.get("framework_agent_candidate_id") or ""
-            ).strip()
-            if cand_id and getattr(p, "action_name", "") == "integrate_patch":
-                in_flight.add(cand_id)
+            payload = p.payload or {}
+            in_flight.add(
+                str(
+                    payload.get("framework_agent_candidate_id")
+                    or (payload.get("params") or {}).get("framework_agent_candidate_id")
+                    or ""
+                )
+            )
+        in_flight.discard("")
         return in_flight
 
     async def _pump_framework_agent_phase(self) -> None:
-        """Drive the FRAMEWORK_AGENT phase: submit candidates for authoring in parallel.
+        """Drive the FRAMEWORK_AGENT phase: submit candidates for review in parallel.
 
-        Idempotent; a discover failure flips framework_agent_phase_done so the
-        phase advances rather than wedging.  Candidates are submitted for Critic
-        review in a loop, up to the session ``research_lane_capacity`` concurrency
-        limit.  The discovery → local-explore → phase-done fallback only runs
-        when no candidate is unselected and nothing is in flight.
+        Up to ``research_lane_capacity`` candidates are in flight at once; landing
+        still serialises on ``workspace_mutation``. The discovery → local-explore →
+        phase-done fallback runs only once no candidate is left and none is in
+        flight. Idempotent; a discover failure flips ``framework_agent_phase_done``
+        so the phase advances rather than wedging.
         """
         state = self._coord.shared_state
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
         if bool(getattr(state, "framework_agent_phase_done", False)):
             return
-
-        queued = await self._coord.tasks.queued()
-        running = await self._coord.tasks.running()
-
-        # Skip if any candidate integrate_patch (landed from the LLM or authoring)
-        # is already queued or running — landing serialises on workspace_mutation.
-        for t in (*queued, *running):
-            if getattr(t, "kind", "") == "integrate_patch" and (getattr(t, "params", None) or {}).get(
-                "framework_agent_candidate_id"
-            ):
-                return
-
-        in_flight_ids = self._authoring_inflight_candidate_ids(queued, running)
-        cap = max(1, int(getattr(state, "research_lane_capacity", 1) or 1))
-
-        # Submit as many unprocessed candidates as the lane capacity allows.
-        submitted = 0
-        while len(in_flight_ids) < cap:
-            next_candidate = self._select_next_framework_agent_candidate(exclude_ids=in_flight_ids)
-            if next_candidate is None:
+        in_flight_ids = self._authoring_inflight_candidate_ids(
+            await self._coord.tasks.queued(), await self._coord.tasks.running()
+        )
+        submitted = False
+        while len(in_flight_ids) < max(1, state.research_lane_capacity):
+            candidate = self._select_next_framework_agent_candidate(exclude_ids=in_flight_ids)
+            if candidate is None:
                 break
-            cand_id = self._framework_candidate_key(next_candidate)
             await self._submit_framework_agent_candidate_for_review(
-                next_candidate,
-                audit=dict(next_candidate.get("audit") or {}),
-                audit_step=str(next_candidate.get("route") or "author_via_specialist"),
+                candidate,
+                audit=dict(candidate.get("audit") or {}),
+                audit_step=str(candidate.get("route") or "author_via_specialist"),
             )
-            if cand_id:
-                in_flight_ids.add(cand_id)
-            submitted += 1
-
-        if submitted:
+            in_flight_ids.add(self._framework_candidate_key(candidate))
+            submitted = True
+        if submitted or in_flight_ids or await self._framework_agent_authoring_inflight():
             return
-
-        # Fallback: nothing to submit and nothing in flight.
-        if in_flight_ids:
-            return
-
-        # Hold while an authoring specialist or its downstream proposal is alive.
-        if await self._framework_agent_authoring_inflight():
-            return
-
         # Minimum supply: with the pool empty and no discovery in flight, ask for one.
         if await self._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty"):
             state.save(self._coord.session_dir)
@@ -1305,16 +1278,11 @@ class FrameworkPhase:
                 out.append(cand)
         return out
 
-    def _select_next_framework_agent_candidate(
-        self,
-        exclude_ids: "set[str] | None" = None,
-    ) -> "dict[str, Any] | None":
-        """Return the next unprocessed candidate not already in ``exclude_ids``."""
+    def _select_next_framework_agent_candidate(self, exclude_ids: Collection[str] = ()) -> dict[str, Any] | None:
+        """Return the next unprocessed candidate whose id is not in ``exclude_ids``, in batch order."""
         for cand in self._unprocessed_framework_agent_candidates():
-            cand_id = self._framework_candidate_key(cand)
-            if exclude_ids and cand_id and cand_id in exclude_ids:
-                continue
-            return cand
+            if self._framework_candidate_key(cand) not in exclude_ids:
+                return cand
         return None
 
     def _authoring_specialist_domain(self) -> str:
@@ -2553,63 +2521,38 @@ class FrameworkPhase:
         return out
 
     async def _maybe_bench_untested_proposals(self) -> None:
-        """Enqueue an explore grid from the top untested specialist proposals.
+        """Enqueue an explore grid from the highest-severity untested specialist proposals.
 
-        Runs only in FRAMEWORK_AGENT when no explore task is queued or running
-        and the proposal queue is non-empty. Consumes up to
-        ``_AUTO_EXPLORE_GRID_CAP`` rows by gap severity. The idempotency key
-        is derived from the fingerprint set, so a batch that failed as a whole
-        without writing any ``tested`` entries is not re-enqueued until the
-        queue changes.
+        Runs in FRAMEWORK_AGENT while no explore is queued or running. The
+        idempotency key names the fingerprint set, so a grid that failed without
+        recording any variant is not re-enqueued until the queue head changes.
         """
-        from hashlib import sha1
-
         from ..actions.executors._proposal_identity import controls_of
 
         state = self._coord.shared_state
-        if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+        if (
+            state.phase or ""
+        ).strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT or state.framework_agent_phase_done:
             return
-        if bool(getattr(state, "framework_agent_phase_done", False)):
+        if self._coord.admission_frozen or self._coord._dispatch_paused_for_phase_budget():
             return
-        if self._coord._admit_frozen:
+        if any(t.kind == "explore" for t in (*await self._coord.tasks.queued(), *await self._coord.tasks.running())):
             return
-        if self._coord._dispatch_paused_for_phase_budget():
-            return
-
-        queued = await self._coord.tasks.queued()
-        running = await self._coord.tasks.running()
-        if any(getattr(t, "kind", "") == "explore" for t in (*queued, *running)):
-            return
-
-        rows = state._untested_proposal_rows()
+        rows = state.untested_proposal_rows()[: self._AUTO_EXPLORE_GRID_CAP]
         if not rows:
             return
-
-        rows = rows[: self._AUTO_EXPLORE_GRID_CAP]
-        grid: list[dict[str, Any]] = []
-        fps: list[str] = []
-        for row in rows:
-            entry: dict[str, Any] = {
+        grid = [
+            {
                 "name": row["name"],
                 "extra_args": row["extra_args"],
                 "extra_envs": dict(row["extra_envs"]),
                 **controls_of(row),
-                "provenance": f"specialist:{row['domain']}" if row.get("domain") else "specialist",
-                "note": str(row.get("reason") or "")[:200],
+                "provenance": f"specialist:{row['domain']}",
+                "note": row["reason"][:200],
             }
-            grid.append(entry)
-            from ..actions.executors._proposal_identity import controls_of as _co, effective_fingerprint
-
-            from ..actions.executors._proposal_identity import effective_fingerprint as _efp
-
-            from ..actions.executors._proposal_identity import effective_fingerprint
-
-            fps.append(effective_fingerprint(row["extra_args"], row["extra_envs"], controls=controls_of(row)))
-
-        cycle = int(getattr(state, "macro_cycle", 0) or 0)
-        fp_hash = sha1(",".join(sorted(fps)).encode(), usedforsecurity=False).hexdigest()[:12]
-        idem = f"auto-explore-c{cycle}-{fp_hash}"
-
+            for row in rows
+        ]
+        fp_hash = sha1(",".join(sorted(row["fingerprint"] for row in rows)).encode(), usedforsecurity=False)
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": "auto_bench_untested_proposals",
@@ -2627,17 +2570,13 @@ class FrameworkPhase:
         etask, was_existing = await self._coord.tasks.create_or_return_existing(
             kind="explore",
             params=params,
-            idempotency_key=idem,
+            idempotency_key=f"auto-explore-c{int(state.macro_cycle or 0)}-{fp_hash.hexdigest()[:12]}",
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )
-        log.info(
-            "auto_bench: enqueued explore task_id=%s (variants=%d, existing=%s)",
-            etask.task_id,
-            len(grid),
-            was_existing,
-        )
+        if not was_existing:
+            log.info("auto_bench: enqueued explore task_id=%s (variants=%d)", etask.task_id, len(grid))
 
     async def maybe_autosubmit_specialist_patches(
         self,

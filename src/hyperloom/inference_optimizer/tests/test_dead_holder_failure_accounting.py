@@ -172,9 +172,9 @@ async def test_reap_skips_failure_accounting_already_charged():
     task = SimpleNamespace(task_id="t-dead", kind="baseline", params={})
     result = SubAgentResult(task_id=task.task_id, state="failed", result={"status": "failed"})
 
-    await stub._reap_dispatched_task(task, result, None)
+    await stub._reap_dispatched_task(task, result)
     assert stub.unpromotable == ["t-dead"]
 
     stub._dead_holder_accounted.add(task.task_id)
-    await stub._reap_dispatched_task(task, result, None)
+    await stub._reap_dispatched_task(task, result)
     assert stub.unpromotable == ["t-dead"]

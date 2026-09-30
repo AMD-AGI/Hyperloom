@@ -423,9 +423,9 @@ class TestPreDispatchBackstop:
         # The budget drains while the task waits in the queue.
         _set_budget(coord, minutes=600, elapsed_min=590.0)
 
-        spawned = await coord._spawn_fitting_queued(exclude_ids=set())
+        await coord._spawn_fitting_queued()
 
-        assert [t.task_id for t, _, _ in spawned] == []
+        assert task.task_id not in coord._inflight_actions
         assert (await coord.tasks.get(task.task_id)).state == "cancelled"
 
     @pytest.mark.asyncio
@@ -439,7 +439,7 @@ class TestPreDispatchBackstop:
         )
         _set_budget(coord, minutes=600, elapsed_min=590.0)
 
-        await coord._spawn_fitting_queued(exclude_ids=set())
+        await coord._spawn_fitting_queued()
 
         assert (await coord.tasks.get(task.task_id)).state == "cancelled"
         failures = list(getattr(coord.shared_state, "last_action_failures", []) or [])
@@ -508,9 +508,9 @@ class TestPreDispatchBackstop:
         )
         _set_budget(coord, minutes=600, elapsed_min=600.0)
 
-        spawned = await coord._spawn_fitting_queued(exclude_ids=set())
+        await coord._spawn_fitting_queued()
 
-        assert [t.task_id for t, _, _ in spawned] == []
+        assert task.task_id not in coord._inflight_actions
         assert (await coord.tasks.get(task.task_id)).state == "cancelled"
         assert task.task_id not in coord._inflight_actions
 
@@ -519,7 +519,7 @@ class TestPreDispatchBackstop:
         self,
         coord: Coordinator,
     ):
-        """It is registered for cancellation and excluded, but never joined."""
+        """It is registered for cancellation, but the pump returns without joining it."""
         _set_budget(coord, minutes=600)
         task, _ = await coord.tasks.create_or_return_existing(
             kind="targeted_build",
@@ -528,13 +528,10 @@ class TestPreDispatchBackstop:
             requires_lanes=["build_lane"],
             lease_ttl_sec=900,
         )
-        exclude: set[str] = set()
 
-        spawned = await coord._spawn_fitting_queued(exclude_ids=exclude)
+        await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5.0)
 
-        assert [t.task_id for t, _, _ in spawned] == []
         assert task.task_id in coord._inflight_actions
-        assert task.task_id in exclude
         await coord.cancel_inflight_actions(reason="test_teardown")
 
     @pytest.mark.asyncio
@@ -553,9 +550,9 @@ class TestPreDispatchBackstop:
         )
         _set_budget(coord, minutes=180, elapsed_min=166.0)
 
-        spawned = await coord._spawn_fitting_queued(exclude_ids=set())
+        await coord._spawn_fitting_queued()
 
-        assert [t.task_id for t, _, _ in spawned] == []
+        assert task.task_id not in coord._inflight_actions
         assert (await coord.tasks.get(task.task_id)).state == "cancelled"
         assert coord.shared_state.last_conc_sweep["status"] == "skipped"
         assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
@@ -583,7 +580,7 @@ class TestPreDispatchBackstop:
         )
         _set_budget(coord, minutes=180, elapsed_min=166.0)
 
-        await coord._spawn_fitting_queued(exclude_ids=set())
+        await coord._spawn_fitting_queued()
 
         assert (await coord.tasks.get(task.task_id)).state == "cancelled"
         assert coord.shared_state.last_conc_sweep["status"] == "succeeded"
@@ -636,10 +633,9 @@ async def _start_action(
 ) -> tuple[Task, asyncio.Task]:
     """Dispatch the action with no pump running, for the pieces under it."""
     task, started = await _queue_action(coord, kind=kind, key=key, make_executor=make_executor)
-    spawned = await coord._spawn_fitting_queued(exclude_ids=set())
-    assert [t.task_id for t, _, _ in spawned] == [task.task_id]
+    await coord._spawn_fitting_queued()
     await asyncio.wait_for(started.wait(), timeout=5.0)
-    return task, spawned[0][1]
+    return task, coord._inflight_actions[task.task_id].atask
 
 
 async def _start_action_under_pump(
@@ -652,7 +648,7 @@ async def _start_action_under_pump(
     task, started = await _queue_action(coord, kind=kind, key=key)
     pump = asyncio.create_task(coord._pump_dispatcher_once())
     await asyncio.wait_for(started.wait(), timeout=5.0)
-    return task, coord._inflight_actions[task.task_id][1], pump
+    return task, coord._inflight_actions[task.task_id].atask, pump
 
 
 async def _settle(atask: asyncio.Task) -> None:
@@ -712,8 +708,8 @@ class TestInflightHandles:
             params={},
             idempotency_key="h-quick",
         )
-        spawned = await coord._spawn_fitting_queued(exclude_ids=set())
-        await _settle(spawned[0][1])
+        await coord._spawn_fitting_queued()
+        await _settle(coord._inflight_actions[task.task_id].atask)
         assert task.task_id not in coord._inflight_actions
 
 
@@ -1130,8 +1126,8 @@ async def test_cancelled_result_bookkeeping_does_not_release_gpu_capacity(coord)
 
     coord.gpu_specialist_pool = SpecialistGpuPool(coord.db, gpu_ids=[0])
     task = await coord.tasks.create(kind="specialist", params={}, idempotency_key="pending-cleanup")
-    gpu = await coord.gpu_specialist_pool.try_acquire(count=1, holder_id=task.task_id, task_id=task.task_id)
-    await coord._reap_dispatched_task(task, asyncio.CancelledError(), gpu)
+    await coord.gpu_specialist_pool.try_acquire(count=1, holder_id=task.task_id, task_id=task.task_id)
+    await coord._reap_dispatched_task(task, asyncio.CancelledError())
     assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is not None
 
 
@@ -1248,8 +1244,8 @@ class TestThePumpStopsWorkItCannotWaitFor:
         assert atask.cancelled()
 
     @pytest.mark.asyncio
-    async def test_a_cancelled_pump_does_not_orphan_its_actions(self, coord: Coordinator, monkeypatch):
-        """A cancelled caller retains ownership until the worker and completion settle."""
+    async def test_a_cancelled_pump_leaves_its_actions_to_finish_and_be_booked(self, coord: Coordinator, monkeypatch):
+        """Dispatched work outlives a cancelled pump; a later pump books its completion."""
         from unittest.mock import AsyncMock
 
         from hyperloom.orchestrator.loop import dispatcher
@@ -1287,14 +1283,22 @@ class TestThePumpStopsWorkItCannotWaitFor:
             await _settle(pump)
 
             assert pump.cancelled()
-            assert handle.atask.cancelled()
-            assert handle.scope.cancelled
+            assert not handle.atask.done()
+            assert not handle.scope.cancelled
             assert coord._inflight_actions[task.task_id] == handle
             assert executions and all(not execution.done() for execution in executions)
-            assert not worker_done.is_set()
             assert (await coord.tasks.get(task.task_id)).state == "running"
             assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
+
+            finish.set()
+            await _settle(handle.atask)
+            assert worker_done.is_set()
+            assert coord.has_unbooked_completions()
             promoted.assert_not_awaited()
+
+            await coord._pump_dispatcher_once()
+            promoted.assert_awaited()
+            assert not coord.has_unbooked_completions()
         finally:
             finish.set()
             await asyncio.gather(*tuple(coord._executions))
@@ -1411,8 +1415,8 @@ class TestInlineActionsAreReachableToo:
         assert outcome and "was cancelled" in outcome[0]
 
 
-class TestThePumpOnlyCancelsWhatItSpawned:
-    """The registry is dispatcher-wide; the pump's exit sweep is not."""
+class TestThePumpOnlyWaitsOnWhatItBooks:
+    """The registry is dispatcher-wide; the pump waits only on completions it books."""
 
     @pytest.mark.asyncio
     async def test_a_tick_with_nothing_queued_leaves_an_inline_action_running(
@@ -1431,12 +1435,12 @@ class TestThePumpOnlyCancelsWhatItSpawned:
             await _settle(inline)
 
     @pytest.mark.asyncio
-    async def test_a_cancelled_pump_takes_its_own_and_only_its_own(
+    async def test_a_cancelled_pump_cancels_no_action(
         self,
         coord: Coordinator,
         monkeypatch,
     ):
-        """Narrowing the sweep must not cost the pump the actions it does own."""
+        """Neither its own spawn nor an inline action ends with the pump."""
         _quick_poll(coord)
         inline = await _start_inline_action(coord, monkeypatch)
         _task, spawned, pump = await _start_action_under_pump(coord, kind=_CLOSING_ACTION, key="own-spawn")
@@ -1444,9 +1448,11 @@ class TestThePumpOnlyCancelsWhatItSpawned:
             pump.cancel()
             await _settle(pump)
 
-            assert spawned.cancelled()
+            assert not spawned.done()
             assert not inline.done()
         finally:
+            await coord.cancel_inflight_actions(reason="test_teardown")
+            await _settle(spawned)
             inline.cancel()
             await _settle(inline)
 

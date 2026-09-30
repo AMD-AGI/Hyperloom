@@ -1,244 +1,171 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract tests for the decoupled pump: returns on first completion, deduplification and barrier freeze."""
+"""Contract tests for the pump returning on the first completion while dispatched work keeps running."""
 
 from __future__ import annotations
 
 import asyncio
 import time
 from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
 
 import pytest
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────────
+class _Gated:
+    """Executor that runs until its gate opens."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.gate = asyncio.Event()
+
+    async def __call__(self, ctx) -> dict:
+        self.calls.append(ctx.task.task_id)
+        await self.gate.wait()
+        return {"runner_status": "succeeded"}
 
 
-def _build_coord(tmp_path: Path):
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
-    from hyperloom.orchestrator.roles.mock_backend import (
-        MockBackend,
-        MockTurn,
-        ScriptedPlan,
-    )
+class _Instant(_Gated):
+    """Executor that finishes immediately."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate.set()
+
+
+@pytest.fixture
+def coord(tmp_path: Path):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.roles.agent_role import default_role_registry
+    from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState(session_id="decouple-test")
     state.max_minutes = 30
     state.save(tmp_path)
-
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
-    backends = {name: MockBackend(idle) for name in ("orchestration", "critic")}
-    return Coordinator(
+    coord = Coordinator(
         session_dir=tmp_path,
-        backends=backends,
+        backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
         role_registry=default_role_registry(),
         recipe_kb=None,
         knowledge_plane=None,
     )
+    coord._dispatcher_poll_sec = 0.05
+    return coord
 
 
-class _SlowExecutor:
-    """Executor that holds for ``hold_sec`` before succeeding."""
-
-    def __init__(self, hold_sec: float = 0.2):
-        self.hold_sec = hold_sec
-        self.calls: list[str] = []
-
-    async def __call__(self, ctx) -> dict:
-        self.calls.append(ctx.task.task_id)
-        await asyncio.sleep(self.hold_sec)
-        return {
-            "runner_status": "succeeded",
-            "task_id": ctx.task.task_id,
-        }
+async def _enqueue(coord, kind: str, key: str, lanes: list[str] | None = None, params: dict | None = None):
+    await coord.tasks.create_or_return_existing(
+        kind=kind, params=params or {}, idempotency_key=key, requires_lanes=lanes or [], lease_ttl_sec=600
+    )
 
 
-class _FastExecutor:
-    """Executor that returns immediately."""
-
-    def __init__(self):
-        self.calls: list[str] = []
-
-    async def __call__(self, ctx) -> dict:
-        self.calls.append(ctx.task.task_id)
-        return {
-            "runner_status": "succeeded",
-            "task_id": ctx.task.task_id,
-        }
+def _in_flight_kinds(coord) -> list[str]:
+    return [entry.kind for entry in coord._inflight_actions.values()]
 
 
-# ── Tests ────────────────────────────────────────────────────────────────────
-
-
-def test_pump_returns_after_first_completion_not_after_all(tmp_path: Path):
-    """A fast task and a slow task: the pump returns once the fast one is booked,
-    while the slow task keeps running in the background."""
-    coord = _build_coord(tmp_path)
-    fast = _FastExecutor()
-    slow = _SlowExecutor(hold_sec=5.0)
+async def test_pump_returns_after_first_completion_while_slow_work_keeps_running(coord):
+    fast, slow = _Instant(), _Gated()
     coord.sub.register_executor("fast_action", fast)
     coord.sub.register_executor("slow_action", slow)
+    await _enqueue(coord, "fast_action", "fast")
+    await _enqueue(coord, "slow_action", "slow")
 
-    async def _run():
-        from hyperloom.orchestrator.phases.machine_state import PHASE_ALLOWED_ACTIONS
+    started = time.monotonic()
+    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
 
-        coord.shared_state.phase = "ENABLEMENT"
-
-        await coord.tasks.create_or_return_existing(
-            kind="fast_action",
-            params={},
-            idempotency_key="fast-t1",
-            requires_lanes=[],
-            lease_ttl_sec=60,
-        )
-        await coord.tasks.create_or_return_existing(
-            kind="slow_action",
-            params={},
-            idempotency_key="slow-t1",
-            requires_lanes=[],
-            lease_ttl_sec=60,
-        )
-
-        t_start = time.monotonic()
-        await coord._pump_dispatcher_once()
-        elapsed = time.monotonic() - t_start
-
-        # Pump must return well before the slow task finishes (< 1 s).
-        assert elapsed < 2.0, f"pump took {elapsed:.2f}s; slow task still running"
-        # Fast task was called.
-        assert fast.calls, "fast executor never ran"
-        # Slow task was dispatched (inflight by kind).
-        assert any(v.kind == "slow_action" for v in coord._inflight_actions.values())
-
-    asyncio.run(_run())
+    assert time.monotonic() - started < 2
+    assert fast.calls and slow.calls
+    assert _in_flight_kinds(coord) == ["slow_action"]
+    slow.gate.set()
+    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    assert _in_flight_kinds(coord) == []
 
 
-def test_no_task_dispatched_twice_across_pump_calls(tmp_path: Path):
-    """The same queued task is not dispatched a second time on the next pump call
-    if it is still in _inflight_actions."""
-    coord = _build_coord(tmp_path)
-    slow = _SlowExecutor(hold_sec=5.0)
-    coord.sub.register_executor("slow_action", slow)
-
-    async def _run():
-        coord.shared_state.phase = "ENABLEMENT"
-
-        await coord.tasks.create_or_return_existing(
-            kind="slow_action",
-            params={},
-            idempotency_key="slow-dedup",
-            requires_lanes=[],
-            lease_ttl_sec=60,
-        )
-
-        await coord._pump_dispatcher_once()
-        call_count_after_first_pump = len(slow.calls)
-
-        await coord._pump_dispatcher_once()
-        call_count_after_second_pump = len(slow.calls)
-
-        assert call_count_after_first_pump == 1, "should have been dispatched once"
-        assert call_count_after_second_pump == 1, "must not be dispatched again while inflight"
-
-    asyncio.run(_run())
-
-
-def test_gpu_specialist_stays_exclusive_with_explore_across_pumps(tmp_path: Path):
-    """A GPU specialist (holding gpu_research_lane) must not be dispatched while
-    an explore (holding benchmark_lane, which conflicts with gpu_research_lane) is
-    already running, even across multiple pump calls."""
-    coord = _build_coord(tmp_path)
-    slow_explore = _SlowExecutor(hold_sec=5.0)
-    gpu_spec = _FastExecutor()
-    coord.sub.register_executor("explore", slow_explore)
-    coord.sub.register_executor("specialist", gpu_spec)
-
-    async def _run():
-        coord.shared_state.phase = "FRAMEWORK_AGENT"
-        coord.shared_state.gpu_specialist_capacity = 4
-        coord.shared_state.research_lane_capacity = 4
-
-        await coord.tasks.create_or_return_existing(
-            kind="explore",
-            params={"source": "test"},
-            idempotency_key="explore-1",
-            requires_lanes=["benchmark_lane"],
-            lease_ttl_sec=3600,
-        )
-        await coord.tasks.create_or_return_existing(
-            kind="specialist",
-            params={"domain": "serving_specialist", "needs_gpu": True, "gpu_count": 1},
-            idempotency_key="gpu-spec-1",
-            requires_lanes=["gpu_research_lane"],
-            lease_ttl_sec=3600,
-        )
-
-        # First pump: explore starts, GPU specialist cannot start (lane conflict).
-        await coord._pump_dispatcher_once()
-        assert "explore-1" in coord._inflight_actions or slow_explore.calls
-
-        # Second pump: GPU specialist still must not start.
-        await coord._pump_dispatcher_once()
-        assert not gpu_spec.calls, "GPU specialist must not run while explore holds benchmark_lane"
-
-    asyncio.run(_run())
-
-
-def test_barrier_admission_freeze_prevents_new_spawns(tmp_path: Path):
-    """While _admit_frozen is True, the pump does not spawn new tasks."""
-    coord = _build_coord(tmp_path)
-    fast = _FastExecutor()
+async def test_a_running_task_is_not_dispatched_again_by_a_later_pump(coord):
+    fast, slow = _Instant(), _Gated()
     coord.sub.register_executor("fast_action", fast)
+    coord.sub.register_executor("slow_action", slow)
+    await _enqueue(coord, "fast_action", "fast")
+    await _enqueue(coord, "slow_action", "slow")
+    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
 
-    async def _run():
-        coord.shared_state.phase = "ENABLEMENT"
-        coord._admit_frozen = True
+    asyncio.get_running_loop().call_later(0.2, slow.gate.set)
+    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
 
-        await coord.tasks.create_or_return_existing(
-            kind="fast_action",
-            params={},
-            idempotency_key="frozen-t1",
-            requires_lanes=[],
-            lease_ttl_sec=60,
-        )
-
-        await coord._pump_dispatcher_once()
-        assert not fast.calls, "pump must not spawn while _admit_frozen is True"
-
-        coord._admit_frozen = False
-        await coord._pump_dispatcher_once()
-        assert fast.calls, "pump must spawn after _admit_frozen is cleared"
-
-    asyncio.run(_run())
+    assert len(slow.calls) == 1
 
 
-def test_unbooked_completion_counts_as_running_in_barrier(tmp_path: Path):
-    """The barrier logic counts pending completions as running, preventing transition."""
-    coord = _build_coord(tmp_path)
+async def test_gpu_specialist_stays_exclusive_with_a_running_explore_across_pumps(coord):
+    explore, specialist = _Gated(), _Instant()
+    coord.sub.register_executor("explore", explore)
+    coord.sub.register_executor("specialist", specialist)
+    await _enqueue(coord, "explore", "explore", ["benchmark_lane"])
+    await _enqueue(
+        coord,
+        "specialist",
+        "gpu-spec",
+        ["gpu_research_lane"],
+        {"domain": "serving_specialist", "gap_canonical_id": "gap.test"},
+    )
 
-    async def _run():
-        from types import SimpleNamespace
+    pump = asyncio.create_task(coord._pump_dispatcher_once())
+    await asyncio.sleep(0.3)
+    assert explore.calls and not specialist.calls
 
-        # Plant a pending completion.
-        fake_task = SimpleNamespace(task_id="fake-t1", kind="specialist", params={})
-        coord._completion_queue.append((fake_task, object(), None))
+    explore.gate.set()
+    await asyncio.wait_for(pump, timeout=5)
+    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    assert specialist.calls
 
-        # Set up a state where PRELUDE would normally transition to ENABLEMENT.
-        coord.shared_state.phase = "PRELUDE"
-        coord.shared_state.baseline_tput = 1.0
-        coord.shared_state.tp = 0
-        coord.shared_state.gpu_specialist_capacity = 0
 
-        prior_phase = coord.shared_state.phase
-        await coord._advance_phase_if_needed()
-        # Phase must not have advanced while there is a pending completion.
-        assert coord.shared_state.phase == prior_phase, "phase must not advance while completion queue is non-empty"
-        # _admit_frozen should be set (barrier entered but held due to pending bookkeeping).
-        assert coord._admit_frozen, "_admit_frozen must be set during barrier hold"
+async def test_frozen_admission_spawns_nothing(coord):
+    fast = _Instant()
+    coord.sub.register_executor("fast_action", fast)
+    await _enqueue(coord, "fast_action", "fast")
 
-    asyncio.run(_run())
+    coord.admission_frozen = True
+    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    assert not fast.calls
+
+    coord.admission_frozen = False
+    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    assert fast.calls
+
+
+async def test_spawning_a_specialist_resets_its_domain_stale_counter(coord):
+    from hyperloom.orchestrator.specialists.domains import get_domain
+
+    specialist = _Gated()
+    coord.sub.register_executor("specialist", specialist)
+    anchor = get_domain("serving_specialist").kb_anchor
+    for _ in range(5):
+        coord.shared_state.bump_domain_round_counters()
+    await _enqueue(
+        coord,
+        "specialist",
+        "cpu-spec",
+        ["research_lane"],
+        {"domain": "serving_specialist", "gap_canonical_id": "gap.test"},
+    )
+
+    pump = asyncio.create_task(coord._pump_dispatcher_once())
+    await asyncio.sleep(0.3)
+    assert specialist.calls
+    assert coord.shared_state.rounds_since_last_specialist[anchor] == 0
+
+    specialist.gate.set()
+    await asyncio.wait_for(pump, timeout=5)
+
+
+async def test_an_unbooked_completion_holds_the_phase_transition(coord):
+    coord._completion_queue.append((SimpleNamespace(task_id="t", kind="specialist", params={}), object()))
+    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.baseline_tput = 1.0
+
+    await coord._advance_phase_if_needed()
+
+    assert coord.shared_state.phase == "PRELUDE"
+    assert coord.admission_frozen
