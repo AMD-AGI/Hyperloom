@@ -723,7 +723,7 @@ def test_a_source_proposal_keeps_every_kb_read_that_shaped_it(session_dir: Path)
         task=SimpleNamespace(task_id="t-int-1", kind="integrate_patch", params=integrate_params),
         result={"status": "reverted", "base_tput": 100.0, "output_throughput": 99.0, "delta_pct": -1.0},
     )
-    coord._close_framework_timeline(exit_reason="optimize_no_more_leverage")
+    coord.phase_framework.close_timeline(exit_reason="optimize_no_more_leverage")
 
     ext = _events(session_dir)[0]["ext"]
     [attempt] = ext["attempts"]
@@ -1005,7 +1005,7 @@ def test_a_delegated_grid_is_a_proposal_carrying_its_read_and_relayed_citations(
             kept=False,
         )
     )
-    coord._close_framework_timeline(exit_reason="optimize_budget_cap")
+    coord.phase_framework.close_timeline(exit_reason="optimize_budget_cap")
 
     ext = _events(session_dir)[0]["ext"]
     [proposal] = ext["proposals"]

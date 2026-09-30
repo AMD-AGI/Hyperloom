@@ -272,7 +272,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             return
         from hyperloom.inference_optimizer.experience_kb import integration_for
 
-        integration = integration_for(self._coord, self.session_dir)
+        integration = integration_for(self, self.session_dir)
         if integration is None:
             return
         evidence = await asyncio.to_thread(integration.read_for_specialist, state, params)
