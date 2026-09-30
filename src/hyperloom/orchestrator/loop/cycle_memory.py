@@ -70,10 +70,14 @@ class CycleMemoryCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         cycle = int(state.macro_cycle or 0)
         directive = str((dict(state.orchestration_memory or {})).get("next_cycle_directive", "") or "")
+        log_rows = list(state.cycle_strategy_log or [])
+        prior_cycles = [r for r in log_rows if isinstance(r, dict) and int(r.get("cycle", -1) or -1) != cycle]
+        focus_plan = self._coord.phase_macro_cycle._plan_cycle_focus()
+        focus_plan["prior_cycles"] = prior_cycles[-5:]
         new_prompt = rebuild(
             macro_cycle=cycle,
             cycle_directive=directive,
-            cycle_strategy=self._coord.phase_macro_cycle._plan_cycle_focus(),
+            cycle_strategy=focus_plan,
             phase=state.phase,
         )
         overrides = getattr(self, "system_prompt_overrides", None)

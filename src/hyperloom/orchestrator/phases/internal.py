@@ -270,7 +270,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
                 domain,
             )
 
-    def _consume_static_recon(self, done_payload: dict[str, Any]) -> None:
+    def consume_static_recon(self, done_payload: dict[str, Any]) -> None:
         """Seed static-recon bridge candidates into gaps[] (idempotent)."""
         block = done_payload.get("recon")
         if not isinstance(block, dict):

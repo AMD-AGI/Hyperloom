@@ -276,10 +276,6 @@ class Coordinator:
 
         # Persistent session state (state.json) — load existing for resume.
         self.shared_state = SharedState.load_or_init(self.session_dir)
-        # Lifecycle save debounce: terminal events flush immediately; bursty non-terminal markers coalesce within a
-        # short window.
-        self._lifecycle_last_save: float = 0.0
-        self._lifecycle_save_min_interval_s: float = 2.0
         # Thread live SharedState into the runner so executors get it via ctx.extra.
         self.sub.shared_state = self.shared_state
         # Serving-disjoint invariant: the live serving process holds the first ``serving_tp`` cards, carved off the

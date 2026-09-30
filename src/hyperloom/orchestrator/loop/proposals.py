@@ -19,6 +19,7 @@ from hyperloom.orchestrator.collaborator import CoordinatorCollaborator
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
+    from .coordinator import Coordinator
 
 import logging as _logging
 
@@ -197,6 +198,10 @@ def _extra_server_args(payload: Mapping[str, Any]) -> str:
 class ProposalsCollaborator(CoordinatorCollaborator):
     """Extracted collaborator; delegates unknown attrs to its Coordinator."""
 
+    def __init__(self, coordinator: "Coordinator") -> None:
+        super().__init__(coordinator)
+        self._local_recipe_cache: tuple[int, dict[str, Any]] | None = None
+
     def _workload_canonical_id(self) -> str:
         """Return the workload's canonical seven-dimension Recipe identity."""
         ss = self.shared_state
@@ -227,7 +232,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         if self.recipe_kb is None:
             return {}
         tick = int(self.shared_state.tick or 0)
-        cache = getattr(self, "_local_recipe_cache", None)
+        cache = self._local_recipe_cache
         if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == tick:
             return cache[1]
         try:
@@ -239,7 +244,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             )
         except Exception:  # noqa: BLE001 - the recipe store may be remote
             row = {}
-        self._coord._local_recipe_cache = (tick, row)
+        self._local_recipe_cache = (tick, row)
         return row
 
     @staticmethod
@@ -442,7 +447,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         }
         try:
             self.recipe_kb.put_recipe(**put_kwargs)
-            self._coord._local_recipe_cache = None
+            self._local_recipe_cache = None
         except Exception:
             log.exception(
                 "_kb_amend_recipe: put_recipe failed for cid=%s",
