@@ -972,7 +972,7 @@ async def test_auto_retry_caps_attempts(coord: Coordinator, monkeypatch) -> None
 async def test_fan_out_wave_rejects_invalid_entries(coord: Coordinator, monkeypatch) -> None:
     called = []
     monkeypatch.setattr(
-        coord,
+        coord.router,
         "_handle_delegate",
         lambda *a, **k: called.append(a),
     )
