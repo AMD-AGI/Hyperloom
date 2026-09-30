@@ -216,11 +216,9 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             "new_cycle": int(new_cycle),
         }
         # Capture the LLM-authored directive for the new cycle (best-effort).
+        # Prompt reseed happens in _on_phase_entered after the cycle bump.
         memory_captured = await self._coord.cycle_memory._capture_cycle_memory()
         summary["memory_captured"] = memory_captured
-        # Rebuild the orchestration system prompt for the new cycle from the directive captured
-        # during the SWEEP turn of the prior cycle.
-        summary["orch_prompt_reseeded"] = self._coord.cycle_memory._reseed_orch_prompt_for_cycle()
         # Reap leases, reclaim orphaned running tasks, prune DB.
         await run_lease_and_db_reclaim(self, summary, reason="cycle_soft_restart")
         log.info(
