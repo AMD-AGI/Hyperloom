@@ -366,7 +366,7 @@ def test_forced_specialist_actor_kill_releases_capacity_and_lane(tmp_path, monke
     )
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
     dispatcher = _dispatcher(tmp_path)
-    dispatcher.gpu_specialist_pool = SimpleNamespace(release=AsyncMock())
+    dispatcher._coord.gpu_specialist_pool = SimpleNamespace(release=AsyncMock())
     actor = SimpleNamespace(stop=SimpleNamespace(remote=lambda: False))
     specialist_lease = ray_serving.GpuSpecialistLease(num_gpus=1)
     specialist_lease._actor = actor
@@ -407,7 +407,7 @@ def test_cleanup_unconfirmed_preserves_outcome_without_completion(tmp_path, clea
     dispatcher = _dispatcher(tmp_path)
     payload = {"status": "ok", "decision": "KEEP", "nested": {"answer": [42]}}
     completed = AsyncMock()
-    dispatcher.gpu_specialist_pool = SimpleNamespace(release=AsyncMock())
+    dispatcher._coord.gpu_specialist_pool = SimpleNamespace(release=AsyncMock())
 
     async def execute(_ctx):
         if outcome == "failed":

@@ -39,7 +39,7 @@ def _silent_plan() -> ScriptedPlan:
 def test_stale_delegated_method_raises_attribute_error(monkeypatch: pytest.MonkeyPatch) -> None:
     coord = Coordinator.__new__(Coordinator)
     stale_name = "_stale_delegated_for_test"
-    # _DELEGATED no longer exists; unknown attributes raise AttributeError directly.
+    # _DELEGATED and __getattr__ are deleted; unknown attributes raise AttributeError directly.
     with pytest.raises(AttributeError):
         getattr(coord, stale_name)
 
@@ -166,8 +166,7 @@ def coord(session_dir) -> Coordinator:
 
 def test_every_delegated_name_resolves_on_its_collaborator(coord: Coordinator) -> None:
     """All cross-collaborator methods live on their explicit collaborator property."""
-    # Spot-check a selection of previously-delegated methods to confirm they
-    # are reachable through the owning collaborator, not through the coordinator.
+    # Spot-check that cross-collaborator methods live on their explicit collaborator property.
     assert callable(getattr(coord.writeback, "_record_observation", None))
     assert callable(getattr(coord.dispatcher, "_pump_dispatcher_once", None))
     assert callable(getattr(coord.phase_kernel, "timeline", None))
