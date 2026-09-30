@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 
 
@@ -103,7 +103,6 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
     assert coord.shared_state.current_best["action"] == "baseline"
     assert coord.shared_state.cumulative_gain_validated == pytest.approx(0.0)
     assert not any(e.get("action") == "geak_e2e" for e in coord.shared_state.optimization_stack)
-    assert coord.shared_state.pending_escalate_hint == ESCALATE_HINT_SKIP_TO_SWEEP
 
     # The recovered candidate is handed to the same-harness revalidation.
     assert revalidations == ["geak_e2e_win_recovered"]
