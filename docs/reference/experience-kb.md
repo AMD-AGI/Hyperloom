@@ -150,7 +150,8 @@ network, put a TLS-terminating proxy in front of it and hand out its
 | `GET /health` | liveness, schemas, corpus size, process, settings digest | `health()` |
 
 Every request, including `/health`, sends `Authorization: Bearer <token>`.
-Unknown request fields are rejected, so a misspelled field fails loudly.
+Unknown request fields are rejected, so a misspelled field fails loudly. A
+request body may be up to 256 MiB; Experiences themselves have no size limit.
 
 | Status | Body `error` | Meaning | Retry? |
 |---|---|---|---|
@@ -184,6 +185,7 @@ content under an existing id is 409.
 | `schema_ref` | no | the service's `--declaration` | the one schema to search |
 | `outcome` | no | `mixed` | `keep`, `revert`, another declared decision, or `mixed` |
 | `limit` | no | `10` | maximum Experiences to return, 1–100 |
+| `content_inline_limit` | no | none (all inline) | bytes above which a `change.content` is rendered as a reference instead of inline |
 
 The service's planner turns `decision` and `context` into weighted query
 signals, then ranks candidates by exact field matches plus lexical fuzzy
@@ -213,6 +215,14 @@ every member.
 and Repeat Group annotations, never condensed, under an
 `Experience <id>` heading. A producer that acts on a read records the returned
 `rendered_refs` in the resulting Experience.
+
+With `content_inline_limit`, a longer `change.content` appears in the record as
+`<external content sha256:<hex>, <n> bytes>`, and `contents` carries its text:
+`[{"ref": "sha256:<hex>", "bytes": <n>, "content": "..."}]`. Hyperloom asks for
+2048 bytes, writes each one under `<session>/experience_kb/contents/<hex>.txt`
+(and each patch of a source change as its own file beside it), and lists those
+paths at the end of the injected block, so an agent reads a large patch only
+when it needs it.
 
 Each item in `experiences`, and in `/v1/list`, is a summary:
 `experience_id`, `source_run_id`, `change_summary`, `decision`,

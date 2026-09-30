@@ -339,10 +339,20 @@ def test_prose_is_not_mistaken_for_a_credential_assignment() -> None:
     assert find_sensitive({"content": '{"TOKENIZERS_PARALLELISM":"false"}'}) is None
 
 
-def test_oversized_change_content_is_skipped() -> None:
-    huge = "+" * (300 * 1024)
+def test_an_attempts_experience_citations_reach_its_provenance() -> None:
+    citation = {"id": "exp-00000000000000000000000000000001", "stance": "avoid", "claim": "It regressed decode."}
+    report = _dry(_sbd(_attempt("revert-1", experience_citations=[citation]), _attempt("revert-2")))
+    collected = _collected(report)
+    assert collected["revert-1"]["provenance"]["extra"]["experience_citations"] == [citation]
+    assert collected["revert-2"]["provenance"]["extra"]["experience_citations"] == []
+
+
+def test_a_large_patch_is_collected_whole() -> None:
+    huge = "+" * (3 * 1024 * 1024)
     attempt = _source_attempt(patch_material=[{"path": "patches/a.diff", "sha256": "a" * 64, "content": huge}])
-    assert "change.content exceeds" in _skipped(_dry(_sbd(attempt)))["source-1"]
+    report = _dry(_sbd(attempt))
+    assert report["skipped"] == []
+    assert huge in _collected(report)["source-1"]["change"]["content"]
 
 
 def test_evaluation_errors_skip_only_the_unit() -> None:

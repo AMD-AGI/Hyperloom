@@ -494,6 +494,7 @@ def _record_config_attempts(
             reason=str(row.get("reason") or ""),
             reasoning=str(variant.get("note") or ""),
             reasoning_origin=str(variant.get("reasoning_origin") or ""),
+            experience_citations=variant.get("experience_citations") or [],
             stage=str(row.get("stage") or ""),
             fingerprint=fingerprint,
             # The fingerprint is the join key; the name is what a reader

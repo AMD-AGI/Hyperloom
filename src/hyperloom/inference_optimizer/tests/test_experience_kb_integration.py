@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sys
 from types import SimpleNamespace
 
 from hyperloom.inference_optimizer.experience_collect import mapping_schema_ref
 from hyperloom.inference_optimizer.experience_kb import (
+    CONTENT_INLINE_LIMIT,
     ExperienceKBEvidence,
     ExperienceKBIntegration,
 )
@@ -38,8 +40,9 @@ class FakeClient:
     def __init__(self) -> None:
         self.calls = []
 
-    def read(self, decision, context, *, schema_ref):
+    def read(self, decision, context, *, schema_ref, content_inline_limit):
         assert schema_ref == _SCHEMA
+        assert content_inline_limit == CONTENT_INLINE_LIMIT
         self.calls.append((decision, context))
         return SimpleNamespace(
             read_id=f"read-{len(self.calls)}",
@@ -48,6 +51,7 @@ class FakeClient:
             rendered_refs=(FakeRef(),),
             warnings=(),
             experiences=({"experience_id": _FIRST, "decision": "keep"},),
+            contents=(),
         )
 
 
@@ -192,13 +196,50 @@ def test_reads_speak_the_service_read_contract_through_the_real_sdk(tmp_path) ->
     assert request.full_url == "https://kb.example/v1/read"
     assert request.get_header("Authorization") == "Bearer service-token"
     body = json.loads(request.data)
-    assert set(body) == {"decision", "context", "schema_ref"}
-    assert body["schema_ref"] == _SCHEMA
+    assert set(body) == {"decision", "context", "schema_ref", "content_inline_limit"}
+    assert (body["schema_ref"], body["content_inline_limit"]) == (_SCHEMA, CONTENT_INLINE_LIMIT)
     assert evidence.status == "completed"
     assert evidence.read_id == response["read_id"]
     assert evidence.prompt_block == response["prompt_block"]
     assert evidence.rendered_refs == ({"id": _FIRST, "purpose": "representative"},)
     assert evidence.experiences == tuple(response["experiences"])
+
+
+def test_a_referenced_change_reaches_the_prompt_as_session_files(tmp_path) -> None:
+    patch = "--- a/vllm/x.py\n+++ b/vllm/x.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n" * 60
+    content = json.dumps({"patches": [{"path": "patches/fuse attn.diff", "sha256": "0" * 64, "content": patch}]})
+    ref = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
+    block = f"=== Relevant Experience KB ===\nExperience {_FIRST}\nRecord:\n<external content {ref}, 9 bytes>"
+    contents = ({"ref": ref, "bytes": len(content.encode()), "content": content},)
+    reads = []
+
+    class _Client:
+        def read(self, decision, context, *, schema_ref, content_inline_limit):
+            reads.append(content_inline_limit)
+            return SimpleNamespace(
+                read_id=f"read-{len(reads)}",
+                status="completed",
+                prompt_block=block,
+                rendered_refs=(FakeRef(),),
+                warnings=(),
+                experiences=(),
+                contents=contents,
+            )
+
+    integration = ExperienceKBIntegration(_Client(), tmp_path, _SCHEMA)
+    evidence = integration.read_for_framework(_state(tick=1))
+    again = integration.read_for_framework(_state(tick=2))
+
+    content_file = tmp_path / "experience_kb" / "contents" / f"{ref.removeprefix('sha256:')}.txt"
+    patch_file = content_file.with_suffix("") / "1-fuse_attn.diff"
+    assert content_file.read_text(encoding="utf-8") == content
+    assert patch_file.read_text(encoding="utf-8") == patch
+    assert evidence.prompt_block.startswith(block)
+    assert f"- {ref} ({len(content.encode())} bytes): {content_file}" in evidence.prompt_block
+    assert f"  - patch: {patch_file}" in evidence.prompt_block
+    assert patch not in evidence.prompt_block
+    assert again.prompt_block == evidence.prompt_block
+    assert reads == [CONTENT_INLINE_LIMIT, CONTENT_INLINE_LIMIT]
 
 
 def test_bootstrap_uses_only_service_url_and_token(tmp_path) -> None:
@@ -432,6 +473,37 @@ def test_proposal_exposure_only_uses_current_orchestration_tick() -> None:
     router.shared_state.tick = 8
     _stamp_kb_exposure(router, stale, source="orchestration")
     assert stale == {}
+
+
+def _grid_citing(*citations: dict) -> dict:
+    return {"params": {"grid": [{"name": "v1", "experience_citations": list(citations)}, {"name": "v2"}]}}
+
+
+def test_a_grid_keeps_only_citations_of_experiences_its_tick_showed() -> None:
+    evidence = ExperienceKBEvidence(
+        tick=7,
+        read_id="read-1",
+        status="completed",
+        prompt_block="evidence",
+        rendered_refs=({"id": _FIRST, "purpose": "representative"},),
+        warnings=(),
+    )
+    router = SimpleNamespace(_kb_last_read=evidence, shared_state=SimpleNamespace(tick=7))
+    shown = {"id": _FIRST, "stance": "ADOPT", "claim": "  Kept   twice on this model. "}
+    unshown = {"id": _SECOND, "stance": "adopt", "claim": "Never rendered."}
+    unknown_stance = {"id": _FIRST, "stance": "trust", "claim": "Not a stance."}
+    payload = _grid_citing(shown, unshown, unknown_stance, shown)
+
+    _stamp_kb_exposure(router, payload, source="orchestration")
+
+    [cited, uncited] = payload["params"]["grid"]
+    assert cited["experience_citations"] == [{"id": _FIRST, "stance": "adopt", "claim": "Kept twice on this model."}]
+    assert uncited == {"name": "v2"}
+
+    router.shared_state.tick = 8
+    later = _grid_citing(shown)
+    _stamp_kb_exposure(router, later, source="orchestration")
+    assert later["params"]["grid"][0]["experience_citations"] == []
 
 
 def test_state_reader_prints_each_consumers_latest_injection(tmp_path, monkeypatch, capsys) -> None:

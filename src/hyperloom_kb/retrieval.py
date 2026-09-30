@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol, TypeAlias, runtime_checkable
+from typing import Protocol, TypeAlias, cast, runtime_checkable
 
 from hyperloom_kb.query_view import (
     CapabilityState,
@@ -416,11 +417,33 @@ def _render_experience(experience: Experience, view: QueryView) -> str:
     )
 
 
-def render_complete_experience(experience: Experience, view: QueryView) -> str:
-    """Render every canonical field plus full Repeat Group annotations."""
+def content_ref(content: str) -> str:
+    return "sha256:" + hashlib.sha256(content.encode()).hexdigest()
+
+
+def render_complete_experience(
+    experience: Experience,
+    view: QueryView,
+    *,
+    inline_limit: int | None = None,
+    external: dict[str, str] | None = None,
+) -> str:
+    """Render every canonical field plus full Repeat Group annotations.
+
+    A ``change.content`` longer than ``inline_limit`` bytes renders as a reference to its text, which is put in
+    ``external`` under that reference: the record stays complete while the prompt carries only its size.
+    """
 
     group_key = view.experience_groups[experience.id]
     annotations = view.groups[group_key].annotations
+    record = experience.to_dict()
+    content = experience.change.content if experience.change is not None else ""
+    if inline_limit is not None and external is not None and len(content.encode()) > inline_limit:
+        ref = content_ref(content)
+        external[ref] = content
+        cast(dict[str, JsonValue], record["change"])["content"] = (
+            f"<external content {ref}, {len(content.encode())} bytes>"
+        )
     return "\n".join(
         (
             f"Experience {experience.id}",
@@ -428,7 +451,7 @@ def render_complete_experience(experience: Experience, view: QueryView) -> str:
             "Repeat Group Annotations:",
             json.dumps(annotations.to_dict(), ensure_ascii=False, indent=2),
             "Record:",
-            json.dumps(experience.to_dict(), ensure_ascii=False, indent=2),
+            json.dumps(record, ensure_ascii=False, indent=2),
         )
     )
 
@@ -448,5 +471,6 @@ __all__ = [
     "RetrievalError",
     "RetrievalResult",
     "ViewUnavailable",
+    "content_ref",
     "render_complete_experience",
 ]

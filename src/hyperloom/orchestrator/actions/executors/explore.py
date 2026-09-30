@@ -113,7 +113,17 @@ _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "kb_evidence",
     "pr_evidence",
     "source_evidence",
+    "experience_citations",
 )
+
+
+def _decision_fields(gv: Any) -> dict[str, Any]:
+    """Why this variant was proposed, as authored at action time, for every row that records it."""
+    return {
+        "note": gv.note,
+        "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
+        "experience_citations": list(getattr(gv, "experience_citations", []) or []),
+    }
 
 
 def _explore_eval_disabled(shared_state: Any, params: dict[str, Any]) -> bool:
@@ -212,6 +222,10 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
+        # Validated against what the proposing agent was shown before the grid reached this executor.
+        gv.experience_citations = [  # type: ignore[attr-defined]
+            dict(item) for item in (raw.get("experience_citations") or []) if isinstance(item, dict)
+        ]
         out.append(gv)
     return out
 
@@ -948,8 +962,7 @@ class ExploreExecutor:
                                 "extra_server_args": gv.extra_server_args,
                                 "extra_envs": dict(gv.extra_envs),
                                 **control_fields,
-                                "note": gv.note,
-                                "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
+                                **_decision_fields(gv),
                                 "outcome": TS_FAILED,
                                 "status": getattr(w, "status", "failed") if w is not None else "failed",
                                 "tput": None,
@@ -983,8 +996,7 @@ class ExploreExecutor:
                                     "extra_server_args": gv.extra_server_args,
                                     "extra_envs": dict(gv.extra_envs),
                                     **control_fields,
-                                    "note": gv.note,
-                                    "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
+                                    **_decision_fields(gv),
                                     "reason": "warmup_failed",
                                     "gain_pct": None,
                                     "tput": None,
@@ -1179,8 +1191,7 @@ class ExploreExecutor:
                         "extra_server_args": gv.extra_server_args,
                         "extra_envs": dict(gv.extra_envs),
                         **control_fields,
-                        "note": gv.note,
-                        "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
+                        **_decision_fields(gv),
                         "outcome": outcome,
                         "status": r.status,
                         "tput": decision_tput,
@@ -1281,8 +1292,7 @@ class ExploreExecutor:
                             "effective_extra_server_args": next_effective_args,
                             "extra_envs": dict(next_envs),
                             **effective_control_fields,
-                            "note": gv.note,
-                            "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
+                            **_decision_fields(gv),
                             "provenance": provenance,
                             # Names of the authored kernels this config carried, when an overlay was loaded.
                             "accepted_kernels": list(getattr(gv, "accepted_kernels", []) or []),
@@ -1344,8 +1354,7 @@ class ExploreExecutor:
                             "extra_server_args": gv.extra_server_args,
                             "extra_envs": dict(gv.extra_envs),
                             **control_fields,
-                            "note": gv.note,
-                            "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
+                            **_decision_fields(gv),
                             "reason": reason or "not_keep",
                             "gain_pct": gain,
                             "tput": decision_tput,
@@ -1473,6 +1482,7 @@ class ExploreExecutor:
                         "args_mode": str(te.get("args_mode") or "append"),
                         "note": str(te.get("note") or ""),
                         "reasoning_origin": str(te.get("reasoning_origin") or ""),
+                        "experience_citations": list(te.get("experience_citations") or []),
                     },
                     # The verdicts and the stack behind them, as the round
                     # ruled. Absent keys mean the variant never got that far:

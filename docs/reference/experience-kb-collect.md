@@ -148,7 +148,6 @@ A mapping cannot turn these off:
   `TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`, or `CREDENTIAL`, with `TOKENIZER`
   exempt). `reasoning`, `reflection`, `change.summary`, and `alternatives` get
   only the token formats, so prose is not mistaken for an assignment.
-- `change.content` is limited to 256 KiB and a whole Experience to 1 MiB.
 - The Experience id is derived from producer, `run_id`, and `seq`, so collecting
   the same document again is idempotent: an Experience that already exists
   unchanged reports `unchanged`, and a different one under the same id is an error.

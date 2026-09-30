@@ -13,7 +13,6 @@ from typing import Any, Protocol
 
 from hyperloom_kb.collect.expressions import (
     EvaluationError,
-    canonical_json,
     is_present,
     truth,
 )
@@ -38,8 +37,6 @@ from hyperloom_kb.schema import (
 from hyperloom_kb.transitions import ExperienceConflictError
 
 REPORT_FORMAT = "hyperloom-kb.collect-report.v1"
-MAX_CHANGE_CONTENT_BYTES = 256 * 1024
-MAX_EXPERIENCE_BYTES = 1024 * 1024
 
 
 class SourceDocumentError(ValueError):
@@ -302,11 +299,6 @@ def _screen(experience: Experience) -> None:
     finding = find_sensitive(payload)
     if finding:
         raise _Skip(f"sensitive content in {finding}")
-    content = experience.change.content if experience.change is not None else ""
-    if len(content.encode()) > MAX_CHANGE_CONTENT_BYTES:
-        raise _Skip(f"change.content exceeds {MAX_CHANGE_CONTENT_BYTES} bytes")
-    if len(canonical_json(payload).encode()) > MAX_EXPERIENCE_BYTES:
-        raise _Skip(f"Experience exceeds {MAX_EXPERIENCE_BYTES} bytes")
 
 
 def _prepare(mapping: CollectMapping, unit: dict[str, Any]) -> Experience:
@@ -475,8 +467,6 @@ def collect(
 
 
 __all__ = [
-    "MAX_CHANGE_CONTENT_BYTES",
-    "MAX_EXPERIENCE_BYTES",
     "REPORT_FORMAT",
     "CollectReport",
     "CollectedExperience",

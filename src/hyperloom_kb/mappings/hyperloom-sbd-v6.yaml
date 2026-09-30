@@ -241,6 +241,16 @@ experience:
         action_ref: {text: {first: [$attempt.proposal_ref, $attempt.task_id]}}
         reasoning_origin: $reasoning_origin
         kb_read_id: {text: $proposal.kb_read_id}
+        # The Experiences the deciding agent says shaped this attempt, and how (adopt/adapt/avoid/contrast).
+        experience_citations:
+          each: $attempt.experience_citations
+          as: citation
+          where: {present: {token: $citation.id}}
+          value:
+            object:
+              id: {token: $citation.id}
+              stance: {token: $citation.stance}
+              claim: {text: $citation.claim}
         round_id: {text: $attempt.round_id}
         variant_name: {text: $attempt.variant_name}
         validation_basis: {text: $attempt.validation_basis}

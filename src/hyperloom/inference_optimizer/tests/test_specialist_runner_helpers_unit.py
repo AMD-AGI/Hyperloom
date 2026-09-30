@@ -253,14 +253,14 @@ def test_write_specialist_done_partial(tmp_path):
     assert "ts" in payload
 
 
-def _finalize(r, tmp_path, payload):
+def _finalize(r, tmp_path, payload, params=None):
     """Drive ``_finalize`` far enough to inspect the artifact it writes."""
     prep = sr._PreparedRun(
         domain=SimpleNamespace(key="serving_specialist"),
         gap="gap-1",
         workspace=tmp_path,
     )
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params=dict(params or {})), extra={})
     result = r._finalize(
         ctx=ctx,
         prep=prep,
@@ -272,6 +272,28 @@ def _finalize(r, tmp_path, payload):
         patches_written=[],
     )
     return result, json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
+
+
+def test_a_specialist_keeps_only_citations_of_experiences_its_dispatch_showed(tmp_path):
+    shown_id, unshown_id = "exp-" + "1" * 32, "exp-" + "2" * 32
+    cite = {"id": shown_id, "stance": "avoid", "claim": "It reverted on this stack."}
+    _, written = _finalize(
+        _runner(),
+        tmp_path,
+        {
+            "proposal_set": [
+                {"name": "v1", "reason": "why", "experience_citations": [cite, {**cite, "id": unshown_id}]},
+                {"name": "v2", "reason": "why"},
+            ],
+            "experience_citations": [{**cite, "stance": "adapt"}, {**cite, "id": unshown_id, "stance": "adapt"}],
+            "summary": "s",
+        },
+        params={"kb_rendered_refs": [{"id": shown_id, "purpose": "representative"}]},
+    )
+
+    assert written["proposal_set"][0]["experience_citations"] == [cite]
+    assert "experience_citations" not in written["proposal_set"][1]
+    assert written["experience_citations"] == [{**cite, "stance": "adapt"}]
 
 
 def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(tmp_path):

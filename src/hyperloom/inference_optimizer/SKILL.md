@@ -599,7 +599,12 @@ injected Experience set changes:
 `consumer` is `orchestration` or `specialist`; `domain` and `gap_canonical_id`
 identify the specialist dispatch and are empty for orchestration.
 `prompt_block` is the injected text; each Experience appears in it under an
-`Experience <id>` heading with its complete record. `experiences` holds one
+`Experience <id>` heading with its complete record. A `change.content` over
+2 KiB, typically a source patch, appears as `<external content sha256:...>`
+and is written whole under `<session>/experience_kb/contents/`, each patch
+also as its own file; the block ends with those paths. The injected agents
+cite the Experiences that shaped a proposal in its `experience_citations`,
+which reach the measured Experience's `provenance.extra`. `experiences` holds one
 summary per injected Experience, in `experience_ids` order: `experience_id`,
 `source_run_id`, `change_summary`, `decision`, `baseline_value`,
 `outcome_value`, `score`, and `why_matched`. `read_optimizer_state.py` prints

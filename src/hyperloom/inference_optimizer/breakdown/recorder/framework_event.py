@@ -634,6 +634,16 @@ class FrameworkEventRecorder:
         ):
             if name in fields:
                 row[name] = [str(item) for item in (fields.get(name) or []) if str(item or "")]
+        if "experience_citations" in fields:
+            row["experience_citations"] = [
+                {
+                    "id": str(item.get("id") or ""),
+                    "stance": str(item.get("stance") or ""),
+                    "claim": str(item.get("claim") or ""),
+                }
+                for item in (fields.get("experience_citations") or [])
+                if isinstance(item, Mapping) and str(item.get("id") or "")
+            ]
         if "ts" not in fields:
             row["ts"] = _now()
         else:

@@ -202,6 +202,7 @@ def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> No
 def _forward_integrate_source(
     src: dict[str, Any],
     dst: dict[str, Any],
+    done_payload: Mapping[str, Any],
 ) -> None:
     """Preserve proposal ownership across delayed ``integrate_patch`` execution."""
 
@@ -231,6 +232,10 @@ def _forward_integrate_source(
         value = src.get(key)
         if value not in (None, "", [], {}):
             dst[key] = value
+    # What the specialist says those Experiences did to the patch it wrote, already checked against them.
+    citations = done_payload.get("experience_citations")
+    if citations:
+        dst["experience_citations"] = list(citations)
 
 
 def _recorder(coord: Any):
@@ -347,15 +352,12 @@ def _source_action_reasoning(
     return "", ""
 
 
-_MAX_RECORDED_PATCH_BYTES = 128 * 1024
-
-
 def _patch_material(session_dir: Path, paths: Iterable[str]) -> list[dict[str, str]]:
     """Each distinct session-local patch as ``{path, sha256, content}``, in the order given.
 
-    A patch outside the session, over the size cap, not UTF-8, or carrying a
-    credential is left out, so the session breakdown only ever holds patch text
-    that is safe to publish whole.
+    A patch outside the session, not UTF-8, or carrying a credential is left
+    out, so the session breakdown only ever holds patch text that is safe to
+    publish whole.
     """
     root = Path(session_dir).resolve()
     material: list[dict[str, str]] = []
@@ -372,7 +374,7 @@ def _patch_material(session_dir: Path, paths: Iterable[str]) -> list[dict[str, s
         if relative in seen:
             continue
         try:
-            if not resolved.is_file() or resolved.stat().st_size > _MAX_RECORDED_PATCH_BYTES:
+            if not resolved.is_file():
                 continue
             payload = resolved.read_bytes()
         except OSError:
@@ -466,6 +468,7 @@ def _record_source_attempt(
         reason=str(result.get("reason") or ""),
         reasoning=reasoning,
         reasoning_origin=reasoning_origin,
+        experience_citations=params.get("experience_citations") or [],
         stage=str(result.get("stage") or ""),
         route=str(params.get("audit_step") or ""),
         patch_source=specialist_task_id,
@@ -2876,6 +2879,7 @@ class FrameworkPhase:
         _forward_integrate_source(
             spec_params,
             integrate_params,
+            done_payload,
         )
         # FRAMEWORK authoring provenance passthrough: propagate the PR
         # candidate/batch id onto the synthetic integrate_patch task so the
@@ -3029,6 +3033,7 @@ class FrameworkPhase:
         _forward_integrate_source(
             spec_params,
             integrate_params,
+            done_payload,
         )
         # FRAMEWORK authoring provenance passthrough for the authored-outcome bridge.
         fa_cand = str(spec_params.get("framework_agent_candidate_id") or "")
