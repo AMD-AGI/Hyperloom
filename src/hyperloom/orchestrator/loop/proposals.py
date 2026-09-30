@@ -202,13 +202,13 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         ss = self.shared_state
         workload = ss.model_name or "unknown_model"
         hw = self._kb_hardware_slug()
-        framework = str(getattr(ss, "framework", "") or "")
-        framework_version = str(getattr(ss, "framework_version", "") or "")
+        framework = str(ss.framework or "")
+        framework_version = str(ss.framework_version or "")
         if not framework_version and framework:
             framework_version = detect_framework_version(framework)
-        precision = str(getattr(ss, "precision", "") or "")
-        model_type = str(getattr(ss, "model_type", "") or "")
-        architectures = getattr(ss, "model_architectures", None) or []
+        precision = str(ss.precision or "")
+        model_type = str(ss.model_type or "")
+        architectures = ss.model_architectures or []
         from hyperloom.common.perf_metric import agentx_active
 
         return recipe_canonical_id(
@@ -219,14 +219,14 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             precision=precision,
             model_type=model_type,
             architectures=architectures,
-            scheme=("agentx" if agentx_active(benchmark_mode=getattr(ss, "benchmark_mode", "")) else "inference"),
+            scheme=("agentx" if agentx_active(benchmark_mode=ss.benchmark_mode) else "inference"),
         )
 
     def _read_local_recipe_row(self) -> dict[str, Any]:
         """Load the selected store's exact authority row for writes."""
         if self.recipe_kb is None:
             return {}
-        tick = int(getattr(self.shared_state, "tick", 0) or 0)
+        tick = int(self.shared_state.tick or 0)
         cache = getattr(self, "_local_recipe_cache", None)
         if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == tick:
             return cache[1]
@@ -322,16 +322,16 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             return
         from hyperloom.common.perf_metric import agentx_active
 
-        if agentx_active(benchmark_mode=getattr(self.shared_state, "benchmark_mode", "")):
+        if agentx_active(benchmark_mode=self.shared_state.benchmark_mode):
             return
         cid = self._workload_canonical_id()
 
         ss = self.shared_state
-        framework = str(getattr(ss, "framework", "") or "")
-        framework_version = str(getattr(ss, "framework_version", "") or "")
+        framework = str(ss.framework or "")
+        framework_version = str(ss.framework_version or "")
         if not framework_version and framework:
             framework_version = detect_framework_version(framework)
-        precision = str(getattr(ss, "precision", "") or "")
+        precision = str(ss.precision or "")
 
         # Local mode reads the exact authority row before amending it.
         try:
@@ -381,12 +381,12 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         prior_extras = {k: v for k, v in live.items() if k not in _reserved}
         merged_extras = {**prior_extras, **(overrides.get("extras") or {})}
         # Re-stamp config.json architecture-identity tags; skipped when unset.
-        _arch = getattr(ss, "model_architectures", None) or []
+        _arch = ss.model_architectures or []
         if isinstance(_arch, list):
             _arch_list = [str(a).strip() for a in _arch if str(a or "").strip()]
             if _arch_list:
                 merged_extras["architectures"] = _arch_list
-        _mtype = str(getattr(ss, "model_type", "") or "").strip()
+        _mtype = str(ss.model_type or "").strip()
         if _mtype:
             merged_extras["model_type"] = _mtype
         put_kwargs: dict[str, Any] = {
@@ -451,21 +451,21 @@ class ProposalsCollaborator(CoordinatorCollaborator):
 
     def _inject_explore_runtime_params(self, params: dict) -> None:
         """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides."""
-        br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
+        br = float(self.shared_state.baseline_runtime_sec or 0.0)
         if br > 0:
             params.setdefault("baseline_runtime_sec", br)
-        baseline_accuracy = float(getattr(self.shared_state, "baseline_accuracy", 0.0) or 0.0)
+        baseline_accuracy = float(self.shared_state.baseline_accuracy or 0.0)
         if baseline_accuracy > 0:
             params.setdefault("accuracy_baseline", baseline_accuracy)
         # Warm measure-round anchor for admission costing.
-        bwr = float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0)
+        bwr = float(self.shared_state.baseline_warm_runtime_sec or 0.0)
         if bwr > 0:
             params.setdefault("baseline_warm_runtime_sec", bwr)
         keep = _phase_state.resolve_keep_threshold(self.shared_state)
         params.setdefault("keep_threshold_pct", keep)
         # The round-id seed: the executor holds no cross-round state, so the round
         # it labels itself with has to come from the durable cursor.
-        cursor = int((getattr(self.shared_state, "explore_search", None) or {}).get("cursor") or 0)
+        cursor = int((self.shared_state.explore_search or {}).get("cursor") or 0)
         params.setdefault("explore_search_cursor", cursor)
 
     async def _materialize_approved_proposal(

@@ -243,7 +243,7 @@ def resolve_keep_threshold(state: Any) -> float:
     """Current-cycle KEEP threshold for every path that injects ``keep_threshold_pct``."""
     from ..actions.executors._multi_node_env import is_multi_node
 
-    cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    cycle = int(state.macro_cycle or 0)
     return decaying_keep_threshold_pct(cycle, multi_node=is_multi_node())
 
 
@@ -340,7 +340,7 @@ KERNEL_INLINE_STEP_STALE_SECONDS: float = 3.0 * KERNEL_HEARTBEAT_SEC
 
 def kernel_inline_step_running(state: Any, *, now_unix: float | None = None) -> bool:
     """Report whether an inline kernel request is executing right now."""
-    seen = getattr(state, "kernel_inline_step_seen_unix", 0.0)
+    seen = state.kernel_inline_step_seen_unix
     try:
         seen = float(seen or 0.0)
     except (TypeError, ValueError):
@@ -794,9 +794,9 @@ GEAK_TERMINAL_STATUSES = frozenset(
 
 def _geak_phase_terminal(state: Any) -> bool:
     """Return true once the GEAK-owned KERNEL phase has produced a terminal result."""
-    if str(getattr(state, "kernel_optimizer", "") or "").strip().lower() != "geak":
+    if str(state.kernel_optimizer or "").strip().lower() != "geak":
         return False
-    result = getattr(state, "geak_result", None) or {}
+    result = state.geak_result or {}
     if not isinstance(result, dict):
         return False
     return str(result.get("status") or "").strip().lower() in GEAK_TERMINAL_STATUSES
@@ -818,14 +818,14 @@ CONTROLLER_TERMINAL_STATUSES: frozenset[str] = frozenset(
 
 def _controller_phase_terminal(state: Any) -> bool:
     """Return true when this macro cycle's rewrite controller has stopped."""
-    if str(getattr(state, "kernel_optimizer", "") or "").strip().lower() != "forge":
+    if str(state.kernel_optimizer or "").strip().lower() != "forge":
         return False
-    result = getattr(state, "kernel_rewrite_controller_result", None) or {}
+    result = state.kernel_rewrite_controller_result or {}
     if not isinstance(result, dict):
         return False
     try:
         result_cycle = int(result.get("macro_cycle", -1))
-        current_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        current_cycle = int(state.macro_cycle or 0)
     except (TypeError, ValueError):
         return False
     status = str(result.get("status") or "").strip().lower()
@@ -865,7 +865,7 @@ def compute_kernel_progress_fingerprint(
     import json
 
     attempts: list[list[str]] = []
-    ledger = getattr(state, "kernel_opt_task_attempts", None)
+    ledger = state.kernel_opt_task_attempts
     if isinstance(ledger, dict):
         for ledger_id, attempt in ledger.items():
             if not isinstance(attempt, dict):
@@ -1356,7 +1356,7 @@ def _sweep_predicate_inputs(
     if not isinstance(last_conc, dict):
         last_conc = {}
     summary = last_conc.get("summary") if isinstance(last_conc.get("summary"), dict) else {}
-    cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    cycle = int(state.macro_cycle or 0)
     saturated = getattr(state, "saturated_directions", None) or {}
     saturated_facts = (
         {str(key): bool(value.get("saturated")) for key, value in saturated.items() if isinstance(value, dict)}
@@ -1396,7 +1396,7 @@ def workflow_predicate_inputs(
     kernel_work_in_flight: bool = False,
 ) -> dict[str, Any]:
     """Freeze primitive, normalized facts consumed by one phase decision."""
-    current = (getattr(state, "phase", "") or "").strip().upper() or PHASE_PRELUDE
+    current = (state.phase or "").strip().upper() or PHASE_PRELUDE
     frozen_now = float(now_unix if now_unix is not None else _now_unix(state))
     inputs = _base_workflow_predicate_inputs(
         state,
@@ -1410,8 +1410,8 @@ def workflow_predicate_inputs(
     if current == PHASE_PRELUDE:
         inputs["baseline"] = _prelude_predicate_inputs(state, now_unix=frozen_now)
     elif current == PHASE_ENABLEMENT:
-        enablement = getattr(state, "enablement", None)
-        inputs["baseline"] = {"tput": _number(getattr(state, "baseline_tput", 0.0)) or 0.0}
+        enablement = state.enablement
+        inputs["baseline"] = {"tput": _number(state.baseline_tput) or 0.0}
         inputs["pending_work"] = {
             "validation_pending": bool(getattr(enablement, "validation_pending", False)),
             "enablement_in_flight": bool(enablement_in_flight),
@@ -1938,11 +1938,11 @@ def make_lifecycle_event(
 # bookkeeping).
 def bank_phase_segment(state, *, until_unix: float) -> float:
     """Bank the current phase's live segment, ending at ``until_unix``, into the durable totals."""
-    phase = (getattr(state, "phase", "") or "").strip().upper()
+    phase = (state.phase or "").strip().upper()
     if not phase:
         return 0.0
     segment = phase_elapsed_seconds(state, now_unix=until_unix)
-    totals = getattr(state, "phase_elapsed_totals", None)
+    totals = state.phase_elapsed_totals
     totals = dict(totals) if isinstance(totals, dict) else {}
     try:
         banked = max(0.0, float(totals.get(phase, 0.0) or 0.0))

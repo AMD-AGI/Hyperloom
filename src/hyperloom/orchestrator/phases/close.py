@@ -73,7 +73,7 @@ class ClosePhase(CoordinatorCollaborator):
 
     def _session_integrated_kernel_patch(self) -> bool:
         """True iff this session landed a kernel-level optimization (optimization_stack has an integrate/gemm_tuning/geak_e2e entry). Gates the CLOSE post-opt roofline so pure param-search sessions skip the extra profile."""
-        stack = getattr(self.shared_state, "optimization_stack", None) or []
+        stack = self.shared_state.optimization_stack or []
         if not isinstance(stack, list):
             return False
         for entry in stack:
@@ -87,10 +87,10 @@ class ClosePhase(CoordinatorCollaborator):
             return
         # Skip on the wall-clock-deadline close path (its grace window is too short for a full profile+TraceLens);
         # only run on a normal converged close.
-        if bool(getattr(self.shared_state, "closing_phase", False)):
+        if bool(self.shared_state.closing_phase):
             log.info("CLOSE step 0: skipped post-opt roofline (wall-clock closing grace window)")
             return
-        if str(getattr(self.shared_state, "stop_reason", "") or "") == PATCH_RECOVERY_INCOMPLETE_STOP_REASON:
+        if str(self.shared_state.stop_reason or "") == PATCH_RECOVERY_INCOMPLETE_STOP_REASON:
             # Profiling the tree the run just refused to trust would attribute
             # the reading to a baseline that is not on disk.
             log.info("CLOSE step 0: skipped post-opt roofline (patch recovery incomplete)")
@@ -143,7 +143,7 @@ class ClosePhase(CoordinatorCollaborator):
 
     def _close_stack_revalidation_timeout_sec(self) -> float:
         """How long CLOSE waits for its full-stack revalidation to settle."""
-        runtime_sec = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
+        runtime_sec = float(self.shared_state.baseline_runtime_sec or 0.0)
         return max(float(self.CLOSE_STACK_REVALIDATION_TIMEOUT_SEC), 2.0 * runtime_sec)
 
     async def _abandon_close_task(self, task: Task, *, reason: str) -> None:
@@ -421,7 +421,7 @@ class ClosePhase(CoordinatorCollaborator):
         close-section refresh can rebuild the zip after the final close record
         is written.
         """
-        session_id = str(getattr(self.shared_state, "session_id", "") or "")
+        session_id = str(self.shared_state.session_id or "")
         from hyperloom.inference_optimizer.breakdown import package_session_artifacts
 
         # Zipping a large session walks thousands of files; off the loop so it does not stall the Coordinator's
@@ -503,7 +503,7 @@ class ClosePhase(CoordinatorCollaborator):
         # had not happened yet from the ones that never will.
         _close_out.record_close_settled(
             self.session_dir,
-            stop_reason=str(getattr(self.shared_state, "stop_reason", "") or ""),
+            stop_reason=str(self.shared_state.stop_reason or ""),
         )
 
         # Refresh the breakdown's ``close`` key now that the sequence is on
@@ -527,7 +527,7 @@ class ClosePhase(CoordinatorCollaborator):
             if patch_breakdown_close(self.session_dir) and pkg_path is not None:
                 from hyperloom.inference_optimizer.breakdown import package_session_artifacts
 
-                session_id = str(getattr(self.shared_state, "session_id", "") or "")
+                session_id = str(self.shared_state.session_id or "")
                 rebuilt = await asyncio.to_thread(
                     package_session_artifacts,
                     self.session_dir,
@@ -587,7 +587,7 @@ class ClosePhase(CoordinatorCollaborator):
 
     def _close_leg_idem_suffix(self) -> str:
         """Idempotency-key suffix scoping a close-step task to the current run leg; empty before any resume."""
-        resumed_ts = str(getattr(self.shared_state, "resumed_ts", "") or "").strip()
+        resumed_ts = str(self.shared_state.resumed_ts or "").strip()
         return f"-leg-{resumed_ts}" if resumed_ts else ""
 
     async def _enqueue_internal_report_task(
@@ -671,7 +671,7 @@ class ClosePhase(CoordinatorCollaborator):
     async def _await_running_close_task(self, task: Task, *, step: str) -> str:
         """Wait for an already-dispatched close-step task to reach a terminal state."""
         bound_sec = self._close_step_wait_sec(task)
-        poll_sec = float(getattr(self, "_dispatcher_poll_sec", _DEFAULT_TASK_POLL_SEC))
+        poll_sec = float(self._dispatcher_poll_sec)
         deadline = time.monotonic() + bound_sec
         log.info(
             "CLOSE step %s: task_id=%s is already running; waiting up to %.0fs for it",

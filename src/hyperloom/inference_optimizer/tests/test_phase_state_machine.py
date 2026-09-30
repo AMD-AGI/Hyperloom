@@ -171,6 +171,8 @@ def _prelude_state(
         baseline_measure_round_dropped=baseline_measure_round_dropped,
         baseline_double_run=baseline_double_run,
         session_budget_usable_sec=lambda: usable_sec,
+        resumed_ts="",
+        pending_escalate_hint="",
     )
 
 
@@ -344,6 +346,8 @@ def test_optimize_phase_budget_exhaustion_advances():
         explore_search={},
         optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
+        resumed_ts="",
+        pending_escalate_hint="",
     )
     out = phase_state.compute_next_phase(state)
     assert out is not None and out[1] == "optimize_phase_budget_exhausted"
@@ -384,6 +388,7 @@ def test_skip_to_kernel_requires_a_tested_round():
         macro_cycle=0,
         optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
+        resumed_ts="",
     )
     out = phase_state.compute_next_phase(state)
     assert out is None
@@ -401,6 +406,7 @@ def test_skip_to_kernel_fires_once_a_round_ran():
         macro_cycle=0,
         optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
+        resumed_ts="",
     )
     out = phase_state.compute_next_phase(state)
     assert out is not None
@@ -441,6 +447,11 @@ class TestAMetTargetDoesNotOutrankTheGuards:
             params_no_promote_streak=0,
             explore_search={},
             optimization_stack=[],
+            resumed_ts="",
+            pending_escalate_hint="",
+            kernel_optimizer="geak",
+            geak_result={},
+            kernel_rewrite_controller_result={},
         )
         base.update(kw)
         return SimpleNamespace(**base)
@@ -493,6 +504,7 @@ def test_a_met_target_renames_a_budget_limited_sweep_exit():
         cumulative_gain_validated=0.0,
         gain_at_cycle_start=0.0,
         no_gain_cycle_streak=0,
+        resumed_ts="",
     )
     out = phase_state.compute_next_phase(state, kernel_enabled=True)
     assert out is not None
@@ -829,6 +841,11 @@ def _enablement_state(phase, *, tput=0.0, streak=1, validation_pending=False):
         baseline_tput=tput,
         baseline_failure_streak=streak,
         enablement=SimpleNamespace(validation_pending=validation_pending),
+        phase_budget_pct={},
+        phase_started_unix=0.0,
+        max_minutes=0,
+        resumed_ts="",
+        pending_escalate_hint="",
     )
 
 

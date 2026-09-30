@@ -120,14 +120,14 @@ class MachinePhase(CoordinatorCollaborator):
             # cli already T0'd or resume picked up the sid.
             return
         # Derive workload / hw from SharedState.
-        workload = getattr(state, "model_name", "") or "unknown_model"
-        hw = getattr(state, "gpu_type", "") or "unknown_gpu"
+        workload = state.model_name or "unknown_model"
+        hw = state.gpu_type or "unknown_gpu"
         extra_attrs = {
-            "marathon_dispatch_id": getattr(state, "session_id", "") or "",
-            "framework_name": getattr(state, "framework", "") or "",
-            "model_class": getattr(state, "model_class", "") or "",
-            "claw_session_id": getattr(state, "claw_session_id", "") or "",
-            "sandbox_user_id": getattr(state, "sandbox_user_id", "") or "",
+            "marathon_dispatch_id": state.session_id or "",
+            "framework_name": state.framework or "",
+            "model_class": state.model_class or "",
+            "claw_session_id": state.claw_session_id or "",
+            "sandbox_user_id": state.sandbox_user_id or "",
             # boot_origin is a dev-debug label, NOT written to KB.
             "boot_origin": "coordinator_fallback",
         }
@@ -174,7 +174,7 @@ class MachinePhase(CoordinatorCollaborator):
     async def _track_kernel_idle_streak(self) -> None:
         """Advance or reset the KERNEL idle-streak counters for this tick."""
         state = self.shared_state
-        if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
+        if str(state.phase or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
             state.kernel_idle_ticks = 0
             state.kernel_progress_fingerprint = ""
             state.kernel_idle_since_unix = 0.0
@@ -187,7 +187,7 @@ class MachinePhase(CoordinatorCollaborator):
             state,
             inflight_task_ids=inflight,
         )
-        if fingerprint != str(getattr(state, "kernel_progress_fingerprint", "") or ""):
+        if fingerprint != str(state.kernel_progress_fingerprint or ""):
             state.kernel_progress_fingerprint = fingerprint
             state.kernel_idle_ticks = 0
             state.kernel_idle_since_unix = now
@@ -197,7 +197,7 @@ class MachinePhase(CoordinatorCollaborator):
             return
         # Only reachable after a tick that opened the streak above, so ``kernel_idle_since_unix`` is already stamped
         # whenever the counter is non-zero — the pairing the guard's wall-clock floor relies on.
-        state.kernel_idle_ticks = int(getattr(state, "kernel_idle_ticks", 0) or 0) + 1
+        state.kernel_idle_ticks = int(state.kernel_idle_ticks or 0) + 1
 
     async def _advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick."""
@@ -262,7 +262,7 @@ class MachinePhase(CoordinatorCollaborator):
             state.consume_pending_escalate_hint()
         elif (
             str(prior or "").strip().upper() == _phase_state.PHASE_SWEEP
-            and str(getattr(state, "pending_escalate_hint", "") or "").strip() == ESCALATE_HINT_SKIP_TO_CLOSE
+            and str(state.pending_escalate_hint or "").strip() == ESCALATE_HINT_SKIP_TO_CLOSE
         ):
             # SWEEP already had an honest closeout, so skip_to_close was suppressed in _global_terminal.
             state.consume_pending_escalate_hint()
@@ -295,11 +295,11 @@ class MachinePhase(CoordinatorCollaborator):
             )
         is_loopback = bool(isinstance(evidence, dict) and evidence.get("loopback"))
         if is_loopback:
-            prior_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+            prior_cycle = int(state.macro_cycle or 0)
             self._coord.phase_macro_cycle._apply_macro_cycle_reloop(evidence)
             await self._coord.phase_macro_cycle._run_cycle_soft_restart(
                 prior_cycle=prior_cycle,
-                new_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+                new_cycle=int(state.macro_cycle or 0),
             )
         # Also persist the no-gain streak on a cyclic-mode terminal close so a subsequent resume sees the convergence
         # state.

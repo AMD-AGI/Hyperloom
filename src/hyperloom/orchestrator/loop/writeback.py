@@ -695,8 +695,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
             actor=source,
             proposal_msg_id=str(proposal_msg_id) if proposal_msg_id else None,
             action=resolved_action,
-            phase=str(getattr(self.shared_state, "phase", "") or ""),
-            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            phase=str(self.shared_state.phase or ""),
+            macro_cycle=int(self.shared_state.macro_cycle or 0),
             rule=str(denied.rule or ""),
             hint=str(denied.hint or ""),
         )
@@ -904,7 +904,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 },
             },
         }
-        outbox = list(getattr(self.shared_state, "kb_stage_outbox", []) or [])
+        outbox = list(self.shared_state.kb_stage_outbox or [])
         if not any(isinstance(existing, dict) and existing.get("id") == row["id"] for existing in outbox):
             outbox.append(row)
         if include_patches and (sources or missing):
@@ -919,13 +919,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
 
     def _drain_agent_keep_outbox(self) -> None:
         """Run section writes only after the authoritative state save."""
-        pending = list(getattr(self.shared_state, "kb_stage_outbox", []) or [])
+        pending = list(self.shared_state.kb_stage_outbox or [])
         if not pending:
             return
         retained: list[dict[str, Any]] = []
-        dead_letter = [
-            dict(row) for row in (getattr(self.shared_state, "kb_stage_dead_letter", []) or []) if isinstance(row, dict)
-        ]
+        dead_letter = [dict(row) for row in (self.shared_state.kb_stage_dead_letter or []) if isinstance(row, dict)]
         stack = list(self.shared_state.optimization_stack or [])
         for row in pending:
             if not isinstance(row, dict):
@@ -1019,9 +1017,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         self.shared_state.cumulative_gain_validated = float(validated_gain)
         self.shared_state.cumulative_gain_validated_ts = ts
         self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
-        self.shared_state.validated_recipe_generation = int(
-            getattr(self.shared_state, "working_recipe_generation", 0) or 0
-        )
+        self.shared_state.validated_recipe_generation = int(self.shared_state.working_recipe_generation or 0)
         # The breakdown's own total is the sum of its ledger, so without this
         # record there is nothing for it to disagree with.
         try:
@@ -1119,7 +1115,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "name": result.get("kernel_id"),
             "candidate_extra_server_args": result.get("extra_server_args"),
             "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
-            "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
+            "source_phase": str(self.shared_state.phase or "KERNEL_AGENT"),
             **integrate_measurement_fields(measurement),
         }
         if is_fusion:
@@ -1686,7 +1682,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             The hyperloom-local session id (recipe_kb_session_id when set, else
             ``session_dir.name``).
         """
-        return str(getattr(self.shared_state, "recipe_kb_session_id", "") or "") or self.session_dir.name
+        return str(self.shared_state.recipe_kb_session_id or "") or self.session_dir.name
 
     async def _fact_write_hook(
         self,
@@ -1764,22 +1760,20 @@ class WritebackCollaborator(CoordinatorCollaborator):
             The per-session :class:`Journal` instance (created on first call,
             with the baseline backfilled on subsequent calls).
         """
-        existing = getattr(self, "_journal", None)
+        existing = self._journal
         if existing is None:
             ss = self.shared_state
             self._coord._journal = Journal.load_or_create(
                 self.session_dir,
-                session_id=str(getattr(ss, "recipe_kb_session_id", "") or "")
-                or str(getattr(ss, "session_id", "") or "")
-                or self.session_dir.name,
-                model=str(getattr(ss, "model_name", "") or ""),
-                hardware=str(getattr(ss, "gpu_type", "") or ""),
-                framework=str(getattr(ss, "framework", "") or ""),
-                baseline_throughput=float(getattr(ss, "baseline_tput", 0.0) or 0.0),
+                session_id=str(ss.recipe_kb_session_id or "") or str(ss.session_id or "") or self.session_dir.name,
+                model=str(ss.model_name or ""),
+                hardware=str(ss.gpu_type or ""),
+                framework=str(ss.framework or ""),
+                baseline_throughput=float(ss.baseline_tput or 0.0),
             )
         else:
             # Backfill baseline once the baseline executor finishes.
-            existing.update_baseline(float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0))
+            existing.update_baseline(float(self.shared_state.baseline_tput or 0.0))
         return self._journal
 
     def _pitfall_severity_for(
@@ -1826,7 +1820,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         Returns:
             str: The uppercased phase name, or ``"UNKNOWN"`` when unset.
         """
-        return str(getattr(self.shared_state, "phase", "") or "").strip().upper() or "UNKNOWN"
+        return str(self.shared_state.phase or "").strip().upper() or "UNKNOWN"
 
     def _record_fact_impl(
         self,
@@ -1892,7 +1886,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             impact = self._build_measured_impact(
                 gain_pct=gain_pct,
                 throughput_after=throughput_after,
-                stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
+                stack_depth=len(self.shared_state.optimization_stack or []),
                 measured_at=now_iso,
             )
             live = self._coord.proposals._read_local_recipe_row()
@@ -2022,7 +2016,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         Returns:
             The identity-stable statement / description string.
         """
-        framework = str(getattr(self.shared_state, "framework", "") or "").strip()
+        framework = str(self.shared_state.framework or "").strip()
         fw_tag = f"[{framework or '?'}] "
         model = self.shared_state.model_name or "?"
         hw = self.shared_state.gpu_type or "?"
@@ -2186,14 +2180,14 @@ class WritebackCollaborator(CoordinatorCollaborator):
         """
         ss = self.shared_state
         out: dict[str, Any] = {}
-        framework = str(getattr(ss, "framework", "") or "").strip()
+        framework = str(ss.framework or "").strip()
         if framework:
             out["framework"] = framework
-        model_class = str(getattr(ss, "model_class", "") or "").strip()
+        model_class = str(ss.model_class or "").strip()
         if model_class:
             out["model_class"] = model_class
         # model_family is not part of the seven-dimension Recipe identity.
-        model_name = str(getattr(ss, "model_name", "") or "").strip()
+        model_name = str(ss.model_name or "").strip()
         if model_name:
             out["model_name"] = model_name
         for src_attr, dst_key in (
@@ -2226,7 +2220,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if pp_n > 0:
             out["pp"] = pp_n
         # runtime version tags from stack_fingerprint_meta (cli writes at boot, resume reads verbatim).
-        fp_meta = getattr(ss, "stack_fingerprint_meta", None) or {}
+        fp_meta = ss.stack_fingerprint_meta or {}
         if isinstance(fp_meta, dict):
             # framework_version is whichever of sglang/vllm is active.
             fw_lc = framework.lower()
@@ -2243,7 +2237,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 if v and v != "unknown":
                     out[dst_key] = v
         # per-baseline workload extras from materialized YAML; keep bool False (don't drop an "explicitly disabled" signal).
-        wl_extra = getattr(ss, "baseline_workload_extra", None) or {}
+        wl_extra = ss.baseline_workload_extra or {}
         if isinstance(wl_extra, dict):
             for k in ("max_running_requests", "max_num_seqs"):
                 v = wl_extra.get(k)
@@ -2267,8 +2261,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
             joined with its E2E integrate verdict where available.
         """
         ss = self.shared_state
-        opt_attempts = getattr(ss, "kernel_opt_task_attempts", {}) or {}
-        integ_attempts = getattr(ss, "kernel_integrate_attempts", {}) or {}
+        opt_attempts = ss.kernel_opt_task_attempts or {}
+        integ_attempts = ss.kernel_integrate_attempts or {}
         if not isinstance(opt_attempts, dict):
             return []
 
@@ -2348,7 +2342,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         kept_sources: dict[str, str] = {}
         kept_by_gap: dict[str, str] = {}
         reverted_rows: list[dict[str, Any]] = []
-        gaps = getattr(self.shared_state, "gaps", []) or []
+        gaps = self.shared_state.gaps or []
         for gap in gaps:
             if not isinstance(gap, dict):
                 continue
@@ -2387,10 +2381,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
             writes.
         """
         ss = self.shared_state
-        current_best = getattr(ss, "current_best", {}) or {}
-        opt_stack = getattr(ss, "optimization_stack", []) or []
-        gain_per_stack = getattr(ss, "gain_per_stack_entry", []) or []
-        last_failures = getattr(ss, "last_action_failures", []) or []
+        current_best = ss.current_best or {}
+        opt_stack = ss.optimization_stack or []
+        gain_per_stack = ss.gain_per_stack_entry or []
+        last_failures = ss.last_action_failures or []
         # RecipeKB best_config keys on the canonical extra_server_args field.
         best_config: dict[str, Any] = {}
         if isinstance(current_best, dict):
@@ -2409,7 +2403,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 ).strip()
                 if stack_args:
                     best_config["extra_server_args"] = stack_args
-        sediment_on = bool(getattr(ss, "recipe_sediment_enabled", True))
+        sediment_on = bool(ss.recipe_sediment_enabled)
         kept_sources, kept_by_gap, reverted_rows = self._collect_attempt_provenance() if sediment_on else ({}, {}, [])
         what_worked: list[dict[str, Any]] = []
         for idx, entry in enumerate(opt_stack):
@@ -2447,8 +2441,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
         for rev in reverted_rows:
             what_failed.append(rev)
         kernel_optimizations = self._build_kernel_optimizations_from_state()
-        cumulative_validated = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
-        validated_stack_len = int(getattr(ss, "cumulative_gain_validated_stack_len", 0) or 0)
+        cumulative_validated = float(ss.cumulative_gain_validated or 0.0)
+        validated_stack_len = int(ss.cumulative_gain_validated_stack_len or 0)
         # Workload-shape tags for shape-filtered warm-start queries (shared via _collect_workload_tags).
         workload_tags = self._collect_workload_tags()
         # framework_version left unset here (manifest-derived); the T0 backfill writes it.
@@ -2458,7 +2452,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "what_worked": what_worked,
             "what_failed": what_failed,
             "kernel_optimizations": kernel_optimizations,
-            "last_profiled": str(getattr(ss, "cumulative_gain_validated_ts", "") or ""),
+            "last_profiled": str(ss.cumulative_gain_validated_ts or ""),
             "workload": workload_tags,
             "sessions": [
                 {
@@ -2466,7 +2460,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "gain_pct": cumulative_validated,
                     "stack_len": validated_stack_len or len(opt_stack),
                     # arbor-shape provenance so the session row is self-describing (before/after tput + knobs).
-                    "throughput_before": float(getattr(ss, "baseline_tput", 0.0) or 0.0),
+                    "throughput_before": float(ss.baseline_tput or 0.0),
                     "throughput_after": (
                         float(current_best.get("tput", 0.0)) if isinstance(current_best, dict) else 0.0
                     ),
@@ -2647,11 +2641,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
         """
         state = self.shared_state
         return {
-            "kernel_optimizer": str(getattr(state, "kernel_optimizer", "") or ""),
-            "tp": to_int(getattr(state, "tp", None), None),
-            "conc": to_int(getattr(state, "conc", None), None),
-            "isl": to_int(getattr(state, "isl", None), None),
-            "osl": to_int(getattr(state, "osl", None), None),
+            "kernel_optimizer": str(state.kernel_optimizer or ""),
+            "tp": to_int(state.tp or None, None),
+            "conc": to_int(state.conc or None, None),
+            "isl": to_int(state.isl or None, None),
+            "osl": to_int(state.osl or None, None),
         }
 
     def finalize_recipe_and_journal(
@@ -2670,9 +2664,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
             log.warning(
                 "Recipe finalize skipped: working recipe is not validated (stack=%s/%s generation=%s/%s)",
                 len(getattr(ss, "optimization_stack", None) or []),
-                getattr(ss, "cumulative_gain_validated_stack_len", 0),
-                getattr(ss, "working_recipe_generation", 0),
-                getattr(ss, "validated_recipe_generation", 0),
+                ss.cumulative_gain_validated_stack_len,
+                ss.working_recipe_generation,
+                ss.validated_recipe_generation,
             )
             return {
                 "status": "skipped",
@@ -2682,9 +2676,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
             }
         journal = self._ensure_journal()
         ss = self.shared_state
-        cb = getattr(ss, "current_best", {}) or {}
+        cb = ss.current_best or {}
         final_tput = float(cb.get("tput", 0.0)) if isinstance(cb, dict) else 0.0
-        total_gain = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
+        total_gain = float(ss.cumulative_gain_validated or 0.0)
         journal.finalize(
             final_throughput=final_tput if final_tput > 0 else None,
             total_gain_pct=total_gain,
@@ -2866,12 +2860,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
             }
             # Overwrite best_config/best_throughput only on a real improvement: requires has_validated_win AND my_tput > live_tput.
             my_tput = float(attrs.get("best_throughput") or 0.0)
-            cb_now = getattr(ss, "current_best", {}) or {}
+            cb_now = ss.current_best or {}
             cb_args_now = str(cb_now.get("extra_server_args") or "").strip() if isinstance(cb_now, dict) else ""
-            validated_gain = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
-            has_validated_win = bool(
-                (getattr(ss, "optimization_stack", []) or []) or validated_gain > 0.0 or cb_args_now
-            )
+            validated_gain = float(ss.cumulative_gain_validated or 0.0)
+            has_validated_win = bool((ss.optimization_stack or []) or validated_gain > 0.0 or cb_args_now)
             try:
                 live_tput = float(existing_row.get("best_throughput") or 0.0)
             except (TypeError, ValueError):
@@ -2932,8 +2924,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
 
             phase_event.record_specialist_round(
                 task_id=str(task.task_id or ""),
-                phase=source_phase or str(getattr(self.shared_state, "phase", "") or ""),
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                phase=source_phase or str(self.shared_state.phase or ""),
+                macro_cycle=int(self.shared_state.macro_cycle or 0),
                 round_id=str(round_entry.get("round_id") or ""),
                 domain=round_entry.get("domain") or "",
                 gap_canonical_id=round_entry.get("gap_canonical_id") or "",
@@ -2989,9 +2981,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 },
             )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing.
-        _scorer = getattr(self, "_proposal_scorer", None)
-        if _scorer is not None and proposals:
-            scores = await _scorer.score(
+        if self._proposal_scorer is not None and proposals:
+            scores = await self._proposal_scorer.score(
                 gap={
                     "domain": domain,
                     "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
@@ -3001,8 +2992,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 },
                 proposals=proposals,
                 task_id=task.task_id,
-                tick=int(getattr(self.shared_state, "tick", 0) or 0),
-                phase=(getattr(self.shared_state, "phase", "") or "") or None,
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
             )
             if scores and (scores.get("models") or scores.get("errors")):
                 round_entry["ensemble_scores"] = scores
@@ -3491,9 +3482,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
                 current_best["args_mode"] = "replace"
         self.shared_state.current_best = current_best
-        self.shared_state.working_recipe_generation = (
-            int(getattr(self.shared_state, "working_recipe_generation", 0) or 0) + 1
-        )
+        self.shared_state.working_recipe_generation = int(self.shared_state.working_recipe_generation or 0) + 1
         self._stamp_current_best_measurement(bv)
         return True
 
@@ -4270,7 +4259,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # crediting it to the newer one is the mismatch CLOSE refuses to
             # publish. Rows enqueued before generations existed carry no stamp.
             measured_generation = (task.params or {}).get("recipe_generation")
-            working_generation = int(getattr(self.shared_state, "working_recipe_generation", 0) or 0)
+            working_generation = int(self.shared_state.working_recipe_generation or 0)
             stale_measurement = measured_generation is not None and int(measured_generation) != working_generation
             if stale_measurement:
                 log.warning(
@@ -4437,7 +4426,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                                 if not has_material:
                                     decision = "no_material"
 
-                pending = getattr(self.shared_state, "geak_pending", None) or {}
+                pending = self.shared_state.geak_pending or {}
                 pending_status = str(pending.get("status") or "") if isinstance(pending, dict) else ""
                 if decision == "validated":
                     # Write the headline from the measured orchestrator-harness
@@ -4789,7 +4778,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             result.get("enablement") or task_params.get("enablement") or task_params.get("enablement_landing")
         )
         prebaseline_enablement = bool(
-            kept_flag and float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0) <= 0.0 and enablement_landing
+            kept_flag and float(self.shared_state.baseline_tput or 0.0) <= 0.0 and enablement_landing
         )
         lifted = False
         if kept_flag:
@@ -6121,7 +6110,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             deploy the candidate.
         """
         benchmark_script = baseline_benchmark_script(self.shared_state)
-        recipe_generation = int(getattr(self.shared_state, "working_recipe_generation", 0) or 0)
+        recipe_generation = int(self.shared_state.working_recipe_generation or 0)
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
         ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
@@ -6219,7 +6208,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 }
             ],
             # The rebench reproduces the whole stack, so its gain is cumulative-vs-baseline.
-            "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
+            "base_tput": float(self.shared_state.baseline_tput or 0.0),
             **base_params,
         }
         if self.shared_state.baseline_config_path:
@@ -6253,7 +6242,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         benchmark_script = baseline_benchmark_script(self.shared_state)
         # The grid is frozen from ``current_best`` now; a lift before the result lands makes it a measurement of an
         # older Recipe.
-        recipe_generation = int(getattr(self.shared_state, "working_recipe_generation", 0) or 0)
+        recipe_generation = int(self.shared_state.working_recipe_generation or 0)
         launch = self._current_best_launch_config()
         args = launch["extra_server_args"]
         envs = launch["extra_envs"]
@@ -6281,7 +6270,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 }
             ],
             # The rebench reproduces the whole stack, so its gain is cumulative-vs-baseline.
-            "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
+            "base_tput": float(self.shared_state.baseline_tput or 0.0),
         }
         if cb_remove:
             params["base_remove_args"] = [cb_remove] if isinstance(cb_remove, str) else list(cb_remove or [])
@@ -6329,7 +6318,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         from hyperloom.common.perf_metric import is_agentx_mode
         from ..actions.executors._workload_envs import agentx_enabled
 
-        mode = str(getattr(self.shared_state, "benchmark_mode", "") or "").strip()
+        mode = str(self.shared_state.benchmark_mode or "").strip()
         agentx = is_agentx_mode(mode) if mode else agentx_enabled()
         if agentx:
             return {

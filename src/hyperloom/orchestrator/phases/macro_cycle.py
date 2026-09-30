@@ -211,7 +211,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             A summary dict of the restart steps performed, or ``None`` when the
             soft restart is disabled.
         """
-        if not getattr(self, "_cycle_soft_restart", False):
+        if not self._cycle_soft_restart:
             return None
         summary: dict[str, Any] = {
             "prior_cycle": int(prior_cycle),

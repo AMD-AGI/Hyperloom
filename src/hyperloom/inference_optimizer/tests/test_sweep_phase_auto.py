@@ -54,6 +54,7 @@ class _BareState:
     save_count: int = 0
     stop_reason: str = ""
     usable_sec: float | None = None
+    macro_cycle: int = 0
 
     def session_budget_usable_sec(self, *, reserve_sec=None) -> float | None:
         return self.usable_sec
