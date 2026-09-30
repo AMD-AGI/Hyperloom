@@ -1788,8 +1788,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # flags real defaults rather than None.
         if args.no_warm_replay:
             state.warm_replay_enabled = False
-        _wr_value = getattr(args, "warm_replay_min_confidence", 0.7)
-        if _wr_value != 0.7:
+        _wr_value = getattr(args, "warm_replay_min_confidence", None)
+        if _wr_value is not None:
             state.warm_replay_min_confidence = _wr_value
         # Honour persisted kernel_enabled on resume; CLI --no-kernel can still override.
         if not state.kernel_enabled:
