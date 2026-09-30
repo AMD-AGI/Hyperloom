@@ -344,7 +344,7 @@ other existing remote/special workflows, not to bypass checks in this local ATOM
 
 ### `docker`
 
-Do **not** run `hyperloom.inference_optimizer.setup` on the host.
+Do **not** run `hyperloom setup` on the host.
 The example (workload) skill will start the container and run setup inside it.
 
 After writing `.env`, tell the user:

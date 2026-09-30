@@ -6,8 +6,7 @@ description: |
   a single pod provides (i.e. ``nodes >= 2``) — typical prompt signals are
   ``Nodes=N`` / ``N pods`` / ``TP=N`` larger than one pod's GPU count, or
   any model that cannot fit on one pod's GPUs. Drives a platform-provisioned
-  multi-node cluster through the ``hyperloom.inference_optimizer.multi_node``
-  Python CLI.
+  multi-node cluster through the ``hyperloom multi-node`` CLI.
 globs:
   - "**/multi_node/**"
   - "**/multi-node/**"
