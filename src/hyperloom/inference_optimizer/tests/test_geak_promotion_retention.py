@@ -118,7 +118,7 @@ def rebench_task(result):
         kind="explore",
         state="succeeded",
         params={
-            "source": "resume_stack_revalidate",
+            "source": "stack_revalidate",
             "geak_fallback": True,
             "expected_cfg_hash": "candidate",
             "expected_overlay": result["final_overlay"],
@@ -193,7 +193,7 @@ async def test_geak_acceptance_requires_native_retention(
         )
         assert not sweep_calls, "A conclusive retention veto must not trigger another harness"
     assert not state.geak_pending
-    assert state.resume_pending_revalidation is (not accepted)
+    assert _resume_pending(state) is (not accepted)
     if accepted:
         assert state.current_best["tput"] == 120.0
         assert state.current_best["final_overlay"] == result["final_overlay"]
@@ -258,7 +258,7 @@ async def test_fallback_rejection_is_conclusive_and_not_validated(promotion, mon
     assert state.cumulative_gain_validated == before_gain
     assert not state.kernel_integrate_attempts
     assert not state.geak_pending
-    assert state.resume_pending_revalidation
+    assert _resume_pending(state)
     assert state.geak_result["revalidation_status"] == "no_promote"
     assert state.geak_result["final_validation"]["decision"] == "REJECTED"
 
