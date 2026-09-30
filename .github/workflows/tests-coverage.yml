@@ -121,6 +121,25 @@ jobs:
             echo "::notice::OOB/ not in checkout (no pyproject.toml); skipping editable OOB install."
           fi
 
+      # Kernel-agent tests import TraceLens as a module, so it must be importable for
+      # collection. It is not on PyPI: derive the repo+SHA from install.sh so the pod
+      # installer stays the single pin owner. kernel_source pulls itanium-demangler.
+      - name: Install TraceLens (pinned, kernel_source extra)
+        run: |
+          set -euo pipefail
+          INSTALL_SH="src/hyperloom/agents/kernel/scripts/install.sh"
+          TL_REPO="$(sed -n 's/^TRACELENS_REPO="\(.*\)"$/\1/p' "$INSTALL_SH" | head -n1)"
+          TL_REF="$(sed -n 's/^TRACELENS_REF="\(.*\)"$/\1/p' "$INSTALL_SH" | head -n1)"
+          if [ -z "$TL_REPO" ] || [ -z "$TL_REF" ]; then
+            echo "::error::Could not read TRACELENS_REPO/TRACELENS_REF from ${INSTALL_SH}; the TraceLens pin moved or changed format."
+            exit 1
+          fi
+          echo "::notice::Installing TraceLens ${TL_REF} from ${TL_REPO} with the kernel_source extra."
+          pip install "TraceLens[kernel_source] @ git+${TL_REPO}@${TL_REF}"
+          # Fail loudly here if the pin is bad, rather than as an opaque collection
+          # error later: the types the tests build and the demangler must import.
+          python -c "import itanium_demangler; from TraceLens.TraceUtils.kernel_source import ResolveResult, SourceLocation; from TraceLens.Agent.Analysis.post_processing import render_analysis_json; print('TraceLens + itanium-demangler import OK')"
+
       # All shards, including partial reruns, must use the same immutable key.
       - name: Restore selected test durations
         id: durations

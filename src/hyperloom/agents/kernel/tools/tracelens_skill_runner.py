@@ -211,9 +211,6 @@ class _InFlight:
                 self.tasks.discard(task_id)
 
 
-# Strips a ``Kernel N:`` label prefix from a kernel-name cell piece.
-_KERNEL_LABEL_RE = re.compile(r"^\s*Kernel\s+\d+\s*:\s*", re.IGNORECASE)
-
 # Upstream TraceLens category enum (orchestrator_prepare.py CATEGORY_SKILL_MAP) → GEAK labels.
 UPSTREAM_CATEGORY_TO_GEAK: dict[str, str] = {
     "cpu_idle": "Other",
@@ -264,7 +261,7 @@ def normalize_upstream_category(raw: str) -> str:
 
 @dataclass
 class TraceLensSkillRunResult:
-    """Artifacts produced by one TraceLens skill run (``analysis.md`` is the single source of truth)."""
+    """Artifacts produced by one TraceLens skill run (``report_path`` names the ``analysis.md``; the ``analysis.json`` rendered beside it is the candidate source of truth)."""
 
     output_dir: Path
     report_path: Path
@@ -896,364 +893,6 @@ async def run_tracelens_skill(
 _safe_float = safe_float
 
 
-# analysis.md parser (TraceLens final-report contract): reads p_item markers + compute-tier reasoning blocks with a 9-column **Data:** table. Sole reader of candidate data.
-_DATA_TABLE_HEADER_TOKENS = (
-    "operation",
-    "args",
-    "kernel path",
-    "time (ms)",
-    "%e2e",
-    "count",
-    "flops/byte",
-    "efficiency",
-    "bound",
-)
-# Lowercased canonical header tokens; separate the 9 typed fields from extras.
-_DATA_TABLE_CANONICAL_KEY_SET = frozenset(tok.strip().lower() for tok in _DATA_TABLE_HEADER_TOKENS)
-_PITEM_MARKER_RE = re.compile(
-    r"<!--\s*impact-begin\s+kind=p_item\s+([^>]*?)-->",
-    re.IGNORECASE,
-)
-_REASONING_MARKER_RE = re.compile(
-    r"<!--\s*reasoning-candidate\s+tier=(\w+)\s+rank=(\d+)\s*-->",
-    re.IGNORECASE,
-)
-_HEADING_RE = re.compile(
-    r"^####\s+(?:[\U0001F300-\U0001FAFF\u2600-\u27BF]+\s+)?P(\d+):\s*(.+?)\s*$",
-    re.MULTILINE,
-)
-_LIBRARY_PARENS_RE = re.compile(r"\(([^()]+)\)\s*$")
-_EFFICIENCY_RE = re.compile(
-    r"([\d.]+)\s*%\s*of\s*([\d.]+)\s*([A-Za-z/]+)",
-    re.IGNORECASE,
-)
-# Detailed Analysis sibling labels; extracted prose is a hypothesis to validate.
-_IDENTIFICATION_LABEL = "**Identification:**"
-_DATA_LABEL = "**Data:**"
-_REASONING_LABEL = "**Reasoning for Slowdown:**"
-_RESOLUTION_LABEL = "**Resolution:**"
-_IMPACT_LABEL = "**Impact estimate:**"
-_IMPACT_LOW_RE = re.compile(
-    r"Low end[^:\n]*:\s*([0-9.]+)\s*ms savings\s*\(([0-9.]+)%\s*E2E\)",
-    re.IGNORECASE,
-)
-_IMPACT_HIGH_RE = re.compile(
-    r"High end[^:\n]*:\s*([0-9.]+)\s*ms savings\s*\(([0-9.]+)%\s*E2E\)",
-    re.IGNORECASE,
-)
-
-
-def _parse_marker_attrs(blob: str) -> dict[str, str]:
-    """Parse ``key=value`` attributes from an HTML-comment marker blob.
-
-    Args:
-        blob (str): The inner text of a TraceLens marker comment.
-
-    Returns:
-        dict[str, str]: A mapping of attribute names to their string values.
-    """
-    return dict(re.findall(r"(\w+)=([^\s>]+)", blob))
-
-
-def _extract_between(
-    text: str,
-    start_marker: str,
-    end_markers: tuple[str, ...],
-) -> str:
-    """Extract the substring between a start marker and the earliest end marker.
-
-    Args:
-        text: The text to search.
-        start_marker: Marker that begins the region.
-        end_markers: Candidate markers that end the region; the earliest match
-            wins.
-
-    Returns:
-        The trimmed substring, the tail when no end marker is found, or an
-        empty string when the start marker is absent.
-    """
-    start = text.find(start_marker)
-    if start == -1:
-        return ""
-    start += len(start_marker)
-    end_positions = [text.find(m, start) for m in end_markers]
-    end_positions = [pos for pos in end_positions if pos != -1]
-    end = min(end_positions) if end_positions else len(text)
-    return text[start:end].strip()
-
-
-def _extract_pitem_prose(body: str) -> dict[str, Any]:
-    """Extract prose and impact fields from a P-item body.
-
-    Args:
-        body: The Markdown body of a single P-item.
-
-    Returns:
-        A dict with ``identification``, ``reasoning_for_slowdown``,
-        ``resolution``, and impact estimates (defaulting to empty / 0.0).
-    """
-    identification = _extract_between(
-        body,
-        _IDENTIFICATION_LABEL,
-        (_DATA_LABEL, _REASONING_LABEL, _RESOLUTION_LABEL, _IMPACT_LABEL),
-    )
-    reasoning = _extract_between(
-        body,
-        _REASONING_LABEL,
-        (_RESOLUTION_LABEL, _IMPACT_LABEL),
-    )
-    resolution = _extract_between(body, _RESOLUTION_LABEL, (_IMPACT_LABEL,))
-    low_match = _IMPACT_LOW_RE.search(body)
-    high_match = _IMPACT_HIGH_RE.search(body)
-    return {
-        "identification": identification,
-        "reasoning_for_slowdown": reasoning,
-        "resolution": resolution,
-        "impact_low_ms": _safe_float(low_match.group(1)) if low_match else 0.0,
-        "impact_low_e2e_pct": _safe_float(low_match.group(2)) if low_match else 0.0,
-        "impact_high_ms": _safe_float(high_match.group(1)) if high_match else 0.0,
-        "impact_high_e2e_pct": _safe_float(high_match.group(2)) if high_match else 0.0,
-    }
-
-
-def _extract_pitem_categories(text: str) -> list[dict[str, Any]]:
-    """Extract per-P-item category and impact metadata in priority order.
-
-    Args:
-        text: The full report text containing ``p_item`` markers.
-
-    Returns:
-        A list of dicts with ``category`` and ``impact_score*`` fields, one
-        per P-item marker.
-    """
-
-    items: list[dict[str, Any]] = []
-    for match in _PITEM_MARKER_RE.finditer(text):
-        attrs = _parse_marker_attrs(match.group(1))
-        if "category" not in attrs:
-            continue
-        items.append(
-            {
-                "category": attrs.get("category", ""),
-                "impact_score_low": _safe_float(attrs.get("low")),
-                "impact_score": _safe_float(attrs.get("mid")),
-                "impact_score_high": _safe_float(attrs.get("high")),
-            }
-        )
-    return items
-
-
-def _split_data_blocks(text: str) -> list[tuple[int, str, str]]:
-    """Split the report into compute-tier reasoning blocks.
-
-    Args:
-        text (str): The full ``analysis.md`` report text.
-
-    Returns:
-        list[tuple[int, str, str]]: One ``(rank, title, body)`` triple per
-            compute-tier reasoning-candidate block found.
-    """
-
-    blocks: list[tuple[int, str, str]] = []
-    matches = list(_REASONING_MARKER_RE.finditer(text))
-    for idx, match in enumerate(matches):
-        tier = match.group(1).lower()
-        if tier != "compute":
-            continue
-        body_start = match.end()
-        body_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-        body = text[body_start:body_end]
-        head_match = _HEADING_RE.search(body)
-        if not head_match:
-            continue
-        rank = int(head_match.group(1))
-        title = head_match.group(2).strip()
-        blocks.append((rank, title, body))
-    return blocks
-
-
-def _extract_data_table(body: str) -> list[list[str]]:
-    """Pull the 9-column markdown table that follows a ``**Data:**`` marker.
-
-    The table includes the raw header and data cells and ends at a blank line
-    or the next ``**Field:**`` marker.
-
-    Args:
-        body: The P-item body text to scan.
-
-    Returns:
-        The table rows as lists of cell strings.
-    """
-
-    marker = body.find("**Data:**")
-    if marker < 0:
-        return []
-    tail = body[marker + len("**Data:**") :]
-    rows: list[list[str]] = []
-    in_table = False
-    for line in tail.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            if in_table:
-                break
-            continue
-        if not stripped.startswith("|"):
-            if in_table:
-                break
-            continue
-        in_table = True
-        if set(stripped.replace("|", "").strip()) <= set("-: "):
-            continue
-        cells = [cell.strip() for cell in stripped.split("|")[1:-1]]
-        rows.append(cells)
-    return rows
-
-
-def _parse_kernel_name_cell(raw: str) -> list[str]:
-    """Parse the ``Kernel Name`` cell into clean device kernel names.
-
-    The going-forward report may list several kernels per row as
-    ``Kernel 1: a<br>Kernel 2: b``; split those on ``<br>`` and strip the
-    ``Kernel N:`` labels. A single bare kernel name passes through. Placeholders
-    (``-`` / ``—``) and empties are dropped.
-    """
-    if not raw:
-        return []
-    names: list[str] = []
-    for piece in raw.replace("<br>", "\n").split("\n"):
-        name = _KERNEL_LABEL_RE.sub("", piece).strip()
-        if name and name not in {"-", "—"} and name not in names:
-            names.append(name)
-    return names
-
-
-def _row_to_candidate(
-    headers: list[str],
-    cells: list[str],
-    *,
-    category: str,
-    rank: int,
-    title: str,
-    library: str,
-    impact: dict[str, float],
-    prose: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    """Convert one parsed data-table row into a hot-kernel candidate dict.
-
-    Maps the 9 canonical columns into typed candidate fields, preserves any
-    trailing extra columns under ``tracelens_extra_columns``, resolves the
-    launcher path to an absolute source file where possible, and attaches the
-    shared P-item prose.
-
-    Args:
-        headers (list[str]): Lower-cased column header names for ``cells``.
-        cells (list[str]): The row's cell strings, aligned with ``headers``.
-        category (str): The TraceLens category for the owning P-item.
-        rank (int): The P-item rank (1-based).
-        title (str): The P-item title.
-        library (str): The library name parsed from the P-item title.
-        impact (dict[str, float]): Impact scores for the owning P-item.
-        prose (dict[str, Any] | None): Shared P-item prose to attach, if any.
-
-    Returns:
-        dict[str, Any] | None: The candidate dict, or ``None`` when the row is
-            malformed (cell count mismatch) or names a placeholder operation
-            with no device kernel symbol to stand in for it.
-    """
-    if len(cells) != len(headers):
-        return None
-    record = dict(zip(headers, cells))
-    # Preserve trailing extra columns verbatim for downstream consumers.
-    extra_columns = {key: value for key, value in record.items() if key not in _DATA_TABLE_CANONICAL_KEY_SET}
-
-    # Device kernel symbol(s) used to disambiguate dispatch ops; keep the full
-    # list and use the first for matching. Placeholders normalize to "".
-    device_kernel_names = _parse_kernel_name_cell(record.get("kernel name", ""))
-    device_kernel_name = device_kernel_names[0] if device_kernel_names else ""
-    name = record.get("operation", "").strip()
-    if not name or name in {"-", "—"}:
-        if not device_kernel_name:
-            return None
-        # Graph-collapsed trace (HIP/CUDA graph): TraceLens' deterministic
-        # fallback leaves Operation as "—" and the device symbol IS the identity.
-        name = device_kernel_name
-    args = record.get("args", "").replace("<br>", "\n").strip()
-    shapes = [s.strip() for s in args.split("\n") if s.strip() and s.strip() not in {"-", "—"}]
-    kernel_path = record.get("kernel path", "").strip()
-    # Share the launcher placeholder vocabulary so a sentinel such as TraceLens'
-    # "Not found" cannot survive as a fake source_file (see the constant).
-    if kernel_path.lower() in _LAUNCHER_PATH_PLACEHOLDERS:
-        kernel_path = ""
-    # Store only the path in source_file; line/function annotations have their
-    # own fields and otherwise make extension-based routing see an unknown file.
-    resolved_source_file, resolved_line, resolved_func = _parse_launcher_path(kernel_path)
-    if kernel_path:
-        resolved = _resolve_launcher_to_abs_source(kernel_path)
-        if resolved is not None:
-            resolved_source_file, resolved_line, resolved_func = resolved
-    time_ms = _safe_float(record.get("time (ms)"))
-    percent_e2e = _safe_float(record.get("%e2e"))
-    count_val = _safe_float(record.get("count"), 1.0)
-    flops_per_byte = _safe_float(record.get("flops/byte"))
-    bound_raw = record.get("bound", "").strip()
-    eff_raw = record.get("efficiency", "").strip()
-    eff_match = _EFFICIENCY_RE.search(eff_raw)
-    if eff_match:
-        eff_pct = _safe_float(eff_match.group(1))
-        peak_value = _safe_float(eff_match.group(2))
-        peak_unit = eff_match.group(3).strip()
-    else:
-        eff_pct = _safe_float(eff_raw.rstrip("%")) if eff_raw else 0.0
-        peak_value = 0.0
-        peak_unit = ""
-
-    candidate: dict[str, Any] = {
-        "name": name,
-        "duration_us": time_ms * 1000.0,
-        "call_count": int(count_val) if count_val else 0,
-        "source_file": resolved_source_file,
-        "source_line": resolved_line,
-        "source_function": resolved_func or "",
-        # Raw Kernel Path kept so aggregation's AST resolution survives the source_file overwrite.
-        "tracelens_launcher_path": kernel_path,
-        # Device kernel symbol for dispatch resolution; "" when absent.
-        "device_kernel_name": device_kernel_name,
-        # Full list when the row names multiple kernels; [] when absent.
-        "device_kernel_names": device_kernel_names,
-        "source_type": "tracelens_report",
-        "shapes": shapes,
-        "tracelens_category": category,
-        "tracelens_pitem_rank": rank,
-        "tracelens_pitem_title": title,
-        "library": library,
-        "bound_type": bound_raw,
-        "percent_of_total": percent_e2e,
-        "flops_per_byte": flops_per_byte,
-        "efficiency_percent": eff_pct,
-        "efficiency_peak_value": peak_value,
-        "efficiency_peak_unit": peak_unit,
-        "impact_score": impact.get("impact_score", 0.0),
-        "impact_score_low": impact.get("impact_score_low", 0.0),
-        "impact_score_high": impact.get("impact_score_high", 0.0),
-    }
-    if extra_columns:
-        candidate["tracelens_extra_columns"] = extra_columns
-    if prose:
-        # Duplicate the block-shared P-item prose onto each candidate.
-        for key in (
-            "identification",
-            "reasoning_for_slowdown",
-            "resolution",
-            "impact_low_ms",
-            "impact_low_e2e_pct",
-            "impact_high_ms",
-            "impact_high_e2e_pct",
-        ):
-            if key in prose:
-                candidate[key] = prose[key]
-    return candidate
-
-
 _IDLE_PCT_TABLE_RE = re.compile(
     r"^\|\s*Idle\s*%\s*\|\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*\|",
     re.IGNORECASE | re.MULTILINE,
@@ -1338,116 +977,6 @@ def extract_exposed_comm_pct_from_analysis_md(md_path: Path) -> float | None:
         missing/unparseable.
     """
     return _extract_exec_summary_pct(md_path, _EXPOSED_COMM_PCT_TABLE_RE)
-
-
-def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
-    """Compute the per-row sort key for the ``Lower Efficiency`` filter.
-
-    Args:
-        candidate: A candidate row carrying ``efficiency_percent``.
-
-    Returns:
-        The efficiency value, or ``inf`` so rows with no efficiency sort last.
-    """
-    eff = candidate.get("efficiency_percent")
-    try:
-        value = float(eff)
-    except (TypeError, ValueError):
-        return float("inf")
-    if value <= 0.0:
-        return float("inf")
-    return value
-
-
-def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
-    """Parse a TraceLens ``analysis.md`` report into hot-kernel rows.
-
-    Rows are returned in priority order (P-item, then lower efficiency
-    within each item).
-
-    Args:
-        md_path: Path to the ``analysis.md`` report.
-        top_k: Maximum number of hot-kernel rows to return.
-
-    Returns:
-        The hot-kernel rows, or an empty list when the report is missing or
-        unparseable.
-    """
-
-    if not md_path.exists():
-        return []
-    try:
-        text = md_path.read_text(encoding="utf-8")
-    except OSError:
-        return []
-
-    pitems = _extract_pitem_categories(text)
-
-    blocks = _split_data_blocks(text)
-    if not blocks:
-        return []
-
-    headers_canonical = [tok.strip().lower() for tok in _DATA_TABLE_HEADER_TOKENS]
-
-    candidates: list[dict[str, Any]] = []
-    canonical_width = len(headers_canonical)
-    for rank, title, body in blocks:
-        rows = _extract_data_table(body)
-        if not rows:
-            continue
-        header_row = [cell.strip().lower() for cell in rows[0]]
-        # Validate by presence of every canonical column (matched by name), not by
-        # position, and tolerate inserted/appended extra columns. Normalize each
-        # header cell to its canonical name when it contains one (e.g. "kernel path
-        # (resolved)" -> "kernel path"); unknown extras are kept verbatim.
-        if len(header_row) < canonical_width:
-            continue
-        normalized_header: list[str] = []
-        for cell in header_row:
-            match = next(
-                (canon for canon in headers_canonical if canon == cell or canon in cell),
-                cell,
-            )
-            normalized_header.append(match)
-        # Accept extra/inserted columns but reject genuine reordering of the
-        # canonical columns: every canonical column must be present and appear in
-        # canonical relative order (extras may be interleaved anywhere).
-        canonical_in_header = [c for c in normalized_header if c in headers_canonical]
-        if canonical_in_header != headers_canonical:
-            continue
-        header_row = normalized_header
-        # P-item meta by 1-based rank; a missing entry => category unknown.
-        pitem_meta = pitems[rank - 1] if rank - 1 < len(pitems) else {}
-        category = pitem_meta.get("category", "")
-        library_match = _LIBRARY_PARENS_RE.search(title)
-        library = library_match.group(1).strip() if library_match else ""
-        impact = {
-            "impact_score": pitem_meta.get("impact_score", 0.0),
-            "impact_score_low": pitem_meta.get("impact_score_low", 0.0),
-            "impact_score_high": pitem_meta.get("impact_score_high", 0.0),
-        }
-        prose = _extract_pitem_prose(body)
-        pitem_candidates: list[dict[str, Any]] = []
-        for cells in rows[1:]:
-            cand = _row_to_candidate(
-                header_row,
-                cells,
-                category=category,
-                rank=rank,
-                title=title,
-                library=library,
-                impact=impact,
-                prose=prose,
-            )
-            if cand is None:
-                continue
-            pitem_candidates.append(cand)
-        pitem_candidates.sort(key=_efficiency_sort_key)
-        for cand in pitem_candidates:
-            candidates.append(cand)
-            if len(candidates) >= top_k:
-                return candidates
-    return candidates
 
 
 # Source-function aggregation: group candidates sharing an AST-resolved
@@ -1701,23 +1230,38 @@ def _resolve_source_target(
     *,
     source_root: Path | None,
 ) -> dict[str, Any] | None:
-    """Resolve a candidate's launcher path to a source-target triple.
+    """Resolve a candidate's source location to a source-target triple.
 
-    The AST-derived definition line overrides the reported call-site line when
-    resolvable.
+    A row TraceLens resolved carries the verdict directly in ``source_file`` /
+    ``source_line``; that def line is authoritative and keys the group against
+    ``source_file``. Only a row with no resolved line falls back to parsing the
+    launcher string and recovering the def line from the Python AST.
 
     Args:
-        candidate: The candidate dict carrying launcher/source paths.
+        candidate: The candidate dict carrying resolved source / launcher paths.
         source_root: Optional root to resolve relative paths against.
 
     Returns:
         A ``(source_path, definition_line, function_name)`` dict, or ``None``
-        when the path is unparseable.
+        when neither a resolved location nor a parseable launcher path exists.
     """
-    # Prefer verbatim tracelens_launcher_path so AST resolution survives _finalize_candidates'
-    # source_file overwrite; fall back to source_file / kernel_path for non-TraceLens candidates.
+    source_line = candidate.get("source_line")
+    source_file = str(candidate.get("source_file") or "")
+    if source_file and isinstance(source_line, int) and source_line > 0:
+        source_path = Path(source_file)
+        if not source_path.is_absolute() and source_root is not None:
+            source_path = source_root / source_path
+        return {
+            "source_path": str(source_path),
+            "definition_line": source_line,
+            "function_name": str(candidate.get("source_function") or source_path.stem),
+            "reported_path": source_file,
+            "reported_line": source_line,
+            "reported_func": str(candidate.get("source_function") or "") or None,
+            "ast_resolved": False,
+        }
     kernel_path = str(
-        candidate.get("tracelens_launcher_path") or candidate.get("source_file") or candidate.get("kernel_path") or ""
+        candidate.get("kernel_launcher_path") or candidate.get("source_file") or candidate.get("kernel_path") or ""
     )
     raw_path, reported_line, reported_func = _parse_launcher_path(kernel_path)
     if not raw_path:
@@ -1898,9 +1442,7 @@ def aggregate_by_source_function(
                     "identification": str(cand.get("identification") or "").strip(),
                     "reasoning_for_slowdown": str(cand.get("reasoning_for_slowdown") or "").strip(),
                     "resolution": str(cand.get("resolution") or "").strip(),
-                    "impact_low_ms": _safe_float(cand.get("impact_low_ms")),
                     "impact_low_e2e_pct": _safe_float(cand.get("impact_low_e2e_pct")),
-                    "impact_high_ms": _safe_float(cand.get("impact_high_ms")),
                     "impact_high_e2e_pct": _safe_float(cand.get("impact_high_e2e_pct")),
                 }
             )
@@ -1942,12 +1484,7 @@ def aggregate_by_source_function(
         group["all_pitem_prose"] = [
             e
             for e in group["all_pitem_prose"]
-            if e["rank"]
-            or e["identification"]
-            or e["reasoning_for_slowdown"]
-            or e["resolution"]
-            or e["impact_low_ms"]
-            or e["impact_high_ms"]
+            if e["rank"] or e["identification"] or e["reasoning_for_slowdown"] or e["resolution"]
         ]
         # ``_pitem_prose_seen`` is a set (not JSON-serializable); pop before return.
         group.pop("_pitem_prose_seen", None)
@@ -1958,8 +1495,6 @@ def aggregate_by_source_function(
 __all__ = [
     "TraceLensSkillRunResult",
     "UPSTREAM_CATEGORY_TO_GEAK",
-    "_extract_between",
-    "_extract_pitem_prose",
     "_function_line_from_ast",
     "_parse_launcher_path",
     "aggregate_by_source_function",
@@ -1970,7 +1505,6 @@ __all__ = [
     "extract_idle_pct_from_analysis_md",
     "infer_analysis_mode",
     "normalize_upstream_category",
-    "parse_analysis_md",
     "run_tracelens_skill",
     "write_local_cmd_prefix",
 ]
