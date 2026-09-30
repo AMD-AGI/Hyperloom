@@ -375,7 +375,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 )
         except Exception:
             log.exception("dispatcher: dead-running task reclaim failed")
-        report = getattr(getattr(self, "reconciler", None), "last_report", None)
+        report = getattr(getattr(self._coord, "reconciler", None), "last_report", None)
         dead_tasks.extend(getattr(report, "failed_tasks", ()))
         if dead_tasks:
             try:

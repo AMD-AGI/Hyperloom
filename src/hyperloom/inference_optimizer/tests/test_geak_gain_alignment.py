@@ -375,7 +375,7 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         measured = None
         measurement.pop("tput")
     elif case == "lift_refused":
-        monkeypatch.setattr(coord, "_promote_geak_from_candidate", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(coord.phase_kernel, "_promote_geak_from_candidate", lambda *_args, **_kwargs: False)
 
     async def _must_not_launch(**_kwargs):
         raise AssertionError("Inconclusive AgentX 2b must not launch GEAK 2a")
@@ -564,7 +564,7 @@ def test_report_shows_validated_when_same_harness_confirmed() -> None:
 
 def _revalidate_task(*, expected_hash: str, recipe_generation: int | None = None) -> Task:
     params: dict = {
-        "source": "resume_stack_revalidate",
+        "source": "stack_revalidate",
         "geak_fallback": True,
         "expected_cfg_hash": expected_hash,
     }
@@ -1039,7 +1039,6 @@ async def test_2b_no_material_candidate_does_not_promote(tmp_path: Path) -> None
     assert ss.current_best["tput"] == pytest.approx(current_best)
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
     assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
-    assert _resume_pending(ss) is False
     assert not ss.geak_pending
 
 
@@ -1117,7 +1116,6 @@ async def test_2b_empty_result_without_prior_geak_e2e_does_not_promote(tmp_path:
     assert ss.current_best["tput"] == pytest.approx(current_best)
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
     assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
-    assert _resume_pending(ss) is False
     assert not ss.geak_pending
 
 
