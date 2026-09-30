@@ -42,7 +42,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
 from ..actions.executors.baseline import _revert_warm_patch_state, revert_warm_kernel_patches
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task
-from ..loop.coordinator_helpers import (
+from ..loop.time_budget import (
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
 )
@@ -1369,7 +1369,7 @@ class PreludePhase(CoordinatorCollaborator):
                 combined_args = str(sdk_replay.get("combined_extra_server_args") or "")
                 combined_envs = dict(sdk_replay.get("combined_extra_envs") or {})
         else:
-            from ..loop.coordinator_helpers import (
+            from ..loop.server_args import (
                 _merge_cumulative_extra_server_args,
             )
 

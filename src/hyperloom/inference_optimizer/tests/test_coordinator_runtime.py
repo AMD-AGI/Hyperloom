@@ -26,7 +26,7 @@ from hyperloom.orchestrator.roles import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.coordinator_helpers import (
+from hyperloom.orchestrator.loop.proposal_utils import (
     _BASELINE_FINGERPRINT_KEYS,
     _baseline_params_fingerprint,
 )

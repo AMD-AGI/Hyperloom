@@ -20,7 +20,7 @@ from hyperloom.orchestrator.actions.executors._grid_base import coerce_extra_env
 from hyperloom.orchestrator.kernel.attempt_summary import _backend_results_dir
 from hyperloom.orchestrator.kernel.conc_sweep import _budget_limited_without_valid_pair
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.coordinator_helpers import (
+from hyperloom.orchestrator.actions.executors._gpu_pin import (
     _parse_server_arg_value,
     _resolve_gpu_pin,
     _resolve_handoff_gpu_ids,

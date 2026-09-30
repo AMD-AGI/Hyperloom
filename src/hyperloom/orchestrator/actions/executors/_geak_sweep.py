@@ -19,8 +19,10 @@ import yaml
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS, effective_mask_tokens, is_rocr_level
-from hyperloom.orchestrator.loop.coordinator_helpers import (
+from hyperloom.orchestrator.kernel.geak_config import (
     _accepted_config_as_variant,
+)
+from hyperloom.orchestrator.actions.executors._gpu_pin import (
     _coerce_tp,
     _resolve_gpu_pin,
     _resolve_handoff_gpu_ids,

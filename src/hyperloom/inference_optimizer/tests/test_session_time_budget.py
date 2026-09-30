@@ -36,7 +36,7 @@ from hyperloom.orchestrator.loop.dispatcher import (
     _CANCEL_NOTICE_SEC,
     _COOPERATIVE_CANCEL_GRACE_SEC,
 )
-from hyperloom.orchestrator.loop.coordinator_helpers import (
+from hyperloom.orchestrator.loop.time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
     expected_action_cost_minutes,

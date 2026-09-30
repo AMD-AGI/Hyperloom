@@ -24,7 +24,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
     validate_envelope,
 )
-from hyperloom.orchestrator.loop.coordinator_helpers import (
+from hyperloom.orchestrator.loop.verdicts import (
     collapse_verdict_map,
     collapse_verdicts,
     proceedable_variant_names,

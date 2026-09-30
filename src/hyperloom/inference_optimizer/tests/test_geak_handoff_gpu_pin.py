@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.loop.coordinator_helpers import (
+from hyperloom.orchestrator.actions.executors._gpu_pin import (
     _coerce_tp,
     _is_autofilled_rocr,
     _parse_device_list,

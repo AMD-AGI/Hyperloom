@@ -21,7 +21,7 @@ from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, is_env_fault, load_boot_observation, observation_summary
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.inference_optimizer.breakdown.round_archive import ROLE_LAUNCH_CONFIG, RoundArchive
-from ..loop.coordinator_helpers import _dedupe_extra_server_args
+from ..loop.server_args import _dedupe_extra_server_args
 from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from ..loop.offload import offload
 from .params import ENABLEMENT_PARAMS_BUDGET_SEC

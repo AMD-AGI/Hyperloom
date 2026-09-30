@@ -15,7 +15,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..collaborator import CoordinatorCollaborator
-from ..loop.coordinator_helpers import baseline_benchmark_script
+from ..loop.proposal_utils import baseline_benchmark_script
 from ..state.task_registry import TerminalTaskReuse, create_in_cursor, task_dispatch_origin
 from .params import _enablement_carrier_params
 

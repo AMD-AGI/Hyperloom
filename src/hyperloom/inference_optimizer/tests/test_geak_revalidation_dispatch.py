@@ -504,7 +504,7 @@ async def test_recovered_empty_map_closes_without_fallback(coordinator, tmp_path
 
 def test_material_check_ignores_untrusted_env_names() -> None:
     """An untrusted key on one side only must not read as a config difference."""
-    from hyperloom.orchestrator.loop.coordinator_helpers import _geak_result_has_material
+    from hyperloom.orchestrator.kernel.geak_config import _geak_result_has_material
 
     echoed = {
         "status": "ok",
@@ -542,7 +542,7 @@ def test_material_check_ignores_untrusted_env_names() -> None:
     ],
 )
 def test_material_check_distinguishes_explicit_controls_from_empty_legacy(accepted, previous, expected):
-    from hyperloom.orchestrator.loop.coordinator_helpers import _geak_result_has_material
+    from hyperloom.orchestrator.kernel.geak_config import _geak_result_has_material
 
     assert (
         _geak_result_has_material(

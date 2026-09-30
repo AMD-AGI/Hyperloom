@@ -17,7 +17,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.coordinator_helpers import _geak_overlay_digest
+from hyperloom.orchestrator.kernel.geak_config import _geak_overlay_digest
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 

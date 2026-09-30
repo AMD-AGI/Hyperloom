@@ -81,7 +81,7 @@ def geak_candidate_is_adjudicated(persisted: Any, recovered: Any, *, harness_can
         return False
     blocked_overlay = str(prev.get("revalidation_blocked_overlay") or "")
     if blocked_overlay:
-        from ..loop.coordinator_helpers import _geak_overlay_is_loadable, _normalize_geak_overlay_dir
+        from ..kernel.geak_config import _geak_overlay_is_loadable, _normalize_geak_overlay_dir
 
         if _geak_overlay_is_loadable(_normalize_geak_overlay_dir(blocked_overlay)):
             return False

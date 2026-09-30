@@ -1059,6 +1059,37 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
         return True
 
+    async def validate(
+        self,
+        new_tput: float,
+        measurement: Mapping[str, Any],
+        *,
+        source: str = "writeback",
+        measurement_basis: str = "e2e_rebench",
+    ) -> bool:
+        """Validate cumulative gain and trigger the watermark roofline.
+
+        Wraps :meth:`_update_cumulative_gain_validated` with the baseline guard
+        and a watermark roofline enqueue on success.
+
+        Args:
+            new_tput: The newly measured output throughput.
+            measurement: The measurement the promotion came from.
+            source: Which promotion path produced this figure.
+            measurement_basis: How the reading was obtained.
+
+        Returns:
+            Whether the watermark was updated.
+        """
+        if self.shared_state.baseline_tput <= 0:
+            return False
+        updated = self._update_cumulative_gain_validated(new_tput, measurement, source=source, measurement_basis=measurement_basis)
+        if updated:
+            await self._coord.phase_kernel._maybe_enqueue_watermark_roofline(
+                reason=f"{source}_watermark",
+            )
+        return updated
+
     async def _record_integrate_keep(self, result: dict[str, Any]) -> None:
         """Promote a kernel integrate KEEP into the optimization stack.
 
@@ -1125,10 +1156,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if is_fusion:
             self.shared_state.last_fusion_integrate = {**result, "decision": "KEEP"}
         self._journal_integrate_keep(result, lift_kind=lift_kind, new_tput=float(new_tput))
-        if self.shared_state.baseline_tput > 0 and self._update_cumulative_gain_validated(new_tput, measurement):
-            await self._coord.phase_kernel._maybe_enqueue_watermark_roofline(
-                reason="integrate_keep_watermark",
-            )
+        await self.validate(new_tput, measurement, source="integrate_keep")
 
     def _journal_integrate_keep(self, result: dict[str, Any], *, lift_kind: str, new_tput: float) -> None:
         """Mirror an adopted kernel-recipe-lane (forge-loop/fusion) KEEP as an ``optimization_journal`` row.
@@ -4660,15 +4688,12 @@ class WritebackCollaborator(CoordinatorCollaborator):
             self.shared_state.gain_gated_action_count += 1
         if last_lifted_winner is not None:
             # The last successful lift owns every axis of the validated measurement.
-            if self.shared_state.baseline_tput > 0 and self._update_cumulative_gain_validated(
+            await self.validate(
                 float(last_lifted_winner["tput"]),
                 last_lifted_winner,
+                source="explore_keep",
                 measurement_basis="e2e_decision_round",
-            ):
-                # Watermark refresh: enqueue a fresh roofline once projected tput crosses +10%.
-                await self._coord.phase_kernel._maybe_enqueue_watermark_roofline(
-                    reason="explore_keep_watermark",
-                )
+            )
         else:
             changed = True
         if promoted:

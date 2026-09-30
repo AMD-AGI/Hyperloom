@@ -259,7 +259,7 @@ def _merge_established_server_args(inherited_args: str, round_args: str) -> str:
         return inherited_args
     merged = merge_server_args(inherited_args, round_args)
     if tokenize_server_args_preserving_json(merged) is not None:
-        from ...loop.coordinator_helpers import _dedupe_extra_server_args
+        from hyperloom.orchestrator.loop.server_args import _dedupe_extra_server_args
 
         return _dedupe_extra_server_args(merged)
     # The combined string carries a quoted value with embedded whitespace, which

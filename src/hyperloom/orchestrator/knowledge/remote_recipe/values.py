@@ -368,7 +368,7 @@ def _apply_recipe_delta(
     delta: Mapping[str, Any],
 ) -> dict[str, Any]:
     from hyperloom.inference_optimizer.grid_server_args import compose_server_args
-    from ...loop.coordinator_helpers import _dedupe_extra_server_args
+    from hyperloom.orchestrator.loop.server_args import _dedupe_extra_server_args
 
     mode = str(delta.get("args_mode") or "append").strip().lower()
     if mode not in {"append", "replace"}:

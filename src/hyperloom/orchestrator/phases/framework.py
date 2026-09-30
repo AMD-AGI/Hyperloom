@@ -21,7 +21,7 @@ from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_
 if TYPE_CHECKING:
     from ..state.task_registry import Task
 from ..loop.proposals import PendingProposal, _record_proposal
-from ..loop.coordinator_helpers import _dedupe_extra_server_args
+from ..loop.server_args import _dedupe_extra_server_args
 from hyperloom.inference_optimizer.grid_server_args import (
     merge_server_args,
     tokenize_server_args_preserving_json,
