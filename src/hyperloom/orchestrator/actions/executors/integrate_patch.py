@@ -73,7 +73,7 @@ from ._accuracy_gate import (
     read_eval_probe,
 )
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
-from ._git import _run_git_cp
+from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
 from ._patch_source_pr import (
     DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
@@ -652,22 +652,6 @@ def _run_setup_commands(
                 failed.append(cmd)
                 _record(cmd, cmd_index, "failed")
     return {"applied": applied, "skipped": skipped, "failed": failed, "executions": executions}
-
-
-def _git_head_sha(framework_root: Path | None) -> str:
-    """Return ``framework_root``'s HEAD, or ``""`` when it is not a git tree.
-
-    Read BEFORE any candidate mutation: ``base_sha`` names the tree the patches
-    apply to, so a read taken after the KEEP commit would name a tree that
-    already contains them and every recorded patch would replay onto its own
-    result.
-    """
-    if framework_root is None:
-        return ""
-    cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
-    if cp is None or getattr(cp, "returncode", 1) != 0:
-        return ""
-    return (getattr(cp, "stdout", "") or "").strip()
 
 
 def _candidate_mutation_roots(*, params: dict[str, Any], done_payload: dict[str, Any] | None) -> list[str]:
@@ -2123,7 +2107,7 @@ def _stamp_framework_kb_provenance(
     """Ensure a FRAMEWORK-dispatched deliverable carries KB-writeback provenance.
 
     Stamps the ``specialist:serving:framework...`` provenance prefix (that
-    :meth:`IntegratePatchExecutor._find_frameworkoposal` requires) from the
+    :meth:`IntegratePatchExecutor._find_framework_proposal` requires) from the
     dispatch context, so same-framework deliverables reach ``lessons.jsonl``.
 
     Mutates ``done_payload["proposal_set"][0]`` in place; no-ops when this
@@ -4258,10 +4242,7 @@ class IntegratePatchExecutor:
         try:
             from ...source_snapshot import snapshot_source_layer
 
-            base_sha = ""
-            _cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
-            if _cp is not None and getattr(_cp, "returncode", 1) == 0:
-                base_sha = (_cp.stdout or "").strip()
+            base_sha = _git_head_sha(framework_root)
             dest = self.session_dir / "optimization_stack" / "localization" / (specialist_task_id or "keep")
             snap = snapshot_source_layer(
                 framework_root=framework_root,
@@ -4596,9 +4577,7 @@ class IntegratePatchExecutor:
             from ._patch_snapshot import _patch_touched_paths_split, harvest_realized_diff
 
             if framework_root is not None:
-                _cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
-                if _cp is not None and getattr(_cp, "returncode", 1) == 0:
-                    source_base_sha = (_cp.stdout or "").strip()
+                source_base_sha = _git_head_sha(framework_root)
                 upserted_patch, deleted_patch = _patch_touched_paths_split(framework_root, applied)
                 declared_ops = {r: "upsert" for r in upserted_patch}
                 declared_ops.update({r: "delete" for r in deleted_patch})
@@ -4972,7 +4951,7 @@ class IntegratePatchExecutor:
 
     # Helpers
     @staticmethod
-    def _find_frameworkoposal(
+    def _find_framework_proposal(
         done_payload: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
         """Return the first proposal whose provenance starts with
@@ -5069,7 +5048,7 @@ class IntegratePatchExecutor:
             config_fingerprint: Content fingerprint of the applied server
                 args / envs, recorded so a retried config can be recognised.
         """
-        proposal = self._find_frameworkoposal(done_payload)
+        proposal = self._find_framework_proposal(done_payload)
         if proposal is None:
             # The upstream-PR lane carries the PR identity on the candidate
             # rather than in a specialist's ``fa_*`` markers. Discovery dedups
