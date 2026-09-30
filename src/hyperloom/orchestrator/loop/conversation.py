@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any
+from ..bus.gpu_pool import gpus_by_task_sync
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
 from ..roles.base import BackendTurnResult
@@ -264,14 +265,18 @@ class ConversationCollaborator:
         return "\n".join([header] + rendered)
 
     def _context_running_tasks_reader(self) -> str:
-        """Synchronous projection of in-flight tasks with their held resources."""
+        """Project in-flight tasks and their held resources from three reads, not one snapshot."""
         tasks = self.tasks.running_context_sync()
         if not tasks:
             return "(no tasks in flight)"
 
+        lanes_by_task = self.locks.lanes_by_task_sync()
+        gpus_by_task = gpus_by_task_sync(self.db)
         now_unix = time.time()
         lines = ["=== Tasks in flight ==="]
-        for task, lanes, expires_at, gpus in tasks:
+        for task in tasks:
+            lanes, expires_at = lanes_by_task.get(task.task_id, ([], ""))
+            gpus = gpus_by_task.get(task.task_id, [])
             params = task.params or {}
             started = _parse_iso_unix(task.updated_at)
             running_sec = max(0.0, now_unix - started) if started > 0 else 0.0

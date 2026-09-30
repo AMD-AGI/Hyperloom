@@ -545,42 +545,13 @@ class TaskRegistry:
         rows = await self.db.fetchall("SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC")
         return [Task.from_row(r) for r in rows]
 
-    def running_context_sync(self) -> list[tuple[Task, list[str], str, list[int]]]:
-        """Read running tasks with the lanes, soonest lease expiry and GPUs each holds.
-
-        The three statements are separate reads, not one transactional snapshot.
-        """
+    def running_context_sync(self) -> list[Task]:
+        """Read running tasks least-recently-updated-first off the sync path."""
         rows = self.db.fetchall_sync(
             "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC",
             (),
         )
-        if not rows:
-            return []
-        lanes_by_task: dict[str, list[str]] = {}
-        # Soonest lane expiry: the first one to lapse is when reclaim starts.
-        expiry_by_task: dict[str, str] = {}
-        for row in self.db.fetchall_sync("SELECT lane, task_id, expires_at FROM leases", ()):
-            tid = str(row["task_id"])
-            lanes_by_task.setdefault(tid, []).append(str(row["lane"]))
-            expires = str(row["expires_at"])
-            prev = expiry_by_task.get(tid)
-            if prev is None or expires < prev:
-                expiry_by_task[tid] = expires
-        gpus_by_task: dict[str, list[int]] = {}
-        for row in self.db.fetchall_sync("SELECT gpu_id, task_id FROM gpu_leases", ()):
-            gpus_by_task.setdefault(str(row["task_id"]), []).append(int(row["gpu_id"]))
-        projected: list[tuple[Task, list[str], str, list[int]]] = []
-        for row in rows:
-            task = Task.from_row(row)
-            projected.append(
-                (
-                    task,
-                    lanes_by_task.get(task.task_id, []),
-                    expiry_by_task.get(task.task_id, ""),
-                    gpus_by_task.get(task.task_id, []),
-                )
-            )
-        return projected
+        return [Task.from_row(row) for row in rows]
 
     async def extend_lease(self, task_id: str, extra_sec: int) -> int:
         """Grow a running task's ``lease_ttl_sec`` by ``extra_sec``."""
