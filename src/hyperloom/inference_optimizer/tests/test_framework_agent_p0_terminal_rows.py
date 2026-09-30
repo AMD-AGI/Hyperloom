@@ -55,8 +55,22 @@ class _MiniCoord:
         return self
 
     def __init__(self, tmp_path: Path) -> None:
+        from types import SimpleNamespace
+
         self.session_dir = tmp_path
         self.shared_state = _StateStub()
+
+        async def _noop_record_observation(*_a, **_k):
+            return None
+
+        # Provide a _coord stub so collaborator cross-calls from production code resolve.
+        # phase_framework points to self since _MiniCoord carries FrameworkPhase methods directly.
+        self._coord = SimpleNamespace(
+            shared_state=self.shared_state,
+            session_dir=tmp_path,
+            writeback=SimpleNamespace(_record_observation=_noop_record_observation),
+            phase_framework=self,
+        )
 
 
 def test_pr_url_only_candidate_dedups_against_progress_row(tmp_path: Path):
