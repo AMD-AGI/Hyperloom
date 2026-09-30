@@ -33,12 +33,15 @@ def _fake_self(**state_overrides):
     )
     for k, v in state_overrides.items():
         setattr(state, k, v)
+    dispatcher = SimpleNamespace(
+        _registry_lanes_ttl=lambda kind: ([], 1800),
+    )
+    coord = SimpleNamespace(dispatcher=dispatcher)
     return SimpleNamespace(
         _MN_AUTO_EXPLORE_GRID_CAP=FrameworkPhase._MN_AUTO_EXPLORE_GRID_CAP,
         shared_state=state,
         tasks=_FakeTasks(),
-        # Stands in for the dispatcher's action-catalogue TTL lookup.
-        _registry_lanes_ttl=lambda kind: ([], 1800),
+        _coord=coord,
     )
 
 
