@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 import sys
@@ -837,7 +838,7 @@ def test_nogit_apply_hands_teardown_the_backups_it_needs(tmp_path, output_dir):
 
 
 @pytest.mark.parametrize("backup_intact", [True, False], ids=["intact", "corrupt"])
-def test_teardown_undoes_a_nogit_apply(tmp_path, output_dir, backup_intact):
+def test_teardown_undoes_a_nogit_apply(tmp_path, output_dir, backup_intact, caplog):
     """The restore verifies against the digest the apply recorded, not against whatever the backup now holds."""
     _require_patch_cli()
     install_root = tmp_path / "dist-packages"
@@ -856,16 +857,20 @@ def test_teardown_undoes_a_nogit_apply(tmp_path, output_dir, backup_intact):
     patched = target.read_bytes()
     if not backup_intact:
         Path(backups[0]["backup_path"]).write_text("# fp8 module\ncorrupt = True\n")
+    caplog.clear()
 
     restore = _revert_warm_patch_state(str(install_root), nogit_backups=backups)
 
+    warnings = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
     if backup_intact:
         assert restore == {"ok": True, "errors": []}
         assert target.read_text() == "# fp8 module\noriginal = True\n"
+        assert warnings == []
     else:
         assert restore["ok"] is False
         assert "missing or corrupt backup" in restore["errors"][0]
         assert target.read_bytes() == patched
+        assert any("missing or corrupt backup" in message for message in warnings), warnings
 
 
 def test_legacy_patch_skips_when_rollback_snapshot_fails(

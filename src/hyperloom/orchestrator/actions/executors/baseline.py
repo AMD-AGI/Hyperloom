@@ -1025,6 +1025,8 @@ def _revert_warm_patch_state(
         from ...delivery.ledger import restore_records
 
         _restored, errors = restore_records(nogit_backups)
+        if errors:
+            log.warning("baseline_executor: nogit patch restore failed: %s", errors)
         return {"ok": not errors, "errors": errors}
     return _revert_patches(target_repo, pre_sha, snapshot_manifest)
 
