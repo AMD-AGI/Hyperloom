@@ -481,13 +481,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             return []
 
         created: list[str] = []
-        try:
-            cancelled = await self.tasks.by_state("cancelled")
-        except Exception:
-            log.exception("dispatcher: reconcile could not list cancelled tasks")
-            return []
-
-        for task in cancelled:
+        for task in await self.tasks.by_state("cancelled"):
             if task.kind != "integrate_patch":
                 continue
             evidence = _dispatch_policy_denied_evidence(task)
@@ -507,18 +501,15 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             except PolicyDenied:
                 continue
             base_key = str(task.idempotency_key or f"integrate-{task.task_id}").strip()
-            if await self.tasks.integrate_reconcile_child_exists(
-                base_key,
-                states=("succeeded",),
-            ):
-                continue
-            if await self.tasks.integrate_reconcile_child_exists(
-                base_key,
-                states=("queued", "running"),
+            child_key_prefix = f"{base_key}-reconcile"
+            if await self.tasks.exists_with_key_prefix(
+                task.kind,
+                child_key_prefix,
+                states=("succeeded", "queued", "running"),
             ):
                 continue
             for attempt in range(1, 6):
-                new_key = f"{base_key}-reconcile{attempt}"
+                new_key = f"{child_key_prefix}{attempt}"
                 new_task, was_existing = await self.tasks.create_or_return_existing(
                     kind=task.kind,
                     params=params,
@@ -535,8 +526,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                         new_task.task_id,
                         new_key,
                     )
-                    break
-                if new_task.state in ("queued", "running", "succeeded"):
                     break
         return created
 
@@ -1259,11 +1248,10 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # integrate_patch completion handling.
         if task.kind == "integrate_patch" and result.state != "cancelled":
             await self.phase_framework.on_integrate_patch_settled(task, result)
-        # Auto-promote succeeded results into CORE_STATE_FIELDS
-        # (Coordinator-only writer).  Warm replay is deliberately routed
-        # through its promote handler even when dispatch itself failed:
-        # that handler owns rollback of pre-applied framework patches and
-        # clears the PRELUDE ``in_flight`` gate.
+        # Auto-promote succeeded results (Coordinator-only writer).  Warm
+        # replay is deliberately routed through its promote handler even when
+        # dispatch itself failed: that handler owns rollback of pre-applied
+        # framework patches and clears the PRELUDE ``in_flight`` gate.
         result_payload = dict(result.result or {})
         replay_needs_cleanup = task.kind == "replay_warm_recipe" and result.state == "failed"
         if replay_needs_cleanup:

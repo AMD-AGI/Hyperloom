@@ -1187,7 +1187,7 @@ def test_scan_logs_increment_tells_the_childs_own_log_from_the_servers(tmp_path)
     _scan_logs_increment(passed, offsets)
 
     with server_log.open("a") as f:
-        f.write('INFO:     127.0.0.1:0 - "GET /health HTTP/1.1" 200 OK\n')
+        f.write("[atom 22:29:41] Scheduled prefill batch: 4 reqs, 3707 new tokens\n")
     server_only = _scan_logs_increment(passed, offsets)
     assert server_only.grew is True and server_only.child_spoke is False
 
@@ -1195,6 +1195,30 @@ def test_scan_logs_increment_tells_the_childs_own_log_from_the_servers(tmp_path)
         f.write("bench: 128/2000 requests done\n")
     child_only = _scan_logs_increment(passed, offsets)
     assert child_only.grew is True and child_only.child_spoke is True
+
+
+def test_health_probe_lines_are_not_server_activity(tmp_path):
+    """An engine that died behind a live HTTP front end still answers /metrics.
+
+    ATOM's ModelRunner crashed on a GPU memory fault while its API server kept
+    serving the monitor's /metrics polls, so the log grew every few seconds and
+    the silence gate never fired: lm_eval waited on 64 requests nothing would
+    serve until the 7800s hard cap.
+    """
+    log_path = tmp_path / "server.log"
+    log_path.write_text("Application startup complete\n", encoding="utf-8")
+    offsets: dict[str, int] = {}
+    _scan_logs_increment(str(log_path), offsets)
+
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write('INFO:     127.0.0.1:45518 - "GET /metrics HTTP/1.1" 200 OK\n')
+        f.write('INFO:     127.0.0.1:45520 - "GET /health HTTP/1.1" 200 OK\n')
+    assert _scan_logs_increment(str(log_path), offsets).grew is False
+
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write('INFO:     127.0.0.1:45522 - "GET /metrics HTTP/1.1" 200 OK\n')
+        f.write("[atom 23:29:42] Request 639 arrived, input tokens: 1295, pending requests: 64\n")
+    assert _scan_logs_increment(str(log_path), offsets).grew is True
 
 
 def test_run_with_session_kill_detok_stall_reaps_ready_but_silent_server(tmp_path):

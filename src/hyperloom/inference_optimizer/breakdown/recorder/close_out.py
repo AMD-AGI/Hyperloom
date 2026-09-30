@@ -99,12 +99,29 @@ def record_close_opened(session_dir: Path | str | None, *, ts: str = "") -> None
     _write(
         session_dir,
         {
+            "sequence_schema_version": "hyperloom.close.v1",
+            "source": "normal_close",
             "status": "running",
             "start_time": _stamp(ts),
             "close_sequence_done": False,
             "artifacts": {"session_breakdown_path": SESSION_BREAKDOWN_PATH},
         },
     )
+
+
+def record_close_safety_net(session_dir: Path | str | None) -> None:
+    """Mark a terminal write that never entered the CLOSE sequencer."""
+    if not session_dir:
+        return
+    from .assembler import assemble_parts
+
+    try:
+        if assemble_parts(Path(session_dir), only_sections=(SECTION,)).get(SECTION):
+            return
+    except RECORDING_ERRORS as exc:
+        note_failure(section=SECTION, error=exc, detail="safety-net source readback failed")
+        return
+    _write(session_dir, {"source": "safety_net", "sequence_schema_version": "hyperloom.close.v1"})
 
 
 def record_close_step(
@@ -115,6 +132,10 @@ def record_close_step(
     ts: str = "",
     task_id: str = "",
     detail: str = "",
+    optional: bool | None = None,
+    artifact_path: str = "",
+    artifact_digest: str = "",
+    error: str = "",
 ) -> None:
     """Append one settled close step.
 
@@ -134,6 +155,14 @@ def record_close_step(
         row["task_id"] = str(task_id)
     if detail:
         row["detail"] = str(detail)
+    if optional is not None:
+        row["optional"] = optional
+    if artifact_path:
+        row["artifact_path"] = artifact_path
+    if artifact_digest:
+        row["artifact_digest"] = artifact_digest
+    if error:
+        row["error"] = error
     recorder_for(session_dir, producer=PRODUCER).record_item(STEP_SECTION, row)
 
 
@@ -601,6 +630,7 @@ __all__ = [
     "record_baseline_progress",
     "record_close_artifacts",
     "record_close_opened",
+    "record_close_safety_net",
     "record_close_settled",
     "record_close_step",
     "record_geak_candidate",

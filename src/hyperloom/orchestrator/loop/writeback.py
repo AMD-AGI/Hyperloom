@@ -10,6 +10,7 @@ import json
 import os
 import shlex
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -88,6 +89,7 @@ from ..policy.gate import (
 from ..state.round_store import ABANDONED, BOOTED, FAILED
 from ..state.task_registry import Task
 from ..actions.executors.benchmark_result import is_valid_measurement
+from ..actions.executors.integrate_patch import KEEP_STATUSES
 from ..actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
     BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
@@ -206,34 +208,6 @@ def _graded_source(measurement: Mapping[str, Any], output_tput: float) -> dict[s
     return {**measurement, "output_throughput": float(output_tput)}
 
 
-def _integrate_measurement_fields(measurement: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep performance axes and launch evidence on the same E2E measurement."""
-    from hyperloom.common.perf_metric import graded_axes_of
-
-    return {
-        **graded_axes_of(measurement),
-        **{
-            key: measurement[key]
-            for key in (
-                "ttft_mean_ms",
-                "e2el_mean_ms",
-                "tpot_mean_ms",
-                "workspace",
-                "raw_result_path",
-                "report_path",
-                "materialized_config",
-                "launch_evidence",
-                "launch_evidence_path",
-                "server_log_path",
-            )
-            if key in measurement
-        },
-    }
-
-
-_INTEGRATE_KEEP_STATUSES: frozenset[str] = frozenset({"kept", "advanced", "kept_inert"})
-
-
 def _integrate_marker_verdict(status: str, phase: str) -> str:
     """Classify one integrate window from its verdict and its durable phase.
 
@@ -248,9 +222,9 @@ def _integrate_marker_verdict(status: str, phase: str) -> str:
         still waiting for its benchmark, and ``"incomplete"`` when the two
         disagree and no obligation can be discharged from them.
     """
-    if phase == "accepted" and status in _INTEGRATE_KEEP_STATUSES:
+    if phase == "accepted" and status in KEEP_STATUSES:
         return "retained"
-    if phase == "restored" and status not in _INTEGRATE_KEEP_STATUSES and status != "applied_no_bench":
+    if phase == "restored" and status not in KEEP_STATUSES and status != "applied_no_bench":
         return "settled"
     if status == "applied_no_bench" and phase in {"applied", "applied_with_restored_stash"}:
         return "inflight"
@@ -283,32 +257,18 @@ def _confirmed_task_outcome(task: Task) -> dict[str, Any] | None:
     return None
 
 
-def _integrate_stack_fields(result: Mapping[str, Any], state: SharedState) -> dict[str, Any]:
-    """Validate kernel membership before promotion and copy its independent evidence."""
+def _integrate_stack_fields(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the members a KEEP promotes.
+
+    Only the kernel-stack lane produces multi-member results, and it binds them to their ledger rows before
+    promoting, so the members are read off the result rather than bound again here.
+    """
     from ..phases.kernel_stack import resolve_stack_members
 
     raw_members = result.get("stack_kernel_ids")
-    inferred_stack = (
-        (isinstance(raw_members, list) and len(raw_members) > 1)
-        or "stack_validation_started_at" in result
-        or "stack_member_identities" in result
-    )
-    membership = {"stack_validation": inferred_stack, **result}
-    members = resolve_stack_members(
-        membership,
-        entries=state.kernel_integrate_attempts if membership["stack_validation"] is True else None,
-    )
-    fields: dict[str, Any] = {
-        "stack_kernel_ids": list(members),
-        "stack_validation": membership["stack_validation"],
-    }
-    if membership["stack_validation"] is True:
-        fields["stack_validation_started_at"] = membership["stack_validation_started_at"]
-        fields["stack_member_identities"] = [
-            {key: entry[key] for key in ("kernel_id", "patch_path", "target_file")}
-            for entry in membership["stack_member_identities"]
-        ]
-    return fields
+    membership = {"stack_validation": isinstance(raw_members, list) and len(raw_members) > 1, **result}
+    members = resolve_stack_members(membership)
+    return {"stack_kernel_ids": list(members), "stack_validation": membership["stack_validation"]}
 
 
 def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
@@ -321,10 +281,10 @@ def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -
     return patch_lever_kind(result) or patch_lever_kind(task_params)
 
 
-#: The one owner label a patch KEEP stages under. Explore- and framework-agent
-#: lifts used to route to two separate columns; the three-column layout has a
-#: single ``patch`` column, so both collapse to this marker. Attribution keeps
-#: its own explore/framework split on the lever kind -- that is unaffected.
+#: The one owner label a patch KEEP stages under. The three-column layout has a
+#: single ``patch`` column, so explore- and framework-agent lifts both stage
+#: under this marker. Attribution keeps its own explore/framework split on the
+#: lever kind.
 _PATCH_KEEP_OWNER = "PATCH"
 
 #: Levers whose overlays feed the one patch column. ``kernel`` publishes through
@@ -1093,7 +1053,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
-        stack_fields = _integrate_stack_fields(result, self.shared_state)
+        stack_fields = _integrate_stack_fields(result)
         # A fusion sibling drained through the shared integrate lane must still
         # land on the stack as ``action="fusion"``: the idempotency short-circuit
         # (``_active_forge_fusion_env_flags``) and the remote-recipe fusion export
@@ -3345,6 +3305,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         variant_name,
                     )
                 stack_entry: dict[str, Any] = {
+                    "stack_entry_id": uuid.uuid4().hex,
                     "action": task_kind,
                     "variant_name": variant_name,
                     "candidate_extra_server_args": candidate_args,
@@ -4983,12 +4944,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
             A dict with ``is_resume``, ``event_count``, ``state_json_present``
             and ``rebuilt`` (the last set later by :meth:`replay_for_resume`).
         """
-        ev_count = self.bus.db.fetchone_sync("SELECT COUNT(*) AS c FROM events")
-        events_present = (int(ev_count["c"]) if ev_count else 0) > 0
+        event_count = self.bus.count_sync()
         state_path = SharedState.state_path(self.session_dir)
         return {
-            "is_resume": events_present or state_path.exists(),
-            "event_count": int(ev_count["c"]) if ev_count else 0,
+            "is_resume": event_count > 0 or state_path.exists(),
+            "event_count": event_count,
             "state_json_present": state_path.exists(),
             "rebuilt": False,  # set by replay_for_resume()
         }
@@ -5447,10 +5407,18 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 )
                 if hasattr(state, "set_stop_reason"):
                     state.set_stop_reason("active_inferencex_checkout_missing")
-        # (0) Interrupted stack unwind: its members are still applied to the
-        # framework tree. SWEEP entry is where this used to be retried, so
-        # everything a resumed leg benchmarked before reaching SWEEP measured
-        # the patched tree -- the failure the halt exists to prevent.
+        # Loading the state file is the one boundary the persisted
+        # ``optimization_stack`` crosses, so bind its rows to their members here:
+        # a row that cannot name what it integrated makes every later read of the
+        # stack a guess, and every reader below inherits that guess.
+        try:
+            self._stack_resolved_kernel_ids()
+        except ValueError as exc:
+            self._halt_stack_recovery(exc)
+        # (0) Interrupted stack attempt: its members may still be applied to the
+        # framework tree, and everything this pass or the leg benchmarks before
+        # SWEEP entry would measure them. SWEEP entry settles through the same
+        # recovery.
         await self._resume_recover_interrupted_stack(report)
         # (1) Half-applied integrate window: replay the
         # missing stack append or roll back the partial patch BEFORE anything
@@ -5664,31 +5632,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
             return False
 
     async def _resume_recover_interrupted_stack(self, report: dict[str, Any]) -> None:
-        """Retry an unwind a halted leg left owed, before anything here can benchmark.
+        """Settle a stack attempt a crash or halt left behind, before anything here can benchmark.
 
-        The recovery halts the session again if the tree still cannot be
-        settled, which is the point: the alternative is measuring a tree whose
-        contents no resume can account for.
+        The recovery halts the session if the tree cannot be settled, which is
+        the point: the alternative is measuring a tree whose contents no resume
+        can account for.
         """
-        state = self.shared_state
-        if not (
-            getattr(state, "pending_stack_validation_result", None)
-            or getattr(state, "pending_stack_validation_apply_results", None)
-        ):
-            return
-        try:
-            recovered = await self._recover_interrupted_stack_validation()
-        except ValueError as exc:
-            # The checkpoint cannot be bound to the ledger rows it was written
-            # from, so which patches are on the tree is unknown. Halting says
-            # that and keeps the evidence; raising would leave the resume above
-            # ``Coordinator.run``'s own guard, ending the process with the
-            # patches applied and no stop reason naming why.
-            self.shared_state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
-            self.shared_state.save(self.session_dir)
-            report["warnings"].append({"kind": "interrupted_stack_validation_unbindable", "error": repr(exc)})
-            return
-        if recovered:
+        if await self._recover_interrupted_stack_validation():
             report["fixes"].append({"kind": "interrupted_stack_validation_recovered"})
 
     def _clear_pending_integrate(self, pending: dict[str, Any], *, gc_runtime: bool) -> None:

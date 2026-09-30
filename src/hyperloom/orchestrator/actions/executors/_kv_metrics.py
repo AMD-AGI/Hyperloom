@@ -281,18 +281,31 @@ def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, An
     if not isinstance(payload, dict):
         return []
 
-    blocks: list[tuple[str, Any]] = []
+    phase_ranges = (
+        ((payload.get("summary") or {}).get("phase_time_ranges") or {})
+        if isinstance(payload.get("summary"), dict)
+        else {}
+    )
+
+    def bounds(name: str) -> tuple[int, int]:
+        value = phase_ranges.get(name)
+        if not isinstance(value, dict):
+            return 0, 0
+        return int(_number(value.get("start_ns")) or 0), int(_number(value.get("end_ns")) or 0)
+
+    blocks: list[tuple[str, Any, tuple[int, int]]] = []
     warmup = payload.get("warmup_metrics")
     if isinstance(warmup, dict):
-        blocks.append(("warmup", warmup))
+        blocks.append(("warmup", warmup, bounds("warmup")))
     measured = payload.get("metrics")
     if isinstance(measured, dict):
-        phase = _CREDIT_PHASE_NAMES.get(str(payload.get("metrics_phase") or "").lower(), "measured")
-        blocks.append((phase, measured))
+        metrics_phase = str(payload.get("metrics_phase") or "").lower()
+        phase = _CREDIT_PHASE_NAMES.get(metrics_phase, "measured")
+        blocks.append((phase, measured, bounds(metrics_phase)))
 
     cumulative: dict[tuple[str, str], float] = {}
     rows: list[tuple[int, int, str, str, dict[str, str], float]] = []
-    for phase, metrics in blocks:
+    for phase, metrics, (phase_start, phase_end) in blocks:
         for name, metric in metrics.items():
             if not isinstance(metric, dict):
                 continue
@@ -304,7 +317,13 @@ def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, An
                 label_map = {str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}
                 series_key = (str(name), canonical_label_key(label_map))
                 running = cumulative.get(series_key, 0.0)
-                timeslices = [item for item in (series.get("timeslices") or []) if isinstance(item, dict)]
+                timeslices = [
+                    item
+                    for item in (series.get("timeslices") or [])
+                    if isinstance(item, dict)
+                    and (not phase_start or int(_number(item.get("end_ns")) or 0) > phase_start)
+                    and (not phase_end or int(_number(item.get("start_ns")) or 0) < phase_end)
+                ]
                 if metric_type == "counter" and timeslices:
                     start = int(_number(timeslices[0].get("start_ns")) or 0)
                     if start > 0:
@@ -666,8 +685,8 @@ def port_from_server_log(workspace: Any) -> int | None:
                 for line in head.splitlines():
                     # Matched on what the line is about rather than on its exact wording. The observed builds say
                     # "Starting vLLM server on http://0.0.0.0:8000"; older ones and SGLang say "Uvicorn running on".
-                    # Enumerating the phrasings is how this collector got its original bug, so the test is the
-                    # combination -- a line announcing the server, carrying a URL with a port.
+                    # A list of phrasings misses the next build's wording, so the test is the combination -- a
+                    # line announcing the server, carrying a URL with a port.
                     if not _SERVER_BIND_HINT.search(line):
                         continue
                     match = _SERVER_BIND_URL.search(line)
@@ -738,9 +757,10 @@ def port_from_server_command(workspace: Any) -> int | None:
 def resolve_metrics_port(config_envs: dict[str, Any] | None = None, workspace: Any = None) -> int:
     """Resolve the port the engine serves ``/metrics`` on.
 
-    The server binds whatever ``benchmark.envs.PORT`` the materialized YAML pins -- an ephemeral port assigned per
-    session, not a constant. The YAML is therefore the authority; the caller's env and the ambient env are fallbacks for
-    paths that never materialize one, and the default is a last resort that is only ever right by coincidence.
+    A ``PORT`` in the caller's env is an operator pin and wins. Then the round's own evidence: its materialized
+    ``benchmark.envs.PORT`` (an ephemeral port assigned per session, never exported into the subprocess env), the port
+    the server logged at bind, and the ``--port`` of the command that launched it. Only then a ``PORT`` in the ambient
+    env, and the default last, which is only ever right by coincidence.
     """
     port = _port_value((config_envs or {}).get("PORT"))
     if port is not None:

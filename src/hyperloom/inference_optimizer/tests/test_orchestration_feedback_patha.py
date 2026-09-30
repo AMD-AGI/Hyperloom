@@ -785,14 +785,10 @@ def test_short_session_reloop_boundary(monkeypatch, benchmark_timeout, expected_
         monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", benchmark_timeout)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
     remaining_sec = expected_floor + remaining_offset
-    reloop, ev = ps.should_reloop_to_explore(
-        st,
-        now_unix=start_unix + 7200 - remaining_sec,
-        min_remaining_sec=7200,
-    )
+    target, _reason, ev = ps.compute_next_phase(st, now_unix=start_unix + 7200 - remaining_sec)
 
     assert ev["min_remaining_sec_effective"] == expected_floor
-    assert reloop is (remaining_offset >= 0), ev
+    assert (target == ps.PHASE_FRAMEWORK_AGENT) is (remaining_offset >= 0), ev
     if remaining_offset < 0:
         assert ev["reloop_blocked"] == "insufficient_remaining"
         assert ev["session_remaining_seconds"] == remaining_sec

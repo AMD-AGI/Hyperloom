@@ -134,6 +134,12 @@ def open_event(
     if start_time:
         payload["start_time"] = str(start_time)
     sink.record(event_section, payload)
+    from .outcome_stage import EVENT_STAGES, record_stage_reached
+
+    if event_type in EVENT_STAGES:
+        from ...session.session_binding import bound_session
+
+        record_stage_reached(bound_session(), event_type)
     return sequence
 
 

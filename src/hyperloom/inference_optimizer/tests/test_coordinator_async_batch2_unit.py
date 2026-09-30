@@ -8,6 +8,7 @@ KB T4 safety net)."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
 )
+from hyperloom.orchestrator.roles.mcp_context_tools import ContextProvider
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
@@ -194,6 +196,42 @@ async def test_recent_outcomes_reader_with_rows(coord: Coordinator) -> None:
 def test_recent_outcomes_reader_clamps_top_k(coord: Coordinator) -> None:
     assert isinstance(coord._context_recent_outcomes_reader(top_k=999), str)
     assert isinstance(coord._context_recent_outcomes_reader(top_k=0), str)
+
+
+# -- context reader failure surface -----------------------------------------
+@pytest.mark.parametrize(
+    ("owner", "source", "tool"),
+    [
+        ("bus", "inbox_context_sync", "inbox"),
+        ("bus", "recent_outcomes_context_sync", "recent_outcomes"),
+        ("tasks", "running_context_sync", "running_tasks"),
+    ],
+)
+def test_context_reader_failure_carries_traceback_to_the_log(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    owner: str,
+    source: str,
+    tool: str,
+) -> None:
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("projection read exploded")
+
+    monkeypatch.setattr(getattr(coord, owner), source, _boom)
+    provider = ContextProvider(
+        shared_state=coord.shared_state,
+        inbox_reader=coord._context_inbox_reader,
+        recent_outcomes_reader=coord._context_recent_outcomes_reader,
+        running_tasks_reader=coord._context_running_tasks_reader,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="hyperloom.orchestrator.roles.mcp_context_tools"):
+        out = getattr(provider, tool)()
+
+    assert f"context tool {tool} unavailable" in out
+    assert "projection read exploded" in out
+    assert "Traceback (most recent call last)" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -2194,6 +2232,32 @@ async def test_materialize_explore_filters_grid(coord: Coordinator) -> None:
     )
     tail = await coord.bus.tail(topic="decision", n=10)
     assert any(m.payload.get("kind") == "approved_proposal" for m in tail)
+    task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
+    assert task.params["proposal_msg_id"] == pending.proposal_msg_id
+
+
+@pytest.mark.asyncio
+async def test_materialize_explore_proposal_id_does_not_break_content_dedup(
+    coord: Coordinator,
+) -> None:
+    coord.shared_state.baseline_tput = 800.0
+    first = _pending(
+        "explore",
+        {"params": {"grid": [{"name": "v0"}]}},
+        msg_id="prop-first",
+    )
+    duplicate = _pending(
+        "explore",
+        {"params": {"grid": [{"name": "v0"}]}},
+        msg_id="prop-duplicate",
+    )
+
+    await coord._materialize_approved_proposal(first)
+    await coord._materialize_approved_proposal(duplicate)
+
+    queued = [task for task in await coord.tasks.queued() if task.kind == "explore"]
+    assert len(queued) == 1
+    assert queued[0].params["proposal_msg_id"] == "prop-first"
 
 
 @pytest.mark.asyncio

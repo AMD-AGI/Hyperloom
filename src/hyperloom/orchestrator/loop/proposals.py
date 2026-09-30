@@ -493,6 +493,10 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         # Content-addressed so a batch of proposals that would launch identical work collapses to one task; a
         # terminated twin still gets a fresh key so a legitimate retry after failure is never locked out.
         raw_key = approved_proposal_idempotency_key(pending.action_name, params)
+        # Preserve the authoritative config-proposal join on the materialized task. Keep this out of the
+        # content-addressed idempotency key above so two proposals for identical grids still collapse to one task.
+        if pending.action_name == "explore" and pending.proposal_msg_id:
+            params["proposal_msg_id"] = str(pending.proposal_msg_id)
         task = None
         was_existing = False
         for attempt in range(_MAX_IDEMPOTENCY_ATTEMPTS):

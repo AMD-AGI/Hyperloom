@@ -891,6 +891,37 @@ def _positive_int(value: object) -> int:
     return parsed if parsed > 0 else 0
 
 
+def _fusion_attn_tp_size(state: object, payload: dict, *, tp: int) -> int:
+    """Attention TP shard behind the session's serving ``tp``.
+
+    DP-attention splits the ``tp`` ranks into ``dp`` attention groups, so
+    forge-fuse cannot infer the attention shard from ``--tp`` alone -- and it
+    stamps the harness group/head dims from exactly this number.
+    """
+    explicit = _positive_int(payload.get("attn_tp"))
+    if explicit:
+        return explicit
+    from hyperloom.inference_optimizer.roofline_ceiling import _parse_server_arg, resolve_runtime_workload
+
+    server_args = str(payload.get("extra_server_args") or "").strip()
+    if not server_args:
+        try:
+            server_args = resolve_runtime_workload(state, arm="current_best").server_args
+        except Exception:  # noqa: BLE001 - best-effort for partial state / test doubles
+            server_args = ""
+
+    if "--enable-dp-attention" not in str(server_args).replace("=", " ").split():
+        return tp
+    # launch_infera_node injects --dp-size = tp when a dp-attention flag arrives
+    # without one, and these args are read before that injection.
+    dp = (
+        _positive_int(_parse_server_arg(server_args, "--dp-size"))
+        or _positive_int(_parse_server_arg(server_args, "--data-parallel-size"))
+        or tp
+    )
+    return max(1, tp // dp)
+
+
 def _fusion_session_serve_args(
     state: object,
     payload: dict,
@@ -898,7 +929,7 @@ def _fusion_session_serve_args(
     framework: str,
     model_path: str,
 ) -> dict[str, int]:
-    """TP / KV block size / max-model-len the serving smoke must match."""
+    """TP / attention TP / KV block size / max-model-len the smoke must match."""
     tp = _positive_int(payload.get("tp") or getattr(state, "tp", 0))
     max_model_len = _positive_int(payload.get("max_model_len") or getattr(state, "max_model_len", 0))
     block_size = _positive_int(payload.get("block_size"))
@@ -911,6 +942,7 @@ def _fusion_session_serve_args(
     args: dict[str, int] = {}
     if tp:
         args["tp"] = tp
+        args["attn_tp"] = _fusion_attn_tp_size(state, payload, tp=tp)
     if block_size:
         args["block_size"] = block_size
     if max_model_len:
@@ -3145,8 +3177,8 @@ async def _run_forge_gemm_tuning(
     if resolved_model_dir is None:
         # Forge needs the config on disk to derive shapes, so it cannot run --
         # but not running one tuning backend is a skip, not a session failure.
-        # Reporting it as failed spends a REVERT verdict on an experiment that
-        # never started, which is the misattribution this change set removes.
+        # Reporting it as failed would spend a REVERT verdict on an experiment
+        # that never started.
         return {
             "status": "skipped",
             "error_class": "model_path_unavailable",
@@ -3208,12 +3240,10 @@ async def _run_forge_gemm_tuning(
     #
     # This has to happen BEFORE the MoE untuned CSV is built, not just before
     # the payload is assembled: ``_write_fmoe_untuned_csv_from_log`` consumes
-    # ``tokens`` directly, and its fallback for an empty one is ``[1]``. Derive
-    # afterwards and the dense lane got the full observed sweep while the MoE
-    # lane got a table with a single M=1 row -- which then missed on every
-    # prefill and large-batch lookup and was reverted as no_shape_key_matched.
-    # That is precisely the failure this change set exists to remove, so leaving
-    # it in place on the MoE side would have fixed one lane and not the other.
+    # ``tokens`` directly, and its fallback for an empty one is ``[1]``. Derived
+    # afterwards, the dense lane would get the full observed sweep while the MoE
+    # lane gets a table with a single M=1 row, which misses on every prefill and
+    # large-batch lookup and is reverted as no_shape_key_matched.
     if not tokens and kernel_sig_log:
         tokens = _normalize_tokens(await asyncio.to_thread(_tokens_from_serving_log, kernel_sig_log))
         if tokens:
@@ -3497,9 +3527,9 @@ async def _run_forge_gemm_tuning(
             result["skip_reason"] = reason
 
     # Surface crashed tuners. forge lists every failure in ``failed_tuners``
-    # regardless of the overall decision, but this array was previously dropped
-    # here -- so a dense tuner winning made a MoE tuner's crash invisible, and a
-    # KEEP read as "no headroom elsewhere" when siblings had in fact hard-failed.
+    # regardless of the overall decision; dropped here, a dense tuner winning
+    # would hide a MoE tuner's crash, and a KEEP would read as "no headroom
+    # elsewhere" when siblings had in fact hard-failed.
     # Backfill from disk when the sentinel omitted it (mirrors tuners_skipped),
     # keep it on the envelope for the trace row / breakdown, and log it so the
     # failure is never silent even when the session is kept.
@@ -4216,13 +4246,10 @@ _TRACE_TUNER_ALWAYS_KEYS = ("tuner", "best_micro_speedup", "kept")
 def _trace_tuner_row(tuner: dict[str, Any]) -> dict[str, Any]:
     """One per-tuner entry for the audit row, keeping why it ended as it did.
 
-    The row used to carry only ``tuner``/``best_micro_speedup``/``kept``, which
-    cannot separate a tuner that crashed from one that ran and found nothing --
-    the single question the audit trail exists to answer. Across one campaign 38
-    of 337 tuner runs ended ``failed`` or ``empty_output`` and the trace showed
-    none of them; one of those was 82 runs rejected by argparse in 11 seconds
-    and recorded as a clean ``no_improvement`` (#1211), which stayed invisible
-    for three weeks because this row had nowhere to put it.
+    ``tuner``/``best_micro_speedup``/``kept`` alone cannot separate a tuner that
+    crashed from one that ran and found nothing -- the single question the audit
+    trail exists to answer. Without the reason, a tuner whose runs argparse
+    rejected in seconds reads as a clean ``no_improvement`` (#1211).
     """
     error = tuner.get("error")
     if isinstance(error, str) and len(error) > _TRACE_TUNER_ERROR_MAXLEN:

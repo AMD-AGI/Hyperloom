@@ -67,16 +67,10 @@ __all__ = [
 # namespace so unrelated names that merely end in "ck" (``block::``,
 # ``unpack::``, ``flashck::``) are NOT misclassified.
 #
-# Tradeoff (intentional behavior change vs the retired op_to_source.json): the
-# curated map marked its ~56 ``aiter_ck`` entries ``patchable: true`` and routed
-# them to the ck backend. Resolving from the device symbol alone, we
-# cannot recover that per-entry ck ownership, so a CK instantiation is
-# classified non-patchable and no longer reaches the ck backend branch of
-# kernel-backend resolution. This is deliberate: the symbol-based finder trades that
-# hand-maintained CK routing (which could not generalize across framework
-# versions) for coverage that self-heals. Restoring CK -> ck routing
-# would require a structured, symbol-derivable CK classifier and is left as a
-# separately reviewable follow-up rather than a static map.
+# The device symbol alone does not say which CK entry owns an instantiation, so
+# a CK instantiation never reaches the ck backend branch of kernel-backend
+# resolution. Routing CK to the ck backend needs a symbol-derivable CK
+# classifier.
 _CK_DEMANGLED_RE = re.compile(r"(?:^|[^A-Za-z0-9_])ck(?:_tile)?::")
 # Mangled (Itanium) fallback for when ``c++filt`` is absent: the ``ck`` /
 # ``ck_tile`` namespace is length-prefixed (e.g. ``...2ck15kernel...`` /

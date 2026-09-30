@@ -31,7 +31,6 @@ from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     _build_specialist_env,
-    _pick_worktree_base,
     _setup_worktree,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
@@ -277,9 +276,11 @@ exit 0
 
 
 @pytest.fixture
-def fake_framework_repo(tmp_path: Path) -> Path:
+def fake_framework_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The checkout the session optimises, named the way a session names it."""
     repo = tmp_path / "framework"
     init_git_repo(repo)
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
     return repo
 
 
@@ -292,6 +293,7 @@ def _make_runner_ctx(task_id: str = "t-spec-1") -> RunnerContext:
             "domain": "serving_specialist",
             "gap_canonical_id": "gap.test.example",
             "max_turns": 2,
+            "framework": "sglang",
         },
         idempotency_key=task_id,
         requires_lanes=tuple(),
@@ -329,22 +331,55 @@ def test_kb_mcp_tools_not_in_denylist():
     assert denylisted_kb_mcp == [], f"stale KB MCP entries in the denylist: {denylisted_kb_mcp}"
 
 
-def test_pick_worktree_base_picks_first_git_root(
+@pytest.mark.asyncio
+async def test_worktree_of_a_pip_installed_framework_is_its_snapshot_not_another_checkout(
     tmp_path: Path,
-    fake_framework_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
-    nonrepo = tmp_path / "not-a-repo"
-    nonrepo.mkdir()
-    base = _pick_worktree_base((str(nonrepo), str(fake_framework_repo)))
-    assert base is not None
-    assert base.samefile(fake_framework_repo)
+    """With no checkout of its own, the framework still hands its specialist its own code -- never InferenceX's."""
+    harness = tmp_path / "InferenceX"
+    init_git_repo(harness, seed_file="benchmark_lib.sh", seed_text="run\n")
+    package = tmp_path / "site-packages" / "vllm"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "envs.py").write_text("VLLM_USE_X = 0\n", encoding="utf-8")
+    monkeypatch.setenv("INFERENCEX_PATH", str(harness))
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    runner = SpecialistRunner(
+        subprocess_config=SpecialistSubprocessConfig(framework_source_roots=(str(harness), str(package))),
+        session_dir=session_dir,
+    )
+    ctx = _make_runner_ctx("t-spec-pip")
+    ctx.task.params["session_framework_tree"] = f"{package}/"
+    workspace = session_dir / "runs" / "specialist" / "t-spec-pip"
+    workspace.mkdir(parents=True)
+
+    worktree, source, err = runner._maybe_setup_worktree(ctx, workspace=workspace)
+
+    assert err == ""
+    assert source is not None and source.root == package and not source.checkout
+    assert worktree is not None and (worktree / "envs.py").read_text(encoding="utf-8") == "VLLM_USE_X = 0\n"
+    assert not (worktree / "benchmark_lib.sh").exists()
+    assert not (package / ".git").exists()
+    listed = subprocess.run(
+        ["git", "-C", str(harness), "worktree", "list"], capture_output=True, text=True, check=True
+    ).stdout
+    assert str(worktree) not in listed
 
 
-def test_pick_worktree_base_returns_none_when_no_repo(tmp_path: Path):
-    nonrepo = tmp_path / "not-a-repo"
-    nonrepo.mkdir()
-    base = _pick_worktree_base((str(nonrepo),))
-    assert base is None
+def test_an_integrate_in_flight_holds_the_snapshot(tmp_path: Path):
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=session_dir)
+    assert runner._integrate_in_flight() is False
+
+    state = SharedState.load_or_init(session_dir)
+    state.pending_integrate = {"task_id": "t-integrate", "patches": []}
+    state.save(session_dir)
+    assert runner._integrate_in_flight() is True
 
 
 def test_setup_worktree_creates_branch_off_base(
