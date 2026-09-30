@@ -539,7 +539,6 @@ class ClosePhase(CoordinatorCollaborator):
         try:
             from hyperloom.inference_optimizer.breakdown import patch_breakdown_close
 
-            pkg_path = getattr(self, "_pkg_path", None)
             if patch_breakdown_close(self.session_dir) and pkg_path is not None:
                 from hyperloom.inference_optimizer.breakdown import package_session_artifacts
 
