@@ -83,6 +83,12 @@ These flags are rejected with `unrecognized arguments`:
   `--pd-*-extra-args` now fail the server restart instead of being ignored;
   they are supported on infera only.
 
+### Required: quantization failure exits 4
+
+A failed `--quantize` prelude now exits 4 instead of 3; exit 3 means only
+that another optimizer holds the session lock. Launchers that branch on the
+exit code should treat 4 as a non-retryable failure.
+
 ---
 
 ## Upgrading from 0.5.x → 0.6.0

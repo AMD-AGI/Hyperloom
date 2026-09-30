@@ -35,7 +35,7 @@ Rules:
 - Keep `--precision` consistent with quantization, for example
   `--quantize-scheme fp8` with `--precision fp8`.
 - Quantization is one-shot and never runs on a resume.
-- Failed or unusable quantization hard-stops with `SystemExit(3)`; it never
+- Failed or unusable quantization hard-stops with `SystemExit(4)`; it never
   silently optimizes the source model.
 - A scheme/GPU mismatch via `--quantize-scheme` is skipped, emits
   `QUANTIZATION_SKIPPED:`, and sets `$HYPERLOOM_QUANTIZATION_SKIPPED`.

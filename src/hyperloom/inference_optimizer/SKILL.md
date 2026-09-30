@@ -695,7 +695,7 @@ python3 -m hyperloom optimize \
   operator-supplied precision label (e.g. `fp8`/`bf16`) and **mislabel** an
   actually-quantized model. Never leave a conflicting precision when quantizing.
 - Behavior: one-shot, **never runs on a resume**. On a failed/unusable
-  quantization the run **hard-stops (`SystemExit(3)`)** — it never silently
+  quantization the run **hard-stops (`SystemExit(4)`)** — it never silently
   optimizes the un-quantized source after an explicit `--quantize`.
   The one exception is a **pre-flight scheme/GPU mismatch** via
   `--quantize-scheme` (e.g. `mxfp4` on a non-MI355X target): this is **skipped**

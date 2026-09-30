@@ -20,7 +20,7 @@ export HYPERLOOM_QUANTIZE_ENABLED=1
 Then choose one request style:
 
 ```bash
-# Free-text power-user path. Failure hard-stops the run with exit code 3.
+# Free-text power-user path. Failure hard-stops the run with exit code 4.
 python3 -m hyperloom optimize \
   --model /models/source \
   --quantize "fp8 global scheme, fp8 kv_cache, exclude lm_head"

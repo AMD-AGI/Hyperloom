@@ -208,7 +208,8 @@ Launchers can rely on these outputs of `hyperloom optimize`.
 | 0 | The run finished with a completed outcome |
 | 1 | The run failed or was aborted, including by a signal |
 | 2 | Invalid arguments or a startup check failed (topology, resume, model gate, credentials) |
-| 3 | The session lock is held by another optimizer, or quantization failed |
+| 3 | The session lock is held by another optimizer |
+| 4 | The `--quantize` prelude failed; the run refuses to optimize the unquantized model |
 
 `hyperloom recover` exits 0 on success, 1 when the breakdown rebuild fails and 2 on invalid arguments.
 
