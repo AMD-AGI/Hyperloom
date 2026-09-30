@@ -585,15 +585,11 @@ class FrameworkPhase(CoordinatorCollaborator):
             },
         }
 
-    def _close_framework_timeline(self, *, exit_reason: str = "", evidence: dict | None = None) -> None:
-        """Close the FRAMEWORK timeline event when the phase is left.
-
-        The phase machine has entry hooks only, so the seam in
-        ``_on_phase_entered`` calls this before dispatching the next phase's
-        hook. Plateau rows are written from ``evidence`` rather than
-        recomputed: re-reading both arms here would report counts over a
-        history that kept growing.
-        """
+    def _close_framework_timeline(self, tr: "Transition") -> None:
+        """Close the FRAMEWORK timeline event when the phase is left."""
+        from .machine import Transition  # noqa: F401 — type reference only
+        exit_reason = tr.reason
+        evidence: dict | None = tr.evidence if tr.evidence else None
         recorder = self._coord.phase_kernel.timeline()
         if recorder is None:
             return

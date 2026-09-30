@@ -71,7 +71,7 @@ class MaintenanceCollaborator(CoordinatorCollaborator):
     _DISK_RUNS_KEEP_PER_ACTION: int = 50
     _STATE_JSON_WARN_BYTES: int = 50 * 1024 * 1024
 
-    async def _run_maintenance(
+    async def run(
         self,
         *,
         tick: int,
