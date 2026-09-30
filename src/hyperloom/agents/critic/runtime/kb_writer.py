@@ -406,38 +406,6 @@ class KBWriter:
             )
 
     # add_contradiction
-    def add_contradiction(
-        self,
-        *,
-        new_id: str,
-        old_ids: list[str],
-        ctx: WriteContext,
-    ) -> WriteResult:
-        """Add ``contradicts`` edges from a new row to older rows."""
-        if not self.write_enabled:
-            return WriteResult("disabled", {"reason": "KB_WRITE_ENABLED=false"})
-        if self.is_kb_unreachable():
-            return WriteResult(
-                "disabled",
-                {
-                    "reason": "kb_unreachable",
-                    "breaker": self.kb_breaker_state(),
-                },
-            )
-        if not new_id or not old_ids:
-            return WriteResult("skipped", {"reason": "missing_ids"})
-        edges = [{"kind": "contradicts", "from_id": new_id, "to_id": old_id} for old_id in old_ids]
-        try:
-            response = self.client.add_edges(edges)
-            self._record_kb_success()
-            return WriteResult("ok", {"response": response})
-        except KBTransportError as exc:
-            self._record_kb_failure("edges/add", exc)
-            return WriteResult("skipped", {"reason": "edge_write_failed", "error": str(exc)})
-        except KBError as exc:
-            # Supplemental — don't dead-letter.
-            return WriteResult("skipped", {"reason": "edge_write_failed", "error": str(exc)})
-
     # internals
     def _upsert_with_dead_letter(
         self,

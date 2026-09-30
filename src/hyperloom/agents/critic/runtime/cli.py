@@ -17,8 +17,7 @@ from .decision_reviewer import DecisionReviewer
 from .errors import RuntimeAdapterError
 from .in_memory_kb_client import InMemoryKBClient
 from .kb_client import HTTPKBClient, KBClient
-from .kb_writer import KBWriter, WriteContext
-from .scope_builder import build_scope, scope_cache_key
+from .kb_writer import KBWriter
 from .session_memory import SessionMemory
 
 
@@ -44,14 +43,6 @@ def _resolve_reviewer() -> DecisionReviewer:
     return DecisionReviewer(session_memory=sm, kb_client=client, kb_writer=writer)
 
 
-def _cmd_init_session(args: argparse.Namespace) -> None:
-    """Handle ``init-session``: merge a request's context and emit it."""
-    request = read_json(args.request)
-    reviewer = _resolve_reviewer()
-    out = reviewer.init_session(request)
-    emit_json(out, args.out)
-
-
 def _cmd_prepare_review(args: argparse.Namespace) -> None:
     """Handle ``prepare-review``: emit the phase-1 judge bundle."""
     request = read_json(args.request)
@@ -69,96 +60,6 @@ def _cmd_commit_review(args: argparse.Namespace) -> None:
     reviewer = _resolve_reviewer()
     outcome = reviewer.commit_review(request, review)
     emit_json(outcome.to_dict(), args.out)
-
-
-def _cmd_close_session(args: argparse.Namespace) -> None:
-    """Handle ``close-session``: close a session, optionally flushing drafts."""
-    request = read_json(args.request)
-    kb_draft = read_json(args.kb_draft) if args.kb_draft else None
-    reviewer = _resolve_reviewer()
-    outcome = reviewer.close_session(request, kb_draft)
-    emit_json(outcome.to_dict(), args.out)
-
-
-def _cmd_list_priors(args: argparse.Namespace) -> None:
-    """Handle ``list-priors``: look up KB priors for a packet's scope."""
-    packet = read_json(args.packet) or {}
-    context = packet.get("context") or packet.get("environment") or {}
-    scope = build_scope(context, require_critical=False)
-    scope_filter = {k: v for k, v in scope.items() if v != "unknown"}
-    client = _resolve_kb_client()
-    writer = KBWriter(client)
-    priors = writer.list_priors(
-        scope=scope_filter,
-        kind=args.kind,
-        topic=args.topic,
-        limit=args.limit,
-        ctx=WriteContext(session_id=args.session or "cli", review_id="cli"),
-    )
-    priors["scope_cache_key"] = scope_cache_key(scope_filter, topic=args.topic, kind=args.kind, limit=args.limit)
-    emit_json(priors, args.out)
-
-
-def _cmd_write_verdict(args: argparse.Namespace) -> None:
-    """Handle ``write-verdict``: write a single verdict lesson to KB."""
-    packet = read_json(args.packet) or {}
-    verdict = read_json(args.verdict) or {}
-    ctx_raw = read_json(args.ctx) or {}
-    client = _resolve_kb_client()
-    writer = KBWriter(client)
-    ctx = WriteContext(
-        session_id=ctx_raw.get("session_id") or "cli",
-        review_id=ctx_raw.get("review_id"),
-        source_role=ctx_raw.get("source_role", "critic"),
-        source_type=ctx_raw.get("source_type", "critic_decision_review"),
-        topic=ctx_raw.get("topic"),
-        extra_metadata=ctx_raw.get("metadata") or {},
-    )
-    res = writer.write_verdict(
-        verdict=verdict,
-        packet_context=packet.get("context") or {},
-        session_context=ctx_raw.get("session_context") or {},
-        ctx=ctx,
-    )
-    emit_json(res.to_dict(), args.out)
-
-
-def _cmd_write_kb_drafts(args: argparse.Namespace) -> None:
-    """Handle ``write-kb-drafts``: batch-write KB drafts from a packet."""
-    packet = read_json(args.packet) or {}
-    kb_draft = read_json(args.kb_draft) or {}
-    ctx_raw = read_json(args.ctx) or {}
-    client = _resolve_kb_client()
-    writer = KBWriter(client)
-    ctx = WriteContext(
-        session_id=ctx_raw.get("session_id") or "cli",
-        review_id=ctx_raw.get("review_id"),
-        source_role=ctx_raw.get("source_role", "critic"),
-        source_type=ctx_raw.get("source_type", "critic_kb_draft"),
-        extra_metadata=ctx_raw.get("metadata") or {},
-    )
-    res = writer.write_kb_drafts(
-        kb_drafts=kb_draft.get("kb_drafts") or [],
-        packet_context=packet.get("context") or {},
-        session_context=ctx_raw.get("session_context") or {},
-        ctx=ctx,
-    )
-    emit_json(res.to_dict(), args.out)
-
-
-def _cmd_add_contradiction(args: argparse.Namespace) -> None:
-    """Handle ``add-contradiction``: add contradicts edges between rows."""
-    ctx_raw = read_json(args.ctx) or {}
-    client = _resolve_kb_client()
-    writer = KBWriter(client)
-    ctx = WriteContext(
-        session_id=ctx_raw.get("session_id") or "cli",
-        review_id=ctx_raw.get("review_id"),
-        source_role=ctx_raw.get("source_role", "critic"),
-    )
-    old_ids = [oid.strip() for oid in args.old_ids.split(",") if oid.strip()]
-    res = writer.add_contradiction(new_id=args.new_id, old_ids=old_ids, ctx=ctx)
-    emit_json(res.to_dict(), args.out)
 
 
 def _cmd_replay_dead_letter(args: argparse.Namespace) -> None:
@@ -191,17 +92,6 @@ def _make_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="hyperloom.agents.critic.runtime.cli", description="Critic runtime CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    init = sub.add_parser("init-session")
-    init.add_argument("--request", required=True)
-    init.add_argument("--out", default="-")
-    init.set_defaults(func=_cmd_init_session)
-
-    close = sub.add_parser("close-session")
-    close.add_argument("--request", required=True)
-    close.add_argument("--kb-draft", default=None)
-    close.add_argument("--out", default="-")
-    close.set_defaults(func=_cmd_close_session)
-
     prep = sub.add_parser("prepare-review")
     prep.add_argument("--request", required=True)
     prep.add_argument("--out", default="-")
@@ -212,36 +102,6 @@ def _make_parser() -> argparse.ArgumentParser:
     commit.add_argument("--review", required=True)
     commit.add_argument("--out", default="-")
     commit.set_defaults(func=_cmd_commit_review)
-
-    listp = sub.add_parser("list-priors")
-    listp.add_argument("--packet", required=True)
-    listp.add_argument("--kind", default=None)
-    listp.add_argument("--topic", default=None)
-    listp.add_argument("--limit", type=int, default=10)
-    listp.add_argument("--session", default=None)
-    listp.add_argument("--out", default="-")
-    listp.set_defaults(func=_cmd_list_priors)
-
-    wv = sub.add_parser("write-verdict")
-    wv.add_argument("--packet", required=True)
-    wv.add_argument("--verdict", required=True)
-    wv.add_argument("--ctx", required=True)
-    wv.add_argument("--out", default="-")
-    wv.set_defaults(func=_cmd_write_verdict)
-
-    wd = sub.add_parser("write-kb-drafts")
-    wd.add_argument("--packet", required=True)
-    wd.add_argument("--kb-draft", required=True)
-    wd.add_argument("--ctx", required=True)
-    wd.add_argument("--out", default="-")
-    wd.set_defaults(func=_cmd_write_kb_drafts)
-
-    ac = sub.add_parser("add-contradiction")
-    ac.add_argument("--new-id", required=True)
-    ac.add_argument("--old-ids", required=True, help="Comma-separated KB ids.")
-    ac.add_argument("--ctx", required=True)
-    ac.add_argument("--out", default="-")
-    ac.set_defaults(func=_cmd_add_contradiction)
 
     rd = sub.add_parser("replay-dead-letter")
     rd.add_argument("--dir", default=None)
