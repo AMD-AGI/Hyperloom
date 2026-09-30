@@ -395,7 +395,7 @@ brief:
   orchestration prompt. One arm dry is advisory — the phase stays open on the
   other lever. **Both arms dry advances the phase** via
   `optimize_no_more_leverage`. The LLM may also emit
-  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'}` when it judges
+  `escalate_strategy_change{hint='skip_to_kernel'}` when it judges
   further effort unproductive. `skip_to_close` is not a phase advance: it abandons
   the remaining budget and is reserved for genuine early abandonment.
 

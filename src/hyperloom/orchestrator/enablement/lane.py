@@ -120,7 +120,7 @@ class EnablementLane(CoordinatorCollaborator):
                 )
             return ""
         launch_log = state.enablement.launch_log
-        deadline = self._run_deadline
+        deadline = self._coord._run_deadline
         # Reaches the network and stats a checkout on a network mount, so it
         # runs off the tick; discovery degrades to repos-only at the deadline.
         params = await offload(
@@ -646,7 +646,7 @@ class EnablementLane(CoordinatorCollaborator):
                 # the lane's event is open for the whole session, so only the
                 # lane knows which exceptions are its own to answer for.
                 enablement_event.record_fault(stage=stage, exc=exc)
-                self._record_coordinator_exception(stage=stage, exc=exc)
+                self._coord._record_coordinator_exception(stage=stage, exc=exc)
 
 
 def _stack_patch_roots(state: Any, res: dict[str, Any]) -> None:

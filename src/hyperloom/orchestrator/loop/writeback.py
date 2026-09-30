@@ -1483,7 +1483,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # An upstream-PR candidate task that settles failed/empty never reaches
         # the promote branch that writes the terminal progress row; stamp
         # no_result_failed so the pump does not re-select it every tick.
-        self.phase_framework.record_unpromoted_candidate(task, result_payload)
+        self._coord.phase_framework.record_unpromoted_candidate(task, result_payload)
         # Baseline-specific gates: streak counter + stop_reason + baseline_not_promoted event.
         # Fast arg errors get their own streak so they don't burn the
         # slow-baseline retry budget on deterministic failures.
@@ -1738,7 +1738,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             The per-session :class:`Journal` instance (created on first call,
             with the baseline backfilled on subsequent calls).
         """
-        existing = self._journal
+        existing = self._coord._journal
         if existing is None:
             ss = self.shared_state
             self._coord._journal = Journal.load_or_create(
@@ -1752,7 +1752,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         else:
             # Backfill baseline once the baseline executor finishes.
             existing.update_baseline(float(self.shared_state.baseline_tput or 0.0))
-        return self._journal
+        return self._coord._journal
 
     def _pitfall_severity_for(
         self,
@@ -2894,7 +2894,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "ensemble_scores": round_entry.get("ensemble_scores") or {},
         }
         source_phase = str(round_entry.get("source_phase") or "").strip().upper()
-        recorder = self.phase_framework.timeline()
+        recorder = self._coord.phase_framework.timeline()
         if recorder is not None and source_phase == PHASE_FRAMEWORK_AGENT:
             recorder.record_run(str(task.task_id or ""), **product)
             return
@@ -2960,8 +2960,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 },
             )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing.
-        if self._proposal_scorer is not None and proposals:
-            scores = await self._proposal_scorer.score(
+        if self._coord._proposal_scorer is not None and proposals:
+            scores = await self._coord._proposal_scorer.score(
                 gap={
                     "domain": domain,
                     "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
@@ -4042,7 +4042,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             got_hash: The fingerprint the run reported.
             got_overlay_digest: The overlay digest observed after the run.
         """
-        recorder = self.phase_kernel.timeline()
+        recorder = self._coord.phase_kernel.timeline()
         if recorder is None:
             return
         params = task.params or {}
@@ -4082,7 +4082,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         afterwards. The recorder declines silently when the kernel event has
         already closed, and the close-out's ``geak_candidate`` carries it then.
         """
-        recorder = self.phase_kernel.timeline()
+        recorder = self._coord.phase_kernel.timeline()
         if recorder is None:
             return
         recorder.record_geak_rebench_conclusion(
@@ -4466,7 +4466,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     ps_stamped["revalidation_status"] = "no_material"
                     self.shared_state.geak_result = ps_stamped
                     self._record_geak_rebench_conclusion(final_status="no_material")
-                    self.phase_kernel._reject_geak_kernel_journey(
+                    self._coord.phase_kernel._reject_geak_kernel_journey(
                         ps_stamped,
                         measured_tput=float(measured),
                         current_best_tput=(float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0),
@@ -4950,12 +4950,12 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
             rebuilt += 1
 
-        self._resumed_from["rebuilt"] = True
-        self._resumed_from["pending_restored"] = rebuilt
+        self._coord._resumed_from["rebuilt"] = True
+        self._coord._resumed_from["pending_restored"] = rebuilt
         return {
-            "is_resume": self._resumed_from["is_resume"],
-            "event_count": self._resumed_from["event_count"],
-            "state_json_present": self._resumed_from["state_json_present"],
+            "is_resume": self._coord._resumed_from["is_resume"],
+            "event_count": self._coord._resumed_from["event_count"],
+            "state_json_present": self._coord._resumed_from["state_json_present"],
             "pending_restored": rebuilt,
             "verdicts_seen": len(verdicts),
         }
@@ -5344,7 +5344,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         resumed session and every recovery step dedupes, so a second pass is a
         no-op.
         """
-        if not self._resumed_from.get("is_resume"):
+        if not self._coord._resumed_from.get("is_resume"):
             return {"skipped": True, "reason": "not_resume"}
         state = self.shared_state
         report: dict[str, Any] = {
@@ -5774,7 +5774,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         pending = getattr(state, "warm_replay_pending", {}) or {}
         if not isinstance(pending, dict) or not pending:
             return
-        rollback = self.phase_prelude._rollback_combined_warm({}, None)
+        rollback = self._coord.phase_prelude._rollback_combined_warm({}, None)
         errors = list(rollback.get("errors") or [])
         if errors:
             report["warnings"].append(
@@ -6481,7 +6481,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         """
         from ..phases.machine_state import PHASE_KERNEL_AGENT
 
-        if not self._resumed_from.get("is_resume"):
+        if not self._coord._resumed_from.get("is_resume"):
             return
         state = self.shared_state
         if (state.phase or "").strip().upper() != PHASE_KERNEL_AGENT:
@@ -6514,12 +6514,12 @@ class WritebackCollaborator(CoordinatorCollaborator):
             A copy of the resume-detection dict so callers cannot mutate
             internal state.
         """
-        return dict(self._resumed_from)
+        return dict(self._coord._resumed_from)
 
     # Bounded test interface
     async def _replay_resume_if_needed(self) -> None:
         """Rebuild in-memory state once for a resumed session (replay log + abandon orphan dispatches)."""
-        if not (self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]):
+        if not (self._coord._resumed_from["is_resume"] and not self._coord._resumed_from["rebuilt"]):
             return
         await self.replay_for_resume()
         await self._resume_consistency_pass()

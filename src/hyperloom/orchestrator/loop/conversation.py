@@ -371,7 +371,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     def _refresh_target_gap_pct(self) -> None:
         """Update target_gap_pct from the current objective."""
-        obj = self._current_objective
+        obj = self._coord._current_objective
         self.shared_state.target_gap_pct = obj.gap_pct(self.shared_state) if obj is not None else 0.0
 
     async def _compose_prompt(self, agent_name: str) -> str:
@@ -390,9 +390,9 @@ class ConversationCollaborator(CoordinatorCollaborator):
         if agent_name == "orchestration":
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
-            if self._run_deadline is not None and self._run_started_monotonic is not None:
-                remaining_min = max(0.0, self._run_deadline.remaining() / 60.0)
-                elapsed_min = (time.monotonic() - self._run_started_monotonic) / 60.0
+            if self._coord._run_deadline is not None and self._coord._run_started_monotonic is not None:
+                remaining_min = max(0.0, self._coord._run_deadline.remaining() / 60.0)
+                elapsed_min = (time.monotonic() - self._coord._run_started_monotonic) / 60.0
                 budget_min = self.shared_state.max_minutes or 0
                 sections.append("=== Time budget ===")
                 sections.append(
