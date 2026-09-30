@@ -694,8 +694,7 @@ class Coordinator:
         # Bump the persistent tick counter — drives phase/plateau math.
         self.shared_state.increment_tick()
         try:
-            # A phase-entry hook may have finished by setting a pending phase hint (for example current GEAK
-            # returning no_gain -> skip_to_sweep).
+            # A phase-entry hook may have finished early (for example a GEAK no_gain run exits KERNEL immediately).
             await self._await_within_session_bound(
                 self.phase_machine._advance_phase_if_needed,
                 stage="advance_phase_pre_reactor",
