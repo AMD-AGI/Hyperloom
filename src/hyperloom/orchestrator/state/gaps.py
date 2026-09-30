@@ -138,6 +138,8 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             state.upsert_gap(entry)
         for entry in self._extract_gaps_from_attempts():
             state.upsert_gap(entry)
+        for entry in self._extract_gaps_from_profile():
+            state.upsert_gap(entry)
 
         plane = getattr(self, "knowledge_plane", None)
         if plane is not None and hasattr(plane, "recipe_kb_traverse_issues"):
@@ -270,6 +272,42 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
                 }
             )
         return gaps
+
+    def _extract_gaps_from_profile(self) -> list[dict[str, Any]]:
+        """Emit a gap when the last profile covered only one serving phase on a workload that exercises the other.
+
+        A partial capture drops the missing phase out of the Amdahl denominator, so ranking against it steers the run
+        to the phase that happened to be measured. Scoped to a prefill miss on an agentic (prefill-heavy) workload —
+        the failure mode where the dominant phase goes unseen — so a synthetic decode-steady-state capture stays quiet.
+        The gap self-resolves once a profile captures prefill: the extractor then emits nothing and the row ages out.
+
+        Returns:
+            A single-row list carrying the prefill-unmeasured gap, or empty when coverage is complete or the workload
+            is not agentic.
+        """
+        from hyperloom.common.perf_metric import is_agentx_mode
+
+        state = self.shared_state
+        coverage = getattr(state, "last_profile_phase_coverage", None) or {}
+        if not coverage.get("partial") or str(coverage.get("missing") or "") != "prefill":
+            return []
+        if not is_agentx_mode(getattr(state, "benchmark_mode", "")):
+            return []
+        anchor = self._workload_canonical_id()
+        return [
+            {
+                "canonical_id": f"{anchor}#phase_unmeasured:prefill",
+                "symptom": (
+                    "prefill is absent from the last profile split — on this agentic workload prefill dominates the "
+                    "engine, so its component shares are unmeasured, not zero. Instrument the prefill path directly "
+                    "(a targeted per-component eval) before ranking against decode-only data."
+                ),
+                "layer": "framework",
+                "severity": "high",
+                "domain_hint": self._framework_authoring_domain(),
+                "source": "profile",
+            }
+        ]
 
     def _seed_gaps_from_research_hints(self) -> None:
         """Inject research hints as advisory gaps[] seeds (idempotent)."""

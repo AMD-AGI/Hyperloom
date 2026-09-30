@@ -546,6 +546,10 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # ``current_best.action`` in effect when ``last_profile_workload`` was recorded, so the backfill in
     # ``current_profile_workload_context`` can tell a same-arm reuse from a stale one.
     last_profile_workload_action: str = ""
+    # Phase coverage of ``last_profile_trace``: ``{"partial": bool, "missing": "prefill"|"decode"|""}``. A partial
+    # capture means one serving phase never landed in the trace split, so its component shares are unmeasured (not
+    # zero); the gap refresh turns a prefill miss on an agentic workload into a first-class gap.
+    last_profile_phase_coverage: dict[str, Any] = field(default_factory=dict)
     # Rolling log of PolicyGate denials (newest last, cap 50).
     policy_denial_history: list[dict[str, Any]] = field(default_factory=list)
     # Per-(action_name, rule) consecutive denial counter.
