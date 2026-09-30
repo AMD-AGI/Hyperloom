@@ -1443,7 +1443,7 @@ async def test_promote_replay_warm_recipe_routes_and_skips_tail(session_dir, mon
         return None
 
     monkeypatch.setattr(
-        coord.writeback,
+        coord.phase_prelude,
         "_maybe_enqueue_prelude_initial_analysis_after_baseline",
         _noop_prelude,
     )
@@ -1500,7 +1500,7 @@ async def test_promote_explore_resume_revalidate_clears_pending(session_dir):
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.current_best = {"action": "explore", "tput": 130.0}
-    s.resume_pending_revalidation = True
+    _set_resume_pending(s, True)
 
     await coord.writeback._promote_to_shared_state(
         "explore",
@@ -1513,12 +1513,12 @@ async def test_promote_explore_resume_revalidate_clears_pending(session_dir):
         task=_task(
             "explore",
             task_id="t1",
-            params={"source": "resume_stack_revalidate"},
+            params={"source": "stack_revalidate"},
         ),
     )
 
     # A valid rebench clears the pending flag; current_best is not re-promoted.
-    assert s.resume_pending_revalidation is False
+    assert _resume_pending(s) is False
     assert s.current_best["action"] == "explore"
     assert s.current_best["tput"] == 130.0
 
@@ -1541,7 +1541,7 @@ async def test_promote_explore_resume_revalidate_keeps_pending_on_empty_rebench(
         task=_task(
             "explore",
             task_id="t2",
-            params={"source": "resume_stack_revalidate"},
+            params={"source": "stack_revalidate"},
         ),
     )
 
@@ -2252,7 +2252,7 @@ class TestWritebackRequiredAxes:
 
         await coord.writeback._promote_explore(
             {**candidate, "winners": [], "round_id": "r-incomparable-revalidation"},
-            _task("explore", params={"source": "resume_stack_revalidate"}),
+            _task("explore", params={"source": "stack_revalidate"}),
             wb._PromoteOutcome(),
         )
 

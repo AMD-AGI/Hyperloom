@@ -2209,10 +2209,11 @@ async def test_materialize_sweep_stamps_base(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
-async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator) -> None:
+async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator, monkeypatch) -> None:
     # Regression: explore must inherit current_best.extra_envs as its env base, else the accepted stack's envs
     # collapse to the last variant's delta.
     coord.shared_state.baseline_tput = 800.0
+    monkeypatch.setattr(coord.proposals, "phase_framework", coord.phase_framework)
     coord.shared_state.current_best = {
         "tput": 900.0,
         "extra_server_args": "--kv-cache-dtype fp8",
@@ -2539,8 +2540,9 @@ async def test_pump_framework_agent_dedup_does_not_resubmit(coord: Coordinator, 
 
 
 @pytest.mark.asyncio
-async def test_framework_agent_reject_records_critic_denied(coord: Coordinator) -> None:
+async def test_framework_agent_reject_records_critic_denied(coord: Coordinator, monkeypatch) -> None:
     """A reject verdict on a framework_agent candidate proposal writes a critic_denied progress row."""
+    monkeypatch.setattr(coord.router, "phase_framework", coord.phase_framework)
     from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     pending = PendingProposal(

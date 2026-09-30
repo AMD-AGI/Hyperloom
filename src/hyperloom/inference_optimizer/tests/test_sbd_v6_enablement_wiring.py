@@ -185,19 +185,23 @@ def _lane(session_dir: Path, **overrides: Any):
         # to whichever test ran before this one, so the host answers that it cannot tell.
         _environment_verdict=lambda: None,
     )
+    for name in ("_registry_lanes_ttl",):
+        setattr(fake, name, types.MethodType(getattr(DispatcherCollaborator, name), fake))
+    for name in ("_build_enablement_specialist_params", "_discover_enablement_candidate_refs"):
+        setattr(fake, name, types.MethodType(getattr(EnablementParams, name), fake))
     for name in (
-        "_registry_lanes_ttl",
-        "_build_enablement_specialist_params",
-        "_discover_enablement_candidate_refs",
         "_maybe_enqueue_enablement_specialist",
         "_maybe_record_enablement_human_review",
         "_maybe_rearm_enablement",
+    ):
+        setattr(fake, name, types.MethodType(getattr(EnablementLane, name), fake))
+    for name in (
         "_maybe_enqueue_enablement_baseline_revalidation",
         "_open_revalidation_row",
         "_open_row_past_spent_generations",
         "_open_round_past_spent_generations",
     ):
-        setattr(fake, name, types.MethodType(getattr(Coordinator, name), fake))
+        setattr(fake, name, types.MethodType(getattr(EnablementRevalidation, name), fake))
     # The round ledger's own surface: the cap, the lease and the settle all live on it.
     for name in (
         "_enablement_admitted",
@@ -698,6 +702,11 @@ async def test_a_raising_pump_is_named_on_the_event(_bound_session):
         _maybe_route_build_outcomes=_boom,
         _maybe_enqueue_enablement_baseline_revalidation=_ok,
         _maybe_enqueue_enablement_specialist=_ok,
+        _record_coordinator_exception=_record,
+    )
+    fake._coord = types.SimpleNamespace(
+        enablement_build=types.SimpleNamespace(_maybe_route_build_outcomes=_boom),
+        enablement_revalidation=types.SimpleNamespace(_maybe_enqueue_enablement_baseline_revalidation=_ok),
         _record_coordinator_exception=_record,
     )
     await EnablementLane._pump_enablement_safely(fake)
