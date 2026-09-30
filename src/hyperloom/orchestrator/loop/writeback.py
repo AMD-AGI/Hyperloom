@@ -1748,10 +1748,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 result_dict=result_dict,
                 verdict=verdict,
             )
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:
-            log.exception("fact-write SharedState.save failed")
+        self.shared_state.save(self.session_dir)
 
     def _ensure_journal(self) -> Journal:
         """Lazy-instantiate the per-session :class:`Journal` (load_or_create reads an existing file on resume).
@@ -5590,11 +5587,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
         path = Path(str(attempt_dir or "").strip())
         if not attempt_dir or not path.exists():
             return False
-        try:
-            shutil.rmtree(path, ignore_errors=True)
-            return True
-        except Exception:  # noqa: BLE001 — GC is best-effort
-            return False
+        shutil.rmtree(path, ignore_errors=True)
+        return True
 
     async def _resume_recover_interrupted_stack(self, report: dict[str, Any]) -> None:
         """Retry an unwind a halted leg left owed, before anything here can benchmark.

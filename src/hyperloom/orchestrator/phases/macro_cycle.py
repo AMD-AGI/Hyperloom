@@ -228,14 +228,11 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             int(new_cycle),
             summary,
         )
-        try:
-            await self._coord.writeback._record_observation(
-                "coordinator",
-                "observation",
-                {"kind": "cycle_soft_restart", **summary},
-            )
-        except Exception:
-            log.exception("cycle soft-restart: observation write failed")
+        await self._coord.writeback._record_observation(
+            "coordinator",
+            "observation",
+            {"kind": "cycle_soft_restart", **summary},
+        )
         return summary
 
     async def _on_cycle_start_reprofile(self, *, from_phase: str) -> None:
@@ -253,19 +250,14 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         if (from_phase or "").upper() == _phase_state.PHASE_SWEEP and int(
             getattr(self.shared_state, "macro_cycle", 0) or 0
         ) > 0:
-            try:
-                task = await self._coord.phase_prelude._enqueue_internal_analysis_task(
-                    reason="cycle_start",
-                )
-                if task is None:
-                    return
-                self.shared_state.auto_roofline_pending_task_id = task.task_id
-                log.info(
-                    "cycle %d start: forced reprofile task=%s",
-                    int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                    task.task_id,
-                )
-            except Exception:
-                log.exception(
-                    "cycle start: forced reprofile enqueue failed",
-                )
+            task = await self._coord.phase_prelude._enqueue_internal_analysis_task(
+                reason="cycle_start",
+            )
+            if task is None:
+                return
+            self.shared_state.auto_roofline_pending_task_id = task.task_id
+            log.info(
+                "cycle %d start: forced reprofile task=%s",
+                int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                task.task_id,
+            )

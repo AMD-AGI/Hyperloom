@@ -108,7 +108,7 @@ class CoordinatorCollaborator:
 
     @property
     def _journal(self):
-        return self._coord._journal
+        return getattr(self._coord, "_journal", None)
 
     @_journal.setter
     def _journal(self, value):
