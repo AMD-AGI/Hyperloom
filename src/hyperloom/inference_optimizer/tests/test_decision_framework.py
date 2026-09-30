@@ -75,7 +75,7 @@ async def test_trace_analyze_does_not_record_kernel_opt(
             type=IntentType.REQUEST,
             payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": "/tmp/t.json"}},
         )
-        await c._handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", intent)
         assert c.shared_state.last_kernel_opt == {}
     finally:
         await c.stop()
