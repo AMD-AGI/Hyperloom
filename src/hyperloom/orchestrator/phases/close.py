@@ -365,7 +365,13 @@ class ClosePhase(CoordinatorCollaborator):
     async def _do_report(self) -> None:
         """Enqueue and await the report task; emit lifecycle signals and record artifacts."""
         self._coord.writeback._emit_lifecycle(step="report", status="START", detail="close_phase_entry")
-        report_task = await self._enqueue_internal_report_task(reason="close_phase_entry")
+        try:
+            report_task = await self._enqueue_internal_report_task(reason="close_phase_entry")
+        except Exception as exc:
+            detail = f"enqueue_failed={exc!r}"
+            self._coord.writeback._emit_lifecycle(step="report", status="ERROR", detail=detail)
+            await self._record_close_step("report", status="failed", detail=detail)
+            raise
         terminal_state = await self._run_close_task(report_task, step="1 (report)")
         if terminal_state in {"succeeded", None}:
             await self._record_close_step("report", status="done", task_id=report_task.task_id)
@@ -418,12 +424,11 @@ class ClosePhase(CoordinatorCollaborator):
         record_session_breakdown(self.session_dir)
         await self._record_close_step("langfuse_flush", status="done")
 
-    async def _do_artifact_package(self) -> None:
+    async def _do_artifact_package(self) -> Path | None:
         """Bundle session artifacts into a zip under ``/workspace``.
 
-        Stores the package path on ``self._pkg_path`` so the post-sequencer
-        close-section refresh can rebuild the zip after the final close record
-        is written.
+        Returns the package path (or None when nothing was written) so the caller
+        can pass it directly to the post-sequencer close-section rebuild.
         """
         session_id = str(self.shared_state.session_id or "")
         from hyperloom.inference_optimizer.breakdown import package_session_artifacts
@@ -435,7 +440,6 @@ class ClosePhase(CoordinatorCollaborator):
             self.session_dir,
             session_id=session_id,
         )
-        self._pkg_path = pkg_path
         if pkg_path is not None:
             _close_out.record_close_artifacts(self.session_dir, artifact_package_path=pkg_path)
             await self._record_close_step("artifact_package", status="done", detail=str(pkg_path))
@@ -443,6 +447,7 @@ class ClosePhase(CoordinatorCollaborator):
             await self._record_close_step(
                 "artifact_package", status="skipped", detail="no artifacts matched or dest unwritable"
             )
+        return pkg_path
 
     async def _on_enter_close(self, tr: "Transition") -> None:
         """CLOSE sequencer (fixed order): stack revalidation → post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons."""
@@ -489,7 +494,12 @@ class ClosePhase(CoordinatorCollaborator):
 
         # Artifact package: bundle the curated result/report/analysis files into a single zip under ``/workspace``
         # so the Claw sandbox sync ships it to object storage even when ``$USER_DATA_PATH`` is outside ``/workspace``.
-        await self._run_close_step("artifact_package", self._do_artifact_package())
+        pkg_path: Path | None = None
+        try:
+            pkg_path = await self._do_artifact_package()
+        except Exception as exc:
+            log.exception("CLOSE step %r failed", "artifact_package")
+            await self._record_close_step("artifact_package", status="failed", detail=repr(exc)[:240])
 
         # Record a skipped ``ndjson_drain`` close-step for ledger consumers (RecipeKB is local-only).
         await self._record_close_step("ndjson_drain", status="skipped")
@@ -888,7 +898,8 @@ class ClosePhase(CoordinatorCollaborator):
         if self.shared_state.close_sequence_done:
             return False
         log.info("CLOSE: no close sequence has run (reason=%s); running it now", reason)
-        await self._on_enter_close(from_phase=reason)
+        from .machine import Transition
+        await self._on_enter_close(Transition(from_phase=reason, to_phase="CLOSE", reason=reason, evidence={}, loopback=False))
         return True
 
     async def _closing_report_terminal(self) -> bool:
