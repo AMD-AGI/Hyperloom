@@ -1435,9 +1435,9 @@ async def test_promote_replay_warm_recipe_routes_and_skips_tail(session_dir, mon
     def _spy_warm(result, *, task=None):
         warm_calls.append({"result": result, "task": task})
 
-    # _promote_warm_replay lives on the writeback collaborator; also stub the deferred PRELUDE analysis enqueue so the
+    # _promote_warm_replay lives on the phase_prelude collaborator; also stub the deferred PRELUDE analysis enqueue so the
     # test stays hermetic.
-    monkeypatch.setattr(coord.writeback, "_promote_warm_replay", _spy_warm)
+    monkeypatch.setattr(coord.phase_prelude, "_promote_warm_replay", _spy_warm)
 
     async def _noop_prelude(*a, **k):
         return None
@@ -2482,13 +2482,13 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
         "server_log_path": "/last/server.log",
     }
     updates = []
-    real_update = coord.writeback._update_cumulative_gain_validated
+    real_update = coord.writeback.validate
 
     def capture_update(new_tput, measurement, **kwargs):
         updates.append((new_tput, dict(measurement), kwargs.get("measurement_basis")))
         return real_update(new_tput, measurement, **kwargs)
 
-    monkeypatch.setattr(coord.writeback, "_update_cumulative_gain_validated", capture_update)
+    monkeypatch.setattr(coord.writeback, "validate", capture_update)
     await coord.writeback._promote_to_shared_state(
         "explore",
         {

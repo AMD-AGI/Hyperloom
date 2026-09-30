@@ -148,8 +148,8 @@ async def test_existing_events_triggers_resume(session_dir):
         await c1.stop()
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        assert c2.resumed_from["is_resume"] is True
-        assert c2.resumed_from["event_count"] >= 1
+        assert c2.writeback.resumed_from["is_resume"] is True
+        assert c2.writeback.resumed_from["event_count"] >= 1
     finally:
         await c2.stop()
 

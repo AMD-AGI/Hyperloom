@@ -253,6 +253,7 @@ class _ArchState:
     isl: int = 0
     osl: int = 0
     max_model_len: int = 0
+    macro_cycle: int = 0
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[Any] = field(default_factory=list)
     warm_start_lessons: list[Any] = field(default_factory=list)

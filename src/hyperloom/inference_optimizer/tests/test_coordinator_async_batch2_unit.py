@@ -1313,7 +1313,7 @@ async def test_resume_stack_revalidate_promote_clears_flag_and_sets_watermark(co
         {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
     ]
     coord.shared_state.cumulative_gain_validated_stack_len = 0
-    task = SimpleNamespace(task_id="tr-1", params={"source": "resume_stack_revalidate"})
+    task = SimpleNamespace(task_id="tr-1", params={"source": "stack_revalidate"})
     await coord.writeback._promote_to_shared_state(
         "explore",
         {"winners": [], "best_variant": None, "output_throughput": 121.0},
@@ -1333,7 +1333,7 @@ async def test_resume_revalidate_failed_rebench_keeps_flag_set(coord: Coordinato
         {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
     ]
     coord.shared_state.cumulative_gain_validated_stack_len = 0
-    task = SimpleNamespace(task_id="tr-fail", params={"source": "resume_stack_revalidate"})
+    task = SimpleNamespace(task_id="tr-fail", params={"source": "stack_revalidate"})
     await coord.writeback._promote_to_shared_state(
         "explore",
         {"winners": [], "best_variant": None, "output_throughput": 0.0},
@@ -2444,7 +2444,10 @@ async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch
         return SubAgentResult(task_id=task.task_id, state="succeeded", result={}, error=None)
 
     monkeypatch.setattr(coord.sub, "run_task", _fake_run)
-    await coord.phase_close._on_enter_close(from_phase="SWEEP")
+    from hyperloom.orchestrator.phases.machine import Transition
+    await coord.phase_close._on_enter_close(
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="SWEEP", evidence={}, loopback=False)
+    )
     assert coord.shared_state.close_sequence_done is True
     assert coord.shared_state.stop_reason
 
