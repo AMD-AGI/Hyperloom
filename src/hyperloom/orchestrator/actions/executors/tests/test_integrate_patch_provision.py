@@ -300,7 +300,12 @@ def test_rearm_reactivation_threads_kept_action_into_next_params(monkeypatch):
             last_build_failure={},
         ),
     )
-    fake = types.SimpleNamespace(shared_state=state)
+    gpu_lanes = types.SimpleNamespace(_framework_gpu_params=lambda: {})
+    fake = types.SimpleNamespace(
+        shared_state=state,
+        knowledge_plane=None,
+        _coord=types.SimpleNamespace(gpu_lanes=gpu_lanes),
+    )
     fake._discover_enablement_candidate_refs = types.MethodType(
         EnablementParams._discover_enablement_candidate_refs, fake
     )
