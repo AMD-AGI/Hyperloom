@@ -438,10 +438,12 @@ def parse_eval_results(
 
         if is_mlperf_backend():
             # The harness scores every smoke run inline, so each KEEP is gated on that score against the
-            # baseline's, the same way lm-eval accuracy is. Over the error-rate ceiling it is a drop outright.
-            score = _mlperf_inline_accuracy(_latest_agentx_result(workspace)) if passed else 0.0
+            # baseline's, the same way lm-eval accuracy is. Over the error-rate ceiling, an unscored turn or no
+            # scores.json is a drop outright: 0.0, not None, which a lane without a required gate reads as
+            # "no eval ran" and skips.
+            score = _mlperf_inline_accuracy(_latest_agentx_result(workspace)) if passed else None
             return {
-                "accuracy": score,
+                "accuracy": 0.0 if score is None else score,
                 "task": "mlperf_agentic_inline",
                 "metric": "score",
                 "error_rate": rate,

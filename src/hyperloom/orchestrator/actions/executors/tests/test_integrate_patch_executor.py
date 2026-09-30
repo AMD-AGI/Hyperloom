@@ -2465,6 +2465,9 @@ async def test_executor_grades_real_patch_bench(
     (workspace.parent / "results.json").write_text(
         json.dumps({"results": {"gsm8k": {"exact_match,strict-match": 0.9}}}), encoding="utf-8"
     )
+    if grading_mode != "synthetic":
+        # An AgentX round's correctness signal is its request error rate, which the client writes here.
+        (workspace / "inferencex_result.json").write_text(json.dumps({"request_error_rate": 0.0}), encoding="utf-8")
     measured = VariantResult(
         name="patch-grading",
         extra_server_args="",
@@ -2801,3 +2804,82 @@ async def test_executor_refuses_an_unvetted_blob_without_invoking_git(tmp_path: 
     assert result["status"] == "apply_failed"
     assert result["patches_applied"] == []
     assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "inline,expected_status",
+    [
+        pytest.param({"accuracy_score": 0.72, "accuracy_missing_turns": 0}, "kept", id="baseline-accuracy"),
+        pytest.param({"accuracy_score": 0.60, "accuracy_missing_turns": 0}, "reverted", id="accuracy-drop"),
+        pytest.param({"accuracy_score": 0.72, "accuracy_missing_turns": 3}, "reverted", id="unscored-turns"),
+    ],
+)
+async def test_mlperf_integrate_patch_is_gated_on_inline_accuracy(tmp_path: Path, monkeypatch, inline, expected_status):
+    """On the MLPerf backend a +10% output-throughput patch is decided by the harness's inline score.
+
+    ``require_accuracy_for_keep`` is left at its default (off for a patch the framework agent did not author), which is
+    the path that used to read no accuracy at all and KEEP on throughput alone.
+    """
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors import _ray_serving
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_NOISE_PCT", raising=False)
+    session_dir = tmp_path / "session"
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-mlperf", patch_contents=[_VALID_PATCH])
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+    workspace = tmp_path / "grid" / "benchmark_test"
+    workspace.mkdir(parents=True)
+    (workspace / "inferencex_result.json").write_text(
+        json.dumps({"output_throughput": 110.0, "request_error_rate": 0.0, **inline}), encoding="utf-8"
+    )
+    measured = VariantResult(
+        name="patch-mlperf",
+        extra_server_args="",
+        extra_envs={},
+        status="succeeded",
+        output_throughput=110.0,
+        duration_seconds=3500.0,
+        request_error_rate=0.0,
+        workspace=str(workspace),
+    )
+
+    async def fake_run_grid(**_kwargs):
+        return [measured]
+
+    monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
+    monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
+    state = SimpleNamespace(
+        framework="sglang",
+        benchmark_mode="agentx",
+        agentx_backend="mlperf",
+        current_best={"tput": 100.0, "duration_seconds": 3500.0, "request_error_rate": 0.0},
+        baseline_accuracy=0.72,
+        get_specialist_patch_verdict=lambda _sid: "approve",
+        save=lambda _path: None,
+    )
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    ctx = _make_ctx(
+        "t-int-mlperf",
+        {
+            "specialist_task_id": "t-spec-mlperf",
+            "framework_source_root": str(repo),
+            "framework": "sglang",
+            "config_path": str(config_path),
+        },
+    )
+    ctx.extra["shared_state"] = state
+    result = await executor(ctx)
+
+    assert result["status"] == expected_status
+    assert result["accuracy_pass"] is (expected_status == "kept")

@@ -2643,4 +2643,6 @@ async def test_explore_mlperf_reverts_when_turns_went_unscored(sub_agent_runner,
         sub_agent_runner, tmp_path, monkeypatch, candidate=_mlperf_smoke(accuracy_missing_turns=3), name="unscored"
     )
     assert tested["outcome"] == "REVERT"
-    assert {gate["gate"]: gate for gate in tested["gates"]}["accuracy"]["reason"] == "accuracy_unavailable"
+    accuracy = {gate["gate"]: gate for gate in tested["gates"]}["accuracy"]
+    assert accuracy["reason"] == "accuracy_drop"
+    assert accuracy["observed"] == 0.0, "an unscored turn scores the run 0.0 rather than skipping the gate"
