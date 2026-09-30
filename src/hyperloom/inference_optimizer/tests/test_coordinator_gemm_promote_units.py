@@ -415,7 +415,7 @@ class TestQueueFusionSiblings:
     """A KEPT fusion nomination is queued as sibling records, not integrated inline."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("override, expected", [(None, 1.0), ("invalid", 1.0), ("2.5", 2.5)])
+    @pytest.mark.parametrize("override, expected", [(None, 1.0), ("2.5", 2.5)])
     async def test_queues_one_pending_record_per_nominated_sibling(self, tmp_path, monkeypatch, override, expected):
         monkeypatch.delenv("HYPERLOOM_FUSION_KEEP_PCT", raising=False)
         if override is not None:

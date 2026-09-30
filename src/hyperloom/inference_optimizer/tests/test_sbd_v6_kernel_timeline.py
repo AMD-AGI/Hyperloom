@@ -69,8 +69,10 @@ def _geak_recorder(*, macro_cycle: int = 1):
 
 def _phase_with_recorder(tmp_path: Path, recorder: Any) -> KernelPhase:
     phase = object.__new__(KernelPhase)
-    phase.session_dir = tmp_path
-    phase.shared_state = types.SimpleNamespace(macro_cycle=3)
+    phase._coord = types.SimpleNamespace(
+        session_dir=tmp_path,
+        shared_state=types.SimpleNamespace(macro_cycle=3),
+    )
     phase._kernel_timeline_recorder = recorder
     return phase
 
