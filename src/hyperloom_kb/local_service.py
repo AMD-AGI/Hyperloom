@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -124,9 +125,8 @@ def _stop(health: Mapping[str, JsonValue], host: str, port: int, timeout_seconds
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
         raise LocalServiceError(f"the Experience service on {host}:{port} reports no process to restart; stop it")
     try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
+        with suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGTERM)
     except PermissionError as exc:
         raise LocalServiceError(f"cannot stop the Experience service process {pid} on {host}:{port}") from exc
     deadline = time.monotonic() + timeout_seconds

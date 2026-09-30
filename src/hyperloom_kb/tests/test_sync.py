@@ -238,7 +238,8 @@ def test_a_write_of_an_unregistered_schema_needs_its_declaration(tmp_path: Path)
             local.write(_experience(other, 0))
         with pytest.raises(RemoteClientError, match="does not derive"):
             local.write(_experience(other, 0), declaration=_declaration())
-        assert local.write(_experience(other, 0), declaration=other).status == "created"
+        written = local.write(_experience(other, 0), declaration=other)
+        assert written.status == "created"
 
 
 def test_a_spooled_write_of_a_new_schema_is_accepted_when_the_service_returns(tmp_path: Path) -> None:
