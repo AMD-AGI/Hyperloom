@@ -329,7 +329,7 @@ async def test_handle_request_cache_hit_emits_lone_end(session_dir, monkeypatch)
     try:
         cached = {"status": "ok", "candidates_path": "/tmp/cached_kc.json"}
         monkeypatch.setattr(
-            c,
+            c.phase_kernel,
             "_cached_kernel_request",
             lambda kind, payload: cached,
         )
@@ -369,7 +369,7 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
             lambda target, kind: None,
         )
         monkeypatch.setattr(
-            c,
+            c.phase_kernel,
             "_cached_kernel_request",
             lambda kind, payload: None,
         )
@@ -491,7 +491,7 @@ async def test_on_enter_close_emits_report_end(session_dir, monkeypatch):
             lambda: None,
         )
 
-        await c._on_enter_close(from_phase="SWEEP")
+        await c.phase_close._on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}, loopback=False))
 
         rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
         statuses = [e["status"] for e in rpt]
@@ -562,7 +562,7 @@ async def test_on_enter_close_emits_report_error_for_failed_task(
             lambda: None,
         )
 
-        await c._on_enter_close(from_phase="SWEEP")
+        await c.phase_close._on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}, loopback=False))
 
         rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
         assert [e["status"] for e in rpt] == ["START", "ERROR"]
