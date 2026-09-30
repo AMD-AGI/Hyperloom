@@ -197,6 +197,34 @@ or the split Anthropic/OpenAI credentials.
 
 ---
 
+## Launcher contract
+
+Launchers can rely on these outputs of `hyperloom optimize`.
+
+**Exit codes**
+
+| Code | Meaning |
+|---|---|
+| 0 | The run finished with a completed outcome |
+| 1 | The run failed or was aborted, including by a signal |
+| 2 | Invalid arguments or a startup check failed (topology, resume, model gate, credentials) |
+| 3 | The session lock is held by another optimizer, or quantization failed |
+
+`hyperloom recover` exits 0 on success, 1 when the breakdown rebuild fails and 2 on invalid arguments.
+
+**Launch line**
+
+Once the session directory exists, stdout carries one line
+
+```text
+HYPERLOOM_LAUNCH event=launch pid=... session_dir=... session_id=... run_log=... manifest=... gpu_type=... framework=... model=...
+```
+
+with shell-quoted values, and `--launch-info-file PATH` writes the same keys as JSON. A skipped quantization prelude prints a line starting
+with `QUANTIZATION_SKIPPED:`.
+
+---
+
 ## Observability
 
 Hyperloom does not ship a metrics endpoint of its own; observability

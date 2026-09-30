@@ -43,6 +43,48 @@ host the CLI defaults to `session/` under the current directory instead. Prefer
 
 ---
 
+## Upgrading from 1.1.x
+
+### Required: launch through `hyperloom <command>`
+
+Every command now runs under one entry point, `hyperloom <command>`, or
+`python -m hyperloom <command>` where no console script is installed. Update
+launchers, skills and scripts:
+
+| Before | After |
+|---|---|
+| `python -m hyperloom.inference_optimizer.cli --verbose optimize ...` | `python -m hyperloom optimize --verbose ...` |
+| `inference_optimizer optimize ...` | `hyperloom optimize ...` |
+| `... recover-session --session-dir S` | `hyperloom recover --session-dir S` |
+| `python -m hyperloom.inference_optimizer.setup ...` / `hyperloom --check-only` | `hyperloom setup ...` / `hyperloom setup --check-only` |
+| `quantization-agent ...` | `hyperloom quantize ...` |
+| `python -m hyperloom.inference_optimizer.multi_node SUB ...` | `hyperloom multi-node SUB ...` |
+| `python -m hyperloom.inference_optimizer.tools.dump_session_breakdown` | `hyperloom session breakdown` |
+| `python -m hyperloom.inference_optimizer.tools.dump_session_report` | `hyperloom session report` |
+| `python -m hyperloom.inference_optimizer.tools.backfill_langfuse` | `hyperloom session backfill` |
+| `.../tools/event_counts.py` | `hyperloom session events` |
+| `.../tools/read_optimizer_state.py` | `hyperloom session state` |
+| `.../tools/preflight_optimizer.py MODEL_PATH` | `hyperloom check MODEL_PATH` |
+
+`--verbose` now follows the command name. `hyperloom` without a command prints
+its usage and exits 2 instead of running setup.
+
+### Required: removed flags
+
+These flags are rejected with `unrecognized arguments`:
+
+* `--kernel-codex`, `--kernel-claude`, `--kernel-prompt` (no-ops since the
+  kernel LLM role was retired): drop them.
+* `--max-minutes-{prelude,framework,explore,kernel,sweep,close}-pct` and
+  `--phase-budget-explore-pct`: use `--phase-budget-<phase>-pct`
+  (`--phase-budget-framework-pct` covers what the explore spelling set).
+* `recover --backfill-trace`: run `hyperloom session backfill --session-dir S`.
+* On the rayjob backend, `--pd-prefill-ep`, `--pd-decode-ep` and
+  `--pd-*-extra-args` now fail the server restart instead of being ignored;
+  they are supported on infera only.
+
+---
+
 ## Upgrading from 0.5.x → 0.6.0
 
 Apply the following changes in order. Required steps must be completed before running; recommended and optional steps improve behavior or unlock new features.
