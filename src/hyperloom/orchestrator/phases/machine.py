@@ -278,16 +278,11 @@ class MachinePhase(CoordinatorCollaborator):
                 target,
                 reason,
             )
-        # Terminal transition (target=CLOSE): mirror the stop_reason onto state.
-        if (
-            target == _phase_state.PHASE_CLOSE
-            and isinstance(evidence, dict)
-            and evidence.get("terminal")
-            and reason
-            and is_valid_stop_reason(reason)
-            and not state.stop_reason
-        ):
-            state.set_stop_reason(reason)
+        # Terminal transition (target=CLOSE): set stop_reason once from the transition reason.
+        # Non-vocab reasons are mapped to time_exhausted so the sequencer always finds it populated.
+        if target == _phase_state.PHASE_CLOSE and not state.stop_reason:
+            canonical = reason if reason and is_valid_stop_reason(reason) else "time_exhausted"
+            state.set_stop_reason(canonical)
         # A cyclic config-arm plateau winds the cycle down with ``switch_bottleneck``: record the plateaued bottleneck
         # so the next cycle steers specialists off it.
         if isinstance(evidence, dict) and evidence.get("switch_bottleneck"):

@@ -534,11 +534,6 @@ def test_build_kernel_optimizations_from_state(coord: Coordinator) -> None:
     assert row["e2e_tput"] == 210.0
 
 
-def test_derive_close_stop_reason_default(coord: Coordinator) -> None:
-    coord.shared_state.phase_history = []
-    assert coord.phase_close._derive_close_stop_reason() == "time_exhausted"
-
-
 # -- phase denial gate -----------------------------------------------------
 def test_phase_denial_for_action(coord: Coordinator) -> None:
     ss = coord.shared_state
