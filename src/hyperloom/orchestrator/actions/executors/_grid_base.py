@@ -27,16 +27,6 @@ TS_KILLED_OVERTIME = "KILLED_OVERTIME"
 TS_SKIPPED_DEDUP = "SKIPPED_DEDUP"
 
 
-def is_kept(outcome: str) -> bool:
-    """True when *outcome* is an adoption.
-
-    The graded executors spell it ``VERDICT_KEEP``; ``integrate_patch`` spells
-    it ``"kept"``. Both derive ``adopted`` from here so the two spellings cannot
-    disagree about what counts.
-    """
-    return outcome in (VERDICT_KEEP, "kept")
-
-
 @dataclass
 class GridVariant:
     """One row of the grid we're going to test."""
