@@ -34,6 +34,8 @@ class ContextProvider:
     action_runner: Callable[[str, dict[str, Any]], Awaitable[str]] | None = None
     # On-demand reference documents directory; ``None`` => unavailable.
     reference_reader: Callable[[str], str] | None = None
+    # Specialist findings beyond the prompt's bounded block: (domain, offset, limit) -> text.
+    findings_reader: Callable[[str, int, int], str] | None = None
 
     def _safe(self, fn: Callable[[], str], label: str) -> str:
         """Invoke a projection callable, never letting it crash the reactor."""
@@ -122,6 +124,12 @@ class ContextProvider:
             return "(read_reference not wired)"
         return self._safe(lambda: self.reference_reader(name), "read_reference")
 
+    def specialist_findings(self, domain: str = "", offset: int = 0, limit: int = 10) -> str:
+        """Return specialist findings rounds, newest first, optionally for one domain."""
+        if self.findings_reader is None:
+            return "(get_specialist_findings not wired)"
+        return self._safe(lambda: self.findings_reader(domain, offset, limit), "specialist_findings")
+
     def get_failure(self, failure_id: str = "") -> str:
         """Return one failure evidence packet as JSON."""
         fid = str(failure_id or "").strip()
@@ -196,6 +204,15 @@ _VARIANT_FAILURES_SCHEMA: dict[str, Any] = {
     "properties": {
         "task_id": {"type": "string"},
         "top_k": {"type": "integer", "minimum": 1, "maximum": 50},
+    },
+    "additionalProperties": False,
+}
+_FINDINGS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "domain": {"type": "string"},
+        "offset": {"type": "integer", "minimum": 0},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
     },
     "additionalProperties": False,
 }
@@ -334,6 +351,14 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         _VARIANT_FAILURES_SCHEMA,
         "get_variant_failures",
     ),
+    (
+        "get_specialist_findings",
+        "Return specialist findings rounds, newest first, as JSON lines (domain, round_id, completed_at, "
+        "new_findings, residual_questions). The prompt's Specialist findings block is size-bounded and says how "
+        "many rows it left out; page through them here with domain / offset / limit (default 10).",
+        _FINDINGS_SCHEMA,
+        "specialist_findings",
+    ),
 )
 
 
@@ -376,6 +401,12 @@ def _make_handler(
                 kwargs["failure_id"] = str(args["failure_id"])
             if "task_id" in args:
                 kwargs["task_id"] = str(args["task_id"])
+            if "domain" in args:
+                kwargs["domain"] = str(args["domain"])
+            if "offset" in args:
+                kwargs["offset"] = int(args["offset"])
+            if "limit" in args:
+                kwargs["limit"] = int(args["limit"])
         try:
             if method_name == "run_action_now":
                 text = await method(**kwargs)

@@ -154,6 +154,16 @@ async def test_make_handler_forwards_kwargs():
     assert out["content"][0]["text"] == "denials(2)"
 
 
+async def test_specialist_findings_tool_pages_through_the_reader():
+    assert "get_specialist_findings" in mct.CONTEXT_TOOL_NAMES
+    p = mct.ContextProvider(shared_state=_shared_state(), findings_reader=lambda d, o, n: f"findings({d},{o},{n})")
+    handler = mct._make_handler(p, "specialist_findings")
+    out = await handler({"domain": "comm_specialist", "offset": 10, "limit": 5})
+    assert out["content"][0]["text"] == "findings(comm_specialist,10,5)"
+    unwired = mct.ContextProvider(shared_state=_shared_state())
+    assert unwired.specialist_findings() == "(get_specialist_findings not wired)"
+
+
 async def test_make_handler_forwards_since_seq():
     p = mct.ContextProvider(shared_state=_shared_state(), inbox_reader=lambda s: f"inbox({s})")
     handler = mct._make_handler(p, "inbox")

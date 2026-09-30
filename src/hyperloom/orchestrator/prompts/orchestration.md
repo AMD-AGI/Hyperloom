@@ -91,6 +91,9 @@ Five tools close the act->observe loop without waiting for the next tick
 - **`get_variant_failures{task_id}`** — list recent evidence packets,
   optionally scoped to one task, to find a failure_id you do not already
   hold.
+- **`get_specialist_findings{domain, offset, limit}`** — page through
+  specialist findings older than what the size-bounded Specialist findings
+  block shows; the block says how many rows it left out.
 
 <!-- phase: FRAMEWORK_AGENT -->
 ### Watching a running specialist

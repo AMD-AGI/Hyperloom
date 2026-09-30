@@ -452,6 +452,46 @@ def test_specialist_findings_are_ordered_newest_first(coord: Coordinator) -> Non
     assert block.index("newer finding") < block.index("older finding")
 
 
+def test_specialist_findings_block_stays_within_its_budget(coord: Coordinator, monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_FINDINGS_PROMPT_CHARS", "800")
+    coord.shared_state.specialist_rounds = [
+        _round(f"domain_{i}", f"finding {i} " + "x" * 150, 0.5, questions=[f"question {i}?"]) for i in range(30)
+    ]
+
+    block = _findings(coord)
+
+    assert "finding 29 " in block
+    assert "finding 0 " not in block
+    assert "call get_specialist_findings" in block
+    assert len(block) < 800 + 400
+
+
+def test_specialist_findings_block_unbounded_at_zero(coord: Coordinator, monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_FINDINGS_PROMPT_CHARS", "0")
+    coord.shared_state.specialist_rounds = [_round(f"domain_{i}", f"finding {i} " + "x" * 150, 0.5) for i in range(30)]
+
+    block = _findings(coord)
+
+    assert "finding 0 " in block and "finding 29 " in block
+    assert "get_specialist_findings" not in block
+
+
+def test_findings_reader_pages_by_domain(coord: Coordinator) -> None:
+    from hyperloom.orchestrator.loop.conversation import ConversationCollaborator
+
+    coord.shared_state.specialist_rounds = [
+        _round("comm_specialist", "first", 0.5),
+        _round("serving_specialist", "other", 0.5),
+        _round("comm_specialist", "second", 0.5),
+    ]
+    reader = ConversationCollaborator(coord)._context_findings_reader
+
+    page = reader("comm_specialist", 0, 1)
+    assert "second" in page and "first" not in page and "(2 rounds for comm_specialist" in page
+    assert "first" in reader("comm_specialist", 1, 1)
+    assert reader("comm_specialist", 5, 1).startswith("(no specialist findings")
+
+
 def test_specialist_findings_skip_rows_carrying_neither_findings_nor_questions(coord: Coordinator) -> None:
     coord.shared_state.specialist_rounds = [
         {"domain": "serving_specialist", "new_findings": [], "residual_questions": []},

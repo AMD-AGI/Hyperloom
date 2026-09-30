@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 import json
+import os
 import time
 from typing import Any
 from ..phases import machine_state as _phase_state
@@ -44,6 +45,28 @@ _OUTCOME_TPUT_KEYS: tuple[str, ...] = (
 _OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome", "runner_status")
 # Notes rendered per inbox line.
 _OUTCOME_NOTES_MAX: int = 3
+
+# The findings block is rebuilt into every orchestration prompt and grows with every specialist round; past this many
+# characters the older rows stay reachable through get_specialist_findings instead. 0 renders everything.
+_FINDINGS_PROMPT_CHARS_ENV = "HYPERLOOM_FINDINGS_PROMPT_CHARS"
+_FINDINGS_PROMPT_CHARS_DEFAULT = 12000
+_FINDING_LINE_CHARS = 600
+_FINDINGS_QUESTIONS_SHARE = 0.2
+
+
+def _findings_prompt_budget() -> int:
+    """Character budget for the prompt's findings block (0 = unbounded)."""
+    raw = (os.environ.get(_FINDINGS_PROMPT_CHARS_ENV) or "").strip()
+    if not raw:
+        return _FINDINGS_PROMPT_CHARS_DEFAULT
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _FINDINGS_PROMPT_CHARS_DEFAULT
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
@@ -210,6 +233,7 @@ class ConversationCollaborator:
                 running_tasks_reader=self._context_running_tasks_reader,
                 action_runner=self._coord.dispatcher._run_action_now_wait,
                 reference_reader=self._context_reference_reader,
+                findings_reader=self._context_findings_reader,
             )
             setter(provider)
         except Exception:
@@ -911,31 +935,94 @@ class ConversationCollaborator:
         if not hints and not rounds:
             return ""
 
+        budget = _findings_prompt_budget()
+        line_cap = _FINDING_LINE_CHARS if budget > 0 else 0
         lines = ["=== Specialist findings ==="]
+        used = 0
+        omitted = 0
+
+        def _fits(text: str, limit: int) -> bool:
+            return budget == 0 or used + len(text) + 1 <= limit
+
         if hints:
             lines.append("Findings:")
             for hint in hints:
-                lines.append(json.dumps(hint, sort_keys=True))
+                text = json.dumps(hint, sort_keys=True)
+                text = _clip(text, line_cap) if line_cap else text
+                if _fits(text, budget):
+                    lines.append(text)
+                    used += len(text) + 1
+                else:
+                    omitted += 1
 
         questions: list[str] = []
         seen_questions: set[str] = set()
+        findings_limit = int(budget * (1 - _FINDINGS_QUESTIONS_SHARE)) if budget > 0 else 0
         for row in rounds:
             domain_label = str(row.get("domain") or "").strip()
-            findings = row.get("new_findings") or []
-            if findings:
-                lines.append(f"[{domain_label}] findings:")
-                for finding in findings:
-                    lines.append(json.dumps(finding, sort_keys=True) if isinstance(finding, dict) else str(finding))
+            header_added = False
+            for finding in row.get("new_findings") or []:
+                text = json.dumps(finding, sort_keys=True) if isinstance(finding, dict) else str(finding)
+                text = _clip(text, line_cap) if line_cap else text
+                if not _fits(text, findings_limit):
+                    omitted += 1
+                    continue
+                if not header_added:
+                    lines.append(f"[{domain_label}] findings:")
+                    header_added = True
+                lines.append(text)
+                used += len(text) + 1
             for question in row.get("residual_questions") or []:
                 text = str(question).strip()
                 if text and text not in seen_questions:
                     seen_questions.add(text)
-                    questions.append(f"[{domain_label}] {text}")
+                    questions.append(f"[{domain_label}] {_clip(text, line_cap) if line_cap else text}")
 
         if questions:
             lines.append("Residual questions:")
-            lines.extend(f"- {question}" for question in questions)
+            for question in questions:
+                if _fits(question, budget):
+                    lines.append(f"- {question}")
+                    used += len(question) + 3
+                else:
+                    omitted += 1
+        if omitted:
+            lines.append(
+                f"({omitted} older findings/questions not shown; call get_specialist_findings with a domain "
+                "and offset to read them.)"
+            )
         return "\n".join(lines)
+
+    def _context_findings_reader(self, domain: str = "", offset: int = 0, limit: int = 10) -> str:
+        """Specialist rounds with findings, newest first, filtered by domain and paged."""
+        wanted = str(domain or "").strip()
+        rows = [
+            row
+            for row in reversed(getattr(self.shared_state, "specialist_rounds", []) or [])
+            if isinstance(row, dict)
+            and (row.get("new_findings") or row.get("residual_questions"))
+            and (not wanted or str(row.get("domain") or "").strip() == wanted)
+        ]
+        start = max(0, int(offset or 0))
+        page = rows[start : start + max(1, min(int(limit or 10), 50))]
+        if not page:
+            return f"(no specialist findings{' for ' + wanted if wanted else ''} at offset {start}; {len(rows)} rounds)"
+        out = [f"({len(rows)} rounds{' for ' + wanted if wanted else ''}; showing {start}..{start + len(page) - 1})"]
+        for row in page:
+            out.append(
+                json.dumps(
+                    {
+                        "domain": row.get("domain"),
+                        "round_id": row.get("round_id"),
+                        "completed_at": row.get("completed_at"),
+                        "new_findings": row.get("new_findings") or [],
+                        "residual_questions": row.get("residual_questions") or [],
+                    },
+                    sort_keys=True,
+                    default=str,
+                )
+            )
+        return "\n".join(out)
 
     def _priors_match_advisory_block(self) -> str:
         """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering, fail-soft)."""
