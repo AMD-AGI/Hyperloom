@@ -105,6 +105,7 @@ def test_a_result_with_no_attempts_still_credits_the_backend_it_names(tmp_path: 
     instrument.record_backend_versions_and_timeline(
         tmp_path,
         {"kernel_id": "k1", "backend": "geak", "status": "failed", "attempts": []},
+        recorder=None,
     )
     out = assemble_parts(tmp_path)
     assert out["metadata"]["versions"]["tools"]["geak"]["tool"] == "geak"
@@ -115,6 +116,7 @@ def test_a_pre_dispatch_gating_failure_invents_no_build(tmp_path: Path) -> None:
     instrument.record_backend_versions_and_timeline(
         tmp_path,
         {"kernel_id": "k1", "status": "failed", "attempts": []},
+        recorder=None,
     )
     out = assemble_parts(tmp_path)
     assert not (out.get("metadata") or {}).get("versions")

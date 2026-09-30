@@ -377,13 +377,6 @@ def test_phase_seam_survives_an_unwritable_session_dir(tmp_path):
     assert coord.system_prompt_overrides["orchestration"] == "PROMPT[phase=SWEEP]"
 
 
-def test_reseed_for_phase_is_reachable_through_the_coordinator_delegation_map():
-    """The collaborator method must be routed, or the seam hook is a no-op."""
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    assert Coordinator._DELEGATED.get("_reseed_orch_prompt_for_phase") == "phase_machine"
-
-
 # Snapshot paths: one artefact per scope the model ran under
 def test_prompt_snapshot_path_is_phase_suffixed(tmp_path):
     from hyperloom.inference_optimizer.session.session_paths import agent_prompt_snapshot

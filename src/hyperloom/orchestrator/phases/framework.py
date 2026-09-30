@@ -1683,8 +1683,6 @@ class FrameworkPhase(CoordinatorCollaborator):
                 continue
             if not (getattr(p, "payload", None) or {}).get("framework_agent_candidate_id"):
                 continue
-            if getattr(p, "decided", False):
-                continue
             pl = getattr(p, "payload", {}) or {}
             if str(pl.get("framework_agent_candidate_id") or "") == cand_id and cand_id:
                 return
@@ -2085,7 +2083,12 @@ class FrameworkPhase(CoordinatorCollaborator):
         result: Any,
         adopted: bool,
     ) -> None:
-        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK progress ledger (else the gain is invisible). Attributed to the latest batch; every terminal status is recorded (empty/in-progress statuses and lane-owned ``apply_failed`` retries are skipped). The row is ``kept`` only when the patch was adopted."""
+        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK progress ledger.
+
+        Attributed to the latest batch; every terminal status is recorded (empty/in-progress
+        statuses and lane-owned ``apply_failed`` retries are skipped). The row is ``kept``
+        only when the patch was adopted.
+        """
         params = getattr(task, "params", None) or {}
         if not bool(params.get("framework_agent_authoring")):
             return

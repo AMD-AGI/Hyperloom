@@ -159,7 +159,7 @@ a diff that reads well hides its defects. One line per check into `$WORK/ai_diag
 "clean" alone is not an answer; a reason that names nothing in the diff is not one either.
 
 1. `wiring` — **both directions.** Every first-party import the diff adds resolves against the merge
-   base. Every name-resolved entry (`_COLLAB_MODULES`, `KERNEL_REQUEST_HANDLERS`,
+   base. Every name-resolved entry (`KERNEL_REQUEST_HANDLERS`,
    `ACTION_CATALOGUE`, action-surface names) has a module and class that exist. Then the inverse:
    an added identifier whose head-tree occurrence count is 1 is a writer with no reader; a removed
    caller whose helper survives is a reader with no writer. Both are blocking.

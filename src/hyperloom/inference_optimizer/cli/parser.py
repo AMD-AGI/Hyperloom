@@ -794,7 +794,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--warm-replay-min-confidence",
         dest="warm_replay_min_confidence",
         type=float,
-        default=0.7,
+        default=None,
         help="Minimum ``warm_start_recipe.confidence`` required to "
         "trigger the auto-replay. Default 0.7 means an ``exact`` "
         "seven-tuple hit (conf 1.0) and a server-returned ``relative`` "
