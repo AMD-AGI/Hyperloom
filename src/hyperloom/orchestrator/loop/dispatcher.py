@@ -1221,11 +1221,10 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     run_error=str(result.error or ""),
                 )
                 self.phase_framework.on_specialist_settled(task, done_payload, run_error=str(result.error or ""))
-        # Auto-promote succeeded results into CORE_STATE_FIELDS
-        # (Coordinator-only writer).  Warm replay is deliberately routed
-        # through its promote handler even when dispatch itself failed:
-        # that handler owns rollback of pre-applied framework patches and
-        # clears the PRELUDE ``in_flight`` gate.
+        # Auto-promote succeeded results (Coordinator-only writer).  Warm replay
+        # is deliberately routed through its promote handler even when dispatch
+        # itself failed: that handler owns rollback of pre-applied framework
+        # patches and clears the PRELUDE ``in_flight`` gate.
         result_payload = dict(result.result or {})
         replay_needs_cleanup = task.kind == "replay_warm_recipe" and result.state == "failed"
         if replay_needs_cleanup:

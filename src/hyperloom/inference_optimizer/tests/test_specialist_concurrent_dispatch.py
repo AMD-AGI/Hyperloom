@@ -410,7 +410,6 @@ def test_cli_clamps_research_lane_capacity_above_ceiling(tmp_path, monkeypatch):
         research_lane_capacity=32,
         model="/tmp/dummy-model",
         model_class="",
-        target_summary="clamp test",
         target_gain=0.0,
         max_hours=0,
     )

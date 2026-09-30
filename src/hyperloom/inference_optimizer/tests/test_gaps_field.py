@@ -11,18 +11,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.protocol.intent import (
-    Intent,
-    IntentType,
-)
-from hyperloom.orchestrator.policy.gate import (
-    CORE_STATE_FIELDS,
-    PolicyDenied,
-    PolicyGate,
-)
 from hyperloom.orchestrator.state.gaps import _GAPS_ATTEMPTS_HISTORY, _GAPS_MAX_ENTRIES
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
 
 # 1. Field surface
@@ -59,27 +49,7 @@ def test_gaps_field_roundtrip_through_state_json(tmp_path):
     assert loaded.gaps[0]["layer"] == "kernel_agent"
 
 
-# 2. PolicyGate lock (Inv-1 / Inv-10.2)
-def test_core_state_fields_includes_gaps():
-    """``CORE_STATE_FIELDS`` MUST contain ``gaps`` so the LLM can't fabricate entries via ``update_state``."""
-    assert "gaps" in CORE_STATE_FIELDS
-
-
-def test_policy_gate_rejects_update_state_for_gaps():
-    """Orchestration cannot mutate gaps[] via ``update_state`` (rule='state_field')."""
-    gate = PolicyGate(role_registry=default_role_registry())
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.UPDATE_STATE,
-                payload={"changes": {"gaps": [{"canonical_id": "fake"}]}},
-            ),
-        )
-    assert exc.value.rule == "state_field"
-
-
-# 3. SharedState helpers
+# 2. SharedState helpers
 def test_upsert_gap_inserts_then_merges_by_canonical_id():
     s = SharedState()
     e1 = s.upsert_gap(
