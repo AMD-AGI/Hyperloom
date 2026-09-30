@@ -1462,7 +1462,7 @@ class PreludePhase(CoordinatorCollaborator):
             "workload_compatibility": workload_compatibility,
         }
         try:
-            lanes, ttl = self._registry_lanes_ttl("replay_warm_recipe")
+            lanes, ttl = self._coord.dispatcher._registry_lanes_ttl("replay_warm_recipe")
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind="replay_warm_recipe",
                 params=params,
@@ -2416,7 +2416,7 @@ class PreludePhase(CoordinatorCollaborator):
                 params["recipe_extra_server_args"] if "recipe_extra_server_args" in params else warm_args
             ).strip()
             recipe_envs = dict(params["recipe_extra_envs"] if "recipe_extra_envs" in params else warm_envs)
-            if not already_pushed and not self._lift_to_current_best(
+            if not already_pushed and not self._coord.writeback._lift_to_current_best(
                 "replay_warm_recipe",
                 float(single_round_tput),
                 {
@@ -2486,7 +2486,7 @@ class PreludePhase(CoordinatorCollaborator):
             # and the post-ruling mirror agree there is nothing adopted.
             state.warm_replay_outcome = outcome
             if baseline_tput > 0:
-                self._update_cumulative_gain_validated(single_round_tput, result)
+                self._coord.writeback._update_cumulative_gain_validated(single_round_tput, result)
             log.info(
                 "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%); pushed warm_replay onto stack",
                 measured_gain,
@@ -2494,7 +2494,7 @@ class PreludePhase(CoordinatorCollaborator):
             )
             # Journal warm-replay as a synthetic KEEP; no KB lesson.
             try:
-                journal = self._ensure_journal()
+                journal = self._coord.writeback._ensure_journal()
                 journal.append_entry(
                     JournalEntry(
                         phase=str(getattr(state, "phase", "PRELUDE")).upper() or "PRELUDE",
@@ -2629,12 +2629,12 @@ class PreludePhase(CoordinatorCollaborator):
         if params is None:
             return None
         kind = self._internal_analysis_kind()
-        lanes, ttl = self._registry_lanes_ttl(kind)
+        lanes, ttl = self._coord.dispatcher._registry_lanes_ttl(kind)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=kind,
             params=params,
             idempotency_key=(
-                f"internal-analysis-{reason}{self._cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}"
+                f"internal-analysis-{reason}{self._coord.dispatcher._cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}"
             ),
             requires_lanes=lanes,
             lease_ttl_sec=ttl,

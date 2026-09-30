@@ -1138,7 +1138,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 task = await self.tasks.get(task_id)
             except TaskNotFound:
                 continue
-            await self._handle_unpromotable_result(
+            await self._coord.writeback._handle_unpromotable_result(
                 task,
                 {
                     "status": "failed",
@@ -1206,7 +1206,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             result_dict = result.result if isinstance(result.result, dict) else {}
             done_payload = result_dict.get("specialist_done") or {}
             if isinstance(done_payload, dict):
-                await self._record_specialist_result(
+                await self._coord.writeback._record_specialist_result(
                     task=task,
                     done_payload=done_payload,
                     source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
@@ -1229,10 +1229,10 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         promotion_raised = False
         if result.state != "cancelled":
             try:
-                if (result.state == "succeeded" or replay_needs_cleanup) and self._is_promotable_result(
-                    task.kind, result_payload
-                ):
-                    promoted = await self._promote_to_shared_state(
+                if (
+                    result.state == "succeeded" or replay_needs_cleanup
+                ) and self._coord.writeback._is_promotable_result(task.kind, result_payload):
+                    promoted = await self._coord.writeback._promote_to_shared_state(
                         task.kind,
                         result_payload,
                         task=task,
@@ -1244,7 +1244,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     # their class on the result, not in the empty payload.
                     if result.error_class and not unpromotable_result.get("error_class"):
                         unpromotable_result["error_class"] = result.error_class
-                    await self._handle_unpromotable_result(task, unpromotable_result)
+                    await self._coord.writeback._handle_unpromotable_result(task, unpromotable_result)
             except Exception as exc:
                 log.exception(
                     "dispatcher: promotion/unpromotable handling failed for task=%s",
@@ -1271,7 +1271,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             action=str(task.kind or ""),
         )
         if task.kind in ("explore", "integrate_patch"):
-            self._record_intervention_for_task(task, result.result, verdict)
+            self._coord.writeback._record_intervention_for_task(task, result.result, verdict)
         if result.state == "cancelled" or promotion_raised:
             return
         if task.kind == "integrate_patch":
@@ -1280,7 +1280,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # write. replay_warm_recipe is excluded (verification, not a fact).
         if task.kind != "replay_warm_recipe":
             try:
-                await self._fact_write_hook(
+                await self._coord.writeback._fact_write_hook(
                     task=task,
                     result=result,
                     verdict=verdict,
@@ -1520,7 +1520,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             task.kind,
             denied,
         )
-        await self._record_observation(
+        await self._coord.writeback._record_observation(
             "coordinator",
             "observation",
             {

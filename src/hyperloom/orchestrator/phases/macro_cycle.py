@@ -229,7 +229,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             summary,
         )
         try:
-            await self._record_observation(
+            await self._coord.writeback._record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "cycle_soft_restart", **summary},

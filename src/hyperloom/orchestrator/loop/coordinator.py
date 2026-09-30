@@ -157,7 +157,7 @@ class Coordinator:
             self.db,
             gpu_ids=resolve_gpu_specialist_devices(
                 int(getattr(self.shared_state, "gpu_specialist_capacity", 0) or 0),
-                serving_tp=self._resolve_serving_tp(),
+                serving_tp=self.dispatcher._resolve_serving_tp(),
             ),
         )
         # Framework-authoring pool over the whole node.
@@ -193,7 +193,7 @@ class Coordinator:
         # Attach read-only context-pull MCP tools to Orchestration backend.
         self.conversation._attach_orchestration_context_tools()
         # Resume detection must run before any boot-time state.json write.
-        self._resumed_from = self._detect_resume_state()
+        self._resumed_from = self.writeback._detect_resume_state()
         # Reap serving processes orphaned by a prior monitor-process crash (e.g. a raylet death that took the
         # optimizer down mid-benchmark), scoped strictly to this session's own pidfiles.
         self._reap_orphaned_servers_best_effort(phase="boot")
@@ -260,123 +260,6 @@ class Coordinator:
             r = IntentRouter(self)
             self.__dict__["_router"] = r
         return r
-
-    # Methods extracted into collaborator objects are delegated back by name here (symmetric to each collaborator's
-    # ``__getattr__`` back to this coordinator).
-    _DELEGATED = {
-        # recorder (folded into writeback)
-        "_aggregate_research_evidence": "writeback",
-        "_harvest_specialist_findings": "writeback",
-        "_record_specialist_result": "writeback",
-        "_drain_queued_baselines": "writeback",
-        # Phase handlers: kernel cluster only (all others made explicit).
-        "_maybe_reprofile_for_kernel": "phase_kernel",
-        "_geak_enabled": "phase_kernel",
-        "_on_enter_kernel": "phase_kernel",
-        "_run_kernel_agent": "phase_kernel",
-        "_open_kernel_timeline": "phase_kernel",
-        "_close_kernel_timeline": "phase_kernel",
-        "timeline": "phase_kernel",
-        "_resolve_bench_protocol": "phase_kernel",
-        "_geak_timeouts": "phase_kernel",
-        "_run_geak_kernel_phase": "phase_kernel",
-        "_geak_win_already_recorded": "phase_kernel",
-        "_parse_geak_accepted_config": "phase_kernel",
-        "_record_geak_candidate": "phase_kernel",
-        "_promote_geak_from_candidate": "phase_kernel",
-        "_reject_geak_promotion": "phase_kernel",
-        "_record_geak_kernel_journey": "phase_kernel",
-        "_ck_blockscale_switch_eligible": "phase_kernel",
-        "_ck_switch_precision_is_fp8": "phase_kernel",
-        "_handle_gemm_tuning_result": "phase_kernel",
-        "_sync_profile_state_after_gemm_roofline": "phase_kernel",
-        "_journal_gemm_tuning_keep": "phase_kernel",
-        "_replace_latest_gemm_tuning_attempt": "phase_kernel",
-        "_gemm_e2e_candidates": "phase_kernel",
-        "_validate_gemm_tuning_e2e": "phase_kernel",
-        "_current_tput_from_validated_gain": "phase_kernel",
-        "_last_measured_roofline_tput": "phase_kernel",
-        "_needs_roofline_for_watermark": "phase_kernel",
-        "_maybe_enqueue_watermark_roofline": "phase_kernel",
-        "_cached_kernel_request": "phase_kernel",
-        "_registry_lanes_ttl": "dispatcher",
-        "_cycle_idem_suffix": "dispatcher",
-        "_dispatch_paused_for_phase_budget": "dispatcher",
-        "_pump_dispatcher_once": "dispatcher",
-        "_spawn_fitting_queued": "dispatcher",
-        "run_task_registered": "dispatcher",
-        "_specialist_wall_budget_sec": "dispatcher",
-        "_specialist_deadline": "dispatcher",
-        "_specialist_progress_publisher": "dispatcher",
-        "_resolve_serving_tp": "dispatcher",
-        "_gpu_lease_ttl_sec": "dispatcher",
-        "_reap_dispatched_task": "dispatcher",
-        "_account_dead_holder_failures": "dispatcher",
-        "_lanes_fit": "dispatcher",
-        "_phase_denial_for_action": "dispatcher",
-        "_sequence_denial_for_action": "dispatcher",
-        "_time_budget_denial_for_action": "dispatcher",
-        "_admission_denial_for_action": "dispatcher",
-        "_sequence_denial_for_request": "dispatcher",
-        "_skip_gemm_tuning": "dispatcher",
-        "_gemm_tuning_required_before_kernel_opt": "dispatcher",
-        "_emit_lifecycle": "writeback",
-        "_record_policy_denied": "writeback",
-        "_record_observation": "writeback",
-        "_record_integrate_keep": "writeback",
-        "_is_promotable_result": "writeback",
-        "_record_intervention_for_task": "writeback",
-        "_handle_unpromotable_result": "writeback",
-        "_source_session_id": "writeback",
-        "_fact_write_hook": "writeback",
-        "_ensure_journal": "writeback",
-        "_pitfall_severity_for": "writeback",
-        "_journal_entry_phase": "writeback",
-        "_record_fact_per_task": "writeback",
-        "_build_statement": "writeback",
-        "_build_measured_impact": "writeback",
-        "_record_fact_per_variant": "writeback",
-        "_collect_workload_tags": "writeback",
-        "_build_kernel_optimizations_from_state": "writeback",
-        "_collect_attempt_provenance": "writeback",
-        "_build_recipe_attrs_from_state": "writeback",
-        "ensure_recipe_finalized": "writeback",
-        "finalize_recipe_and_journal": "writeback",
-        "_lift_to_current_best": "writeback",
-        "_update_cumulative_gain_validated": "writeback",
-        "_promote_to_shared_state": "writeback",
-        "_should_run_prelude_bootstrap": "writeback",
-        "_detect_resume_state": "writeback",
-        "replay_for_resume": "writeback",
-        "_current_best_launch_config": "writeback",
-        "build_env_spec": "writeback",
-        "_resume_consistency_pass": "writeback",
-        "_resume_reenter_kernel_if_needed": "writeback",
-        "_replay_keep_from_result": "writeback",
-        "_resume_rollback_pending_integrate": "writeback",
-        "_resume_recover_pending_integrate": "writeback",
-        "_resume_recover_orphaned_keeps": "writeback",
-        "_geak_rebench_params": "writeback",
-        "_enqueue_internal_stack_rebench": "writeback",
-        "_validate_geak_via_geak_harness": "writeback",
-        "resumed_from": "writeback",
-        "_replay_resume_if_needed": "writeback",
-    }
-
-    def __getattr__(self, name: str):
-        # Only fires for genuinely-missing attributes (not shadowed instance attrs / real methods).
-        owner = Coordinator._DELEGATED.get(name)
-        if owner is not None:
-            target = getattr(self, owner)
-            try:
-                # Do not invoke the collaborator's fallback ``__getattr__`` here: a stale _DELEGATED entry would
-                # otherwise bounce back to this Coordinator and recurse until RecursionError.
-                return object.__getattribute__(target, name)
-            except AttributeError as exc:
-                raise AttributeError(
-                    f"{type(self).__name__!r} delegates {name!r} to {owner!r}, but that collaborator does not define it"
-                ) from exc
-        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     def _collaborator(self, attr: str, factory):
         """Lazily build + cache a collaborator object (like ``router``/``writeback``); works for
@@ -688,7 +571,7 @@ class Coordinator:
             sid = (self.shared_state.recipe_kb_session_id or "").strip()
             if not sid:
                 return
-        self.ensure_recipe_finalized(source="t4_fallback")
+        self.writeback.ensure_recipe_finalized(source="t4_fallback")
         try:
             self.shared_state.save(self.session_dir)
         except Exception:
@@ -696,7 +579,7 @@ class Coordinator:
 
     async def tick(self, n: int = 1) -> None:
         """Run ``n`` loop-body ticks of :meth:`run` without its stop checks or teardown; replays a resume first."""
-        await self._replay_resume_if_needed()
+        await self.writeback._replay_resume_if_needed()
         for _ in range(n):
             await self._tick_once()
 
@@ -733,7 +616,7 @@ class Coordinator:
                     stage=f"reactor:{name}",
                 )
         if not self._stop_requested():
-            await self._pump_dispatcher_once()
+            await self.dispatcher._pump_dispatcher_once()
         if not in_closing:
             # FRAMEWORK_AGENT phase pump: enqueue the next candidate / fetch the next batch.
             await self.phase_framework.pump()
@@ -912,7 +795,7 @@ class Coordinator:
             )
             log.info("Coordinator.run: stop-signal drain armed=%s", self._signals.armed)
 
-        await self._replay_resume_if_needed()
+        await self.writeback._replay_resume_if_needed()
         grace_sec, deadline, max_minutes_value = self._bind_session_deadline(
             max_minutes=max_minutes,
             closing_grace_sec=closing_grace_sec,
@@ -1078,7 +961,7 @@ class Coordinator:
                     exc,
                     latency_ms=int((time.perf_counter() - _t0) * 1000),
                 )
-            await self._record_observation(
+            await self.writeback._record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "backend_error", "agent": agent_name, "error": repr(exc)},
@@ -1087,7 +970,7 @@ class Coordinator:
             return
         except NoIntentEmitted as exc:
             # No parseable intents; surface as observation so the next tick self-corrects.
-            await self._record_observation(
+            await self.writeback._record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "no_intent_emitted", "agent": agent_name, "error": str(exc)[:500]},
@@ -1097,7 +980,7 @@ class Coordinator:
         except Exception as exc:
             # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
-            await self._record_observation(
+            await self.writeback._record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "reactor_exception", "agent": agent_name, "error": format_exc_brief(exc, limit=500)},
@@ -1212,7 +1095,7 @@ class Coordinator:
         threshold = self._backend_error_streak_threshold
         if new_value >= threshold and self._backend_error_alarm_armed.get(agent_name, True):
             self._backend_error_alarm_armed[agent_name] = False
-            await self._record_observation(
+            await self.writeback._record_observation(
                 "coordinator",
                 "observation",
                 {

@@ -110,7 +110,7 @@ class ClosePhase(CoordinatorCollaborator):
         # lands and the chart degrades to baseline-only.
         try:
             result = await asyncio.wait_for(
-                self.run_task_registered(task),
+                self._coord.dispatcher.run_task_registered(task),
                 timeout=self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError:
@@ -193,7 +193,7 @@ class ClosePhase(CoordinatorCollaborator):
             )
             return
         generation = int(getattr(state, "working_recipe_generation", 0) or 0)
-        summary = await self._enqueue_internal_stack_rebench(
+        summary = await self._coord.writeback._enqueue_internal_stack_rebench(
             reason="close_unvalidated_stack",
             idempotency_key=f"close-stack-revalidate-g{generation}",
         )
@@ -211,9 +211,9 @@ class ClosePhase(CoordinatorCollaborator):
         log.info("CLOSE: revalidating the working stack task=%s (timeout=%.0fs)", task_id, timeout_sec)
         try:
             result = await asyncio.wait_for(
-                self.run_task_registered(
+                self._coord.dispatcher.run_task_registered(
                     task,
-                    on_complete=partial(self._reap_dispatched_task, task),
+                    on_complete=partial(self._coord.dispatcher._reap_dispatched_task, task),
                 ),
                 timeout=timeout_sec,
             )
@@ -284,7 +284,7 @@ class ClosePhase(CoordinatorCollaborator):
         try:
             state = self.shared_state
             best = state.current_best if isinstance(state.current_best, dict) else {}
-            config = self._current_best_launch_config()
+            config = self._coord.writeback._current_best_launch_config()
             action_path: list[str] = []
             for entry in state.optimization_stack or []:
                 if not isinstance(entry, dict):
@@ -343,7 +343,7 @@ class ClosePhase(CoordinatorCollaborator):
 
     async def _do_fact_finalize(self) -> None:
         """Recipe KB commit: publishes the terminal outcome before telemetry steps."""
-        outcome = self.ensure_recipe_finalized(source="close") or {}
+        outcome = self._coord.writeback.ensure_recipe_finalized(source="close") or {}
         kb_status = str(outcome.get("status") or "done")
         close_status = (
             "failed" if kb_status == "error" else "skipped" if kb_status in {"disabled", "skipped"} else "done"
@@ -357,7 +357,7 @@ class ClosePhase(CoordinatorCollaborator):
 
     async def _do_report(self) -> None:
         """Enqueue and await the report task; emit lifecycle signals and record artifacts."""
-        self._emit_lifecycle(step="report", status="START", detail="close_phase_entry")
+        self._coord.writeback._emit_lifecycle(step="report", status="START", detail="close_phase_entry")
         report_task = await self._enqueue_internal_report_task(reason="close_phase_entry")
         terminal_state = await self._run_close_task(report_task, step="1 (report)")
         if terminal_state in {"succeeded", None}:
@@ -368,7 +368,7 @@ class ClosePhase(CoordinatorCollaborator):
             _json_path = _rd / "final.json" if (_rd / "final.json").exists() else None
             _md_path = _rd / "final.md" if (_rd / "final.md").exists() else None
             _close_out.record_close_artifacts(self.session_dir, final_json_path=_json_path, final_md_path=_md_path)
-            self._emit_lifecycle(
+            self._coord.writeback._emit_lifecycle(
                 step="report",
                 status="END",
                 artifacts={
@@ -379,7 +379,7 @@ class ClosePhase(CoordinatorCollaborator):
             )
         else:
             detail = f"task_state={terminal_state!r}"
-            self._emit_lifecycle(step="report", status="ERROR", detail=detail)
+            self._coord.writeback._emit_lifecycle(step="report", status="ERROR", detail=detail)
             await self._record_close_step("report", status="failed", task_id=report_task.task_id, detail=detail)
 
     async def _do_session_breakdown(self) -> None:
@@ -734,7 +734,7 @@ class ClosePhase(CoordinatorCollaborator):
             bound_sec,
         )
         try:
-            result = await asyncio.wait_for(self.run_task_registered(task), timeout=bound_sec)
+            result = await asyncio.wait_for(self._coord.dispatcher.run_task_registered(task), timeout=bound_sec)
         except asyncio.TimeoutError:
             log.warning(
                 "CLOSE step %s: task_id=%s still running after %.0fs; recording the step as failed",

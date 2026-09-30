@@ -136,7 +136,7 @@ async def test_entering_kernel_enqueues_one_lane_holding_task_and_returns(coord,
         lambda *_args, **_kwargs: (ps.PHASE_KERNEL_AGENT, "test_enter_kernel", {"source": "test"}),
     )
 
-    await asyncio.wait_for(c._advance_phase_if_needed(), timeout=2.0)
+    await asyncio.wait_for(c.phase_machine._advance_phase_if_needed(), timeout=2.0)
 
     assert st.phase == ps.PHASE_KERNEL_AGENT
     assert ran == []
@@ -292,14 +292,14 @@ async def test_kernel_holds_while_its_task_is_in_flight_and_leaves_once_it_settl
     await c.tasks.transition(task.task_id, "running")
 
     for _ in range(ps.KERNEL_IDLE_MAX_TICKS * 5):
-        await c._advance_phase_if_needed()
+        await c.phase_machine._advance_phase_if_needed()
         st.kernel_idle_since_unix = datetime.now(timezone.utc).timestamp() - ps.KERNEL_IDLE_MIN_SECONDS * 10
 
     assert st.phase == ps.PHASE_KERNEL_AGENT
     assert st.kernel_idle_ticks == 0
 
     await c.tasks.transition(task.task_id, "succeeded", evidence={"result_keys": []})
-    await c._advance_phase_if_needed()
+    await c.phase_machine._advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_SWEEP
     assert st.phase_history[-1]["reason"] == "kernel_no_more_leverage"
@@ -330,7 +330,7 @@ async def test_a_spent_phase_budget_stops_the_kernel_agent_and_leaves_kernel(coo
     await asyncio.wait_for(started.wait(), timeout=2.0)
     _spend_the_phase_budget(st)
 
-    await asyncio.wait_for(c._advance_phase_if_needed(), timeout=30.0)
+    await asyncio.wait_for(c.phase_machine._advance_phase_if_needed(), timeout=30.0)
 
     assert st.phase == ps.PHASE_SWEEP
     assert st.phase_history[-1]["reason"] in {"kernel_phase_budget_exhausted", "kernel_budget_cap"}
@@ -475,11 +475,11 @@ async def test_phase_transition_waits_until_no_task_is_running(coord, monkeypatc
     task = await _create_kernel_agent(c)
     await c.tasks.transition(task.task_id, "running")
 
-    await c._advance_phase_if_needed()
+    await c.phase_machine._advance_phase_if_needed()
     assert st.phase == ps.PHASE_KERNEL_AGENT
 
     await c.tasks.transition(task.task_id, "succeeded", evidence={"result_keys": []})
-    await c._advance_phase_if_needed()
+    await c.phase_machine._advance_phase_if_needed()
     assert st.phase == ps.PHASE_SWEEP
     assert await c.tasks.running() == []
 
@@ -492,7 +492,7 @@ async def test_phase_transition_drops_queued_work_the_next_phase_does_not_allow(
     _arm_kernel_phase(st)
     roofline = await c.tasks.create(kind="roofline", params={}, idempotency_key="left-behind-roofline")
 
-    await c._advance_phase_if_needed()
+    await c.phase_machine._advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_SWEEP
     assert (await c.tasks.get(roofline.task_id)).state == "cancelled"

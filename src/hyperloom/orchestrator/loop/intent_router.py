@@ -450,7 +450,7 @@ class IntentRouter(CoordinatorCollaborator):
         try:
             self.policy.validate_intent(source, intent)
         except PolicyDenied as denied:
-            await self._record_policy_denied(source, intent, denied)
+            await self._coord.writeback._record_policy_denied(source, intent, denied)
             return
 
         try:
@@ -471,7 +471,7 @@ class IntentRouter(CoordinatorCollaborator):
                 await handler(source, intent)
             else:
                 # Unknown / unhandled intent — record for replay.
-                await self._record_observation(
+                await self._coord.writeback._record_observation(
                     source,
                     "observation",
                     {"intent": it.value, "payload": intent.payload},
@@ -486,7 +486,7 @@ class IntentRouter(CoordinatorCollaborator):
                 exc=exc,
             )
             try:
-                await self._record_observation(
+                await self._coord.writeback._record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -505,7 +505,7 @@ class IntentRouter(CoordinatorCollaborator):
         action_name = intent.payload["action_name"]
         # Pruned families are advisory: proposal still queues with an advisory note.
         if self.shared_state.is_pruned(action_name):
-            await self._record_observation(
+            await self._coord.writeback._record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -520,15 +520,15 @@ class IntentRouter(CoordinatorCollaborator):
                     ),
                 },
             )
-        denied = self._admission_denial_for_action(action_name)
+        denied = self._coord.dispatcher._admission_denial_for_action(action_name)
         if denied is not None:
-            await self._record_policy_denied(source, intent, denied)
+            await self._coord.writeback._record_policy_denied(source, intent, denied)
             return
         payload = dict(intent.payload)
         if action_name == "integrate_patch":
             params = dict(payload.get("params") or {})
             if not await self._stamp_integrate_patch_owner(params):
-                await self._record_observation(
+                await self._coord.writeback._record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -558,7 +558,7 @@ class IntentRouter(CoordinatorCollaborator):
         verdict_map = intent.payload.get("verdict_map")
         single_verdict = intent.payload.get("verdict")
         if pending is None:
-            await self._record_observation(
+            await self._coord.writeback._record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -652,7 +652,7 @@ class IntentRouter(CoordinatorCollaborator):
             verdict,
             downgraded_from_code,
         )
-        await self._record_observation(
+        await self._coord.writeback._record_observation(
             "coordinator",
             "observation",
             {
@@ -691,7 +691,7 @@ class IntentRouter(CoordinatorCollaborator):
         pending.verdict = verdict
         self.state.pending_proposals.pop(pending.proposal_msg_id, None)
         if is_upstream_pr_prescreen(pending.action_name, pending.payload):
-            await self._record_observation(
+            await self._coord.writeback._record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -789,7 +789,7 @@ class IntentRouter(CoordinatorCollaborator):
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
         if self.shared_state.is_pruned(action_name):
-            await self._record_observation(
+            await self._coord.writeback._record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -804,9 +804,9 @@ class IntentRouter(CoordinatorCollaborator):
                     ),
                 },
             )
-        denied = self._admission_denial_for_action(action_name)
+        denied = self._coord.dispatcher._admission_denial_for_action(action_name)
         if denied is not None:
-            await self._record_policy_denied(
+            await self._coord.writeback._record_policy_denied(
                 source,
                 intent,
                 denied,
@@ -817,7 +817,7 @@ class IntentRouter(CoordinatorCollaborator):
         params = dict(intent.payload.get("params") or {})
         if action_name == "integrate_patch":
             if not await self._stamp_integrate_patch_owner(params):
-                await self._record_observation(
+                await self._coord.writeback._record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -893,7 +893,7 @@ class IntentRouter(CoordinatorCollaborator):
         was_existing = False
         for attempt in range(6):
             idempotency_key = str(raw_key) if attempt == 0 else f"{raw_key}-retry{attempt}"
-            lanes, ttl = self._registry_lanes_ttl(action_name)
+            lanes, ttl = self._coord.dispatcher._registry_lanes_ttl(action_name)
             # Bench-enabled specialists serialize against the other GPU benchmark/profile/server work via
             # benchmark_lane (research_lane alone conflicts with nothing).
             if action_name == "specialist":
@@ -906,7 +906,7 @@ class IntentRouter(CoordinatorCollaborator):
                 if needs_gpu:
                     lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
                     # Shared with the GPU-pool lease so the two TTLs never drift.
-                    ttl = self._gpu_lease_ttl_sec(
+                    ttl = self._coord.dispatcher._gpu_lease_ttl_sec(
                         int(ttl or 0),
                         params=params,
                     )
@@ -925,7 +925,7 @@ class IntentRouter(CoordinatorCollaborator):
                     f"task {task.task_id} is still {task.state!r}; wait for the "
                     f"delegated_result event instead of re-emitting the same key."
                 )
-                await self._record_policy_denied(
+                await self._coord.writeback._record_policy_denied(
                     source,
                     intent,
                     PolicyDenied(
@@ -941,7 +941,7 @@ class IntentRouter(CoordinatorCollaborator):
                 f"task {task.task_id if task else '?'} terminated and could not "
                 f"allocate a fresh idempotency_key after 5 retries"
             )
-            await self._record_policy_denied(
+            await self._coord.writeback._record_policy_denied(
                 source,
                 intent,
                 PolicyDenied(
@@ -1038,9 +1038,9 @@ class IntentRouter(CoordinatorCollaborator):
         """Route a REQUEST intent to its programmatic handler."""
         target_agent = intent.payload["target_agent"]
         kind = intent.payload["kind"]
-        denied = self._sequence_denial_for_request(target_agent, kind)
+        denied = self._coord.dispatcher._sequence_denial_for_request(target_agent, kind)
         if denied is not None:
-            await self._record_policy_denied(source, intent, denied)
+            await self._coord.writeback._record_policy_denied(source, intent, denied)
             return
         # Always record the request on the bus for replay.
         request_msg = Message.new(
@@ -1104,13 +1104,13 @@ class IntentRouter(CoordinatorCollaborator):
             merged_payload = {**intent.payload, **params}
             # Roofline data is read from the last_trace_analyze cache rather than auto-injected here.
             cache_hit_source = None
-            cached_result = self._cached_kernel_request(kind, merged_payload)
+            cached_result = self._coord.phase_kernel._cached_kernel_request(kind, merged_payload)
             if cached_result is not None:
                 result = cached_result
                 cache_hit_source = "shared_state_cache"
                 # A cache hit never runs the handler; emit a single END (detail=cache_hit) so the lifecycle log
                 # records the step.
-                self._emit_lifecycle(
+                self._coord.writeback._emit_lifecycle(
                     step=kind,
                     status="END",
                     artifacts=_lifecycle_paths(result),
@@ -1134,7 +1134,7 @@ class IntentRouter(CoordinatorCollaborator):
                     }
                     cache_hit_source = "shared_state_kernel_rejection"
                     # A short-circuited integrate never runs the handler; emit a lone END recording the rejection.
-                    self._emit_lifecycle(
+                    self._coord.writeback._emit_lifecycle(
                         step=kind,
                         status="END",
                         artifacts=_lifecycle_paths(result),
@@ -1150,7 +1150,7 @@ class IntentRouter(CoordinatorCollaborator):
                     # A handler that benchmarks runs under its action's catalogue lanes, so it waits out the
                     # kernel_agent task instead of sharing the GPUs with it.
                     action = REQUEST_KIND_TO_OWNED_ACTION.get(kind, kind)
-                    lanes, ttl = self._registry_lanes_ttl(action)
+                    lanes, ttl = self._coord.dispatcher._registry_lanes_ttl(action)
                     handler_lease = None
                     if lanes:
                         handler_lease = await self.locks.try_acquire_many(
@@ -1183,7 +1183,7 @@ class IntentRouter(CoordinatorCollaborator):
                     }
                     # Bracket the programmatic kernel step with START / END lifecycle events.
                     _lc_t0 = time.monotonic()
-                    self._emit_lifecycle(
+                    self._coord.writeback._emit_lifecycle(
                         step=kind,
                         status="START",
                         artifacts=_lifecycle_paths(merged_payload),
@@ -1218,7 +1218,7 @@ class IntentRouter(CoordinatorCollaborator):
                         )
                         if p
                     )
-                    self._emit_lifecycle(
+                    self._coord.writeback._emit_lifecycle(
                         step=kind,
                         status=_lc_status,
                         artifacts=_lifecycle_paths(result),
@@ -1263,7 +1263,7 @@ class IntentRouter(CoordinatorCollaborator):
                         payload_gap = str(merged_payload.get("gap_canonical_id") or "").strip()
                         if payload_gap:
                             result["gap_canonical_id"] = payload_gap
-                    await self._record_integrate_keep(result)
+                    await self._coord.writeback._record_integrate_keep(result)
                 self.shared_state.save(self.session_dir)
         else:
             _fail_result = {
@@ -1295,7 +1295,7 @@ class IntentRouter(CoordinatorCollaborator):
         try:
             new_ttl = await self.tasks.extend_lease(task_id, extra_sec)
         except (TaskNotFound, IllegalTransition) as exc:
-            await self._record_observation(
+            await self._coord.writeback._record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -1336,7 +1336,7 @@ class IntentRouter(CoordinatorCollaborator):
             wall_budget_error = repr(exc)[:200]
         # A swallowed GPU or wall-budget failure would leave the lane extended while the GPU reaper or subprocess
         # wall-clock cap can still interrupt the work — report the partial extension as degraded.
-        await self._record_observation(
+        await self._coord.writeback._record_observation(
             "coordinator",
             "observation",
             {
@@ -1363,7 +1363,7 @@ class IntentRouter(CoordinatorCollaborator):
         if not drain_only and self.shared_state.add_pruned_family(family):
             self.shared_state.save(self.session_dir)
         if drain_only and family == "baseline":
-            cancelled = await self._drain_queued_baselines(reason=reason)
+            cancelled = await self._coord.writeback._drain_queued_baselines(reason=reason)
         else:
             cancelled = await self.tasks.cancel_family([family], reason=reason)
         await self.bus.append_and_seq(

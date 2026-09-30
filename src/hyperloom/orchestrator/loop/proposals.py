@@ -493,7 +493,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 original_grid=original_grid,
                 approved_variant_names=approved_variant_names,
             ):
-                await self._record_observation(
+                await self._coord.writeback._record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -525,7 +525,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             inject_stack_base_params(params, self.shared_state, anchor=True)
             if self.shared_state.baseline_config_path:
                 params.setdefault("config_path", self.shared_state.baseline_config_path)
-        lanes, ttl = self._registry_lanes_ttl(pending.action_name)
+        lanes, ttl = self._coord.dispatcher._registry_lanes_ttl(pending.action_name)
         # Content-addressed so a batch of proposals that would launch identical work collapses to one task; a
         # terminated twin still gets a fresh key so a legitimate retry after failure is never locked out.
         raw_key = approved_proposal_idempotency_key(pending.action_name, params)
@@ -544,7 +544,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             if not was_existing:
                 break
             if task.state not in TERMINAL_STATES:
-                await self._record_observation(
+                await self._coord.writeback._record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -559,7 +559,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 )
                 return
         else:
-            await self._record_observation(
+            await self._coord.writeback._record_observation(
                 "coordinator",
                 "observation",
                 {

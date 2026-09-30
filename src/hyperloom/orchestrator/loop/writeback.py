@@ -1122,7 +1122,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             self.shared_state.last_fusion_integrate = {**result, "decision": "KEEP"}
         self._journal_integrate_keep(result, lift_kind=lift_kind, new_tput=float(new_tput))
         if self.shared_state.baseline_tput > 0 and self._update_cumulative_gain_validated(new_tput, measurement):
-            await self._maybe_enqueue_watermark_roofline(
+            await self._coord.phase_kernel._maybe_enqueue_watermark_roofline(
                 reason="integrate_keep_watermark",
             )
 
@@ -1837,7 +1837,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         """
         models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
         hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
-        workload_tags = self._coord._collect_workload_tags()
+        workload_tags = self._collect_workload_tags()
         extra = workload_tags if workload_tags else None
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -1854,11 +1854,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
             provenance_base["source_variant_name"] = variant_name
 
         if is_keep and gain_pct is not None and gain_pct > 0:
-            statement = self._coord._build_statement(
+            statement = self._build_statement(
                 change=change,
                 kind="lesson",
             )
-            impact = self._coord._build_measured_impact(
+            impact = self._build_measured_impact(
                 gain_pct=gain_pct,
                 throughput_after=throughput_after,
                 stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
@@ -1882,7 +1882,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
 
         severity = self._pitfall_severity_for(pitfall_severity_dict)
         if severity is not None:
-            description = self._coord._build_statement(
+            description = self._build_statement(
                 change=change,
                 severity=severity,
                 kind="pitfall",
@@ -2415,11 +2415,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 )
         for rev in reverted_rows:
             what_failed.append(rev)
-        kernel_optimizations = self._coord._build_kernel_optimizations_from_state()
+        kernel_optimizations = self._build_kernel_optimizations_from_state()
         cumulative_validated = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
         validated_stack_len = int(getattr(ss, "cumulative_gain_validated_stack_len", 0) or 0)
         # Workload-shape tags for shape-filtered warm-start queries (shared via _collect_workload_tags).
-        workload_tags = self._coord._collect_workload_tags()
+        workload_tags = self._collect_workload_tags()
         # framework_version left unset here (manifest-derived); the T0 backfill writes it.
         return {
             "best_config": best_config,
@@ -2784,7 +2784,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "result_type": _close_out.RESULT_INVALID_SCOPE,
             }
         try:
-            attrs = self._coord._build_recipe_attrs_from_state()
+            attrs = self._build_recipe_attrs_from_state()
             # Hoist workload tags flat into top-level recipe attrs (shallow-merged) for warm-start filters.
             workload_tags = attrs.get("workload") or {}
 
@@ -3012,7 +3012,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
 
         # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain.
         if done_payload.get("new_findings"):
-            await self._coord._harvest_specialist_findings(done_payload)
+            await self._harvest_specialist_findings(done_payload)
 
         # Consume static-recon bridge candidates into gaps[] so the
         # freeform specialist picks them up with a precise mandate.
@@ -3023,7 +3023,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # self-reports a ``research`` block, so FRAMEWORK / explore lanes
         # reuse the session-wide seen-set. Idempotent for research_scout
         # (already harvested above).
-        self._coord._aggregate_research_evidence(done_payload)
+        self._aggregate_research_evidence(done_payload)
 
         # Refresh the gaps ledger after a specialist round closes; record the verdict as a gap attempt.
         gap_cid = str(done_payload.get("gap_canonical_id") or "").strip()
@@ -4003,7 +4003,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             changed = True
         # On a successful profile, re-anchor last_roofline_tput and clear the pending field.
         if measurement_status == "succeeded":
-            anchor_tput = self._current_tput_from_validated_gain()
+            anchor_tput = self._coord.phase_kernel._current_tput_from_validated_gain()
             if anchor_tput > 0:
                 self.shared_state.last_roofline_tput = float(anchor_tput)
                 changed = True
@@ -4144,7 +4144,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # taken here. Leaving the anchor alone lets the watermark re-arm and
             # take a real one.
             if str((self.shared_state.last_trace_analyze or {}).get("analysis_md_text") or ""):
-                anchor_tput = self._current_tput_from_validated_gain()
+                anchor_tput = self._coord.phase_kernel._current_tput_from_validated_gain()
                 if anchor_tput > 0:
                     self.shared_state.last_roofline_tput = float(anchor_tput)
             else:
@@ -4428,7 +4428,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         promotion_result.pop(key, None)
                         if key in rebench_measurement:
                             promotion_result[key] = rebench_measurement[key]
-                    promoted = self._promote_geak_from_candidate(
+                    promoted = self._coord.phase_kernel._promote_geak_from_candidate(
                         promotion_result,
                         measured_tput=float(measured),
                         provenance="geak_orch_harness_validated",
@@ -4509,7 +4509,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     # Persist the closed verdict so a later KERNEL entry does
                     # not recover stale result.json and re-enqueue this already
                     # adjudicated candidate (#1240).
-                    self._reject_geak_promotion(
+                    self._coord.phase_kernel._reject_geak_promotion(
                         ps,
                         measured_tput=float(measured) if measured_ok else 0.0,
                         current_best_tput=float(cb_tput or 0.0),
@@ -4532,7 +4532,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         # Routed via ``_coord`` so a test / caller that overrides
                         # ``coordinator._validate_geak_via_geak_harness`` still wins
                         # (bare-name delegation resolves it back onto this class).
-                        fallback_result = await self._coord._validate_geak_via_geak_harness(reason="2b_inconclusive")
+                        fallback_result = await self._validate_geak_via_geak_harness(reason="2b_inconclusive")
                     except Exception as exc:
                         log.exception("geak 2a GEAK-harness fallback failed")
                         fallback_result = {
@@ -4673,7 +4673,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 measurement_basis="e2e_decision_round",
             ):
                 # Watermark refresh: enqueue a fresh roofline once projected tput crosses +10%.
-                await self._maybe_enqueue_watermark_roofline(
+                await self._coord.phase_kernel._maybe_enqueue_watermark_roofline(
                     reason="explore_keep_watermark",
                 )
         else:
@@ -4853,7 +4853,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     and self._update_cumulative_gain_validated(new_tput, measurement)
                 ):
                     self.shared_state.resume_pending_revalidation = False
-                    await self._maybe_enqueue_watermark_roofline(
+                    await self._coord.phase_kernel._maybe_enqueue_watermark_roofline(
                         reason="integrate_keep_watermark",
                     )
             changed = True
@@ -6129,7 +6129,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
             ps_flags, ps_envs = _accepted_config_as_variant(ps_cfg)
             ps_has_material = ps_admissible and _geak_result_has_material(ps)
         except ValueError as exc:
-            self._reject_geak_promotion(ps, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
+            self._coord.phase_kernel._reject_geak_promotion(
+                ps, measured_tput=0.0, current_best_tput=0.0, reason=str(exc)
+            )
             self.shared_state.save(self.session_dir)
             return {"skipped": True, "reason": "geak_invalid_config"}
         if not (
@@ -6285,7 +6287,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             params["config_path"] = self.shared_state.baseline_config_path
         if benchmark_script:
             params["benchmark_script"] = benchmark_script
-        lanes, ttl = self._registry_lanes_ttl("explore")
+        lanes, ttl = self._coord.dispatcher._registry_lanes_ttl("explore")
         self._coord.proposals._inject_explore_runtime_params(params)
         task, existing = await self.tasks.create_or_return_existing(
             kind="explore",
@@ -6411,7 +6413,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             elif not accuracy_passed(baseline_accuracy, float(replay_accuracy)):
                 accuracy_failure = "accuracy_drop"
         if accuracy_failure:
-            self._reject_geak_promotion(
+            self._coord.phase_kernel._reject_geak_promotion(
                 {
                     **ps,
                     "fallback_result": res,
@@ -6449,7 +6451,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     overlay_digest_before,
                     _geak_overlay_digest(ps_overlay_2a),
                 )
-            accepted = self._promote_geak_from_candidate(
+            accepted = self._coord.phase_kernel._promote_geak_from_candidate(
                 ps,
                 measured_tput=measured,
                 provenance="geak_same_harness_geak",
@@ -6516,7 +6518,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         if (state.phase or "").strip().upper() != PHASE_KERNEL_AGENT:
             return
-        if not (self._coord.phase_machine._kernel_enabled() and self._geak_enabled()):
+        if not (self._coord.phase_machine._kernel_enabled() and self._coord.phase_kernel._geak_enabled()):
             return
         history = state.phase_history or []
         row = history[-1] if history else {}
@@ -6533,7 +6535,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "resume: re-entering KERNEL GEAK delegation (no completion "
             "evidence on the current phase row); recover-from-disk or re-run."
         )
-        await self._on_enter_kernel(from_phase="resume")
+        await self._coord.phase_kernel._on_enter_kernel(from_phase="resume")
 
     @property
     def resumed_from(self) -> dict[str, Any]:
