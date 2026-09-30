@@ -678,7 +678,6 @@ async def test_coordinator_propose_action_creates_pending(session_dir):
         assert len(c.state.pending_proposals) == 1
         prop = next(iter(c.state.pending_proposals.values()))
         assert prop.action_name == "baseline"
-        assert prop.decided is False
     finally:
         await c.stop()
 

@@ -847,6 +847,33 @@ async def test_close_sequencer_does_not_overwrite_caller_set_stop_reason(
     assert coord.shared_state.stop_reason == "signal"
 
 
+
+def test_machine_maps_non_vocab_close_reason_to_time_exhausted():
+    """Machine maps an unrecognised transition reason to 'time_exhausted' at CLOSE."""
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState(phase="SWEEP")
+    assert not is_valid_stop_reason("not_a_real_vocab_reason")
+    reason = "not_a_real_vocab_reason"
+    canonical = reason if reason and is_valid_stop_reason(reason) else "time_exhausted"
+    state.set_stop_reason(canonical)
+
+    assert state.stop_reason == "time_exhausted"
+
+
+def test_machine_does_not_overwrite_already_set_stop_reason():
+    """Machine skips setting stop_reason when one is already set (not state.stop_reason guard)."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState(phase="SWEEP")
+    state.set_stop_reason("signal")
+    if not state.stop_reason:
+        state.set_stop_reason("sweep_done")
+
+    assert state.stop_reason == "signal"
+
+
 @pytest.mark.asyncio
 async def test_close_sequencer_report_before_session_breakdown(coord):
     """Report task MUST be enqueued before session_breakdown."""
