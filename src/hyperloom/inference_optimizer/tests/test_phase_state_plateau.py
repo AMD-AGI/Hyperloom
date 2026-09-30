@@ -281,6 +281,7 @@ def test_kernel_does_not_exit_on_plateau():
         pending_escalate_hint="",
         stop_reason="",
         optimization_stack=[],
+        kernel_optimizer="",
     )
     assert compute_next_phase(state) is None
 
@@ -304,6 +305,7 @@ def test_gemm_completion_with_no_pending_work_exits_kernel():
         },
         stop_reason="",
         optimization_stack=[],
+        kernel_optimizer="",
     )
     out = compute_next_phase(state)
     assert out is not None
