@@ -337,4 +337,7 @@ class TestTheTickItself:
         coord = _coordinator(tmp_path)
         coord.some_coordinator_only_thing = "reachable"
 
-        assert MaintenanceCollaborator(coord).some_coordinator_only_thing == "reachable"
+        # CoordinatorCollaborator exposes coordinator infrastructure as explicit properties;
+        # other attributes must be accessed via self._coord directly.
+        collab = MaintenanceCollaborator(coord)
+        assert collab._coord.some_coordinator_only_thing == "reachable"

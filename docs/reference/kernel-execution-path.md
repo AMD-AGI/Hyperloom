@@ -74,13 +74,13 @@ lanes. Which calls it makes depends on the backend:
 ```python
 # 1. GEAK branch — the SGLang/vLLM default. One whole-pipeline e2e run, then
 #    the phase winds down to SWEEP. Nothing below this line executes.
-if geak_enabled:                      # geak_selected(): order is not exactly `forge`
-    await self._run_geak_kernel_phase(from_phase=from_phase)
+if geak_enabled:                      # KernelPhase._geak_enabled(): order is not exactly `forge`
+    await self._coord.phase_kernel._run_geak_kernel_phase(from_phase=from_phase)
     return
 
 # 2. Forge branch — only with KERNEL_OPT_BACKEND_ORDER=forge. Two routes into
 #    one shared tail, chosen by whether GEMM tuning is due.
-if not self._gemm_tuning_required_before_kernel_opt():
+if not self._coord.dispatcher._gemm_tuning_required_before_kernel_opt():
     await self._finish_kernel_entry()
     return
 result = await run_gemm_tuning_handler({...}, session_dir=session_dir)
