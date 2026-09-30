@@ -95,10 +95,9 @@ Five tools close the act->observe loop without waiting for the next tick
 <!-- phase: FRAMEWORK_AGENT -->
 ### Watching a running specialist
 
-In-flight tasks are visible in the `=== Tasks in flight ===` projection and
-via `get_running_tasks`. A specialist or benchmark can hold the machine for
-hours; check these before dispatching to avoid redundant parallel work on the
-same gap. Prefer `send_message` or `extend_lease` over re-dispatching a
+In-flight tasks are listed in the `=== Tasks in flight ===` projection. A
+specialist or benchmark can hold the machine for hours; check it before
+dispatching, and prefer `send_message` / `extend_lease` over re-dispatching a
 specialist that is already in flight.
 
 Rescue moves: `send_message` / `extend_lease` for a single task;
@@ -237,12 +236,12 @@ has covered the gap yet.
 
 **Where a grid comes from.** `=== Untested proposals (current cycle) ===`
 carries the executable specialist proposals this cycle that no explore round
-has benched, ranked by gap severity. The Coordinator benches these automatically
-(4 variants at a time) when no explore is queued or running. Dispatch an
-`explore` only for variants **not already in this queue** — copying from the
-queue would create a redundant grid alongside the automatic one. An entry
-marked ATOMIC must go in as one variant, never split or re-authored. To add
-idea-generation variants, top up after the queue holds nothing else worth running.
+has benched, ranked by gap severity. The Coordinator benches its head
+automatically (4 variants at a time) whenever no explore is queued or running,
+so dispatch an `explore` only for variants **not already in this queue**.
+Target **4 variants per grid, hard maximum 6**: they run serially on one
+benchmark lane at roughly 13 minutes each, and a grid the round cannot finish
+is truncated from the end.
 
 **GPU specialists** hold the same cards as the serving stack and acquire
 `gpu_research_lane` (mutually exclusive with benchmark/profile/serving
@@ -257,8 +256,8 @@ serving benchmark, omit `gpu_count` (defaults to serving TP) or pass
 that never starts a serving server.
 
 **Honor `atomic` proposals.** A `specialist_done.proposal_set` entry
-with `"atomic": true` is a coupled set that only works together. Dispatch
-it verbatim as one explore variant — never split, drop, or re-author.
+with `"atomic": true` is a coupled set that only works together; it is
+benched as one variant — never split, drop, or re-author it into a grid.
 
 **Advisory proposal scores**: the prompt MAY carry a
 `=== Specialist proposal scores (advisory) ===` block — independent 0-10
@@ -503,7 +502,7 @@ defaults the rest; omitting a dial is safe):
   — GPU specialists serialize against serving).
 
 The `=== Resource pools ===` block reports the capacities such a request is
-admitted against. A `bench` / framework-authoring specialist admits against
+admitted against. A `bench` / enablement specialist admits against
 `whole_machine_gpu_pool`; any other `needs_gpu` specialist admits against
 `serving_disjoint_gpu_pool`, which is `serving_tp` cards smaller and is `0`
 whenever serving owns every card — in that case dispatch CPU specialists, or
