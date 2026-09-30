@@ -64,7 +64,7 @@ async def run_lease_and_db_reclaim(
 
 
 class MaintenanceCollaborator(CoordinatorCollaborator):
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+    """Handles session maintenance: disk cleanup, task reclaim, and health checks."""
 
     _DISK_FREE_MIN_GB: float = 20.0
     _DISK_USED_MAX_FRAC: float = 0.85

@@ -785,12 +785,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     #: ``serving_config`` is excluded here too: it has its own comparison, which
     #: comes from ``current_best`` on both sides and is therefore symmetric.
     #:
-    #: ``ClassVar`` because a bare annotation would make this constant a
-    #: dataclass field: it would be written into every ``state.json``, accepted
-    #: back from disk. None of that changes behaviour while the sole reader goes
-    #: through ``cls``, which is exactly what makes it worth closing -- it
-    #: decides trace staleness, so an instance-scoped read added later would let
-    #: a stored value govern whether a profile is reused or re-run.
+    #: ClassVar so it never serialises into state.json.
     PROFILE_WORKLOAD_IDENTITY_KEYS: ClassVar[tuple[str, ...]] = (
         "benchmark_mode",
         "framework",
