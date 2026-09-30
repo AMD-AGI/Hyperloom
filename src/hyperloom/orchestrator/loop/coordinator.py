@@ -235,7 +235,7 @@ class Coordinator(
                 serving_tp=self._resolve_serving_tp(),
             ),
         )
-        # Framework-authoring pool over the whole node.
+        # Whole-node pool for enablement and bench specialists.
         self.framework_gpu_pool = SpecialistGpuPool(
             self.db,
             gpu_ids=resolve_whole_machine_devices(),

@@ -99,7 +99,7 @@ def effective_gpu_specialist_pool_size(shared_state: Any | None = None) -> int:
 
 
 def whole_machine_pool_size() -> int:
-    """Size of the whole-machine (framework / bench) GPU pool.
+    """Size of the whole-machine (enablement / bench) GPU pool.
 
     Returns:
         int: Number of visible cards.

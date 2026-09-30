@@ -99,18 +99,8 @@ def test_bench_falsy_values(falsy):
 
 def test_holds_serving_slot_only_for_bench_capable():
     """Only bench-capable patch specialists hold the whole-machine serving_slot."""
-    # Bench-capable patch specialist -> holds the slot.
     assert holds_serving_slot({"mode": "patch", "bench": True}) is True
-    # Framework authoring is CPU now -> no slot, no whole-machine pool.
-    fw = {"framework_agent_authoring": True, "domain": "serving_specialist"}
-    assert holds_serving_slot(fw) is False
-    assert uses_whole_machine_gpu_lane(fw) is False
-    # Enablement authoring still uses the whole-machine pool (boots a server).
-    en = {"enablement": True, "domain": "serving_specialist"}
-    assert uses_whole_machine_gpu_lane(en) is True
-    # A bench-capable specialist DOES hold the slot for that window.
-    assert holds_serving_slot({"mode": "patch", "bench": True}) is True
-    # Plain research / non-bench GPU probe -> no slot.
+    assert holds_serving_slot({"framework_agent_authoring": True, "domain": "serving_specialist"}) is False
     assert holds_serving_slot({"mode": "research"}) is False
     assert holds_serving_slot(None) is False
 
@@ -122,49 +112,51 @@ def test_bench_is_meaningless_for_research_mode():
     assert prof.reserves_benchmark_lane is False
 
 
-def test_requires_gpu_variants():
-    """requires_gpu covers needs_gpu, bench and enablement authoring."""
+@pytest.fixture
+def whole_machine(monkeypatch):
+    """Pin the single-node / visible-GPU probe that gates enablement GPU leases."""
+
+    def _set(available: bool) -> None:
+        monkeypatch.setattr("hyperloom.orchestrator.specialists.profile._whole_machine_available", lambda: available)
+
+    return _set
+
+
+def test_requires_gpu_variants(whole_machine):
+    """GPU for needs_gpu / bench always; for enablement only when the whole machine is available."""
+    whole_machine(True)
     assert requires_gpu({"needs_gpu": True}) is True
     assert requires_gpu({"mode": "patch", "bench": True}) is True
     assert requires_gpu({"enablement": True}) is True
-    assert requires_gpu({"framework_agent_authoring": True}) is False
-    assert requires_gpu({"mode": "patch"}) is False
+    assert requires_gpu({"framework_agent_authoring": True, "mode": "patch"}) is False
     assert requires_gpu({"mode": "research"}) is False
     assert requires_gpu(None) is False
+    whole_machine(False)
+    assert requires_gpu({"enablement": True}) is False
+    assert requires_gpu({"needs_gpu": True}) is True
 
 
-def test_specialist_lanes_cpu():
-    """CPU specialists use only research_lane."""
-    lanes = specialist_lanes({"mode": "patch"}, ["research_lane"])
-    assert lanes == ["research_lane"]
+@pytest.mark.parametrize(
+    ("params", "expected"),
+    [
+        ({"mode": "patch"}, ["research_lane"]),
+        ({"framework_agent_authoring": True, "mode": "patch"}, ["research_lane"]),
+        ({"needs_gpu": True}, ["gpu_research_lane"]),
+        ({"enablement": True}, ["gpu_research_lane"]),
+        ({"mode": "patch", "bench": True}, ["gpu_research_lane", "benchmark_lane"]),
+    ],
+)
+def test_specialist_lanes(whole_machine, params, expected):
+    """CPU specialists hold research_lane; GPU specialists hold gpu_research_lane instead; bench adds benchmark_lane."""
+    whole_machine(True)
+    assert specialist_lanes(params, ["research_lane"]) == expected
 
 
-def test_specialist_lanes_gpu():
-    """GPU specialists replace research_lane with gpu_research_lane."""
-    lanes = specialist_lanes({"needs_gpu": True}, ["research_lane"])
-    assert "gpu_research_lane" in lanes
-    assert "research_lane" not in lanes
-
-
-def test_specialist_lanes_bench():
-    """Bench specialists get gpu_research_lane + benchmark_lane."""
-    lanes = specialist_lanes({"mode": "patch", "bench": True}, ["research_lane"])
-    assert "gpu_research_lane" in lanes
-    assert "benchmark_lane" in lanes
-    assert "research_lane" not in lanes
-
-
-def test_specialist_lanes_enablement():
-    """Enablement authoring specialists get gpu_research_lane."""
-    lanes = specialist_lanes({"enablement": True}, ["research_lane"])
-    assert "gpu_research_lane" in lanes
-
-
-def test_specialist_lanes_framework_authoring_cpu():
-    """FRAMEWORK authoring specialists are CPU; they keep research_lane only."""
-    lanes = specialist_lanes({"framework_agent_authoring": True}, ["research_lane"])
-    assert lanes == ["research_lane"]
-    assert "gpu_research_lane" not in lanes
+def test_whole_machine_lane_is_enablement_or_bench():
+    """FRAMEWORK authoring is CPU; enablement and bench specialists lease the whole machine."""
+    assert uses_whole_machine_gpu_lane({"enablement": True}) is True
+    assert uses_whole_machine_gpu_lane({"mode": "patch", "bench": True}) is True
+    assert uses_whole_machine_gpu_lane({"framework_agent_authoring": True}) is False
 
 
 def test_wall_budget_base_min_by_mode():
@@ -172,9 +164,7 @@ def test_wall_budget_base_min_by_mode():
     assert wall_budget_base_min({"mode": "patch"}) == 60.0
     assert wall_budget_base_min({"mode": "research"}) == 10.0
     assert wall_budget_base_min({"scope": "freeform"}) == 10.0
-    # bare dispatch resolves to freeform research mode
     assert wall_budget_base_min(None) == 10.0
-    # domain-anchored (default patch mode)
     assert wall_budget_base_min({"domain": "serving_specialist"}) == 60.0
 
 

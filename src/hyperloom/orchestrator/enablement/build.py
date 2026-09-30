@@ -473,8 +473,7 @@ class EnablementBuild(CoordinatorCollaborator):
         applying any patch.  The probe completes as an ordinary integrate_patch
         task whose enablement:True result is routed by the dispatcher through
         _maybe_rearm_authored_lane → _maybe_rearm_enablement, producing a
-        genuine KEEP/advanced/reverted outcome.  The whole-machine GPU pool is
-        acquired because enablement=True is set on the params.
+        genuine KEEP/advanced/reverted outcome.
 
         The probe is what declares KEEP for a build, so it must not be opened
         into a session that cannot run it: the queue scan drops a queued row the

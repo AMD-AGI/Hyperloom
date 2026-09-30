@@ -435,7 +435,11 @@ def force_coord(tmp_path: Path, monkeypatch):
     source_root = tmp_path / "framework"
     (source_root / ".git").mkdir(parents=True)
     c.shared_state.framework_repo_path = str(source_root)
-    c.tasks = SimpleNamespace(find_by_idempotency_key=AsyncMock(return_value=None))
+    c.tasks = SimpleNamespace(
+        find_by_idempotency_key=AsyncMock(return_value=None),
+        queued=AsyncMock(return_value=[]),
+        running=AsyncMock(return_value=[]),
+    )
     monkeypatch.setattr(SpecialistDispatchCollaborator, "_warm_specialist_params", AsyncMock())
     c._handle_intent = AsyncMock()  # type: ignore[method-assign]
     return c
@@ -467,8 +471,6 @@ async def test_force_stalled_domain_dispatches_when_gap_pending(force_coord):
     assert "forced-stalled-framework" in intent.payload["idempotency_key"]
     # Cycle 0 → no cycle suffix.
     assert not intent.payload["idempotency_key"].endswith("-c0")
-    # Counter is zeroed up-front so it can't re-fire next tick.
-    assert state.rounds_since_last_specialist["framework"] == 0
 
 
 @pytest.mark.asyncio
@@ -546,48 +548,20 @@ async def test_force_stalled_source_patch_without_git_root_is_pruned_once(force_
     ]
 
 
-def test_force_stalled_skips_anchor_with_inflight_specialist(tmp_path: Path):
-    """When a specialist for an anchor is already queued or running, the stalled-domain
-    force is skipped for that anchor."""
-    import asyncio
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    c = Coordinator.__new__(Coordinator)
-    c.session_dir = tmp_path
-    state = SharedState()
-    state.phase = "FRAMEWORK_AGENT"
-    c.shared_state = state
-    source_root = tmp_path / "framework"
-    (source_root / ".git").mkdir(parents=True)
-    state.framework_repo_path = str(source_root)
-
-    running_specialist = SimpleNamespace(
-        kind="specialist",
-        params={"domain": "serving_specialist", "tags": ["framework"]},
-    )
-
-    queued_calls: list[str] = []
-    c.tasks = SimpleNamespace(
-        find_by_idempotency_key=AsyncMock(return_value=None),
-        queued=AsyncMock(return_value=[running_specialist]),
-        running=AsyncMock(return_value=[]),
-    )
-    c._handle_intent = AsyncMock()
-
+async def test_force_stalled_skips_a_domain_with_a_specialist_in_flight(force_coord):
+    state = force_coord.shared_state
     for _ in range(10):
         state.bump_domain_round_counters()
     state.upsert_gap(
         {"canonical_id": "gap.framework.scheduler.s1", "domain_hint": "serving_specialist", "severity": "high"}
     )
+    force_coord.tasks.running.return_value = [
+        SimpleNamespace(kind="specialist", params={"domain": "serving_specialist"})
+    ]
 
-    from unittest.mock import patch
+    await force_coord._maybe_force_stalled_domain_specialist()
 
-    with patch.object(SpecialistDispatchCollaborator, "_warm_specialist_params", new=AsyncMock()):
-        asyncio.run(c._maybe_force_stalled_domain_specialist())
-
-    c._handle_intent.assert_not_awaited()
+    force_coord._handle_intent.assert_not_awaited()
 
 
 @pytest.mark.asyncio

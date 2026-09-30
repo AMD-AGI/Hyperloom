@@ -64,72 +64,47 @@ def _infer_scope(p: dict[str, Any]) -> str:
     return SCOPE_FREEFORM
 
 
-def requires_gpu(params: dict[str, Any] | None) -> bool:
-    """True when a specialist needs a GPU lease.
+def _whole_machine_available() -> bool:
+    """Whether this single node exposes any card to a whole-machine lease."""
+    from ..actions.executors._multi_node_env import is_multi_node
+    from ..bus.gpu_pool import resolve_whole_machine_devices
 
-    Covers explicit ``needs_gpu``, bench-capable dispatches, and
-    enablement authoring (which boots a server to validate the patch).
-    FRAMEWORK authoring runs CPU-only; its integration benchmark goes
-    through ``integrate_patch``.
-    """
+    return not is_multi_node() and bool(resolve_whole_machine_devices())
+
+
+def requires_gpu(params: dict[str, Any] | None) -> bool:
+    """True for ``needs_gpu``, bench-capable, and enablement specialists (the latter boot a server)."""
     p = params or {}
-    if is_truthy(p.get("needs_gpu")):
+    if is_truthy(p.get("needs_gpu")) or resolve_specialist_profile(p).reserves_benchmark_lane:
         return True
-    if resolve_specialist_profile(p).reserves_benchmark_lane:
-        return True
-    # Enablement specialists compile and boot a server; they need the whole machine.
-    if bool(p.get("enablement")):
-        return True
-    return False
+    return bool(p.get("enablement")) and _whole_machine_available()
 
 
 def specialist_lanes(params: dict[str, Any] | None, base_lanes: list[str]) -> list[str]:
-    """Compute the lane list for a specialist dispatch.
-
-    CPU specialists use only ``base_lanes`` (typically ``["research_lane"]``).
-    GPU specialists replace ``research_lane`` with ``gpu_research_lane``.
-    Bench specialists also add ``benchmark_lane``.
-    """
-    p = params or {}
-    gpu = requires_gpu(p)
-    profile = resolve_specialist_profile(p)
-    lanes: list[str] = []
-    for lane in base_lanes:
-        if lane == "research_lane" and gpu:
-            lanes.append("gpu_research_lane")
-        else:
-            lanes.append(lane)
-    if gpu and "gpu_research_lane" not in lanes:
-        lanes.append("gpu_research_lane")
-    if profile.reserves_benchmark_lane and "benchmark_lane" not in lanes:
+    """Lanes for a specialist: GPU specialists hold ``gpu_research_lane`` instead of ``research_lane``."""
+    lanes = list(base_lanes)
+    if requires_gpu(params):
+        lanes = [lane for lane in lanes if lane != "research_lane"] + ["gpu_research_lane"]
+    if resolve_specialist_profile(params).reserves_benchmark_lane:
         lanes.append("benchmark_lane")
     return list(dict.fromkeys(lanes))
 
 
 def wall_budget_base_min(params: dict[str, Any] | None) -> float:
-    """Base wall-clock budget in minutes for a specialist, tiered by mode.
-
-    Patch mode gets 60 minutes; research mode gets 10 minutes. The bench
-    floor (rebench timeout + 10 min) is applied by the caller.
-    """
-    profile = resolve_specialist_profile(params or {})
-    return 60.0 if profile.mode == MODE_PATCH else 10.0
+    """Base wall-clock budget in minutes: 60 for patch mode, 10 for research mode."""
+    return 60.0 if resolve_specialist_profile(params).mode == MODE_PATCH else 10.0
 
 
 def is_authoring_specialist(params: dict[str, Any] | None) -> bool:
-    """True for an ENABLEMENT authoring specialist, which defaults to every GPU on the machine.
-
-    FRAMEWORK authoring is no longer whole-machine GPU.
-    """
+    """True for a FRAMEWORK or ENABLEMENT authoring specialist."""
     p = params or {}
-    return bool(p.get("enablement"))
+    return bool(p.get("framework_agent_authoring")) or bool(p.get("enablement"))
 
 
 def uses_whole_machine_gpu_lane(params: dict[str, Any] | None) -> bool:
     """True when a GPU specialist should lease the *whole machine* (time-shared with serving via ``gpu_research_lane``) rather than the serving-disjoint ``gpu_specialist_pool``."""
-    if is_authoring_specialist(params):
-        return True
-    return resolve_specialist_profile(params or {}).reserves_benchmark_lane
+    p = params or {}
+    return bool(p.get("enablement")) or resolve_specialist_profile(p).reserves_benchmark_lane
 
 
 def holds_serving_slot(params: dict[str, Any] | None) -> bool:

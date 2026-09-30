@@ -96,38 +96,43 @@ class _GpuProbe:
         }
 
 
-# ── 1. enablement authoring carries GPU; FRAMEWORK authoring is CPU ──
+# ── 1. enablement specialists request the whole machine only when it exists ──
 
 
-def test_enablement_params_carry_whole_machine_gpu(tmp_path, monkeypatch):
-    """The enablement param builder sets enablement=True; requires_gpu derives whole-machine GPU from that."""
-    from hyperloom.orchestrator.specialists.profile import requires_gpu, specialist_lanes
-
-    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
+def _enablement_params(coord):
     coord.shared_state.framework = "sglang"
     coord.shared_state.model_name = "some/model"
     log = "Model architecture 'FooBarForCausalLM' is not supported by this build"
     params = coord._build_enablement_specialist_params(log)
-    assert params is not None
-    assert params.get("enablement") is True
-    assert requires_gpu(params) is True
-    lanes = specialist_lanes(params, ["research_lane"])
-    assert "gpu_research_lane" in lanes
+    assert params is not None and params.get("enablement") is True
+    return params
 
 
-def test_framework_authoring_is_cpu(tmp_path, monkeypatch):
-    """FRAMEWORK authoring no longer requests the whole-machine GPU."""
+def test_enablement_specialist_leases_gpu_on_a_single_node_with_cards(tmp_path, monkeypatch):
     from hyperloom.orchestrator.specialists.profile import requires_gpu, specialist_lanes
 
-    fw_params = {
-        "framework_agent_authoring": True,
-        "domain": "serving_specialist",
-        "mode": "patch",
-    }
-    assert requires_gpu(fw_params) is False
-    lanes = specialist_lanes(fw_params, ["research_lane"])
-    assert lanes == ["research_lane"]
-    assert "gpu_research_lane" not in lanes
+    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
+    params = _enablement_params(coord)
+    assert requires_gpu(params) is True
+    assert specialist_lanes(params, ["research_lane"]) == ["gpu_research_lane"]
+
+
+def test_enablement_specialist_is_cpu_without_visible_cards(tmp_path, monkeypatch):
+    """No visible cards → no GPU lease, so the dispatcher never waits on an empty pool."""
+    from hyperloom.orchestrator.specialists.profile import requires_gpu
+
+    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0, visible_devices="")
+    assert coord.framework_gpu_pool.capacity == 0
+    assert requires_gpu(_enablement_params(coord)) is False
+
+
+def test_enablement_specialist_is_cpu_on_multi_node(tmp_path, monkeypatch):
+    """Multi-node → no whole-machine lease (the cards live on remote pods)."""
+    from hyperloom.orchestrator.specialists.profile import requires_gpu
+
+    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    assert requires_gpu(_enablement_params(coord)) is False
 
 
 # ── 2. dispatch leases the whole machine when capacity=0 (enablement) ────────────────
