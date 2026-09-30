@@ -104,7 +104,7 @@ the knowledge base are described further in
 | Framework | SGLang, vLLM, xDiT |
 | Kernel language | HIP, Triton, FlyDSL |
 | Kernel backends | GEAK, KernelForge |
-| LLM backend | Claude |
+| LLM backend | Claude, Codex |
 
 ## Get started
 
@@ -188,7 +188,7 @@ the terms of the MIT license, provided the copyright notice and the
 permission notice are retained in all copies or substantial portions of
 the software.
 
-Third-party tools and agents (Cursor, Visual Studio, and Claude Code)
+Third-party tools and agents (Cursor, Visual Studio, Claude Code, and Codex)
 that Hyperloom invokes are governed by their own separate license terms
 and are NOT covered by the MIT license above — see the "Third-Party
 Tools and Agents" section in [`LICENSE`](https://github.com/AMD-AGI/Hyperloom/blob/main/LICENSE). You are responsible
