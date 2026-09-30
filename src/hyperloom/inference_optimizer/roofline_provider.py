@@ -1,19 +1,16 @@
 """RooflineProvider — one seam for analytical roofline data (native compute vs external CSV).
 
-Consumers ask a provider for a value; the provider decides whether to compute it natively or
-read it from an external (MAIDAS-authored) CSV. This is the seam that collapses the
-external-vs-native mode selection. The ceiling read (:func:`compute_roofline_breakdown_from_state`)
-is wired through it today; the other read methods (arch peak / model-meta / per-kernel) are the
-stable read surface those consume sites migrate onto.
+Consumers ask a provider for a value; the provider decides, per read, whether to compute it natively
+or read it from an external (MAIDAS-authored) CSV — the seam that collapses that external-vs-native
+selection. It is read-only by design: Hyperloom's existing producers own CSV *writes*.
 
 The five read methods mirror the shapes the native math already exposes, so ``NativeRooflineProvider``
 is a thin delegate — the default provider runs the identical stock computation with no CSV, which
 keeps a no-external-CSV run byte-identical by construction.
 
-The provider is read-only (per design): Hyperloom's existing producers own CSV *writes*; the provider
-only decides, per read, between native compute and an external CSV value. The ceiling choke point
-(:func:`compute_roofline_breakdown_from_state`) consumes it today; the other read methods are the
-stable read surface for the remaining consume sites.
+The ceiling read (:func:`compute_roofline_breakdown_from_state`) is wired through the provider today;
+the other read methods (arch peak / model-meta / per-kernel) are the stable read surface the remaining
+consume sites migrate onto.
 """
 
 from __future__ import annotations
