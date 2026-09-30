@@ -209,6 +209,24 @@ def test_freeform_description_too_long_rejected(gate, orchestration_role):
     assert exc.value.rule == "specialist_freeform_description_too_long"
 
 
+@pytest.mark.parametrize("framework", ["tensorrt", "", None])
+def test_unregistered_framework_param_rejected(gate, orchestration_role, framework):
+    """A specialist resolves its source tree from params.framework, so the name must be one the registry knows."""
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch({"scope": "freeform", "task_description": "A short mandate.", "framework": framework}),
+        )
+    assert exc.value.rule == "specialist_framework_unregistered"
+
+
+def test_registered_framework_param_admitted(gate, orchestration_role):
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch({"scope": "freeform", "task_description": "A short mandate.", "framework": "vllm"}),
+    )
+
+
 @pytest.mark.parametrize(
     "desc",
     [

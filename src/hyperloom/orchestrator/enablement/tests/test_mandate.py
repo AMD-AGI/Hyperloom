@@ -19,6 +19,7 @@ from hyperloom.orchestrator.enablement.mandate import (
     _FRAMEWORK_ROOT_HINT,
     _ROCM_HIP_ROOT_HINT,
     _resolve_actual_root_hints,
+    _resolve_package_version,
     build_enablement_ladder_book,
     build_mandate,
     build_search_plan,
@@ -294,6 +295,34 @@ def test_version_appended_when_package_installed():
     ):
         hints = _resolve_actual_root_hints("vllm")
     assert any("0.9.1+rocm" in h for h in hints)
+
+
+def test_version_hint_names_xdit_by_its_xfuser_package():
+    with (
+        patch(
+            "hyperloom.orchestrator.enablement.mandate.resolve_kernel_search_roots",
+            return_value=("/app/xDiT/",),
+        ),
+        patch(
+            "hyperloom.orchestrator.enablement.mandate._resolve_package_version",
+            side_effect=lambda package: "0.4.1" if package == "xfuser" else "",
+        ),
+    ):
+        hints = _resolve_actual_root_hints("xdit")
+    assert "(xfuser installed version: 0.4.1)" in hints
+
+
+def test_a_framework_without_a_package_gets_no_version_hint():
+    with patch(
+        "hyperloom.orchestrator.enablement.mandate.resolve_kernel_search_roots",
+        return_value=("/opt/rocm/",),
+    ):
+        hints = _resolve_actual_root_hints("custom")
+    assert not any("installed version" in h for h in hints)
+
+
+def test_an_absent_package_has_no_version():
+    assert _resolve_package_version("hyperloom-no-such-distribution") == ""
 
 
 def test_build_mandate_uses_resolved_roots_in_task_description():

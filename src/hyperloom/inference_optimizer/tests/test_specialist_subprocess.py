@@ -290,6 +290,7 @@ def _make_runner_ctx(task_id: str = "t-spec-1") -> RunnerContext:
         state="queued",
         params={
             "domain": "serving_specialist",
+            "framework": "sglang",
             "gap_canonical_id": "gap.test.example",
             "max_turns": 2,
         },

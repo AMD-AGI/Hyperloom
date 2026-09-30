@@ -70,6 +70,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
+from hyperloom.inference_optimizer import framework_registry
 from ._recipe_script import recipe_launch_contract
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
@@ -1010,32 +1011,16 @@ def _coerce_workload_int_env(env_key: str, raw: str) -> int:
     return value
 
 
-# ``$FRAMEWORK`` (lowercased) -> shipped Magpie YAML, relative to
-# ``asset_root()``. Unknown / unset frameworks fall back to
-# ``_DEFAULT_BASELINE_CONFIG`` (sglang) so existing sglang-default tests keep
-# passing. Values are relative so ``asset_root()`` is still resolved at call
-# time (honoring the ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` override).
-_BASELINE_CONFIG_BY_FRAMEWORK: dict[str, Path] = {
-    "atom": Path("assets/configs/baseline_atom.yaml"),
-    "vllm": Path("assets/configs/baseline_vllm.yaml"),
-    "xdit": Path("assets/configs/baseline_xdit.yaml"),
-    "custom": Path("assets/configs/baseline_custom.yaml"),
-}
-_DEFAULT_BASELINE_CONFIG = Path("assets/configs/baseline_sglang.yaml")
-
-
 def default_baseline_config() -> Path:
-    """Resolve the shipped Magpie YAML based on ``$FRAMEWORK`` env.
+    """Resolve the shipped Magpie YAML for ``$FRAMEWORK``, or for the default framework when it is unset.
 
-    Returns the sglang YAML when ``$FRAMEWORK`` is unset/unknown so existing
-    sglang-default tests keep passing.
+    Resolved at call time so ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` is honoured.
 
     Returns:
         Path: The shipped Magpie YAML config path for the resolved framework.
     """
-    fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    rel = _BASELINE_CONFIG_BY_FRAMEWORK.get(fw, _DEFAULT_BASELINE_CONFIG)
-    return asset_root() / rel
+    fw = os.environ.get("FRAMEWORK") or framework_registry.DEFAULT_FRAMEWORK
+    return asset_root() / "assets" / "configs" / framework_registry.shipped_config_name("baseline", fw)
 
 
 _PROFILER_FLAG_RE = re.compile(r"--profiler-config\.(\w+)[=\s]+(\S+)")

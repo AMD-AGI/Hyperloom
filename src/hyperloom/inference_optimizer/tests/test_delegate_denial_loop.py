@@ -94,6 +94,7 @@ async def test_delegate_running_collision_denies_without_new_task(session_dir):
 async def test_delegate_source_patch_without_git_root_prunes_without_retry(session_dir):
     c = _silent_coordinator(session_dir)
     try:
+        c.shared_state.framework = "sglang"
         c.shared_state.framework_repo_path = ""
         await c._handle_delegate(
             "orchestration",

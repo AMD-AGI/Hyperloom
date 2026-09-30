@@ -434,7 +434,12 @@ def force_coord(tmp_path: Path, monkeypatch):
     (source_root / ".git").mkdir(parents=True)
     c.shared_state.framework_repo_path = str(source_root)
     c.tasks = SimpleNamespace(find_by_idempotency_key=AsyncMock(return_value=None))
-    monkeypatch.setattr(SpecialistDispatchCollaborator, "_warm_specialist_params", AsyncMock())
+    # The real warmup stamps the session's framework onto every dispatch.
+    monkeypatch.setattr(
+        SpecialistDispatchCollaborator,
+        "_warm_specialist_params",
+        AsyncMock(side_effect=lambda params: params.setdefault("framework", "sglang")),
+    )
     c._handle_intent = AsyncMock()  # type: ignore[method-assign]
     return c
 

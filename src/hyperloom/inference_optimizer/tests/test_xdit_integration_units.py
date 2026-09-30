@@ -252,20 +252,6 @@ class TestScriptableMeasurement:
         assert m["valid_measurement"] is True
 
 
-class TestConfigResolvers:
-    def test_baseline_config_xdit(self, monkeypatch):
-        from hyperloom.orchestrator.actions.executors import _workload_envs as we
-
-        monkeypatch.setenv("FRAMEWORK", "xdit")
-        assert we.default_baseline_config().name == "baseline_xdit.yaml"
-
-    def test_profile_config_xdit(self, monkeypatch):
-        from hyperloom.orchestrator.actions.executors import profile as pf
-
-        monkeypatch.setenv("FRAMEWORK", "xdit")
-        assert pf._default_profile_config().name == "profile_xdit.yaml"
-
-
 class TestExploreGrid:
     @pytest.mark.parametrize(
         "framework,model_class,hints",
@@ -326,20 +312,63 @@ class TestExploreGrid:
             assert v.note == v.provenance == "default_grid"
 
 
-class TestRegistryRepoUrlConsistency:
-    """Guard against repo_url drift between framework_registry and repo_map."""
+def _default_config(kind: str):
+    from hyperloom.orchestrator.actions.executors import _workload_envs as we
+    from hyperloom.orchestrator.actions.executors import profile as pf
 
-    def test_registry_urls_match_repo_map(self):
-        try:
-            from hyperloom.agents.framework.repo_map import _FRAMEWORK_TO_REPO_URL
-        except ImportError:
-            pytest.skip("hyperloom.agents.framework not installed")
-        for name, spec in fr.FRAMEWORKS.items():
-            if spec.repo_url is not None:
-                assert spec.repo_url == _FRAMEWORK_TO_REPO_URL.get(name, ""), (
-                    f"repo_url mismatch for {name}: "
-                    f"registry={spec.repo_url!r} vs repo_map={_FRAMEWORK_TO_REPO_URL.get(name)!r}"
-                )
+    return {"baseline": we.default_baseline_config, "profile": pf._default_profile_config}[kind]()
+
+
+def _per_framework_tables() -> dict[str, dict]:
+    from hyperloom.orchestrator.actions.executors import _grid_variant_filter, baseline
+    from hyperloom.orchestrator.enablement.runtime import adapters
+    from hyperloom.orchestrator.framework import adapter_parsers
+
+    return {
+        "_ADAPTERS": adapters._ADAPTERS,
+        "_PARSER_SOURCES": adapter_parsers._PARSER_SOURCES,
+        "_HELP_PROBE_COMMANDS": _grid_variant_filter._HELP_PROBE_COMMANDS,
+        "_DISABLE_CUDA_GRAPH_FLAGS": baseline._DISABLE_CUDA_GRAPH_FLAGS,
+    }
+
+
+class TestRegistryOwnsPerFrameworkAssets:
+    """What the registry derives for a framework must exist for every framework it registers."""
+
+    @pytest.mark.parametrize("kind", ["baseline", "profile"])
+    @pytest.mark.parametrize("framework", list(fr.FRAMEWORKS))
+    def test_every_registered_framework_resolves_its_shipped_config(self, monkeypatch, kind, framework):
+        monkeypatch.setenv("FRAMEWORK", framework)
+        config = _default_config(kind)
+        assert config.name == f"{kind}_{framework}.yaml"
+        assert config.is_file()
+
+    @pytest.mark.parametrize("kind", ["baseline", "profile"])
+    def test_unset_framework_resolves_the_default_config(self, monkeypatch, kind):
+        monkeypatch.delenv("FRAMEWORK", raising=False)
+        assert _default_config(kind).name == f"{kind}_{fr.DEFAULT_FRAMEWORK}.yaml"
+
+    @pytest.mark.parametrize("kind", ["baseline", "profile"])
+    def test_unregistered_framework_has_no_config(self, monkeypatch, kind):
+        monkeypatch.setenv("FRAMEWORK", "tensorrt")
+        with pytest.raises(KeyError):
+            _default_config(kind)
+
+    @pytest.mark.parametrize(
+        "lookup",
+        [fr.python_package, fr.source_root, fr.repo_url, lambda name: fr.shipped_config_name("baseline", name)],
+    )
+    def test_registry_lookups_reject_an_unregistered_name(self, lookup):
+        with pytest.raises(KeyError):
+            lookup("tensorrt")
+
+    @pytest.mark.parametrize("table", sorted(_per_framework_tables()))
+    def test_per_framework_tables_cover_every_serving_framework(self, table):
+        """Tables the registry cannot hold still have to name every serving framework, and only registered ones."""
+        keys = set(_per_framework_tables()[table])
+        serving = {name for name, spec in fr.FRAMEWORKS.items() if spec.kind == fr.SERVING}
+        assert serving - keys == set()
+        assert keys - set(fr.FRAMEWORKS) == set()
 
 
 class TestLifecycleScriptableSkip:

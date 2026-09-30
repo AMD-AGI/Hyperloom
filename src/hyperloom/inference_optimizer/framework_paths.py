@@ -10,12 +10,13 @@ frameworks: atom, sglang, vllm, xdit (``xfuser`` package); aiter is discovered
 as a shared kernel library.
 
 Three resolvers, three questions, not interchangeable.
-:func:`resolve_framework_tree` names *the* tree a session is optimising, keyed by
-the framework's own name. :func:`resolve_kernel_search_roots` lists the trees
-worth searching, filtered to what exists here. :func:`resolve_known_source_prefixes`
-matches a path string against every layout that could hold source, including
-those absent from this host. None is a permission set: what may be written is
-decided by the integration step that applies the patch.
+:func:`resolve_framework_tree` names *the* tree a session is optimising, from
+what the framework registry declares about it. :func:`resolve_kernel_search_roots`
+lists the trees worth searching, filtered to what exists here.
+:func:`resolve_known_source_prefixes` matches a path string against every layout
+that could hold source, including those absent from this host. None is a
+permission set: what may be written is decided by the integration step that
+applies the patch.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from hyperloom.inference_optimizer import framework_registry as _reg
+
 log = logging.getLogger(__name__)
 
 #: Framework-agnostic way to name the source tree a session may patch. Accepted in
@@ -34,35 +37,29 @@ log = logging.getLogger(__name__)
 #: precedence; see :func:`_discover_explicit_framework_root`.
 GENERIC_FRAMEWORK_ROOT_ENV: str = "FRAMEWORK_REPO_PATH"
 
+#: aiter is a shared kernel library, not a registered framework, so its facts live here.
+_KERNEL_LIBRARY: str = "aiter"
+_KERNEL_LIBRARY_SOURCE_ROOT: str = "/sgl-workspace/aiter/"
+
 _DEFAULT_SOURCE_ROOTS: tuple[str, ...] = (
-    "/sgl-workspace/aiter/",
-    "/sgl-workspace/sglang/",
-    "/sgl-workspace/vllm/",
-    # atom's editable-install layout.
-    "/app/ATOM/atom/",
-    # xDiT editable install (pure-Python).
-    "/app/xDiT/",
+    _KERNEL_LIBRARY_SOURCE_ROOT,
+    *(root for name in _reg.names() if (root := _reg.source_root(name))),
 )
 
-#: Every package whose installed tree counts as framework source. The single
+#: Every package whose installed tree counts as framework source: the kernel
+#: libraries, then each registered framework's ``python_package``. The single
 #: authoritative list: importlib discovery, the ``$VIRTUAL_ENV`` glob and the
-#: install-parent glob all derive their patterns from it, so a package added
+#: install-parent glob all derive their patterns from it, so a package named
 #: here reaches all three. Naming one in only some of them is how a standalone
 #: ``sgl_kernel`` wheel stayed invisible to root discovery while the tool that
 #: greps for kernel source listed it -- and a root that is never searched reads
 #: downstream exactly like a kernel whose source is not on this host.
 FRAMEWORK_SOURCE_PACKAGES: tuple[str, ...] = (
-    "aiter",
+    _KERNEL_LIBRARY,
     "aiter_meta",
-    "sglang",
     "sgl_kernel",
-    "vllm",
-    "atom",
-    "xfuser",
+    *(package for name in _reg.names() if (package := _reg.python_package(name))),
 )
-
-#: Backwards-compatible private alias.
-_FRAMEWORK_PACKAGES: tuple[str, ...] = FRAMEWORK_SOURCE_PACKAGES
 
 #: Packages an isolated vLLM venv may hold. Deliberately narrower than
 #: :data:`FRAMEWORK_SOURCE_PACKAGES`: that tree exists because vLLM needs its
@@ -258,7 +255,7 @@ def _discover_installed_framework_roots() -> tuple[str, ...]:
             seen.add(root)
             found.append(root)
 
-    for mod in _FRAMEWORK_PACKAGES:
+    for mod in FRAMEWORK_SOURCE_PACKAGES:
         origin = _find_spec_origin(mod)
         if origin is not None:
             add(origin)
@@ -291,46 +288,43 @@ def _discover_installed_framework_roots() -> tuple[str, ...]:
 
 
 def _scriptable_frameworks() -> tuple[str, ...]:
-    """Return the registered scriptable framework names (empty on import error).
-
-    Imported lazily: ``framework_registry`` lives in ``inference_optimizer`` and
-    importing it at module scope would close a cycle back through this package.
-
-    Returns:
-        tuple[str, ...]: Scriptable framework names, or ``()`` when the registry
-            cannot be imported.
-    """
-    try:
-        from hyperloom.inference_optimizer import framework_registry as _reg
-
-        return tuple(name for name in _reg.names() if _reg.is_scriptable(name))
-    except Exception:  # noqa: BLE001 - discovery must never break path resolution
-        return ()
+    """Return the registered scriptable framework names."""
+    return tuple(name for name in _reg.names() if _reg.is_scriptable(name))
 
 
-def _framework_repo_dirname(framework: str) -> str:
-    """Return the checkout directory name implied by a framework's repo URL.
+def _source_dirnames(owner: str) -> frozenset[str]:
+    """Directory names a tree of ``owner`` is installed or checked out under.
 
-    ``my-framework.git`` -> ``my-framework``. Used so a checkout whose directory
-    name differs from the framework name still registers as discovered.
+    ``owner`` is a registered framework or the kernel library. A framework's
+    names are its installed package and its default checkout's directory, so a
+    tree is recognised from either layout. Names are lower-cased: a checkout's
+    directory is named by whoever cloned it (``xdit``, ``xDiT``).
 
     Args:
-        framework (str): Registered framework name.
+        owner (str): Registered framework name, or ``"aiter"``.
 
     Returns:
-        str: The bare repo directory name, or ``""`` when unknown.
+        frozenset[str]: The directory names; empty for a framework with no tree.
     """
-    try:
-        from hyperloom.inference_optimizer import framework_registry as _reg
+    if owner == _KERNEL_LIBRARY:
+        return frozenset({_KERNEL_LIBRARY})
+    checkout = _reg.source_root(owner)
+    return frozenset(d.lower() for d in (_reg.python_package(owner), Path(checkout).name if checkout else None) if d)
 
-        spec = _reg.FRAMEWORKS.get(framework)
-        url = str(getattr(spec, "repo_url", "") or "").strip()
-    except Exception:  # noqa: BLE001
-        return ""
-    if not url:
-        return ""
-    name = url.rstrip("/").rsplit("/", 1)[-1]
-    return name[:-4] if name.endswith(".git") else name
+
+def _root_belongs_to(owner: str, root: str) -> bool:
+    """Return whether the tree at ``root`` is ``owner``'s source.
+
+    Args:
+        owner (str): Registered framework name, or ``"aiter"``.
+        root (str): A source root (may carry a trailing slash).
+
+    Returns:
+        bool: True when the root's own directory is one ``owner`` installs or
+            checks out under, ignoring case; a name merely containing it does
+            not count.
+    """
+    return Path(root.strip().rstrip("/")).name.lower() in _source_dirnames(owner)
 
 
 def _discover_scriptable_repo_roots() -> tuple[str, ...]:
@@ -467,29 +461,32 @@ def resolve_session_framework_root() -> str:
 def resolve_framework_tree(framework: str) -> str:
     """Return the source tree belonging to ``framework``, or ``""``.
 
-    Every source consulted here is keyed by the framework's own name — its env
-    vars, its Python package, its default path. That is what distinguishes this
-    from :func:`resolve_kernel_search_roots`, whose order reflects only how
-    roots were discovered and so cannot name the tree a session is optimising.
+    Every source consulted here belongs to the framework: its env vars, then the
+    ``python_package`` and ``source_root`` its registry entry declares. That is
+    what distinguishes this from :func:`resolve_kernel_search_roots`, whose order
+    reflects only how roots were discovered and so cannot name the tree a
+    session is optimising.
 
     Args:
-        framework: Framework name, e.g. ``"sglang"``.
+        framework: Registered framework name, e.g. ``"sglang"``.
 
     Returns:
         str: The normalised tree root, or ``""`` when the framework has none.
+
+    Raises:
+        KeyError: When ``framework`` is not registered.
     """
-    pkg = str(framework or "").strip().lower()
-    if not pkg:
-        return ""
-    for key in (f"{pkg.upper()}_REPO_PATH", f"{pkg.upper()}_DIR", GENERIC_FRAMEWORK_ROOT_ENV):
+    name = framework.strip().lower()
+    package = _reg.python_package(name)
+    for key in (f"{name.upper()}_REPO_PATH", f"{name.upper()}_DIR", GENERIC_FRAMEWORK_ROOT_ENV):
         candidate = os.environ.get(key, "").strip()
         if candidate and Path(candidate).is_dir():
             return _normalize_root(candidate)
-    origin = _find_spec_origin(pkg)
+    origin = _find_spec_origin(package) if package else None
     if origin is not None:
         return _normalize_root(str(origin))
     for default in _DEFAULT_SOURCE_ROOTS:
-        if default.rstrip("/").endswith(f"/{pkg}") and Path(default).is_dir():
+        if _root_belongs_to(name, default) and Path(default).is_dir():
             return _normalize_root(default)
     return ""
 
@@ -582,35 +579,24 @@ def probe_framework_source_roots_for_env() -> str:
     return ":".join(resolve_kernel_search_roots())
 
 
-# Ordered for deterministic substring matching (atom before vllm/sglang).
-_FRAMEWORK_BUCKETS: tuple[str, ...] = ("atom", "vllm", "sglang", "aiter", "xdit", "custom")
-
-
 def summarise_framework_root_discovery(roots: str) -> str:
     """Return ``"sglang=ok atom=missing ..."``-style one-line summary.
 
     Input is the colon-separated string from
-    ``probe_framework_source_roots_for_env``; emitted in ``_FRAMEWORK_BUCKETS``
-    order for stable output.
+    ``probe_framework_source_roots_for_env``. One entry per registered framework
+    that has a source tree, in registry order, then aiter.
 
     Args:
         roots: Colon-separated source roots to summarise.
 
     Returns:
-        A one-line ``fw=ok``/``fw=missing`` summary in bucket order.
+        A one-line ``fw=ok``/``fw=missing`` summary.
     """
-    parts: list[str] = []
-    items = [p.strip().lower() for p in (roots or "").split(":") if p.strip()]
-    for fw in _FRAMEWORK_BUCKETS:
-        # A checkout directory rarely matches the framework name, so accept the
-        # repo dirname the registry implies too.
-        tokens = [f"/{fw}/"]
-        dirname = _framework_repo_dirname(fw)
-        if dirname:
-            tokens.append(f"/{dirname.lower()}/")
-        status = "ok" if any(item.endswith(t) for item in items for t in tokens) else "missing"
-        parts.append(f"{fw}={status}")
-    return " ".join(parts)
+    items = [p for p in roots.split(":") if p.strip()]
+    owners = [name for name in _reg.names() if _source_dirnames(name)] + [_KERNEL_LIBRARY]
+    return " ".join(
+        f"{owner}={'ok' if any(_root_belongs_to(owner, item) for item in items) else 'missing'}" for owner in owners
+    )
 
 
 def resolved_within(value: str, root: str) -> bool:
