@@ -768,11 +768,11 @@ async def test_close_sequencer_surfaces_remote_finalize_failure(
 
 @pytest.mark.asyncio
 async def test_close_sequencer_falls_back_to_time_exhausted(coord):
-    """Falls back to ``stop_reason='time_exhausted'`` when CLOSE had no usable phase-exit reason."""
+    """stop_reason set by machine at transition survives the sequencer unchanged."""
     coord.shared_state.phase_history = [
         {"to_phase": "CLOSE", "reason": "", "evidence": {}},
     ]
-    assert coord.shared_state.stop_reason == ""
+    coord.shared_state.set_stop_reason("time_exhausted")
 
     await coord.phase_close._on_enter_close(from_phase="SWEEP")
 

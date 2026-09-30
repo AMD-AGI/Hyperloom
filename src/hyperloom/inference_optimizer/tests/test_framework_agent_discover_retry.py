@@ -72,18 +72,21 @@ class _CoordinatorStub:
     _framework_candidate_key = staticmethod(FrameworkPhase._framework_candidate_key)
     _framework_processed_candidate_keys = FrameworkPhase._framework_processed_candidate_keys
     _stamp_framework_progress = FrameworkPhase._stamp_framework_progress
-    # Reverse-lookup called on every repo; here it resolves to the session framework, so nothing is tagged
-    # (same-framework path).
-    _registry_lanes_ttl = DispatcherCollaborator._registry_lanes_ttl
+    _framework_known_candidate_ids = FrameworkPhase._framework_known_candidate_ids
 
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub()
         self.action_registry = _ACTION_REGISTRY
         self.framework_agent_discover_timeout_sec = 0.0
-
-    def _framework_known_candidate_ids(self) -> set[str]:
-        return FrameworkPhase._framework_known_candidate_ids(self)  # type: ignore[arg-type]
+        # Build a minimal _coord so methods that go through self._coord work.
+        dispatcher_stub = type(
+            "_DispatcherStub",
+            (),
+            {"_registry_lanes_ttl": DispatcherCollaborator._registry_lanes_ttl},
+        )()
+        dispatcher_stub._coord = self  # type: ignore[attr-defined]
+        self._coord = type("_FakeCoord", (), {"dispatcher": dispatcher_stub, "shared_state": self.shared_state})()  # type: ignore[attr-defined]
 
 
 class _TasksStub:
