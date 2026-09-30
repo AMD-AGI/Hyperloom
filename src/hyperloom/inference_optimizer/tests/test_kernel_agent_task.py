@@ -63,6 +63,8 @@ def _arm_kernel_phase(st):
     st.phase_started_unix = (now - timedelta(minutes=20)).timestamp()
     st.start_ts = (now - timedelta(minutes=30)).isoformat()
     st.max_minutes = 96 * 60
+    if not st.phase_budget_pct:
+        st.phase_budget_pct = dict(ps.DEFAULT_PHASE_BUDGET_PCT)
 
 
 def _spend_the_phase_budget(st):
@@ -151,18 +153,20 @@ async def test_entering_kernel_enqueues_one_lane_holding_task_and_returns(coord,
 
 @pytest.mark.asyncio
 async def test_resumed_entry_reuses_a_live_task_and_replaces_a_settled_one(coord):
+    from hyperloom.orchestrator.phases.machine import Transition
+
     c = coord
     st = c.shared_state
     _arm_kernel_phase(st)
 
-    await c.phase_kernel._on_enter_kernel(from_phase=ps.PHASE_FRAMEWORK_AGENT)
+    await c.phase_kernel._on_enter_kernel(Transition(from_phase=ps.PHASE_FRAMEWORK_AGENT, to_phase=ps.PHASE_KERNEL_AGENT, reason="test", evidence={}, loopback=False))
     first = [t for t in await c.tasks.queued() if t.kind == "kernel_agent"]
-    await c.phase_kernel._on_enter_kernel(from_phase="resume")
+    await c.phase_kernel._on_enter_kernel(Transition(from_phase="resume", to_phase=ps.PHASE_KERNEL_AGENT, reason="test", evidence={}, loopback=False))
     assert [t.task_id for t in await c.tasks.queued() if t.kind == "kernel_agent"] == [first[0].task_id]
 
     await c.tasks.transition(first[0].task_id, "running")
     await c.tasks.transition(first[0].task_id, "failed", evidence={"reason": "dead_holder"})
-    await c.phase_kernel._on_enter_kernel(from_phase="resume")
+    await c.phase_kernel._on_enter_kernel(Transition(from_phase="resume", to_phase=ps.PHASE_KERNEL_AGENT, reason="test", evidence={}, loopback=False))
 
     requeued = [t for t in await c.tasks.queued() if t.kind == "kernel_agent"]
     assert len(requeued) == 1
@@ -195,6 +199,7 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
     from hyperloom.inference_optimizer.breakdown.exporter import build
     from hyperloom.inference_optimizer.breakdown.workflow_contract import workflow_schema
     from hyperloom.inference_optimizer.session.manifest import write_manifest
+    from hyperloom.orchestrator.phases.machine import Transition
 
     c = coord
     _arm_kernel_phase(c.shared_state)
@@ -203,7 +208,7 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
     c.sub.register_executor("kernel_agent", lambda _ctx: asyncio.sleep(0, result={"status": "ok"}))
     write_manifest(c.session_dir, session_id="kernel-dispatch-contract")
 
-    await c.phase_kernel._on_enter_kernel(from_phase=ps.PHASE_FRAMEWORK_AGENT)
+    await c.phase_kernel._on_enter_kernel(Transition(from_phase=ps.PHASE_FRAMEWORK_AGENT, to_phase=ps.PHASE_KERNEL_AGENT, reason="test", evidence={}, loopback=False))
     task = next(task for task in await c.tasks.queued() if task.kind == "kernel_agent")
     c.shared_state.phase = ps.PHASE_SWEEP
     c.shared_state.macro_cycle = 4
