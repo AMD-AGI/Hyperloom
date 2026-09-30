@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 import logging as _logging
+from dataclasses import dataclass
 from typing import Any
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 
@@ -17,6 +18,15 @@ from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
 from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Transition:
+    from_phase: str
+    to_phase: str
+    reason: str
+    evidence: dict
+    loopback: bool
 
 
 class MachinePhase(CoordinatorCollaborator):
