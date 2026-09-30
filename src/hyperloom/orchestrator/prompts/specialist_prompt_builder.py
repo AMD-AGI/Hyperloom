@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
+from hyperloom.inference_optimizer.framework_paths import framework_import_name
 from .agentx_context import corpus_lines, grading_lines
 
 from ..specialists.domains import (
@@ -914,10 +915,8 @@ class SpecialistPromptInputs:
     framework_source_roots: tuple[str, ...] = ()
     worktree_base: str = ""
     source_hint_directories: tuple[str, ...] = ()
-    # Relative path inside the worktree to the pip-installable project directory
-    # (the directory containing pyproject.toml or setup.py). Empty when the
-    # project root is the worktree root itself, or when no worktree was created.
-    worktree_project_rel: str = ""
+    # Framework package directory relative to the worktree; empty without a worktree.
+    worktree_package_dir: str = ""
 
     # Structured model architecture features mirrored from SharedState.model_info;
     # machine-parseable companion to ``arch_notes``. Empty dict => not warmed.
@@ -1155,30 +1154,19 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _cpu_selfcheck_block(inp: SpecialistPromptInputs) -> list[str]:
-    """Optional selfcheck helper block for CPU patch specialists with a worktree.
-
-    Describes how to validate worktree changes before submitting them, using a
-    private venv that installs the worktree's package.
-    """
-    if inp.allocated_gpu_ids:
+    """Optional ``selfcheck`` helper for a patch specialist with a worktree and no GPU."""
+    if inp.allocated_gpu_ids or inp.mode != MODE_PATCH or not inp.worktree_package_dir:
         return []
-    if inp.mode != MODE_PATCH:
-        return []
-    workspace = inp.workspace_path
-    if not workspace:
-        return []
-    project_rel = inp.worktree_project_rel
-    project_arg = f"--project {project_rel}" if project_rel else ""
-    lines = [
+    return [
         "",
-        "Optional helper: ``selfcheck`` creates a private venv, installs your worktree's",
-        "package into it, compiles the changed files and runs optional pytest targets:",
+        "Optional helper: ``selfcheck`` installs your worktree's package into a private venv,",
+        "imports it, byte-compiles the files you changed and runs any pytest targets you pass:",
         "    python -m hyperloom.orchestrator.specialists.selfcheck \\",
-        f"        --worktree {workspace} {project_arg}".rstrip() + " [--pytest tests/unit/...]",
-        "  It prints a JSON result. For frameworks with compiled extensions (e.g. vLLM),",
-        "  installation triggers a C++ build that may take 30+ minutes.",
+        f"        --worktree {inp.workspace_path} --package-dir {inp.worktree_package_dir} "
+        f"--package {framework_import_name(inp.framework)} [--pytest <target>]",
+        "  It prints a JSON result. A framework with compiled extensions (e.g. vLLM) rebuilds",
+        "  them on install, which can take well over your wall budget.",
     ]
-    return lines
 
 
 def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:

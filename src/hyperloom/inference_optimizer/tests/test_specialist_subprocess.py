@@ -1449,118 +1449,42 @@ def test_a_ray_actor_names_no_local_process_group_for_the_operator_log():
     assert subprocess_._local_tree_pgid(None) is None
 
 
-def test_cpu_specialist_env_hides_all_gpus_and_uses_private_caches(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """A specialist with no GPU lease gets all *_VISIBLE_DEVICES set to '' and
-    workspace-local Triton/Inductor/aiter cache directories, so it cannot touch
-    production GPU hardware or shared compiler caches."""
-    captured: dict[str, Any] = {}
+async def _spawn_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gpu_ids: tuple[int, ...]) -> dict[str, str]:
+    """The env a local specialist spawn is handed; the fake ``Popen`` refuses to start."""
+    captured: dict[str, str] = {}
 
-    class _CapturePopen:
-        def __init__(self, _cmd, *, env=None, **_kw):
-            captured["env"] = dict(env or {})
-            self.returncode = None
+    def _popen(_cmd, *, env, **_kwargs):
+        captured.update(env)
+        raise OSError("spawn refused by test")
 
-        def poll(self):
-            return None
-
-        def communicate(self, *_a, **_kw):
-            return b"", b""
-
-    import hyperloom.orchestrator.specialists.subprocess_ as sp
-
-    monkeypatch.setattr(sp.subprocess, "Popen", _CapturePopen)
+    monkeypatch.setattr(subprocess_.subprocess, "Popen", _popen)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
-
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    cfg = SpecialistSubprocessConfig(poll_interval_seconds=0.01)
-    disp = SpecialistSubprocessDispatcher(config=cfg)
-
-    import asyncio
-
-    async def _call():
-        try:
-            await disp.run(
-                task_id="t-cpu-iso",
-                workspace=workspace,
-                worktree=None,
-                worktree_base=None,
-                system_prompt="sys",
-                user_prompt="usr",
-                disallowed_tools=frozenset(),
-                max_turns=1,
-                gpu_ids=(),
-                deadline=Deadline.after(1.0),
-                gpu_lease=None,
-            )
-        except Exception:
-            pass
-
-    asyncio.run(_call())
-
-    env = captured.get("env", {})
-    for var in GPU_MASK_ENV_NAMES:
-        assert env.get(var) == "", f"{var} must be set to '' to hide GPUs, got {env.get(var)!r}"
-
-    cache_root = str(workspace / ".cache")
-    assert env.get("TRITON_CACHE_DIR", "").startswith(cache_root)
-    assert env.get("TORCHINDUCTOR_CACHE_DIR", "").startswith(cache_root)
-    assert env.get("AITER_JIT_DIR", "").startswith(cache_root)
-    assert env.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").startswith(cache_root)
+    disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
+    result = await disp.run(
+        task_id="t-env",
+        workspace=tmp_path / "ws",
+        worktree=None,
+        worktree_base=None,
+        system_prompt="sys",
+        user_prompt="usr",
+        disallowed_tools=frozenset(),
+        max_turns=1,
+        gpu_ids=gpu_ids,
+        deadline=Deadline.after(5.0),
+    )
+    assert "spawn refused by test" in (result.error or "")
+    return captured
 
 
-def test_gpu_specialist_env_is_unaffected_by_cpu_isolation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """GPU specialists (with explicit gpu_ids) get the pinned devices set; no cache redirection."""
-    captured: dict[str, Any] = {}
+async def test_cpu_specialist_env_hides_all_gpus_and_uses_private_caches(tmp_path, monkeypatch):
+    env = await _spawn_env(tmp_path, monkeypatch, gpu_ids=())
+    assert all(env[var] == "" for var in GPU_MASK_ENV_NAMES)
+    cache_root = tmp_path / "ws" / ".cache"
+    for var in ("TRITON_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR", "AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR"):
+        assert Path(env[var]).parent == cache_root
 
-    class _CapturePopen:
-        def __init__(self, _cmd, *, env=None, **_kw):
-            captured["env"] = dict(env or {})
-            self.returncode = None
 
-        def poll(self):
-            return None
-
-    import hyperloom.orchestrator.specialists.subprocess_ as sp
-
-    monkeypatch.setattr(sp.subprocess, "Popen", _CapturePopen)
-
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    cfg = SpecialistSubprocessConfig(poll_interval_seconds=0.01)
-    disp = SpecialistSubprocessDispatcher(config=cfg)
-
-    import asyncio
-
-    async def _call():
-        try:
-            await disp.run(
-                task_id="t-gpu-iso",
-                workspace=workspace,
-                worktree=None,
-                worktree_base=None,
-                system_prompt="sys",
-                user_prompt="usr",
-                disallowed_tools=frozenset(),
-                max_turns=1,
-                gpu_ids=(0, 1),
-                deadline=Deadline.after(1.0),
-                gpu_lease=None,
-            )
-        except Exception:
-            pass
-
-    asyncio.run(_call())
-
-    env = captured.get("env", {})
-    assert env.get("HIP_VISIBLE_DEVICES") == "0,1"
-    assert env.get("CUDA_VISIBLE_DEVICES") == "0,1"
-    assert "TRITON_CACHE_DIR" not in env
-    assert "AITER_JIT_DIR" not in env
+async def test_gpu_specialist_env_keeps_its_cards_and_shared_caches(tmp_path, monkeypatch):
+    env = await _spawn_env(tmp_path, monkeypatch, gpu_ids=(0, 1))
+    assert env["HIP_VISIBLE_DEVICES"] == env["ROCR_VISIBLE_DEVICES"] == "0,1"
+    assert "TRITON_CACHE_DIR" not in env and "AITER_JIT_DIR" not in env

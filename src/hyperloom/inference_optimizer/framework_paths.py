@@ -71,6 +71,13 @@ _FRAMEWORK_PACKAGES: tuple[str, ...] = FRAMEWORK_SOURCE_PACKAGES
 #: Frameworks whose Python package is not named after them.
 _FRAMEWORK_IMPORT_NAMES: dict[str, str] = {"xdit": "xfuser"}
 
+
+def framework_import_name(framework: str) -> str:
+    """The Python package a framework is imported as, e.g. ``"xfuser"`` for ``"xdit"``."""
+    name = str(framework or "").strip().lower()
+    return _FRAMEWORK_IMPORT_NAMES.get(name, name)
+
+
 #: Packages an isolated vLLM venv may hold. Deliberately narrower than
 #: :data:`FRAMEWORK_SOURCE_PACKAGES`: that tree exists because vLLM needs its
 #: own interpreter, so only vLLM and the kernel library it links against are
@@ -582,7 +589,7 @@ def resolve_framework_tree(framework: str) -> str:
         candidate = os.environ.get(key, "").strip()
         if candidate and Path(candidate).is_dir():
             return _normalize_root(candidate)
-    origin = _find_spec_origin(_FRAMEWORK_IMPORT_NAMES.get(name, name))
+    origin = _find_spec_origin(framework_import_name(name))
     if origin is not None:
         return _normalize_root(str(origin))
     for default in _DEFAULT_SOURCE_ROOTS:
@@ -737,6 +744,7 @@ __all__ = [
     "FRAMEWORK_SOURCE_PACKAGES",
     "FrameworkTree",
     "framework_apply_tree",
+    "framework_import_name",
     "probe_framework_source_roots_for_env",
     "resolve_framework_tree",
     "resolve_kernel_search_roots",

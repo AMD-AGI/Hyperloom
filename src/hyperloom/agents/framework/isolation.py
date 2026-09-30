@@ -129,19 +129,12 @@ def _fetch_candidate_ref(repo_dir: Path, candidate: Candidate) -> None:
     )
 
 
-# venv lifecycle
-def create_venv(venv_dir: Path, *, timeout_sec: int = 600) -> None:
-    """Create a fresh venv with ``--system-site-packages`` at ``venv_dir``.
-
-    Removes any existing venv first so the caller always gets a clean slate.
-    """
+def create_venv(venv_dir: Path) -> None:
+    """Create a fresh ``--system-site-packages`` venv at ``venv_dir``, replacing any existing one."""
     if venv_dir.exists():
         shutil.rmtree(venv_dir)
     log.info("create_venv: %s", venv_dir)
-    _run_subprocess(
-        [sys.executable, "-m", "venv", "--system-site-packages", str(venv_dir)],
-        timeout_sec=timeout_sec,
-    )
+    _run_subprocess([sys.executable, "-m", "venv", "--system-site-packages", str(venv_dir)], timeout_sec=600)
 
 
 # Per-candidate workspace lifecycle
