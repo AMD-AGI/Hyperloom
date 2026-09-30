@@ -16,7 +16,6 @@ class FrameworkSpec:
     kind: str
     extra_args_env: str
     repo_url: str | None
-    supports_server_reuse: bool
     throughput_unit: str
     has_denoiser_config: bool = False
 
@@ -32,7 +31,6 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         kind=SERVING,
         extra_args_env="EXTRA_SGLANG_ARGS",
         repo_url="https://github.com/sgl-project/sglang.git",
-        supports_server_reuse=True,
         throughput_unit="tok/s",
     ),
     "vllm": FrameworkSpec(
@@ -40,7 +38,6 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         kind=SERVING,
         extra_args_env="EXTRA_VLLM_ARGS",
         repo_url="https://github.com/ROCm/vllm.git",
-        supports_server_reuse=True,
         throughput_unit="tok/s",
     ),
     "atom": FrameworkSpec(
@@ -48,7 +45,6 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         kind=SERVING,
         extra_args_env="EXTRA_ATOM_ARGS",
         repo_url="https://github.com/ROCm/ATOM.git",
-        supports_server_reuse=False,
         throughput_unit="tok/s",
     ),
     "xdit": FrameworkSpec(
@@ -56,7 +52,6 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         kind=SCRIPTABLE,
         extra_args_env="EXTRA_XDIT_ARGS",
         repo_url="https://github.com/xdit-project/xDiT.git",
-        supports_server_reuse=False,
         throughput_unit="img/s",
         # A diffusers pipeline: transformer/ + vae/ configs are on disk.
         has_denoiser_config=True,
@@ -67,7 +62,6 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         kind=SCRIPTABLE,
         extra_args_env="EXTRA_CUSTOM_ARGS",
         repo_url=None,
-        supports_server_reuse=False,
         throughput_unit="unit/s",
     ),
 }

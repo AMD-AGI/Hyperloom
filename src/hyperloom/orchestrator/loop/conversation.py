@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any
+from ..bus.gpu_pool import gpus_by_task_sync
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
 from ..roles.base import BackendTurnResult
@@ -20,6 +21,7 @@ from .coordinator_helpers import _parse_iso_unix, serialize_verdict_advisory
 from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 import logging as _logging
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -184,14 +186,8 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
     return f"{head} payload={payload}"
 
 
-class ConversationCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
-
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
+class ConversationCollaborator(CoordinatorCollaborator):
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     def _attach_orchestration_context_tools(self) -> None:
         """Bind a read-only ContextProvider to the orchestration backend (no-op without setter)."""
@@ -208,7 +204,7 @@ class ConversationCollaborator:
                 analysis_reader=self._context_analysis_reader,
                 recent_outcomes_reader=self._context_recent_outcomes_reader,
                 running_tasks_reader=self._context_running_tasks_reader,
-                action_runner=self._coord.dispatcher._run_action_now_wait,
+                action_runner=self._run_action_now_wait,
                 reference_reader=self._context_reference_reader,
             )
             setter(provider)
@@ -234,10 +230,7 @@ class ConversationCollaborator:
 
     def _context_inbox_reader(self, since_seq: int = 0) -> str:
         """Synchronous projection of the orchestration inbox tail (sync SQLite path)."""
-        try:
-            msgs = self.bus.inbox_context_sync("orchestration", after_seq=int(since_seq or 0))
-        except Exception as exc:  # noqa: BLE001
-            return f"(inbox unavailable: {exc!r})"
+        msgs = self.bus.inbox_context_sync("orchestration", after_seq=int(since_seq or 0))
         if not msgs:
             return "(no inbox events)"
 
@@ -246,14 +239,8 @@ class ConversationCollaborator:
 
     def _context_recent_outcomes_reader(self, top_k: int = 8) -> str:
         """Synchronous projection of recent action outcomes."""
-        try:
-            k = max(1, min(int(top_k or 8), 50))
-        except (TypeError, ValueError):
-            k = 8
-        try:
-            newest_first = self.bus.recent_outcomes_context_sync(limit=k)
-        except Exception as exc:  # noqa: BLE001
-            return f"(recent outcomes unavailable: {exc!r})"
+        k = max(1, min(top_k or 8, 50))
+        newest_first = self.bus.recent_outcomes_context_sync(limit=k)
         if not newest_first:
             return "(no recent outcomes)"
         # Flip newest-first query to newest-last for chronological reading.
@@ -273,17 +260,18 @@ class ConversationCollaborator:
         return "\n".join([header] + rendered)
 
     def _context_running_tasks_reader(self) -> str:
-        """Synchronous projection of in-flight tasks with their held resources."""
-        try:
-            tasks = self.tasks.running_context_sync()
-        except Exception as exc:  # noqa: BLE001
-            return f"(running tasks unavailable: {exc!r})"
+        """Project in-flight tasks and their held resources from three reads, not one snapshot."""
+        tasks = self.tasks.running_context_sync()
         if not tasks:
             return "(no tasks in flight)"
 
+        lanes_by_task = self.locks.lanes_by_task_sync()
+        gpus_by_task = gpus_by_task_sync(self.db)
         now_unix = time.time()
         lines = ["=== Tasks in flight ==="]
-        for task, lanes, expires_at, gpus in tasks:
+        for task in tasks:
+            lanes, expires_at = lanes_by_task.get(task.task_id, ([], ""))
+            gpus = gpus_by_task.get(task.task_id, [])
             params = task.params or {}
             started = _parse_iso_unix(task.updated_at)
             running_sec = max(0.0, now_unix - started) if started > 0 else 0.0
@@ -502,15 +490,13 @@ class ConversationCollaborator:
                 sections.append("=== Discarded escalation hint (advisory) ===")
                 sections.append(discarded_escalate_block)
 
-        # NOTE: there is deliberately no "=== Specialist health ===" block.
-
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
         msgs = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
         rendered = list(msgs)
         if msgs:
             top = msgs[-1]
-            self._coord._rendered_cursor[agent_name] = (int(top.seq), str(top.msg_id))
+            self._rendered_cursor[agent_name] = (int(top.seq), str(top.msg_id))
         if agent_name == "critic":
             rendered = await self._augment_critic_inbox_with_pending(rendered)
         if rendered:
@@ -527,7 +513,7 @@ class ConversationCollaborator:
 
     async def _advance_rendered_cursor(self, agent_name: str) -> None:
         """Advance an agent's read cursor to the last message its prompt rendered."""
-        entry = self._coord._rendered_cursor.get(agent_name)
+        entry = self._rendered_cursor.get(agent_name)
         if entry is None:
             return
         seq, msg_id = entry

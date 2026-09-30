@@ -1188,6 +1188,65 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert res.runner == "claude_agent_sdk"
 
 
+@pytest.mark.parametrize(
+    ("tool_idle_env", "expected_ceiling_ms"),
+    [(None, "3600000"), ("900", "900000"), ("0", "0")],
+)
+def test_run_tracelens_skill_aligns_cli_background_wait_with_tool_idle_bound(
+    tmp_path, monkeypatch, tool_idle_env, expected_ceiling_ms
+):
+    """The Claude CLI must not kill background sub-agents before the runner's own in-flight bound does."""
+    import asyncio
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class _TextBlock:
+        text: str
+
+    @dataclass
+    class _Message:
+        content: list[Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.delenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", raising=False)
+    if tool_idle_env is None:
+        monkeypatch.delenv("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", raising=False)
+    else:
+        monkeypatch.setenv("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", tool_idle_env)
+    output_dir = tmp_path / "out"
+    captured: dict[str, Any] = {}
+
+    async def _fake_query(*, prompt, options):
+        captured["options"] = options.kwargs
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield _Message(content=[_TextBlock("done")])
+
+    asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=None,
+            budget_minutes=1,
+            model="claude-sonnet-4-5-20250929",
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        )
+    )
+
+    assert captured["options"]["env"]["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] == expected_ceiling_ms
+
+
 def test_run_tracelens_skill_books_its_requests_on_the_trajectory(tmp_path):
     import asyncio
     from dataclasses import dataclass

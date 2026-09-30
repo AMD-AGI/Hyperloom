@@ -252,6 +252,7 @@ without reaching an agent, so the selection can be checked before anything is sp
 | `--framework-root <dir>` | auto-detect | Explicit framework source root, else the installed package is located. |
 | `--decode-batch <n>` | `16` | Representative decode batch size (T) for shapes. |
 | `--decode-steps <n>` | `0` | Decode steps captured in the trace, used to normalize kernels/step. |
+| `--attn-tp <n>` | `1` | Attention tensor-parallel size, mirroring the model's `attn_tp_size`. Local shape dims are divided by it, e.g. `n_local_heads = num_attention_heads // attn_tp`, and for DeepSeek-V4 `n_local_groups = o_groups // attn_tp`. With `--enable-dp-attention` the workload's serving `--tp` is DP, so `attn_tp` is `1`; without it, set `attn_tp` to the attention shard count. |
 
 ### Discovery and authoring
 

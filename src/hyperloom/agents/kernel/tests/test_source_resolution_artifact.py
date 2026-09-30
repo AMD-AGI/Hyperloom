@@ -174,6 +174,40 @@ def test_projection_echoes_each_tracelens_resolver_method():
     assert by_id["k5"]["method"] == ksc.METHOD_UNRESOLVED
 
 
+def test_active_finder_non_patchable_verdict_is_written(tmp_path):
+    """A symbol-detected non-patchable kernel names no source, so it must not be recorded as located."""
+    out = tmp_path / ksc.SOURCE_RESOLUTION_FILENAME
+    written = tl.write_source_resolution_artifact(
+        [
+            {
+                "kernel_id": "k1",
+                "name": "a",
+                "gpu_pct": 5.0,
+                "source_file": "/x/a.py",
+                "source_resolution_method": "trace_python_stack",
+            },
+            {
+                "kernel_id": "k2",
+                "name": "asm_gemm",
+                "gpu_pct": 4.0,
+                "source_file": "",
+                "source_resolution_method": "active_finder",
+                "source_resolution_reason": "non-patchable kernel (symbol-detected)",
+                "skip_reason": "non-patchable kernel name marker",
+            },
+        ],
+        out,
+        framework="atom",
+    )
+    assert written == out
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert ksc.validate_document(doc) == []
+    by_id = {e["kernel_id"]: e for e in doc["entries"]}
+    assert by_id["k2"]["method"] == ksc.METHOD_UNRESOLVED
+    assert by_id["k2"]["reason"] == "non-patchable kernel (symbol-detected)"
+    assert by_id["k2"]["reason_class"] == ksc.CLASS_NON_PATCHABLE_NAME
+
+
 def test_written_artifact_satisfies_its_own_contract(tmp_path):
     out = tmp_path / ksc.SOURCE_RESOLUTION_FILENAME
     tl.write_source_resolution_artifact(

@@ -253,7 +253,9 @@ def test_an_adoption_states_the_basis_its_gain_was_measured_on(tmp_path):
 
 def test_the_integrate_gate_is_what_settles_a_forge_candidate(tmp_path):
     recorder = _forge_recorder()
-    recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep")
+    recorder.record_kernel_rewrite(
+        run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep", integrate_ref="int-1"
+    )
     record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="KEEP", gain_pct=6.0)
     recorder.finish(tput_after=1060.0)
 
@@ -291,7 +293,9 @@ def test_a_lane_that_declined_its_own_candidate_needs_no_gate(tmp_path):
 
 def test_a_reverted_kernel_is_rejected_by_the_gate_not_left_pending(tmp_path):
     recorder = _forge_recorder()
-    recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep")
+    recorder.record_kernel_rewrite(
+        run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep", integrate_ref="int-1"
+    )
     record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT")
     recorder.finish(tput_after=1000.0)
 
@@ -303,7 +307,9 @@ def test_a_reverted_kernel_is_rejected_by_the_gate_not_left_pending(tmp_path):
 
 def test_a_kernel_gated_twice_is_settled_by_the_verdict_that_stands(tmp_path):
     recorder = _forge_recorder()
-    recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep")
+    recorder.record_kernel_rewrite(
+        run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep", integrate_ref="int-2"
+    )
     record_integrate_verdict(
         macro_cycle=3,
         integration_id="int-1",
@@ -357,6 +363,7 @@ def test_an_integrate_verdict_lands_after_the_visit_has_closed(tmp_path):
         kernel_id="k001",
         status="success",
         micro_decision="keep",
+        integrate_ref="int-1",
     )
     recorder.finish(tput_after=1000.0)
 
@@ -403,7 +410,7 @@ def test_an_integrate_verdict_lands_after_the_visit_has_closed(tmp_path):
             "gain_attributed": None,
         }
     ]
-    # And the same verdict reaches the row it ruled on, joined by kernel_id.
+    # The explicitly referenced verdict reaches the row it ruled on.
     assert ext["attempts"][0]["e2e"] == {
         "integrated": True,
         "e2e_gain_pct": 4.5,
@@ -414,9 +421,9 @@ def test_an_integrate_verdict_lands_after_the_visit_has_closed(tmp_path):
     }
 
 
-def test_the_standing_verdict_wins_and_the_best_gain_survives_a_later_fault(tmp_path):
+def test_a_later_unrelated_integration_cannot_rewrite_an_exact_attempt(tmp_path):
     recorder = _forge_recorder()
-    recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success")
+    recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", integrate_ref="int-1")
     recorder.finish(tput_after=1000.0)
 
     record_integrate_verdict(
@@ -440,14 +447,23 @@ def test_the_standing_verdict_wins_and_the_best_gain_survives_a_later_fault(tmp_
     ext = _kernel_events(tmp_path)[0]["ext"]
     assert [row["integration_id"] for row in ext["integrate"]] == ["int-1", "int-2"]
     e2e = ext["attempts"][0]["e2e"]
-    assert e2e["decision"] == "REVERT"
-    assert e2e["integrated"] is False
+    assert e2e["decision"] == "KEEP"
+    assert e2e["integrated"] is True
     assert e2e["e2e_gain_pct"] == 6.0
 
 
 def test_a_kernel_that_was_never_gated_has_no_e2e_block(tmp_path):
     recorder = _forge_recorder()
     recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success")
+    recorder.finish(tput_after=1000.0)
+
+    assert _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["e2e"] is None
+
+
+def test_same_kernel_name_without_integration_ref_does_not_claim_a_gate(tmp_path):
+    recorder = _forge_recorder()
+    recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep")
+    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT")
     recorder.finish(tput_after=1000.0)
 
     assert _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["e2e"] is None
@@ -1079,7 +1095,9 @@ def test_the_verdict_comes_from_the_gate_and_not_from_the_caller(tmp_path):
 
 
 def _forge_rewrite_with_gate(recorder, **verdict: Any) -> None:
-    recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep")
+    recorder.record_kernel_rewrite(
+        run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep", integrate_ref="int-1"
+    )
     record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", **verdict)
 
 

@@ -28,6 +28,16 @@ note() {
 [ "$REVIEW_RESULT" = success ] || note "the review job ended with result '${REVIEW_RESULT}'"
 [ -s "$CARD" ] || note "the review produced no card"
 
+WORK=$(dirname "$CARD")
+required=(rules.txt answers.txt core_files.txt verdicts.txt ai_diagnostic.txt refutations.txt independent.txt)
+for artifact in "${required[@]}"; do
+  [ -s "$WORK/$artifact" ] || note "the review did not produce non-empty ${artifact}"
+done
+
+first=$(head -1 "$CARD")
+[[ "$first" =~ ^##\ PR\ \#$PR\ --\ .+ ]] || note "the card has no well-formed PR heading"
+[ "$(grep -cE '^What it does: .+' "$CARD" || true)" = 1 ] \
+  || note "the card has no single well-formed 'What it does:' line"
 strict=$(grep -cE '^Blocking issues: (none|[1-5])$' "$CARD" || true)
 loose=$(grep -ciE '^[#*[:space:]]*blocking issues' "$CARD" || true)
 [ "$strict" = 1 ] && [ "$loose" = 1 ] \
@@ -38,7 +48,17 @@ findings=$(grep -cE '^[0-9]+\. \[' "$CARD" || true)
 if [ "$verdict" = none ]; then expected=0; else expected=$verdict; fi
 [ "$findings" = "$expected" ] \
   || note "the card states 'Blocking issues: ${verdict}' but lists ${findings} numbered finding(s)"
-grep -qF "Head: ${REVIEWED_SHA}" "$CARD" || note "the card does not name the reviewed head ${REVIEWED_SHA}"
+verified=$(grep -cE '^[0-9]+\. \[[^]]+\] .+ \[verified\]$' "$CARD" || true)
+[ "$verified" = "$expected" ] || note "every blocking finding must be marked [verified]"
+for field in Problem Impact Action; do
+  [ "$(grep -cE "^   ${field}: .+" "$CARD" || true)" = "$expected" ] \
+    || note "every blocking finding must carry ${field}"
+done
+if [ "$verdict" = none ]; then
+  ! grep -q '^deferred:' "$CARD" || note "a clean card cannot defer a surviving finding"
+fi
+grep -qE "^Checked: .+ \\| Ran: .+ \\| Base: [0-9a-f]{7,40} \\| Head: ${REVIEWED_SHA}$" "$CARD" \
+  || note "the card has no well-formed verification-depth line for the reviewed head"
 
 pr_now=$(gh pr view "$PR" --repo "$REPO" --json state,headRefOid --jq '"\(.state) \(.headRefOid)"') \
   || note "reading the PR state failed"

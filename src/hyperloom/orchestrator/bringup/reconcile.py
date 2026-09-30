@@ -121,7 +121,7 @@ class Reconciler:
             holder went terminal with no successor.
         review_ttl_sec (float): How long a proposal may sit undecided.
         last_report (ReconcileReport): What the most recent pass did; read by
-            the maintenance tick, which no longer sweeps leases itself.
+            the maintenance tick, which leaves lease sweeping to this pass.
     """
 
     def __init__(

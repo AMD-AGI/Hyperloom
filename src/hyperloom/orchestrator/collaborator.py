@@ -5,14 +5,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 
 class CoordinatorCollaborator:
-    """An object that borrows the Coordinator's attributes for its own methods."""
+    """Base of every class ``Coordinator`` inherits.
 
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
+    A collaborator's methods run with the Coordinator as ``self`` and use state and methods that
+    ``Coordinator.__init__`` and the other collaborators define. A type checker cannot see those
+    from one collaborator, so it is told that any other attribute exists.
+    """
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(object.__getattribute__(self, "_coord"), name)
+    if TYPE_CHECKING:
+
+        def __getattr__(self, name: str) -> Any: ...

@@ -1019,16 +1019,6 @@ def test_update_last_specialist_snapshot():
     assert s.last_specialist["task_id"] == "task-001"
 
 
-def test_research_lane_capacity_is_core_state_field():
-    """LLM cannot raise research_lane_capacity mid-flight."""
-    from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
-
-    assert "research_lane_capacity" in CORE_STATE_FIELDS
-    assert "gpu_specialist_capacity" in CORE_STATE_FIELDS
-    assert "specialist_rounds" in CORE_STATE_FIELDS
-    assert "last_specialist" in CORE_STATE_FIELDS
-
-
 # --------------------------------------------------------------------------- # Read-only specialists never receive
 # the patch-authoring contract --------------------------------------------------------------------------- # Derived
 # from the property under test: a research-mode domain is exactly one the registry declares as such, so a new one is

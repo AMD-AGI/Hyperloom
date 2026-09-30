@@ -283,11 +283,10 @@ _PHASE_ORIENTATION: dict[str, str] = {
 }
 
 
-#: Orientation by the lever a proposal moves. The phase used to carry this,
-#: which worked only while each phase held one lever: the FRAMEWORK entry told
-#: the Critic that flat gain was a legitimate KEEP, and merging the phases would
-#: have silently extended that to configuration search. The deterministic layer
-#: already routes on payload markers rather than phase; this matches it.
+#: Orientation by the lever a proposal moves, not by phase: one phase carries
+#: several levers, so a phase-keyed entry telling the Critic that flat gain is a
+#: legitimate KEEP would extend that to configuration search. The deterministic
+#: layer routes on payload markers rather than phase; this matches it.
 _LEVER_ORIENTATION: dict[str, str] = {
     LEVER_UPSTREAM_PR: (
         "This lands an upstream diff nobody here wrote. Judge whether it is "
@@ -602,7 +601,7 @@ class CriticAgentBackend:
             rc["action_verdict_policy"] = dict(self.action_verdict_policy)
 
         _inject_phase_constraints(judge_bundle, self._trace_phase or "")
-        # The lever says what a KEEP has to clear; the phase no longer can, now that one phase carries every lever.
+        # The lever says what a KEEP has to clear; the phase cannot, since one phase carries several levers.
         _proposals = judge_bundle.get("proposals") or []
         _first = _proposals[0] if isinstance(_proposals, list) and _proposals else None
         _inject_lever_orientation(judge_bundle, _first if isinstance(_first, dict) else None)

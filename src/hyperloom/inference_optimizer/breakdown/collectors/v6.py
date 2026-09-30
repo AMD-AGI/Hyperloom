@@ -370,7 +370,7 @@ def _graded_axes(recorded: Any) -> dict[str, Any]:
     return {key: _optional_float(source.get(key)) for key in GRADED_AXIS_KEYS}
 
 
-def _baseline_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
+def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str] | None = None) -> dict[str, Any]:
     """Read the session's anchoring baseline off the ``baseline`` events.
 
     Two dispatches reach the baseline executor and land an action on a
@@ -390,7 +390,7 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
         dict[str, Any]: The four baseline figures, each ``None`` when the
             timeline holds no anchoring measurement.
     """
-    anchors: list[tuple[str, dict[str, Any]]] = []
+    anchors: list[tuple[str, dict[str, Any], str]] = []
     for event in timeline:
         if not isinstance(event, dict) or str(event.get("type") or "") != "baseline":
             continue
@@ -403,7 +403,9 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
             # session, so the latest anchor wins. Ordered on the action's own
             # stamps because the actions array is keyed by task id and carries
             # no chronology of its own.
-            anchors.append((str(action.get("end_time") or action.get("start_time") or ""), action))
+            anchors.append(
+                (str(action.get("end_time") or action.get("start_time") or ""), action, str(event.get("id") or ""))
+            )
     if not anchors:
         return {
             **dict.fromkeys(_BASELINE_OUTCOME_FIELDS),
@@ -412,6 +414,8 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
             "submission_invalid_reasons": [],
         }
     anchors.sort(key=lambda row: row[0])
+    if source_ids is not None and anchors[-1][2]:
+        source_ids.append(anchors[-1][2])
     measurement = _mapping(anchors[-1][1].get("measurement"))
     submission_valid = measurement.get("submission_valid")
     return {
@@ -427,7 +431,7 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _validation_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
+def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str] | None = None) -> dict[str, Any]:
     """Read the session's gain attribution off the ``stack`` ledger event.
 
     Every figure here is read, not computed: the ledger event's ``ext`` was
@@ -451,6 +455,8 @@ def _validation_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
     for event in timeline:
         if isinstance(event, dict) and str(event.get("type") or "") == "stack":
             ledger = _mapping(event.get("ext"))
+            if source_ids is not None:
+                source_ids[:] = [str(event["id"])] if event.get("id") else []
     available = bool(ledger)
     buckets = _mapping(_mapping(ledger.get("adoptions")).get("by_source"))
 
@@ -601,6 +607,7 @@ def collect_v6_outcome(
     state: dict[str, Any],
     timeline: list[dict[str, Any]],
     warnings: list[str] | None = None,
+    recorded: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the V6 ``outcome`` block off the timeline and the close-out.
 
@@ -620,7 +627,8 @@ def collect_v6_outcome(
         dict[str, Any]: The ``outcome`` block.
     """
     stop_reason = str(session.get("stop_reason") or "").strip()
-    baseline = _baseline_from_timeline(timeline)
+    baseline_ids: list[str] = []
+    baseline = _baseline_from_timeline(timeline, baseline_ids)
     measured_tput = _optional_float(baseline.get("throughput_tok_s_per_gpu"))
     if measured_tput is None:
         measured_tput = _optional_float(state.get("baseline_tput")) or 0.0
@@ -631,12 +639,15 @@ def collect_v6_outcome(
         if str(event.get("status") or "").strip().lower() == "failed":
             outcome_status = "failed"
         break
-    validation = _validation_from_timeline(timeline)
+    validation_ids: list[str] = []
+    validation = _validation_from_timeline(timeline, validation_ids)
     recipe = _mapping(close.get("final_recipe"))
-    return {
+    stage_recorded = str(_mapping(recorded).get("stage_reached_recorded") or "")
+    outcome = {
         "stop_reason": stop_reason,
         "status": outcome_status,
-        "stage_reached": _stage_reached(state, stop_reason, timeline, warnings),
+        "stage_reached": stage_recorded or _stage_reached(state, stop_reason, timeline, warnings),
+        "derived_from_event_ids": {"baseline": baseline_ids, "validation": validation_ids},
         "baseline": baseline,
         "anchoring_eval": anchoring_eval_from_timeline(timeline),
         "final": {
@@ -661,6 +672,9 @@ def collect_v6_outcome(
         },
         "validation": validation,
     }
+    if stage_recorded:
+        outcome["stage_reached_recorded"] = stage_recorded
+    return outcome
 
 
 def _measured_final(validation: dict[str, Any], recipe: dict[str, Any]) -> dict[str, Any]:

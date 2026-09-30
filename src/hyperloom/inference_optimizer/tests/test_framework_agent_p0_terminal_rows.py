@@ -39,24 +39,14 @@ class _StateStub:
 
 
 class _MiniCoord:
-    """Minimal binding of the framework progress helpers under test."""
+    """The Coordinator surface the framework progress helpers read."""
 
-    _MAX_REPEATED_REVIEW_SUBMISSIONS = FrameworkPhase._MAX_REPEATED_REVIEW_SUBMISSIONS
-    _framework_candidate_key = staticmethod(FrameworkPhase._framework_candidate_key)
-    _framework_processed_candidate_keys = FrameworkPhase._framework_processed_candidate_keys
-    _stamp_framework_progress = FrameworkPhase._stamp_framework_progress
-    _unprocessed_framework_agent_candidates = FrameworkPhase._unprocessed_framework_agent_candidates
-    _select_next_framework_agent_candidate = FrameworkPhase._select_next_framework_agent_candidate
-    record_unpromoted_candidate = FrameworkPhase.record_unpromoted_candidate
     _handle_unpromotable_result = Coordinator._handle_unpromotable_result
-
-    @property
-    def phase_framework(self) -> "_MiniCoord":
-        return self
 
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub()
+        self.phase_framework = FrameworkPhase(self)
 
 
 def test_pr_url_only_candidate_dedups_against_progress_row(tmp_path: Path):
@@ -67,19 +57,19 @@ def test_pr_url_only_candidate_dedups_against_progress_row(tmp_path: Path):
     coord.shared_state.framework_agent_batches = [
         {"batch_id": "b1", "candidates": [cand_pr_only, cand_other]},
     ]
-    assert len(coord._unprocessed_framework_agent_candidates()) == 2
-    coord._stamp_framework_progress(
-        candidate_id=coord._framework_candidate_key(cand_pr_only),
+    assert len(coord.phase_framework._unprocessed_framework_agent_candidates()) == 2
+    coord.phase_framework._stamp_framework_progress(
+        candidate_id=coord.phase_framework._framework_candidate_key(cand_pr_only),
         batch_id="b1",
         status="critic_denied",
     )
-    remaining = coord._unprocessed_framework_agent_candidates()
+    remaining = coord.phase_framework._unprocessed_framework_agent_candidates()
     assert [candidate_key(c) for c in remaining] == ["cid-2"]
 
 
 def test_stamp_writes_row_and_is_idempotent(tmp_path: Path):
     coord = _MiniCoord(tmp_path)
-    first = coord._stamp_framework_progress(
+    first = coord.phase_framework._stamp_framework_progress(
         candidate_id="cid-1",
         batch_id="b1",
         status="reauthor_cap",
@@ -98,7 +88,7 @@ def test_stamp_writes_row_and_is_idempotent(tmp_path: Path):
     assert row["rationale"] == "cap reached"
     assert row["error"] == "boom"
     assert row["ts"]
-    second = coord._stamp_framework_progress(
+    second = coord.phase_framework._stamp_framework_progress(
         candidate_id="cid-1",
         batch_id="b1",
         status="no_result_failed",
@@ -110,7 +100,7 @@ def test_stamp_writes_row_and_is_idempotent(tmp_path: Path):
 
 def test_stamp_empty_key_is_noop(tmp_path: Path):
     coord = _MiniCoord(tmp_path)
-    assert coord._stamp_framework_progress(candidate_id="", status="x") is False
+    assert coord.phase_framework._stamp_framework_progress(candidate_id="", status="x") is False
     assert coord.shared_state.framework_agent_phase_progress == []
 
 
@@ -145,12 +135,6 @@ class _BusStub:
 
 
 class _ReviewCoord(_MiniCoord):
-    # Borrowed alongside the method that reads it: the stub used to get away without it because the helper swallowed
-    # its own AttributeError.
-    _CRITIC_PRIORS_OUTCOME_TAIL = FrameworkPhase._CRITIC_PRIORS_OUTCOME_TAIL
-    _collect_framework_agent_candidate_priors = FrameworkPhase._collect_framework_agent_candidate_priors
-    _submit_framework_agent_candidate_for_review = FrameworkPhase._submit_framework_agent_candidate_for_review
-
     def __init__(self, tmp_path: Path) -> None:
         super().__init__(tmp_path)
         self.bus = _BusStub()
@@ -161,15 +145,13 @@ class _ReviewCoord(_MiniCoord):
 
 
 def _submit(coord: _ReviewCoord, cand: dict[str, Any]) -> None:
-    asyncio.run(
-        FrameworkPhase._submit_framework_agent_candidate_for_review(coord, cand)  # type: ignore[arg-type]
-    )
+    asyncio.run(coord.phase_framework._submit_framework_agent_candidate_for_review(cand))
 
 
 def test_repeated_review_aborts_after_cap(tmp_path: Path):
     coord = _ReviewCoord(tmp_path)
     cand = {"candidate_id": "cid-loop", "batch_id": "b1"}
-    cap = coord._MAX_REPEATED_REVIEW_SUBMISSIONS
+    cap = FrameworkPhase._MAX_REPEATED_REVIEW_SUBMISSIONS
     # First ``cap`` submissions proceed (each drains its pending before the next).
     for _ in range(cap):
         coord.state.pending_proposals = {}
@@ -189,4 +171,4 @@ def test_repeated_review_aborts_after_cap(tmp_path: Path):
     coord.shared_state.framework_agent_batches = [
         {"batch_id": "b1", "candidates": [cand]},
     ]
-    assert coord._select_next_framework_agent_candidate() is None
+    assert coord.phase_framework._select_next_framework_agent_candidate() is None

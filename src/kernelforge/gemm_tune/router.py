@@ -447,7 +447,7 @@ def _select_sglang_tuners(
                 )
             )
 
-    # --- Dense GEMM tuning --- Dense fp8/fp4 tuners no longer require an externally-recorded CSV: when none is
+    # --- Dense GEMM tuning --- Dense fp8/fp4 tuners do not require an externally-recorded CSV: when none is
     # supplied they derive GEMM shapes from the model config (same as the bf16 dense path).
     def _dense_spec(name: str) -> TunerSpec:
         if has_untuned_csv or has_shapes_json or _profile_can_derive_dense(profile):
