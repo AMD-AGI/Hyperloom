@@ -3149,7 +3149,8 @@ def analyze_trace_files(
 
     Sums per-kernel duration and call counts across all events, takes the
     top ``top_k`` by duration, then runs :func:`_finalize_candidates`. This
-    is the dry-run / test-only raw-trace path (production uses analysis.md).
+    is the dry-run / test-only raw-trace path (production reads candidates
+    from the orchestrator's analysis.json).
 
     Args:
         trace_files (list[Path]): Trace files (optionally gzipped) to scan.
@@ -3965,7 +3966,7 @@ def run_command(
 
 # Kept in sync with install.sh (TRACELENS_REPO / TRACELENS_REF). Overridable via env.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
-_TRACELENS_REF_DEFAULT = "dcce78aa4564cc22749a904e0031ac4114f57307"
+_TRACELENS_REF_DEFAULT = "b79f9065af079e1adbd42c0454e2b64bd3674fdd"
 
 
 def _default_tracelens_root() -> Path:

@@ -216,58 +216,25 @@ def test_fail_closed_symbol_has_no_source(tmp_path, monkeypatch):
     assert row["op_to_source_patchable"] is False
 
 
-def test_triton_symbol_routes_with_kernel_file(tmp_path, monkeypatch):
-    """A Triton SYMBOL takes the Triton route with its launcher; op_name rides along."""
-    seen: dict = {}
+def test_reader_forwards_symbol_launcher_and_op_name(tmp_path, monkeypatch):
+    """The reader maps candidate fields onto the resolve call verbatim.
 
-    def _spy(kernel_name="", *, kernel_file="", is_triton=False, op_name="", search_paths=None):
-        seen.update(kernel_file=kernel_file, is_triton=is_triton, op_name=op_name)
-        return ResolveResult(location=None, patchable=False, method="unresolved")
-
-    monkeypatch.setattr(ks, "resolve_kernel_source", _spy)
-    member = _member(kernel_name=["triton_poi_fused_add"], kernel_launcher_path="moe.py(10): fwd")
-    aj.load_report_tasks(_write_report(tmp_path, [member]))
-    assert seen["is_triton"] is True
-    assert seen["kernel_file"] == "moe.py(10): fwd"
-    assert seen["op_name"] == "aiter::gemm"
-
-
-def test_triton_launcher_path_routes_even_when_symbol_is_clean(tmp_path, monkeypatch):
-    """An aiter Gluon Triton kernel names triton only in its ``.../triton/...`` launcher."""
-    seen: dict = {}
-
-    def _spy(kernel_name="", *, kernel_file="", is_triton=False, op_name="", search_paths=None):
-        seen.update(kernel_file=kernel_file, is_triton=is_triton)
-        return ResolveResult(location=None, patchable=False, method="unresolved")
-
-    monkeypatch.setattr(ks, "resolve_kernel_source", _spy)
-    member = _member(
-        kernel_name=["paged_attention_decode_sliding_window"],
-        library="AITER",
-        kernel_launcher_path="aiter/ops/triton/gluon/pa_decode_gluon.py(5194): pa_decode_gluon",
-    )
-    aj.load_report_tasks(_write_report(tmp_path, [member]))
-    assert seen["is_triton"] is True
-    assert seen["kernel_file"] == "aiter/ops/triton/gluon/pa_decode_gluon.py(5194): pa_decode_gluon"
-
-
-def test_native_symbol_with_py_launcher_stays_native(tmp_path, monkeypatch):
-    """A native kernel dispatched through a .py must NOT take the Triton route.
-
-    Forcing Triton on a Tensile/CK symbol would bypass TraceLens' native gate and
-    mislabel a precompiled kernel as patchable.
+    Device symbol, ``kernel_launcher_path`` -> ``kernel_file``, and the operation
+    name -> ``op_name`` pass straight through; the reader adds no ``is_triton`` or
+    ``library`` guess -- TraceLens owns the native-vs-Triton decision.
     """
     seen: dict = {}
 
-    def _spy(kernel_name="", *, kernel_file="", is_triton=False, op_name="", search_paths=None):
-        seen.update(kernel_file=kernel_file, is_triton=is_triton)
+    def _spy(kernel_name="", **kwargs):
+        seen.update(symbol=kernel_name, **kwargs)
         return ResolveResult(location=None, patchable=False, method="unresolved")
 
     monkeypatch.setattr(ks, "resolve_kernel_source", _spy)
     member = _member(kernel_name=["Cijk_Ailk_Bljk"], library="aiter", kernel_launcher_path="tuned_gemm.py(9): g")
     aj.load_report_tasks(_write_report(tmp_path, [member]))
-    assert seen["is_triton"] is False
-    assert seen["kernel_file"] == ""
+    assert seen == {"symbol": "Cijk_Ailk_Bljk", "kernel_file": "tuned_gemm.py(9): g", "op_name": "aiter::gemm"}
+    assert "is_triton" not in seen
+    assert "library" not in seen
 
 
 def test_non_patchable_with_source_partitions_to_skipped_with_a_source(tmp_path, monkeypatch):

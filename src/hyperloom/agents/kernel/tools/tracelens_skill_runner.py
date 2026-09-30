@@ -208,7 +208,7 @@ def normalize_upstream_category(raw: str) -> str:
 
 @dataclass
 class TraceLensSkillRunResult:
-    """Artifacts produced by one TraceLens skill run (``analysis.md`` is the single source of truth)."""
+    """Artifacts produced by one TraceLens skill run (``report_path`` names the ``analysis.md``; the ``analysis.json`` rendered beside it is the candidate source of truth)."""
 
     output_dir: Path
     report_path: Path

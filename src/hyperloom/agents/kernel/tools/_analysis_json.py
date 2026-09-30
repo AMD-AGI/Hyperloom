@@ -130,7 +130,6 @@ def _resolve_member_source(candidate: dict[str, Any], *, framework: str = "") ->
         symbol,
         kernel_file=str(candidate.get("kernel_launcher_path") or ""),
         op_name=str(candidate.get("name") or ""),
-        library=str(candidate.get("library") or ""),
     )
     location = result.location
     candidate["source_file"] = location.source_file if location else ""

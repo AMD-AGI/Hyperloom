@@ -9,13 +9,16 @@
 
 TraceLens owns path-finding: :func:`resolve_source_verdict` is the one call both
 routes make, wrapping TraceLens' ``resolve_kernel_source`` and returning its
-``ResolveResult`` straight through. Only the Triton-vs-native routing decision
-is HL's, and it lives here so both callers route identically.
+``ResolveResult`` straight through. TraceLens also owns the native-vs-Triton
+routing decision; HL just forwards the symbol and its launcher and lets
+TraceLens classify.
 
 TraceLens' ``kernel_source`` is an independent path-identifier (source path
-mapping only, not TraceLens' analysis layer). The bypass analysis backend is
-otherwise TraceLens-free and depends on TraceLens solely through this seam; the
-bypass route is slated for removal.
+mapping only, not TraceLens' analysis layer). Both routes resolve source through
+it, bypass included, so importing this module imports TraceLens: an importable
+TraceLens is a hard requirement here. The bypass analysis layer is otherwise
+TraceLens-free (it reads raw Kineto and builds its own rows) and leans on
+TraceLens solely for this source path mapping.
 """
 
 from __future__ import annotations
@@ -24,29 +27,17 @@ from TraceLens.TraceUtils.kernel_source import ResolveResult, resolve_kernel_sou
 
 __all__ = ["ResolveResult", "resolve_source_verdict"]
 
-#: Match "triton" in the symbol, library, or launcher path, not the ``.py`` suffix: native kernels dispatch through ``.py`` too.
-_TRITON_MARKER = "triton"
-
 
 def resolve_source_verdict(
     symbol: str,
     *,
     kernel_file: str = "",
     op_name: str = "",
-    library: str = "",
 ) -> ResolveResult:
     """Resolve one device symbol to its source via TraceLens.
 
-    A genuine Triton kernel takes the Triton route with its launcher; a native
-    kernel passes just the symbol so TraceLens' native gate can classify
-    Tensile/CK/MIOpen instead of the Triton path accepting the ``.py`` dispatcher.
+    HL forwards the symbol and its launcher; TraceLens owns the native-vs-Triton
+    routing decision (it falls back to native when a ``.py`` launcher has no real
+    ``@triton.jit``/``@gluon.jit`` def).
     """
-    is_triton = (
-        _TRITON_MARKER in symbol.lower() or _TRITON_MARKER in library.lower() or _TRITON_MARKER in kernel_file.lower()
-    )
-    return resolve_kernel_source(
-        symbol,
-        kernel_file=kernel_file if is_triton else "",
-        is_triton=is_triton,
-        op_name=op_name,
-    )
+    return resolve_kernel_source(symbol, kernel_file=kernel_file, op_name=op_name)
