@@ -180,7 +180,7 @@ async def test_busy_lanes_cancel_the_rebench_instead_of_leaving_it_queued(coordi
 @pytest.mark.asyncio
 async def test_a_rebench_that_outlives_its_bound_is_abandoned(coordinator) -> None:
     c = coordinator
-    c.CLOSE_STACK_REVALIDATION_TIMEOUT_SEC = 0.05
+    c.phase_close.CLOSE_STACK_REVALIDATION_TIMEOUT_SEC = 0.05
     seen: list = []
 
     async def _hang(task, **_kwargs):
