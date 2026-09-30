@@ -2495,10 +2495,7 @@ class KernelPhase(CoordinatorCollaborator):
         from ..kernel.request_handlers import integrate_handler
         from ..measurement.paired import assess_paired, interleaved_plan
 
-        try:
-            n_pairs = env_int("HYPERLOOM_GEMM_PAIRED_PAIRS", default=0)
-        except ValueError:
-            n_pairs = 0
+        n_pairs = env_int("HYPERLOOM_GEMM_PAIRED_PAIRS", default=0)
         if n_pairs <= 0 or float(reference.get("tput") or 0.0) <= 0:
             return None
 
@@ -3984,10 +3981,7 @@ class KernelPhase(CoordinatorCollaborator):
                     refused or "none",
                 )
             return
-        try:
-            keep_pct = env_float("HYPERLOOM_FUSION_KEEP_PCT", default=1.0)
-        except (TypeError, ValueError):
-            keep_pct = 1.0
+        keep_pct = env_float("HYPERLOOM_FUSION_KEEP_PCT", default=1.0)
         queued = 0
         for patch in outcome.patches:
             record = enqueue_nominated_patch(

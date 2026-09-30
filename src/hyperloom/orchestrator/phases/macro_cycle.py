@@ -114,7 +114,6 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             reasons[domain].append(f"recent negative ledger count={count} penalty={penalty:.1f}")
         focus = max(scores.items(), key=lambda kv: (kv[1], kv[0]))[0] if scores else "freeform_specialist"
         rationale_bits = reasons.get(focus) or ["fallback focus; no stronger cycle-level evidence"]
-        prior_cycles = [r for r in log_rows if isinstance(r, dict) and int(r.get("cycle", -1) or -1) != cycle]
         return {
             "cycle": cycle,
             "focus": focus,
@@ -128,7 +127,6 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             ),
             "gain_at_start": float(getattr(state, "gain_at_cycle_start", 0.0) or 0.0),
             "gain_delta": None,
-            "prior_cycles": prior_cycles[-5:],
         }
 
     def _record_cycle_strategy_for_current_cycle(self) -> None:

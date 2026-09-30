@@ -581,7 +581,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                     _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK,
                 ),
                 "discovery_retry_limit": DISCOVER_FAILURE_RETRY_LIMIT,
-                "authoring_enabled": bool(getattr(state, "framework_agent_authoring_enabled", False)),
+                "authoring_enabled": True,
             },
         }
 
@@ -690,19 +690,18 @@ class FrameworkPhase(CoordinatorCollaborator):
             return
         # An authoring specialist (or its downstream integrate_patch) for the current candidate may still be running;
         # wait only on a live TASK (queued/running), NOT on a pending Critic proposal.
-        if getattr(state, "framework_agent_authoring_enabled", False):
-            _q = await self.tasks.queued()
-            _r = await self.tasks.running()
-            if any(
-                getattr(t, "kind", "") in ("specialist", "integrate_patch")
-                and bool((getattr(t, "params", None) or {}).get("framework_agent_authoring"))
-                for t in (*_q, *_r)
-            ):
-                return
-            # Proposal-window guard: the task check above misses the interval between a specialist completing and its
-            # integrate_patch becoming a live TASK (the deliverable exists only as a pending Critic proposal).
-            if await self._framework_agent_authoring_inflight():
-                return
+        _q = await self.tasks.queued()
+        _r = await self.tasks.running()
+        if any(
+            getattr(t, "kind", "") in ("specialist", "integrate_patch")
+            and bool((getattr(t, "params", None) or {}).get("framework_agent_authoring"))
+            for t in (*_q, *_r)
+        ):
+            return
+        # Proposal-window guard: the task check above misses the interval between a specialist completing and its
+        # integrate_patch becoming a live TASK (the deliverable exists only as a pending Critic proposal).
+        if await self._framework_agent_authoring_inflight():
+            return
         # Take the next un-dispatched candidate.
         next_candidate = self._select_next_framework_agent_candidate()
         if next_candidate is None:
@@ -711,7 +710,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             discovered_batch = bool(getattr(state, "framework_agent_batches", None) or [])
             if (
                 discovered_batch
-                and getattr(state, "framework_agent_authoring_enabled", False)
                 and await self._framework_agent_authoring_inflight()
             ):
                 return
@@ -1344,9 +1342,7 @@ class FrameworkPhase(CoordinatorCollaborator):
     def _framework_local_explore_arm_enabled(self) -> bool:
         """True when the candidate-free local-exploration arm may run."""
         state = self.shared_state
-        return bool(getattr(state, "framework_agent_authoring_enabled", False)) and bool(
-            getattr(state, "framework_local_explore_enabled", True)
-        )
+        return bool(getattr(state, "framework_local_explore_enabled", True))
 
     def _compose_framework_local_explore_gap(self) -> tuple[str, list[str]]:
         """Compose the ``(gap, keywords)`` steering the local-exploration arm."""
@@ -1359,8 +1355,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 gpu_type=str(getattr(state, "gpu_type", "") or ""),
                 model_class=str(getattr(state, "model_class", "") or ""),
                 precision=str(getattr(state, "precision", "") or ""),
-                profile_kernel_breakdown_path=getattr(state, "last_profile_kernel_breakdown", None),
-                rewrite_evidence_path=getattr(state, "last_framework_rewrite_evidence", None),
+                rewrite_evidence_path=state.last_framework_rewrite_evidence or None,
             )
         except Exception:
             log.debug("FRAMEWORK: local-explore gap compose failed", exc_info=True)
@@ -1787,7 +1782,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         cand_id = str(payload.get("framework_agent_candidate_id") or self._framework_candidate_key(candidate))
         batch_id = str(payload.get("batch_id") or candidate.get("batch_id") or "")
         _record_review_outcome(self, cand_id, materialized=True)
-        authoring_enabled = bool(getattr(self.shared_state, "framework_agent_authoring_enabled", False))
+        authoring_enabled = True
         want_raw = audit_step == "direct_framework"
         want_author = audit_step == "author_via_specialist"
         if audit_step not in ("direct_framework", "author_via_specialist"):

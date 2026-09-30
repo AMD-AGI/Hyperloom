@@ -586,6 +586,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
 
     PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0
 
+    def __init__(self, coordinator: "Coordinator") -> None:
+        super().__init__(coordinator)
+        self._lifecycle_last_save: float = 0.0
+        self._lifecycle_save_min_interval_s: float = 2.0
+
     def _emit_lifecycle(
         self,
         *,
@@ -597,8 +602,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
     ) -> None:
         """Record + persist one operator-facing lifecycle event.
 
-        Best-effort by design: operator-facing logging must never break the
-        orchestration loop, so any failure is swallowed at debug level.
+        Terminal events (END/ERROR) flush immediately; non-terminal markers are
+        debounced within ``_lifecycle_save_min_interval_s``.
 
         Args:
             step: The machine step name (resolved to a human label downstream).
@@ -607,29 +612,19 @@ class WritebackCollaborator(CoordinatorCollaborator):
             detail: Optional free-text detail.
             duration_s: Optional elapsed seconds for the step.
         """
-        try:
-            record_lifecycle_event(
-                self.shared_state,
-                step=step,
-                status=status,
-                artifacts=artifacts,
-                detail=detail,
-                duration_s=duration_s,
-            )
-            # Terminal events (END/ERROR) always flush; non-terminal markers are
-            # debounced by ``_lifecycle_save_min_interval_s``.
-            terminal = status in ("END", "ERROR")
-            now = time.monotonic()
-            if terminal or (now - self._lifecycle_last_save >= self._lifecycle_save_min_interval_s):
-                self.shared_state.save(self.session_dir)
-                self._coord._lifecycle_last_save = now
-        except Exception:
-            log.debug(
-                "Coordinator: lifecycle emit failed (step=%s status=%s)",
-                step,
-                status,
-                exc_info=True,
-            )
+        record_lifecycle_event(
+            self.shared_state,
+            step=step,
+            status=status,
+            artifacts=artifacts,
+            detail=detail,
+            duration_s=duration_s,
+        )
+        terminal = status in ("END", "ERROR")
+        now = time.monotonic()
+        if terminal or (now - self._lifecycle_last_save >= self._lifecycle_save_min_interval_s):
+            self.shared_state.save(self.session_dir)
+            self._lifecycle_last_save = now
 
     async def _record_policy_denied(
         self,
@@ -2639,10 +2634,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         return {
             "kernel_optimizer": str(state.kernel_optimizer or ""),
-            "tp": to_int(state.tp or None, None),
-            "conc": to_int(state.conc or None, None),
-            "isl": to_int(state.isl or None, None),
-            "osl": to_int(state.osl or None, None),
+            "tp": to_int(state.tp, None),
+            "conc": to_int(state.conc, None),
+            "isl": to_int(state.isl, None),
+            "osl": to_int(state.osl, None),
         }
 
     def finalize_recipe_and_journal(
@@ -3036,7 +3031,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # Consume static-recon bridge candidates into gaps[] so the
         # freeform specialist picks them up with a precise mandate.
         if domain == "static_recon_specialist":
-            self._coord._consume_static_recon(done_payload)
+            self._coord.phase_internal.consume_static_recon(done_payload)
 
         # Aggregate research evidence from any research domain that
         # self-reports a ``research`` block, so FRAMEWORK / explore lanes
