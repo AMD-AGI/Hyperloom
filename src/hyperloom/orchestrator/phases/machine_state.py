@@ -243,7 +243,7 @@ def resolve_keep_threshold(state: Any) -> float:
     """Current-cycle KEEP threshold for every path that injects ``keep_threshold_pct``."""
     from ..actions.executors._multi_node_env import is_multi_node
 
-    cycle = int(state.macro_cycle or 0)
+    cycle = int(getattr(state, "macro_cycle", 0) or 0)
     return decaying_keep_threshold_pct(cycle, multi_node=is_multi_node())
 
 
@@ -572,8 +572,8 @@ def _phase_budget_total_seconds(
     now_unix: float | None = None,
 ) -> float | None:
     """Effective TOTAL budget (seconds) allotted to the current phase."""
-    budget = state.phase_budget_pct
-    phase = (state.phase or "").strip().upper()
+    budget = normalize_budget_pct(getattr(state, "phase_budget_pct", None))
+    phase = (getattr(state, "phase", "") or "").strip().upper()
     if phase not in budget:
         return None
     pct = float(budget[phase])
@@ -629,8 +629,8 @@ def effective_max_minutes(state: Any) -> float:
 
 def phase_cap_seconds(state: Any) -> float | None:
     """Absolute wall-clock ceiling (seconds) for the current phase."""
-    budget = state.phase_budget_pct
-    phase = (state.phase or "").upper()
+    budget = normalize_budget_pct(getattr(state, "phase_budget_pct", None))
+    phase = (getattr(state, "phase", "") or "").upper()
     if phase not in budget:
         return None
     pct = float(budget[phase])
