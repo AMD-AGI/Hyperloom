@@ -2,10 +2,10 @@
 # Hyperloom Forge CI E2E: submit one single-GPU ``kernelforge forge-loop``
 # smoke run built from the exact Hyperloom PR commit, then poll it to terminal.
 #
-# This is the successor to KernelForge's standalone ci-e2e-dispatch.sh. The
-# registered ``kernelforge`` workload template still owns GPU bootstrap and the
-# actual Triton-softmax campaign; this script supplies the vendored Hyperloom
-# source tree and maps the workload result back to the PR.
+# This is the successor to KernelForge's standalone ci-e2e-dispatch.sh. Dispatron's
+# `kernelforge` run script owns GPU bootstrap and the actual Triton-softmax campaign,
+# and Dispatron's platform row decides where it runs; this script names the PR commit
+# to check out and maps the run's result back to the PR.
 set -euo pipefail
 
 GPUS="${GPUS:-1}"
@@ -40,7 +40,6 @@ if [ -z "$PULL_REF" ] && [[ "${PR_NUMBER:-}" =~ ^[0-9]+$ ]]; then
 fi
 PR_CHECK_BASE="${CI_E2E_PR_CHECK_BASE:-/tmp/ci-e2e}"
 SRC_DIR="${CI_E2E_SOURCE_DIR:-${PR_CHECK_BASE%/}/pr_${PR_NUMBER:-manual}/${HEAD_SHA}/hyperloom}"
-WORKSPACE="${CI_E2E_WORKSPACE:-control-plan-hyperloom-ci}"
 
 # Bootstrap happens before forge-loop starts counting MAX_HOURS. Keep the
 # server-side deadline and the poll window derived from the same budget.
@@ -113,7 +112,6 @@ report_upsert() { # result
       --max-hours "$MAX_HOURS" \
       --max-iters "$MAX_ITERS" \
       --gpus "$GPUS" \
-      --workspace "$WORKSPACE" \
       --head-ref "$HEAD_REF" \
       --head-sha "$HEAD_SHA" \
       --session-id "$UID_" \

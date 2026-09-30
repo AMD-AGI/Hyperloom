@@ -101,17 +101,17 @@ def test_workflow_dispatches_the_kernelforge_smoke_contract() -> None:
     workflow = (_ROOT / ".github" / "workflows" / "forge-e2e.yml").read_text(encoding="utf-8")
     dispatcher = (_ROOT / ".github" / "scripts" / "forge-ci-e2e-dispatch.sh").read_text(encoding="utf-8")
 
-    assert 'kind:"kernelforge"' in dispatcher
-    assert "KERNELFORGE_SOURCE_REPO:$srcrepo" in dispatcher
-    assert "KERNELFORGE_SOURCE_SHA:$sha" in dispatcher
-    assert "KERNELFORGE_SOURCE_PULL_REF:$pullref" in dispatcher
-    assert 'KF_USE_GIT:"1"' in dispatcher
+    # Dispatron's CLI submits and polls. The PR commit reaches the run as its flags, and
+    # Dispatron's platform row -- not a workspace named here -- decides where it lands.
+    assert "dispatron-ci \\" in dispatcher
+    for flag in ("--kind kernelforge", '--sha "$HEAD_SHA"', '--source-repo "$SRC_REPO"', '--pull-ref "$PULL_REF"'):
+        assert flag in dispatcher, flag
     assert "STATUS_CONTEXT: ci-e2e/kernelforge" in workflow
-    assert "CI_E2E_WORKSPACE: ${{ vars.FORGE_E2E_WORKSPACE || 'control-plan-hyperloom-ci' }}" in workflow
+    assert "FORGE_E2E_WORKSPACE" not in workflow
     assert "secrets.KERNEL_OPT_WORKSPACE" not in workflow
+    assert "secrets.CI_E2E_API_BASE" not in workflow
     assert ".github/scripts/forge-ci-e2e-dispatch.sh" in workflow
     assert ".github/scripts/forge_e2e_report.py" in dispatcher
-    assert "__FORGE_RESULT__" in dispatcher
 
 
 def test_workflow_gates_all_pr_backed_retries_but_not_manual_runs() -> None:
