@@ -6176,7 +6176,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         expected_overlay_digest = _geak_overlay_digest(ps_overlay)
         ps_kernels = [_geak_spec_name(k) for k in _geak_accepted_kernel_specs(ps)]
         params_ps: dict[str, Any] = {
-            "source": "stack_revalidate",
+            "source": STACK_REVALIDATE_SOURCE,
             "reason": reason,
             "recipe_generation": recipe_generation,
             "geak_fallback": True,
@@ -6243,18 +6243,18 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if not (args or envs or cb_remove or cb_unset or cb_replace):
             return {"skipped": True, "reason": "empty_config"}
         params: dict[str, Any] = {
-            "source": "stack_revalidate",
+            "source": STACK_REVALIDATE_SOURCE,
             "reason": reason,
             "recipe_generation": recipe_generation,
             "grid": [
                 {
-                    "name": "stack_revalidate",
+                    "name": STACK_REVALIDATE_SOURCE,
                     "extra_args": args,
                     "extra_envs": dict(envs),
                     # Carry the overlay so an authored-kernel native stack rebuild
                     # loads the built kernels (inert when empty).
                     "overlay_pythonpath": overlay,
-                    "provenance": "stack_revalidate",
+                    "provenance": STACK_REVALIDATE_SOURCE,
                     "note": "full-stack end-to-end revalidation",
                 }
             ],

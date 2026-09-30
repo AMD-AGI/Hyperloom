@@ -292,27 +292,26 @@ def test_phase_argument_is_case_insensitive(registry):
 
 # Coordinator re-scopes the override at the phase seam
 def _machine_with_stub_coordinator(session_dir, *, user_supplied: bool = False):
-    """Build a MachinePhase over a minimal coordinator stub."""
-    from types import SimpleNamespace
-
+    """Build a MachinePhase over a real Coordinator with a controlled rebuild function."""
+    from hyperloom.orchestrator.collaborator import OrchestrationPrompt
     from hyperloom.orchestrator.phases.machine import MachinePhase
-    from hyperloom.orchestrator.state.shared_state import SharedState
 
-    state = SharedState(session_id="t", macro_cycle=3)
-    state.orchestration_memory = {"next_cycle_directive": "keep pushing MoE dispatch"}
+    from .conftest import make_coordinator
+
     rebuild_calls: list[dict] = []
 
     def _rebuild(**kwargs) -> str:
         rebuild_calls.append(kwargs)
         return f"PROMPT[phase={kwargs.get('phase')}]"
 
-    coord = SimpleNamespace(
-        shared_state=state,
-        session_dir=session_dir,
-        system_prompt_overrides={"orchestration": "ORIGINAL"},
-        _rebuild_orch_prompt=_rebuild,
-        _orch_prompt_is_user_supplied=user_supplied,
-        _plan_cycle_focus=lambda: {"focus": "serving_specialist", "score": 1.0},
+    coord = make_coordinator(session_dir)
+    coord.shared_state.session_id = "t"
+    coord.shared_state.macro_cycle = 3
+    coord.shared_state.orchestration_memory = {"next_cycle_directive": "keep pushing MoE dispatch"}
+    coord.orch_prompt = OrchestrationPrompt(
+        overrides={"orchestration": "ORIGINAL"},
+        is_user_supplied=user_supplied,
+        rebuild=_rebuild,
     )
     return MachinePhase(coord), coord, rebuild_calls
 
@@ -321,7 +320,7 @@ def test_phase_seam_rescopes_the_override_and_keeps_the_cycle_directive(tmp_path
     handler, coord, calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("kernel_agent") is True
-    assert coord.system_prompt_overrides["orchestration"] == "PROMPT[phase=KERNEL_AGENT]"
+    assert coord.orch_prompt.overrides["orchestration"] == "PROMPT[phase=KERNEL_AGENT]"
     assert len(calls) == 1
     assert calls[0]["macro_cycle"] == 3
     assert calls[0]["cycle_directive"] == "keep pushing MoE dispatch"
@@ -333,7 +332,7 @@ def test_phase_seam_never_clobbers_a_user_supplied_prompt(tmp_path):
     handler, coord, calls = _machine_with_stub_coordinator(tmp_path, user_supplied=True)
 
     assert handler._reseed_orch_prompt_for_phase("EXPLORE") is False
-    assert coord.system_prompt_overrides["orchestration"] == "ORIGINAL"
+    assert coord.orch_prompt.overrides["orchestration"] == "ORIGINAL"
     assert calls == []
 
 
@@ -341,7 +340,7 @@ def test_phase_seam_ignores_a_blank_phase(tmp_path):
     handler, coord, calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("") is False
-    assert coord.system_prompt_overrides["orchestration"] == "ORIGINAL"
+    assert coord.orch_prompt.overrides["orchestration"] == "ORIGINAL"
     assert calls == []
 
 
@@ -374,7 +373,7 @@ def test_phase_seam_survives_an_unwritable_session_dir(tmp_path):
     handler, coord, _calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("SWEEP") is True
-    assert coord.system_prompt_overrides["orchestration"] == "PROMPT[phase=SWEEP]"
+    assert coord.orch_prompt.overrides["orchestration"] == "PROMPT[phase=SWEEP]"
 
 
 # Snapshot paths: one artefact per scope the model ran under

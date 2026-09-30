@@ -32,6 +32,29 @@ class Transition:
 class MachinePhase(CoordinatorCollaborator):
     """Phase transition machine: validates, records, and dispatches phase transitions."""
 
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        self._on_enter: dict[str, Any] = {}
+        self._on_exit: dict[str, Any] = {}
+        self._pump_table: dict[str, Any] = {}
+
+    def _build_dispatch_tables(self) -> None:
+        """Build on_enter, on_exit, and pump dispatch tables from phase owners. Called once after all collaborators are available."""
+        c = self._coord
+        self._on_exit = {
+            _phase_state.PHASE_KERNEL_AGENT: c.phase_kernel._close_kernel_timeline,
+            _phase_state.PHASE_FRAMEWORK_AGENT: c.phase_framework._close_framework_timeline,
+        }
+        self._on_enter = {
+            _phase_state.PHASE_FRAMEWORK_AGENT: c.phase_framework._on_enter_framework,
+            _phase_state.PHASE_KERNEL_AGENT: c.phase_kernel._on_enter_kernel,
+            _phase_state.PHASE_SWEEP: c.phase_sweep._on_enter_sweep,
+            _phase_state.PHASE_CLOSE: c.phase_close._on_enter_close,
+        }
+        self._pump_table = {
+            _phase_state.PHASE_FRAMEWORK_AGENT: c.phase_framework.pump,
+        }
+
     def _ensure_phase_initialised(self, budget_pct: dict[str, float] | None) -> None:
         """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent).
 
@@ -367,47 +390,27 @@ class MachinePhase(CoordinatorCollaborator):
         reason: str = "",
         evidence: dict[str, Any] | None = None,
     ) -> None:
-        """Fire per-phase entry side effects (pure dispatcher; hooks catch + log internally). CLOSE runs the 7-step sequencer (sets close_sequence_done).
-
-        Args:
-            from_phase: The phase being left.
-            to_phase: The phase being entered; selects which per-phase entry
-                hook fires.
-            reason: The transition reason, recorded as the left phase's exit
-                reason when that phase owns a timeline event.
-            evidence: The transition evidence. Carried for the phase being
-                left, whose exit rule already read the values it decided on --
-                a phase that recomputed them at close would report counts over
-                a history that kept growing after the decision.
-        """
+        """Fire per-phase entry side effects (pure dispatcher; hooks catch + log internally). CLOSE runs the 7-step sequencer (sets close_sequence_done)."""
         self._reseed_orch_prompt_for_phase(to_phase)
 
-        _exit_reason = str(reason or "")
-        _ev = evidence if isinstance(evidence, dict) else None
-        _exit_hooks: dict[str, Any] = {
-            _phase_state.PHASE_KERNEL_AGENT: lambda: self._coord.phase_kernel._close_kernel_timeline(
-                exit_reason=_exit_reason
-            ),
-            _phase_state.PHASE_FRAMEWORK_AGENT: lambda: self._coord.phase_framework._close_framework_timeline(
-                exit_reason=_exit_reason, evidence=_ev
-            ),
-        }
-        hook = _exit_hooks.get((from_phase or "").upper())
-        if hook:
-            hook()
+        tr = Transition(
+            from_phase=from_phase or "",
+            to_phase=(to_phase or "").upper(),
+            reason=str(reason or ""),
+            evidence=evidence if isinstance(evidence, dict) else {},
+            loopback=bool(isinstance(evidence, dict) and evidence.get("loopback")),
+        )
 
-        target = (to_phase or "").upper()
-        _entry_hooks: dict[str, Any] = {
-            _phase_state.PHASE_FRAMEWORK_AGENT: lambda: self._coord.phase_framework._on_enter_framework(
-                from_phase=from_phase
-            ),
-            _phase_state.PHASE_KERNEL_AGENT: lambda: self._coord.phase_kernel._on_enter_kernel(from_phase=from_phase),
-            _phase_state.PHASE_SWEEP: lambda: self._coord.phase_sweep._on_enter_sweep(from_phase=from_phase),
-            _phase_state.PHASE_CLOSE: lambda: self._coord.phase_close._on_enter_close(from_phase=from_phase),
-        }
-        entry_hook = _entry_hooks.get(target)
+        if not self._on_exit:
+            self._build_dispatch_tables()
+
+        exit_hook = self._on_exit.get((from_phase or "").upper())
+        if exit_hook:
+            exit_hook(tr)
+
+        entry_hook = self._on_enter.get(tr.to_phase)
         if entry_hook:
-            await entry_hook()
+            await entry_hook(tr)
 
     def _reseed_orch_prompt_for_phase(self, to_phase: str) -> bool:
         """Re-scope the orchestration system prompt to the phase being entered."""
