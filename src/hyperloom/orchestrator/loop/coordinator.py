@@ -723,8 +723,10 @@ class Coordinator:
         if not self._stop_requested():
             await self.dispatcher._pump_dispatcher_once()
         if not in_closing:
-            # FRAMEWORK_AGENT phase pump: enqueue the next candidate / fetch the next batch.
-            await self.phase_framework.pump()
+            phase = (self.shared_state.phase or "").strip().upper()
+            pump = self.phase_machine._pump_table.get(phase)
+            if pump is not None:
+                await pump()
             # Phase-independent enablement pump: repair a non-runnable combo.
             await self.enablement_lane._pump_enablement_safely()
         # phase machine advance; runs even in_closing so CLOSE is recorded.
