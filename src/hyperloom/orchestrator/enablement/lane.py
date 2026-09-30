@@ -109,7 +109,11 @@ class EnablementLane(CoordinatorCollaborator):
                 state.save(self.session_dir)
                 # The cap is the lane's own terminal, so the lane event closes
                 # here: no round follows it to close on the lane's behalf.
-                await self._close_enablement_lane(
+                # Reached through the writeback collaborator, which owns the
+                # close: a bare ``self.`` resolves against the Coordinator,
+                # which does not carry it, and the cap path then raises instead
+                # of stopping the run.
+                await self.writeback._close_enablement_lane(
                     outcome=enablement_event.OUTCOME_STALLED,
                     reason="enablement_attempts_exhausted",
                 )

@@ -22,6 +22,7 @@ from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.enablement.build import EnablementBuild
 from hyperloom.orchestrator.enablement.lane import EnablementLane
+from hyperloom.orchestrator.collaborator import CoordinatorCollaborator
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
@@ -193,9 +194,17 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         (EnablementLane, "_settle_enablement_round"),
         (EnablementBuild, "_maybe_enqueue_specialist_requested_build"),
         (EnablementBuild, "_maybe_escalate_to_targeted_build"),
-        (WritebackCollaborator, "_close_enablement_lane"),
     ):
         setattr(shim, name, types.MethodType(getattr(owner, name), shim))
+    # Writeback stays on its own collaborator rather than being flattened onto
+    # the shim: the Coordinator does not carry its methods, so a lane that
+    # reaches one through a bare ``self.`` raises in a real run. Modelling the
+    # boundary is what lets this scenario catch that.
+    writeback = CoordinatorCollaborator(shim)
+    writeback._close_enablement_lane = types.MethodType(
+        WritebackCollaborator._close_enablement_lane, writeback
+    )
+    shim.writeback = writeback
     return shim
 
 
