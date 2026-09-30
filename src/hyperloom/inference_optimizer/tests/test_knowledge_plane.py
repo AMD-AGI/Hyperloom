@@ -13,6 +13,7 @@ import pytest
 
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.knowledge.pr_monitor import PRMonitorClient
+from hyperloom.orchestrator.phases.machine import Transition
 
 
 def test_plane_disabled_pr_returns_empty_mcp_url():
@@ -47,7 +48,7 @@ async def test_on_enter_the_optimisation_phase_runs_without_plane(tmp_path: Path
     coord.knowledge_plane = None
     coord.shared_state = _make_bare_shared_state()
     coord.session_dir = tmp_path
-    await coord.phase_framework._on_enter_framework(from_phase="PRELUDE")
+    await coord.phase_framework._on_enter_framework(Transition(from_phase="PRELUDE", to_phase="FRAMEWORK", reason="test", evidence={}, loopback=False))
 
 
 def _make_bare_shared_state():
