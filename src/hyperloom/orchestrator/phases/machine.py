@@ -394,34 +394,35 @@ class MachinePhase(CoordinatorCollaborator):
         """
         self._reseed_orch_prompt_for_phase(to_phase)
 
-        # The machine has entry hooks only, so the phase being left closes its own timeline event here rather than in
-        # a hook of its own.
-        if (from_phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT:
+        _exit_reason = str(reason or "")
+        _ev = evidence if isinstance(evidence, dict) else None
+        _exit_hooks: dict[str, Any] = {
+            _phase_state.PHASE_KERNEL_AGENT: lambda: self._coord.phase_kernel._close_kernel_timeline(
+                exit_reason=_exit_reason
+            ),
+            _phase_state.PHASE_FRAMEWORK_AGENT: lambda: self._coord.phase_framework._close_framework_timeline(
+                exit_reason=_exit_reason, evidence=_ev
+            ),
+        }
+        hook = _exit_hooks.get((from_phase or "").upper())
+        if hook:
             try:
-                self._close_kernel_timeline(exit_reason=str(reason or ""))
+                hook()
             except Exception:
-                log.debug("Coordinator: kernel timeline close failed", exc_info=True)
-        # FRAMEWORK closes on the same terms, and additionally needs the
-        # evidence: its exit rule already read both arms' plateau state, and
-        # that reading is what the phase acted on.
-        if (from_phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
-            try:
-                self._coord.phase_framework._close_framework_timeline(
-                    exit_reason=str(reason or ""),
-                    evidence=evidence if isinstance(evidence, dict) else None,
-                )
-            except Exception:
-                log.debug("Coordinator: framework timeline close failed", exc_info=True)
+                log.debug("Coordinator: timeline close failed for phase=%s", from_phase, exc_info=True)
 
         target = (to_phase or "").upper()
-        if target == _phase_state.PHASE_FRAMEWORK_AGENT:
-            await self._coord.phase_framework._on_enter_framework(from_phase=from_phase)
-        elif target == _phase_state.PHASE_KERNEL_AGENT:
-            await self._on_enter_kernel(from_phase=from_phase)
-        elif target == _phase_state.PHASE_SWEEP:
-            await self._coord.phase_sweep._on_enter_sweep(from_phase=from_phase)
-        elif target == _phase_state.PHASE_CLOSE:
-            await self._coord.phase_close._on_enter_close(from_phase=from_phase)
+        _entry_hooks: dict[str, Any] = {
+            _phase_state.PHASE_FRAMEWORK_AGENT: lambda: self._coord.phase_framework._on_enter_framework(
+                from_phase=from_phase
+            ),
+            _phase_state.PHASE_KERNEL_AGENT: lambda: self._coord.phase_kernel._on_enter_kernel(from_phase=from_phase),
+            _phase_state.PHASE_SWEEP: lambda: self._coord.phase_sweep._on_enter_sweep(from_phase=from_phase),
+            _phase_state.PHASE_CLOSE: lambda: self._coord.phase_close._on_enter_close(from_phase=from_phase),
+        }
+        entry_hook = _entry_hooks.get(target)
+        if entry_hook:
+            await entry_hook()
 
     def _reseed_orch_prompt_for_phase(self, to_phase: str) -> bool:
         """Re-scope the orchestration system prompt to the phase being entered."""
