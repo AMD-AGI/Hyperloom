@@ -1513,6 +1513,13 @@ class PreludePhase(CoordinatorCollaborator):
             "kernel_count": len(kernel_pending),
             "recipe_suppressed": recipe_suppressed,
             **({"overlay_provenance": summary} if (summary := _overlay_provenance_summary(sdk_replay)) else {}),
+            # The ROCm/AITER delta T0 found on the matched recipe, when that recipe is the config being replayed, so
+            # a replay that fails or reverts can be read against the build it was tuned on.
+            **(
+                {"stack_mismatch": dict(wsc["stack_mismatch"])}
+                if config_tier == "self" and isinstance(wsc, dict) and isinstance(wsc.get("stack_mismatch"), dict)
+                else {}
+            ),
             **donor_metadata,
         }
         state.warm_replay_pending = {

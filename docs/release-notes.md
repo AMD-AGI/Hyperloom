@@ -52,6 +52,26 @@ is a patch release on top of 1.1.2. The per-change history is on the
   `auto`, so campaigns died after discovery. The resolved provider is now
   forwarded.
 
+- **The ROCm/AITER build a KB config was tuned on is now recorded correctly and
+  disclosed at warm start (#1507).** A KB row's `best_config` can carry
+  build-specific knobs (`--attention-backend aiter`, `SGLANG_USE_AITER`, tuned
+  `AITER_CONFIG_*` CSVs), but the recorded `rocm_version` / `aiter_commit` did
+  not describe the build the config was measured on: T0 stamped the current
+  pod's ROCm/AITER onto the row before its own lookup, so every row matched
+  whatever pod read it. T0 no longer overwrites the build on a row that already
+  carries a `best_config`, and writing a new `best_config` records the stack of
+  the session that measured it.
+
+  Warm start now compares that build with the pod's and discloses any difference
+  in the `=== Warm start ===` prompt block and on the warm-replay outcome
+  (`stack_mismatch`). It does not stop the replay: the replay measures the
+  config, and a failure or revert is the measured outcome. Among otherwise equal
+  borrowed donors, one recorded on the pod's build ranks first. ROCm is compared
+  by the framework-version rule (same major.minor line, recorded not newer than
+  the pod); AITER on equal commits (prefix) or equal versions, with a commit
+  against a version reported as not comparable. `unknown` on either side is no
+  claim, and remote rows, which carry no fingerprint, are unaffected.
+
 ## Hyperloom 1.1.2 release
 
 The [1.1.2 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.2)

@@ -3019,3 +3019,51 @@ def test_a_skip_that_resolved_no_recipe_states_an_empty_request_not_an_invented_
     assert ext["skip"]["code"] == "no_warm_start_recipe"
     assert ext["request"]["tier"] == ""
     assert ext["request"]["donor"] is None
+
+
+_STACK_MISMATCH = {"conflicts": ["aiter commit abc1234 recorded, pod runs def5678"], "notes": []}
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_runs_a_recipe_tuned_on_another_stack_and_records_the_delta(tmp_path):
+    """The replay is the validation; the build delta travels on its outcome so a failure can be read against it."""
+    recipe = _warm_recipe_t1(extra_server_args="--from-recipe-row")
+    context = {
+        "status": "hit",
+        "match": {"tier": "exact", "confidence": 0.85},
+        "stack_mismatch": _STACK_MISMATCH,
+        "recommended_replay": {
+            "extra_server_args": "--from-recipe-row",
+            "extra_envs": {},
+            "expected_gain_pct": 25.0,
+            "config_tier": "self",
+        },
+    }
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe, warm_start_context=context)
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+    assert task is not None
+    assert coord.tasks.calls[0]["params"]["extra_server_args"] == "--from-recipe-row"
+    assert coord.shared_state.warm_replay_outcome["stack_mismatch"] == _STACK_MISMATCH
+
+
+@pytest.mark.asyncio
+async def test_a_borrowed_donor_replay_does_not_carry_the_matched_recipes_delta(tmp_path):
+    """The delta describes the matched recipe, not the donor whose config is replayed."""
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe=_warm_recipe_t1(),
+        warm_start_context={
+            "status": "hit",
+            "match": {"tier": "exact", "confidence": 0.85},
+            "stack_mismatch": _STACK_MISMATCH,
+            "recommended_replay": {
+                "extra_server_args": "--from-donor",
+                "extra_envs": {},
+                "expected_gain_pct": 25.0,
+                "config_tier": "same_arch_class",
+                "config_confidence": 0.95,
+            },
+        },
+    )
+    assert await coord._maybe_enqueue_warm_replay(baseline_tput=600.0) is not None
+    assert "stack_mismatch" not in coord.shared_state.warm_replay_outcome
