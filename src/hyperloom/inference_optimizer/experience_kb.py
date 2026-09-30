@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.perf_metric import agentx_active
 from hyperloom.inference_optimizer.experience_collect import mapping_schema_ref
 from hyperloom_kb import RemoteClient, RemoteClientError, RemoteConfig
 
@@ -320,7 +321,14 @@ class ExperienceKBIntegration:
 
 def integration_for(owner: Any, session_dir: str | Path) -> ExperienceKBIntegration | None:
     """Return ``owner``'s one Experience service integration, bootstrapping it on first use."""
-    if not hasattr(owner, "_kb_integration"):
+    if hasattr(owner, "_kb_integration"):
+        return owner._kb_integration
+    # The schema cannot tell an agentic workload from a synthetic one: the mapping publishes no AgentX Experience,
+    # so an AgentX run must not read the synthetic ones either.
+    if agentx_active(benchmark_mode=getattr(owner.shared_state, "benchmark_mode", "")):
+        log.info("Experience KB reads are off for this AgentX run: its schema cannot represent an AgentX workload")
+        owner._kb_integration = None
+    else:
         owner._kb_integration = ExperienceKBIntegration.from_env(session_dir)
     return owner._kb_integration
 

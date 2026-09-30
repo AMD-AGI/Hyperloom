@@ -584,7 +584,9 @@ is injected into the prompt:
 
 Every written Experience is readable by the next read. Retrieved evidence is
 advisory and never replaces the measured benchmark baseline. A read failure
-soft-degrades to the original prompt.
+soft-degrades to the original prompt. An AgentX run neither reads nor writes
+Experiences: the Experience schema cannot yet tell its workload from a
+synthetic one.
 
 Every complete measured attempt is written idempotently when the session
 breakdown is written. Rendered Experience references from an orchestration
