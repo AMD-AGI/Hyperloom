@@ -15,7 +15,7 @@ from ..bus.message_bus import Message
 from .proposal_utils import approved_proposal_idempotency_key
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import TERMINAL_STATES
-from hyperloom.orchestrator.collaborator import CoordinatorCollaborator
+from ..collaborator import CoordinatorCollaborator
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -320,7 +320,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         provenance_details: dict[str, Any] | None = None,
     ) -> None:
         """Read-modify-write helper for the recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Best-effort; lesson/pitfall appended without dedup."""
-        config = getattr(getattr(self, "knowledge_plane", None), "config", None)
+        config = getattr(self.knowledge_plane, "config", None)
         if getattr(getattr(config, "mode", None), "value", None) == "remote" or self.recipe_kb is None:
             return
         from hyperloom.common.perf_metric import agentx_active

@@ -608,11 +608,11 @@ class PreludePhase(CoordinatorCollaborator):
         """Why this run must not replay kernel champions, or '' when allowed."""
         if not self.shared_state.warm_replay_enabled:
             return "warm_replay_disabled"
-        if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
+        if bool(getattr(self.knowledge_plane, "kb_disabled", False)):
             return "kb_degraded"
         from ..knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 
-        config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
+        config = getattr(self.knowledge_plane, "config", None) or KnowledgeConfig.from_env()
         if config.mode is not KnowledgeStoreMode.REMOTE:
             return "local_knowledge_mode"
         return ""

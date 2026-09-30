@@ -139,7 +139,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         for entry in self._extract_gaps_from_attempts():
             state.upsert_gap(entry)
 
-        plane = getattr(self, "knowledge_plane", None)
+        plane = self.knowledge_plane
         if plane is not None and hasattr(plane, "recipe_kb_traverse_issues"):
             try:
                 traverse = getattr(plane, "recipe_kb_traverse_issues")

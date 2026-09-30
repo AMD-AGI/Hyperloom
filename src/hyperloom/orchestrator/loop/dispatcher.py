@@ -52,7 +52,7 @@ from .time_budget import (
     measured_baseline_runtime_sec,
 )
 
-from hyperloom.orchestrator.collaborator import CoordinatorCollaborator
+from ..collaborator import CoordinatorCollaborator
 import logging as _logging
 
 log = _logging.getLogger(__name__)

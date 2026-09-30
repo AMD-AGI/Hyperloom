@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from hyperloom.common.coerce import to_unix
+from hyperloom.common.env import env_float as _env_float, env_int as _env_int
 from hyperloom.common.timeutil import now_iso as _now_iso
 from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
@@ -197,8 +198,6 @@ DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT: float = 0.5
 DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK: int = 5
 DEFAULT_PLATEAU_EXPLORE_LOOKBACK: int = 5
 
-
-from hyperloom.common.env import env_float as _env_float, env_int as _env_int  # noqa: E402
 
 # FRAMEWORK per-candidate plateau: after this many consecutive resolved candidates without a KEEP (including
 # non-benchmarked terminal outcomes), the source arm is dry.

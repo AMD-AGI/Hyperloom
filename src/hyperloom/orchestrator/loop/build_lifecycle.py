@@ -12,7 +12,7 @@ import sys as _sys
 import uuid
 
 from hyperloom.inference_optimizer.session.session_paths import enablement_builds_dir
-from hyperloom.orchestrator.collaborator import CoordinatorCollaborator
+from ..collaborator import CoordinatorCollaborator
 
 from ..enablement.runtime.build_actions import TargetedBuildAction, build_novelty_key
 
