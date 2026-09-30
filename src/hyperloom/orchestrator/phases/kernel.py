@@ -1141,8 +1141,8 @@ class KernelPhase(CoordinatorCollaborator):
             observed_identity = f"sha256:{hashlib.sha256(observed_payload).hexdigest()}"
         same_config_tput = float(measurement.get("tput") or 0.0) if reference_verified else 0.0
         workload = {
-            "isl": int(state.isl or 1024),
-            "osl": int(state.osl or 1024),
+            "isl": int(state.isl),
+            "osl": int(state.osl),
             "conc": int(state.conc or 64),
         }
         # Forward the benchmark settings and GPU placement used by Hyperloom.

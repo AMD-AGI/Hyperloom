@@ -213,10 +213,16 @@ def _make_phase_machine_stub(state: Any) -> Any:
     """Minimal MachinePhase stub whose _ensure_phase_initialised can run."""
     from hyperloom.orchestrator.phases.machine import MachinePhase
 
+    class _FakeCoord:
+        def __init__(self, s: Any) -> None:
+            self.shared_state = s
+            self.session_dir = None
+
+        def __getattr__(self, name: str) -> Any:
+            return None
+
     stub = object.__new__(MachinePhase)
-    stub.shared_state = state  # type: ignore[attr-defined]
-    stub.session_dir = None  # type: ignore[attr-defined]
-    # Bind the phase-capability predicates so _ensure_phase_initialised can call them.
+    stub.__dict__["_coord"] = _FakeCoord(state)
     stub._optimize_enabled = lambda: bool(state.framework_agent_phase_enabled)  # type: ignore[attr-defined]
     stub._kernel_enabled = lambda: bool(state.kernel_enabled)  # type: ignore[attr-defined]
     stub._enablement_admitted = lambda: True  # type: ignore[attr-defined]
