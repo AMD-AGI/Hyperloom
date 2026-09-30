@@ -913,6 +913,111 @@ def test_a_specialist_labelled_grid_names_its_domain(session_dir: Path):
     assert proposal["scope"] == "domain"
 
 
+def _delegate_grid(coord: Coordinator, grid: list[dict[str, Any]]) -> None:
+    """Delegate one explore grid through the real intent seam."""
+    import asyncio
+
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    if coord.shared_state.baseline_tput <= 0:
+        coord.shared_state.baseline_tput = 100.0
+    intent = Intent(type=IntentType.DELEGATE, payload={"action_name": "explore", "params": {"grid": grid}})
+    asyncio.run(coord._handle_delegate("orchestration", intent))
+
+
+def test_a_delegated_grid_is_a_proposal_carrying_its_read_and_relayed_citations(session_dir: Path):
+    import asyncio
+
+    from hyperloom.inference_optimizer.experience_kb import ExperienceKBEvidence
+
+    shown = "exp-" + "1" * 32
+    specialist_only = "exp-" + "2" * 32
+    coord = _coordinator(session_dir)
+    state = coord.shared_state
+    state.phase = "FRAMEWORK_AGENT"
+    coord.phase_framework._open_framework_timeline()
+    coord._kb_last_read = ExperienceKBEvidence(
+        tick=state.tick,
+        read_id="read-orchestration",
+        status="completed",
+        prompt_block="evidence",
+        rendered_refs=({"id": shown, "purpose": "representative"},),
+        warnings=(),
+    )
+    specialist_citation = {"id": specialist_only, "stance": "adopt", "claim": "Kept on the same model."}
+    state.record_specialist_round(
+        {
+            "round_id": "r-1",
+            "task_id": "t-spec-1",
+            "domain": "serving_specialist",
+            "proposal_set": [
+                {
+                    "name": "fp8-kv",
+                    "extra_args": "--kv-cache-dtype fp8",
+                    "reason": "Decode is KV-bandwidth bound.",
+                    "experience_citations": [specialist_citation],
+                }
+            ],
+        }
+    )
+    own_citation = {"id": shown, "stance": "contrast", "claim": "That run kept bf16 KV."}
+    grid = [
+        {
+            "name": "relayed-fp8-kv",
+            "extra_args": "--kv-cache-dtype fp8",
+            "provenance": "specialist:serving",
+            "reasoning": "Bench the specialist's KV proposal as it stands.",
+            "experience_citations": [own_citation, {"id": "exp-" + "9" * 32, "stance": "adopt", "claim": "unseen"}],
+        },
+        {
+            "name": "bigger-batch",
+            "extra_args": "--max-num-seqs 512",
+            "provenance": "llm_direct",
+            "reasoning": "Decode is launch-bound at this concurrency.",
+        },
+    ]
+
+    _delegate_grid(coord, grid)
+    _delegate_grid(coord, grid)
+
+    [task] = asyncio.run(coord.tasks.by_state("queued"))
+    proposal_id = task.params["proposal_msg_id"]
+    relayed, own = task.params["grid"]
+    assert relayed["experience_citations"] == [own_citation, specialist_citation]
+    assert "experience_citations" not in own
+
+    variant = {"extra_server_args": "--kv-cache-dtype fp8", "note": relayed["reasoning"]}
+    asyncio.run(
+        coord._fact_write_hook(
+            task=task,
+            result={
+                "round_id": "explore-001",
+                "per_variant_outcomes": [
+                    {
+                        "variant_name": "relayed-fp8-kv",
+                        "outcome": "REVERT",
+                        "fingerprint": "fp1",
+                        "metrics": {"base_tput": 100.0, "tput": 99.0, "gain_pct": -1.0},
+                        "variant": {**variant, "experience_citations": relayed["experience_citations"]},
+                    }
+                ],
+            },
+            kept=False,
+        )
+    )
+    coord._close_framework_timeline(exit_reason="optimize_budget_cap")
+
+    ext = _events(session_dir)[0]["ext"]
+    [proposal] = ext["proposals"]
+    assert proposal["proposal_id"] == proposal_id
+    assert proposal["kb_read_id"] == "read-orchestration"
+    assert proposal["rendered_refs"] == [{"id": shown, "purpose": "representative"}]
+    assert (proposal["lifecycle"][0]["step"], proposal["lifecycle"][0]["outcome"]) == ("proposed", "delegated")
+    [attempt] = ext["attempts"]
+    assert attempt["proposal_ref"] == proposal_id
+    assert attempt["experience_citations"] == [own_citation, specialist_citation]
+
+
 def test_a_seeded_grid_is_not_the_agents_idea(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
