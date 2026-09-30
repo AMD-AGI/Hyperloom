@@ -61,6 +61,7 @@ from .bootstrap import (
     _snapshot_system_prompts,
     agentx_state_is_stale,
     parse_operator_extra_env,
+    resolve_framework_version,
     resolve_model_display_name,
 )
 from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
@@ -1154,10 +1155,8 @@ def _resolve_workload_knobs(
 def _export_workload_envs_for_optimize(
     args: argparse.Namespace,
     *,
-    nodes_resolved: int,
     tp_resolved: int,
     ep_resolved: int,
-    argv: list[str] | None = None,
 ) -> None:
     """Project resolved workload knobs (TP/CONC/EP) into env for downstream Magpie YAMLs."""
     os.environ["TP"] = str(max(1, int(tp_resolved or 1)))
@@ -1558,7 +1557,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if not args.resume_from:
         _export_workload_envs_for_optimize(
             args,
-            nodes_resolved=nodes_resolved,
             tp_resolved=tp_resolved,
             ep_resolved=ep_resolved,
         )
@@ -1944,19 +1942,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             args.max_hours = DEFAULT_MAX_HOURS
         for line in _resume_budget_lines(state, extend_hours=extend_hours):
             print(line)
-        # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.
-        recipe_kb_client = _bootstrap_recipe_kb(
-            args,
-            session_dir=session_dir,
-            manifest=manifest,
-            resume=True,
-        )
-        # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
-        knowledge_plane = _bootstrap_knowledge_plane(
-            args,
-            recipe_kb_client=recipe_kb_client,
-            session_dir=session_dir,
-        )
         # No resume backfill needed for roofline (roofline_snapshots restored by SharedState.from_dict).
     else:
         # Resolve model path: --model > $MODEL_PATH; fail fast rather than silently use the YAML hardcoded model.
@@ -2058,21 +2043,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if getattr(args, "profile_osl", None) is not None:
             os.environ["PROFILE_OSL"] = str(args.profile_osl)
         os.environ["PRECISION"] = args.precision
-        # Mirror resolved framework_version into env (explicit > auto-detect > unset; see _resolve_framework_version).
-        _fw_version_for_env = (getattr(args, "framework_version", None) or "").strip() or (
-            os.environ.get("FRAMEWORK_VERSION", "") or ""
-        ).strip()
-        if not _fw_version_for_env:
-            from ..recipe_snapshot_constants import (
-                DEFAULT_FRAMEWORK_VERSION_SLUG,
-                detect_framework_version,
-            )
-
-            _detected = detect_framework_version(
-                (getattr(args, "framework", None) or "").strip() or os.environ.get("FRAMEWORK", "")
-            )
-            if _detected and _detected != DEFAULT_FRAMEWORK_VERSION_SLUG:
-                _fw_version_for_env = _detected
+        _fw_version_for_env = resolve_framework_version(args)
         if _fw_version_for_env:
             os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
         if _agentx_enabled():
@@ -2158,19 +2129,20 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if _preflight_context_window(args, session_dir):
             sys.exit(2)
         _finish_model_gate(args, session_dir)
-        # Recipe KB T0 anchor (after seed for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
-        recipe_kb_client = _bootstrap_recipe_kb(
-            args,
-            session_dir=session_dir,
-            manifest=manifest,
-            resume=False,
-        )
-        # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
-        knowledge_plane = _bootstrap_knowledge_plane(
-            args,
-            recipe_kb_client=recipe_kb_client,
-            session_dir=session_dir,
-        )
+
+    # Recipe KB T0 anchor (after seed/restore for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
+    recipe_kb_client = _bootstrap_recipe_kb(
+        args,
+        session_dir=session_dir,
+        manifest=manifest,
+        resume=bool(args.resume_from),
+    )
+    # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
+    knowledge_plane = _bootstrap_knowledge_plane(
+        args,
+        recipe_kb_client=recipe_kb_client,
+        session_dir=session_dir,
+    )
 
     from ..multi_node.state_paths import bind_state_file_to_session
 
