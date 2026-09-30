@@ -225,3 +225,14 @@ def test_log_line_scan_is_capped(tmp_path: Path, lines: int) -> None:
 
 def test_missing_log_is_unavailable(tmp_path: Path) -> None:
     assert evidence.observed_sglang_server_identity_from_log(str(tmp_path / "missing.log")) == {}
+
+
+def test_an_sglang_log_yields_no_argv(tmp_path: Path) -> None:
+    """The only ``launch_server`` token an SGLang log carries names no model, so it is rejected."""
+    log = tmp_path / "server.log"
+    log.write_text(
+        "'python -m sglang.launch_server' is still supported, but 'sglang serve' is the recommended entrypoint.\n",
+        encoding="utf-8",
+    )
+
+    assert evidence.launch_argv_from_log(str(log), "sglang") == ""

@@ -157,20 +157,20 @@ def test_canonical_fingerprint_distinguishes_envs():
 
 
 _CANDIDATE = "candidate"
-# Merges to exactly the observed stack argv, so the argv half of the gate
-# matches and the verdict turns on env alone.
+# Names a flag the observed stack already holds at this value, so the argv half
+# of the gate matches and the verdict turns on env alone.
 _RESTATES_ARGV = "--max-running-requests 512"
 # A knob a stack genuinely varies: the recipe reads it as
 # ``${HICACHE_IO_BACKEND:-direct}``, so both values below are reachable.
 _TUNED_ENV = "HICACHE_IO_BACKEND"
-# The recipe's own env, minus the argv key. A round's base layers are the stack's,
-# so this rides identically on both sides and the verdict turns on the deltas.
+# The recipe's own env. The stack stamps it whether or not a variant names it,
+# so it rides identically on both sides and the verdict turns on the delta.
 _RECIPE_ENV = {"KV_OFFLOADING": "1"}
+# The argv the base config carries before any variant overlays it.
 _BASE_ARGS_ENV = {"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"}
-# A stack whose chunked-prefill size arrives through base_extra_args rather than
-# the YAML, so a variant is only judged correctly after the base layer merges.
+# The stack pins chunked-prefill at 32768, so a variant naming 65536 is a real
+# change however the stack came to hold that value.
 _CHUNKED_STACK = {
-    "base_extra_args": "--chunked-prefill-size 32768",
     "observed_server_launch_flags": "--mem-fraction-static 0.9 --chunked-prefill-size 32768",
 }
 
@@ -232,9 +232,9 @@ _ALREADY_THE_STACK = (
 _MUST_RUN = (
     ("different_argv_value", [_variant("--max-running-requests 128")], {}),
     (
-        # The wrong drop reported on #1579: the stack sits at 32768 through
-        # base_extra_args, so a variant proposing 65536 is a real change.
-        "different_argv_value_carried_by_the_base_layer",
+        # The wrong drop reported on #1579: the stack sits at 32768, so a
+        # variant proposing 65536 is a real change.
+        "different_argv_value_the_stack_already_pins",
         [_variant("--chunked-prefill-size 65536")],
         _CHUNKED_STACK,
     ),
@@ -243,15 +243,28 @@ _MUST_RUN = (
         [_variant(extra_envs={_TUNED_ENV: "direct"})],
         {"observed_server_env": _stack_env(HICACHE_IO_BACKEND="kernel")},
     ),
-    (
-        "base_layer_adds_an_env_the_stack_lacks",
-        [_variant()],
-        {"base_extra_envs": {_TUNED_ENV: "kernel"}},
-    ),
     # One half of the stack is unrecorded, so no match can be proven either way.
     # The argv case restates the stack exactly: only the missing evidence keeps it.
     ("stack_argv_is_unknown", [_variant()], {"observed_server_launch_flags": ""}),
     ("stack_env_is_unknown", [_variant(extra_envs={_TUNED_ENV: "kernel"})], {"observed_server_env": {}}),
+    (
+        # split_launch_flags drops the parallelism family, so a dp change read as
+        # no change. The stack says --dp, the variant --dp-size: one knob, two spellings.
+        "different_parallelism_value",
+        [_variant("--dp-size 4")],
+        {"observed_server_launch_flags": "--mem-fraction-static 0.9 --enable-dp-attention --dp 8"},
+    ),
+    (
+        # _args_pairs keeps a flag's first value and scatters the rest, so two
+        # lists sharing a prefix collapse to the same pairs. Not comparable.
+        "multi_value_flag_is_not_comparable",
+        [_variant("--cuda-graph-bs 1 2 4 8")],
+        {"observed_server_launch_flags": "--mem-fraction-static 0.9 --cuda-graph-bs 1 2 4 8 16"},
+    ),
+    # A removal changes the launch by subtraction, which the materialized
+    # config cannot express, so the comparison reads it as proposing nothing.
+    ("removes_an_arg_the_script_supplies", [_variant(remove_args=["--enable-dp-attention"])], {}),
+    ("unsets_an_env_the_container_exports", [_variant(unset_envs=["HIP_FORCE_DEV_KERNARG"])], {}),
     # Restates the stack exactly on both halves, so only the exemption saves it.
     ("resume_stack_revalidate_is_exempt", [_revalidate()], {}),
 )
@@ -288,22 +301,16 @@ def _measurement(flags: str, env: dict[str, str]) -> dict:
 
 _OBSERVED_LAUNCH_CASES = (
     (
-        # Current best carries evidence, so the baseline is not consulted at all
-        # -- not even for the env half that current best left empty.
-        "current_best_wins_field_by_field",
-        SimpleNamespace(
-            current_best_measurement=_measurement("--tp 2", {}),
-            last_baseline=_measurement("--tp 1", {_TUNED_ENV: "direct"}),
-        ),
-        ("--tp 2", {}),
+        "current_best_carries_both_halves",
+        SimpleNamespace(current_best_measurement=_measurement("--tp 2", {_TUNED_ENV: "kernel"})),
+        ("--tp 2", {_TUNED_ENV: "kernel"}),
     ),
     (
-        "baseline_when_there_is_no_current_best",
-        SimpleNamespace(
-            current_best_measurement={},
-            last_baseline=_measurement("--tp 1", {_TUNED_ENV: "direct"}),
-        ),
-        ("--tp 1", {_TUNED_ENV: "direct"}),
+        # last_baseline is an attempt entry and never carries launch_evidence,
+        # so a stack without a current best is simply unknown.
+        "no_current_best_means_no_evidence",
+        SimpleNamespace(current_best_measurement={}, last_baseline=_measurement("--tp 1", {_TUNED_ENV: "direct"})),
+        ("", {}),
     ),
 )
 
@@ -314,7 +321,7 @@ _OBSERVED_LAUNCH_CASES = (
     ids=[case[0] for case in _OBSERVED_LAUNCH_CASES],
 )
 def test_observed_launch_from_state_reads_only_the_current_stack(state, expected):
-    """current_best when it carries evidence, else last_baseline, and never a mix of the two."""
+    """Only current_best carries evidence; nothing else is consulted for it."""
     assert observed_launch_from_state(state) == expected
 
 
@@ -330,7 +337,12 @@ def test_a_measurement_stamps_its_env_and_the_filter_drops_a_restatement_of_it(t
             {
                 "benchmark": {
                     "framework": "sglang",
-                    "envs": {**_BASE_ARGS_ENV, **_stack_env(HICACHE_IO_BACKEND="kernel")},
+                    # The argv key rides along so the stamp has to drop it: it
+                    # holds the launch command, not an env value.
+                    "envs": {
+                        "EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9",
+                        **_stack_env(HICACHE_IO_BACKEND="kernel"),
+                    },
                 }
             }
         ),

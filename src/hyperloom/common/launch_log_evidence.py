@@ -58,6 +58,37 @@ _PROFILING_LAUNCH_FLAGS: frozenset[str] = frozenset(
     }
 )
 
+#: Flags that cannot tell two launches of one round apart. Narrower than
+#: ``_RUN_SPECIFIC_LAUNCH_FLAGS``, which also drops knobs a variant may tune.
+_NON_DISTINGUISHING_LAUNCH_FLAGS: frozenset[str] = frozenset(
+    {
+        "--model-path",
+        "--model",
+        "--tokenizer",
+        "--tokenizer-path",
+        "--served-model-name",
+        "--host",
+        "--port",
+        "--nccl-port",
+        "--dist-init-addr",
+        "--base-gpu-id",
+        "--gpu-id-step",
+        "--node-rank",
+        "--download-dir",
+        "--pid",
+    }
+)
+
+#: Spellings of one knob, folded to a single name: SGLang launches with
+#: ``--dp`` where a variant proposes ``--dp-size``.
+_LAUNCH_FLAG_ALIASES: dict[str, str] = {
+    "--tp": "--tp-size",
+    "--tensor-parallel-size": "--tp-size",
+    "--dp": "--dp-size",
+    "--data-parallel-size": "--dp-size",
+    "--pipeline-parallel-size": "--pp-size",
+}
+
 #: Per-backend marker for the start of a captured launch argv.
 _LAUNCH_ARGV_MARKERS: dict[str, str] = {
     "sglang": "launch_server",
@@ -65,8 +96,8 @@ _LAUNCH_ARGV_MARKERS: dict[str, str] = {
 }
 
 
-def split_launch_flags(argv_tail: str) -> str:
-    """Remove run-specific and profiling flags from a captured launch argv."""
+def _filter_launch_flags(argv_tail: str, *, strip: frozenset[str], aliases: dict[str, str]) -> str:
+    """Drop every flag in ``strip`` and fold the spellings in ``aliases``."""
     try:
         tokens = shlex.split(argv_tail)
     except ValueError:
@@ -85,15 +116,37 @@ def split_launch_flags(argv_tail: str) -> str:
             if index < len(tokens) and not tokens[index].startswith("-"):
                 index += 1
             continue
-        if flag in _RUN_SPECIFIC_LAUNCH_FLAGS or flag in _PROFILING_LAUNCH_FLAGS:
+        if flag in strip:
             if "=" not in token and index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
                 index += 2
             else:
                 index += 1
             continue
+        canonical = aliases.get(flag)
+        if canonical:
+            _, sep, value = token.partition("=")
+            token = f"{canonical}{sep}{value}" if sep else canonical
         kept.append(token)
         index += 1
     return " ".join(kept)
+
+
+def split_launch_flags(argv_tail: str) -> str:
+    """Remove run-specific and profiling flags from a captured launch argv."""
+    return _filter_launch_flags(
+        argv_tail,
+        strip=_RUN_SPECIFIC_LAUNCH_FLAGS | _PROFILING_LAUNCH_FLAGS,
+        aliases={},
+    )
+
+
+def identity_launch_flags(argv_tail: str) -> str:
+    """Normalize a launch argv for asking whether two launches are the same server."""
+    return _filter_launch_flags(
+        argv_tail,
+        strip=_NON_DISTINGUISHING_LAUNCH_FLAGS,
+        aliases=_LAUNCH_FLAG_ALIASES,
+    )
 
 
 def launch_argv_from_log(path: str, framework: str) -> str:

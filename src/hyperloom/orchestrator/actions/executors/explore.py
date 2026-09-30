@@ -19,7 +19,7 @@ import yaml
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
-from hyperloom.common.launch_log_evidence import split_launch_flags
+from hyperloom.common.launch_log_evidence import identity_launch_flags
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
@@ -84,7 +84,11 @@ from ._grid_runner import (
     sanitize_script_name,
     session_grid_bounds,
 )
-from hyperloom.inference_optimizer.grid_server_args import compose_server_args, server_args_env_name
+from hyperloom.inference_optimizer.grid_server_args import (
+    _MULTI_VALUE_FLAGS,
+    compose_server_args,
+    server_args_env_name,
+)
 from ._ray_serving import maybe_serving_lease
 
 from ._server_argv import config_server_argv, seal_server_argv
@@ -371,23 +375,17 @@ def _is_config_replay_variant(variant: Any) -> bool:
 
 
 def observed_launch_from_state(state: Any) -> tuple[str, dict[str, str]]:
-    """Observed flags and env of the current stack: current_best if present, else last_baseline.
-
-    Empty if the chosen measurement has no evidence. Never reads a different measurement.
-    """
-    current_best = getattr(state, "current_best_measurement", None)
-    if isinstance(current_best, dict) and current_best:
-        measurement = current_best
-    else:
-        measurement = getattr(state, "last_baseline", None)
+    """Observed launch flags and env of the current stack, empty unless ``current_best`` observed them."""
+    measurement = getattr(state, "current_best_measurement", None)
     if not isinstance(measurement, dict) or not measurement:
         return "", {}
     evidence = measurement.get("launch_evidence")
     if not isinstance(evidence, Mapping):
         return "", {}
-    raw = evidence.get("observed_server_env")
-    # Same shape as _config_envs, so the two can be compared directly.
-    env = {str(k): str(v) for k, v in raw.items()} if isinstance(raw, Mapping) else {}
+
+    raw_env = evidence.get("observed_server_env")
+    # Same shape as a variant's extra_envs, so the two compare directly.
+    env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, Mapping) else {}
     return str(evidence.get("observed_server_launch_flags") or "").strip(), env
 
 
@@ -400,8 +398,12 @@ def _seal_raw_argv(text: str, *, framework: str) -> str | None:
 
 
 def _canonical_launch_pairs(argv_text: str) -> list[list[str]]:
-    """Strip run-specific/profiling flags, then return sorted last-wins ``[flag, value]`` pairs."""
-    return _args_pairs(split_launch_flags(argv_text))
+    """Sorted last-wins ``[flag, value]`` pairs, normalized for a same-launch test.
+
+    Not ``split_launch_flags``: it strips the parallelism family, so two
+    launches differing only in ``--dp-size`` compared equal.
+    """
+    return _args_pairs(identity_launch_flags(argv_text))
 
 
 def _config_envs(config_path: Path) -> dict[str, str]:
@@ -418,6 +420,16 @@ def _config_envs(config_path: Path) -> dict[str, str]:
         return {}
     args_env = server_args_env_name(str(bench.get("framework") or ""))
     return {str(k): str(v) for k, v in envs.items() if str(k) != args_env}
+
+
+def _subtracts_from_the_launch(variant: GridVariant) -> bool:
+    """Whether ``variant`` removes something, which the probe's config cannot show."""
+    return bool(getattr(variant, "remove_args", None) or getattr(variant, "unset_envs", None))
+
+
+def _touches_a_multi_value_flag(argv_text: str) -> bool:
+    """Whether ``argv_text`` names a list-valued flag, which ``_args_pairs`` cannot represent."""
+    return any(flag in argv_text for flag in _MULTI_VALUE_FLAGS)
 
 
 # Separate from _CONFIG_REPLAY_PROVENANCE (shared with filter_operator_pinned_envs):
@@ -455,6 +467,9 @@ def filter_baseline_noop_variants(
     ``observed_server_launch_flags`` and ``observed_server_env`` recorded on the
     stack's own measurement. A variant is dropped only when both halves match.
 
+    A variant that removes something, or names a list-valued flag, is exempt:
+    neither is visible here, so both would read as a restatement of the stack.
+
     Returns the variants still to run, plus ``(name, reason)`` for each drop.
     Filters nothing when the stack has no observed launch flags.
     """
@@ -472,7 +487,10 @@ def filter_baseline_noop_variants(
     with tempfile.TemporaryDirectory(prefix="explore_noop_probe_") as tmp_dir:
         tmp_root = Path(tmp_dir)
         for idx, gv in enumerate(grid):
-            if _is_noop_filter_exempt(gv):
+            if _is_noop_filter_exempt(gv) or _subtracts_from_the_launch(gv):
+                kept.append(gv)
+                continue
+            if _touches_a_multi_value_flag(str(getattr(gv, "extra_server_args", "") or "")):
                 kept.append(gv)
                 continue
             try:
