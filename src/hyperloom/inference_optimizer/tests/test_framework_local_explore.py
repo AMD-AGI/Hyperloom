@@ -111,7 +111,9 @@ class _Stub:
         coord.tasks = _Tasks()
         coord.framework_gpu_pool = None
         coord.bus = _Bus()
-        coord._warm_specialist_params = self._warm_specialist_params  # type: ignore[method-assign]
+        coord.knowledge_plane = None
+        coord._journal = None
+        coord._proposal_scorer = None
         object.__setattr__(self, "_coord", coord)
 
     def __getattr__(self, name: str) -> Any:
@@ -119,7 +121,12 @@ class _Stub:
         try:
             return getattr(coord, name)
         except AttributeError:
+            pass
+        try:
             return getattr(coord.phase_framework, name)
+        except AttributeError:
+            pass
+        return getattr(coord.specialist_dispatch, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
         if name == "_coord":

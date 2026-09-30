@@ -1338,7 +1338,9 @@ class FrameworkPhase(CoordinatorCollaborator):
     def _framework_local_explore_arm_enabled(self) -> bool:
         """True when the candidate-free local-exploration arm may run."""
         state = self.shared_state
-        return bool(getattr(state, "framework_local_explore_enabled", True))
+        return bool(getattr(state, "framework_agent_authoring_enabled", False)) and bool(
+            getattr(state, "framework_local_explore_enabled", True)
+        )
 
     def _compose_framework_local_explore_gap(self) -> tuple[str, list[str]]:
         """Compose the ``(gap, keywords)`` steering the local-exploration arm."""
