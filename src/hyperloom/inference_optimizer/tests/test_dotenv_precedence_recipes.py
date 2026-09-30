@@ -235,7 +235,7 @@ docker() {
     )
     record = json.loads((workspace / "launch.json").read_text(encoding="utf-8"))
     argv = record["argv"]
-    assert argv[:4] == ["-m", "hyperloom.inference_optimizer.cli", "--verbose", "optimize"]
+    assert argv[:4] == ["-m", "hyperloom", "optimize", "--verbose"]
     expected_flags = {
         "--model": model.as_posix(),
         "--framework": "atom",
@@ -421,7 +421,8 @@ def test_atom_docker_recipe_passes_selected_python_to_setup(tmp_path: Path, doc:
         assert result["INFERENCE_OPTIMIZER_FORCE_PYTHON"] == "1"
         assert (tmp_path / "setup-argv").read_text().splitlines() == [
             "-m",
-            "hyperloom.inference_optimizer.setup",
+            "hyperloom",
+            "setup",
             "--check-only",
             "--",
             "--install-framework",
@@ -471,7 +472,7 @@ def test_atom_recipe_provides_direct_setup_commands(tmp_path: Path, doc: Path) -
     setup_blocks = [
         "\n".join(block)
         for block in blocks
-        if any("hyperloom.inference_optimizer.setup" in line for line in block)
+        if any("-m hyperloom setup" in line for line in block)
         and not any("docker" in line for line in block)
         and (doc == ATOM_DOC or any("--frameworks atom" in line for line in block))
     ]
@@ -486,7 +487,7 @@ export PYTHON=python_probe
         fragment, tmp_path, {"USER_DATA_PATH": "/selected/data"}, observed=("CHECK_ARGS", "INSTALL_ARGS")
     )
     for key, args in result.items():
-        assert "-m hyperloom.inference_optimizer.setup" in args
+        assert "-m hyperloom setup" in args
         assert "--install-framework none" in args
         assert "--frameworks atom" in args
         assert "--require-frameworks" in args

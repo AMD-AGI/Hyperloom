@@ -18,20 +18,20 @@ Examples
 
     # Live session in this sandbox ($INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR,
     # else $USER_DATA_PATH / /workspace/hyperloom)
-    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown
+    hyperloom session breakdown
 
     # Historical session on a shared filesystem
-    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
+    hyperloom session breakdown \\
         --session-dir /shared/hyperloom-sessions/<user>/<sid>
 
     # Override output path (don't touch session_dir)
-    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
+    hyperloom session breakdown \\
         --session-dir <SD> --output /tmp/breakdown-<sid>.json
 
     # Bulk historical
     for d in /shared/hyperloom-sessions/*/*; do
         [ -d "$d" ] || continue
-        python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
+        hyperloom session breakdown \\
             --session-dir "$d" > /dev/null
     done
 """

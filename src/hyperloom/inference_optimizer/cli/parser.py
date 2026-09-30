@@ -158,10 +158,11 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="hyperloom",
         description="Inference Optimizer — multi-agent inference optimization (SGLang/vLLM/Atom/xDiT)",
     )
-    p.add_argument("--verbose", "-v", action="count", default=0, help="Verbose logging (-v INFO, -vv DEBUG)")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--verbose", "-v", action="count", default=0, help="Verbose logging (-v INFO, -vv DEBUG)")
     sub = p.add_subparsers(dest="command", required=True)
 
-    opt = sub.add_parser("optimize", help="Drive a multi-agent optimization run on a model")
+    opt = sub.add_parser("optimize", parents=[common], help="Drive a multi-agent optimization run on a model")
     opt.add_argument(
         "--model",
         "-m",
@@ -1151,6 +1152,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     rec = sub.add_parser(
         "recover",
+        parents=[common],
         help="Rebuild + push the session_breakdown for a session that exited "
         "abnormally (crash / SIGKILL) so its breakdown lands on Langfuse.",
     )

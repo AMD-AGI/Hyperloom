@@ -4,7 +4,7 @@
 """Print concise optimizer state and lifecycle status.
 
 Usage:
-    python src/hyperloom/inference_optimizer/tools/read_optimizer_state.py SESSION_DIR
+    hyperloom session state SESSION_DIR
 """
 
 from __future__ import annotations

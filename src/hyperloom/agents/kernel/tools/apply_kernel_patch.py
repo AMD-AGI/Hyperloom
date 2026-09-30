@@ -192,7 +192,8 @@ def _dispatch_multinode_apply(
     cmd = [
         sys.executable,
         "-m",
-        "hyperloom.inference_optimizer.multi_node",
+        "hyperloom",
+        "multi-node",
         "apply-patch",
         "--patch-file",
         str(patch_path),
@@ -254,7 +255,8 @@ def _dispatch_multinode_revert(
     cmd = [
         sys.executable,
         "-m",
-        "hyperloom.inference_optimizer.multi_node",
+        "hyperloom",
+        "multi-node",
         "revert-patch",
         "--target-path",
         str(target_path),
@@ -297,7 +299,8 @@ def _dispatch_multinode_finalize(
     cmd = [
         sys.executable,
         "-m",
-        "hyperloom.inference_optimizer.multi_node",
+        "hyperloom",
+        "multi-node",
         "finalize-patch",
         "--records-json",
         json.dumps(records_by_host, sort_keys=True),

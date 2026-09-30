@@ -86,9 +86,27 @@ def test_stale_scan_skips_the_launcher_ancestry(preflight: ModuleType, monkeypat
     monkeypatch.setattr(
         preflight,
         "_read_cmdline",
-        lambda pid: f"bash -c python -m hyperloom.inference_optimizer.cli optimize  # pid {pid}",
+        lambda pid: f"bash -c python -m hyperloom optimize  # pid {pid}",
     )
     assert [pid for pid, _ in preflight._find_stale_processes()] == ["12"]
+
+
+@pytest.mark.parametrize(
+    ("cmdline", "stale"),
+    [
+        ("/venv/bin/python3 -m hyperloom optimize --model /m", True),
+        ("/venv/bin/hyperloom optimize --model /m", True),
+        ("/venv/bin/python3 -m hyperloom check /m", False),
+    ],
+)
+def test_stale_scan_matches_the_unified_optimize_command(
+    preflight: ModuleType, monkeypatch: pytest.MonkeyPatch, cmdline: str, stale: bool
+) -> None:
+    monkeypatch.setattr(preflight.os, "getpid", lambda: 11)
+    monkeypatch.setattr(preflight, "_parent_pid", lambda pid: 1)
+    monkeypatch.setattr(preflight.os, "listdir", lambda path: ["12"])
+    monkeypatch.setattr(preflight, "_read_cmdline", lambda pid: cmdline)
+    assert [pid for pid, _ in preflight._find_stale_processes()] == (["12"] if stale else [])
 
 
 def test_stale_scan_sees_an_atom_server(preflight: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:

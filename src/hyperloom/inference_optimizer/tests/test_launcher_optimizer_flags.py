@@ -27,7 +27,7 @@ LAUNCHERS = (
 # Retired with the kernel LLM role.
 RETIRED = ("--kernel-codex", "--kernel-claude", "--kernel-prompt", "HL_KERNEL_BACKEND")
 
-_CLI_MODULE = "hyperloom.inference_optimizer.cli"
+_CLI_MODULE = "-m hyperloom optimize"
 _FLAG_RE = re.compile(r"--[a-z][a-z0-9-]*")
 # Tokens that may follow a flag without being its value.
 _SHELL_OPERATORS = frozenset({">", ">>", "<", "|", "&", "&&", "||", ";", "2>&1"})

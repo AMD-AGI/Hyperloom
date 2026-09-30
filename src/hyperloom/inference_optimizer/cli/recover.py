@@ -97,7 +97,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         breakdown_path = write_breakdown_json(session_dir)
         print(f"  rebuilt breakdown : {breakdown_path}")
     except Exception:
-        log.exception("recover-session: breakdown rebuild failed")
+        log.exception("recover: breakdown rebuild failed")
         return 1
 
     # 2) Reconcile + flush Langfuse, splice the final receipt, attach the SBD.
@@ -113,7 +113,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         record_session_breakdown(session_dir)
         print("  langfuse          : flushed + breakdown attached")
     except Exception:
-        log.exception("recover-session: langfuse push failed (non-fatal)")
+        log.exception("recover: langfuse push failed (non-fatal)")
 
     # 3) Re-package the artifact bundle so /workspace carries the recovered SBD.
     try:
@@ -123,6 +123,6 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         if pkg_path is not None:
             print(f"  artifact package  : {pkg_path}")
     except Exception:
-        log.exception("recover-session: artifact package failed (non-fatal)")
+        log.exception("recover: artifact package failed (non-fatal)")
 
     return 0

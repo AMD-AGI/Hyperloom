@@ -4,7 +4,7 @@
 """Launcher-side preflight for hyperloom.inference_optimizer.
 
 Usage:
-    python src/hyperloom/inference_optimizer/tools/preflight_optimizer.py MODEL_PATH
+    hyperloom check MODEL_PATH
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from hyperloom.common import rocm_smi
 #: descent from the wrapper reaches them, which is teardown's job and not this
 #: scan's.
 STALE_PROCESS_PATTERNS = (
+    "hyperloom optimize",
     "hyperloom.inference_optimizer.cli",
     "Magpie",
     "atom.entrypoints",
