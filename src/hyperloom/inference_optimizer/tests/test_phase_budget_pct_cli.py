@@ -217,6 +217,7 @@ def _make_phase_machine_stub(state: Any) -> Any:
         def __init__(self, s: Any) -> None:
             self.shared_state = s
             self.session_dir = None
+            self.enablement_lane = type("_EL", (), {"_enablement_admitted": lambda self: True})()
 
         def __getattr__(self, name: str) -> Any:
             return None
