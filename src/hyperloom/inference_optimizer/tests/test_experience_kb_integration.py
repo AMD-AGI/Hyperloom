@@ -16,7 +16,6 @@ from hyperloom.inference_optimizer.experience_kb import (
     ExperienceKBIntegration,
     integration_for,
 )
-from hyperloom.orchestrator.loop.conversation import ConversationCollaborator
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.intent_router import _stamp_kb_exposure
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
@@ -286,14 +285,9 @@ class _Integration:
 def test_conversation_kb_block_is_fail_open_and_records_exposure(tmp_path) -> None:
     evidence = _evidence(_FIRST)
     state = SharedState(tick=7, phase="FRAMEWORK_AGENT")
-    coordinator = SimpleNamespace(
-        session_dir=tmp_path,
-        shared_state=state,
-        _kb_integration=_Integration(evidence),
-    )
-    collaborator = ConversationCollaborator(coordinator)
+    coordinator = _kb_coordinator(tmp_path, state, _Integration(evidence))
 
-    block = asyncio.run(collaborator._kb_prompt_block("proposal"))
+    block = asyncio.run(coordinator._kb_prompt_block("proposal"))
 
     assert evidence.prompt_block in block
     assert "original Recipe benchmark measurement remains" in block
@@ -314,8 +308,7 @@ def test_conversation_kb_block_is_fail_open_and_records_exposure(tmp_path) -> No
 def test_orchestration_injection_is_recorded_once_per_injected_experience_set(tmp_path) -> None:
     state = SharedState()
     integration = _Integration(_evidence(_FIRST, _SECOND))
-    coordinator = SimpleNamespace(session_dir=tmp_path, shared_state=state, _kb_integration=integration)
-    collaborator = ConversationCollaborator(coordinator)
+    coordinator = _kb_coordinator(tmp_path, state, integration)
 
     for tick, evidence in (
         (1, _evidence(_FIRST, _SECOND, tick=1)),
@@ -324,7 +317,7 @@ def test_orchestration_injection_is_recorded_once_per_injected_experience_set(tm
     ):
         state.tick = tick
         integration.evidence = evidence
-        asyncio.run(collaborator._kb_prompt_block("proposal"))
+        asyncio.run(coordinator._kb_prompt_block("proposal"))
         state.record_experience_kb_injection(
             consumer="specialist",
             domain="serving_specialist",
@@ -338,7 +331,7 @@ def test_orchestration_injection_is_recorded_once_per_injected_experience_set(tm
         tick=4, read_id="read-4", status="unavailable", prompt_block="", rendered_refs=(), warnings=("offline",)
     )
     state.tick = 4
-    assert asyncio.run(collaborator._kb_prompt_block("proposal")) == ""
+    assert asyncio.run(coordinator._kb_prompt_block("proposal")) == ""
 
     orchestration = [row for row in state.experience_kb_injections if row["consumer"] == "orchestration"]
     specialist = [row for row in state.experience_kb_injections if row["consumer"] == "specialist"]
@@ -368,7 +361,7 @@ def test_injection_record_is_capped_and_survives_resume(tmp_path) -> None:
     assert "experience_kb_injections" not in SharedState.AGENT_UPDATE_FIELDS
 
 
-def _dispatch_coordinator(tmp_path, state: SharedState, integration: _Integration) -> Coordinator:
+def _kb_coordinator(tmp_path, state: SharedState, integration: _Integration) -> Coordinator:
     coordinator = Coordinator.__new__(Coordinator)
     coordinator.session_dir = tmp_path
     coordinator.shared_state = state
@@ -389,7 +382,7 @@ def test_specialist_dispatch_injects_its_experience_block_and_records_it(tmp_pat
     )
     evidence = _evidence(_FIRST, _SECOND, tick=9)
     integration = _Integration(evidence)
-    coordinator = _dispatch_coordinator(tmp_path, state, integration)
+    coordinator = _kb_coordinator(tmp_path, state, integration)
     params = {"gap_canonical_id": "gap.static_recon.aiter_master"}
 
     asyncio.run(coordinator._warm_specialist_params(params))
@@ -427,7 +420,7 @@ def test_specialist_dispatch_injects_its_experience_block_and_records_it(tmp_pat
 def test_specialist_dispatch_reads_only_in_framework_agent_and_fails_open(tmp_path) -> None:
     state = SharedState(tick=3, phase="PRELUDE")
     integration = _Integration(_evidence(_FIRST, tick=3))
-    coordinator = _dispatch_coordinator(tmp_path, state, integration)
+    coordinator = _kb_coordinator(tmp_path, state, integration)
 
     prelude_params = {"domain": "research_scout_specialist"}
     asyncio.run(coordinator._warm_specialist_params(prelude_params))
@@ -455,7 +448,7 @@ def test_a_specialist_read_that_matched_nothing_still_travels_with_the_dispatch(
         tick=5, read_id="read-empty", status="completed", prompt_block="", rendered_refs=(), warnings=()
     )
     integration = _Integration(empty)
-    coordinator = _dispatch_coordinator(tmp_path, state, integration)
+    coordinator = _kb_coordinator(tmp_path, state, integration)
     params = {"domain": "serving_specialist"}
 
     asyncio.run(coordinator._warm_specialist_params(params))
@@ -482,7 +475,7 @@ def test_an_agentx_run_reads_no_experience_since_none_of_its_own_is_published(tm
     coordinator.knowledge_plane = None
     params = {"domain": "serving_specialist"}
 
-    assert asyncio.run(ConversationCollaborator(coordinator)._kb_prompt_block("proposal")) == ""
+    assert asyncio.run(coordinator._kb_prompt_block("proposal")) == ""
     asyncio.run(coordinator._warm_specialist_params(params))
 
     assert coordinator._kb_integration is None

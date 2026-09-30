@@ -194,7 +194,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         """Read shared Experience evidence once per FRAMEWORK_AGENT orchestration tick."""
         from hyperloom.inference_optimizer.experience_kb import integration_for
 
-        integration = integration_for(self._coord, self.session_dir)
+        integration = integration_for(self, self.session_dir)
         if integration is None:
             return ""
         try:
@@ -206,7 +206,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         except Exception:
             log.exception("Coordinator: Experience KB read failed")
             return ""
-        self._coord._kb_last_read = evidence
+        self._kb_last_read = evidence
         if evidence.status != "completed" or not evidence.prompt_block:
             return ""
         block = "\n".join(

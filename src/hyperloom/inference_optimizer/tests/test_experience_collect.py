@@ -277,7 +277,7 @@ def _record_framework_attempts(session_dir: Path) -> list[dict[str, Any]]:
             kept=False,
         )
     )
-    coord._close_framework_timeline(exit_reason="optimize_no_more_leverage")
+    coord.phase_framework.close_timeline(exit_reason="optimize_no_more_leverage")
     return [event for event in read_timeline_events(session_dir) if event.get("type") == "framework_agent"]
 
 
@@ -482,7 +482,7 @@ def test_a_specialists_config_only_deliverable_is_published_as_a_config_experien
         },
     )
     asyncio.run(
-        coord._maybe_autosubmit_framework_config(
+        coord.phase_framework.maybe_autosubmit_config(
             task=authoring,
             done_payload={
                 "proposal_set": [
@@ -509,7 +509,7 @@ def test_a_specialists_config_only_deliverable_is_published_as_a_config_experien
             "measured_against": {"throughput": 100.0, "extra_server_args": "--already-kept 1"},
         },
     )
-    coord._close_framework_timeline(exit_reason="optimize_no_more_leverage")
+    coord.phase_framework.close_timeline(exit_reason="optimize_no_more_leverage")
     timeline = [event for event in read_timeline_events(session_dir) if event.get("type") == "framework_agent"]
 
     report = kb_collect.collect(experience_collect.MAPPING, _document(timeline), dry_run=True).to_dict()

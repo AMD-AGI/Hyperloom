@@ -481,7 +481,9 @@ def _record_source_attempt(
         # not recoverable from the single primary path.
         patches_applied=patches_applied,
         patches_reverted=patches_reverted,
-        patch_material=_patch_material(Path(coord.session_dir), [patch_path, *patches_applied, *patches_reverted]),
+        patch_material=_patch_material(
+            Path(coord._coord.session_dir), [patch_path, *patches_applied, *patches_reverted]
+        ),
         target_files=result.get("target_files") or [],
         source_ref=str(params.get("framework_agent_candidate_id") or candidate_id),
         measurement={
