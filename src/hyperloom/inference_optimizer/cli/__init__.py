@@ -555,8 +555,6 @@ def _codex_model_should_follow_claude() -> bool:
 
 def _claude_model_should_follow_codex() -> bool:
     """True when the operator supplied only OpenAI-compatible config."""
-    if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
-        return True
     return llm_config.is_openai_only()
 
 
@@ -586,8 +584,12 @@ def _critic_agent_runtime_needed(critic_choice: str) -> bool:
 def _validate_and_resolve_claude_model(
     args: argparse.Namespace,
     resolved_urls: tuple[str, str] | None,
+    *,
+    claude_follows_codex: bool | None = None,
 ) -> set[str] | None:
     """Gate Claude model selection against the gateway catalog; mutates ``args.claude_model``."""
+    if claude_follows_codex is None:
+        claude_follows_codex = _claude_model_should_follow_codex()
     chosen = (args.claude_model or "").strip()
     # Custom orchestration models are enabled by default; the gateway catalog probe below is the sole gate.
     allow_custom = _custom_orch_model_allowed()
@@ -641,7 +643,7 @@ def _validate_and_resolve_claude_model(
         openai_key = os.environ.get("OPENAI_API_KEY", "")
         # The Claude catalog must come from the Anthropic side.
         candidates: list[tuple[str, str]] = []
-        if _claude_model_should_follow_codex():
+        if claude_follows_codex:
             if openai_url:
                 candidates.append((openai_url, openai_key))
             elif anthropic_url:
@@ -744,18 +746,22 @@ def _resolve_models_for_run(
         args.claude_model = args.codex_model
 
     # Hard-gate the Claude model (mutates args.claude_model on fallback; sys.exit(2) on failure).
-    _validate_and_resolve_claude_model(args, resolved_urls)
+    _validate_and_resolve_claude_model(args, resolved_urls, claude_follows_codex=claude_follows_codex)
 
     if codex_follows_claude:
         args.codex_model = args.claude_model
 
-    _probe_critic_review_model(args, codex_follows_claude=codex_follows_claude)
+    _probe_critic_review_model(
+        args, codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+    )
 
 
 _CRITIC_PROBE_TIMEOUT_SEC = 60.0
 
 
-def _probe_critic_review_model(args: argparse.Namespace, *, codex_follows_claude: bool) -> None:
+def _probe_critic_review_model(
+    args: argparse.Namespace, *, codex_follows_claude: bool, claude_follows_codex: bool = False
+) -> None:
     """Send the critic's model one real request before the session starts; exit rc=2 when it cannot answer.
 
     A catalog listing only proves a gateway names a model, not that its upstream serves it, and the critic has no
@@ -767,7 +773,9 @@ def _probe_critic_review_model(args: argparse.Namespace, *, codex_follows_claude
     try:
         protocol, model = critic_review_target(
             args.critic_protocol,
-            orchestration_on_codex=orchestration_runs_on_codex(codex_follows_claude=codex_follows_claude),
+            orchestration_on_codex=orchestration_runs_on_codex(
+                codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+            ),
             claude_model=args.claude_model,
             codex_model=args.codex_model,
         )
@@ -1612,10 +1620,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     claude_follows_codex = _claude_model_should_follow_codex()
     if claude_follows_codex:
-        os.environ["INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX"] = "1"
         args.claude_model = args.codex_model
-    else:
-        os.environ.pop("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX", None)
 
     # Capture provider intent before _preflight() fills missing endpoints (preflight may populate OPENAI_BASE_URL from
     # ANTHROPIC_BASE_URL).
@@ -2248,6 +2253,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         critic_agent_root=critic_agent_root,
         critic_kb_mode=critic_kb_mode,
         codex_follows_claude=codex_follows_claude,
+        claude_follows_codex=claude_follows_codex,
         critic_protocol=args.critic_protocol,
     )
     # Expose active session_dir to in-process executors via the canonical pin env var; reinforced here for resume

@@ -111,8 +111,6 @@ def _default_claude_model_env() -> str:
     explicit = (os.environ.get("CLAUDE_MODEL") or "").strip()
     if explicit:
         return explicit
-    if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
-        return (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
     gateway_model = provider_model_defaults().get("CLAUDE_MODEL", "")
     if gateway_model:
         return gateway_model
