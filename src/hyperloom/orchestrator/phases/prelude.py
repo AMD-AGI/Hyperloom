@@ -2016,10 +2016,9 @@ class PreludePhase(CoordinatorCollaborator):
         """Settle the one-shot guard for a replay that will not run.
 
         Every refusal owes the same four things: flip the guard, state the
-        outcome, close the timeline event, and persist. The persist is the one
-        that used to be left out of some branches, and it is what makes the
-        guard mean anything -- a refusal that never reached disk would let the
-        next boot replay against the decision just taken.
+        outcome, close the timeline event, and persist. The persist is what
+        makes the guard mean anything -- a refusal that never reached disk would
+        let the next boot replay against the decision just taken.
 
         Call this after any rollback or stop-reason the branch also sets, so
         that one save carries the whole refusal.

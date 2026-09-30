@@ -82,15 +82,8 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     monkeypatch.setenv("FRAMEWORK", "sglang")
     monkeypatch.setenv("GPU_TYPE", "mi300x")
     monkeypatch.setenv("TARGET_GPU_TYPE", "mi325x")
-    args = SimpleNamespace(
-        model="/models/Qwen3",
-        model_class="",
-        target_summary="",
-        max_hours=1,
-        no_kernel=False,
-        gpu_type="mi325x",
-        target_gain=None,
-        target_tput=None,
+    args = cli_parser._build_parser().parse_args(
+        ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi325x"]
     )
 
     assert gpu_types._gpu_runner_type("mi325x") == "mi300x"
@@ -112,15 +105,8 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     monkeypatch.setenv("FRAMEWORK", "sglang")
     monkeypatch.setenv("GPU_TYPE", "mi300x")
     monkeypatch.setenv("TARGET_GPU_TYPE", "mi308x")
-    args = SimpleNamespace(
-        model="/models/Qwen3",
-        model_class="",
-        target_summary="",
-        max_hours=1,
-        no_kernel=False,
-        gpu_type="mi308x",
-        target_gain=None,
-        target_tput=None,
+    args = cli_parser._build_parser().parse_args(
+        ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi308x"]
     )
 
     assert gpu_types._gpu_runner_type("mi308x") == "mi300x"

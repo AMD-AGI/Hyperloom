@@ -820,23 +820,6 @@ def test_run_conc_sweep_does_not_touch_final_json(
     assert not final_json_path.exists()
 
 
-class TestTheAgentXLadderIsDefaultOn:
-    """The sweep is what an agentic session produces; it used to default off."""
-
-    def test_the_state_default_is_on(self):
-        assert SharedState().conc_sweep_enabled is True
-
-    def test_agentx_does_not_turn_it_off(self, monkeypatch: pytest.MonkeyPatch):
-        from argparse import Namespace
-
-        from hyperloom.inference_optimizer.cli import bootstrap as cb
-
-        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-        args = Namespace(enable_conc_sweep=True)
-        assert bool(getattr(args, "enable_conc_sweep", True)) is True
-        assert not hasattr(cb, "_flag_explicitly_set")
-
-
 def test_the_engine_resolves_the_ladder_from_the_session_mode(monkeypatch: pytest.MonkeyPatch):
     """`concs=None` reaches the engine from the SDK and from a bare task alike."""
     from hyperloom.orchestrator.kernel.conc_sweep import default_concs_for_mode

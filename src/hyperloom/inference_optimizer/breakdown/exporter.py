@@ -187,9 +187,7 @@ def build(session_dir: Path | str) -> dict[str, Any]:
     v6_critic = collectors.collect_v6_critic(assembled.get("critic"))
     v6_robustness = collectors.collect_v6_robustness(assembled.get("robustness"))
     # Snapshot last: every collector above feeds this one list, and this is the
-    # single place a collection failure surfaces. An export used to also carry
-    # a top-level copy taken partway through, which was a strict subset and so
-    # disagreed with this one about how the export had gone.
+    # single place a collection failure surfaces.
     if isinstance(metadata, dict):
         metadata["warnings"] = list(warnings)
 

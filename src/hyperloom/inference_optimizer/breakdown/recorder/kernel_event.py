@@ -1298,9 +1298,8 @@ class KernelEventRecorder:
         ``roofline`` task by default, which analyses the trace it just captured,
         so the phase's own request is skipped as cached. A non-empty section
         therefore marks the case where the analysis behind a rewrite has no
-        roofline event of its own -- previously that request bumped the snapshot
-        counter and replaced the cache with nothing on the timeline to explain
-        the increment.
+        roofline event of its own; it is what explains that request's snapshot
+        counter bump and cache replacement on the timeline.
 
         ``reusable_native_kernel_ids`` is recorded because it is the only legal
         source of a ``kernel_id``: the hot-kernel ranking includes vendor

@@ -666,8 +666,8 @@ def port_from_server_log(workspace: Any) -> int | None:
                 for line in head.splitlines():
                     # Matched on what the line is about rather than on its exact wording. The observed builds say
                     # "Starting vLLM server on http://0.0.0.0:8000"; older ones and SGLang say "Uvicorn running on".
-                    # Enumerating the phrasings is how this collector got its original bug, so the test is the
-                    # combination -- a line announcing the server, carrying a URL with a port.
+                    # A list of phrasings misses the next build's wording, so the test is the combination -- a
+                    # line announcing the server, carrying a URL with a port.
                     if not _SERVER_BIND_HINT.search(line):
                         continue
                     match = _SERVER_BIND_URL.search(line)
@@ -738,9 +738,10 @@ def port_from_server_command(workspace: Any) -> int | None:
 def resolve_metrics_port(config_envs: dict[str, Any] | None = None, workspace: Any = None) -> int:
     """Resolve the port the engine serves ``/metrics`` on.
 
-    The server binds whatever ``benchmark.envs.PORT`` the materialized YAML pins -- an ephemeral port assigned per
-    session, not a constant. The YAML is therefore the authority; the caller's env and the ambient env are fallbacks for
-    paths that never materialize one, and the default is a last resort that is only ever right by coincidence.
+    A ``PORT`` in the caller's env is an operator pin and wins. Then the round's own evidence: its materialized
+    ``benchmark.envs.PORT`` (an ephemeral port assigned per session, never exported into the subprocess env), the port
+    the server logged at bind, and the ``--port`` of the command that launched it. Only then a ``PORT`` in the ambient
+    env, and the default last, which is only ever right by coincidence.
     """
     port = _port_value((config_envs or {}).get("PORT"))
     if port is not None:

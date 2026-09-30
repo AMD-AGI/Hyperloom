@@ -72,7 +72,7 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "OPENAI_CUSTOM_HEADERS",
     "GEAK_BASE_URL",
     "LLM_API_BASE",
-    # Legacy: not consumed anymore, still stripped if present.
+    # Legacy: nothing reads these, but they are stripped if present.
     "LLM_GATEWAY_KEY",
     "SAFE_API_KEY",
     # A retired DeepSeek config normalizes to BOTH protocol sides, so it is stripped in either single-provider mode:
@@ -2349,7 +2349,7 @@ def _preflight(
                     "writable checkout instead."
                 )
             elif (Path(candidate) / "benchmarks" / "benchmark_lib.sh").is_file():
-                # Complete but at the wrong revision: the case that used to be accepted silently.
+                # Complete but at the wrong revision: refused, never accepted silently.
                 print(
                     f"Preflight: ignoring InferenceX at {candidate}: it is at "
                     f"{_inferencex_head_sha(candidate)[:12] or 'an unreadable ref'}, "
@@ -2434,8 +2434,8 @@ def _preflight(
     )
 
     # --- Magpie/InferenceX eval-concurrency compatibility ------------------- Preflight installs Magpie and clones
-    # InferenceX itself (above), entirely outside install.sh -- and install.sh is the ONLY place that used to apply
-    # the Magpie script patches.
+    # InferenceX itself (above), entirely outside install.sh, so the Magpie script patches install.sh applies are
+    # applied here as well.
     try:
         if _magpie_backend_active:
             # Trust patch first, mirroring install.sh: the eval-concurrency strip removes the very `run_eval ...

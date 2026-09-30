@@ -3522,10 +3522,9 @@ class IntegratePatchExecutor:
                 # An ADVANCED round stacks its patch and never reaches the
                 # KEEP capture, so without this the tree its patch applied
                 # to is never recorded and a later KEEP binds it to that
-                # round's framework root instead. Since the capture now
-                # PROVES a patch against the tree it is bound to, a
-                # mis-binding no longer certifies anything -- it refuses the
-                # whole recipe, which for a legitimate multi-root stack is a
+                # round's framework root instead. The capture proves a patch
+                # against the tree it is bound to, so a mis-binding refuses
+                # the whole recipe -- for a legitimate multi-root stack a
                 # false refusal rather than a false pass.
                 "enablement_patch_roots": _accepted_patch_roots(
                     getattr(attempt.shared_state, "enablement", None),
@@ -3700,9 +3699,8 @@ class IntegratePatchExecutor:
             applied=applied,
             framework_root=root,
         )
-        # The durable stack, not a dispatch parameter: the base set used to
-        # arrive beside the round and be re-installed before its boot, and the
-        # round lifecycle no longer sends or replays it.
+        # Read from the durable stack: the round lifecycle does not dispatch
+        # the base set with the round.
         inherited_artifacts = [a for a in (getattr(enablement, "kept_artifacts", None) or []) if isinstance(a, Mapping)]
         stack_artifacts = accepted_stack_artifacts(
             inherited=inherited_artifacts,
@@ -4984,9 +4982,9 @@ class IntegratePatchExecutor:
     def _upstream_pr_kb_proposal(params: Mapping[str, Any]) -> dict[str, Any] | None:
         """Present an upstream-PR candidate in the shape the KB writer reads.
 
-        The ``fa_pr_url`` / ``fa_pr_sha`` keys exist because the PR identity used
-        to reach this executor only by being smuggled through a specialist's
-        output. A candidate row carries it directly, so map rather than relay.
+        The KB writer reads the PR identity from ``fa_pr_url`` / ``fa_pr_sha``.
+        A candidate row carries it directly, so map rather than relay it through
+        a specialist's output.
 
         Args:
             params: Task params, read for ``candidate``.

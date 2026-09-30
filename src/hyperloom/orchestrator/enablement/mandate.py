@@ -315,9 +315,9 @@ ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
 # Targeted-build request contract. A pure source patch (a unified diff against
 # the installed tree) cannot deliver a *compiled* component (a new AITER
 # FP4/MLA/NSA op, sgl-kernel) or a from-source framework build (a newer vLLM
-# that natively implements a brand-new architecture). Historically the
-# specialist had no way to ask for one — it could only author a patch or return
-# empty — so genuinely-new architectures dead-ended at the arch-registry alias.
+# that natively implements a brand-new architecture). Without a way to ask for
+# one, the specialist can only author a patch or return empty, and a
+# genuinely-new architecture dead-ends at the arch-registry alias.
 # This contract lets the specialist REQUEST an off-loop targeted build; the
 # Coordinator enqueues it on the isolated, ROCm-safe build lane (isolated venv +
 # pinned ROCm torch constraints), gated by the runnable-decision probe.

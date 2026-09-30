@@ -40,7 +40,7 @@ class SweepPhase(CoordinatorCollaborator):
             await self._drain_pending_keep_integrates()
         # Validate the stack for positive NEEDS_REVIEW kernels.
         await self._maybe_validate_positive_needs_review_stack()
-        if not getattr(state, "conc_sweep_enabled", False):
+        if not state.conc_sweep_enabled:
             log.info(
                 "SWEEP entry (from=%s): conc_sweep disabled; recording terminal skip.",
                 from_phase or "<unknown>",

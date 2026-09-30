@@ -268,11 +268,8 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
     async def _on_cycle_start_reprofile(self, *, from_phase: str) -> None:
         """Force a fresh analysis at the start of a reopened macro-cycle.
 
-        Reached on every cycle start now. It used to be attached to the config-arm
-        entry, and the reloop targeted FRAMEWORK_AGENT whenever the framework
-        phase was enabled -- so with the default configuration this never ran,
-        and each new cycle re-targeted the bottleneck the *previous* cycle
-        measured. One phase means one entry, and the reprofile happens.
+        Reached on every cycle start, whichever phase the reloop targets, so a
+        new cycle never re-targets the bottleneck the *previous* cycle measured.
 
         Args:
             from_phase: The phase being left; only a SWEEP origin starts a cycle.

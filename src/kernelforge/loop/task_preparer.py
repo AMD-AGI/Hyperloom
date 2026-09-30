@@ -456,8 +456,8 @@ def _distributed_contract_violation(worker_payloads: dict[int, dict]) -> str:
     measure inside ``dist_harness``? The harness binds each rank to its own
     device, seeds them apart, keeps the timed region free of synchronization,
     reduces with the slowest rank and destroys the process group -- properties
-    that used to be inferred one at a time from what the run happened to do,
-    each inference weaker than the property it stood for. A driver that went its
+    that, inferred one at a time from what the run happened to do, would each be
+    weaker than the property it stood for. A driver that went its
     own way is refused for that, not for whichever of them it broke first.
     """
     outside = sorted(rank for rank, shard in worker_payloads.items() if shard.get("harness") is not True)

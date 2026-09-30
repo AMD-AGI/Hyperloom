@@ -18,6 +18,7 @@ from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.timeutil import now_iso
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
 )
@@ -297,7 +298,9 @@ def _seed_shared_state(
         # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each
         # rung is a 3600s window and the session grades at a fixed CONC.
         # Pass --enable-conc-sweep explicitly to override.
-        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", not _agentx_enabled())),
+        conc_sweep_enabled=(
+            not is_agentx_mode(benchmark_mode) if args.enable_conc_sweep is None else args.enable_conc_sweep
+        ),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
         grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
