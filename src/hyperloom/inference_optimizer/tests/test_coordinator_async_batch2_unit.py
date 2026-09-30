@@ -8,6 +8,7 @@ KB T4 safety net)."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
 )
+from hyperloom.orchestrator.roles.mcp_context_tools import ContextProvider
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
@@ -223,6 +225,42 @@ async def test_recent_outcomes_reader_with_rows(coord: Coordinator) -> None:
 def test_recent_outcomes_reader_clamps_top_k(coord: Coordinator) -> None:
     assert isinstance(coord._context_recent_outcomes_reader(top_k=999), str)
     assert isinstance(coord._context_recent_outcomes_reader(top_k=0), str)
+
+
+# -- context reader failure surface -----------------------------------------
+@pytest.mark.parametrize(
+    ("owner", "source", "tool"),
+    [
+        ("bus", "inbox_context_sync", "inbox"),
+        ("bus", "recent_outcomes_context_sync", "recent_outcomes"),
+        ("tasks", "running_context_sync", "running_tasks"),
+    ],
+)
+def test_context_reader_failure_carries_traceback_to_the_log(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    owner: str,
+    source: str,
+    tool: str,
+) -> None:
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("projection read exploded")
+
+    monkeypatch.setattr(getattr(coord, owner), source, _boom)
+    provider = ContextProvider(
+        shared_state=coord.shared_state,
+        inbox_reader=coord._context_inbox_reader,
+        recent_outcomes_reader=coord._context_recent_outcomes_reader,
+        running_tasks_reader=coord.conversation._context_running_tasks_reader,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="hyperloom.orchestrator.roles.mcp_context_tools"):
+        out = getattr(provider, tool)()
+
+    assert f"context tool {tool} unavailable" in out
+    assert "projection read exploded" in out
+    assert "Traceback (most recent call last)" in caplog.text
 
 
 @pytest.mark.asyncio
