@@ -120,6 +120,29 @@ class TestIntegrateDecision:
         assert performance.decision == "REVERT"
         assert performance.graded.veto_reason == "power_budget_exceeded"
 
+    @pytest.mark.parametrize(("gpu_power_avg_w", "decision"), [(812.0, "REVERT"), (None, "REVERT"), (650.0, "KEEP")])
+    def test_a_stacked_layer_below_the_graded_bar_still_honours_the_power_budget(self, gpu_power_avg_w, decision):
+        """+0.7% on a stacked integrate KEEPs on the 0.5% stack bar while the 1.0% graded verdict carries no veto."""
+        from hyperloom.orchestrator.measurement.integrate_performance import assess_integrate_performance
+
+        state = SharedState(baseline_tput=1000.0, power_budget_w=700.0)
+        state.current_best = {"action": "integrate", "tput": 1000.0}
+        state.optimization_stack = [{"action": "integrate"}]
+        measurement = {"output_throughput": 1007.0}
+        if gpu_power_avg_w is not None:
+            measurement["gpu_power_avg_w"] = gpu_power_avg_w
+
+        performance = assess_integrate_performance(
+            state,
+            measurement,
+            base_tput=1000.0,
+            keep_threshold_pct=1.0,
+            stack_incremental_keep_threshold_pct=0.5,
+        )
+        assert performance.stack_positive_keep is True
+        assert performance.graded.veto_reason == ""
+        assert performance.decision == decision
+
 
 # --- reading and asserting the settings -----------------------------------------------------------------------------
 
