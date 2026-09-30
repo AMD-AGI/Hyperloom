@@ -625,10 +625,10 @@ def test_workload_canonical_id_and_anchor(coord: Coordinator) -> None:
     ss.gpu_type = "mi300x"
     ss.framework = "sglang"
     ss.precision = "fp8"
-    cid = coord.conversation._workload_canonical_id()
+    cid = coord.proposals._workload_canonical_id()
     assert cid.startswith("inference:")
     assert "mi300x" in cid
-    assert coord.conversation._workload_canonical_id() == cid
+    assert coord.proposals._workload_canonical_id() == cid
 
 
 # -- framework candidate selection -------------------------------------
