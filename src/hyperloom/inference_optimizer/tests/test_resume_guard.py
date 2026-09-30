@@ -579,7 +579,7 @@ def test_confirmation_parser_accepts_only_explicit_task_arguments(tmp_path):
     parser = _build_parser()
     args = parser.parse_args(
         [
-            "recover-session",
+            "recover",
             "--session-dir",
             str(tmp_path),
             "--confirm-stopped",
@@ -590,7 +590,7 @@ def test_confirmation_parser_accepts_only_explicit_task_arguments(tmp_path):
     )
     assert args.confirm_stopped == "task-1"
     assert args.confirmation_reason == "Verified all workers stopped"
-    old = parser.parse_args(["recover-session", "--session-dir", str(tmp_path)])
+    old = parser.parse_args(["recover", "--session-dir", str(tmp_path)])
     assert old.confirm_stopped is None and old.confirmation_reason is None
 
 
@@ -968,7 +968,7 @@ def test_confirmation_cli_real_legacy_ledger_then_normal_resume_admission(tmp_pa
     monkeypatch.setattr(recover, "_session_recovery_status", Mock(side_effect=AssertionError("not a report command")))
     args = _build_parser().parse_args(
         [
-            "recover-session",
+            "recover",
             "--session-dir",
             str(tmp_path),
             "--confirm-stopped",

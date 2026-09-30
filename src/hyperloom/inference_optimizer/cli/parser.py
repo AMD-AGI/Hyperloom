@@ -155,7 +155,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     p = RedactingArgumentParser(
-        prog="inference_optimizer",
+        prog="hyperloom",
         description="Inference Optimizer — multi-agent inference optimization (SGLang/vLLM/Atom/xDiT)",
     )
     p.add_argument("--verbose", "-v", action="count", default=0, help="Verbose logging (-v INFO, -vv DEBUG)")
@@ -1163,7 +1163,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     rec = sub.add_parser(
-        "recover-session",
+        "recover",
         help="Rebuild + push the session_breakdown for a session that exited "
         "abnormally (crash / SIGKILL) so its breakdown lands on Langfuse.",
     )

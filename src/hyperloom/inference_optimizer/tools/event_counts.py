@@ -25,9 +25,9 @@ import sys
 from collections import Counter
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Count and print coordinator event topics for a session."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="hyperloom session events", description=__doc__)
     parser.add_argument(
         "session_dir",
         nargs="?",
@@ -51,7 +51,7 @@ def main() -> int:
         default=500,
         help="Window size for the most-recent events (default: 500).",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.session_dir is not None:
         session_dir = pathlib.Path(args.session_dir)

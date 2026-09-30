@@ -2477,7 +2477,7 @@ def main(argv: list[str] | None = None) -> int:
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))
         return asyncio.run(_run_optimize(args))
-    if args.command == "recover-session":
+    if args.command == "recover":
         return _run_recover_session(args)
     parser.print_help()
     return 2

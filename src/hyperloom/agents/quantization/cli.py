@@ -27,7 +27,7 @@ def _interactive_value(raw: str) -> bool | None:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Build the argument parser and parse the CLI arguments."""
     p = argparse.ArgumentParser(
-        prog="quantization_agent",
+        prog="hyperloom quantize",
         description="Drive the AMD Quark PTQ skill chain from a natural-language prompt.",
     )
     p.add_argument(

@@ -1637,7 +1637,7 @@ def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argparse parser with every subcommand."""
     p = argparse.ArgumentParser(
-        prog="python3 -m hyperloom.inference_optimizer.multi_node",
+        prog="hyperloom multi-node",
         description=(
             "Drive the multi-node cluster the platform provisioned and handed over "
             "via HYPERLOOM_MN_EXT_*. State persists in $MULTI_NODE_STATE_FILE."

@@ -136,7 +136,7 @@ dev = [
 
 [project.scripts]
 inference_optimizer = "hyperloom.inference_optimizer.cli:main"
-hyperloom = "hyperloom.inference_optimizer.setup:main"
+hyperloom = "hyperloom.cli:main"
 quantization-agent = "hyperloom.agents.quantization.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
 # ``python -m kernelforge.cli`` directly; this is for interactive use.

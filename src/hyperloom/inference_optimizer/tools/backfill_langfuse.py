@@ -383,7 +383,7 @@ def ingest(plan: dict[str, Any]) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     p = argparse.ArgumentParser(
-        prog="backfill_langfuse",
+        prog="hyperloom session backfill",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

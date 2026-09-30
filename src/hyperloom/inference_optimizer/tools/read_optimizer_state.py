@@ -39,9 +39,9 @@ def _format_lifecycle_event(event: dict[str, Any]) -> str:
     return line
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Print a concise optimizer state and recent lifecycle summary."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="hyperloom session state", description=__doc__)
     parser.add_argument("session_dir", help="Optimizer session directory.")
     parser.add_argument(
         "--lifecycle-limit",
@@ -49,7 +49,7 @@ def main() -> int:
         default=12,
         help="Number of recent lifecycle events to print (default: 12).",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     session_dir = Path(args.session_dir)
     state_file = state_path(session_dir)

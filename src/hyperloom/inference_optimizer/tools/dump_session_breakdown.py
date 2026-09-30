@@ -59,7 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
         and ``--verbose`` options.
     """
     parser = argparse.ArgumentParser(
-        prog="dump_session_breakdown",
+        prog="hyperloom session breakdown",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

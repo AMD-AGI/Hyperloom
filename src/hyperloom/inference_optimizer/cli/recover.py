@@ -80,7 +80,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
 
     status = _session_recovery_status(session_dir)
     print(
-        f"recover-session   : {session_dir}\n"
+        f"recover           : {session_dir}\n"
         f"  close_sequence_done={status['close_done']} "
         f"breakdown_exists={status['breakdown_exists']} "
         f"breakdown_recorded={status['breakdown_recorded']} "

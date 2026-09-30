@@ -22,6 +22,7 @@ log = logging.getLogger("dump_session_report")
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for the session-report CLI."""
     p = argparse.ArgumentParser(
+        prog="hyperloom session report",
         description="Render a Hyperloom session_breakdown.json to markdown.",
     )
     p.add_argument("--input", "-i", required=True, type=Path, help="Path to session_breakdown.json")

@@ -124,11 +124,11 @@ def _find_stale_processes() -> list[tuple[str, str]]:
     return matches
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Run launcher preflight checks and return a process exit code."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="hyperloom check", description=__doc__)
     parser.add_argument("model_path", help="Model directory to optimize.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     model_path = pathlib.Path(args.model_path)
     ok = True
