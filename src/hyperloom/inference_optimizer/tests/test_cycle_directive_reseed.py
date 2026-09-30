@@ -22,19 +22,23 @@ def _explore_with_memory_backend(*, raw_text: str, previous: dict | None = None)
         async def run(self, **_kwargs):
             return SimpleNamespace(raw_text=raw_text)
 
+    async def _stub(_agent: str) -> str:
+        return "STUB"
+
+    conversation_stub = SimpleNamespace(
+        _compose_prompt=_stub,
+        _load_system_prompt=_stub,
+    )
+
     phase = ExplorePhase(
         SimpleNamespace(
             shared_state=st,
             session_dir=None,
             backends={"orchestration": _Backend()},
+            conversation=conversation_stub,
         )
     )
 
-    async def _stub(_agent: str) -> str:
-        return "STUB"
-
-    phase._compose_prompt = _stub  # type: ignore[method-assign]
-    phase._load_system_prompt = _stub  # type: ignore[method-assign]
     return phase, st
 
 
