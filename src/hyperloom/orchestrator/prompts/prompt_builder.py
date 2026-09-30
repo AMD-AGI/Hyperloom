@@ -768,11 +768,9 @@ verdict (KEEP→integrate next; PARTIAL→the lane retries at most
 `_DEFAULT_KERNEL_OPT_MAX_PARTIAL` times then rejects; REVERT→rejected),
 `rejected_kernel_ids` lists the ids already written off, and
 `last_action_failures` explains a request of your own that failed.
-A KERNEL_AGENT plateau signal (3 REVERTs across distinct kernels, or low
-recent KEEP gain) is rendered as advisory; KERNEL_AGENT → SWEEP advance is
-driven by the phase budget, an `escalate_strategy_change` hint, or a
-terminal stop_reason. Read the advisory and emit `skip_to_sweep` if
-you want to wind down sooner.
+KERNEL_AGENT → SWEEP advance is driven by the phase budget, an
+`escalate_strategy_change` hint, or a terminal stop_reason. Emit
+`skip_to_sweep` to wind down sooner.
 
 ### `trace_analyze` — read-only candidate analysis
 

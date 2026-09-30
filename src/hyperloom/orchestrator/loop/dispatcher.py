@@ -1156,8 +1156,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Performs post-completion bookkeeping: specialist auto-retry,
         ``delegated_result`` emission, ledgers, shared-state promotion,
         fact-write and explore-gap refresh. Execution owns resource cleanup.
-        The promotion decides the settlement :class:`Verdict` once; every
-        ledger after it reads that verdict.
+        A promoted result's verdict comes from its promoter; cancelled and
+        unpromotable results settle FAILED (including cancelled tasks).
 
         Args:
             task: The finished dispatched task.

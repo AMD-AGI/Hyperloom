@@ -63,6 +63,7 @@ def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
                 {"attempt_id": "a1", "backend": "geak", "status": "completed"},
             ],
         },
+        recorder=None,
     )
     out = assemble_parts(tmp_path)
     versions = out["metadata"]["versions"]["tools"]
@@ -87,6 +88,7 @@ def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
                 },
             ],
         },
+        recorder=None,
     )
     out = assemble_parts(tmp_path)
     versions = out["metadata"]["versions"]["tools"]

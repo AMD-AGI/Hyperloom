@@ -1227,7 +1227,7 @@ async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Pat
     machine_state.record_phase_transition(
         coord.shared_state,
         to_phase="SWEEP",
-        reason="plateau_kernel",
+        reason="kernel_no_more_leverage",
         evidence={"trigger": "test_e2e"},
     )
     await coord.phase_machine._on_phase_entered(from_phase="KERNEL", to_phase="SWEEP")

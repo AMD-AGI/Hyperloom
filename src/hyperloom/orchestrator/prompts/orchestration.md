@@ -263,10 +263,9 @@ authority. Rater identities are hidden; do NOT speculate which model a
 `rater_N` is. Cross-rater disagreement is an uncertainty signal.
 
 **Plateau**: the `Plateau advisory` reports each arm separately. Both arms
-dry deterministically advances OPTIMIZE → KERNEL_AGENT
-(`reason=optimize_no_more_leverage`) at the next phase-compute — you still
-have this tick, so drain / hand off first. One arm dry is a signal to work the
-other, not to wind down. KERNEL plateaus remain advisory only.
+dry advances OPTIMIZE → KERNEL_AGENT (`reason=optimize_no_more_leverage`)
+at the next phase-compute — drain / hand off first. One arm dry means work
+the other. KERNEL exits on REVERT streak or budget cap.
 
 <!-- phase: KERNEL_AGENT -->
 ### KERNEL — phase goal

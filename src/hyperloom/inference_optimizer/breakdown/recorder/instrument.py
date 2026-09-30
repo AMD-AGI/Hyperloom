@@ -115,12 +115,11 @@ def _to_bool(value: Any) -> bool | None:
     return None
 
 
-def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any], recorder: Any) -> None:
+def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any], recorder: "KernelEventRecorder | None") -> None:
     """Mirror the result's backend attempts into the open KERNEL timeline event.
 
     The legacy ``kernel_backend_result`` fragment is session-wide; the V6 kernel
-    event is visit-scoped. This copies each attempt as its own
-    ``kernel_rewrites[]`` row while a KERNEL visit recorder is active.
+    event is visit-scoped. This copies each attempt as its own ``kernel_rewrites[]`` row.
 
     Every backend the kernel agent dispatched lands here, GEAK included: the
     lane is about a kernel having been rewritten, not about which backend did
@@ -228,15 +227,15 @@ def record_backend_versions_and_timeline(
     session_dir: Path | str | None,
     result: dict[str, Any],
     *,
-    recorder: Any = None,
+    recorder: "KernelEventRecorder | None",
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
     """Record what a kernel-agent result says about the backends that ran.
 
     Two facts are recorded: the build of each backend, which reaches the
     optimizer through nothing else, and the attempts themselves, which are
-    mirrored onto the kernel timeline event. A falsy ``session_dir``, or a
-    ``result`` that is not a dict, is a no-op.
+    mirrored onto the kernel timeline event via ``recorder``. A falsy
+    ``session_dir``, or a ``result`` that is not a dict, is a no-op.
     """
     if not session_dir or not isinstance(result, dict):
         trace_skip(
