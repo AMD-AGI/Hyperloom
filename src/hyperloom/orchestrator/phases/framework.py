@@ -667,96 +667,118 @@ class FrameworkPhase:
         self._open_framework_timeline()
         await self._pump_framework_agent_phase()
 
+    def _authoring_inflight_candidate_ids(
+        self,
+        queued: list[Any],
+        running: list[Any],
+    ) -> set[str]:
+        """Collect candidate ids that are currently in flight or awaiting a Critic verdict."""
+        in_flight: set[str] = set()
+        for t in (*queued, *running):
+            params = getattr(t, "params", None) or {}
+            cand_id = str(params.get("framework_agent_candidate_id") or "").strip()
+            if cand_id and getattr(t, "kind", "") in ("specialist", "integrate_patch"):
+                in_flight.add(cand_id)
+        for p in self._coord.state.pending_proposals.values():
+            if getattr(p, "decided", False):
+                continue
+            payload = getattr(p, "payload", None) or {}
+            iparams = payload.get("params") or {}
+            cand_id = str(
+                payload.get("framework_agent_candidate_id")
+                or iparams.get("framework_agent_candidate_id")
+                or ""
+            ).strip()
+            if cand_id and getattr(p, "action_name", "") == "integrate_patch":
+                in_flight.add(cand_id)
+        return in_flight
+
     async def _pump_framework_agent_phase(self) -> None:
-        """Drive the FRAMEWORK_AGENT phase: enqueue the next candidate. Idempotent; a discover failure flips framework_agent_phase_done so the phase advances rather than wedging."""
+        """Drive the FRAMEWORK_AGENT phase: submit candidates for authoring in parallel.
+
+        Idempotent; a discover failure flips framework_agent_phase_done so the
+        phase advances rather than wedging.  Candidates are submitted for Critic
+        review in a loop, up to the session ``research_lane_capacity`` concurrency
+        limit.  The discovery → local-explore → phase-done fallback only runs
+        when no candidate is unselected and nothing is in flight.
+        """
         state = self._coord.shared_state
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
         if bool(getattr(state, "framework_agent_phase_done", False)):
             return
-        # Skip if a framework task is already queued or running.
+
         queued = await self._coord.tasks.queued()
         running = await self._coord.tasks.running()
+
+        # Skip if any candidate integrate_patch (landed from the LLM or authoring)
+        # is already queued or running — landing serialises on workspace_mutation.
         for t in (*queued, *running):
-            # A candidate landing as ``integrate_patch`` with a candidate id.
             if getattr(t, "kind", "") == "integrate_patch" and (getattr(t, "params", None) or {}).get(
                 "framework_agent_candidate_id"
             ):
                 return
-        # Serialize one candidate at a time: skip while a candidate proposal awaits its (durable) Critic verdict,
-        # resolved on a later tick.
-        if any(
-            getattr(p, "action_name", "") == "integrate_patch"
-            and not getattr(p, "decided", False)
-            and (getattr(p, "payload", None) or {}).get("framework_agent_candidate_id")
-            for p in self._coord.state.pending_proposals.values()
-        ):
-            return
-        # An authoring specialist (or its downstream integrate_patch) for the current candidate may still be running;
-        # wait only on a live TASK (queued/running), NOT on a pending Critic proposal.
-        if getattr(state, "framework_agent_authoring_enabled", False):
-            _q = await self._coord.tasks.queued()
-            _r = await self._coord.tasks.running()
-            if any(
-                getattr(t, "kind", "") in ("specialist", "integrate_patch")
-                and bool((getattr(t, "params", None) or {}).get("framework_agent_authoring"))
-                for t in (*_q, *_r)
-            ):
-                return
-            # Proposal-window guard: the task check above misses the interval between a specialist completing and its
-            # integrate_patch becoming a live TASK (the deliverable exists only as a pending Critic proposal).
-            if await self._framework_agent_authoring_inflight():
-                return
-        # Take the next un-dispatched candidate.
-        next_candidate = self._select_next_framework_agent_candidate()
-        if next_candidate is None:
-            # Hold the phase open while authored patches are still benched or reviewed; only when a batch was
-            # discovered (an LLM-proposed integrate_patch must not keep FRAMEWORK open).
-            discovered_batch = bool(getattr(state, "framework_agent_batches", None) or [])
-            if (
-                discovered_batch
-                and getattr(state, "framework_agent_authoring_enabled", False)
-                and await self._framework_agent_authoring_inflight()
-            ):
-                return
-            # Minimum supply: with the pool empty and no discovery in flight, ask for one.
-            if await self._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty"):
-                state.save(self._coord.session_dir)
-                return
-            if self._framework_local_explore_arm_enabled():
-                gap, keywords = self._compose_framework_local_explore_gap()
-                title = (
-                    f"local source exploration ({gap})"
-                    if gap
-                    else "local source exploration (author a throughput patch from live source + profile)"
-                )
-                dispatched = await self._enqueue_framework_agent_local_explore_specialist(
-                    {
-                        "title": title,
-                        "repo": "(local source)",
-                        "framework": str(getattr(state, "framework", "") or "").strip().lower(),
-                        "gap_description": gap,
-                        "gap_keywords": keywords,
-                    },
-                    reason="no_new_candidates",
-                )
-                if dispatched:
-                    state.save(self._coord.session_dir)
-                    return
-            self._record_framework_agent_phase_done(
-                reason="no_candidates_and_discovery_exhausted",
-                failure_count=int(getattr(state, "framework_agent_discover_failures", 0) or 0),
+
+        in_flight_ids = self._authoring_inflight_candidate_ids(queued, running)
+        cap = max(1, int(getattr(state, "research_lane_capacity", 1) or 1))
+
+        # Submit as many unprocessed candidates as the lane capacity allows.
+        submitted = 0
+        while len(in_flight_ids) < cap:
+            next_candidate = self._select_next_framework_agent_candidate(exclude_ids=in_flight_ids)
+            if next_candidate is None:
+                break
+            cand_id = self._framework_candidate_key(next_candidate)
+            await self._submit_framework_agent_candidate_for_review(
+                next_candidate,
+                audit=dict(next_candidate.get("audit") or {}),
+                audit_step=str(next_candidate.get("route") or "author_via_specialist"),
             )
-            state.framework_agent_phase_done = True
+            if cand_id:
+                in_flight_ids.add(cand_id)
+            submitted += 1
+
+        if submitted:
+            return
+
+        # Fallback: nothing to submit and nothing in flight.
+        if in_flight_ids:
+            return
+
+        # Hold while an authoring specialist or its downstream proposal is alive.
+        if await self._framework_agent_authoring_inflight():
+            return
+
+        # Minimum supply: with the pool empty and no discovery in flight, ask for one.
+        if await self._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty"):
             state.save(self._coord.session_dir)
             return
-        # Submit the candidate as a proposal; the async Critic verdict drives the apply/author enqueue or the
-        # critic_denied row on a later tick.
-        await self._submit_framework_agent_candidate_for_review(
-            next_candidate,
-            audit=dict(next_candidate.get("audit") or {}),
-            audit_step=str(next_candidate.get("route") or "author_via_specialist"),
+        if self._framework_local_explore_arm_enabled():
+            gap, keywords = self._compose_framework_local_explore_gap()
+            title = (
+                f"local source exploration ({gap})"
+                if gap
+                else "local source exploration (author a throughput patch from live source + profile)"
+            )
+            dispatched = await self._enqueue_framework_agent_local_explore_specialist(
+                {
+                    "title": title,
+                    "repo": "(local source)",
+                    "framework": str(getattr(state, "framework", "") or "").strip().lower(),
+                    "gap_description": gap,
+                    "gap_keywords": keywords,
+                },
+                reason="no_new_candidates",
+            )
+            if dispatched:
+                state.save(self._coord.session_dir)
+                return
+        self._record_framework_agent_phase_done(
+            reason="no_candidates_and_discovery_exhausted",
+            failure_count=int(getattr(state, "framework_agent_discover_failures", 0) or 0),
         )
+        state.framework_agent_phase_done = True
+        state.save(self._coord.session_dir)
 
     async def _framework_agent_authoring_inflight(self) -> bool:
         """True while a FRAMEWORK-authored patch for an unprocessed candidate is still in flight."""
@@ -1285,10 +1307,17 @@ class FrameworkPhase:
                 out.append(cand)
         return out
 
-    def _select_next_framework_agent_candidate(self) -> dict[str, Any] | None:
-        """Return the next unprocessed candidate in the batch, in the order given."""
-        unprocessed = self._unprocessed_framework_agent_candidates()
-        return unprocessed[0] if unprocessed else None
+    def _select_next_framework_agent_candidate(
+        self,
+        exclude_ids: "set[str] | None" = None,
+    ) -> "dict[str, Any] | None":
+        """Return the next unprocessed candidate not already in ``exclude_ids``."""
+        for cand in self._unprocessed_framework_agent_candidates():
+            cand_id = self._framework_candidate_key(cand)
+            if exclude_ids and cand_id and cand_id in exclude_ids:
+                continue
+            return cand
+        return None
 
     def _authoring_specialist_domain(self) -> str:
         """Pick the authoring domain that matches the session's framework kind."""

@@ -922,3 +922,118 @@ async def test_perf_explore_retry_stamps_immutable_explore_owner(
     params = stub.tasks.created[-1]["params"]
     assert params["source_phase"] == "FRAMEWORK_AGENT"
     assert params["gap_layer"] == "perf_explore"
+
+
+# ── Parallel authoring ───────────────────────────────────────────────────────
+
+def _make_stub_for_parallel(tmp_path, num_candidates=3, research_lane_capacity=3):
+    """Minimal FrameworkPhase stub for parallel-authoring tests."""
+    from hyperloom.orchestrator.phases.framework import FrameworkPhase
+    from hyperloom.orchestrator.state.shared_state import SharedState
+    from types import SimpleNamespace
+    import asyncio
+
+    state = optimize_state(
+        framework_agent_authoring_enabled=True,
+        framework_local_explore_enabled=False,
+        model="test-model",
+        framework="sglang",
+        gpu_type="MI300X",
+        baseline_tput=1000.0,
+    )
+    state.research_lane_capacity = research_lane_capacity
+    state.phase = "FRAMEWORK_AGENT"
+    state.framework_agent_phase_done = False
+    cands = [
+        {
+            "pr_url": f"https://github.com/ex/repo/pull/{i}",
+            "title": f"Candidate {i}",
+            "route": "author_via_specialist",
+            "framework": "sglang",
+        }
+        for i in range(num_candidates)
+    ]
+    state.framework_agent_batches = [{"batch_id": "b1", "candidates": cands}]
+
+    tasks = _TasksStub()
+    submitted: list[dict] = []
+
+    class _Stub(FakeCoordinator):
+        pass
+
+    stub = _Stub(tmp_path, shared_state=state, tasks=tasks)
+    stub.state = SimpleNamespace(pending_proposals={})
+
+    async def _fake_submit(candidate, *, audit=None, audit_step=None):
+        submitted.append(dict(candidate))
+
+    async def _noop_discover(reason):
+        return False
+
+    stub._submit_framework_agent_candidate_for_review = _fake_submit
+    stub._maybe_enqueue_candidate_discovery = _noop_discover
+    return stub, submitted
+
+
+def test_parallel_authoring_submits_up_to_capacity(tmp_path):
+    """The pump submits as many candidates as research_lane_capacity allows in one call."""
+    import asyncio
+    from unittest.mock import patch, AsyncMock
+    from hyperloom.orchestrator.phases.framework import FrameworkPhase
+
+    stub, submitted = _make_stub_for_parallel(tmp_path, num_candidates=5, research_lane_capacity=3)
+
+    async def _fake_submit(self_inner, candidate, *, audit=None, audit_step=None):
+        submitted.append(dict(candidate))
+
+    with patch.object(FrameworkPhase, "_submit_framework_agent_candidate_for_review", _fake_submit), \
+         patch.object(FrameworkPhase, "_maybe_enqueue_candidate_discovery", AsyncMock(return_value=False)), \
+         patch.object(FrameworkPhase, "_framework_agent_authoring_inflight", AsyncMock(return_value=False)):
+        asyncio.run(stub._pump_framework_agent_phase())
+
+    assert len(submitted) == 3, f"expected 3 (capacity), got {len(submitted)}"
+    assert stub.shared_state.framework_agent_phase_done is False
+
+
+def test_parallel_authoring_no_duplicate_candidate(tmp_path):
+    """The same candidate is never submitted twice in the same pump call."""
+    import asyncio
+    from unittest.mock import patch, AsyncMock
+    from hyperloom.orchestrator.phases.framework import FrameworkPhase
+
+    stub, submitted = _make_stub_for_parallel(tmp_path, num_candidates=2, research_lane_capacity=4)
+
+    async def _fake_submit(self_inner, candidate, *, audit=None, audit_step=None):
+        submitted.append(dict(candidate))
+
+    with patch.object(FrameworkPhase, "_submit_framework_agent_candidate_for_review", _fake_submit), \
+         patch.object(FrameworkPhase, "_maybe_enqueue_candidate_discovery", AsyncMock(return_value=False)), \
+         patch.object(FrameworkPhase, "_framework_agent_authoring_inflight", AsyncMock(return_value=False)):
+        asyncio.run(stub._pump_framework_agent_phase())
+
+    urls = [s.get("pr_url") for s in submitted]
+    assert len(urls) == len(set(urls)), f"duplicate candidates submitted: {urls}"
+
+
+def test_parallel_authoring_fallback_when_no_candidates(tmp_path):
+    """When all candidates are processed, the pump proceeds to discovery fallback."""
+    import asyncio
+    from unittest.mock import patch, AsyncMock
+    from hyperloom.orchestrator.phases.framework import FrameworkPhase
+
+    stub, submitted = _make_stub_for_parallel(tmp_path, num_candidates=0, research_lane_capacity=3)
+    stub.shared_state.framework_agent_batches = []
+
+    discovery_called: list[str] = []
+
+    async def _fake_discover(self_inner, *, reason):
+        discovery_called.append(reason)
+        return False
+
+    with patch.object(FrameworkPhase, "_submit_framework_agent_candidate_for_review", AsyncMock()), \
+         patch.object(FrameworkPhase, "_maybe_enqueue_candidate_discovery", _fake_discover), \
+         patch.object(FrameworkPhase, "_framework_agent_authoring_inflight", AsyncMock(return_value=False)):
+        asyncio.run(stub._pump_framework_agent_phase())
+
+    assert not submitted
+    assert discovery_called
