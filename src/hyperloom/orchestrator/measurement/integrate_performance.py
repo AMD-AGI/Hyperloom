@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from hyperloom.common.gain_math import gain_pct_or_zero, incremental_gain_pct
-from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, graded_axes_of
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, graded_axes_of, latency_veto_reason
 from ..state.shared_state import resolve_graded_comparison
 
 
@@ -74,6 +74,11 @@ def assess_integrate_performance(
             if gain_pct > keep_threshold_pct or stack_positive_keep
             else ("REVERT" if gain_pct < -keep_threshold_pct else "NEEDS_REVIEW")
         )
+    # The grader computes the veto only for its own KEEP, and a stacked layer can KEEP here below that bar.
+    if decision == "KEEP" and latency_veto_reason(
+        measurement.get("e2el_mean_ms"), float(getattr(state, "latency_budget_ms", 0.0) or 0.0)
+    ):
+        decision = "REVERT"
     return IntegratePerformance(
         graded=graded,
         gain_pct=gain_pct,

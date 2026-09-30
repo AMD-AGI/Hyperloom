@@ -274,6 +274,30 @@ class TestIntegrateDecisionsHonourTheVeto:
         )
         assert performance.decision == "KEEP"
 
+    @pytest.mark.parametrize(("e2el_mean_ms", "decision"), [(1211.0, "REVERT"), (None, "REVERT"), (183.0, "KEEP")])
+    def test_a_stacked_layer_below_the_graded_bar_still_honours_the_veto(self, e2el_mean_ms, decision):
+        """+0.7% incremental on a stacked integrate: the graded verdict (1.0%) is REVERT, so it carries no veto,
+        and the lane KEEPs on its own lowered stack bar (0.5%). The budget must still decide that KEEP."""
+        from hyperloom.orchestrator.measurement.integrate_performance import assess_integrate_performance
+
+        state = self._state()
+        state.current_best = {"action": "integrate", "tput": 1000.0}
+        state.optimization_stack = [{"action": "integrate"}]
+        measurement = {"output_throughput": 1007.0}
+        if e2el_mean_ms is not None:
+            measurement["e2el_mean_ms"] = e2el_mean_ms
+
+        performance = assess_integrate_performance(
+            state,
+            measurement,
+            base_tput=1000.0,
+            keep_threshold_pct=1.0,
+            stack_incremental_keep_threshold_pct=0.5,
+        )
+        assert performance.stack_positive_keep is True
+        assert performance.graded.veto_reason == ""
+        assert performance.decision == decision
+
 
 class TestBaselineFailsClosedAtTheBoundary:
     """An over-budget baseline is knowable at launch; do not spend the run on it."""
