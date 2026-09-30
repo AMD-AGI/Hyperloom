@@ -89,6 +89,11 @@ ARCH_PEAKS_COLUMNS: list[str] = [
     "matrix_mx4_tflops",
     "matrix_int8_tflops",
     "vector_fp32_tflops",
+    # What the matrix_*_tflops values are: "achievable" (microbench-sustained, the native default and
+    # what the roofline's achievable slot wants) or "theoretical" (analytical MFMA peak, e.g. MAIDAS).
+    # The achievable-slot consumer uses the values only when this is achievable/absent; a theoretical
+    # row is NOT substituted for the achievable peak (that would inflate the compute ceiling).
+    "matrix_peak_convention",
 ]
 
 #: model_roofline_meta.csv — one row of model-level analytical memory sizes + geometry
@@ -370,7 +375,9 @@ def arch_row_from_spec(spec: dict) -> dict | None:
     name = spec.get("name")
     if not name:
         return None
-    row: dict = {"name": str(name), "mem_bw_gbps": spec.get("mem_bw_gbps")}
+    # The native spec's peaks come from max_achievable_tflops (microbench-sustained), so the row is
+    # tagged achievable; an external author (MAIDAS) supplying theoretical MFMA peaks tags theoretical.
+    row: dict = {"name": str(name), "mem_bw_gbps": spec.get("mem_bw_gbps"), "matrix_peak_convention": "achievable"}
     maf = spec.get("max_achievable_tflops")
     if isinstance(maf, dict):
         for matrix_key, column in _ARCH_SPEC_MATRIX_TO_COLUMN.items():
@@ -685,9 +692,17 @@ class RooflineResolver:
         return self._arch.get((device or "").strip().lower())
 
     def arch_peak(self, device: str, dtype: str) -> float | None:
-        """Matrix peak (TFLOP/s) for ``device``/``dtype``, or ``None`` if blank/missing."""
+        """Max-**achievable** matrix peak (TFLOP/s) for ``device``/``dtype``, or ``None``.
+
+        Returns ``None`` for a row tagged ``matrix_peak_convention == "theoretical"`` (e.g. a MAIDAS
+        MFMA peak): a theoretical peak must not be substituted for the achievable one, so the caller
+        falls back to its native microbench-achievable table instead. A row that is untagged or
+        tagged ``"achievable"`` returns the value.
+        """
         row = self._arch_row(device)
         if not row:
+            return None
+        if str(row.get("matrix_peak_convention") or "achievable").strip().lower() == "theoretical":
             return None
         suffix = _DTYPE_SYNONYMS.get((dtype or "").strip().lower())
         if suffix is None:

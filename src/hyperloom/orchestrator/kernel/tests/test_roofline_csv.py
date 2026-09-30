@@ -292,6 +292,33 @@ def test_arch_row_from_spec_nameless_is_none() -> None:
     assert rc.arch_row_from_spec({"mem_bw_gbps": 8000.0}) is None
 
 
+def test_arch_peak_convention_gate() -> None:
+    # Native microbench rows are tagged achievable and read back as the achievable peak.
+    spec = {"name": "MI355X", "mem_bw_gbps": 8000.0, "max_achievable_tflops": {"matrix_bf16": 1686.0}}
+    assert rc.arch_row_from_spec(spec)["matrix_peak_convention"] == "achievable"
+
+    import tempfile
+    from pathlib import Path as _P
+
+    with tempfile.TemporaryDirectory() as d:
+        rc.write_arch_peaks(
+            [
+                {"name": "achv", "mem_bw_gbps": 8000.0, "matrix_bf16_tflops": 1000.0, "matrix_peak_convention": "achievable"},
+                {"name": "theo", "mem_bw_gbps": 5300.0, "matrix_bf16_tflops": 9999.0, "matrix_peak_convention": "theoretical"},
+                {"name": "untagged", "matrix_bf16_tflops": 777.0},  # legacy row, no convention column
+            ],
+            _P(d) / "gpu_arch_peaks.csv",
+        )
+        r = rc.RooflineResolver(d)
+        # A theoretical peak must NOT be served as the achievable one (would inflate the ceiling).
+        assert r.arch_peak("theo", "bf16") is None
+        assert r.arch_peak("achv", "bf16") == 1000.0
+        assert r.arch_peak("untagged", "bf16") == 777.0  # back-compat: absent -> achievable
+        # mem_bw is a real hardware value, convention-independent — read even for a theoretical row.
+        assert r.mem_bw("achv") == 8000.0
+        assert r.mem_bw("theo") == 5300.0
+
+
 def test_kernel_row_from_view_keeps_only_analytical() -> None:
     view = {
         "name": "triton_gemm",
