@@ -115,7 +115,3 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point for the quantization agent."""
     args = _parse_args(argv)
     return asyncio.run(_run(args))
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

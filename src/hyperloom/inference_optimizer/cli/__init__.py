@@ -2453,7 +2453,3 @@ def main(argv: list[str] | None = None) -> int:
         return _run_recover_session(args)
     parser.print_help()
     return 2
-
-
-if __name__ == "__main__":
-    sys.exit(main())

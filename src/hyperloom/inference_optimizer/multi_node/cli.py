@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``hyperloom.inference_optimizer.multi_node`` — single-entry sandbox CLI driving one handed-over cluster."""
+"""``hyperloom multi-node`` — single-entry sandbox CLI driving one handed-over cluster."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import base64
 import json
 import os
 import shlex
-import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -1973,7 +1972,3 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001
         err(f"{type(exc).__name__}: {exc}")
         return EXIT_TRANSIENT
-
-
-if __name__ == "__main__":
-    sys.exit(main())

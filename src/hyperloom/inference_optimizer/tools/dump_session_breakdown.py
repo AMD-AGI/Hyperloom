@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
@@ -184,7 +183,3 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_json:
         print(json.dumps(breakdown, indent=2, sort_keys=True))
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

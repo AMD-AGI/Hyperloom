@@ -5,8 +5,8 @@
 
 SKILL.md files, agent action docs, orchestrator prompts and the optimizer references are read by LLM
 agents, which run the commands in them verbatim. A renamed module there fails only at runtime, inside
-an agent turn. Every ``<python> -m <module>`` must be a hyperloom/kernelforge module present in the
-source tree (``hyperloom`` itself with a known command) or an allowed external module, and every
+an agent turn. Every ``<python> -m <module>`` must be a hyperloom/kernelforge module in the source
+tree with a ``__main__`` entry (``hyperloom`` itself with a known command) or an allowed external module, and every
 ``src/<package>/...py`` script path must exist. Nothing is imported from the checked tree.
 
 Usage:
@@ -36,6 +36,7 @@ _DOC_GLOBS = (
 # ``-m`` after an interpreter token (python3, /venv/bin/python, "$PYTHON", ${PYTHON}); ``git commit -m`` is not.
 _MODULE_RE = re.compile(r"(?:python[\d.]*|PYTHON\w*\}?)\"?\s+-m\s+([\w.]+)(?:\s+([a-z][\w-]*))?(?:\s+([a-z][\w-]*))?")
 _SCRIPT_RE = re.compile(r"\bsrc/((?:hyperloom|kernelforge)/[\w/.-]+\.py)\b")
+_MAIN_GUARD_RE = re.compile(r"^if __name__ == ['\"]__main__['\"]:", re.MULTILINE)
 _EXTERNAL_MODULES = frozenset({"pip"})
 _SKIPPED_TOP_DIRS = frozenset({".git", ".venv", "build", "node_modules"})
 
@@ -47,16 +48,19 @@ def _doc_files(root: Path) -> list[Path]:
     return sorted(found)
 
 
-def _module_exists(root: Path, module: str) -> bool:
+def _module_runnable(root: Path, module: str) -> bool:
     base = root / "src" / Path(*module.split("."))
-    return base.with_suffix(".py").is_file() or (base / "__main__.py").is_file()
+    if (base / "__main__.py").is_file():
+        return True
+    source = base.with_suffix(".py")
+    return source.is_file() and _MAIN_GUARD_RE.search(source.read_text(encoding="utf-8", errors="replace")) is not None
 
 
 def _check_module(root: Path, module: str, first: str | None, second: str | None) -> str | None:
     if module.split(".")[0] not in ("hyperloom", "kernelforge"):
         return None if module in _EXTERNAL_MODULES else f"module {module} is not a hyperloom/kernelforge module"
     if module != "hyperloom":
-        return None if _module_exists(root, module) else f"module {module} does not exist"
+        return None if _module_runnable(root, module) else f"module {module} is not runnable with -m"
     if first is None or first in hyperloom_cli._COMMANDS:
         return None
     if first != "session":

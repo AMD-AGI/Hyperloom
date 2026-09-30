@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 """Launcher-side preflight for hyperloom.inference_optimizer.
@@ -31,7 +30,6 @@ from hyperloom.common import rocm_smi
 #: scan's.
 STALE_PROCESS_PATTERNS = (
     "hyperloom optimize",
-    "hyperloom.inference_optimizer.cli",
     "Magpie",
     "atom.entrypoints",
     "sglang.launch_server",

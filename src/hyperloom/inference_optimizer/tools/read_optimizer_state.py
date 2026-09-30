@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 """Print concise optimizer state and lifecycle status.
@@ -75,7 +74,3 @@ def main(argv: list[str] | None = None) -> int:
     for event in events[-limit:] if limit else []:
         print(_format_lifecycle_event(event))
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

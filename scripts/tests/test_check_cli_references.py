@@ -17,8 +17,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 @pytest.fixture
 def root(tmp_path: Path) -> Path:
     (tmp_path / "src" / "hyperloom" / "agents" / "critic" / "runtime").mkdir(parents=True)
-    (tmp_path / "src" / "hyperloom" / "agents" / "critic" / "runtime" / "cli.py").write_text("", encoding="utf-8")
-    (tmp_path / "src" / "hyperloom" / "tool.py").write_text("", encoding="utf-8")
+    (tmp_path / "src" / "hyperloom" / "agents" / "critic" / "runtime" / "cli.py").write_text(
+        'if __name__ == "__main__":\n    main()\n', encoding="utf-8"
+    )
+    (tmp_path / "src" / "hyperloom" / "tool.py").write_text("def main(): ...\n", encoding="utf-8")
     return tmp_path
 
 
@@ -48,14 +50,16 @@ def test_unresolvable_references_are_reported(root: Path) -> None:
         "python -m hyperloom.agents.critic.cli prepare-review\n"
         "python -m hyperloom recover-session --session-dir s\n"
         "python -m hyperloom session dump\n"
-        "python3 src/hyperloom/tools/gone.py\n",
+        "python3 src/hyperloom/tools/gone.py\n"
+        "python -m hyperloom.tool\n",
     )
     assert check(root) == [
         "SKILL.md:1: module runtime.cli is not a hyperloom/kernelforge module",
-        "SKILL.md:2: module hyperloom.agents.critic.cli does not exist",
+        "SKILL.md:2: module hyperloom.agents.critic.cli is not runnable with -m",
         "SKILL.md:3: `hyperloom recover-session` is not a hyperloom command",
         "SKILL.md:4: `hyperloom session dump` is not a session command",
         "SKILL.md:5: script src/hyperloom/tools/gone.py does not exist",
+        "SKILL.md:6: module hyperloom.tool is not runnable with -m",
     ]
     assert main([str(root)]) == 1
 
