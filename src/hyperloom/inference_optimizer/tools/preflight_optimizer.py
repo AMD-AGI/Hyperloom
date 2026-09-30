@@ -125,7 +125,7 @@ def _find_stale_processes() -> list[tuple[str, str]]:
     return matches
 
 
-def main(argv: list[str] | None = None) -> int:
+def run_checks(argv: list[str] | None = None) -> int:
     """Run launcher preflight checks and return a process exit code."""
     parser = argparse.ArgumentParser(prog="hyperloom check", description=__doc__)
     parser.add_argument("model_path", help="Model directory to optimize.")
@@ -171,5 +171,6 @@ def _exit(code: int) -> None:
     os._exit(code)
 
 
-if __name__ == "__main__":
-    _exit(main())
+def main(argv: list[str] | None = None) -> None:
+    """``hyperloom check``: run the checks and leave with their status."""
+    _exit(run_checks(argv))
