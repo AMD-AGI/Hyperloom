@@ -55,6 +55,7 @@ from ..bus.resource_lock import (
 )
 from ..state.shared_state import SharedState, effective_closing_grace_sec, timed_teardown_step
 from .signals import SignalDrain
+from .idle_gate import IdleTickGate
 from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry, task_dispatch_origin
@@ -299,6 +300,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
         self._prompt_snapshots = PromptSnapshotTracker()
+        # Orchestration turns whose prompt holds nothing new are skipped until the heartbeat is due.
+        self._idle_gate = IdleTickGate.from_env()
 
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
         self._backend_error_streak: dict[str, int] = {name: 0 for name in self.role_registry}
@@ -1464,6 +1467,16 @@ class Coordinator(metaclass=_CoordinatorMeta):
         backend = self.backends[agent_name]
         sys_prompt = await self._load_system_prompt(agent_name)
         prompt = await self._compose_prompt(agent_name)
+        gated = agent_name == "orchestration"
+        if gated and self._idle_gate.should_skip(prompt, time.time()):
+            # The rendered cursor stays put, so the next turn that runs still sees every message held back here.
+            log.info(
+                "idle gate: skipped %s turn at tick %s, prompt unchanged since the last turn (%d skipped)",
+                agent_name,
+                self.shared_state.tick,
+                self._idle_gate.skipped,
+            )
+            return
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
         _set_trace_ctx = getattr(backend, "set_trace_context", None)
@@ -1533,6 +1546,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
             return
         finally:
             self._trace_mcp_setup(agent_name=agent_name, backend=backend)
+        if gated:
+            self._idle_gate.record_sent(prompt, time.time())
         # Reset the streak — a successful turn proves the backend is alive again.
         if self._backend_error_streak.get(agent_name):
             self._backend_error_streak[agent_name] = 0
