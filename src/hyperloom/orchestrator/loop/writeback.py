@@ -256,16 +256,17 @@ def _confirmed_task_outcome(task: Task) -> dict[str, Any] | None:
     return None
 
 
-def _integrate_stack_fields(result: Mapping[str, Any], state: SharedState) -> dict[str, Any]:
-    """Validate kernel membership against the ledger before promotion and return the members."""
+def _integrate_stack_fields(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the members a KEEP promotes.
+
+    Only the kernel-stack lane produces multi-member results, and it binds them to their ledger rows before
+    promoting, so the members are read off the result rather than bound again here.
+    """
     from ..phases.kernel_stack import resolve_stack_members
 
     raw_members = result.get("stack_kernel_ids")
     membership = {"stack_validation": isinstance(raw_members, list) and len(raw_members) > 1, **result}
-    members = resolve_stack_members(
-        membership,
-        entries=state.kernel_integrate_attempts if membership["stack_validation"] is True else None,
-    )
+    members = resolve_stack_members(membership)
     return {"stack_kernel_ids": list(members), "stack_validation": membership["stack_validation"]}
 
 
@@ -1054,7 +1055,7 @@ class WritebackCollaborator:
                 new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
-        stack_fields = _integrate_stack_fields(result, self.shared_state)
+        stack_fields = _integrate_stack_fields(result)
         # A fusion sibling drained through the shared integrate lane must still
         # land on the stack as ``action="fusion"``: the idempotency short-circuit
         # (``_active_forge_fusion_env_flags``) and the remote-recipe fusion export
@@ -5413,10 +5414,18 @@ class WritebackCollaborator:
                 )
                 if hasattr(state, "set_stop_reason"):
                     state.set_stop_reason("active_inferencex_checkout_missing")
-        # (0) Interrupted stack unwind: its members are still applied to the
-        # framework tree. Retried here, before a resumed leg benchmarks
-        # anything: a measurement taken first would measure the patched tree --
-        # the failure the halt exists to prevent.
+        # Loading the state file is the one boundary the persisted
+        # ``optimization_stack`` crosses, so bind its rows to their members here:
+        # a row that cannot name what it integrated makes every later read of the
+        # stack a guess, and every reader below inherits that guess.
+        try:
+            self._stack_resolved_kernel_ids()
+        except ValueError as exc:
+            self._halt_stack_recovery(exc)
+        # (0) Interrupted stack attempt: its members may still be applied to the
+        # framework tree, and everything this pass or the leg benchmarks before
+        # SWEEP entry would measure them. SWEEP entry settles through the same
+        # recovery.
         await self._resume_recover_interrupted_stack(report)
         # (1) Half-applied integrate window: replay the
         # missing stack append or roll back the partial patch BEFORE anything
@@ -5630,28 +5639,13 @@ class WritebackCollaborator:
             return False
 
     async def _resume_recover_interrupted_stack(self, report: dict[str, Any]) -> None:
-        """Retry an unwind a halted leg left owed, before anything here can benchmark.
+        """Settle a stack attempt a crash or halt left behind, before anything here can benchmark.
 
-        The recovery halts the session again if the tree still cannot be
-        settled, which is the point: the alternative is measuring a tree whose
-        contents no resume can account for.
+        The recovery halts the session if the tree cannot be settled, which is
+        the point: the alternative is measuring a tree whose contents no resume
+        can account for.
         """
-        state = self.shared_state
-        if not (
-            getattr(state, "pending_stack_validation_result", None)
-            or getattr(state, "pending_stack_validation_apply_results", None)
-        ):
-            return
-        try:
-            recovered = await self._recover_interrupted_stack_validation()
-        except ValueError as exc:
-            # What is on the tree is unknown; a raise here would escape
-            # ``Coordinator.run``'s guard with no stop reason naming why.
-            self.shared_state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
-            self.shared_state.save(self.session_dir)
-            report["warnings"].append({"kind": "interrupted_stack_validation_unbindable", "error": repr(exc)})
-            return
-        if recovered:
+        if await self._recover_interrupted_stack_validation():
             report["fixes"].append({"kind": "interrupted_stack_validation_recovered"})
 
     def _clear_pending_integrate(self, pending: dict[str, Any], *, gc_runtime: bool) -> None:
