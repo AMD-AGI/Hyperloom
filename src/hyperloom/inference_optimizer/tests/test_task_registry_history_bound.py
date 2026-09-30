@@ -246,6 +246,8 @@ async def test_exists_with_key_prefix_matches_the_prefix_literally(tmp_path):
         assert await registry.exists_with_key_prefix("integrate_patch", "aab-reconcile", states=("queued",))
         # Real keys carry ``_``; it must match only itself, not any character.
         assert not await registry.exists_with_key_prefix("integrate_patch", "a_b-reconcile", states=("queued",))
+        assert not await registry.exists_with_key_prefix("integrate_patch", "a%b-reconcile", states=("queued",))
+        assert not await registry.exists_with_key_prefix("integrate_patch", "AAB-reconcile", states=("queued",))
         assert not await registry.exists_with_key_prefix("explore", "aab-reconcile", states=("queued",))
         assert not await registry.exists_with_key_prefix("integrate_patch", "aab-reconcile", states=("succeeded",))
     finally:

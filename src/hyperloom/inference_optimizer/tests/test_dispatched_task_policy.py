@@ -599,6 +599,33 @@ async def test_reconcile_does_not_spawn_second_child_after_first_succeeds(tmp_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("child_state", ["queued", "running"])
+async def test_reconcile_does_not_spawn_second_child_while_first_is_live(tmp_path, monkeypatch, child_state):
+    """A queued or running reconcile child must not trigger reconcile2 on the next pump pass."""
+    sub = _runner_with_policy(tmp_path, monkeypatch)
+    task = await sub.tasks.create(
+        kind="integrate_patch",
+        params={"specialist_task_id": "spec-live", "apply_only": True},
+        idempotency_key="approved-prop-live",
+    )
+    await sub.run_task(task)
+
+    state = sub.shared_state
+    assert isinstance(state, SharedState)
+    state.record_specialist_patch_verdict("spec-live", "approve")
+    assert sub.policy is not None
+    sub.policy.shared_state = state
+
+    disp = DispatcherCollaborator(_ReconcileCoordStub(sub=sub, tasks=sub.tasks, shared_state=state))
+    (child_id,) = await disp._reconcile_cancelled_policy_denied_integrate_tasks()
+    if child_state == "running":
+        await sub.tasks.transition(child_id, "running")
+
+    assert await disp._reconcile_cancelled_policy_denied_integrate_tasks() == []
+    assert [t.idempotency_key for t in await sub.tasks.by_state(child_state)] == ["approved-prop-live-reconcile1"]
+
+
+@pytest.mark.asyncio
 async def test_reconcile_skips_when_verdict_still_missing(tmp_path, monkeypatch):
     sub = _runner_with_policy(tmp_path, monkeypatch)
     task = await sub.tasks.create(
