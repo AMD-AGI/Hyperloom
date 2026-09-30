@@ -511,14 +511,10 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]
 # (cp314 postdates it) must be allowed to keep the newer release the
 # kernel-agent installer resolved for them.
 _RAY_MIN_VERSION = "2.44.1"
-# Only 2.44.1's CLI fails to import with click >= 8.3.0, so the ceiling applies
-# to that release alone; forcing it onto newer Ray downgrades a working click.
+# Only 2.44.1's CLI requires the default Click ceiling. Explicit Ray/Click
+# overrides retain the installer's requested ceiling on other releases too.
 _RAY_CLICK_PINNED_VERSION = "2.44.1"
 _RAY_CLI_CLICK_MAX_VERSION = "8.3.0"
-_RAY_INSTALL_SPEC = f"ray[default]=={_RAY_MIN_VERSION}"
-_RAY_FALLBACK_INSTALL_SPEC = f"ray[default]>={_RAY_MIN_VERSION}"
-_CLICK_INSTALL_SPEC = f"click<{_RAY_CLI_CLICK_MAX_VERSION}"
-_RAY_INSTALL_SPECS = (_RAY_INSTALL_SPEC, _CLICK_INSTALL_SPEC)
 
 
 _RAY_SMOKE_TEMPLATE = r"""
@@ -529,7 +525,8 @@ import sys
 RAY_MIN_VERSION = "__RAY_MIN_VERSION__"
 RAY_CLICK_PINNED_VERSION = "__RAY_CLICK_PINNED_VERSION__"
 RAY_CLI_CLICK_MAX_VERSION = "__RAY_CLI_CLICK_MAX_VERSION__"
-RAY_CLI_CLICK_MAX_VERSION_TUPLE = __RAY_CLI_CLICK_MAX_VERSION_TUPLE__
+ray_version = sys.argv[1] if len(sys.argv) > 1 else ""
+click_override = sys.argv[2] if len(sys.argv) > 2 else ""
 
 def _version_tuple(version: str) -> tuple[int, int, int]:
     parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
@@ -542,20 +539,25 @@ except Exception as exc:
     print(f"ray import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
     raise SystemExit(1)
 
-if _version_tuple(ray.__version__) < _version_tuple(RAY_MIN_VERSION):
+if ray_version:
+    if ray.__version__ != ray_version:
+        print(f"ray version mismatch: {ray.__version__} != {ray_version}", file=sys.stderr)
+        raise SystemExit(1)
+elif _version_tuple(ray.__version__) < _version_tuple(RAY_MIN_VERSION):
     print(f"ray too old: {ray.__version__} < {RAY_MIN_VERSION}", file=sys.stderr)
     raise SystemExit(1)
 
-if ray.__version__ == RAY_CLICK_PINNED_VERSION:
+if ray_version or click_override or ray.__version__ == RAY_CLICK_PINNED_VERSION:
+    click_max_version = click_override or RAY_CLI_CLICK_MAX_VERSION
     try:
         click_version = md.version("click")
     except md.PackageNotFoundError:
         print("click is not installed", file=sys.stderr)
         raise SystemExit(1)
 
-    if _version_tuple(click_version) >= RAY_CLI_CLICK_MAX_VERSION_TUPLE:
+    if _version_tuple(click_version) >= _version_tuple(click_max_version):
         print(
-            f"click version incompatible with Ray CLI: {click_version} >= {RAY_CLI_CLICK_MAX_VERSION}",
+            f"click version incompatible with Ray CLI: {click_version} >= {click_max_version}",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -570,17 +572,10 @@ print(ray.__version__)
 """
 
 
-def _version_tuple(version: str) -> tuple[int, int, int]:
-    parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
-    parts.extend([0] * (3 - len(parts)))
-    return tuple(parts[:3])
-
-
 _RAY_SMOKE = (
     _RAY_SMOKE_TEMPLATE.replace("__RAY_MIN_VERSION__", _RAY_MIN_VERSION)
     .replace("__RAY_CLICK_PINNED_VERSION__", _RAY_CLICK_PINNED_VERSION)
     .replace("__RAY_CLI_CLICK_MAX_VERSION__", _RAY_CLI_CLICK_MAX_VERSION)
-    .replace("__RAY_CLI_CLICK_MAX_VERSION_TUPLE__", repr(_version_tuple(_RAY_CLI_CLICK_MAX_VERSION)))
 )
 
 
@@ -597,9 +592,9 @@ def _ray_probe_env() -> dict[str, str]:
     return env
 
 
-def _ray_smoke(python_exe: str) -> subprocess.CompletedProcess:
+def _ray_smoke(python_exe: str, ray_version: str = "", click_max_version: str = "") -> subprocess.CompletedProcess:
     return subprocess.run(
-        [python_exe, "-c", _RAY_SMOKE],
+        [python_exe, "-c", _RAY_SMOKE, ray_version, click_max_version],
         capture_output=True,
         text=True,
         env=_ray_probe_env(),
@@ -608,7 +603,11 @@ def _ray_smoke(python_exe: str) -> subprocess.CompletedProcess:
 
 def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     """Probe-then-install Ray using the interpreter that will import it."""
-    check = _ray_smoke(python_exe)
+    ray_version = os.environ.get("RAY_VERSION") or ""
+    click_override = os.environ.get("RAY_CLI_CLICK_MAX_VERSION") or ""
+    ray_spec = f"ray[default]=={ray_version or _RAY_MIN_VERSION}"
+    click_spec = f"click<{click_override or _RAY_CLI_CLICK_MAX_VERSION}"
+    check = _ray_smoke(python_exe, ray_version, click_override)
     if check.returncode == 0:
         print("Preflight: ray OK")
         return {
@@ -616,26 +615,22 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
             "skip_reason": None,
             "target": "ray",
             "interpreter": python_exe,
-            "spec": _RAY_INSTALL_SPEC,
-            "version_after": (check.stdout or "").strip() or _RAY_MIN_VERSION,
+            "spec": ray_spec,
+            "version_after": (check.stdout or "").strip() or ray_version or _RAY_MIN_VERSION,
             "message": None,
         }
     reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]
-    print(f"Preflight: ray/click invalid ({reason}), installing {_RAY_INSTALL_SPEC} + {_CLICK_INSTALL_SPEC} ...")
-    specs: tuple[str, ...] = _RAY_INSTALL_SPECS
+    print(f"Preflight: ray/click invalid ({reason}), installing {ray_spec} + {click_spec} ...")
+    specs: tuple[str, ...] = (ray_spec, click_spec)
     install = subprocess.run(
         [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
         capture_output=True,
         text=True,
     )
-    if install.returncode != 0:
-        # The pinned release has no distribution for this interpreter; take one
-        # that resolves and drop the click ceiling, which only guards 2.44.1.
-        specs = (_RAY_FALLBACK_INSTALL_SPEC,)
-        print(
-            f"Preflight: {_RAY_INSTALL_SPEC} does not resolve for {python_exe}; "
-            f"retrying with {_RAY_FALLBACK_INSTALL_SPEC}"
-        )
+    if install.returncode != 0 and not ray_version:
+        # Preserve an explicit Click ceiling; the default only guards 2.44.1.
+        specs = (f"ray[default]>={_RAY_MIN_VERSION}",) + ((click_spec,) if click_override else ())
+        print(f"Preflight: {ray_spec} does not resolve for {python_exe}; retrying with {' '.join(specs)}")
         install = subprocess.run(
             [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
             capture_output=True,
@@ -644,11 +639,11 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     if install.returncode != 0:
         detail = (install.stderr or install.stdout or "no pip output").strip()
         raise RuntimeError(f"Ray install failed for {' '.join(specs)}: {detail}")
-    check = _ray_smoke(python_exe)
+    check = _ray_smoke(python_exe, ray_version, click_override)
     if check.returncode != 0:
         reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip()
         raise RuntimeError(f"Ray install completed but smoke test still failed: {reason}")
-    version_after = (check.stdout or "").strip() or _RAY_MIN_VERSION
+    version_after = (check.stdout or "").strip() or ray_version or _RAY_MIN_VERSION
     print(f"Preflight: ray installed OK ({version_after})")
     return {
         "status": "applied",
