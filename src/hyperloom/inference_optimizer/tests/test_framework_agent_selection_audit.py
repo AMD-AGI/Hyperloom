@@ -7,6 +7,7 @@ extraction, and the cyclic phase-budget dispatch guard.
 
 from __future__ import annotations
 
+import time
 import types
 import pytest
 
@@ -16,6 +17,7 @@ from hyperloom.orchestrator.phases import machine_state as ps_mod
 from hyperloom.orchestrator.actions.executors import _patch_source_pr as fpr_mod
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 
@@ -297,7 +299,28 @@ def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> Non
     assert coord._dispatch_paused_for_phase_budget() is False
 
 
-# _maybe_autosubmit_framework_config
+def test_dispatch_pause_spends_the_share_a_disabled_kernel_freed(session_dir) -> None:
+    """``--no-kernel`` hands KERNEL_AGENT's share to FRAMEWORK_AGENT, and dispatch runs until that is spent too."""
+    seeded = SharedState.load_or_init(session_dir)
+    seeded.kernel_enabled = False
+    seeded.save(session_dir)
+    coord = Coordinator(session_dir, backends=_build_backends())
+    state = coord.shared_state
+    state.max_minutes = 100
+    state.phase = "FRAMEWORK_AGENT"
+
+    def _in_phase_for(minutes: float) -> None:
+        state.elapsed_charged_sec = minutes * 60.0
+        state.phase_started_unix = time.time() - minutes * 60.0
+
+    # Minute 50 of 100 is past FRAMEWORK_AGENT's default share and well inside the one --no-kernel leaves it.
+    _in_phase_for(50)
+    assert coord._dispatch_paused_for_phase_budget() is False
+    _in_phase_for(90)
+    assert coord._dispatch_paused_for_phase_budget() is True
+
+
+# maybe_autosubmit_config
 def _authoring_task(task_id: str = "spec-1") -> types.SimpleNamespace:
     return types.SimpleNamespace(
         task_id=task_id,
@@ -312,13 +335,13 @@ def _authoring_task(task_id: str = "spec-1") -> types.SimpleNamespace:
 @pytest.mark.asyncio
 async def test_autosubmit_config_not_authoring_returns(coord: Coordinator) -> None:
     task = types.SimpleNamespace(task_id="x", params={})
-    await coord._maybe_autosubmit_framework_config(task=task, done_payload={})
+    await coord.phase_framework.maybe_autosubmit_config(task=task, done_payload={})
     assert not coord.state.pending_proposals
 
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_patch_deliverable_returns(coord: Coordinator) -> None:
-    await coord._maybe_autosubmit_framework_config(
+    await coord.phase_framework.maybe_autosubmit_config(
         task=_authoring_task(),
         done_payload={"patches_written": ["p.patch"]},
     )
@@ -327,7 +350,7 @@ async def test_autosubmit_config_patch_deliverable_returns(coord: Coordinator) -
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_no_levers_returns(coord: Coordinator) -> None:
-    await coord._maybe_autosubmit_framework_config(
+    await coord.phase_framework.maybe_autosubmit_config(
         task=_authoring_task(),
         done_payload={"proposal_set": [{"name": "n"}]},  # no extra_args/envs -> no levers
     )
@@ -338,7 +361,7 @@ async def test_autosubmit_config_no_levers_returns(coord: Coordinator) -> None:
 async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -> None:
     done = {"proposal_set": [{"name": "mtp-toggle", "extra_envs": {"VLLM_MTP": "1"}, "extra_args": "--speculative 4"}]}
     before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_config(task=_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     assert prop.action_name == "integrate_patch"
@@ -354,7 +377,7 @@ async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -
 async def test_autosubmit_config_idempotent_on_existing_verdict(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict", lambda _sid: "approve", raising=False)
     done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
-    await coord._maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_config(task=_authoring_task(), done_payload=done)
     assert not coord.state.pending_proposals
 
 
@@ -378,7 +401,7 @@ async def test_autosubmit_config_enablement_propagates_marker_and_setup(coord: C
         "setup_commands": ["pip install -U aiter"],
     }
     before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_config(task=_enablement_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     params = (prop.payload or {}).get("params") or {}
@@ -393,7 +416,7 @@ async def test_autosubmit_config_enablement_setup_only_still_routes(coord: Coord
     """An enablement deliverable with NO config levers (setup-only stack upgrade) must still reach integrate_patch so the stall accounting can advance."""
     done = {"proposal_set": [], "setup_commands": ["pip install -U vllm==0.21.0"]}
     before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_config(task=_enablement_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     params = (prop.payload or {}).get("params") or {}
@@ -414,7 +437,7 @@ async def test_autosubmit_config_build_only_skips_integrate(coord: Coordinator) 
         },
     }
 
-    await coord._maybe_autosubmit_framework_config(
+    await coord.phase_framework.maybe_autosubmit_config(
         task=_enablement_authoring_task(),
         done_payload=done,
     )

@@ -59,7 +59,8 @@ PRODUCER = "orchestrator"
 #: The session baseline every contribution is measured against, and the axis.
 SECTION_EVENT = "stack_event"
 
-#: One row per adoption, keyed by its position in the stack.
+#: One row per adoption, keyed by its author-time ID when available. Stack
+#: positions can be reused after a revert.
 SECTION_ADOPTION = "stack_adoption"
 
 #: One row per session validation, keyed by the stack length it validated, so a
@@ -200,6 +201,7 @@ def record_adoption(
     base = _float_or_none(baseline_tput)
     action = str(entry.get("action") or "")
     row: dict[str, Any] = {
+        "stack_entry_id": _text_or_none(entry.get("stack_entry_id")),
         "stack_index": int(stack_index),
         "recorded_at": _now(),
         "ts": _text_or_none(entry.get("ts")) or _now(),
@@ -213,6 +215,7 @@ def record_adoption(
         "source_phase": _text_or_none(entry.get("source_phase")),
         "task_id": _text_or_none(entry.get("task_id")),
         "kernel_id": _text_or_none(entry.get("kernel_id")),
+        "integration_id": _text_or_none(entry.get("integration_id")),
         "fingerprint": _text_or_none(entry.get("fingerprint")),
         "provenance": _text_or_none(entry.get("provenance")),
         "gap_canonical_id": _text_or_none(entry.get("gap_canonical_id")),
@@ -233,7 +236,12 @@ def record_adoption(
         "attribution_eligible": (bool(entry.get("attribution_eligible")) if "attribution_eligible" in entry else None),
         "accepted_kernels": [str(k) for k in _as_list(entry.get("accepted_kernels")) if str(k)],
     }
-    sink.record(SECTION_ADOPTION, row, row_type="adoption", natural_ids=str(int(stack_index)))
+    sink.record(
+        SECTION_ADOPTION,
+        row,
+        row_type="adoption",
+        natural_ids=str(row["stack_entry_id"] or int(stack_index)),
+    )
 
 
 def record_validation(
@@ -366,7 +374,9 @@ def assemble_stack_ext(
     """
     header = _header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
     adoptions = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_ADOPTION) or [], event), keys=("stack_index",)),
+        sort_rows(
+            rows_for_event(parts.get(SECTION_ADOPTION) or [], event), keys=("ts", "stack_entry_id", "stack_index")
+        ),
         drop=("event_id",),
     )
     validations = wire_rows(

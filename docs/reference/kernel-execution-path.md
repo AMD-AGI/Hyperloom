@@ -141,7 +141,7 @@ The seven rules from the retired `kernel_agent.md` live in executable Python:
 
 | Former rule | Real enforcer |
 |---|---|
-| IR-1 submit all candidates in parallel | `_batch_kernel_candidates` + `_DEFAULT_KERNEL_BATCH_PARALLEL=8` in `request_handlers.py` |
+| IR-1 submit all candidates in parallel | None in Hyperloom: #1408 moved kernel selection into KernelForge |
 | IR-2 never modify source before GEAK submission | `_is_runtime_generated_kernel` gate in `request_handlers.py` |
 | IR-3 integration is mandatory after every KEEP | `phases/kernel_stack.py::KernelStackPhase._auto_enqueue_pending_integrations` (called by `intent_router.py`) |
 | IR-4 kill stale servers before restart | `_multi_node_server_lifecycle.py::restart_server_for_round` |
@@ -168,8 +168,8 @@ decides kernel strategy internally:
   the job / container environment; their behavior is unchanged.
 - **Explicit selection**: only an exact, case-insensitive `forge` enables
   per-kernel Forge. Other nonblank values, including `forge,geak`, retain GEAK;
-  `--backends` CLI flags, payload `backends` hints, and `GEMM_TUNING_BACKEND`
-  do not override this choice.
+  `--backends` CLI flags and payload `backends` hints do not override this
+  choice.
 
 `run_gemm_tuning_handler` also defaults to GEAK unless the effective
 `KERNEL_OPT_BACKEND_ORDER` is `forge`, whether selected explicitly or by the
@@ -222,8 +222,9 @@ Required env vars:
 
 | Variable | Set by | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | operator | Anthropic-side key; GEAK and TraceLens both run Claude Code |
+| `ANTHROPIC_API_KEY` | operator | Anthropic-side key; GEAK runs Claude Code, and TraceLens runs Claude unless only the OpenAI side is configured |
 | `ANTHROPIC_BASE_URL` | operator | Anthropic-side endpoint (point it at your gateway) |
+| `OPENAI_API_KEY`, `OPENAI_BASE_URL` | operator | OpenAI-side key and endpoint; with only this side configured, TraceLens and Forge run on Codex and GEAK cannot start |
 | `TRACELENS_ROOT` | `install.sh` (operator can override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
 | `KERNEL_OPT_BACKEND_ORDER` | Unset/blank resolves to `geak` for every framework, ATOM included; the CLI fills in nothing. Bare-metal setup only persists nonempty choices; Slurm launchers still export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Exact, case-insensitive `forge` enables per-kernel Forge; existing `.env` choices are retained |
 
@@ -238,9 +239,6 @@ Optional:
 | Variable | Purpose |
 |---|---|
 | `TRACELENS_INTERNAL_ROOT` | TraceLens internal extension; unset = open-source-only |
-| `KERNEL_OPT_MAX_PARALLEL` | Override the 8-concurrent-kernel default |
-| `INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL` | Override partial-attempt retry cap (default 2) |
-| `KERNEL_OPT_BACKEND_BUDGET_MIN` | Force the per-optimization wall-clock budget in minutes (default 90); wins over the LLM-authored payload value |
 
 Fusion lane:
 

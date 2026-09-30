@@ -105,6 +105,7 @@ def _dense_meta(**over) -> rc.ModelMeta:
         num_attention_heads=8,
     )
     base.update(over)
+    base.setdefault("expert_weight_dtype_bytes", base["weight_dtype_bytes"])
     return rc.ModelMeta(**base)
 
 
@@ -406,7 +407,7 @@ def test_moe_decomposition_reads_a_gemma_style_topk_alias():
         "num_hidden_layers": 30,
         "moe_intermediate_size": 704,
     }
-    _, total, experts, per_tok = rc._compute_expert_decomposition(cfg, weight_bytes=51_611_872_412, dtype_bytes=2.0)
+    _, total, experts, per_tok = rc._compute_expert_decomposition(cfg, weight_bytes=51_611_872_412, expert_bpe=2.0)
     assert (experts, per_tok) == (128, 8)
     assert total == 30 * 128 * 3 * 2816 * 704 * 2
 
@@ -422,12 +423,12 @@ def test_moe_decomposition_sizes_latent_experts_at_their_own_width():
         "moe_intermediate_size": 3072,
     }
     weight_bytes = 1_560_860_324_864
-    _, total, experts, _ = rc._compute_expert_decomposition(cfg, weight_bytes=weight_bytes, dtype_bytes=0.5)
+    _, total, experts, _ = rc._compute_expert_decomposition(cfg, weight_bytes=weight_bytes, expert_bpe=0.5)
     assert experts == 896
     assert total == int(93 * 896 * 3 * 3584 * 3072 * 0.5)
     # The residual width would overshoot the checkpoint and safe-degrade.
     wide = {k: v for k, v in cfg.items() if k != "routed_expert_hidden_size"}
-    assert rc._compute_expert_decomposition(wide, weight_bytes=weight_bytes, dtype_bytes=0.5)[2] == 0
+    assert rc._compute_expert_decomposition(wide, weight_bytes=weight_bytes, expert_bpe=0.5)[2] == 0
 
 
 def test_perfmodel_sizes_the_moe_op_at_the_latent_expert_width(tmp_path):
@@ -478,7 +479,7 @@ def test_load_model_meta_keeps_a_quark_moe_checkpoint_decomposed(tmp_path):
     assert meta.moe_intermediate_size == 2048
     assert meta.expert_weight_bytes == int(expert_elems * 0.5)
     # At bf16 the same config degrades to dense, which is the bug being pinned.
-    assert rc._compute_expert_decomposition(cfg, weight_bytes=weight_bytes, dtype_bytes=2.0) == (
+    assert rc._compute_expert_decomposition(cfg, weight_bytes=weight_bytes, expert_bpe=2.0) == (
         weight_bytes,
         0,
         0,
@@ -517,7 +518,7 @@ def test_moe_decomposition_degrades_when_the_experts_exceed_the_checkpoint():
         "num_hidden_layers": 4,
         "moe_intermediate_size": 256,
     }
-    active, total, experts, per_tok = rc._compute_expert_decomposition(cfg, weight_bytes=1024, dtype_bytes=2.0)
+    active, total, experts, per_tok = rc._compute_expert_decomposition(cfg, weight_bytes=1024, expert_bpe=2.0)
     assert (active, total, experts, per_tok) == (1024, 0, 0, 0)
 
 
@@ -530,7 +531,7 @@ def test_moe_decomposition_degrades_when_the_experts_exceed_the_checkpoint():
     ],
 )
 def test_moe_decomposition_needs_a_complete_config(cfg):
-    assert rc._compute_expert_decomposition(cfg, weight_bytes=999, dtype_bytes=2.0) == (999, 0, 0, 0)
+    assert rc._compute_expert_decomposition(cfg, weight_bytes=999, expert_bpe=2.0) == (999, 0, 0, 0)
 
 
 def test_load_model_meta_declines_an_unreadable_model(tmp_path):
@@ -585,7 +586,7 @@ def test_uniform_moe_runtime_quantization_reaches_perfmodel(tmp_path):
     # Two layers, one routed expert: fp8 weight reads plus bf16 activation IO.
     assert ops["moe_fused"].bytes_moved == 2 * (3 * 16 * 8 + 2 * 16 * 2)
     assert ops["q_proj"].bytes_moved == 2 * (16 * 16 + 2 * 16 * 2)
-    assert meta.expert_weight_dtype_bytes == applied.expert_weight_dtype_bytes == 0.0
+    assert (meta.expert_weight_dtype_bytes, applied.expert_weight_dtype_bytes) == (2.0, 1.0)
     assert meta.expert_weight_bytes == 6144
     assert applied.weight_dtype_bytes == 1.0
     assert (applied.weight_bytes, applied.active_weight_bytes, applied.expert_weight_bytes) == (8192, 5888, 3072)
@@ -594,37 +595,59 @@ def test_uniform_moe_runtime_quantization_reaches_perfmodel(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("expert_dtype", "expert_bpe", "expected_bytes"),
+    ("server_args", "expected_bytes", "general_bpe", "act_bpe"),
     [
-        ("bfloat16", 2.0, (11264, 6656, 6144)),
-        ("fp4", 0.5, (8960, 7808, 1536)),
+        ("--quantization fp8", (8960, 7808, 1536), 1.0, 2.0),
+        ("--dtype float32", (31232, 30080, 1536), 4.0, 4.0),
     ],
-    ids=["explicit-equal", "explicit-mixed"],
+    ids=["quantization", "dtype"],
 )
-def test_runtime_general_dtype_preserves_explicit_experts(tmp_path, expert_dtype, expert_bpe, expected_bytes):
-    meta = _load_small_moe_meta(tmp_path, expert_dtype=expert_dtype)
-    rt = rc.resolve_runtime_dtype(SimpleNamespace(last_baseline={"extra_args": "--quantization fp8"}), meta)
+def test_runtime_general_dtype_preserves_experts_stored_elsewhere(
+    tmp_path, server_args, expected_bytes, general_bpe, act_bpe
+):
+    """An override names one precision, so it misses fp4 experts under bf16 attention."""
+    meta = _load_small_moe_meta(tmp_path, expert_dtype="fp4")
+    rt = rc.resolve_runtime_dtype(SimpleNamespace(last_baseline={"extra_args": server_args}), meta)
     applied = rc.apply_runtime_dtype(meta, rt)
 
     assert (applied.weight_bytes, applied.active_weight_bytes, applied.expert_weight_bytes) == expected_bytes
-    assert meta.expert_weight_dtype_bytes == applied.expert_weight_dtype_bytes == expert_bpe
+    assert meta.expert_weight_dtype_bytes == applied.expert_weight_dtype_bytes == 0.5
     assert applied.expert_weight_bytes == meta.expert_weight_bytes
-    assert applied.weight_dtype_bytes == 1.0
+    assert applied.weight_dtype_bytes == general_bpe
     assert rc.apply_runtime_dtype(applied, rt) == applied
     before = next(op for op in _perfmodel(meta, concurrency=1).ops if op.name == "moe_fused")
     after = next(op for op in _perfmodel(applied, concurrency=1).ops if op.name == "moe_fused")
-    assert before.bytes_moved == after.bytes_moved == 2 * (3 * 16 * 8 * expert_bpe + 2 * 16 * 2)
+    # Expert weights stay at fp4 either way; only the activation width follows the override.
+    assert before.bytes_moved == 2 * (3 * 16 * 8 * 0.5 + 2 * 16 * 2)
+    assert after.bytes_moved == 2 * (3 * 16 * 8 * 0.5 + 2 * 16 * act_bpe)
 
 
-@pytest.mark.parametrize("expert_dtype", [None, "bfloat16", "fp4"])
-def test_runtime_dtype_noop_preserves_moe_metadata(tmp_path, expert_dtype):
-    meta = _load_small_moe_meta(tmp_path, expert_dtype=expert_dtype)
+@pytest.mark.parametrize(
+    ("server_args", "expected_bytes"),
+    [("--quantization fp8", (8192, 5888, 3072)), ("--dtype float32", (32768, 23552, 12288))],
+    ids=["quantization", "dtype"],
+)
+def test_declaring_the_experts_at_the_general_precision_is_not_a_second_precision(
+    tmp_path, server_args, expected_bytes
+):
+    """A config that writes ``expert_dtype`` out and one that leaves it inherited describe one model."""
+    state = SimpleNamespace(last_baseline={"extra_args": server_args})
+    inherited = _load_small_moe_meta(tmp_path / "inherited")
+    declared = _load_small_moe_meta(tmp_path / "declared", expert_dtype="bfloat16")
+    applied = [rc.apply_runtime_dtype(meta, rc.resolve_runtime_dtype(state, meta)) for meta in (inherited, declared)]
+    sizes = [(m.weight_bytes, m.active_weight_bytes, m.expert_weight_bytes) for m in applied]
+    assert sizes[0] == sizes[1] == expected_bytes
+    moved = [next(op for op in _perfmodel(m, concurrency=1).ops if op.name == "moe_fused").bytes_moved for m in applied]
+    assert moved[0] == moved[1]
+
+
+def test_runtime_dtype_noop_preserves_moe_metadata(tmp_path):
+    meta = _load_small_moe_meta(tmp_path, expert_dtype="fp4")
     rt = rc.resolve_runtime_dtype(SimpleNamespace(), meta)
 
     assert rc.apply_runtime_dtype(meta, rt) == meta
 
 
-@pytest.mark.parametrize("expert_dtype, expected_expert_bpe", [(None, 0.0), ("fp8", 1.0), ("fp4", 0.5)])
 @pytest.mark.parametrize(
     "server_args, source",
     [
@@ -632,15 +655,13 @@ def test_runtime_dtype_noop_preserves_moe_metadata(tmp_path, expert_dtype):
         ("--dtype float32", "quantization_config"),
     ],
 )
-def test_prequantized_moe_runtime_dtype_keeps_checkpoint_bytes(
-    tmp_path, expert_dtype, expected_expert_bpe, server_args, source
-):
-    meta = _load_small_moe_meta(tmp_path, quantization_config={"quant_method": "fp8"}, expert_dtype=expert_dtype)
+def test_prequantized_moe_runtime_dtype_keeps_checkpoint_bytes(tmp_path, server_args, source):
+    meta = _load_small_moe_meta(tmp_path, quantization_config={"quant_method": "fp8"}, expert_dtype="fp4")
     rt = rc.resolve_runtime_dtype(SimpleNamespace(last_baseline={"extra_args": server_args}), meta)
 
     assert rt.source == source
     assert rt.weight_dtype_bytes == 1.0
-    assert meta.expert_weight_dtype_bytes == expected_expert_bpe
+    assert meta.expert_weight_dtype_bytes == 0.5
     assert rc.apply_runtime_dtype(meta, rt) == meta
 
 
@@ -651,22 +672,22 @@ def test_cli_fp8_still_overrides_a_uniform_fp4_checkpoint(tmp_path):
 
     assert rt.source == "server_args_quantization"
     assert rt.weight_dtype_bytes == 1.0
-    assert meta.expert_weight_dtype_bytes == applied.expert_weight_dtype_bytes == 0.0
+    assert (meta.expert_weight_dtype_bytes, applied.expert_weight_dtype_bytes) == (0.5, 1.0)
     assert (applied.weight_bytes, applied.active_weight_bytes, applied.expert_weight_bytes) == (32768, 30464, 3072)
     assert rc.apply_runtime_dtype(applied, rt) == applied
 
 
-@pytest.mark.parametrize("active_bytes", [0, 16384])
-def test_runtime_dtype_still_scales_dense_weights(active_bytes):
-    meta = _dense_meta(weight_bytes=16384, active_weight_bytes=active_bytes)
+def test_runtime_dtype_still_scales_dense_weights():
+    meta = _dense_meta(weight_bytes=16384, active_weight_bytes=16384)
     rt = rc.resolve_runtime_dtype(SimpleNamespace(last_baseline={"extra_args": "--dtype fp8"}), meta)
     applied = rc.apply_runtime_dtype(meta, rt)
 
     assert rt.source == "server_args_dtype"
     assert applied.weight_dtype_bytes == 1.0
     assert applied.weight_bytes == 8192
-    assert applied.active_weight_bytes == active_bytes // 2
-    assert applied.expert_weight_bytes == applied.expert_weight_dtype_bytes == 0
+    assert applied.active_weight_bytes == 8192
+    assert applied.expert_weight_bytes == 0
+    assert applied.expert_weight_dtype_bytes == 1.0
     assert rc.apply_runtime_dtype(applied, rt) == applied
 
 

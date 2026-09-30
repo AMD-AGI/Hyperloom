@@ -4,8 +4,8 @@
 """Enablement: make a ``(model, backend)`` combination runnable at all.
 
 Exports the pure functions with consumers outside the package. The four
-collaborator classes are withheld: ``Coordinator._COLLAB_MODULES`` resolves them
-by dotted string, and exporting them would invite instantiation outside it.
+collaborator classes are withheld: they are bases of ``Coordinator``, not objects
+to instantiate on their own.
 """
 
 from __future__ import annotations

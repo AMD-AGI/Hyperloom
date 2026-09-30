@@ -495,6 +495,7 @@ def test_call_id_pairs_across_a_second_boundary(tmp_path, monkeypatch):
 
     assert len(client.generations) == 1
     assert em._counts["generations_paired"] == 1
+    assert client.generations[0].kwargs["metadata"]["call_id"] == "c-1"
 
 
 def test_distinct_call_ids_in_one_second_do_not_cross_pair(tmp_path, monkeypatch):

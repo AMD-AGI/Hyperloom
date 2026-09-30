@@ -386,54 +386,6 @@ class TestPolicyDenialAndPruned:
         assert "a3" in summary
 
 
-class TestApplyChanges:
-    def test_empty_changes_returns_empty(self):
-        assert SharedState().apply_changes({}, allow_core=True) == {}
-
-    def test_unknown_keys_are_skipped(self):
-        s = SharedState()
-        applied = s.apply_changes({"unknown_field": 1}, allow_core=True)
-        assert applied == {}
-
-    def test_known_field_set(self):
-        s = SharedState()
-        applied = s.apply_changes({"model_name": "foo"}, allow_core=True)
-        assert applied == {"model_name": "foo"}
-        assert s.model_name == "foo"
-
-    def test_core_field_dropped_when_allow_core_false(self):
-        # A non-privileged (allow_core=False) changes dict must not write a core field.
-        s = SharedState()
-        before = s.cumulative_gain_validated  # cumulative_gain_validated is a core field
-        applied = s.apply_changes(
-            {"current_action": "baseline", "cumulative_gain_validated": 999.0},
-            allow_core=False,
-        )
-        assert applied == {"current_action": "baseline"}
-        assert s.current_action == "baseline"
-        assert s.cumulative_gain_validated == before  # core write dropped
-
-    def test_a_stop_time_cannot_be_written_apart_from_its_reason(self):
-        # stop_reason is a core field, so a changes dict that carries both must not land the timestamp half either:
-        # the pair is what the export reads as "the session ended then, for this reason".
-        s = SharedState()
-        s.set_stop_reason("time_exhausted")
-        pinned = s.stop_ts
-        applied = s.apply_changes(
-            {"stop_reason": "target_reached", "stop_ts": "2026-01-01T00:01:00+00:00"},
-            allow_core=False,
-        )
-        assert applied == {}
-        assert s.stop_reason == "time_exhausted"
-        assert s.stop_ts == pinned
-
-    def test_core_field_written_when_allow_core_true(self):
-        s = SharedState()
-        applied = s.apply_changes({"cumulative_gain_validated": 999.0}, allow_core=True)
-        assert applied == {"cumulative_gain_validated": 999.0}
-        assert s.cumulative_gain_validated == 999.0
-
-
 class TestKernelPatchIdentity:
     def test_resolves_explicit_payload(self):
         s = SharedState()

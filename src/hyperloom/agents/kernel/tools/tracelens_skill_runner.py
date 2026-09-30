@@ -158,6 +158,59 @@ def _tool_call_transition(message: Any) -> str | None:
     return transition
 
 
+# For SDK builds that do not export TERMINAL_TASK_STATUSES.
+_TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped", "killed", "cancelled"})
+
+
+def _terminal_task_statuses() -> frozenset[str]:
+    try:
+        from claude_agent_sdk import TERMINAL_TASK_STATUSES  # type: ignore[import-not-found]
+    except ImportError:
+        return _TERMINAL_TASK_STATUSES
+    return frozenset(str(s) for s in TERMINAL_TASK_STATUSES)
+
+
+class _InFlight:
+    """Whether the run is waiting on work that emits no SDK message until it ends.
+
+    That is a foreground tool call, or a background task (an async sub-agent)
+    whose launching tool call already returned. A background task is tracked by
+    id from ``TaskStartedMessage`` until a ``TaskNotificationMessage`` or a
+    ``TaskUpdatedMessage`` with a terminal status, which is how the SDK says
+    active task ids must be cleared.
+    """
+
+    def __init__(self) -> None:
+        self.tool = False
+        self.tasks: set[str] = set()
+
+    @property
+    def busy(self) -> bool:
+        return self.tool or bool(self.tasks)
+
+    def observe(self, message: Any) -> None:
+        transition = _tool_call_transition(message)
+        if transition == "start":
+            self.tool = True
+        elif transition == "end":
+            self.tool = False
+        name = type(message).__name__
+        task_id = str(getattr(message, "task_id", "") or "")
+        if name == "ResultMessage":
+            self.tasks.clear()
+        elif not task_id:
+            return
+        elif name == "TaskStartedMessage":
+            self.tasks.add(task_id)
+        elif name == "TaskNotificationMessage":
+            self.tasks.discard(task_id)
+        elif name == "TaskUpdatedMessage":
+            patch = getattr(message, "patch", None)
+            status = patch.get("status") if isinstance(patch, dict) else getattr(patch, "status", None)
+            if str(status or getattr(message, "status", "") or "") in _terminal_task_statuses():
+                self.tasks.discard(task_id)
+
+
 # Strips a ``Kernel N:`` label prefix from a kernel-name cell piece.
 _KERNEL_LABEL_RE = re.compile(r"^\s*Kernel\s+\d+\s*:\s*", re.IGNORECASE)
 
@@ -291,9 +344,8 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
     a subdirectory whose name matches the shared capture-directory shape, so a
     layout that ranking already demotes is also a layout discovery can find.
     Matching by shape rather than by two hard-coded names is what lets an
-    unpatched SGLang's ``graph_capture_profile/`` through: it was previously
-    missed here, so the capture folder went unpassed even on runs that had
-    correctly picked the workload trace.
+    unpatched SGLang's ``graph_capture_profile/`` through, so the capture folder
+    is passed on whenever the workload trace was picked.
 
     Args:
         trace_input (Path): The trace input path (file or directory).
@@ -528,15 +580,15 @@ async def _drive_sdk_stream(
 ) -> str:
     """Consume the SDK stream, appending its text to ``chunks``; return the SDK error, ``""`` when there was none.
 
-    Each next message is bounded by an idle timeout (inactivity, not a total budget), widened while a tool call is in
-    flight because the SDK emits nothing between a tool's launch and its result.
+    Each next message is bounded by an idle timeout (inactivity, not a total budget), widened while a tool call or a
+    background task is in flight because the SDK emits nothing between its launch and its result.
     """
     sdk_error = ""
-    tool_in_flight = False
+    in_flight = _InFlight()
     stream_iter = stream.__aiter__() if hasattr(stream, "__aiter__") else stream
     try:
         while True:
-            wait_for = tool_idle_timeout if tool_in_flight else idle_timeout
+            wait_for = tool_idle_timeout if in_flight.busy else idle_timeout
             try:
                 if wait_for > 0:
                     message = await asyncio.wait_for(stream_iter.__anext__(), timeout=wait_for)
@@ -549,7 +601,12 @@ async def _drive_sdk_stream(
                 # down so its transport/subprocess does not leak. Name the phase —
                 # silence during a tool call means the tool overran its bound, not
                 # that the gateway died.
-                phase = "while a tool call was in flight" if tool_in_flight else "with no tool call in flight"
+                if in_flight.tool:
+                    phase = "while a tool call was in flight"
+                elif in_flight.tasks:
+                    phase = f"while {len(in_flight.tasks)} background task(s) were running"
+                else:
+                    phase = "with no tool call in flight"
                 sdk_error = f"stream idle timeout: no SDK message for {wait_for:.0f}s {phase}"
                 if log:
                     log(f"[claude-sdk] WARNING: {sdk_error}")
@@ -561,11 +618,7 @@ async def _drive_sdk_stream(
                         pass
                 break
             observe(message)
-            transition = _tool_call_transition(message)
-            if transition == "start":
-                tool_in_flight = True
-            elif transition == "end":
-                tool_in_flight = False
+            in_flight.observe(message)
             for text in _iter_message_text(message):
                 chunks.append(text)
                 if log:
@@ -785,6 +838,13 @@ async def run_tracelens_skill(
             operation="analyze_trace",
         )
     )
+    idle_timeout = _resolve_stream_idle_timeout_sec()
+    tool_idle_timeout = _resolve_tool_idle_timeout_sec(idle_timeout)
+    # In print mode the CLI terminates background sub-agents still running 600s
+    # after the main turn goes quiet, before the in-flight bound below applies.
+    kwargs.setdefault("env", {})["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = os.environ.get(
+        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", str(int(tool_idle_timeout * 1000))
+    )
 
     try:
         options = sdk_options_cls(**kwargs)
@@ -798,13 +858,12 @@ async def run_tracelens_skill(
     # Drive the SDK stream manually so each next message is bounded by a
     # per-message idle timeout (inactivity, not a total budget); the in-process
     # SDK has no client-side read timeout and would otherwise block on a stall.
-    idle_timeout = _resolve_stream_idle_timeout_sec()
     with _TrajectoryCall(resolved_model) as trajectory:
         sdk_error = await _drive_sdk_stream(
             sdk_query_factory(prompt=prompt, options=options),
             chunks=chunks,
             idle_timeout=idle_timeout,
-            tool_idle_timeout=_resolve_tool_idle_timeout_sec(idle_timeout),
+            tool_idle_timeout=tool_idle_timeout,
             observe=trajectory.observe,
             log=log,
         )

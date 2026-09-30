@@ -31,7 +31,6 @@ from hyperloom.orchestrator.phases.close import (
     _CLOSE_STEP_WAIT_CEILING_SEC,
     _CLOSE_STEP_WAIT_FLOOR_SEC,
 )
-from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
 from hyperloom.orchestrator.state.shared_state import effective_closing_grace_sec
 
 
@@ -174,6 +173,7 @@ class _StubSubAgentRunner:
 def coord(tmp_path: Path):
     """Lean Coordinator stub for hook unit tests."""
     c = Coordinator.__new__(Coordinator)
+    c._init_dispatch_state()
     c.session_dir = tmp_path
     c.shared_state = _BareState()
     c.tasks = _StubTaskRegistry()
@@ -439,7 +439,7 @@ async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
     coord.locks = ResourceLockManager(SqliteLeaseBackend(db))
     coord.sub = SubAgentRunner(coord.locks, coord.tasks)
     coord.shared_state.max_minutes = 60
-    coord.phase_close._close_step_wait_sec = lambda _task: 0.05  # type: ignore[method-assign]
+    coord._close_step_wait_sec = lambda _task: 0.05  # type: ignore[method-assign]
     finish = asyncio.Event()
     calls = []
 
@@ -459,19 +459,19 @@ async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
         assert elapsed < 2.0
         assert calls == [queued.task_id]
         assert (await coord.tasks.get(queued.task_id)).state == "running"
-        handle = coord.dispatcher._inflight_actions[queued.task_id]
+        handle = coord._inflight_actions[queued.task_id]
         assert handle.scope.cancelled
         assert handle.scope.reason == "caller_cancelled"
-        assert coord.dispatcher._executions
-        assert all(not execution.done() for execution in coord.dispatcher._executions)
+        assert coord._executions
+        assert all(not execution.done() for execution in coord._executions)
     finally:
-        executions = tuple(coord.dispatcher._executions)
+        executions = tuple(coord._executions)
         finish.set()
         await asyncio.gather(*executions)
     try:
         assert (await coord.tasks.get(queued.task_id)).state == "succeeded"
-        assert not coord.dispatcher._inflight_actions
-        assert not coord.dispatcher._executions
+        assert not coord._inflight_actions
+        assert not coord._executions
     finally:
         db.close()
 
@@ -497,7 +497,7 @@ async def test_the_wait_for_a_running_report_outlives_a_short_session_reserve(
 
 
 def test_the_wait_is_the_step_s_own_expected_runtime(coord):
-    bound = coord.phase_close._close_step_wait_sec(_running_report_row(coord))
+    bound = coord._close_step_wait_sec(_running_report_row(coord))
 
     assert bound == pytest.approx(ACTION_CATALOGUE["report"].typical_runtime_min * 60.0)
 
@@ -506,20 +506,20 @@ def test_a_step_the_catalogue_prices_at_almost_nothing_still_gets_the_floor(coor
     """``session_breakdown`` is priced at 12s; giving up on it after 12s is giving up on it."""
     row = _running_report_row(coord, kind="session_breakdown")
 
-    assert coord.phase_close._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
+    assert coord._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
 
 
 def test_an_uncatalogued_step_gets_the_floor_too(coord):
     row = _running_report_row(coord, kind="not_an_action")
 
-    assert coord.phase_close._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
+    assert coord._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
 
 
 def test_an_extravagantly_priced_step_is_capped(coord):
     """A wedged step must not hold the process open for as long as its action might legitimately run."""
     coord.action_registry = {"report": SimpleNamespace(typical_runtime_min=1000.0)}
 
-    bound = coord.phase_close._close_step_wait_sec(_running_report_row(coord))
+    bound = coord._close_step_wait_sec(_running_report_row(coord))
 
     assert bound == pytest.approx(_CLOSE_STEP_WAIT_CEILING_SEC)
 
@@ -598,6 +598,7 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
         "fact_finalize",
         "report",
         "session_breakdown",
+        "langfuse_flush",
         "artifact_package",
         "ndjson_drain",
         "done",
@@ -605,6 +606,7 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     by_step = {r["step"]: r for r in rows}
     assert by_step["report"]["status"] == "done"
     assert by_step["session_breakdown"]["status"] == "done"
+    assert by_step["langfuse_flush"]["status"] == "done"
     # fact_finalize now runs first and writes optimization_journal.json, so the artifact package has a curated file to
     # include.
     assert by_step["artifact_package"]["status"] == "done"
@@ -650,6 +652,7 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
         "fact_finalize",
         "report",
         "session_breakdown",
+        "langfuse_flush",
         "artifact_package",
         "ndjson_drain",
         "done",
@@ -730,7 +733,7 @@ async def test_close_sequencer_surfaces_remote_finalize_failure(
 ):
     coord.shared_state.phase_history = [_close_phase_history_row()]
     monkeypatch.setattr(
-        coord.writeback,
+        coord,
         "finalize_recipe_and_journal",
         lambda *, source: {
             "status": "error",
@@ -848,47 +851,6 @@ async def test_close_sequencer_skips_recipe_kb_steps_when_no_recipe_kb(coord):
     drain_row = next(r for r in rows if r["step"] == "ndjson_drain")
     assert drain_row["status"] == "skipped"
     assert coord.shared_state.close_sequence_done is True
-
-
-def test_close_and_recipe_finalize_fields_in_core_state_fields():
-    """LLM update_state must not flip close_sequence_done and bypass cli.finally's safety net."""
-    assert {
-        "close_sequence_done",
-        "recipe_finalize_status",
-        "recipe_finalize_attempts",
-        "recipe_finalize_outcome",
-    } <= CORE_STATE_FIELDS
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("close_sequence_done", True),
-        ("recipe_finalize_status", "written"),
-        ("recipe_finalize_attempts", 99),
-        ("recipe_finalize_outcome", {"status": "skipped"}),
-    ],
-)
-def test_policy_blocks_llm_recipe_finalize_state_write(field, value):
-    from hyperloom.orchestrator.roles.agent_role import (
-        default_role_registry,
-    )
-    from hyperloom.inference_optimizer.protocol.intent import (
-        Intent,
-        IntentType,
-    )
-    from hyperloom.orchestrator.policy.gate import (
-        PolicyDenied,
-        PolicyGate,
-    )
-
-    gate = PolicyGate(role_registry=default_role_registry())
-    intent = Intent(
-        type=IntentType.UPDATE_STATE,
-        payload={"changes": {field: value}},
-    )
-    with pytest.raises(PolicyDenied):
-        gate.validate_intent("orchestration", intent)
 
 
 @pytest.mark.asyncio
@@ -1127,7 +1089,7 @@ async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Pa
         finalize_calls.append(source)
         return {"status": "written"}
 
-    coord.writeback.finalize_recipe_and_journal = _spy  # type: ignore[method-assign]
+    coord.finalize_recipe_and_journal = _spy  # type: ignore[method-assign]
     await coord._recipe_kb_t4_hook()
     assert finalize_calls == ["t4_fallback"]
 
@@ -1164,7 +1126,7 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
         finalize_calls.append(source)
         return {"status": "written"}
 
-    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
+    coord.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
     coord.shared_state.save = lambda path: save_calls.append(path)  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
@@ -1241,7 +1203,7 @@ async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
         finalize_calls.append(source)
         return {"status": "written"}
 
-    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
+    coord.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 

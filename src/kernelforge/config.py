@@ -36,25 +36,16 @@ def _warn_removed_max_turns_env() -> None:
 def resolve_agent_model(agent_backend: str) -> str:
     """Resolve the model id from the environment ladder Hyperloom publishes.
 
-    Forge no longer ships alongside Hyperloom, it ships *inside* it, and an
-    operator configuring a box should not have to learn a second vocabulary for
-    the same decision. There is exactly one rung, and it is the platform's:
-    ``CLAUDE_MODEL`` / ``CODEX_MODEL``, the same pair
+    Forge ships inside Hyperloom, so an operator configuring a box learns one
+    vocabulary for the decision. There is exactly one rung, and it is the
+    platform's: ``CLAUDE_MODEL`` / ``CODEX_MODEL``, the same pair
     :func:`hyperloom.common.llm_config.resolve_forge_llm_model` reads. The two
     are written out separately rather than sharing one helper because they
     answer different questions -- that one picks the model for Hyperloom's own
     calls into a Forge campaign, this one picks the model an agent session
-    runs -- and the shared piece worth deduplicating is the variable names,
-    which is exactly what this change makes identical.
-
-    Forge used to consult private variables above that pair -- first
-    ``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL``, then a provider-neutral
-    ``FORGE_AGENT_MODEL`` -- from when it was a separate project that had to
-    name its own settings. Inside Hyperloom every one of those is a second
-    spelling of a setting the platform already names, and a second spelling is
-    only ever a second place for a box to be misconfigured. The Hyperloom-side
-    resolver never had them, so deleting them is what makes the two ladders the
-    same ladder rather than two that agree by coincidence.
+    runs -- and the shared piece is the variable names. A Forge-private
+    spelling of the same setting would only be a second place for a box to be
+    misconfigured.
 
     Only a settled backend has an answer here. ``auto`` gets ``""``: which
     provider runs is not known until :meth:`Config.agent_runtime` has checked
@@ -144,9 +135,6 @@ class Config:
     # Paths (derived)
     project_root: Path = field(default_factory=default_project_root)
     experiments_dir: Path = field(default=None)
-    # There is no `knowledge_dir` here any more. It used to resolve the packaged
-    # `data/knowledge_base` tree, which no caller ever read; the tree is gone and
-    # the field went with it.
     # Curated per-backend knowledge tree injected into the forge-loop system
     # prompt as an on-demand index (hardware / common_methodology / flydsl).
     local_knowledge_dir: Path = field(default=None)

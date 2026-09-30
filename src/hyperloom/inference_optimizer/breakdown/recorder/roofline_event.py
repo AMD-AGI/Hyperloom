@@ -546,7 +546,7 @@ class RooflineEventRecorder:
     def record_preflight(self, payload: Mapping[str, Any]) -> None:
         """Record the conditions the action found before it profiled anything.
 
-        These were previously log lines or nothing at all. They are facts about the starting state -- leftover
+        They are facts about the starting state -- leftover
         servers, free disk, trace files already sitting in this task's own output directory -- and they change
         how a later reader should read the result, so the event has to carry them whether or not the run
         succeeded.
@@ -598,9 +598,9 @@ class RooflineEventRecorder:
             row_type=ROW_PROFILE_RUN,
             natural_ids=(self._action_id, str(int(run_index))),
         )
-        # An action-level rollup of the per-run flag. Roofline no longer falls back to eager on a capture failure,
+        # An action-level rollup of the per-run flag. Roofline does not fall back to eager on a capture failure,
         # so this only latches when the arm or the operator override asked for graph capture to be off -- which
-        # still matters downstream, because kernel shapes differ between eager and captured execution.
+        # matters downstream, because kernel shapes differ between eager and captured execution.
         if disable_cuda_graph:
             self._record_action({"graph_capture_disabled": True})
 

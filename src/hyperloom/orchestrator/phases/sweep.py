@@ -27,20 +27,21 @@ def _conc_sweep_lease_ttl_sec(clamped_budget: int | None) -> int:
 
 
 class SweepPhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
         """Auto-enqueue the ``conc_sweep`` task on SWEEP entry."""
         state = self.shared_state
-        # An unwind a previous leg left owed still has the stack's patches on the
-        # tree, so settle it before the drain below applies anything on top.
+        # A stack attempt an earlier entry or leg left behind may still have its
+        # members on the tree, so settle it before the drain below applies
+        # anything on top; the recovery halts the session if it cannot.
         await self._recover_interrupted_stack_validation()
         # Drain pending KEEP integrates so sweep measures full current_best.
         if getattr(state, "has_keep_pending_integrate", False):
             await self._drain_pending_keep_integrates()
         # Validate the stack for positive NEEDS_REVIEW kernels.
         await self._maybe_validate_positive_needs_review_stack()
-        if not getattr(state, "conc_sweep_enabled", False):
+        if not state.conc_sweep_enabled:
             log.info(
                 "SWEEP entry (from=%s): conc_sweep disabled; recording terminal skip.",
                 from_phase or "<unknown>",
