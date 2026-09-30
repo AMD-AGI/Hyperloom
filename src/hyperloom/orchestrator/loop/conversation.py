@@ -369,6 +369,11 @@ class ConversationCollaborator(CoordinatorCollaborator):
         )
         append_conversation(session_dir=self.session_dir, record=record)
 
+    def _refresh_target_gap_pct(self) -> None:
+        """Update target_gap_pct from the current objective. Call once per tick before prompt assembly."""
+        obj = self._current_objective
+        self.shared_state.target_gap_pct = obj.gap_pct(self.shared_state) if obj is not None else 0.0
+
     async def _compose_prompt(self, agent_name: str) -> str:
         """Compose the orchestration prompt: SharedState summary + inbox tail (with canonical msg_id per inbox row)."""
         sections: list[str] = []
@@ -383,9 +388,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
             sections.append(phase_block)
 
         if agent_name == "orchestration":
-            # Refresh before any section renders it.
-            obj = self._current_objective
-            self.shared_state.target_gap_pct = obj.gap_pct(self.shared_state) if obj is not None else 0.0
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
             if self._run_deadline is not None and self._run_started_monotonic is not None:
@@ -574,15 +576,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
             source_dry = bool(evidence.get("source_arm_plateaued"))
             config_ev = evidence
             source_ev = evidence
-            try:
-                self._record_advisory_plateau(
-                    config=(config_dry, config_ev),
-                    source=(source_dry, source_ev),
-                )
-            except AttributeError:
-                # A stand-in that borrowed this method without the recorder
-                # plumbing; the advisory itself does not depend on it.
-                pass
             if config_dry:
                 lines.append("OPTIMIZE config arm plateaued: low recent KEEP gain plus specialist empty streak.")
                 lines.append(
@@ -616,6 +609,20 @@ class ConversationCollaborator(CoordinatorCollaborator):
             "arm until the plateau / budget gate fires."
         )
         return "\n".join(lines)
+
+    def _record_advisory_plateau_from_state(self) -> None:
+        """Snapshot the current plateau reading from shared state into the SBD timeline.
+
+        Both arms are recorded whether or not either fired, so an untripped
+        evaluation is visible as such in the breakdown.
+        """
+        _, evidence = _phase_state.per_lever_dryness(self.shared_state)
+        config_dry = bool(evidence.get("config_arm_plateaued"))
+        source_dry = bool(evidence.get("source_arm_plateaued"))
+        self._record_advisory_plateau(
+            config=(config_dry, evidence),
+            source=(source_dry, evidence),
+        )
 
     def _record_advisory_plateau(
         self,
@@ -910,6 +917,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
         ts = str(self.shared_state.last_discarded_escalate_hint_ts or "")
         if not hint:
             return ""
+        self.shared_state.last_discarded_escalate_hint = ""
+        self.shared_state.last_discarded_escalate_hint_ts = ""
         return (
             f"ADVISORY: your escalate_strategy_change hint '{hint}' (at {ts}) was discarded "
             "because a phase transition to a phase other than FRAMEWORK_AGENT fired before "

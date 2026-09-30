@@ -1073,6 +1073,8 @@ class Coordinator:
         """Run one reactor turn for ``agent_name`` and route its intents."""
         backend = self.backends[agent_name]
         sys_prompt = await self.conversation._load_system_prompt(agent_name)
+        if agent_name == "orchestration":
+            self.conversation._refresh_target_gap_pct()
         prompt = await self.conversation._compose_prompt(agent_name)
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
