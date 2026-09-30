@@ -8,27 +8,11 @@ from __future__ import annotations
 import dataclasses
 import json
 
-import pytest
 
 from hyperloom.orchestrator.state.shared_state import (
     LATEST_STATE_SCHEMA_VERSION,
     SharedState,
 )
-
-
-def _assert_update_state_denied(changes: dict) -> None:
-    """Assert PolicyGate refuses an orchestration ``update_state`` carrying ``changes``."""
-    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-    from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
-
-    gate = PolicyGate(role_registry=default_role_registry())
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(type=IntentType.UPDATE_STATE, payload={"changes": changes}),
-        )
-    assert exc.value.rule == "state_field"
 
 
 # 1. schema_version surface
@@ -240,71 +224,6 @@ def test_cli_exposes_reset_state_flag():
         ]
     )
     assert args2.reset_state is False
-
-
-# 6. Inv-10.2 — the gate blocks an LLM update_state phase change
-@pytest.mark.parametrize(
-    "field",
-    sorted(
-        {
-            "phase",
-            "phase_started_ts",
-            "phase_history",
-            "phase_budget_pct",
-            "recipe_kb_session_id",
-            "warm_start_recipe",
-            "warm_start_pitfalls",
-            "warm_start_lessons",
-            "specialist_rounds",
-            "research_lane_capacity",
-            "stop_reason",
-            "optimization_stack",
-            "current_best",
-            "working_recipe_generation",
-            "validated_recipe_generation",
-        }
-    ),
-)
-def test_v08_coordinator_owned_fields_are_not_writable_by_update_state(field):
-    """v0.8 §3.10 requires these to stay Coordinator-owned."""
-    _assert_update_state_denied({field: "forged"})
-
-
-def test_a_run_leg_boundary_is_not_writable_by_update_state():
-    """``leg_ended_ts`` decides where the stopped leg's phase segment ends.
-
-    The next leg banks time up to it, so a forged value bills that phase for
-    time it never ran; the Coordinator owns it exactly as it owns ``stop_ts``.
-    """
-    _assert_update_state_denied({"leg_ended_ts": "2099-01-01T00:00:00+00:00"})
-
-
-def test_policy_blocks_llm_schema_version_write():
-    """An LLM cannot rewrite the ``schema_version`` migration breadcrumb."""
-    from hyperloom.orchestrator.roles.agent_role import (
-        default_role_registry,
-    )
-    from hyperloom.inference_optimizer.protocol.intent import (
-        Intent,
-        IntentType,
-    )
-    from hyperloom.orchestrator.policy.gate import (
-        PolicyDenied,
-        PolicyGate,
-    )
-
-    gate = PolicyGate(role_registry=default_role_registry())
-    intent = Intent(
-        type=IntentType.UPDATE_STATE,
-        payload={"changes": {"schema_version": 1}},
-    )
-    with pytest.raises(PolicyDenied):
-        gate.validate_intent("orchestration", intent)
-
-
-def test_the_search_ledger_is_not_writable_by_update_state():
-    """A rewritten ``explore_search`` would bypass dedup-by-fingerprint."""
-    _assert_update_state_denied({"explore_search": {"tested": {}}})
 
 
 def test_enablement_accepted_config_path_roundtrips(tmp_path):

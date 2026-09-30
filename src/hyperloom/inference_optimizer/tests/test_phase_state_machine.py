@@ -17,7 +17,6 @@ from hyperloom.orchestrator.phases import machine_state as phase_state
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.gate import (
-    PolicyDenied,
     PolicyGate,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -579,27 +578,6 @@ def test_langfuse_status_includes_explore_runtime_and_kb_hit():
     assert summary["explore_elapsed_s"] >= 120
     assert "explore_ratio" in summary
     assert "session_elapsed_s" in summary
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        "phase",
-        "phase_started_ts",
-        "phase_started_unix",
-        "phase_history",
-        "phase_budget_pct",
-        "phase_elapsed_totals",
-    ],
-)
-def test_update_state_cannot_drive_the_phase_machine(field):
-    gate = PolicyGate(role_registry=_make_role_registry())
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(type=IntentType.UPDATE_STATE, payload={"changes": {field: "CLOSE"}}),
-        )
-    assert exc.value.rule == "state_field"
 
 
 def _make_role_registry():

@@ -11,11 +11,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     make_lifecycle_event,
     record_lifecycle_event,
 )
-import pytest
 
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.shared_state import (
     _LIFECYCLE_CAP,
     SharedState,
@@ -150,17 +146,3 @@ def test_lifecycle_persists_round_trip(tmp_path):
     assert ev["label"] == "TraceLens"
     assert ev["artifacts"] == {"candidates": "/tmp/kc.json"}
     assert ev["duration_s"] == 42.0
-
-
-def test_update_state_cannot_forge_lifecycle_events():
-    # The lifecycle log is the operator-facing record of what the run did.
-    gate = PolicyGate(role_registry=default_role_registry())
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.UPDATE_STATE,
-                payload={"changes": {"lifecycle": [{"step": "forged"}]}},
-            ),
-        )
-    assert exc.value.rule == "state_field"

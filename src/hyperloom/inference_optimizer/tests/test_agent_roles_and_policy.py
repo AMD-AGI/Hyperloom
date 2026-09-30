@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
@@ -336,44 +338,19 @@ def test_gate_orchestration_prune_branch_allowed_with_family(gate):
     )
 
 
-def test_gate_orchestration_update_state_core_field_rejected(gate):
+@pytest.mark.parametrize(
+    "field_name",
+    sorted({f.name for f in dataclasses.fields(SharedState)} - SharedState.AGENT_UPDATE_FIELDS.keys()),
+)
+def test_update_state_refuses_every_field_outside_the_agent_whitelist(gate, field_name):
+    """Every SharedState field is Coordinator-owned unless AGENT_UPDATE_FIELDS lists it, a new field included."""
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             "orchestration",
-            Intent(
-                type=IntentType.UPDATE_STATE,
-                payload={"changes": {"current_best": {"foo": 1}}},
-            ),
+            Intent(type=IntentType.UPDATE_STATE, payload={"changes": {field_name: "forged"}}),
         )
     assert exc.value.rule == "state_field"
-
-
-def test_gate_update_state_model_arch_tags_rejected(gate):
-    """An agent must not overwrite the config.json architecture tags via ``update_state``."""
-    for field_name in ("model_architectures", "model_type"):
-        with pytest.raises(PolicyDenied) as exc:
-            gate.validate_intent(
-                "orchestration",
-                Intent(
-                    type=IntentType.UPDATE_STATE,
-                    payload={"changes": {field_name: ["X"]}},
-                ),
-            )
-        assert exc.value.rule == "state_field", field_name
-
-
-def test_gate_update_state_degraded_markers_rejected(gate):
-    """An agent must not forge/clear the degraded-run markers."""
-    for field_name, value in (("degraded_mode", False), ("model_warnings", [])):
-        with pytest.raises(PolicyDenied) as exc:
-            gate.validate_intent(
-                "orchestration",
-                Intent(
-                    type=IntentType.UPDATE_STATE,
-                    payload={"changes": {field_name: value}},
-                ),
-            )
-        assert exc.value.rule == "state_field", field_name
+    assert repr(field_name) in str(exc.value)
 
 
 # allowed_tools_for_agent
@@ -422,55 +399,3 @@ def test_kernel_agent_prompt_file_absent():
 def test_robustness_role_no_system_prompt_file():
     p = asset_system_prompts_dir() / "robustness.md"
     assert not p.exists(), "robustness.md must not be shipped"
-
-
-def test_gate_update_state_closing_phase_and_baseline_config_rejected(gate):
-    # An agent must not force wind-down or inject a launch config path via update_state.
-    for field_name, value in (("closing_phase", True), ("baseline_config_path", "/etc/evil.yaml")):
-        with pytest.raises(PolicyDenied) as exc:
-            gate.validate_intent(
-                "orchestration",
-                Intent(
-                    type=IntentType.UPDATE_STATE,
-                    payload={"changes": {field_name: value}},
-                ),
-            )
-        assert exc.value.rule == "state_field", field_name
-
-
-def test_gate_update_state_cannot_move_the_resume_boundary(gate):
-    # resumed_ts dates the current run leg: moving it hands the previous leg's CLOSE transition back the right to
-    # speak for this one.
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.UPDATE_STATE,
-                payload={"changes": {"resumed_ts": "2026-01-01T00:00:00+00:00"}},
-            ),
-        )
-    assert exc.value.rule == "state_field"
-
-
-def test_the_model_cannot_rewrite_the_budget_the_closing_reserve_leaves_it(gate):
-    """The reserve decides how much of ``max_minutes`` is spendable, so it is budget too."""
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(type=IntentType.UPDATE_STATE, payload={"changes": {"closing_grace_sec": 0.0}}),
-        )
-    assert exc.value.rule == "state_field"
-
-
-def test_gate_update_state_cannot_move_a_session_end_time(gate):
-    # stop_ts is the timestamp half of stop_reason, written by the same setter: locking only the reason lets a model
-    # post-date the session's end.
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.UPDATE_STATE,
-                payload={"changes": {"stop_ts": "2026-01-01T00:01:00+00:00"}},
-            ),
-        )
-    assert exc.value.rule == "state_field"

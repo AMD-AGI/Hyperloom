@@ -399,23 +399,6 @@ class TestReportedProvenance:
 
 
 class TestRecordedShapeIsProvenanceNotADecision:
-    def test_the_topology_cannot_be_rewritten_by_update_state(self):
-        """Locked for the same reason as model_path: the report prints whatever it says."""
-        from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-        from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
-        from hyperloom.orchestrator.roles.agent_role import default_role_registry
-
-        gate = PolicyGate(role_registry=default_role_registry())
-        with pytest.raises(PolicyDenied) as exc:
-            gate.validate_intent(
-                "orchestration",
-                Intent(
-                    type=IntentType.UPDATE_STATE,
-                    payload={"changes": {"compute_partition": "CPX"}},
-                ),
-            )
-        assert exc.value.rule == "state_field"
-
     def test_the_published_env_is_a_lossy_subset_of_the_verdict(self):
         """Why the seed is handed the verdict instead of re-reading the environment."""
         from hyperloom.common.gpu_partition import published_shape

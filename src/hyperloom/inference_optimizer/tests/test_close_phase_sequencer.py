@@ -849,38 +849,6 @@ async def test_close_sequencer_skips_recipe_kb_steps_when_no_recipe_kb(coord):
     assert coord.shared_state.close_sequence_done is True
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("close_sequence_done", True),
-        ("recipe_finalize_status", "written"),
-        ("recipe_finalize_attempts", 99),
-        ("recipe_finalize_outcome", {"status": "skipped"}),
-    ],
-)
-def test_policy_blocks_llm_recipe_finalize_state_write(field, value):
-    """LLM update_state must not flip close_sequence_done and bypass cli.finally's safety net."""
-    from hyperloom.orchestrator.roles.agent_role import (
-        default_role_registry,
-    )
-    from hyperloom.inference_optimizer.protocol.intent import (
-        Intent,
-        IntentType,
-    )
-    from hyperloom.orchestrator.policy.gate import (
-        PolicyDenied,
-        PolicyGate,
-    )
-
-    gate = PolicyGate(role_registry=default_role_registry())
-    intent = Intent(
-        type=IntentType.UPDATE_STATE,
-        payload={"changes": {field: value}},
-    )
-    with pytest.raises(PolicyDenied):
-        gate.validate_intent("orchestration", intent)
-
-
 @pytest.mark.asyncio
 async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
     """End-to-end: real Coordinator + TaskRegistry enqueue both internal tasks and flip close_sequence_done."""
