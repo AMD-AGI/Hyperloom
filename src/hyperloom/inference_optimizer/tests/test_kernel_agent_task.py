@@ -19,7 +19,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
 )
 from hyperloom.orchestrator.actions.cancel_channel import cancel_scope_listener
 from hyperloom.orchestrator.phases import machine_state as ps
-from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 
 _KERNEL_AGENT_LANES = ("server_lifecycle", "workspace_mutation", "benchmark_lane")
@@ -245,11 +245,6 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
             "kernel_controller_done",
         ),
         (
-            "skip_to_sweep hint",
-            lambda st: st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP),
-            "kernel_no_more_leverage",
-        ),
-        (
             "idle streak",
             lambda st: (
                 setattr(st, "kernel_idle_ticks", ps.KERNEL_IDLE_MAX_TICKS),
@@ -278,7 +273,6 @@ def test_kernel_agent_in_flight_never_blocks_a_budget_exit():
     st = SharedState(session_id="s")
     _arm_kernel_phase(st)
     _spend_the_phase_budget(st)
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
 
     transition = ps.compute_next_phase(st, kernel_work_in_flight=True)
 
@@ -289,12 +283,11 @@ def test_kernel_agent_in_flight_never_blocks_a_budget_exit():
 
 @pytest.mark.asyncio
 async def test_kernel_holds_while_its_task_is_in_flight_and_leaves_once_it_settles(coord, monkeypatch):
-    """The idle guard must not hand the GPUs to SWEEP while the kernel_agent task still holds them."""
+    """The exit rule must not hand the GPUs to SWEEP while the kernel_agent task still holds them."""
     c = coord
     _skip_phase_entry_effects(c, monkeypatch)
     st = c.shared_state
     _arm_kernel_phase(st)
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
     task = await _create_kernel_agent(c)
     await c.tasks.transition(task.task_id, "running")
 
@@ -479,7 +472,6 @@ async def test_phase_transition_waits_until_no_task_is_running(coord, monkeypatc
     _skip_phase_entry_effects(c, monkeypatch)
     st = c.shared_state
     _arm_kernel_phase(st)
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
     task = await _create_kernel_agent(c)
     await c.tasks.transition(task.task_id, "running")
 
@@ -498,7 +490,6 @@ async def test_phase_transition_drops_queued_work_the_next_phase_does_not_allow(
     _skip_phase_entry_effects(c, monkeypatch)
     st = c.shared_state
     _arm_kernel_phase(st)
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
     roofline = await c.tasks.create(kind="roofline", params={}, idempotency_key="left-behind-roofline")
 
     await c._advance_phase_if_needed()

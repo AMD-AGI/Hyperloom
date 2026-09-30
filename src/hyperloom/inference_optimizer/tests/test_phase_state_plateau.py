@@ -262,24 +262,26 @@ def test_skip_to_kernel_hint_short_circuits_optimize():
 
 
 def test_kernel_does_not_exit_on_plateau():
-    """KERNEL_AGENT plateau is advisory only; only the skip_to_sweep hint or budget exhaustion may exit KERNEL."""
+    """Plateau alone (all attempts reverted, one still PARTIAL) does not exit KERNEL."""
     state = SimpleNamespace(
         phase="KERNEL_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
-        kernel_integrate_attempts={
-            f"k{i}": {"attempts": [{"decision": "REVERT", "ts": f"2026-05-19T18:0{i}:00"}]} for i in range(3)
+        kernel_opt_task_attempts={
+            "k0": {"last_decision": "REVERT", "last_status": "ok", "rejected_reason": "revert_decision", "failure_count": 0},
+            "k1": {"last_decision": "PARTIAL", "last_status": "ok", "rejected_reason": "", "failure_count": 0},
         },
         rejected_kernel_ids=[],
         pending_escalate_hint="",
         stop_reason="",
+        optimization_stack=[],
     )
     assert compute_next_phase(state) is None
 
 
-def test_gemm_completion_alone_does_not_exit_kernel():
-    """The GEMM-completed shortcut is removed; GEMM completion alone never advances KERNEL_AGENT → SWEEP."""
+def test_gemm_completion_with_no_pending_work_exits_kernel():
+    """GEMM done with no further kernel_opt work pending → KERNEL exits to SWEEP."""
     state = SimpleNamespace(
         phase="KERNEL_AGENT",
         phase_started_unix=0.0,
@@ -296,8 +298,13 @@ def test_gemm_completion_alone_does_not_exit_kernel():
             "tuned_file": "/tmp/tuned.csv",
         },
         stop_reason="",
+        optimization_stack=[],
     )
-    assert compute_next_phase(state) is None
+    out = compute_next_phase(state)
+    assert out is not None
+    target, reason, _ = out
+    assert target == PHASE_SWEEP
+    assert reason == "kernel_no_more_leverage"
 
 
 def test_compute_next_phase_skip_to_close_routes_to_close():
@@ -363,7 +370,7 @@ def test_compute_next_phase_skip_to_sweep_from_explore_routes_to_kernel():
     assert evidence.get("terminal") is not True
 
 
-def test_compute_next_phase_skip_to_sweep_from_kernel_routes_to_sweep():
+def test_kernel_with_no_pending_work_routes_to_sweep():
     out = compute_next_phase(_skip_to_sweep_state("KERNEL_AGENT"), kernel_enabled=True)
     assert out is not None
     target, reason, _ = out
@@ -371,7 +378,7 @@ def test_compute_next_phase_skip_to_sweep_from_kernel_routes_to_sweep():
     assert reason == "kernel_no_more_leverage"
 
 
-def test_kernel_skip_to_sweep_waits_for_pending_keep():
+def test_kernel_holds_while_work_pending_keep():
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.has_keep_pending_integrate = True
 
@@ -379,7 +386,7 @@ def test_kernel_skip_to_sweep_waits_for_pending_keep():
     assert compute_next_phase(state, kernel_enabled=True) is None
 
 
-def test_kernel_skip_to_sweep_waits_for_partial_kernel_attempt():
+def test_kernel_holds_while_work_pending_partial_attempt():
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.kernel_opt_task_attempts = {
         "k009": {
@@ -393,7 +400,7 @@ def test_kernel_skip_to_sweep_waits_for_partial_kernel_attempt():
     assert compute_next_phase(state, kernel_enabled=True) is None
 
 
-def test_kernel_skip_to_sweep_waits_for_untried_hot_kernel():
+def test_kernel_holds_while_work_pending_untried_hot_kernel():
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.untried_hot_reusable_kernels = lambda: ["k017"]
 
@@ -401,7 +408,7 @@ def test_kernel_skip_to_sweep_waits_for_untried_hot_kernel():
     assert compute_next_phase(state, kernel_enabled=True) is None
 
 
-def test_geak_terminal_skip_to_sweep_ignores_per_kernel_pending_work():
+def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work():
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.kernel_optimizer = "geak"
     state.geak_result = {"status": "no_gain"}
@@ -415,7 +422,7 @@ def test_geak_terminal_skip_to_sweep_ignores_per_kernel_pending_work():
     assert reason == "kernel_no_more_leverage"
 
 
-def test_kernel_skip_to_sweep_waits_for_retryable_failed_kernel():
+def test_kernel_holds_while_work_pending_retryable_failed_kernel():
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.kernel_opt_task_attempts = {
         "k018": {
@@ -431,7 +438,7 @@ def test_kernel_skip_to_sweep_waits_for_retryable_failed_kernel():
     assert compute_next_phase(state, kernel_enabled=True) is None
 
 
-def test_kernel_skip_to_sweep_ignores_rejected_or_integrated_attempts():
+def test_kernel_exits_when_all_attempts_are_rejected_or_integrated():
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.rejected_kernel_ids = ["k001"]
     state.optimization_stack = [{"action": "integrate", "kernel_id": "k002"}]

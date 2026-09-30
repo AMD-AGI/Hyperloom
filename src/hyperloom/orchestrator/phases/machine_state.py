@@ -1556,9 +1556,8 @@ def _kernel_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
                 "task_count": int(pending.get("controller_task_count") or 0),
                 "reason": str(pending.get("controller_reason") or ""),
             }
-        hint = str(inputs.get("hint") or "")
-        if hint == ESCALATE_HINT_SKIP_TO_SWEEP and not work_pending:
-            return "kernel_no_more_leverage", {"evidence": "kernel_no_more_leverage", "hint": hint}
+        if not work_pending:
+            return "kernel_no_more_leverage", {"evidence": "kernel_settled"}
         idle_ticks = int(plateau.get("idle_ticks") or 0)
         idle_since = _number(plateau.get("idle_since_unix")) or 0.0
         if idle_ticks >= int(plateau.get("idle_max_ticks") or 0) and idle_since > 0.0:
@@ -1963,7 +1962,7 @@ def record_phase_transition(
     ts: str | None = None,
     ts_unix: float | None = None,
 ) -> dict[str, Any]:
-    """Append a phase_history row and atomically update ``phase`` fields; ``phase``/``phase_history`` are CORE_STATE_FIELDS so LLM update_state is rejected. Returns the inserted row."""
+    """Append a phase_history row and atomically update ``phase`` fields; Coordinator-only writer. Returns the inserted row."""
     from datetime import datetime as _dt, timezone as _tz
     import time as _time
 
