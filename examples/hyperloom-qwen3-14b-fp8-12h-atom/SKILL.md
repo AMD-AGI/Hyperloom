@@ -165,7 +165,7 @@ Setup checks the selected Python, ROCm torch and ATOM import/server readiness.
 Run its read-only check even when setup previously completed:
 
 ```bash
-"$PYTHON" -m hyperloom.inference_optimizer.setup --check-only -- \
+"$PYTHON" -m hyperloom setup --check-only -- \
   --install-framework none --frameworks atom --require-frameworks \
   --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}"
 ```
@@ -174,7 +174,7 @@ Reuse successful setup in this environment. Only if setup is needed, explain its
 changes and obtain approval before running:
 
 ```bash
-"$PYTHON" -m hyperloom.inference_optimizer.setup -- \
+"$PYTHON" -m hyperloom setup -- \
   --install-framework none --frameworks atom --require-frameworks \
   --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}" --yes
 ```
@@ -251,7 +251,7 @@ Do not replace workload flags with environment-only settings or add
 set -e
 : "${PYTHON:?PYTHON missing}" "${MODEL_PATH:?MODEL_PATH missing}"
 : "${RUN_LOG:?RUN_LOG missing}" "${LAUNCH_INFO_FILE:?LAUNCH_INFO_FILE missing}"
-"$PYTHON" -m hyperloom.inference_optimizer.cli --verbose optimize \
+"$PYTHON" -m hyperloom optimize --verbose \
   --model "$MODEL_PATH" \
   --framework atom \
   --tp 1 --conc 64 --isl 1024 --osl 1024 \

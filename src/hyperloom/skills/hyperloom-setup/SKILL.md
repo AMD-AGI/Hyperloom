@@ -273,7 +273,7 @@ For `none` with a preinstalled SGLang/vLLM stack:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework none --yes
 ```
 
 For **preinstalled ATOM**, activate its existing environment or keep the user's
@@ -288,7 +288,7 @@ Run the non-mutating verification from the selected workspace:
 ```bash
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export INFERENCE_OPTIMIZER_FORCE_PYTHON=1
-"$PYTHON" -m hyperloom.inference_optimizer.setup --check-only -- \
+"$PYTHON" -m hyperloom setup --check-only -- \
   --install-framework none --frameworks atom --require-frameworks \
   --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}"
 ```
@@ -300,7 +300,7 @@ ROCm hotfixes. Do not repeat completed setup just for the handoff or overwrite
 the already selected `USER_DATA_PATH`.
 
 ```bash
-"$PYTHON" -m hyperloom.inference_optimizer.setup -- \
+"$PYTHON" -m hyperloom setup -- \
   --install-framework none --frameworks atom --require-frameworks \
   --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}" --yes
 ```
@@ -316,7 +316,7 @@ defaults to isolated, the flag below is explicit):
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework vllm --framework-env isolated --yes
 ```
 
 Downgrade path only when the user explicitly chooses a pre-0.28 vLLM on a host
@@ -325,14 +325,14 @@ that failed the glibc check:
 ```bash
 export REPO_ROOT="$(pwd -P)"
 export VLLM_VERSION=0.27.1
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework vllm --framework-env isolated --yes
 ```
 
 For `sglang`:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework sglang --yes
 ```
 
 `none` reuses a preinstalled framework; it does not remove it. If no serving

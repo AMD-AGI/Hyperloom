@@ -78,7 +78,7 @@ when possible, but launchers that know the class should pass it explicitly to
 avoid a generic fallback:
 
 ```diff
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
     --model /path/to/GLM-5-FP8 \
     --framework sglang \
     --gpu-type mi355x \
@@ -111,7 +111,7 @@ the "vs B200" comparison number).
 
 Earlier launchers might have waited for the Coordinator to emit a
 `setup` action. Move all setup work to **before** the
-`python -m hyperloom.inference_optimizer.cli optimize` call:
+`python -m hyperloom optimize` call:
 
 ```diff
 # launcher.sh
@@ -119,7 +119,7 @@ Earlier launchers might have waited for the Coordinator to emit a
 + bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
 + . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 + ray stop --force; ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true; ray start --head --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
-+ python3 -m hyperloom.inference_optimizer.cli optimize ...
++ python3 -m hyperloom optimize ...
 ```
 
 ### Recommended: review the `KERNEL_OPT_BACKEND_ORDER` default
@@ -238,7 +238,7 @@ For any minor or patch upgrade:
    ```
 4. If you have ongoing sessions you want to resume across the upgrade,
    verify `manifest.json` and `state.json` are intact, then run
-   `python -m hyperloom.inference_optimizer.cli optimize --resume-from "$SESSION_DIR"`.
+   `python -m hyperloom optimize --resume-from "$SESSION_DIR"`.
 
 Upgrades do not rewrite explicit `HYPERLOOM_LOCAL_KB_ROOT` paths or historical
 sessions. The one-time implicit Recipe-root migration described above is the

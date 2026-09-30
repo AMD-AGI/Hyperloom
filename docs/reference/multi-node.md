@@ -136,7 +136,7 @@ The pinned workload skill at
 [`docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md)
 contains two ready-to-run blocks — **Workload A (infera + PD)** and **Workload B
 (rayjob)** — each a `FLAGS` list and an `Environment` block. The agent runs
-`inference_optimizer optimize` with those blocks and monitors `state.json` until a
+`hyperloom optimize` with those blocks and monitors `state.json` until a
 terminal `stop_reason`.
 
 ### `optimize` flags
@@ -189,7 +189,7 @@ The following example shows an infera + PD disaggregated launch after the
 platform has handed a cluster over:
 
 ```bash
-inference_optimizer optimize \
+hyperloom optimize \
   --model ${NFS_SHARED_ROOT}/models/Qwen3-30B-A3B \
   --nodes 2 --mn-backend infera \
   --pd-mode disaggregated \
@@ -311,7 +311,7 @@ failed before writing `manifest.json`.
 find "$USER_DATA_PATH" -name manifest.json
 
 # Resume with the exact session directory
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
   --resume-from /path/to/session
 ```
 

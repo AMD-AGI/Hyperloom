@@ -225,7 +225,7 @@ ingest it whole on session end.
    `ls "$SESSION_DIR/state.json"`.
 2. Relaunch with `--resume-from`:
    ```bash
-   python3 -m hyperloom.inference_optimizer.cli optimize --resume-from "$SESSION_DIR"
+   python3 -m hyperloom optimize --resume-from "$SESSION_DIR"
    ```
 3. Coordinator reads `manifest.json` + `state.json`, re-enters the
    loop at the last completed action. The current in-flight action
