@@ -303,7 +303,7 @@ def _cycle_reloop_min_remaining_sec(
     """
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
-    effective = float(min_remaining_sec)
+    effective = float(min_remaining_sec) if min_remaining_sec is not None else _default_cycle_reloop_min_remaining_sec()
     max_minutes = _max_minutes(state)
     if max_minutes > 0:
         budget_sec = max_minutes * 60.0
@@ -1338,8 +1338,8 @@ def _kernel_predicate_inputs(
     plateau = {
         "idle_ticks": int(getattr(state, "kernel_idle_ticks", 0) or 0),
         "idle_since_unix": _kernel_idle_since_unix(state),
-        "idle_max_ticks": KERNEL_IDLE_MAX_TICKS,
-        "idle_min_seconds": KERNEL_IDLE_MIN_SECONDS,
+        "idle_max_ticks": _kernel_idle_max_ticks(),
+        "idle_min_seconds": _kernel_idle_min_seconds(),
         "rejected_kernel_count": len(getattr(state, "rejected_kernel_ids", None) or []),
     }
     return pending, plateau, _budget_predicate_inputs(state, now_unix=now_unix)

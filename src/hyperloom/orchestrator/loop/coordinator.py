@@ -885,12 +885,6 @@ class Coordinator:
         objective = objective or TimeOnlyObjective()
         # Stash so _compose_prompt can update target_gap_pct.
         self._current_objective = objective
-        # Capture the live loop for the inline fast-action context tool.
-        try:
-            self._coordinator_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self._coordinator_loop = None
-
         # A dedicated thread reading the interpreter's wakeup pipe, not a loop
         # callback: a TERM has to be recorded while the loop is busy.
         if install_signal_handlers:
