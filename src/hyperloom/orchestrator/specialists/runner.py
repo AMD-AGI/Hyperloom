@@ -77,6 +77,34 @@ log = logging.getLogger(__name__)
 NO_GIT_FRAMEWORK_SOURCE_ROOT = "no_git_framework_source_root"
 
 
+def _find_project_dir_rel(worktree: Path, source: Any) -> str:
+    """Return the relative path inside ``worktree`` to the nearest pip-installable project directory.
+
+    Walks up from ``FrameworkTree.tree`` (the package dir) to ``FrameworkTree.root``
+    (the checkout or snapshot root) looking for the first directory that contains
+    ``pyproject.toml`` or ``setup.py``.  Returns ``""`` when the project root is the
+    worktree root itself, or when no project file is found.
+    """
+    if source is None:
+        return ""
+    tree_path = getattr(source, "tree", None)
+    root_path = getattr(source, "root", None)
+    if tree_path is None or root_path is None:
+        return ""
+    try:
+        tree_abs = Path(str(tree_path))
+        root_abs = Path(str(root_path))
+        for candidate in (tree_abs, *tree_abs.parents):
+            if candidate == root_abs or not str(candidate).startswith(str(root_abs)):
+                break
+            if (candidate / "pyproject.toml").is_file() or (candidate / "setup.py").is_file():
+                rel = candidate.relative_to(root_abs)
+                return "" if rel == Path(".") else str(rel)
+    except (OSError, ValueError):
+        pass
+    return ""
+
+
 def specialist_patch_preflight_error(params: dict[str, Any] | None, *, framework_repo_path: str = "") -> str:
     """Return the deterministic source-root error for a patch specialist."""
     task_params = params or {}
@@ -661,6 +689,7 @@ class SpecialistRunner:
                 session_framework_tree=str(params.get("session_framework_tree") or ""),
                 framework_source_roots=tuple(params.get("framework_source_roots") or ()),
                 worktree_base=str(worktree_base) if worktree is not None and worktree_base is not None else "",
+                worktree_project_rel=_find_project_dir_rel(worktree, worktree_source) if worktree is not None else "",
                 source_hint_directories=tuple(params.get("source_hint_directories") or ()),
                 model_info=dict(params.get("model_info") or {}),
                 static_recon_checklist=str(params.get("static_recon_checklist") or ""),

@@ -129,6 +129,21 @@ def _fetch_candidate_ref(repo_dir: Path, candidate: Candidate) -> None:
     )
 
 
+# venv lifecycle
+def create_venv(venv_dir: Path, *, timeout_sec: int = 600) -> None:
+    """Create a fresh venv with ``--system-site-packages`` at ``venv_dir``.
+
+    Removes any existing venv first so the caller always gets a clean slate.
+    """
+    if venv_dir.exists():
+        shutil.rmtree(venv_dir)
+    log.info("create_venv: %s", venv_dir)
+    _run_subprocess(
+        [sys.executable, "-m", "venv", "--system-site-packages", str(venv_dir)],
+        timeout_sec=timeout_sec,
+    )
+
+
 # Per-candidate workspace lifecycle
 def prepare_candidate_workspace(
     candidate: Candidate,
@@ -165,18 +180,7 @@ def prepare_candidate_workspace(
             _worktree_ref(candidate),
         ]
     )
-    if venv_dir.exists():
-        shutil.rmtree(venv_dir)
-    log.info(
-        "prepare_candidate_workspace[%02d] %s: venv -> %s",
-        index,
-        candidate.ref,
-        venv_dir,
-    )
-    _run_subprocess(
-        [sys.executable, "-m", "venv", "--system-site-packages", str(venv_dir)],
-        timeout_sec=600,
-    )
+    create_venv(venv_dir)
     return WorkspacePaths(candidate_dir, worktree_dir, venv_dir)
 
 
@@ -184,6 +188,7 @@ __all__ = [
     "DiskPreflightError",
     "PER_CANDIDATE_GB",
     "WorkspacePaths",
+    "create_venv",
     "disk_preflight",
     "prepare_candidate_workspace",
     "prepare_repo_cache",
