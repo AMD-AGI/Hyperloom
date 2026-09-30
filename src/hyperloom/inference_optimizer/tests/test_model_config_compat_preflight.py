@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.cli import model_gate as cli
+from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 
 
@@ -45,8 +46,7 @@ def _seed_state(session_dir: Path, monkeypatch):
 def _default_non_amd_gpu(monkeypatch):
     """Keep config checks hermetic unless a test passes gpu_type explicitly."""
     monkeypatch.delenv("GPU_TYPE", raising=False)
-    # Patch the real GPU autodetect call site (cli re-exports the same object).
-    monkeypatch.setattr(cli_model_gate, "_autodetect_gpu_type", lambda: None)
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: None)
 
 
 # _detect_incompatible_model_config

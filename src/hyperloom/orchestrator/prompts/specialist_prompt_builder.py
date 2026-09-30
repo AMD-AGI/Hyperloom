@@ -907,8 +907,9 @@ class SpecialistPromptInputs:
     # Extra knowledge-domain tags; each contributes a focus block to Section 1.
     extra_focus_tags: tuple[str, ...] = ()
 
-    # Local source navigation hint. ``worktree_base`` is empty when the
-    # framework is pip-installed rather than a checkout.
+    # Local source navigation hint. ``worktree_base`` is the tree the worktree
+    # stands for -- the checkout it was cut from, or the installed tree it holds
+    # a snapshot of -- and is empty when the specialist has no worktree.
     session_framework_tree: str = ""
     framework_source_roots: tuple[str, ...] = ()
     worktree_base: str = ""
@@ -1968,15 +1969,17 @@ def _source_root_row(root: str, *, worktree_base: str) -> str:
 
     Args:
         root (str): The source root to render.
-        worktree_base (str): The checkout the specialist's worktree was cut
-            from, when there is one.
+        worktree_base (str): The tree the specialist's worktree stands for,
+            when there is one.
 
     Returns:
         str: A markdown list row for the root.
     """
     base = (worktree_base or "").rstrip("/")
-    if base and root.rstrip("/") == base:
-        return f"- {root} — git checkout; your worktree was cut from it"
+    if base and Path(root.rstrip("/")).is_relative_to(base):
+        if (Path(base) / ".git").exists():
+            return f"- {root} — git checkout; your worktree was cut from it"
+        return f"- {root} — installed package; your worktree holds a git snapshot of it, so edit its files there"
     if (Path(root) / ".git").is_dir():
         return f"- {root} — git checkout"
     return f"- {root} — installed package, no git tree: re-author upstream diffs against it, never apply them"

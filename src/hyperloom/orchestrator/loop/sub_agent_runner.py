@@ -99,7 +99,7 @@ class SubAgentResult:
               classify a failure as crash-severity for the KB.
             * ``"no_executor"``: no runner registered for the task's
               ``kind`` — set directly on this dataclass, same site as
-              ``policy_{rule}``, so this exit no longer collapses into
+              ``policy_{rule}``, so this exit does not collapse into
               ``"unknown_error"`` either.
             * The raised exception's ``__class__.__name__`` (e.g.
               ``"TimeoutError"``): an executor raised instead of returning a

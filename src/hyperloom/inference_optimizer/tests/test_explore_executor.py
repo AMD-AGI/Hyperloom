@@ -2415,19 +2415,11 @@ def test_unified_attn_filter_matches_aiter_dist_version_short_sha(tmp_path):
     )
 
 
-def test_atom_default_grid_survives_compatibility_filter_without_help_probe(
-    monkeypatch,
-):
-    """When the atom help-text probe is unavailable, ``apply_compatibility_filter`` drops no seed variant."""
-    # The filter resolves this name in its own module, so patching the re-export on _grid_runner would leave the real
-    # ten-second probe running.
-    from hyperloom.orchestrator.actions.executors import _grid_variant_filter
-
-    monkeypatch.setattr(_grid_variant_filter, "_probe_server_help_text", lambda fw: "")
-
+def test_atom_default_grid_survives_compatibility_filter():
+    """``apply_compatibility_filter`` drops no atom seed variant."""
     grid = _atom_default_grid(model_class="moe_mla", conc=64)
     kept, dropped = apply_compatibility_filter(grid, framework="atom", model_path="")
-    assert kept == grid, f"compatibility filter dropped seed variants when help-text probe is empty; dropped={dropped}"
+    assert kept == grid, f"compatibility filter dropped seed variants; dropped={dropped}"
 
 
 def test_grid_variants_from_payload_coerces_list_extra_args():

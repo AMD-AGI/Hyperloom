@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -494,7 +493,8 @@ def baseline_writer(monkeypatch, tmp_path):
 
     _agentx(monkeypatch)
     state = SharedState(framework="vllm", benchmark_mode="agentx")
-    writer = WritebackCollaborator(SimpleNamespace(shared_state=state, session_dir=tmp_path))
+    writer = WritebackCollaborator()
+    vars(writer).update(shared_state=state, session_dir=tmp_path)
     monkeypatch.setattr(writer, "_refresh_gaps", AsyncMock(), raising=False)
     monkeypatch.setattr(writer, "_drain_queued_baselines", AsyncMock())
     monkeypatch.setattr(writer, "_should_run_prelude_bootstrap", lambda _tput: False)

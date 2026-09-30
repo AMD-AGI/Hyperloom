@@ -60,6 +60,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
 )
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
+from ..collaborator import CoordinatorCollaborator
 
 # Path-like keys surfaced from a kernel handler payload/result so operators can see where a step's artifacts went.
 _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
@@ -100,9 +101,6 @@ def _lifecycle_paths(payload: Any) -> dict[str, str]:
             out[key] = val
     return out
 
-
-# ``Coordinator`` is intentionally NOT imported (avoids a module-level import cycle with coordinator.py); it is held
-# as a back-reference and the annotation below is a deferred string.
 
 log = __import__("logging").getLogger(__name__)
 
@@ -401,15 +399,8 @@ def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
     recorder.record_proposal_review_outcome(proposal_id, **outcome)
 
 
-class IntentRouter:
+class IntentRouter(CoordinatorCollaborator):
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
-
-    def __init__(self, coordinator: Any) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str) -> Any:
-        # Attributes not defined on the router resolve onto the coordinator.
-        return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
         """Freeze patch ownership when a specialist task is created."""
@@ -422,7 +413,7 @@ class IntentRouter:
 
             gap_layer = str(params.get("gap_layer") or "").strip().lower()
             active_phase = str(getattr(self.shared_state, "phase", "") or "").strip().upper()
-            # Layer first, phase last: both lanes share one phase, so the live phase no longer says which lever a
+            # Layer first, phase last: both lanes share one phase, so the live phase does not say which lever a
             # specialist moves.
             if gap_layer == "framework":
                 owner = "FRAMEWORK_AGENT"
@@ -499,7 +490,7 @@ class IntentRouter:
             it = intent.type
             handler_name = _INTENT_DISPATCH.get(it)
             if handler_name is not None:
-                await getattr(self._coord, handler_name)(source, intent)
+                await getattr(self, handler_name)(source, intent)
             else:
                 # Unknown / unhandled intent — record for replay.
                 await self._record_observation(
@@ -640,7 +631,7 @@ class IntentRouter:
                 str((entry or {}).get("verdict") or "").strip() for entry in verdict_map.values()
             )
             self._log_mixed_verdict_map_collapse(target, verdict, held_by_name)
-        await self._coord._handle_single_verdict(
+        await self._handle_single_verdict(
             source=source,
             pending=pending,
             verdict=verdict,
@@ -851,12 +842,12 @@ class IntentRouter:
                 approved_variant_names=approved_variant_names,
             )
         elif verdict == "reject" and is_upstream_pr_prescreen(pending.action_name, pending.payload):
-            await self._coord.phase_framework.record_critic_denial(pending, reasoning)
+            await self.phase_framework.record_critic_denial(pending, reasoning)
         elif verdict == "reject" and pending.action_name == "integrate_patch" and bool(pa_params.get("enablement")):
             # A Critic-rejected ENABLEMENT integrate_patch never reaches the executor, so the normal integrate-result
             # rearm never fires.
             try:
-                await self._coord._maybe_rearm_enablement(
+                await self._maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
                 )
             except Exception:
@@ -865,7 +856,7 @@ class IntentRouter:
                     sid_candidate,
                 )
         elif verdict == "needs_review":
-            await self._coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, advisory)
+            await self.phase_framework.maybe_reauthor_from_critic_feedback(pending, advisory)
 
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""
@@ -988,7 +979,7 @@ class IntentRouter:
                 if needs_gpu:
                     lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
                     # Shared with the GPU-pool lease so the two TTLs never drift.
-                    ttl = self._coord._gpu_lease_ttl_sec(
+                    ttl = self._gpu_lease_ttl_sec(
                         int(ttl or 0),
                         params=params,
                     )
@@ -1569,13 +1560,9 @@ class IntentRouter:
 
     async def _handle_update_state(self, source: str, intent: Intent) -> None:
         """Apply agent-requested SharedState changes and report the result."""
-        # Apply to persistent SharedState (PolicyGate enforces core-field writes).
-        applied = self.shared_state.apply_changes(
-            intent.payload["changes"],
-            allow_core=False,
-        )
-        if applied:
-            self.shared_state.save(self.session_dir)
+        changes = intent.payload["changes"]
+        self.shared_state.apply_agent_update(changes)
+        self.shared_state.save(self.session_dir)
         await self.bus.append_and_seq(
             Message.new(
                 source,
@@ -1583,8 +1570,7 @@ class IntentRouter:
                 "observation",
                 {
                     "kind": "update_state",
-                    "changes": applied,
-                    "rejected": sorted(set(intent.payload["changes"]) - set(applied)),
+                    "changes": dict(changes),
                 },
             )
         )

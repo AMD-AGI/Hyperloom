@@ -46,11 +46,11 @@ async def test_pump_joins_long_work_without_a_supervisor_stamp(tmp_path, monkeyp
     coord = await _build_coord(tmp_path)
     coord._dispatcher_poll_sec = 0.02
     assert not hasattr(coord.reconciler, "stamp_progress")
-    reaped = AsyncMock(wraps=coord.dispatcher._reap_dispatched_task)
-    monkeypatch.setattr(coord.dispatcher, "_reap_dispatched_task", reaped)
-    monkeypatch.setattr(coord.dispatcher, "_is_promotable_result", lambda *_args: True)
-    monkeypatch.setattr(coord.dispatcher, "_promote_to_shared_state", AsyncMock())
-    monkeypatch.setattr(coord.dispatcher, "_fact_write_hook", AsyncMock())
+    reaped = AsyncMock(wraps=coord._reap_dispatched_task)
+    monkeypatch.setattr(coord, "_reap_dispatched_task", reaped)
+    monkeypatch.setattr(coord, "_is_promotable_result", lambda *_args: True)
+    monkeypatch.setattr(coord, "_promote_to_shared_state", AsyncMock())
+    monkeypatch.setattr(coord, "_fact_write_hook", AsyncMock())
     calls = []
 
     async def execute(ctx):
@@ -76,6 +76,6 @@ async def test_pump_joins_long_work_without_a_supervisor_stamp(tmp_path, monkeyp
         assert (await coord.tasks.get(task.task_id)).state == "succeeded"
         events = await coord.db.fetchall("SELECT payload FROM events WHERE topic='delegated_result'")
         assert len(events) == 1
-        assert not coord.dispatcher._executions
+        assert not coord._executions
     finally:
         await coord.stop()

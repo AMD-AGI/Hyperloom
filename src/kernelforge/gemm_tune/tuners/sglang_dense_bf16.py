@@ -370,8 +370,8 @@ class SglangDenseBf16Tuner(BaseTuner):
                 dtype=dtype_str,
             )
         else:
-            # The derived cross product used to ignore the budget entirely, so a thorough run generated ~20x the
-            # shapes its window could pay for.
+            # Fit the derived cross product to the budget, or a thorough run generates ~20x the shapes its window
+            # can pay for.
             m_values = _fit_m_values_to_budget(
                 m_values,
                 len(nk_shapes),

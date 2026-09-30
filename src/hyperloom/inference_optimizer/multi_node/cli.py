@@ -376,8 +376,8 @@ def install_geak_on_pods_best_effort() -> int:
 # Subcommand: bootstrap
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     """Run the BYOI bootstrap script inside the RayJob via Ray Dashboard REST."""
-    # Only head_pod_ip: the Ray Dashboard client addresses the head pod directly, and rayjob_id no longer has a writer
-    # now that the platform owns creation -- requiring it rejected every handed-over cluster.
+    # Only head_pod_ip: the Ray Dashboard client addresses the head pod directly, and a cluster the platform
+    # handed over carries no rayjob_id.
     state = _require_state("head_pod_ip")
 
     if args.script:

@@ -29,7 +29,7 @@ from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
 from hyperloom.common.timeutil import now_iso
 
-from hyperloom.inference_optimizer.session.session_paths import runs_dir, specialist_intel_path
+from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, runs_dir, specialist_intel_path
 from ..roles.base import BackendError, LLMCallFailed
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
@@ -55,12 +55,16 @@ from .subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     SpecialistSubprocessResult,
-    _pick_worktree_base,
     _setup_worktree,
 )
 from . import patch_safety as _patch_safety
 from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
-from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree
+from .tree_snapshot import snapshot_tree
+from hyperloom.inference_optimizer.framework_paths import (
+    FrameworkTree,
+    framework_apply_tree,
+    resolve_framework_tree,
+)
 from ..loop.sub_agent_runner import RunnerContext
 from ..prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
@@ -73,29 +77,23 @@ log = logging.getLogger(__name__)
 NO_GIT_FRAMEWORK_SOURCE_ROOT = "no_git_framework_source_root"
 
 
-def specialist_patch_preflight_error(
-    params: dict[str, Any] | None,
-    *,
-    framework_repo_path: str = "",
-    framework_source_roots: tuple[str, ...] = (),
-) -> str:
+def specialist_patch_preflight_error(params: dict[str, Any] | None, *, framework_repo_path: str = "") -> str:
     """Return the deterministic source-root error for a patch specialist."""
     task_params = params or {}
     domain = get_domain(str(task_params.get("domain") or ""))
     if resolve_specialist_profile(task_params, domain=domain).mode != MODE_PATCH:
         return ""
-    roots = tuple(
-        path
-        for path in (
-            str(framework_repo_path or "").strip(),
-            *(framework_source_roots or tuple(task_params.get("framework_source_roots") or ())),
-        )
-        if path
+    source = _worktree_source(task_params, framework_repo_path=framework_repo_path)
+    return "" if source is not None else NO_GIT_FRAMEWORK_SOURCE_ROOT
+
+
+def _worktree_source(params: dict[str, Any], *, framework_repo_path: str = "") -> FrameworkTree | None:
+    """The tree the session optimises, which the preflight and the worktree must both read the same way."""
+    return framework_apply_tree(
+        str(params.get("session_framework_tree") or "").strip()
+        or resolve_framework_tree(str(params.get("framework") or ""))
+        or str(framework_repo_path or "").strip()
     )
-    preferred = str(task_params.get("session_framework_tree") or "").strip() or resolve_framework_tree(
-        str(task_params.get("framework") or "")
-    )
-    return "" if _pick_worktree_base(roots, preferred=preferred) is not None else NO_GIT_FRAMEWORK_SOURCE_ROOT
 
 
 def _subprocess_call_outcome(result: SpecialistSubprocessResult) -> tuple[str, dict[str, Any]]:
@@ -628,7 +626,7 @@ class SpecialistRunner:
             notes.append(f"domain={domain.key!r} is outside the domain catalogue; using generic prompt template")
 
         # Worktree — created only under subprocess dispatch; surfaced via ``workspace_path``.
-        worktree, worktree_base, worktree_err = await asyncio.to_thread(
+        worktree, worktree_source, worktree_err = await asyncio.to_thread(
             self._maybe_setup_worktree,
             ctx,
             workspace=workspace,
@@ -636,6 +634,7 @@ class SpecialistRunner:
         )
         if worktree_err:
             notes.append(f"worktree_setup_failed:{worktree_err}")
+        worktree_base = worktree_source.root if worktree_source is not None else None
         workspace_for_prompt = worktree or workspace
 
         allocated_gpu_ids = tuple(int(g) for g in (ctx.extra.get("gpu_ids") or []))
@@ -661,7 +660,7 @@ class SpecialistRunner:
                 framework=str(params.get("framework") or ""),
                 session_framework_tree=str(params.get("session_framework_tree") or ""),
                 framework_source_roots=tuple(params.get("framework_source_roots") or ()),
-                worktree_base=str(worktree_base or ""),
+                worktree_base=str(worktree_base) if worktree is not None and worktree_base is not None else "",
                 source_hint_directories=tuple(params.get("source_hint_directories") or ()),
                 model_info=dict(params.get("model_info") or {}),
                 static_recon_checklist=str(params.get("static_recon_checklist") or ""),
@@ -1547,10 +1546,14 @@ class SpecialistRunner:
         *,
         workspace: Path | None,
         profile: SpecialistProfile | None = None,
-    ) -> tuple[Path | None, Path | None, str]:
+    ) -> tuple[Path | None, FrameworkTree | None, str]:
         """Provision a per-task git worktree when in subprocess mode.
 
         Blocking (``git worktree add``, 60s); call via ``asyncio.to_thread``.
+
+        A tree no checkout tracks, such as a pip-installed package, is branched
+        off a session-owned snapshot of it instead, so the specialist still edits
+        the code the server runs.
 
         Best-effort: the specialist still dispatches without isolation and the
         reason lands in ``notes``.
@@ -1561,30 +1564,51 @@ class SpecialistRunner:
             profile: Resolved dispatch profile; non-patch mode skips worktree.
 
         Returns:
-            A ``(worktree_dir, worktree_base, error)`` tuple; ``worktree_dir``
-            is ``None`` in in-process mode or on git failure.
+            A ``(worktree_dir, source, error)`` tuple; ``worktree_dir`` is
+            ``None`` in in-process mode or on git failure, and ``source`` is
+            the tree the worktree stands for.
         """
         if self.subprocess_config is None or workspace is None:
             return None, None, ""
         if profile is not None:
             if profile.mode != MODE_PATCH:
                 return None, None, ""
-        preflight_error = specialist_patch_preflight_error(
-            ctx.task.params,
-            framework_source_roots=self.subprocess_config.framework_source_roots,
-        )
+        preflight_error = specialist_patch_preflight_error(ctx.task.params)
         if preflight_error:
             return None, None, preflight_error
-        base = _pick_worktree_base(
-            self.subprocess_config.framework_source_roots,
-            preferred=resolve_framework_tree(str((ctx.task.params or {}).get("framework") or "")),
-        )
+        source = _worktree_source(ctx.task.params or {})
+        if source is None:
+            return None, None, ""
+        base = source.root
+        if not source.checkout:
+            if self.session_dir is None:
+                return None, source, f"{source.tree} has no checkout and no session dir to snapshot it into"
+            repo = self.session_dir / "tree_snapshots" / f"{fs_safe_id(str(source.tree))}.git"
+            snapshot, err = snapshot_tree(source.tree, repo, refresh=not self._integrate_in_flight())
+            if snapshot is None:
+                return None, source, err
+            base = snapshot
         worktree_path = workspace / "worktree"
         branch = f"specialist-{ctx.task.task_id}"
         wt, err = _setup_worktree(base, worktree_path, branch)
         if wt is None:
-            return None, base, err
-        return wt, base, ""
+            return None, source, err
+        return wt, source, ""
+
+    def _integrate_in_flight(self) -> bool:
+        """Whether an integrate has mutated the framework tree without deciding on it yet."""
+        from ..state.shared_state import SharedState
+
+        if self.session_dir is None:
+            return False
+        try:
+            return bool(SharedState.load_or_init(self.session_dir).pending_integrate)
+        except Exception:
+            # An unreadable state cannot vouch for the tree.
+            log.warning(
+                "specialist worktree: cannot read pending_integrate; not refreshing the snapshot", exc_info=True
+            )
+            return True
 
     # Workspace file protocol
     def _resolve_workspace(self, ctx: RunnerContext) -> Path | None:

@@ -71,7 +71,7 @@ def _record(coordinator, *, baseline: float, geak_tput: float, comparability=Non
     }
     if comparability is not None:
         result["baseline_basis"] = {"workload_comparability": comparability}
-    coordinator.phase_kernel._record_geak_candidate(result)
+    coordinator._record_geak_candidate(result)
     return st.geak_pending
 
 

@@ -706,8 +706,7 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
                 "* **RULE F1** (PRELUDE) — same baseline fingerprint twice failed →"
                 " change at least one of the eight fingerprint fields.",
                 "* **RULE F2** (PRELUDE) — `error_class='no_report'` + no"
-                " `rescued_from_leaked_path:*` → redirect RESULT_DIR or set"
-                " INFERENCE_OPTIMIZER_RESCUE_PATHS.",
+                " `rescued_from_leaked_path:*` → redirect RESULT_DIR.",
             ]
         )
     lines.extend(
@@ -753,7 +752,11 @@ def _idea_generation_lines() -> list[str]:
         "Variant identity is content-based (args+envs+remove_args+",
         "unset_envs+args_mode); only exact same-grid duplicates are collapsed.",
         "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
-        "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
+        "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`). On an agentic",
+        "recipe a flag replaces the recipe's own value and `remove_args` deletes",
+        "a recipe flag. Its draft (method, model, length) and simulated acceptance",
+        "are pinned; other `--speculative-config` keys such as `attention_backend`",
+        "merge into the recipe's own config.",
         "",
         "Draw first from `=== Untested proposals (current cycle) ===`; the",
         "five moves above are for topping the grid up to its target of 4",
@@ -772,8 +775,7 @@ The request kinds you may emit here are `trace_analyze`, `integrate`, and
 (phase allowed-set + gaps + KB priors), with no system-side priority ranking.
 Read the optimization lane's outcome before you act: a `state.gaps[]`
 `layer='kernel_agent'` gap names the target, `last_kernel_opt` carries the
-verdict (KEEP→integrate next; PARTIAL→the lane retries at most
-`_DEFAULT_KERNEL_OPT_MAX_PARTIAL` times then rejects; REVERT→rejected),
+verdict (KEEP→integrate next; REVERT→rejected),
 `rejected_kernel_ids` lists the ids already written off, and
 `last_action_failures` explains a request of your own that failed.
 A KERNEL_AGENT plateau signal (3 REVERTs across distinct kernels, or low
@@ -905,11 +907,9 @@ def _section_rules(rules_md: str, *, phase: str = "", transport: str = "") -> li
         "",
         "`update_state.payload.changes` must be a non-empty object. Only these fields are agent-writable:",
         *update_fields,
-        "A Coordinator-owned core field refuses the whole intent before anything is written. Every other",
-        "key -- a non-core field outside the list above, a wrong value type, an unknown name -- is dropped",
-        "on its own, and the rest of that same update still applies. The observation reports what was",
-        "written in `changes` and every dropped key in `rejected`; re-sending a key from `changes` would",
-        "repeat a write that already landed.",
+        "Any other key -- a Coordinator-owned field, an unknown name -- and any listed key carrying the",
+        "wrong value type refuses the whole update: nothing is written, and the denial names the key it",
+        "refused. There is no partial apply, so re-send the update carrying only the fields above.",
     ]
 
 

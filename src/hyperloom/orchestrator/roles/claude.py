@@ -16,6 +16,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from hyperloom.common.llm_config import claude_sdk_env_options
+from hyperloom.common.reasoning_effort import REASONING_EFFORT_RANK
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentValidationError,
@@ -145,7 +146,6 @@ _EFFORT_ENV_ORCH: str = "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT"
 _EFFORT_ENV_KERNEL: str = "INFERENCE_OPTIMIZER_CLAUDE_KERNEL_EFFORT"
 _THINKING_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_THINKING"
 _CLI_PATH_ENV: str = "HYPERLOOM_CLAUDE_CLI_PATH"
-_VALID_EFFORT: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 # Per-role (env override, default effort) for :attr:`ClaudeBackend.effort_role`.
 _EFFORT_ROLES: dict[str, tuple[str, str]] = {
@@ -632,7 +632,7 @@ class ClaudeBackend:
     def _apply_effort_options(self, kwargs: dict[str, Any]) -> None:
         """Add env-driven reasoning effort + adaptive thinking to the options."""
         effort = self._resolve_effort()
-        if effort in _VALID_EFFORT:
+        if effort in REASONING_EFFORT_RANK:
             kwargs["effort"] = effort
         thinking = (os.environ.get(_THINKING_ENV) or "adaptive").strip().lower()
         if thinking and thinking != "off":

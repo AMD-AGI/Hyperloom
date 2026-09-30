@@ -676,6 +676,12 @@ class _IncrementScan(NamedTuple):
     saw_warmup_begin: bool = False
     saw_measured_begin: bool = False
     residual: str = ""
+    active: bool = True
+
+
+#: Access lines for the endpoints monitors poll on their own tick. An HTTP front end whose engine died keeps answering
+#: them, so a log that grew only by these says nothing about whether the server is still serving.
+_HEALTH_PROBE_LINE = re.compile(r'"GET /(?:metrics|health|healthz|ping)(?:[/?][^" ]*)? HTTP/[\d.]+"')
 
 
 # Cap on the partial line carried between scans. A log that appends a very long line without a newline -- or none at
@@ -732,7 +738,7 @@ def _scan_logs_increment(
         saw_warmup_begin = saw_warmup_begin or scan.saw_warmup_begin
         saw_measured_begin = saw_measured_begin or scan.saw_measured_begin
         if scan.offset > prev:
-            grew = True
+            grew = grew or scan.active
             child_spoke = child_spoke or Path(path).name == _EVAL_LOG_NAME
     return _LogScan(saw_ready, saw_progress, saw_eval_start, grew, child_spoke, saw_warmup_begin, saw_measured_begin)
 
@@ -770,6 +776,8 @@ def _scan_server_log_increment(path: str, from_offset: int, residual: str = "") 
     saw_eval_start = any(marker in chunk for marker in _EVAL_START_MARKERS)
     saw_warmup_begin = any(marker in chunk for marker in _AGENTX_WARMUP_BEGIN_MARKERS)
     saw_measured_begin = any(marker in chunk for marker in _AGENTX_MEASURED_BEGIN_MARKERS)
+    complete = [line for line in chunk[: tail_at + 1].splitlines() if line.strip()] if tail_at >= 0 else []
+    active = not complete or any(not _HEALTH_PROBE_LINE.search(line) for line in complete)
     return _IncrementScan(
         size,
         saw_ready,
@@ -778,6 +786,7 @@ def _scan_server_log_increment(path: str, from_offset: int, residual: str = "") 
         saw_warmup_begin,
         saw_measured_begin,
         residual=next_residual,
+        active=active,
     )
 
 

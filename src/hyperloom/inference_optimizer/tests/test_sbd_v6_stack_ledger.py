@@ -73,6 +73,16 @@ def _rows() -> list[dict[str, Any]]:
     return _ext()["adoptions"]["rows"]
 
 
+def test_reused_stack_position_preserves_distinct_adoption_ids():
+    _adopt(0, "integrate", 100.0, 110.0, stack_entry_id="entry-1", integration_id="int-1", ts="2026-01-01T00:00:01Z")
+    _adopt(0, "integrate", 100.0, 120.0, stack_entry_id="entry-2", integration_id="int-2", ts="2026-01-01T00:00:02Z")
+
+    assert [(row["stack_entry_id"], row["integration_id"]) for row in _rows()] == [
+        ("entry-1", "int-1"),
+        ("entry-2", "int-2"),
+    ]
+
+
 def test_contributions_sum_to_the_chain_total_on_a_continuous_chain():
     _adopt(0, "explore", 100.0, 110.0)
     _adopt(1, "explore", 110.0, 120.0)

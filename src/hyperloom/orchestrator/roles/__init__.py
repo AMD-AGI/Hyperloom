@@ -30,7 +30,7 @@ from .mock_backend import (
     auto_approve_critic,
 )
 
-# Public name for the row-scan critic mock (formerly the standalone ``MockCriticBackend`` class).
+# Public name for the row-scan critic mock.
 MockCriticBackend = auto_approve_critic
 
 __all__ = [
