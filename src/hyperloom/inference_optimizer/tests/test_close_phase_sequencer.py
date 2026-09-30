@@ -1171,17 +1171,18 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
     coord.shared_state.close_sequence_done = True
     coord.shared_state.recipe_finalize_status = "written"
 
-    finalize_calls: list[str] = []
+    recipe_finalize_attempts = 0
 
     def _finalize(*, source: str) -> dict:
-        finalize_calls.append(source)
+        nonlocal recipe_finalize_attempts
+        recipe_finalize_attempts += 1
         return {"status": "written"}
 
     coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 
-    assert finalize_calls == []
+    assert recipe_finalize_attempts == 0
 
 
 @pytest.mark.asyncio

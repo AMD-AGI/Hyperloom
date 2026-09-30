@@ -373,7 +373,7 @@ class KernelPhase(CoordinatorCollaborator):
 
     def timeline(self) -> Any:
         """The in-flight kernel timeline recorder, or ``None``."""
-        return self._kernel_timeline_recorder if hasattr(self, "_kernel_timeline_recorder") else None
+        return self._kernel_timeline_recorder
 
     def _open_kernel_timeline(self, *, route: str, route_reason: str, from_phase: str) -> None:
         """Open the kernel timeline event for this KERNEL entry."""

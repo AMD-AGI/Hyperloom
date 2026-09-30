@@ -20,7 +20,7 @@ from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
-from ..loop.proposals import PendingProposal, _record_proposal
+from ..loop.proposals import PendingProposal, record_proposal
 from ..loop.server_args import _dedupe_extra_server_args
 from hyperloom.inference_optimizer.grid_server_args import (
     merge_server_args,
@@ -683,7 +683,6 @@ class FrameworkPhase(CoordinatorCollaborator):
         # resolved on a later tick.
         if any(
             getattr(p, "action_name", "") == "integrate_patch"
-            and not getattr(p, "decided", False)
             and (getattr(p, "payload", None) or {}).get("framework_agent_candidate_id")
             for p in self.state.pending_proposals.values()
         ):
@@ -1728,7 +1727,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "audit_step": str(audit_step or ""),
             "priors": self._collect_framework_agent_candidate_priors(),
         }
-        pending = await _record_proposal(
+        pending = await record_proposal(
             self,
             from_agent="coordinator",
             action_name="integrate_patch",
@@ -2757,7 +2756,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "predicted_gain_pct": 0.0,
             "params": integrate_params,
         }
-        pending = await _record_proposal(
+        pending = await record_proposal(
             self,
             from_agent="coordinator",
             action_name="integrate_patch",
@@ -2902,7 +2901,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "predicted_gain_pct": 0.0,
             "params": integrate_params,
         }
-        pending = await _record_proposal(
+        pending = await record_proposal(
             self,
             from_agent="coordinator",
             action_name="integrate_patch",

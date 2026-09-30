@@ -285,9 +285,8 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             requires_lanes=("server_lifecycle", "benchmark_lane"),
             side_effects=("launches_server", "reads_server", "writes_results"),
             description=(
-                "Coordinator-internal one-shot replay of T0 warm_start_recipe.best_config; reproducing "
-                "≥ --warm-replay-min-reproduce-pct of the historical gain pushes the warm config onto "
-                "optimization_stack."
+                "Coordinator-internal one-shot replay of T0 warm_start_recipe.best_config; "
+                "a measured gain clearing the keep threshold pushes the warm config onto optimization_stack."
             ),
         ),
         "report": ActionMetadata(

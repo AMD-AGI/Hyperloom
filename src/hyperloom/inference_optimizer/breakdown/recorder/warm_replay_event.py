@@ -171,8 +171,6 @@ def _verdict(settled: Mapping[str, Any]) -> dict[str, Any]:
         "reason": str(settled.get("reason") or ""),
         "error_class": str(settled.get("error_class") or ""),
         "keep_threshold_pct": _float_or_none(settled.get("keep_threshold_pct")),
-        "below_historical_reproduce_pct": bool(settled.get("below_historical_reproduce_pct")),
-        "historical_reproduce_bar_pct": _float_or_none(settled.get("historical_reproduce_bar_pct")),
         "settled_at": str(settled.get("settled_at") or ""),
     }
 
@@ -196,7 +194,6 @@ class WarmReplayEventRecorder:
         donor: Mapping[str, Any] | None = None,
         expected_gain_pct: Any = None,
         confidence: Any = None,
-        min_reproduce_pct: Any = None,
         session_baseline_tput: Any = None,
         kernel_count: Any = None,
         recipe_suppressed: Any = None,

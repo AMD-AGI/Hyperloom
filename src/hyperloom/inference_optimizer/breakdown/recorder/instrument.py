@@ -19,7 +19,7 @@ Payloads are shaped to the matching ``schema.py`` TypedDict.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.coerce import to_float
 from hyperloom.common.timeutil import iso_z
@@ -27,6 +27,9 @@ from hyperloom.common.timeutil import iso_z
 from . import tool_versions
 from .session_metadata import snapshot_metadata
 from .trace import trace_skip
+
+if TYPE_CHECKING:
+    from .kernel_event import KernelEventRecorder
 
 PRODUCER_COORDINATOR = "coordinator"
 PRODUCER_KERNEL_AGENT = "kernel-agent"
