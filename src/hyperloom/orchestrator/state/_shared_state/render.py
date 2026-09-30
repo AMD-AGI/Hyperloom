@@ -138,8 +138,8 @@ class _RenderMixin:
             else ""
         )
         resume_revalidation_tag = (
-            " ⚠ resume_pending_revalidation=true — recheck current stack before trusting validated gain"
-            if bool(getattr(self, "resume_pending_revalidation", False))
+            " ⚠ stack has unvalidated keeps — recheck before trusting validated gain"
+            if self.optimization_stack_has_unvalidated_keeps()
             else ""
         )
         geak_pending_status = (

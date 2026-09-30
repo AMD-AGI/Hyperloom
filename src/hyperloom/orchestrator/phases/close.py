@@ -163,7 +163,7 @@ class ClosePhase(CoordinatorCollaborator):
         Fact finalize publishes only a Recipe whose gain was measured on it, so a
         KEEP lifted after the last validation would otherwise leave the session
         with nothing to publish. The rebench promotes through the ordinary
-        ``resume_stack_revalidate`` path, which is what moves the validated
+        ``stack_revalidate`` path, which is what moves the validated
         generation; a failed or incomparable run leaves it where it was and
         fact finalize skips.
         """
@@ -172,11 +172,11 @@ class ClosePhase(CoordinatorCollaborator):
         if not (callable(has_unvalidated_keeps) and has_unvalidated_keeps()):
             return
         step = "stack_revalidation"
-        stop_reason = str(getattr(state, "stop_reason", "") or "")
-        if bool(getattr(state, "closing_phase", False)) or stop_reason in _NO_REVALIDATION_STOP_REASONS:
+        stop_reason = str(state.stop_reason or "")
+        if bool(state.closing_phase) or stop_reason in _NO_REVALIDATION_STOP_REASONS:
             await self._record_close_step(step, status="skipped", detail=f"stop_reason={stop_reason or '<none>'}")
             return
-        if float(getattr(state, "baseline_tput", 0.0) or 0.0) <= 0.0:
+        if float(state.baseline_tput or 0.0) <= 0.0:
             await self._record_close_step(step, status="skipped", detail="no_baseline")
             return
         # Explore refuses a variant the budget cannot fit, so asking here only
@@ -192,7 +192,7 @@ class ClosePhase(CoordinatorCollaborator):
                 detail=f"session_budget usable={usable_sec:.0f}s needed={needed_sec:.0f}s",
             )
             return
-        generation = int(getattr(state, "working_recipe_generation", 0) or 0)
+        generation = int(state.working_recipe_generation or 0)
         summary = await self._coord.writeback._enqueue_internal_stack_rebench(
             reason="close_unvalidated_stack",
             idempotency_key=f"close-stack-revalidate-g{generation}",
@@ -310,8 +310,11 @@ class ClosePhase(CoordinatorCollaborator):
             state = self.shared_state
             _close_out.record_geak_candidate(
                 self.session_dir,
-                pending=state.geak_pending if isinstance(getattr(state, "geak_pending", None), dict) else {},
-                revalidation_pending=getattr(state, "resume_pending_revalidation", False),
+                pending=state.geak_pending if isinstance(state.geak_pending, dict) else {},
+                revalidation_pending=bool(
+                    callable(getattr(state, "optimization_stack_has_unvalidated_keeps", None))
+                    and state.optimization_stack_has_unvalidated_keeps()
+                ),
             )
         except Exception:
             log.debug("CLOSE: geak candidate record failed", exc_info=True)
@@ -657,7 +660,7 @@ class ClosePhase(CoordinatorCollaborator):
 
     def _close_step_wait_sec(self, task: Task) -> float:
         """How long CLOSE waits for a close-step task to reach a terminal state."""
-        from ..loop.coordinator_helpers import expected_action_cost_minutes
+        from ..loop.time_budget import expected_action_cost_minutes
 
         registry = getattr(self, "action_registry", None)
         kind = str(getattr(task, "kind", "") or "")

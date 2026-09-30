@@ -49,7 +49,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
 from ..state.shared_state import resolve_graded_comparison
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound
 from ..bus.message_bus import Message
-from ..loop.coordinator_helpers import (
+from ..kernel.geak_config import (
     _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
     _MAX_ROOFLINE_FAILURE_RETRIES,
     _geak_accepted_kernel_specs,
@@ -60,6 +60,8 @@ from ..loop.coordinator_helpers import (
     ROOFLINE_WATERMARK_RATIO,
     _accepted_config_as_variant,
     _accepted_config_controls,
+)
+from ..actions.executors._gpu_pin import (
     _coerce_tp,
     _resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
@@ -236,7 +238,7 @@ class KernelPhase(CoordinatorCollaborator):
         """Whether the latest trace predates the current backend/config."""
         if not signature:
             return False
-        recorded = getattr(self.shared_state, "last_profile_workload", None)
+        recorded = self.shared_state.last_profile_workload
         if not isinstance(recorded, Mapping) or not recorded:
             # No workload recorded for the trace: defer to _profile_workload_changed, which owns the "stale trace with
             # no workload metadata" decision.
@@ -246,15 +248,15 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _profile_workload_changed(self) -> bool:
         """Whether the latest trace predates the active serving workload."""
-        status = str(getattr(self.shared_state, "last_profile_status", "") or "").strip().lower()
+        status = str(self.shared_state.last_profile_status or "").strip().lower()
         if status and status != "succeeded":
             return True
-        recorded = getattr(self.shared_state, "last_profile_workload", None)
+        recorded = self.shared_state.last_profile_workload
         if not isinstance(recorded, dict) or not recorded:
             return bool(
-                getattr(self.shared_state, "last_profile_trace", "")
-                or getattr(self.shared_state, "last_trace_analyze", None)
-                or getattr(self.shared_state, "roofline_snapshots", None)
+                self.shared_state.last_profile_trace
+                or self.shared_state.last_trace_analyze
+                or self.shared_state.roofline_snapshots
             )
         identity = self.shared_state.profile_workload_identity
         return identity(recorded) != identity(self.shared_state.profile_workload_context())
@@ -288,9 +290,9 @@ class KernelPhase(CoordinatorCollaborator):
         trigger = "config_changed" if config_changed else ("workload_changed" if workload_changed else "gain")
         if config_changed or workload_changed:
             log.info("kernel-entry reprofile: active runtime context changed")
-        snapshots_before = len(getattr(self.shared_state, "roofline_snapshots", None) or [])
-        snapshot_id_before = int(getattr(self.shared_state, "roofline_snapshot_id", 0) or 0)
-        stack_len = int(getattr(self.shared_state, "cumulative_gain_validated_stack_len", 0) or 0)
+        snapshots_before = len(self.shared_state.roofline_snapshots or [])
+        snapshot_id_before = int(self.shared_state.roofline_snapshot_id or 0)
+        stack_len = int(self.shared_state.cumulative_gain_validated_stack_len or 0)
         profile_identity = json.dumps(
             {
                 "config": profile_signature,
@@ -335,8 +337,8 @@ class KernelPhase(CoordinatorCollaborator):
             return
         # Advance the anchor only when a new snapshot actually landed.
         after = self._last_measured_roofline_tput()
-        snapshots_after = len(getattr(self.shared_state, "roofline_snapshots", None) or [])
-        snapshot_id_after = int(getattr(self.shared_state, "roofline_snapshot_id", 0) or 0)
+        snapshots_after = len(self.shared_state.roofline_snapshots or [])
+        snapshot_id_after = int(self.shared_state.roofline_snapshot_id or 0)
         snapshot_landed = (
             after != before or snapshots_after != snapshots_before or snapshot_id_after != snapshot_id_before
         )
@@ -378,7 +380,7 @@ class KernelPhase(CoordinatorCollaborator):
 
         state = self.shared_state
         recorder = make_kernel_recorder(
-            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            macro_cycle=int(state.macro_cycle or 0),
             route=route,
             route_reason=route_reason,
             resumed=str(from_phase or "") == "resume",
@@ -388,14 +390,14 @@ class KernelPhase(CoordinatorCollaborator):
         if recorder is None:
             return
         state = self.shared_state
-        stack = state.optimization_stack if isinstance(getattr(state, "optimization_stack", None), list) else []
+        stack = state.optimization_stack if isinstance(state.optimization_stack, list) else []
         self._kernel_stack_at_entry = [dict(item) for item in stack if isinstance(item, dict)]
-        cached = getattr(state, "last_trace_analyze", None) or {}
-        current_best = state.current_best if isinstance(getattr(state, "current_best", None), dict) else {}
+        cached = state.last_trace_analyze or {}
+        current_best = state.current_best if isinstance(state.current_best, dict) else {}
         recorder.begin(
-            stack_depth_in=getattr(state, "cumulative_gain_validated_stack_len", None),
+            stack_depth_in=state.cumulative_gain_validated_stack_len or None,
             tput_before=current_best.get("tput"),
-            session_baseline_tput=getattr(state, "baseline_tput", None),
+            session_baseline_tput=state.baseline_tput or None,
             snapshot=cached,
             snapshot_staleness="absent" if not cached else "fresh",
         )
@@ -406,7 +408,7 @@ class KernelPhase(CoordinatorCollaborator):
         recorder = self.timeline()
         if recorder is None:
             return
-        cached = getattr(self.shared_state, "last_trace_analyze", None) or {}
+        cached = self.shared_state.last_trace_analyze or {}
         recorder.record_discovered_kernels(cached, provenance=provenance)
 
     def _record_kernel_rewrite_controller_timeline(self, result: dict[str, Any]) -> None:
@@ -419,7 +421,7 @@ class KernelPhase(CoordinatorCollaborator):
             record_backend_versions_and_timeline,
         )
 
-        cycle = int(result.get("macro_cycle") or getattr(self.shared_state, "macro_cycle", 0) or 0)
+        cycle = int(result.get("macro_cycle") or self.shared_state.macro_cycle or 0)
         for index, row in enumerate(rows):
             if not isinstance(row, dict):
                 continue
@@ -638,7 +640,7 @@ class KernelPhase(CoordinatorCollaborator):
             return
         self._kernel_timeline_recorder = None
         state = self.shared_state
-        current_best = state.current_best if isinstance(getattr(state, "current_best", None), dict) else {}
+        current_best = state.current_best if isinstance(state.current_best, dict) else {}
         stack_before = getattr(self, "_kernel_stack_at_entry", None) or []
         stack_after = [dict(item) for item in (state.optimization_stack or []) if isinstance(item, dict)]
         if len(stack_after) >= len(stack_before):
@@ -650,8 +652,8 @@ class KernelPhase(CoordinatorCollaborator):
         recorder.finish(
             exit_reason=exit_reason,
             tput_after=current_best.get("tput"),
-            cumulative_gain_validated_out=getattr(state, "cumulative_gain_validated", None),
-            stack_depth_out=getattr(state, "cumulative_gain_validated_stack_len", None),
+            cumulative_gain_validated_out=state.cumulative_gain_validated or None,
+            stack_depth_out=state.cumulative_gain_validated_stack_len or None,
             stack_added=stack_added,
             stack_removed=stack_removed,
         )
@@ -729,7 +731,7 @@ class KernelPhase(CoordinatorCollaborator):
                 {
                     "task_id": "kernel_entry_gemm_tuning",
                     "reason": "kernel_entry_auto",
-                    "macro_cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    "macro_cycle": int(self.shared_state.macro_cycle or 0),
                 },
                 session_dir=self.session_dir,
             )
@@ -1033,7 +1035,7 @@ class KernelPhase(CoordinatorCollaborator):
         from hyperloom.common.perf_metric import is_agentx_mode
         from ..actions.executors._workload_envs import agentx_enabled
 
-        benchmark_mode = str(getattr(state, "benchmark_mode", "") or "").strip()
+        benchmark_mode = str(state.benchmark_mode or "").strip()
         agentx = is_agentx_mode(benchmark_mode) if benchmark_mode else agentx_enabled()
 
         def _finish_skip(
@@ -1059,7 +1061,7 @@ class KernelPhase(CoordinatorCollaborator):
                     runner_timeout_sec=runner_timeout_s,
                     kill_timeout_sec=kill_timeout_s,
                 )
-            prev = state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
+            prev = state.geak_result if isinstance(state.geak_result, dict) else {}
             if not _geak_rebench.geak_verdict_is_terminal(prev):
                 state.geak_result = result
             self._coord.phase_machine._record_phase_entry_evidence(
@@ -1087,7 +1089,7 @@ class KernelPhase(CoordinatorCollaborator):
         accepted_flags = str(spec_config.get("extra_server_args", cb.get("extra_server_args")) or "")
         extra_envs = spec_config.get("extra_envs", cb.get("extra_envs")) or {}
         accepted_env = shlex.join(f"{k}={v}" for k, v in dict(extra_envs).items())
-        state_measurement = getattr(state, "current_best_measurement", None)
+        state_measurement = state.current_best_measurement or None
         measurement = (
             state_measurement
             if isinstance(state_measurement, Mapping) and state_measurement
@@ -1139,12 +1141,12 @@ class KernelPhase(CoordinatorCollaborator):
             observed_identity = f"sha256:{hashlib.sha256(observed_payload).hexdigest()}"
         same_config_tput = float(measurement.get("tput") or 0.0) if reference_verified else 0.0
         workload = {
-            "isl": int(getattr(state, "isl", 0) or 1024),
-            "osl": int(getattr(state, "osl", 0) or 1024),
-            "conc": int(getattr(state, "conc", 0) or 64),
+            "isl": int(state.isl or 1024),
+            "osl": int(state.osl or 1024),
+            "conc": int(state.conc or 64),
         }
         # Forward the benchmark settings and GPU placement used by Hyperloom.
-        _recipe_path = str(getattr(state, "baseline_config_path", "") or "")
+        _recipe_path = str(state.baseline_config_path or "")
         # Parse once so every handoff field uses the same recipe snapshot.
         _recipe_envs = self._read_recipe_bench_envs(_recipe_path)
         bench_protocol = self._resolve_bench_protocol(_recipe_path, envs=_recipe_envs)
@@ -1307,7 +1309,7 @@ class KernelPhase(CoordinatorCollaborator):
 
         def _settled_replay(candidate: dict[str, Any]) -> bool:
             """Whether ``candidate`` is a result this session already settled."""
-            prev = state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
+            prev = state.geak_result if isinstance(state.geak_result, dict) else {}
             return _geak_rebench.geak_candidate_is_adjudicated(prev, candidate, harness_can_replay=not agentx)
 
         def _promote_recovered_result(
@@ -1651,7 +1653,6 @@ class KernelPhase(CoordinatorCollaborator):
         if skip_reason == "geak_no_material":
             state.geak_result = {**state.geak_result, "revalidation_status": "no_material"}
             state.geak_pending = {}
-            state.resume_pending_revalidation = False
             state.save(self.session_dir)
             return
         if skip_reason is not None:
@@ -2081,7 +2082,6 @@ class KernelPhase(CoordinatorCollaborator):
                 graded_measurement,
                 source="geak_e2e_promote",
             )
-        self.shared_state.resume_pending_revalidation = False
         self.shared_state.geak_pending = {}
         return True
 

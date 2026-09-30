@@ -488,7 +488,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     validated_recipe_generation: int = 0
     # Resume sentinels.
     pending_integrate: dict[str, Any] = field(default_factory=dict)
-    resume_pending_revalidation: bool = False
     # A GEAK e2e candidate with a self-reported win not yet confirmed by a main-flow rebench; kept OUT of current_best
     # / optimization_stack / the headline gain until validated.
     geak_pending: dict[str, Any] = field(default_factory=dict)

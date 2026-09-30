@@ -62,14 +62,19 @@ from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from ..state.shared_state import SharedState, resolve_graded_comparison, stack_base_params
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
-from .coordinator_helpers import (
+from .server_args import (
+    _dedupe_extra_server_args,
+    _merge_cumulative_extra_server_args,
+)
+from .proposal_utils import (
+    _baseline_params_fingerprint,
+    _parse_baseline_workload_extra,
+    baseline_benchmark_script,
+)
+from ..kernel.geak_config import (
     _MIN_KERNEL_ENGAGED_GAIN_PCT,
     _accepted_config_as_variant,
     _accepted_config_controls,
-    _baseline_params_fingerprint,
-    _dedupe_extra_server_args,
-    _merge_cumulative_extra_server_args,
-    _parse_baseline_workload_extra,
     _geak_accepted_kernel_specs,
     _geak_has_accepted_kernel,
     _geak_overlay_digest,
@@ -79,7 +84,6 @@ from .coordinator_helpers import (
     _geak_spec_name,
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
-    baseline_benchmark_script,
 )
 from ..policy.gate import (
     PolicyDenied,
@@ -4224,14 +4228,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
         best_tput = result.get("output_throughput")
         promoted = False
         last_lifted_winner: dict[str, Any] | None = None
-        # A post-resume revalidation task confirms the EXISTING stack/current
+        # A stack revalidation task confirms the EXISTING stack/current
         # best rather than adding a variant, so it never "promotes".
-        # Reconcile the validation watermark + clear the
-        # ``resume_pending_revalidation`` flag from the measured tput — but
+        # Reconcile the validation watermark from the measured tput — but
         # ONLY when the rebench actually produced a valid measurement, so a
-        # failed/empty rebench leaves the flag set and reports keep warning.
+        # failed/empty rebench leaves the watermark and reports keep warning.
         is_revalidation_task = task is not None and str((task.params or {}).get("source") or "") in {
-            "resume_stack_revalidate",
+            "stack_revalidate",
         }
         if is_revalidation_task:
             measured = result.get("output_throughput")
@@ -4406,7 +4409,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
                             else:
                                 if not has_material:
                                     decision = "no_material"
-                from ..phases.geak_rebench import geak_harness_replays_workload
 
                 pending = getattr(self.shared_state, "geak_pending", None) or {}
                 pending_status = str(pending.get("status") or "") if isinstance(pending, dict) else ""
@@ -4479,14 +4481,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         rejection_reason="geak_no_material_product",
                     )
                     self.shared_state.geak_pending = {}
-                    # ``resume_pending_revalidation`` tracks the accepted stack,
-                    # not this candidate, and the watermark is deliberately left
-                    # alone above. Under the canonical workload the flag
-                    # therefore stays until a revalidation reconciles it; where
-                    # the GEAK harness can replay, clearing it here is the
-                    # long-standing behaviour and is left as it is.
-                    if geak_harness_replays_workload(self.shared_state):
-                        self.shared_state.resume_pending_revalidation = False
                 elif decision in {"no_promote", "accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}:
                     # A native quality rejection or measured loss is conclusive;
                     # replaying through another harness cannot overturn it.
@@ -4599,8 +4593,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 return
             else:
                 if measured_ok and self.shared_state.baseline_tput > 0 and not stale_measurement:
-                    if self._update_cumulative_gain_validated(measured, result):
-                        self.shared_state.resume_pending_revalidation = False
+                    self._update_cumulative_gain_validated(measured, result)
                     cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
                     recorded = cb_rec.get("tput")
                     floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
@@ -4852,7 +4845,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     and self.shared_state.baseline_tput > 0
                     and self._update_cumulative_gain_validated(new_tput, measurement)
                 ):
-                    self.shared_state.resume_pending_revalidation = False
                     await self._coord.phase_kernel._maybe_enqueue_watermark_roofline(
                         reason="integrate_keep_watermark",
                     )
@@ -5449,14 +5441,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     }
                 )
 
-        # (4) Validation-watermark compensation: unvalidated
-        # KEEPs (claimed gain not yet end-to-end confirmed) → flag + enqueue ONE
-        # full-stack rebench. The flag + watermark are reconciled from the
-        # measured tput when that rebench promotes (see _promote_to_shared_state).
-        stack = [e for e in (getattr(state, "optimization_stack", []) or []) if isinstance(e, dict)]
-        vlen = int(getattr(state, "cumulative_gain_validated_stack_len", 0) or 0)
+        # (4) Validation-watermark compensation: unvalidated KEEPs are reported
+        # in the warning block; the CLOSE trigger enqueues the revalidation.
         if state.optimization_stack_has_unvalidated_keeps():
-            state.resume_pending_revalidation = True
+            stack = [e for e in (getattr(state, "optimization_stack", []) or []) if isinstance(e, dict)]
+            vlen = int(getattr(state, "cumulative_gain_validated_stack_len", 0) or 0)
             report["warnings"].append(
                 {
                     "kind": "resume_unvalidated_keeps",
@@ -5466,12 +5455,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "validated_recipe_generation": state.validated_recipe_generation,
                 }
             )
-            try:
-                fix = await self._enqueue_internal_stack_rebench(reason="resume_unvalidated_keeps")
-                report["fixes"].append({"kind": "queued_resume_stack_rebench", **fix})
-            except Exception:
-                log.exception("Coordinator: failed to enqueue resume stack rebench")
-                report["warnings"].append({"kind": "resume_stack_rebench_enqueue_failed"})
 
         try:
             state.save(self.session_dir)
@@ -6192,7 +6175,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         expected_overlay_digest = _geak_overlay_digest(ps_overlay)
         ps_kernels = [_geak_spec_name(k) for k in _geak_accepted_kernel_specs(ps)]
         params_ps: dict[str, Any] = {
-            "source": "resume_stack_revalidate",
+            "source": "stack_revalidate",
             "reason": reason,
             "recipe_generation": recipe_generation,
             "geak_fallback": True,
@@ -6227,15 +6210,15 @@ class WritebackCollaborator(CoordinatorCollaborator):
         self,
         *,
         reason: str,
-        idempotency_key: str = "resume-stack-revalidate",
+        idempotency_key: str = "stack-revalidate",
     ) -> dict[str, Any]:
         """Enqueue one full-stack end-to-end rebench of the cumulative config.
 
         Builds a single-variant ``explore`` task from ``current_best``'s launch
         args/envs, benched against ``baseline_tput`` so the measured delta
-        becomes the validated cumulative gain. Tagged ``source=resume_stack_revalidate``
+        becomes the validated cumulative gain. Tagged ``source=stack_revalidate``
         so ``_promote_to_shared_state`` reconciles ``cumulative_gain_validated_stack_len``
-        and clears ``resume_pending_revalidation`` from the measured throughput.
+        from the measured throughput.
 
         Args:
             reason: Human-readable reason stamped on the task params.
@@ -6259,19 +6242,19 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if not (args or envs or cb_remove or cb_unset or cb_replace):
             return {"skipped": True, "reason": "empty_config"}
         params: dict[str, Any] = {
-            "source": "resume_stack_revalidate",
+            "source": "stack_revalidate",
             "reason": reason,
             "recipe_generation": recipe_generation,
             "grid": [
                 {
-                    "name": "resume_stack_revalidate",
+                    "name": "stack_revalidate",
                     "extra_args": args,
                     "extra_envs": dict(envs),
                     # Carry the overlay so an authored-kernel native stack rebuild
                     # loads the built kernels (inert when empty).
                     "overlay_pythonpath": overlay,
-                    "provenance": "resume_stack_revalidate",
-                    "note": "post-resume full-stack end-to-end revalidation",
+                    "provenance": "stack_revalidate",
+                    "note": "full-stack end-to-end revalidation",
                 }
             ],
             # The rebench reproduces the whole stack, so its gain is cumulative-vs-baseline.
