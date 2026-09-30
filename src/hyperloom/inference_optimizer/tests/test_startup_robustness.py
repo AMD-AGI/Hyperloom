@@ -568,6 +568,36 @@ def test_emit_launch_info_writes_json_file(tmp_path, capsys):
     assert str(out_file) in out
 
 
+def test_launch_info_is_emitted_on_resume_too():
+    """``--resume-from`` reuses the launch template, so its ``--launch-info-file`` must be honoured.
+
+    The health check reads pid and session_dir from that file; a resume that skips it leaves the launcher unable
+    to identify the optimizer it just started.
+    """
+    import ast
+    import pathlib
+
+    tree = ast.parse(pathlib.Path(cli.__file__).read_text(encoding="utf-8"))
+
+    def emits(stmts) -> bool:
+        return any(
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_emit_launch_info"
+            for stmt in stmts
+            for node in ast.walk(stmt)
+        )
+
+    resume_ifs = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and any(isinstance(sub, ast.Attribute) and sub.attr == "resume_from" for sub in ast.walk(node.test))
+        and node.orelse
+    ]
+    assert any(emits(node.body) and emits(node.orelse) for node in resume_ifs), (
+        "_emit_launch_info runs on only one side of `if args.resume_from:`"
+    )
+
+
 def test_emit_launch_info_no_file_no_extra_print(tmp_path, capsys):
     session_dir = tmp_path / "sess"
     session_dir.mkdir()
