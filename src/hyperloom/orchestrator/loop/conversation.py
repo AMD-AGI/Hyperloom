@@ -262,8 +262,10 @@ class ConversationCollaborator(CoordinatorCollaborator):
     def _context_running_tasks_reader(self) -> str:
         """Project in-flight tasks and their held resources from three reads, not one snapshot."""
         tasks = self.tasks.running_context_sync()
+        queued_counts = self._queued_backlog_line()
+
         if not tasks:
-            return "(no tasks in flight)"
+            return f"(no tasks in flight){queued_counts}"
 
         lanes_by_task = self.locks.lanes_by_task_sync()
         gpus_by_task = gpus_by_task_sync(self.db)
@@ -301,7 +303,30 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if hb_age is not None:
                 parts.append(f"heartbeat_age_sec={int(hb_age)}")
             lines.append(" ".join(parts))
+        if queued_counts:
+            lines.append(queued_counts)
         return "\n".join(lines)
+
+    def _queued_backlog_line(self) -> str:
+        """One-line summary of the queued backlog visible to the LLM."""
+        try:
+            counts = self.tasks.queued_kind_counts_sync()
+        except Exception:
+            return ""
+        parts: list[str] = []
+        for kind in ("integrate_patch", "explore"):
+            n = counts.get(kind, 0)
+            if n:
+                parts.append(f"{n} {kind}")
+        try:
+            untested = len(self.shared_state._untested_proposal_rows())
+        except Exception:
+            untested = 0
+        if untested:
+            parts.append(f"{untested} untested proposals")
+        if not parts:
+            return ""
+        return "  queued backlog: " + ", ".join(parts)
 
     def _task_heartbeat_age_sec(self, task: "Task", *, now_unix: float) -> float | None:
         """Age of a specialist's freshest liveness file, mirroring the reaper."""

@@ -3021,16 +3021,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 task.task_id,
             )
 
-        # Multi-node only: auto-materialise the proposal_set into a
-        # benchmarked explore task. No-op single-node (LLM drives explore
-        # directly there) and no-op when the proposal_set is empty / has
-        # no applicable variants. See :meth:`FrameworkPhase.maybe_materialize_mn_explore`.
-        await self.phase_framework.maybe_materialize_mn_explore(
-            task=task,
-            domain=domain,
-            proposals=proposals,
-        )
-
         # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain.
         if done_payload.get("new_findings"):
             await self._harvest_specialist_findings(done_payload)

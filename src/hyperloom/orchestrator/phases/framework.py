@@ -497,8 +497,8 @@ class FrameworkPhase:
     # Backstop: max Critic-review submissions for a single candidate before the pump force-stamps
     # ``repeated_review_abort`` and stops re-selecting it.
     _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
-    # Multi-node only: cap on specialist proposal_set entries auto-materialised into a single explore grid per round.
-    _MN_AUTO_EXPLORE_GRID_CAP: int = 6
+    # Cap on specialist proposal rows benched per automatic explore grid.
+    _AUTO_EXPLORE_GRID_CAP: int = 4
 
     def on_specialist_settled(self, task: "Task", done_payload: dict[str, Any], *, run_error: str) -> None:
         """Stamp an empty authoring round's terminal row and harvest a discovery round's candidates."""
@@ -2111,6 +2111,7 @@ class FrameworkPhase:
         """
         try:
             await self._pump_framework_agent_phase()
+            await self._maybe_bench_untested_proposals()
         except Exception as exc:
             log.exception("FRAMEWORK pump (%s) failed", caller)
             self._coord._record_coordinator_exception(stage=f"framework_pump:{caller}", exc=exc)
@@ -2553,60 +2554,67 @@ class FrameworkPhase:
             out.append(cand)
         return out
 
-    async def maybe_materialize_mn_explore(
-        self,
-        *,
-        task: "Task",
-        domain: str,
-        proposals: list[Any],
-    ) -> None:
-        """Multi-node bridge: turn a specialist ``proposal_set`` into a
-        benchmarked ``explore`` task automatically.
+    async def _maybe_bench_untested_proposals(self) -> None:
+        """Enqueue an explore grid from the top untested specialist proposals.
 
-        Single-node is a no-op (``is_multi_node()`` False): there the
-        Orchestration LLM drives ``explore`` directly. In multi-node the GPU
-        cluster lives on remote SSH pods, so the only materialisation channel is
-        a structured ``explore`` action; this helper enqueues the explore grid
-        itself. ``proposal_set`` entries reuse the explore variant schema
-        (``name`` / ``extra_args`` / ``extra_envs``) and pass straight through;
-        ``canonical_fingerprint`` dedup + the per-variant KEEP/REVERT gain gate
-        are the safety net.
-
-        Args:
-            task: The completed specialist task whose id seeds the explore
-                idempotency key.
-            domain: The specialist domain, stamped onto variant provenance.
-            proposals: The specialist ``proposal_set`` entries materialised into
-                the explore grid (capped at ``_MN_AUTO_EXPLORE_GRID_CAP``).
+        Runs only in FRAMEWORK_AGENT when no explore task is queued or running
+        and the proposal queue is non-empty. Consumes up to
+        ``_AUTO_EXPLORE_GRID_CAP`` rows by gap severity. The idempotency key
+        is derived from the fingerprint set, so a batch that failed as a whole
+        without writing any ``tested`` entries is not re-enqueued until the
+        queue changes.
         """
-        from ..actions.executors._multi_node_env import is_multi_node
-        from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
+        from hashlib import sha1
 
-        if not is_multi_node() or not proposals:
-            return
-        grid: list[dict[str, Any]] = []
-        for i, p in enumerate(proposals[: self._MN_AUTO_EXPLORE_GRID_CAP]):
-            if not isinstance(p, dict):
-                continue
-            fields = normalize_proposal(p)
-            if not is_executable(fields):
-                continue
-            grid.append(
-                {
-                    "name": fields["name"] or f"{domain or 'specialist'}-{task.task_id[:8]}-{i}",
-                    "extra_args": fields["extra_args"],
-                    "extra_envs": fields["extra_envs"],
-                    **controls_of(fields),
-                    "provenance": f"specialist:{domain}" if domain else "specialist",
-                    "note": fields["reason"][:200],
-                }
-            )
-        if not grid:
-            return
+        from ..actions.executors._proposal_identity import controls_of
+
         state = self._coord.shared_state
+        if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return
+        if bool(getattr(state, "framework_agent_phase_done", False)):
+            return
+        if self._coord._admit_frozen:
+            return
+        if self._coord._dispatch_paused_for_phase_budget():
+            return
+
+        queued = await self._coord.tasks.queued()
+        running = await self._coord.tasks.running()
+        if any(getattr(t, "kind", "") == "explore" for t in (*queued, *running)):
+            return
+
+        rows = state._untested_proposal_rows()
+        if not rows:
+            return
+
+        rows = rows[: self._AUTO_EXPLORE_GRID_CAP]
+        grid: list[dict[str, Any]] = []
+        fps: list[str] = []
+        for row in rows:
+            entry: dict[str, Any] = {
+                "name": row["name"],
+                "extra_args": row["extra_args"],
+                "extra_envs": dict(row["extra_envs"]),
+                **controls_of(row),
+                "provenance": f"specialist:{row['domain']}" if row.get("domain") else "specialist",
+                "note": str(row.get("reason") or "")[:200],
+            }
+            grid.append(entry)
+            from ..actions.executors._proposal_identity import controls_of as _co, effective_fingerprint
+
+            from ..actions.executors._proposal_identity import effective_fingerprint as _efp
+
+            from ..actions.executors._proposal_identity import effective_fingerprint
+
+            fps.append(effective_fingerprint(row["extra_args"], row["extra_envs"], controls=controls_of(row)))
+
+        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        fp_hash = sha1(",".join(sorted(fps)).encode(), usedforsecurity=False).hexdigest()[:12]
+        idem = f"auto-explore-c{cycle}-{fp_hash}"
+
         params: dict[str, Any] = {
-            "source": "coordinator_internal_mn",
-            "reason": f"mn_auto_materialize:{domain or 'specialist'}",
+            "source": "coordinator_internal",
+            "reason": "auto_bench_untested_proposals",
             "grid": grid,
         }
         if state.baseline_config_path:
@@ -2621,17 +2629,15 @@ class FrameworkPhase:
         etask, was_existing = await self._coord.tasks.create_or_return_existing(
             kind="explore",
             params=params,
-            idempotency_key=f"mn-auto-explore-{task.task_id}",
+            idempotency_key=idem,
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )
         log.info(
-            "mn_auto_materialize: enqueued explore task_id=%s (variants=%d, from specialist=%s domain=%s, existing=%s)",
+            "auto_bench: enqueued explore task_id=%s (variants=%d, existing=%s)",
             etask.task_id,
             len(grid),
-            task.task_id,
-            domain,
             was_existing,
         )
 

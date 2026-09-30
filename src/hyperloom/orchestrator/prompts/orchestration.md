@@ -237,13 +237,12 @@ has covered the gap yet.
 
 **Where a grid comes from.** `=== Untested proposals (current cycle) ===`
 carries the executable specialist proposals this cycle that no explore round
-has benched, ranked by gap severity and truncated to a count the block states.
-Draw from it first and copy an entry's fields verbatim — an entry marked
-ATOMIC is a coupled set that must go in as one variant, never split or
-re-authored. Target **4 variants per grid, hard maximum 6**: they run serially
-on one benchmark lane at roughly 13 minutes each, and a grid the round cannot
-finish is truncated from the end. Top up from the idea-generation moves only
-after the queue holds nothing else worth running.
+has benched, ranked by gap severity. The Coordinator benches these automatically
+(4 variants at a time) when no explore is queued or running. Dispatch an
+`explore` only for variants **not already in this queue** — copying from the
+queue would create a redundant grid alongside the automatic one. An entry
+marked ATOMIC must go in as one variant, never split or re-authored. To add
+idea-generation variants, top up after the queue holds nothing else worth running.
 
 **GPU specialists** hold the same cards as the serving stack and acquire
 `gpu_research_lane` (mutually exclusive with benchmark/profile/serving

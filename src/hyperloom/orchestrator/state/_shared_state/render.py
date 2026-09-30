@@ -427,8 +427,10 @@ class _RenderMixin:
             return ""
         out = [
             "Executable specialist proposals from this cycle that no explore round has benched.",
-            "Ranked by gap severity, then most recent. Compose the next `explore` grid from these;",
-            "dispatch an ATOMIC entry verbatim as one variant — never split or re-derive its flags.",
+            "Ranked by gap severity, then most recent.",
+            "The Coordinator benches these automatically when no explore is queued or running.",
+            "Dispatch an `explore` only for variants NOT already in this queue.",
+            "An ATOMIC entry must go in as one variant — never split or re-derive its flags.",
             "",
         ]
         out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])
