@@ -79,6 +79,9 @@ def coord(tmp_path: Path):
     c.session_dir = tmp_path
     c.shared_state = _StubSharedState()
     c.tasks = _StubTaskRegistry()
+    c._proposal_scorer = None
+    c.knowledge_plane = None
+    c.recipe_kb = None
     c.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
     return c
 

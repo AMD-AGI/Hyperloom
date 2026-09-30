@@ -33,7 +33,10 @@ from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
 )
 from hyperloom.orchestrator.enablement.lane import EnablementLane
+from hyperloom.orchestrator.enablement.params import EnablementParams
+from hyperloom.orchestrator.enablement.revalidation import EnablementRevalidation
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.phases.machine_state import ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
@@ -181,6 +184,7 @@ def _lane(session_dir: Path, **overrides: Any):
         _framework_authoring_lanes_ttl=lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
         _time_budget_denial_for_action=lambda _action: None,
         action_registry=ACTION_CATALOGUE,
+        knowledge_plane=None,
         # The host preflight would stat a checkpoint named by the ambient ``MODEL_PATH``, which belongs
         # to whichever test ran before this one, so the host answers that it cannot tell.
         _environment_verdict=lambda: None,
@@ -215,10 +219,38 @@ def _lane(session_dir: Path, **overrides: Any):
         "close_lane_event",
     ):
         setattr(fake, name, types.MethodType(getattr(EnablementLane, name), fake))
+    # Wire a minimal _coord so collaborator methods that use self._coord.sub.method can reach
+    # the overrides the test placed directly on fake.
+    fake._coord = types.SimpleNamespace(
+        _run_deadline=None,
+        _record_coordinator_exception=lambda *_a, **_k: None,
+        enablement_params=types.SimpleNamespace(
+            _build_enablement_specialist_params=lambda *a, **k: fake._build_enablement_specialist_params(*a, **k),
+        ),
+        enablement_build=types.SimpleNamespace(
+            _maybe_enqueue_specialist_requested_build=lambda: fake._maybe_enqueue_specialist_requested_build(),
+            _maybe_escalate_to_targeted_build=lambda *a, **k: fake._maybe_escalate_to_targeted_build(*a, **k),
+            _maybe_route_build_outcomes=_noop,
+        ),
+        enablement_revalidation=types.SimpleNamespace(
+            _maybe_enqueue_enablement_baseline_revalidation=lambda: fake._maybe_enqueue_enablement_baseline_revalidation(),
+        ),
+        specialist_dispatch=types.SimpleNamespace(
+            _warm_specialist_params=lambda *a, **k: fake._warm_specialist_params(*a, **k),
+        ),
+        gpu_lanes=types.SimpleNamespace(
+            _framework_authoring_lanes_ttl=lambda *a, **k: fake._framework_authoring_lanes_ttl(*a, **k),
+            _framework_gpu_params=lambda: fake._framework_gpu_params(),
+        ),
+        writeback=types.SimpleNamespace(
+            _record_observation=lambda *a, **k: fake._record_observation(*a, **k),
+        ),
+        dispatcher=types.SimpleNamespace(
+            _time_budget_denial_for_action=lambda a: fake._time_budget_denial_for_action(a),
+            _registry_lanes_ttl=lambda kind: fake._registry_lanes_ttl(kind),
+        ),
+    )
     return fake
-
-
-def _writeback(session_dir: Path, **overrides: Any):
     """A writeback bound to the real eval-failure persistence."""
     state = types.SimpleNamespace(
         enablement_mode=overrides.get("mode", "all"),
