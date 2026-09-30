@@ -49,6 +49,7 @@ def test_build_for_each_domain_and_framework(domain_key, framework):
         )
     )
     assert sys_p
+    assert "Turn economy:" in sys_p
     assert "## 2. HARDWARE CONTEXT" in user_p
     assert "concurrency: 64" in user_p
 

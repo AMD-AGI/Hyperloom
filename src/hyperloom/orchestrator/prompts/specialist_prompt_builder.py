@@ -1006,6 +1006,14 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         f"{leaf_devices}cannot fan out further. Use leaves for breadth; do multi-round "
         "depth (e.g. coordinate-descent autotune) yourself."
     )
+    turn_economy_line = (
+        "Turn economy: every turn re-reads your whole context, so spend turns on progress, "
+        "not on lookups. When you need several independent reads (grep, cat, ls, Read), get "
+        "them in the same turn: parallel tool calls in one reply, or one Bash command that "
+        "chains them. To wait on a server boot or a benchmark, run ONE blocking command with "
+        "a timeout (e.g. ``timeout 1800 bash -c 'until grep -q READY run.log; do sleep 30; "
+        "done'``) instead of checking again turn after turn."
+    )
     body: list[str] = [
         "## 1. IDENTITY & AUTONOMY",
         "",
@@ -1035,6 +1043,8 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "it is yours.",
         "",
         fanout_line,
+        "",
+        turn_economy_line,
     ]
     rendered_focus_keys: set[str] = set()
     focus = _DOMAIN_FOCUS_TEMPLATES.get(inp.domain.key)
