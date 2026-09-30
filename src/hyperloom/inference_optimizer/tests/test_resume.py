@@ -389,7 +389,12 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
     finally:
         await c1.stop()
 
-    c2 = Coordinator(session_dir, backends=_backends_full())
+    # Use a silent critic so the restored proposal is not auto-approved during tick.
+    silent_backends = {
+        "orchestration": MockBackend(silent, name="o2"),
+        "critic": MockBackend(silent, name="c2"),
+    }
+    c2 = Coordinator(session_dir, backends=silent_backends)
     try:
         assert c2.writeback.resumed_from["rebuilt"] is False
         await c2.tick(1)
