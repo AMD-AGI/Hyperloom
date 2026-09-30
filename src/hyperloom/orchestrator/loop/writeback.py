@@ -105,7 +105,7 @@ from ..actions.executors._accuracy_gate import (
 from ..knowledge.agent_kb import PatchKB
 from .proposals import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
-from hyperloom.orchestrator.collaborator import CoordinatorCollaborator
+from ..collaborator import CoordinatorCollaborator
 import logging as _logging
 
 log = _logging.getLogger(__name__)
@@ -2676,7 +2676,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
             total_gain_pct=total_gain,
         )
 
-        if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
+        kp = self.knowledge_plane
+        if bool(getattr(kp, "kb_disabled", False)):
             log.info("Recipe KB finalize skipped (--degraded-kb)")
             return {
                 "status": "skipped",
@@ -2688,7 +2689,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         from ..knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 
         try:
-            config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
+            config = getattr(kp, "config", None) or KnowledgeConfig.from_env()
         except Exception as exc:
             log.exception("Recipe KB finalize configuration failed (non-fatal)")
             return {

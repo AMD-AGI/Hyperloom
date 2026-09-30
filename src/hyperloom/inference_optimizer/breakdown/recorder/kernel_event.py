@@ -1120,7 +1120,6 @@ class KernelEventRecorder:
         route: str = "",
         route_reason: str = "",
         resumed: bool = False,
-        code_revision: str = "",
     ):
         """Bind a recorder to the event of one KERNEL entry."""
         self._event_id = kernel_event_id(macro_cycle)
@@ -1143,7 +1142,6 @@ class KernelEventRecorder:
                     "route": self._route,
                     "route_reason": str(route_reason or ""),
                     "resumed": bool(resumed),
-                    "code_revision": _text(code_revision),
                 },
             },
         )
@@ -2318,7 +2316,6 @@ def make_kernel_recorder(
     route: str = "",
     route_reason: str = "",
     resumed: bool = False,
-    code_revision: str = "",
 ) -> KernelEventRecorder | None:
     """Build a recorder, or ``None`` when no session is bound.
 
@@ -2334,5 +2331,4 @@ def make_kernel_recorder(
         route=route,
         route_reason=route_reason,
         resumed=resumed,
-        code_revision=code_revision,
     )

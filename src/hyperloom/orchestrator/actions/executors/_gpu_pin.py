@@ -10,6 +10,7 @@ import shlex
 from collections.abc import Mapping
 from typing import Any
 
+from hyperloom.common.env import env_float as _env_float, env_int as _env_int
 from hyperloom.common.visible_devices import (
     HIP_LEVEL_VARS,
     VISIBLE_DEVICE_VARS,
@@ -477,10 +478,7 @@ def _resolve_serving_fidelity(
         except (TypeError, ValueError):
             mml = 0
     if mml <= 0:
-        try:
-            mml = int(os.environ.get("MAX_MODEL_LEN", "0") or 0)
-        except (TypeError, ValueError):
-            mml = 0
+        mml = _env_int("MAX_MODEL_LEN", default=0)
     if mml > 0:
         out["max_model_len"] = mml
 
@@ -490,10 +488,7 @@ def _resolve_serving_fidelity(
     except (TypeError, ValueError):
         mem = 0.0
     if mem <= 0:
-        try:
-            mem = float(os.environ.get("GPU_MEMORY_UTILIZATION", "0") or 0.0)
-        except (TypeError, ValueError):
-            mem = 0.0
+        mem = _env_float("GPU_MEMORY_UTILIZATION", default=0.0)
     if mem > 0:
         out["mem_fraction"] = mem
 

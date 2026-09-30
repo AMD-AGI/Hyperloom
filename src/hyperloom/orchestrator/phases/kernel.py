@@ -385,7 +385,6 @@ class KernelPhase(CoordinatorCollaborator):
             route=route,
             route_reason=route_reason,
             resumed=str(from_phase or "") == "resume",
-            code_revision="",
         )
         self._kernel_timeline_recorder = recorder
         if recorder is None:

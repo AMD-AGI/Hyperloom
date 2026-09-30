@@ -1981,7 +1981,6 @@ class V6KernelEntry(TypedDict, total=False):
     route: str
     route_reason: str
     resumed: bool
-    code_revision: str | None
     stack_depth_in: int | None
     budget_remaining_sec: float | None
     roofline_snapshot_id: int | None

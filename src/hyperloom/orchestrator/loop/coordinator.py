@@ -75,25 +75,8 @@ REACTOR_TURN_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC"
 DEFAULT_REACTOR_TURN_TIMEOUT_SEC = 1800.0
 
 
-def resolve_reactor_turn_timeout_sec(env: Mapping[str, str] | None = None) -> float:
+def resolve_reactor_turn_timeout_sec() -> float:
     """Resolve the reactor turn's total wall-clock timeout."""
-    if env is not None:
-        raw = env.get(REACTOR_TURN_TIMEOUT_ENV, "").strip()
-        if not raw:
-            return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
-        try:
-            value = float(raw)
-        except ValueError:
-            value = 0.0
-        if value > 0.0 and _math.isfinite(value):
-            return value
-        log.warning(
-            "%s=%r is not a positive finite number; using default %.1fs",
-            REACTOR_TURN_TIMEOUT_ENV,
-            raw,
-            DEFAULT_REACTOR_TURN_TIMEOUT_SEC,
-        )
-        return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
     value = env_float(REACTOR_TURN_TIMEOUT_ENV, default=DEFAULT_REACTOR_TURN_TIMEOUT_SEC)
     if value > 0.0 and _math.isfinite(value):
         return value
@@ -366,7 +349,6 @@ class Coordinator:
         _CANONICAL_ORDER = ("orchestration", "critic")
         self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
-        self._coordinator_loop: asyncio.AbstractEventLoop | None = None
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: Deadline | None = None
         self._run_started_monotonic: float | None = None
