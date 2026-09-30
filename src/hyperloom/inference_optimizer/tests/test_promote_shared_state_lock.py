@@ -58,6 +58,26 @@ def _coord(session_dir: Path) -> Coordinator:
     return Coordinator(session_dir, backends=_silent_backends())
 
 
+def _resume_pending(state) -> bool:
+    """Compute resume_pending_revalidation the same way session_facts.py does."""
+    stack_len = len(state.optimization_stack)
+    validated_len = int(state.cumulative_gain_validated_stack_len or 0)
+    working_gen = int(getattr(state, "working_recipe_generation", 0) or 0)
+    validated_gen = int(state.validated_recipe_generation or 0)
+    return stack_len > validated_len or working_gen != validated_gen
+
+
+def _set_resume_pending(state, value: bool) -> None:
+    """Drive the underlying fields that session_facts reads to produce ``value``."""
+    if value:
+        # Make working_recipe_generation differ from validated so the computed flag is True.
+        state.working_recipe_generation = int(state.validated_recipe_generation or 0) + 1
+    else:
+        # Align the generations and stack lengths so the computed flag is False.
+        state.validated_recipe_generation = int(getattr(state, "working_recipe_generation", 0) or 0)
+        state.cumulative_gain_validated_stack_len = len(state.optimization_stack)
+
+
 def _task(kind: str, *, task_id: str = "t1", params: dict | None = None) -> Task:
     return Task(
         task_id=task_id,

@@ -42,7 +42,7 @@ def coordinator(tmp_path, monkeypatch):
 
 def _geak_rebench_params(**extra: object) -> dict:
     return {
-        "source": "resume_stack_revalidate",
+        "source": "stack_revalidate",
         "geak_fallback": True,
         "reason": "geak_e2e_win",
         **extra,
@@ -498,7 +498,7 @@ async def test_recovered_empty_map_closes_without_fallback(coordinator, tmp_path
 
     assert c.shared_state.geak_result["revalidation_status"] == "no_material"
     assert not c.shared_state.geak_pending
-    assert not c.shared_state.resume_pending_revalidation
+    assert not c.shared_state.optimization_stack_has_unvalidated_keeps()
     assert not await c.tasks.queued()
 
 
@@ -676,7 +676,6 @@ async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordin
     st.optimization_stack = [{"action": "explore", "tput": 110.0}]
     st.cumulative_gain_validated = 10.0
     st.cumulative_gain_validated_stack_len = 0
-    st.resume_pending_revalidation = True
     st.geak_result = {
         "status": "ok",
         "accepted_config": {"flags": "--same-config", "env": "SGLANG_USE_AITER=1"},
@@ -1189,7 +1188,7 @@ async def test_invalid_config_with_real_artifact_is_rejected_before_rebench(coor
         "accepted_config": config,
         "accepted_kernels": ["real_kernel"],
     }
-    result = coordinator._geak_rebench_params(reason="invalid_config")
+    result = coordinator.writeback._geak_rebench_params(reason="invalid_config")
     assert result == {"skipped": True, "reason": "geak_invalid_config"}
     assert coordinator.shared_state.geak_result["revalidation_status"] == "no_promote"
     assert "accepted_config" in coordinator.shared_state.geak_result["revalidation_error"]
