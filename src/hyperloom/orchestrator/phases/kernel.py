@@ -685,7 +685,7 @@ class KernelPhase(CoordinatorCollaborator):
         while True:
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind="kernel_agent",
-                params={"from_phase": str(from_phase or "")},
+                params={"from_phase": str(tr.from_phase or "")},
                 idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
                 requires_lanes=lanes,
                 lease_ttl_sec=ttl,

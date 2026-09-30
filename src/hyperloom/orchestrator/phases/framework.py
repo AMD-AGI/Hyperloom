@@ -590,7 +590,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         from .machine import Transition  # noqa: F401 — type reference only
         exit_reason = tr.reason
         evidence: dict | None = tr.evidence if tr.evidence else None
-        recorder = self._coord.phase_kernel.timeline()
+        recorder = self.timeline()
         if recorder is None:
             return
         self._framework_timeline_recorder = None
