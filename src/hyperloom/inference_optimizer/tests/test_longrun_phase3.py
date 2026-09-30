@@ -81,7 +81,7 @@ async def test_soft_restart_runs_at_loopback(cyclic_coordinator):
     st = c.shared_state
     _arm_sweep_loopback(st)
 
-    await c._advance_phase_if_needed()
+    await c.phase_machine._advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_FRAMEWORK_AGENT
     assert st.macro_cycle == 1
@@ -102,7 +102,7 @@ async def test_soft_restart_preserves_best_and_ledger(cyclic_coordinator):
         }
     )
 
-    await c._advance_phase_if_needed()
+    await c.phase_machine._advance_phase_if_needed()
 
     assert st.current_best == {"tput": 123.0, "extra_server_args": "--foo"}
     assert st.optimization_stack == [{"name": "v1", "gain_pct": 5.0}]
@@ -184,7 +184,7 @@ async def test_phase_transition_cancels_queued_specialist(cyclic_coordinator):
         idempotency_key="queued-specialist",
     )
 
-    await c._advance_phase_if_needed()
+    await c.phase_machine._advance_phase_if_needed()
 
     updated = await c.tasks.get(queued.task_id)
     assert c.shared_state.phase == ps.PHASE_SWEEP
@@ -205,11 +205,11 @@ async def test_phase_transition_waits_for_a_running_specialist(cyclic_coordinato
     )
     await c.tasks.transition(running.task_id, "running")
 
-    await c._advance_phase_if_needed()
+    await c.phase_machine._advance_phase_if_needed()
     assert c.shared_state.phase == ps.PHASE_FRAMEWORK_AGENT
 
     await c.tasks.transition(running.task_id, "cancelled", evidence={"reason": "stopped"})
-    await c._advance_phase_if_needed()
+    await c.phase_machine._advance_phase_if_needed()
     assert c.shared_state.phase == ps.PHASE_SWEEP
 
 

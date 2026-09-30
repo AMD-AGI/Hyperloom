@@ -236,6 +236,7 @@ class _BareSharedState:
     baseline_accuracy: float = 0.0
     baseline_warm_runtime_sec: float = 0.0
     explore_search: dict = field(default_factory=dict)
+    macro_cycle: int = 0
 
     def save(self, _session_dir: Path | None) -> None:
         self.save_count += 1
@@ -1794,18 +1795,12 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     )
 
     @dataclass
-    class _MoreState:
+    class _MoreState(_BareSharedState):
         baseline_config_path: str = ""
         baseline_tput: float = 1000.0
-        recipe_kb_session_id: str = "sid-test"
-        save_count: int = 0
         backends_search: dict = field(default_factory=dict)
         params_search: dict = field(default_factory=dict)
         current_best: dict = field(default_factory=dict)
-        auto_roofline_pending_task_id: str = ""
-
-        def save(self, _session_dir):
-            self.save_count += 1
 
     coord.shared_state = _MoreState()
     await coord.proposals._materialize_approved_proposal(pending)
@@ -1821,8 +1816,11 @@ def _delegate_coord(tmp_path: Path):
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
 
+    @dataclass
     class _State(_BareSharedState):
         baseline_config_path: str = ""
+        baseline_tput: float = 0.0
+        current_best: dict = field(default_factory=dict)
         tick: int = 0
 
         def is_pruned(self, _action_name: str) -> bool:
