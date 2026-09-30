@@ -633,6 +633,45 @@ async def test_backend_error_streak_resets_after_successful_turn(
 
 
 @pytest.mark.asyncio
+async def test_run_does_not_call_a_failing_backend_before_its_retry(session_dir, monkeypatch):
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 3600)
+    backends = _build_backends({})
+    failing = _AlwaysFailingBackend("critic")
+    backends["critic"] = failing
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        assert await c.run(max_ticks=3, tick_interval_sec=0.0) == "max_ticks"
+        assert failing.calls == 1
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_waits_for_a_retry_when_every_backend_is_failing(session_dir, monkeypatch):
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0.2)
+    backends = {name: _AlwaysFailingBackend(name) for name in ("orchestration", "critic")}
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        assert await c.run(max_ticks=3, tick_interval_sec=0.0) == "max_ticks"
+        assert backends["orchestration"].calls >= 2
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_stops_once_a_backend_has_failed_for_the_unhealthy_window(session_dir, monkeypatch):
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_UNHEALTHY_STOP_SEC", 0.0)
+    backends = _build_backends({})
+    backends["critic"] = _AlwaysFailingBackend("critic")
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        assert await c.run(max_ticks=5, tick_interval_sec=0.0) == "backend_unhealthy"
+        assert c.shared_state.stop_reason == "backend_unhealthy"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_coordinator_propose_action_creates_pending(session_dir):
     propose = Intent(
         type=IntentType.PROPOSE_ACTION,

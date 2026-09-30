@@ -36,7 +36,7 @@
               "const": "hyperloom.workflow_evaluation.v1"
             },
             "contract_digest": {
-              "const": "51edcb99d1c16f83961757ecfd4da87666c186a5b2441a2d3575cec17713f99b"
+              "const": "57298f78df7bbb347e07cca5adb6027f56e4e13aa6394de57c950b69dc3a1288"
             },
             "run_flags": {
               "type": "object",
@@ -680,6 +680,7 @@
             "",
             "active_inferencex_checkout_missing",
             "agentx_client_unavailable",
+            "backend_unhealthy",
             "baseline_accuracy_failed",
             "baseline_arg_error",
             "baseline_failed",
