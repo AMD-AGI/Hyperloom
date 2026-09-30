@@ -2684,7 +2684,7 @@ def test_no_framework_named_judges_nothing(tmp_path: Path):
     root.mkdir(parents=True)
 
     assert IntegratePatchExecutor._levers_without_readers(_lever_state(VLLM_X="1"), root, framework="") == []
-    assert IntegratePatchExecutor._levers_without_readers(_lever_state(VLLM_X="1"), None, framework="vllm") == []
+    assert IntegratePatchExecutor._levers_without_readers(_lever_state(VLLM_X="1"), None, framework="vllm") is None
 
 
 def test_a_lever_this_keep_introduced_is_scanned(tmp_path: Path):
@@ -2729,6 +2729,43 @@ def test_a_malformed_effective_config_is_ignored(tmp_path: Path):
         assert IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm", effective_config=junk) == [
             "VLLM_HL_OLD"
         ], junk
+
+
+def test_levers_with_no_framework_tree_are_unverified_not_clean():
+    enablement = SimpleNamespace(accepted_config={"extra_envs": {"VLLM_HL_X": "1"}})
+
+    assert IntegratePatchExecutor._levers_without_readers(enablement, None, framework="vllm") is None
+
+
+def test_a_linked_build_with_no_framework_tree_is_unverified_not_carried(tmp_path: Path):
+    attempt_root = tmp_path / "builds" / "tb-1"
+    (attempt_root / "candidates" / "c1" / "worktree" / "vllm").mkdir(parents=True)
+    (attempt_root / "candidates" / "c1" / "worktree" / "vllm" / "_C.abi3.so").write_bytes(b"\x00built")
+    enablement = SimpleNamespace(
+        build_manifest=[{"ok": True, "task_id": "tb-1", "probe_task_id": "p-1", "attempt_root": str(attempt_root)}],
+        last_specialist_task_id="p-1",
+        kept_rounds=[],
+    )
+
+    assert IntegratePatchExecutor._build_extensions_not_carried(enablement, None) is None
+
+
+def test_no_levers_and_no_linked_build_stay_clean_without_a_tree():
+    """Nothing to verify is still ``[]``: only a skipped scan becomes ``None``."""
+    assert IntegratePatchExecutor._levers_without_readers(_lever_state(), None, framework="vllm") == []
+    empty = SimpleNamespace(build_manifest=[], last_specialist_task_id="", kept_rounds=[])
+    assert IntegratePatchExecutor._build_extensions_not_carried(empty, None) == []
+
+
+def test_an_unreadable_materialized_config_is_not_replaced_by_the_ambient_env(tmp_path: Path):
+    with pytest.raises(OSError):
+        IntegratePatchExecutor._graded_launch_env({}, str(tmp_path / "gone.yaml"))
+
+
+def test_an_unreadable_materialized_config_does_not_guess_the_framework(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    with pytest.raises(OSError):
+        IntegratePatchExecutor._graded_framework({"framework": "sglang"}, str(tmp_path / "gone.yaml"))
 
 
 def test_a_switch_set_to_off_is_not_a_credential_channel(tmp_path):
