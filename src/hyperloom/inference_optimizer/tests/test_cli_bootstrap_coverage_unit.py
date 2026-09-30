@@ -444,10 +444,10 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     capsys,
 ) -> None:
     cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "critic": ""})
-    assert (tmp_path / "agents" / "orch" / "system_prompt.snapshot.md").read_text(
+    assert (tmp_path / "agents" / "orch" / "system_prompt.c0.snapshot.md").read_text(
         encoding="utf-8",
     ) == "hello"
-    assert (tmp_path / "agents" / "critic" / "system_prompt.snapshot.md").read_text(
+    assert (tmp_path / "agents" / "critic" / "system_prompt.c0.snapshot.md").read_text(
         encoding="utf-8",
     ) == "(empty)"
 

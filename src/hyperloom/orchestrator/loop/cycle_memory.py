@@ -80,5 +80,7 @@ class CycleMemoryCollaborator(CoordinatorCollaborator):
         if not isinstance(overrides, dict):
             return False
         overrides["orchestration"] = new_prompt
-        _write_prompt_snapshot(self.session_dir, "orchestration", new_prompt, phase=state.phase)
+        _write_prompt_snapshot(
+            self.session_dir, "orchestration", new_prompt, phase=state.phase, macro_cycle=int(state.macro_cycle or 0)
+        )
         return True

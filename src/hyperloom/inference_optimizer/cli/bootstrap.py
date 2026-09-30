@@ -246,7 +246,6 @@ def _seed_shared_state(
         max_model_len=_int_arg("max_model_len", 0),
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
-        target_summary=args.target_summary or _default_target_summary(args),
         # AgentX corpus shape: seeded from canonical constants if AgentX is on;
         # overwritten by the measured shape after every aiperf run.
         agentx_corpus_shape=_build_agentx_corpus_shape_seed() if benchmark_mode == "agentx" else {},
@@ -307,15 +306,16 @@ def _snapshot_system_prompts(
     *,
     prompts: dict[str, str],
     orchestration_phase: str = "",
+    macro_cycle: int = 0,
 ) -> None:
-    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.snapshot.md``."""
+    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.cN.snapshot.md``."""
     for role, body in prompts.items():
-        target = agent_prompt_snapshot(session_dir, role)
+        target = agent_prompt_snapshot(session_dir, role, macro_cycle=macro_cycle)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body or "(empty)", encoding="utf-8")
     boot_phase = orchestration_phase.strip()
     if boot_phase and "orchestration" in prompts:
-        scoped = agent_prompt_snapshot(session_dir, "orchestration", phase=boot_phase)
+        scoped = agent_prompt_snapshot(session_dir, "orchestration", phase=boot_phase, macro_cycle=macro_cycle)
         scoped.write_text(prompts["orchestration"] or "(empty)", encoding="utf-8")
 
 
@@ -488,29 +488,6 @@ def _print_kernel_opt_summary_line(state: SharedState) -> None:
             print(f"  kernel_opt_report    : {report_path}")
     except Exception:  # noqa: BLE001 — stdout print must never fail the run
         pass
-
-
-def _default_target_summary(args: argparse.Namespace) -> str:
-    """Compose a human-readable objective summary from the CLI target flags."""
-    roofline = getattr(args, "target_roofline", None)
-    also = f" or {roofline}% of the roofline ceiling" if roofline else ""
-    if args.target_gain:
-        return (
-            f"Establish baseline on {Path(args.model).name} then drive "
-            f"cumulative_gain_validated to >= {args.target_gain}%{also} within "
-            f"{args.max_hours}h."
-        )
-    if args.target_tput:
-        from .. import framework_registry
-
-        target = framework_registry.format_primary_metric(getattr(args, "framework", None), args.target_tput)
-        return f"Establish baseline on {Path(args.model).name} then reach {target}{also} within {args.max_hours}h."
-    if roofline:
-        return (
-            f"Establish baseline on {Path(args.model).name} then reach {roofline}% "
-            f"of the roofline ceiling within {args.max_hours}h."
-        )
-    return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
 
 
 def _parse_conc_sweep_concs(args: argparse.Namespace, benchmark_mode: str) -> list[int]:
