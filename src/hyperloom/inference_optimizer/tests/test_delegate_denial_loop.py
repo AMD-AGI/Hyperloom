@@ -358,7 +358,7 @@ def test_dead_c_mission_summary_tag_points_at_explore():
     assert "validate_stack" not in text
 
 
-def test_mission_summary_surfaces_resume_pending_revalidation():
+def test_mission_summary_flags_a_stack_that_outgrew_its_validation():
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     s = SharedState(
@@ -367,7 +367,7 @@ def test_mission_summary_surfaces_resume_pending_revalidation():
         cumulative_gain_validated_stack_len=0,
     )
     text = s.to_mission_summary()
-    assert "recheck" in text or "unvalidated" in text
+    assert "stack changed since last validation" in text
 
 
 # The Robustness prune_branch family list used to live in robustness.md, which was loaded every tick and discarded by

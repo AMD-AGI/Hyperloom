@@ -1286,7 +1286,6 @@ async def test_resume_consistency_enqueues_stack_rebench_for_unvalidated(coord: 
 @pytest.mark.asyncio
 async def test_resume_stack_revalidate_promote_clears_flag_and_sets_watermark(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 100.0
-    # resume_pending_revalidation was removed; unvalidated keeps now tracked via optimization_stack
     coord.shared_state.optimization_stack = [
         {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
     ]
@@ -1306,7 +1305,6 @@ async def test_resume_stack_revalidate_promote_clears_flag_and_sets_watermark(co
 @pytest.mark.asyncio
 async def test_resume_revalidate_failed_rebench_keeps_flag_set(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 100.0
-    # resume_pending_revalidation was removed; unvalidated keeps now tracked via optimization_stack
     coord.shared_state.optimization_stack = [
         {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
     ]
