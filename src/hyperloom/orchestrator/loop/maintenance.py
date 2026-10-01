@@ -66,6 +66,8 @@ async def run_lease_and_db_reclaim(
 class MaintenanceCollaborator(CoordinatorCollaborator):
     """Handles session maintenance: disk cleanup, task reclaim, and health checks."""
 
+    # Advisory disk guard: when the session partition runs low, LRU-trim per-task runs/ workspaces; durable state is
+    # never touched.
     _DISK_FREE_MIN_GB: float = 20.0
     _DISK_USED_MAX_FRAC: float = 0.85
     _DISK_RUNS_KEEP_PER_ACTION: int = 50

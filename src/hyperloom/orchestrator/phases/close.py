@@ -71,8 +71,12 @@ def _task_is_dead(task: Task | None) -> bool:
 class ClosePhase(CoordinatorCollaborator):
     """CLOSE phase sequencer: runs the fixed 7-step shutdown sequence and marks close_sequence_done."""
 
+    # Hard cap on the post-opt roofline; on timeout the optimized snapshot is skipped so report/breakdown still run.
     CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
+    # Floor on the full-stack revalidation wait; the bound scales to two baseline runtimes and explore's session-deadline
+    # check keeps it inside the run's budget.
     CLOSE_STACK_REVALIDATION_TIMEOUT_SEC: float = 600.0
+    # Pure param-search (explore) is excluded from the post-opt roofline.
     _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
 
     def _session_integrated_kernel_patch(self) -> bool:

@@ -132,6 +132,7 @@ class _InflightAction(NamedTuple):
 class DispatcherCollaborator(CoordinatorCollaborator):
     """Handles specialist dispatch: budget gating, action routing, and task enqueue."""
 
+    # Long, serially drained GPU grids in these phases must not starve the per-phase cyclic budget exit.
     _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT", "KERNEL_AGENT"})
 
     def __init__(self, coordinator) -> None:
