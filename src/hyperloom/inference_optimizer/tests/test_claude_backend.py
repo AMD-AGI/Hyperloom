@@ -748,13 +748,63 @@ async def test_options_includes_system_prompt_and_max_turns():
     )
     with pytest.raises(NoIntentEmitted):
         await backend.run("the prompt", system_prompt="sys", tools=["Read"], max_turns=3)
-    # max_turns is floored to _RAW_COMPLETION_MIN_MAX_TURNS (8) for every mode: Claude Code counts its own messages as
+    # max_turns is floored for every mode: Claude Code counts its own messages as
     # turns, so a literal max_turns=3 would trip before the model can emit an intent.
     assert captured["options_kwargs"]["max_turns"] == 8
     assert captured["options_kwargs"]["system_prompt"] == "sys"
     assert "Read" in captured["options_kwargs"]["allowed_tools"]
     # Output instructions appended to prompt
     assert "OUTPUT FORMAT" in captured["prompt"]
+
+
+async def _captured_max_turns(requested: int) -> int:
+    """The ``max_turns`` the backend hands the SDK for a requested budget."""
+    captured: dict[str, Any] = {}
+
+    async def q(*, prompt, options):
+        captured["options_kwargs"] = options.kwargs
+        return
+        yield  # make it a generator
+
+    backend = ClaudeBackend(
+        sdk_query_factory=q,
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+    )
+    with pytest.raises(NoIntentEmitted):
+        await backend.run("p", system_prompt="s", tools=["Read"], max_turns=requested)
+    return captured["options_kwargs"]["max_turns"]
+
+
+@pytest.mark.asyncio
+async def test_the_turn_floor_can_be_raised_for_tool_using_specialists(monkeypatch):
+    """A specialist that reads files spends the floor inside Claude Code.
+
+    Every specialist turn asks for ``max_turns=1``, so the floor is the whole
+    budget; exhausting it returns an error result rather than the model's
+    output, and the turn is lost as NoIntentEmitted.
+    """
+    monkeypatch.setenv("HYPERLOOM_CLAUDE_MIN_MAX_TURNS", "40")
+    assert await _captured_max_turns(1) == 40
+
+
+@pytest.mark.asyncio
+async def test_the_turn_floor_is_never_lowered_below_the_default(monkeypatch):
+    """Below the default the floor reinstates the trip it exists to prevent."""
+    monkeypatch.setenv("HYPERLOOM_CLAUDE_MIN_MAX_TURNS", "2")
+    assert await _captured_max_turns(1) == 8
+
+
+@pytest.mark.asyncio
+async def test_an_unparseable_turn_floor_falls_back_to_the_default(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_CLAUDE_MIN_MAX_TURNS", "lots")
+    assert await _captured_max_turns(1) == 8
+
+
+@pytest.mark.asyncio
+async def test_a_request_above_the_floor_is_left_alone(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_CLAUDE_MIN_MAX_TURNS", raising=False)
+    assert await _captured_max_turns(25) == 25
 
 
 @pytest.mark.asyncio

@@ -104,7 +104,37 @@ what changed. Match length to substance.
 
 # Global floor, applied by ``run()`` to every mode: Claude Code counts the
 # model's own text message as a turn, so a low max_turns trips before any output.
-_RAW_COMPLETION_MIN_MAX_TURNS: int = 8
+#
+# The floor is also the ceiling for a caller asking for one turn, which is what
+# every specialist turn does: the runner drives its own outer loop and requests
+# ``max_turns=1`` per iteration. A specialist that reads files before answering
+# spends this budget inside Claude Code, and exhausting it returns an ERROR
+# result ("Reached maximum number of turns") instead of the model's output, so
+# the turn lands as NoIntentEmitted with nothing to parse. Measured on a
+# Kimi-K3 session: 54 of 59 specialists died this way and the run produced no
+# proposals at all. Tunable so an operator can buy depth without a code change.
+_RAW_COMPLETION_MIN_MAX_TURNS_DEFAULT: int = 8
+_RAW_COMPLETION_MIN_MAX_TURNS_ENV: str = "HYPERLOOM_CLAUDE_MIN_MAX_TURNS"
+
+
+def _raw_completion_min_max_turns() -> int:
+    """The per-call turn floor, from the environment or the default."""
+    raw = (os.environ.get(_RAW_COMPLETION_MIN_MAX_TURNS_ENV) or "").strip()
+    if not raw:
+        return _RAW_COMPLETION_MIN_MAX_TURNS_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning(
+            "%s=%r is not an integer; using the default floor of %d",
+            _RAW_COMPLETION_MIN_MAX_TURNS_ENV,
+            raw,
+            _RAW_COMPLETION_MIN_MAX_TURNS_DEFAULT,
+        )
+        return _RAW_COMPLETION_MIN_MAX_TURNS_DEFAULT
+    # A floor below the default reinstates the trip this constant exists to
+    # prevent, so it is raised rather than honoured.
+    return max(value, _RAW_COMPLETION_MIN_MAX_TURNS_DEFAULT)
 
 # Retried timeouts get a progressively larger idle budget so a genuinely slow gateway is not re-killed at the same
 # wall.
@@ -171,7 +201,7 @@ class ClaudeBackend:
 
     model: str | None = None
     api_key_env: str = "ANTHROPIC_API_KEY"
-    # Nominal budget only: run() floors every mode at _RAW_COMPLETION_MIN_MAX_TURNS
+    # Nominal budget only: run() floors every mode at _raw_completion_min_max_turns()
     # (8), so values below 8 have no effect.
     max_turns_default: int = 12
     effort_role: str = "kernel"
@@ -273,7 +303,7 @@ class ClaudeBackend:
         # Claude Code counts the model's own text/tool messages as turns, so a literal max_turns=1 trips ("Reached
         # maximum number of turns (1)") before the model can emit any tool call or intent — newer bundled CLI builds
         # raise this as an error rather than returning a partial result.
-        max_turns_use = max(max_turns_use, _RAW_COMPLETION_MIN_MAX_TURNS)
+        max_turns_use = max(max_turns_use, _raw_completion_min_max_turns())
         try:
             options = self._build_options(
                 tools=tools or [],

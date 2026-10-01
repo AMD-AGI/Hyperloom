@@ -35,6 +35,7 @@ from hyperloom.orchestrator.actions.executors._accuracy_gate import (
 from hyperloom.orchestrator.enablement.lane import EnablementLane
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.machine_state import ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
+from hyperloom.orchestrator.collaborator import CoordinatorCollaborator
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
@@ -212,7 +213,14 @@ def _lane(session_dir: Path, **overrides: Any):
         "_settle_enablement_round",
     ):
         setattr(fake, name, types.MethodType(getattr(EnablementLane, name), fake))
-    fake._close_enablement_lane = types.MethodType(WritebackCollaborator._close_enablement_lane, fake)
+    # Writeback is its own collaborator, reached through the Coordinator rather
+    # than flattened onto the lane: binding it here instead would let a lane
+    # call that cannot resolve in a real run pass this test.
+    writeback = CoordinatorCollaborator(fake)
+    writeback._close_enablement_lane = types.MethodType(
+        WritebackCollaborator._close_enablement_lane, writeback
+    )
+    fake.writeback = writeback
     return fake
 
 
