@@ -411,7 +411,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
 # 7. Point 2 — stalled-domain hard-trigger
 @pytest.fixture
 def force_coord(tmp_path: Path, monkeypatch):
-    """Coordinator stand-in with a real SharedState + mocked _handle_intent."""
+    """Coordinator stand-in with a real SharedState + mocked handle_intent."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -424,7 +424,7 @@ def force_coord(tmp_path: Path, monkeypatch):
     c.shared_state.framework_repo_path = str(source_root)
     c.tasks = SimpleNamespace(find_by_idempotency_key=AsyncMock(return_value=None))
     monkeypatch.setattr(SpecialistDispatchCollaborator, "_warm_specialist_params", AsyncMock())
-    c.router._handle_intent = AsyncMock()  # type: ignore[assignment]
+    c.router.handle_intent = AsyncMock()  # type: ignore[assignment]
     return c
 
 
@@ -444,8 +444,8 @@ async def test_force_stalled_domain_dispatches_when_gap_pending(force_coord):
 
     await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
 
-    force_coord.router._handle_intent.assert_awaited_once()
-    src, intent = force_coord.router._handle_intent.call_args.args
+    force_coord.router.handle_intent.assert_awaited_once()
+    src, intent = force_coord.router.handle_intent.call_args.args
     assert src == "orchestration"
     params = intent.payload["params"]
     assert params["domain"] == "serving_specialist"
@@ -476,7 +476,7 @@ async def test_force_stalled_idempotency_key_is_cycle_scoped(force_coord):
 
     await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
 
-    _, intent = force_coord.router._handle_intent.call_args.args
+    _, intent = force_coord.router.handle_intent.call_args.args
     assert intent.payload["idempotency_key"].endswith("-c2")
 
 
@@ -497,7 +497,7 @@ async def test_force_stalled_domain_does_not_resubmit_existing_round(force_coord
 
     await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
 
-    force_coord.router._handle_intent.assert_not_awaited()
+    force_coord.router.handle_intent.assert_not_awaited()
     force_coord.tasks.find_by_idempotency_key.assert_awaited_once_with("forced-stalled-framework-round0")
 
 
@@ -518,7 +518,7 @@ async def test_force_stalled_source_patch_without_git_root_is_pruned_once(force_
     await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
     await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
 
-    force_coord.router._handle_intent.assert_not_awaited()
+    force_coord.router.handle_intent.assert_not_awaited()
     assert state.pruned_families == ["source_patch"]
     failures = [
         (row["action"], row["task_id"], row["error_class"], row["error_excerpt"]) for row in state.last_action_failures
@@ -543,8 +543,8 @@ async def test_force_stalled_research_specialist_ignores_source_patch_prune(forc
 
     await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
 
-    force_coord.router._handle_intent.assert_awaited_once()
-    _, intent = force_coord.router._handle_intent.call_args.args
+    force_coord.router.handle_intent.assert_awaited_once()
+    _, intent = force_coord.router.handle_intent.call_args.args
     assert intent.payload["params"]["domain"] == "candidate_discovery_specialist"
 
 
@@ -555,7 +555,7 @@ async def test_force_stalled_domain_noop_without_pending_gap(force_coord):
         state.bump_domain_round_counters()
     # No gap in the ledger -> nothing to force even though counters are high.
     await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
-    force_coord.router._handle_intent.assert_not_awaited()
+    force_coord.router.handle_intent.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -572,4 +572,4 @@ async def test_force_stalled_domain_noop_outside_explore(force_coord):
         }
     )
     await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
-    force_coord.router._handle_intent.assert_not_awaited()
+    force_coord.router.handle_intent.assert_not_awaited()

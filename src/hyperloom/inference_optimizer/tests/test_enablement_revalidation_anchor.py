@@ -135,7 +135,6 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
     state.baseline_tput = 100.0
     state.baseline_accuracy = 0.94
     state.baseline_config_path = str(config)
-    state.baseline_double_run = False
     state.baseline_benchmark_script = None if script_source == "legacy" else "sglang_custom.sh"
     if script_source == "generic":
         state.baseline_benchmark_script = ""

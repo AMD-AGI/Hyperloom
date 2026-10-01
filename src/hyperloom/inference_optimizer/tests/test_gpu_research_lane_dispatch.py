@@ -55,7 +55,7 @@ async def _queued_specialist(coord: Coordinator):
 async def test_needs_gpu_specialist_acquires_gpu_research_lane(tmp_path):
     coord = _build_coord(tmp_path, gpu_capacity=8)
     coord.shared_state.macro_cycle = 0
-    await coord.router._handle_delegate(
+    await coord.router.handle_delegate(
         "orchestration",
         _delegate(
             {
@@ -80,7 +80,7 @@ async def test_needs_gpu_specialist_acquires_gpu_research_lane(tmp_path):
 @pytest.mark.asyncio
 async def test_cpu_specialist_has_no_gpu_research_lane(tmp_path):
     coord = _build_coord(tmp_path, gpu_capacity=8)
-    await coord.router._handle_delegate(
+    await coord.router.handle_delegate(
         "orchestration",
         _delegate(
             {

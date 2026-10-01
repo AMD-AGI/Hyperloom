@@ -300,7 +300,6 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     state = coordinator.shared_state
     state.baseline_config_path = str(baseline)
     state.baseline_tput = 100.0
-    state.baseline_double_run = False
     state.current_best = {"tput": 110.0, **current}
     state.geak_result = {"schema_version": 2, "status": "ok", "accepted_config": accepted}
     enqueued = coordinator.writeback._geak_rebench_params(reason="launch_controls_regression")
@@ -1031,7 +1030,6 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
     state.explore_variant_timeout_sec_override = legacy_timeout_override
     state.explore_variant_timeout_safety_margin = 0.5
     state.explore_overtime_kill_ratio = 1.5
-    state.baseline_double_run = False
     monkeypatch.setattr(state, "session_budget_usable_sec", lambda **_kwargs: session_remaining_sec)
     if source == "geak":
         state.geak_result = {"status": "ok", "accepted_config": {"flags": "--mem-fraction-static 0.9"}}
@@ -1085,7 +1083,6 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     )
     state = coordinator.shared_state
     state.baseline_tput = 0.0
-    state.baseline_double_run = True
     for name, tput in [("sglang_custom.sh", 100.0), ("rejected_script.sh", 90.0)]:
         task = await coordinator.tasks.create(kind="baseline", params={"benchmark_script": name}, idempotency_key=name)
         await coordinator.writeback._promote_to_shared_state(

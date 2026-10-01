@@ -1811,7 +1811,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     assert "critic_filtered_count" not in create_calls[0]["params"]
 
 
-# 5. _handle_delegate — explore grid runs directly (no Critic pre-review)
+# 5. handle_delegate — explore grid runs directly (no Critic pre-review)
 def _delegate_coord(tmp_path: Path):
     """Coordinator double reaching the direct explore-task creation path."""
     c = Coordinator.__new__(Coordinator)
@@ -1877,7 +1877,7 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
             "idempotency_key": "explore-round-1",
         },
     )
-    await coord.router._handle_delegate("orchestration", intent)
+    await coord.router.handle_delegate("orchestration", intent)
     assert coord.state.pending_proposals == {}
     assert len(create_calls) == 1
     assert create_calls[0]["kind"] == "explore"
@@ -1921,7 +1921,7 @@ async def test_delegate_explore_seeds_the_stack_with_the_anchor(tmp_path: Path):
             "idempotency_key": "explore-round-4",
         },
     )
-    await coord.router._handle_delegate("orchestration", intent)
+    await coord.router.handle_delegate("orchestration", intent)
     assert len(created) == 1
     params = created[0]
     assert params["base_tput"] == 7725.6
@@ -1962,7 +1962,7 @@ async def test_delegate_sweep_seeds_the_stack_too(tmp_path: Path):
         type=IntentType.DELEGATE,
         payload={"action_name": "sweep", "params": {}, "idempotency_key": "sweep-1"},
     )
-    await coord.router._handle_delegate("orchestration", intent)
+    await coord.router.handle_delegate("orchestration", intent)
     assert len(created) == 1
     params = created[0]
     assert params["base_extra_args"] == "--max-num-seqs 64"

@@ -1538,7 +1538,7 @@ async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatc
     async def _fake_delegate(source, intent):
         seen.append(dict(intent.payload.get("params") or {}))
 
-    monkeypatch.setattr(coord.router, "_handle_delegate", _fake_delegate)
+    monkeypatch.setattr(coord.router, "handle_delegate", _fake_delegate)
     intent = Intent(
         type=IntentType.DELEGATE,
         payload={"idempotency_key": "wave", "action_name": "specialist"},
@@ -1930,7 +1930,7 @@ async def test_recipe_kb_finalize_amends_recipe(coord: Coordinator, monkeypatch)
     assert amends and "recipe_overrides" in amends[0]
 
 
-# -- _handle_intent routing -------------------------------------------------
+# -- handle_intent routing -------------------------------------------------
 @pytest.mark.asyncio
 async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.policy.gate import PolicyDenied
@@ -1946,7 +1946,7 @@ async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> N
         recorded.append(denied)
 
     monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
-    await coord.router._handle_intent("orchestration", _idle_intent())
+    await coord.router.handle_intent("orchestration", _idle_intent())
     assert recorded
 
 
@@ -1958,7 +1958,7 @@ async def test_handle_intent_handler_exception_is_recorded(coord: Coordinator, m
         raise RuntimeError("handler boom")
 
     monkeypatch.setattr(coord.router, "_handle_send_message", _boom)
-    await coord.router._handle_intent("orchestration", _idle_intent())
+    await coord.router.handle_intent("orchestration", _idle_intent())
 
 
 @pytest.mark.asyncio
@@ -1977,7 +1977,7 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
 
         monkeypatch.setattr(coord.router, attr, _h)
     for it in routes:
-        await coord.router._handle_intent("orchestration", Intent(type=it, payload={}))
+        await coord.router.handle_intent("orchestration", Intent(type=it, payload={}))
     assert len(seen) == len(routes)
 
 
@@ -2267,7 +2267,7 @@ async def test_materialize_requeues_same_content_after_terminal_twin(coord: Coor
     assert queued[0].task_id != first.task_id
 
 
-# -- _handle_delegate branches ----------------------------------------------
+# -- handle_delegate branches ----------------------------------------------
 def _delegate(action_name: str, key: str, params=None) -> Intent:
     payload = {"action_name": action_name, "params": params or {}, "idempotency_key": key}
     return Intent(type=IntentType.DELEGATE, payload=payload)
@@ -2278,7 +2278,7 @@ async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) 
     coord.shared_state.baseline_tput = 800.0
     monkeypatch.setattr(coord.shared_state, "is_pruned", lambda a: True)
     monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
-    await coord.router._handle_delegate("orchestration", _delegate("explore", "d-pruned"))
+    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-pruned"))
     assert await coord.tasks.queued()
 
 
@@ -2301,7 +2301,7 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
         recorded.append(denied)
 
     monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
-    await coord.router._handle_delegate("orchestration", _delegate("explore", "d-seq"))
+    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-seq"))
     assert recorded
 
 
@@ -2309,7 +2309,7 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
 async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
     monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
-    await coord.router._handle_delegate("orchestration", _delegate("explore", "d-same"))
+    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-same"))
     recorded: list = []
 
     async def _rec(source, intent, denied, action_name=None):
@@ -2317,7 +2317,7 @@ async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monk
 
     monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
     # Same key while the first task is still queued (non-terminal) -> denied.
-    await coord.router._handle_delegate("orchestration", _delegate("explore", "d-same"))
+    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-same"))
     assert recorded
 
 

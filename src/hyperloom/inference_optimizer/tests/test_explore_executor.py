@@ -1522,7 +1522,6 @@ async def test_explore_decision_stays_cold_when_the_session_skips_the_double_run
     sub, tr, _ = sub_agent_runner
     state = SharedState()
     state.baseline_tput = 800.0
-    state.baseline_double_run = False
     sub.shared_state = state
 
     base = tmp_path / "base.yaml"
