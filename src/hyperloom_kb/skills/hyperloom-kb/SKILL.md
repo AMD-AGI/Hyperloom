@@ -67,10 +67,12 @@ hyperloom-kb exclusions [--schema REF]
 
 - An exclusion hides an Experience from reads, whether it was written here or
   pulled. Ask for the reason when the user gave none; it stays in the history.
-- An excluded Experience written here is not pushed until it is included. One
-  already pushed stays on the global KB: an exclusion acts only on this
-  service.
-- `include` answers `not_excluded` when the Experience was not excluded.
+- An excluded Experience written here is not pushed until `include` releases
+  it, even when a restore to a label without the exclusion lets reads see it
+  again. One already pushed stays on the global KB: an exclusion acts only on
+  this service.
+- `include` answers `not_excluded` when the Experience was neither excluded
+  nor waiting for an include to be pushed.
 - `exclusions` lists the current exclusions and every exclude and include.
 
 ## Push and pull
@@ -87,7 +89,8 @@ hyperloom-kb pull --schema REF
   Pulled ones count as `skipped`; excluded ones, and ones a restore set aside,
   count as `held_back` and go with the first push after reads see them again.
 - A pull names one schema and brings its state to everything the global KB
-  holds of it; reads see the result at once, and exclusions stand. When the
+  holds of it, including Experiences the global KB shows again after hiding
+  them; reads see the result at once, and exclusions stand. When the
   state was unlabelled, the pull first labels it (reason `before_pull`) and
   answers that label as `saved`. Report its `label_id`: restoring it undoes
   the pull.

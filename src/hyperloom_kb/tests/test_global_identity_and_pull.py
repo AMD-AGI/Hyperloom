@@ -126,6 +126,37 @@ def test_a_global_kb_state_decides_what_a_pull_brings(tmp_path: Path) -> None:
     assert (pulled["created"], held) == (2, 2)
 
 
+def test_a_pull_brings_what_the_global_kb_shows_again_after_excluding_it(tmp_path: Path) -> None:
+    hidden = _experience(1, run_id="teammate-run").id
+    with _serving(_service(tmp_path / "global")) as global_client:
+        _seed(global_client, 3)
+        global_client.exclude(hidden, reason="under review")
+        with _serving(_service(tmp_path / "local", global_client.config.base_url)) as local:
+            first = local.pull(SCHEMA.schema_ref)
+            global_client.include(hidden)
+            second = local.pull(SCHEMA.schema_ref)
+            held = _readable(local)
+
+    assert first["created"] == 2
+    assert (second["created"], second["unchanged"], held) == (1, 2, 3)
+
+
+def test_a_pull_brings_what_a_global_kb_restore_shows_again(tmp_path: Path) -> None:
+    with _serving(_service(tmp_path / "global")) as global_client:
+        _seed(global_client, 1)
+        one = global_client.create_label(name="one")
+        for seq in (1, 2):
+            global_client.write(_experience(seq, run_id="teammate-run"), declaration=SCHEMA)
+        rolled_back = global_client.restore(str(one["label_id"]))
+        with _serving(_service(tmp_path / "local", global_client.config.base_url)) as local:
+            first = local.pull(SCHEMA.schema_ref)
+            global_client.restore(str(rolled_back["saved"]["label_id"]))
+            second = local.pull(SCHEMA.schema_ref)
+            held = _readable(local)
+
+    assert (first["created"], second["created"], held) == (1, 2, 3)
+
+
 def test_a_pull_brings_only_the_schema_it_names_and_registers_it(tmp_path: Path) -> None:
     other = _declaration(objective="latency@v1")
     with _serving(_service(tmp_path / "global")) as global_client:

@@ -458,8 +458,8 @@ with a different token, ask the user to set another port in `HYPERLOOM_KB_URL`
 and rerun this step. Do not continue to a demo until it succeeds.
 
 When the `.env` settings the service uses change (the Anthropic gateway, model,
-or global KB), the next run of this step or of an optimize launch restarts it
-with them. Push and pull never restart it, so run this step before them after
+or global KB), or Hyperloom is upgraded, the next run of this step or of an
+optimize launch restarts it with them. Push and pull never restart it, so run this step before them after
 such a change.
 
 ### Global Experience KB

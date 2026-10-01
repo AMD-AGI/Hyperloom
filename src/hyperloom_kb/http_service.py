@@ -18,7 +18,7 @@ from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from functools import partial
+from functools import cache, partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -101,6 +101,21 @@ def _identity(home: Path) -> str:
     temporary.write_text(json.dumps({"kb_id": kb_id, "created_at": _utc_now()}) + "\n", encoding="utf-8")
     os.replace(temporary, path)
     return kb_id
+
+
+@cache
+def code_digest() -> str:
+    """A fingerprint of this package's code, so a client can tell a service started from other code, such as one
+    started before an upgrade."""
+
+    root = Path(__file__).parent
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root)
+        if "tests" not in relative.parts:
+            digest.update(f"{relative.as_posix()}\0".encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def _canonical(value: Any) -> str:
@@ -337,6 +352,7 @@ class ExperienceHTTPService:
         self.name = name
         self.kb_id = _identity(config.home)
         self._config_digest = config_digest
+        self._code_digest = code_digest()
         canonical_root = config.home / "canonical"
         self._store = LocalExperienceStore(canonical_root)
         self._experience_service = ExperienceService(
@@ -353,6 +369,7 @@ class ExperienceHTTPService:
         self._declarations: dict[str, ExperienceDeclaration] = {}
         self._views: dict[str, QueryView] = {}
         self._visible: dict[str, frozenset[str]] = {}
+        self._pushable: dict[str, frozenset[str]] = {}
         for registered in self._experience_service.list_schemas():
             self._load(registered)
         self._sync = GlobalSync(self, self._ledger, global_kb)
@@ -382,9 +399,13 @@ class ExperienceHTTPService:
             fuzzy_ready=True,
         )
         self._visible[declaration.schema_ref] = visible
+        self._pushable[declaration.schema_ref] = visible - self._state.withheld(declaration.schema_ref)
 
     def is_visible(self, experience: Experience) -> bool:
         return experience.id in self._visible.get(experience.schema_ref, frozenset())
+
+    def is_pushable(self, experience: Experience) -> bool:
+        return experience.id in self._pushable.get(experience.schema_ref, frozenset())
 
     def held(self, experience_id: str) -> Experience:
         stored = self._mirror.get_experience(experience_id)
@@ -625,6 +646,7 @@ class ExperienceHTTPService:
         }
         if schema_ref is not None:
             page["declaration"] = self.declaration_for(schema_ref).to_dict()
+            page["state"] = self._state.hidden_digest(schema_ref)
         return page
 
     def _schema_ref(self, schema_ref: str | None) -> str:
@@ -711,6 +733,7 @@ class ExperienceHTTPService:
             "schemas": dict(counts),
             "pid": os.getpid(),
             "config_digest": self._config_digest,
+            "code_digest": self._code_digest,
             "home": str(self.config.home.resolve()),
         }
 
@@ -1016,6 +1039,7 @@ __all__ = [
     "HTTPServiceError",
     "RequestHandler",
     "ServiceSettings",
+    "code_digest",
     "create_http_server",
     "main",
 ]

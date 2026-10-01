@@ -48,6 +48,7 @@ from hyperloom_kb import (
     load_declaration,
 )
 from hyperloom_kb.config import PACKAGED_DECLARATION
+from hyperloom_kb.http_service import code_digest
 
 NOW = datetime(2026, 9, 28, tzinfo=timezone.utc)
 TOKEN = "service-secret"
@@ -263,6 +264,7 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
         "schemas": {schema.schema_ref: 1},
         "pid": os.getpid(),
         "config_digest": "",
+        "code_digest": code_digest(),
         "home": str((tmp_path / "service").resolve()),
     }
 

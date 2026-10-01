@@ -134,10 +134,12 @@ class ListPage:
 
 @dataclass(frozen=True)
 class ExportPage(ListPage):
-    """An export page, with the last write position of what it pages and, for one schema, that schema."""
+    """An export page, with the last write position of what it pages and, for one schema, that schema and its
+    ``state``, which changes whenever the service's exclusions or restores change what it shows of that schema."""
 
     head: int = 0
     declaration: ExperienceDeclaration | None = None
+    state: str = ""
 
 
 def _int(value: JsonValue, name: str) -> int:
@@ -391,18 +393,23 @@ class RemoteClient:
         items = payload.get("items")
         if not isinstance(items, list):
             raise RemoteClientError("Experience export response is invalid")
-        declaration = None
+        declaration, state = None, ""
         if schema_ref is not None:
             try:
                 declaration = ExperienceDeclaration.from_dict(payload.get("declaration"))
             except ValueError as exc:
                 raise RemoteClientError(f"Experience export response has no valid declaration: {exc}") from exc
+            reported = payload.get("state")
+            if not isinstance(reported, str) or not reported:
+                raise RemoteClientError("Experience export response has no state")
+            state = reported
         return ExportPage(
             items=tuple(item for item in items if isinstance(item, dict)),
             next_cursor=_int(payload.get("next_cursor"), "next_cursor"),
             has_more=payload.get("has_more") is True,
             head=_int(payload.get("head"), "head"),
             declaration=declaration,
+            state=state,
         )
 
     @staticmethod

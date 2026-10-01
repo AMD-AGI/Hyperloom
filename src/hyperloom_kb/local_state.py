@@ -160,15 +160,44 @@ class LocalState:
             self._log(connection, schema_ref, experience_id, "exclude", reason, at)
 
     def include(self, schema_ref: str, experience_id: str) -> bool:
-        """Lift an exclusion; ``False`` when the Experience was not excluded."""
+        """Lift an exclusion and release what it withheld; ``False`` when the Experience was neither excluded nor
+        withheld."""
 
         with self._connection() as connection:
             lifted = connection.execute(
                 "DELETE FROM exclusions WHERE schema_ref = ? AND experience_id = ?", (schema_ref, experience_id)
             ).rowcount
-            if lifted:
+            released = lifted or experience_id in self._withheld(connection, schema_ref)
+            if released:
                 self._log(connection, schema_ref, experience_id, "include", "", _now())
-        return bool(lifted)
+        return bool(released)
+
+    @staticmethod
+    def _withheld(connection: sqlite3.Connection, schema_ref: str) -> frozenset[str]:
+        return LocalState._ids(
+            connection,
+            """
+            SELECT experience_id FROM exclusion_history AS entry
+            WHERE schema_ref = ? AND action = 'exclude' AND sequence = (
+                SELECT MAX(sequence) FROM exclusion_history
+                WHERE schema_ref = entry.schema_ref AND experience_id = entry.experience_id
+            )
+            """,
+            schema_ref,
+        )
+
+    def withheld(self, schema_ref: str) -> frozenset[str]:
+        """The Experiences last excluded and not included since; a restore that lifts an exclusion releases none."""
+
+        with self._connection() as connection:
+            return self._withheld(connection, schema_ref)
+
+    def hidden_digest(self, schema_ref: str) -> str:
+        """Changes whenever an exclusion or a restore changes which stored Experiences reads do not see."""
+
+        with self._connection() as connection:
+            outside = self._ids(connection, "SELECT experience_id FROM outside WHERE schema_ref = ?", schema_ref)
+        return _digest(outside, self.excluded(schema_ref))
 
     @staticmethod
     def _log(
