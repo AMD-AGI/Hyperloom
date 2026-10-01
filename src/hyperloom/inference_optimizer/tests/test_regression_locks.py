@@ -283,7 +283,7 @@ async def test_request_response_visible_in_next_prompt(session_dir, monkeypatch)
     )
     c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(intents=[request])))
     try:
-        await c._reactor_pass("orchestration")
+        await c.reactor_pass("orchestration")
         assert "trace_analyze_done" in await c.conversation.compose_prompt("orchestration")
     finally:
         await c.stop()
@@ -296,7 +296,7 @@ async def test_no_intent_turn_advances_cursor(session_dir):
     try:
         alert = Message.new("robustness", "*", "alert", {"kind": "stall_warning"})
         await c.bus.append_and_seq(alert)
-        await c._reactor_pass("orchestration")
+        await c.reactor_pass("orchestration")
 
         cur = await c.cursors.load("orchestration")
         assert cur.last_processed_seq >= alert.seq
@@ -309,7 +309,7 @@ async def test_no_intent_turn_advances_cursor(session_dir):
 async def test_a_turn_without_intents_is_recorded_as_an_observation(session_dir):
     c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(raw_text="thinking out loud")))
     try:
-        await c._reactor_pass("orchestration")
+        await c.reactor_pass("orchestration")
 
         observations = await c.bus.tail(n=50, topic="observation")
         assert any((o.payload or {}).get("kind") == "no_intent_emitted" for o in observations)
@@ -324,7 +324,7 @@ async def test_backend_error_turn_does_not_advance_cursor(session_dir):
     try:
         alert = Message.new("robustness", "*", "alert", {"kind": "stall_warning"})
         await c.bus.append_and_seq(alert)
-        await c._reactor_pass("orchestration")
+        await c.reactor_pass("orchestration")
 
         cur = await c.cursors.load("orchestration")
         assert cur.last_processed_seq == 0

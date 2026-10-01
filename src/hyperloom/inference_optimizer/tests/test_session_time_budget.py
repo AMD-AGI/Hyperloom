@@ -1407,7 +1407,7 @@ class TestATickCannotOutliveTheSessionBound:
         monkeypatch,
     ):
         monkeypatch.setattr(coord.phase_machine, "advance_phase_if_needed", _idle)
-        monkeypatch.setattr(coord, "_reactor_pass", _hang_forever)
+        monkeypatch.setattr(coord, "reactor_pass", _hang_forever)
         monkeypatch.setattr(coord.dispatcher, "pump_dispatcher_once", _idle)
         started = time.monotonic()
         try:
@@ -1427,7 +1427,7 @@ class TestATickCannotOutliveTheSessionBound:
         monkeypatch,
     ):
         monkeypatch.setattr(coord.phase_machine, "advance_phase_if_needed", _hang_forever)
-        monkeypatch.setattr(coord, "_reactor_pass", _idle)
+        monkeypatch.setattr(coord, "reactor_pass", _idle)
         monkeypatch.setattr(coord.dispatcher, "pump_dispatcher_once", _idle)
         started = time.monotonic()
         try:
@@ -1448,7 +1448,7 @@ class TestATickCannotOutliveTheSessionBound:
         async def _must_not_run() -> None:
             started.append(True)
 
-        await coord._await_within_session_bound(_must_not_run, stage="test")
+        await coord.await_within_session_bound(_must_not_run, stage="test")
         assert started == []
 
     @pytest.mark.asyncio
@@ -1458,7 +1458,7 @@ class TestATickCannotOutliveTheSessionBound:
         async def _ok() -> None:
             started.append(True)
 
-        await coord._await_within_session_bound(_ok, stage="test")
+        await coord.await_within_session_bound(_ok, stage="test")
         assert started == [True]
 
     @pytest.mark.asyncio
@@ -1476,7 +1476,7 @@ class TestATickCannotOutliveTheSessionBound:
             await asyncio.sleep(0.2)
             finished.append(True)
 
-        await coord._await_within_session_bound(
+        await coord.await_within_session_bound(
             _slower_than_the_idle_budget,
             stage="reactor:orchestration",
         )
@@ -1502,7 +1502,7 @@ class TestATickCannotOutliveTheSessionBound:
         # the turn was cancelled at its own 30 ms bound, which the assertions below read off directly. Holding this
         # to 0.2 s instead made cancellation latency on a loaded runner look like a failure of the bound.
         await asyncio.wait_for(
-            coord._await_within_session_bound(
+            coord.await_within_session_bound(
                 _stay_active,
                 stage="reactor:orchestration",
             ),
@@ -1525,7 +1525,7 @@ class TestATickCannotOutliveTheSessionBound:
         before = coord.shared_state.recent_crash_count(window_sec=3600.0)
 
         await asyncio.wait_for(
-            coord._await_within_session_bound(_hang_forever, stage="reactor:orchestration"),
+            coord.await_within_session_bound(_hang_forever, stage="reactor:orchestration"),
             timeout=0.5,
         )
 
@@ -1538,7 +1538,7 @@ class TestATickCannotOutliveTheSessionBound:
         before = coord.shared_state.recent_crash_count(window_sec=3600.0)
 
         await asyncio.wait_for(
-            coord._await_within_session_bound(_hang_forever, stage="reactor:orchestration"),
+            coord.await_within_session_bound(_hang_forever, stage="reactor:orchestration"),
             timeout=0.5,
         )
 
@@ -1567,7 +1567,7 @@ class TestATickCannotOutliveTheSessionBound:
             await asyncio.sleep(0.03)
             finished.append(True)
 
-        await coord._await_within_session_bound(_finish_after_the_reactor_cap, stage="advance_phase")
+        await coord.await_within_session_bound(_finish_after_the_reactor_cap, stage="advance_phase")
 
         assert finished == [True]
 
@@ -1578,7 +1578,7 @@ class TestATickCannotOutliveTheSessionBound:
         async def _factory() -> None:
             calls.append("factory")
 
-        await coord._await_within_session_bound(_factory, stage="reactor:orchestration")
+        await coord.await_within_session_bound(_factory, stage="reactor:orchestration")
 
         assert calls == ["factory"]
         assert not (coord.session_dir / "runtime" / "supervisor").exists()
@@ -1593,7 +1593,7 @@ class TestATickCannotOutliveTheSessionBound:
         async def _ok() -> None:
             started.append(True)
 
-        await coord._await_within_session_bound(_ok, stage="close")
+        await coord.await_within_session_bound(_ok, stage="close")
         assert started == [True]
 
 
