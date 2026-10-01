@@ -45,7 +45,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
                 if str(getattr(t, "task_id", "") or "") == tracked_tid:
                     return tracked_tid
         # Do not open a row the dispatcher would cancel on sight.
-        denied = self._coord.dispatcher._time_budget_denial_for_action("baseline")
+        denied = self._coord.dispatcher.time_budget_denial_for_action("baseline")
         if denied is not None:
             log.info("ENABLEMENT revalidation: window held open, not enqueued -- %s", denied)
             return ""
@@ -106,7 +106,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
             stays open and the next tick tries again.
         """
         state = self.shared_state
-        baseline_lanes, baseline_ttl = self._coord.dispatcher._registry_lanes_ttl("baseline")
+        baseline_lanes, baseline_ttl = self._coord.dispatcher.registry_lanes_ttl("baseline")
         task_id, generation = await self._open_round_past_spent_generations(
             params=params,
             key_for=lambda gen: f"enablement_revalidation:gen{gen}",

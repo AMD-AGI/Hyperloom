@@ -1199,7 +1199,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         }
         await self._coord.specialist_dispatch._warm_specialist_params(params)
         # Gap id and attempt both repeat across cycles.
-        idem = f"perf_explore_authoring:{gap_cid}:retry:{attempt}{self._coord.dispatcher._cycle_idem_suffix()}"
+        idem = f"perf_explore_authoring:{gap_cid}:retry:{attempt}{self._coord.dispatcher.cycle_idem_suffix()}"
         lanes, ttl = self._coord.gpu_lanes._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _ = await self.tasks.create_or_return_existing(
             kind="specialist",
@@ -1440,7 +1440,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         # The registry de-duplicates by key and hands back whatever row it finds, so a candidate whose specialist
         # failed keeps resolving to that failure: the phase re-selects the candidate every tick, logs a dispatch, and
         # nothing runs.
-        base_idem = f"framework_agent_local_explore:{cand_id}{self._coord.dispatcher._cycle_idem_suffix()}"
+        base_idem = f"framework_agent_local_explore:{cand_id}{self._coord.dispatcher.cycle_idem_suffix()}"
         spec_task = None
         _spec_existing = False
         for attempt in range(_LOCAL_EXPLORE_MAX_ATTEMPTS):
@@ -1614,7 +1614,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "disable_run_eval": bool(state.eval_disabled),
         }
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
-        lanes, ttl = self._coord.dispatcher._registry_lanes_ttl("integrate_patch")
+        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("integrate_patch")
         try:
             # A framework candidate rebuilds and benchmarks, so it cannot share the GPU.
             if not lanes:
@@ -2407,7 +2407,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             params=params,
             # The round count is part of the key: the registry returns the row a key already names, so a fixed key
             # would re-fetch the finished first attempt and neither streak could advance.
-            idempotency_key=f"candidate-discovery:{reason}{self._coord.dispatcher._cycle_idem_suffix()}:r{empties + failures}",
+            idempotency_key=f"candidate-discovery:{reason}{self._coord.dispatcher.cycle_idem_suffix()}:r{empties + failures}",
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
             side_effects=["writes_results"],
@@ -2593,7 +2593,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             bs = str(last_bl.get("benchmark_script") or "").strip()
             if bs:
                 params["benchmark_script"] = bs
-        lanes, ttl = self._coord.dispatcher._registry_lanes_ttl("explore")
+        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("explore")
         etask, was_existing = await self.tasks.create_or_return_existing(
             kind="explore",
             params=params,

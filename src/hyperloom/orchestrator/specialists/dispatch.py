@@ -321,7 +321,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         # Mirror handle_delegate lane/ttl resolution so the retry task holds the
         # same pools as the original and cannot run concurrently with serving.
-        lanes, ttl = self._coord.dispatcher._registry_lanes_ttl("specialist")
+        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("specialist")
         from .profile import resolve_specialist_profile, uses_whole_machine_gpu_lane
 
         if resolve_specialist_profile(retry_params).reserves_benchmark_lane:
@@ -332,7 +332,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             needs_gpu = True
         if needs_gpu:
             lanes = list(dict.fromkeys((*lanes, "gpu_research_lane")))
-            ttl = self._coord.dispatcher._gpu_lease_ttl_sec(
+            ttl = self._coord.dispatcher.gpu_lease_ttl_sec(
                 int(ttl or 0),
                 params=retry_params,
             )
@@ -542,7 +542,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             is_source_patch = resolve_specialist_profile(params, domain=dom).mode == MODE_PATCH
             if is_source_patch and state.is_pruned(_SOURCE_PATCH_FAMILY):
                 continue
-            idempotency_key = f"forced-stalled-{anchor}-round{round_id}{self._coord.dispatcher._cycle_idem_suffix()}"
+            idempotency_key = f"forced-stalled-{anchor}-round{round_id}{self._coord.dispatcher.cycle_idem_suffix()}"
             lookup = getattr(self.tasks, "find_by_idempotency_key", None)
             if callable(lookup):
                 existing = await lookup(idempotency_key)

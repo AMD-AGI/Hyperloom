@@ -40,5 +40,5 @@ class GpuLanes(CoordinatorCollaborator):
         ttl = int(base_ttl_sec or 0)
         if is_truthy(params.get("needs_gpu")):
             lanes.append("gpu_research_lane")
-            ttl = self._coord.dispatcher._gpu_lease_ttl_sec(ttl, params=params)
+            ttl = self._coord.dispatcher.gpu_lease_ttl_sec(ttl, params=params)
         return lanes, ttl

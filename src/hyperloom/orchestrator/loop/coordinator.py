@@ -266,7 +266,7 @@ class Coordinator:
             self.db,
             gpu_ids=resolve_gpu_specialist_devices(
                 int(self.shared_state.gpu_specialist_capacity or 0),
-                serving_tp=self.dispatcher._resolve_serving_tp(),
+                serving_tp=self.dispatcher.resolve_serving_tp(),
             ),
         )
         # Framework-authoring pool over the whole node.
@@ -715,7 +715,7 @@ class Coordinator:
                     stage=f"reactor:{name}",
                 )
         if not self.stop_requested():
-            await self.dispatcher._pump_dispatcher_once()
+            await self.dispatcher.pump_dispatcher_once()
         if not in_closing:
             phase = (self.shared_state.phase or "").strip().upper()
             if not self.phase_machine._pump_table:

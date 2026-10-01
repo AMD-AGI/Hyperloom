@@ -227,7 +227,7 @@ class ClosePhase(CoordinatorCollaborator):
             result = await asyncio.wait_for(
                 self._coord.dispatcher.run_task_registered(
                     task,
-                    on_complete=partial(self._coord.dispatcher._reap_dispatched_task, task),
+                    on_complete=partial(self._coord.dispatcher.reap_dispatched_task, task),
                 ),
                 timeout=timeout_sec,
             )

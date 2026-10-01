@@ -427,7 +427,7 @@ class IntentRouter(CoordinatorCollaborator):
                     ),
                 },
             )
-        denied = self._coord.dispatcher._admission_denial_for_action(action_name)
+        denied = self._coord.dispatcher.admission_denial_for_action(action_name)
         if denied is not None:
             await self._coord.writeback.record_policy_denied(source, intent, denied)
             return
@@ -709,7 +709,7 @@ class IntentRouter(CoordinatorCollaborator):
                     ),
                 },
             )
-        denied = self._coord.dispatcher._admission_denial_for_action(action_name)
+        denied = self._coord.dispatcher.admission_denial_for_action(action_name)
         if denied is not None:
             await self._coord.writeback.record_policy_denied(
                 source,
@@ -798,7 +798,7 @@ class IntentRouter(CoordinatorCollaborator):
         was_existing = False
         for attempt in range(6):
             idempotency_key = str(raw_key) if attempt == 0 else f"{raw_key}-retry{attempt}"
-            lanes, ttl = self._coord.dispatcher._registry_lanes_ttl(action_name)
+            lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(action_name)
             # Bench-enabled specialists serialize against the other GPU benchmark/profile/server work via
             # benchmark_lane (research_lane alone conflicts with nothing).
             if action_name == "specialist":
@@ -811,7 +811,7 @@ class IntentRouter(CoordinatorCollaborator):
                 if needs_gpu:
                     lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
                     # Shared with the GPU-pool lease so the two TTLs never drift.
-                    ttl = self._coord.dispatcher._gpu_lease_ttl_sec(
+                    ttl = self._coord.dispatcher.gpu_lease_ttl_sec(
                         int(ttl or 0),
                         params=params,
                     )
@@ -943,7 +943,7 @@ class IntentRouter(CoordinatorCollaborator):
         """Route a REQUEST intent to its programmatic handler."""
         target_agent = intent.payload["target_agent"]
         kind = intent.payload["kind"]
-        denied = self._coord.dispatcher._sequence_denial_for_request(target_agent, kind)
+        denied = self._coord.dispatcher.sequence_denial_for_request(target_agent, kind)
         if denied is not None:
             await self._coord.writeback.record_policy_denied(source, intent, denied)
             return
@@ -1055,7 +1055,7 @@ class IntentRouter(CoordinatorCollaborator):
                     # A handler that benchmarks runs under its action's catalogue lanes, so it waits out the
                     # kernel_agent task instead of sharing the GPUs with it.
                     action = REQUEST_KIND_TO_OWNED_ACTION.get(kind, kind)
-                    lanes, ttl = self._coord.dispatcher._registry_lanes_ttl(action)
+                    lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(action)
                     handler_lease = None
                     if lanes:
                         handler_lease = await self.locks.try_acquire_many(

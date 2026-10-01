@@ -6325,7 +6325,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             params["config_path"] = self.shared_state.baseline_config_path
         if benchmark_script:
             params["benchmark_script"] = benchmark_script
-        lanes, ttl = self._coord.dispatcher._registry_lanes_ttl("explore")
+        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("explore")
         self._coord.proposals._inject_explore_runtime_params(params)
         task, existing = await self.tasks.create_or_return_existing(
             kind="explore",
