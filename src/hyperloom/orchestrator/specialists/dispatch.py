@@ -364,7 +364,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 detail="retry slot already taken",
             )
             return False
-        await self._coord.writeback._record_observation(
+        await self._coord.writeback.record_observation(
             "coordinator",
             "observation",
             {
@@ -408,7 +408,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             detail: Why no further retry was scheduled.
         """
         params = task.params or {}
-        await self._coord.writeback._record_observation(
+        await self._coord.writeback.record_observation(
             "coordinator",
             "observation",
             {
@@ -485,7 +485,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             try:
                 self.policy.validate_intent(source, sub_intent)
             except PolicyDenied as denied:
-                await self._coord.writeback._record_policy_denied(source, sub_intent, denied)
+                await self._coord.writeback.record_policy_denied(source, sub_intent, denied)
                 raise
             pending.append(sub_intent)
         for sub_intent in pending:

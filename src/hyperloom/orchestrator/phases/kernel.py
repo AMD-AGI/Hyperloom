@@ -1708,7 +1708,7 @@ class KernelPhase(CoordinatorCollaborator):
         GEAK-harness replay (2a) instead.
         """
         state = self.shared_state
-        params = self._coord.writeback._geak_rebench_params(reason=reason)
+        params = self._coord.writeback.geak_rebench_params(reason=reason)
         skip_reason = params.get("reason") if params.get("skipped") else None
         if skip_reason == "geak_invalid_config":
             return
@@ -1731,16 +1731,16 @@ class KernelPhase(CoordinatorCollaborator):
             }
             state.save(self.session_dir)
             raise
-        if self._coord.writeback._is_promotable_result("explore", result):
-            await self._coord.writeback._promote_to_shared_state("explore", result, task=task)
+        if self._coord.writeback.is_promotable_result("explore", result):
+            await self._coord.writeback.promote_to_shared_state("explore", result, task=task)
         else:
-            await self._coord.writeback._handle_unpromotable_result(task, result)
+            await self._coord.writeback.handle_unpromotable_result(task, result)
 
     async def _revalidate_on_geak_harness(self, *, decline_reason: str) -> None:
         """Replay the candidate through GEAK's own harness (2a); record the decline when it does not validate."""
         state = self.shared_state
         log.warning("geak: 2b declined (%s); validating through the GEAK harness instead", decline_reason)
-        fb = await self._coord.writeback._validate_geak_via_geak_harness(reason=decline_reason)
+        fb = await self._coord.writeback.validate_geak_via_geak_harness(reason=decline_reason)
         # Both are verdicts 2a has already recorded.
         if fb.get("validated") or fb.get("status") == "no_promote":
             return
@@ -2099,7 +2099,7 @@ class KernelPhase(CoordinatorCollaborator):
                 promotion_measurement["extra_envs"] = launch_envs
                 promotion_measurement.update(launch_controls)
                 promotion_measurement["args_mode"] = "replace"
-        lifted = self._coord.writeback._lift_to_current_best(
+        lifted = self._coord.writeback.lift_to_current_best(
             "geak_e2e",
             measured,
             promotion_measurement,
@@ -3117,7 +3117,7 @@ class KernelPhase(CoordinatorCollaborator):
     ) -> None:
         """Mirror an adopted GEMM-tuning stack entry as an optimization_journal KEEP row."""
         try:
-            journal = self._coord.writeback._ensure_journal()
+            journal = self._coord.writeback.ensure_journal()
             variant_name = str(entry.get("variant_name") or "gemm_tuning")
             backend = str(entry.get("backend") or "").strip().lower()
             try:
@@ -3133,7 +3133,7 @@ class KernelPhase(CoordinatorCollaborator):
                 metrics["tuned_file"] = str(entry.get("tuned_file"))
             journal.append_entry(
                 JournalEntry(
-                    phase=self._coord.writeback._journal_entry_phase(),
+                    phase=self._coord.writeback.journal_entry_phase(),
                     iter=int(self.shared_state.tick or 0),
                     kind=KIND_GEMM_TUNING,
                     change=variant_name,
@@ -3600,7 +3600,7 @@ class KernelPhase(CoordinatorCollaborator):
 
             if decision == "KEEP" and new_tput > 0 and not apply_blockers:
                 tuned_file = _candidate_tuned_file(env, cand.get("env_var", ""))
-                lifted = self._coord.writeback._lift_to_current_best(
+                lifted = self._coord.writeback.lift_to_current_best(
                     "gemm_tuning",
                     new_tput,
                     {
@@ -3847,7 +3847,7 @@ class KernelPhase(CoordinatorCollaborator):
                     patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
                     session_dir=self.session_dir,
                     shared_state=self.shared_state,
-                    record_keep=self._coord.writeback._record_integrate_keep,
+                    record_keep=self._coord.writeback.record_integrate_keep,
                 )
                 result["integration"] = integration.to_dict()
             except Exception as error:

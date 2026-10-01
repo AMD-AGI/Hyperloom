@@ -28,7 +28,7 @@ _TERMINAL_REVALIDATION_STATUSES: frozenset[str] = frozenset({"no_material", "no_
 def geak_harness_replays_workload(state: Any) -> bool:
     """Whether GEAK's own harness can replay this session's workload.
 
-    The canonical AgentX workload it cannot: ``_validate_geak_via_geak_harness``
+    The canonical AgentX workload it cannot: ``validate_geak_via_geak_harness``
     refuses before launch, which is what makes a refusal there structural rather
     than a run that might land next time. Persisted mode wins over the ambient
     switch, matching that refusal, so a session recorded as synthetic keeps

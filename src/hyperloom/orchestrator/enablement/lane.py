@@ -485,7 +485,7 @@ class EnablementLane(CoordinatorCollaborator):
             reason=("baseline launch failure did not match any actionable enablement signature; needs human triage"),
             signature=signature.to_dict(),
         )
-        await self._coord.writeback._record_observation(
+        await self._coord.writeback.record_observation(
             "coordinator",
             "observation",
             {
