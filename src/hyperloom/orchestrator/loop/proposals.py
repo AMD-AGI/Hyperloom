@@ -284,7 +284,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         ss = self.shared_state
         return kb_hardware_slug(ss.gpu_type or "unknown_gpu", **resolve_kb_topology())
 
-    def _workload_canonical_id(self) -> str:
+    def workload_canonical_id(self) -> str:
         """Return the workload's canonical seven-dimension Recipe identity."""
         ss = self.shared_state
         workload = ss.model_name or "unknown_model"
@@ -309,7 +309,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             scheme=("agentx" if agentx_active(benchmark_mode=ss.benchmark_mode) else "inference"),
         )
 
-    def _read_local_recipe_row(self) -> dict[str, Any]:
+    def read_local_recipe_row(self) -> dict[str, Any]:
         """Load the selected store's exact authority row for writes."""
         if self.recipe_kb is None:
             return {}
@@ -320,7 +320,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         try:
             row = (
                 self.recipe_kb.get_authoritative_recipe(
-                    canonical_id=self._workload_canonical_id(),
+                    canonical_id=self.workload_canonical_id(),
                 )
                 or {}
             )
@@ -330,7 +330,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         return row
 
     @staticmethod
-    def _extract_kept_best_config(
+    def extract_kept_best_config(
         *,
         task: "Task",
         variant_attrs: dict[str, Any] | None = None,
@@ -362,7 +362,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         return best_config
 
     @staticmethod
-    def _kb_best_config_overrides_for_keep(
+    def kb_best_config_overrides_for_keep(
         *,
         live: Mapping[str, Any],
         best_config_candidate: Mapping[str, Any],
@@ -395,7 +395,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             return overrides
         return {}
 
-    def _kb_amend_recipe(
+    def kb_amend_recipe(
         self,
         *,
         append_lesson: dict[str, Any] | None = None,
@@ -411,7 +411,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
 
         if agentx_active(benchmark_mode=self.shared_state.benchmark_mode):
             return
-        cid = self._workload_canonical_id()
+        cid = self.workload_canonical_id()
 
         ss = self.shared_state
         framework = str(ss.framework or "")
@@ -425,7 +425,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             live = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
         except Exception as exc:  # noqa: BLE001
             log.info(
-                "_kb_amend_recipe: authority get_recipe failed (%s); proceeding with empty live",
+                "kb_amend_recipe: authority get_recipe failed (%s); proceeding with empty live",
                 exc,
             )
             live = {}
@@ -532,11 +532,11 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             self._local_recipe_cache = None
         except Exception:
             log.exception(
-                "_kb_amend_recipe: put_recipe failed for cid=%s",
+                "kb_amend_recipe: put_recipe failed for cid=%s",
                 cid,
             )
 
-    def _inject_explore_runtime_params(self, params: dict) -> None:
+    def inject_explore_runtime_params(self, params: dict) -> None:
         """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides."""
         br = float(self.shared_state.baseline_runtime_sec or 0.0)
         if br > 0:
@@ -555,7 +555,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         cursor = int((self.shared_state.explore_search or {}).get("cursor") or 0)
         params.setdefault("explore_search_cursor", cursor)
 
-    async def _materialize_approved_proposal(
+    async def materialize_approved_proposal(
         self,
         pending: PendingProposal,
         *,
@@ -601,7 +601,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             if self.shared_state.baseline_config_path:
                 params.setdefault("config_path", self.shared_state.baseline_config_path)
         if pending.action_name == "explore":
-            self._inject_explore_runtime_params(params)
+            self.inject_explore_runtime_params(params)
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if pending.action_name == "integrate_patch":
             # ``source_phase`` is stamped where the specialist is created and carried from there; a
