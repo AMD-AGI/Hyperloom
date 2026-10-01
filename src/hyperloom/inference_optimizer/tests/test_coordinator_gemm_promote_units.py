@@ -1086,7 +1086,7 @@ class TestBf16DenseFallbackIsInternalToForge:
         coord.bus = type("Bus", (), {})()
         coord.bus.append_and_seq = _append_and_seq
         coord.phase_machine._kernel_enabled = lambda: True
-        coord.phase_kernel._geak_enabled = lambda: False
+        coord.phase_kernel.geak_enabled = lambda: False
         coord.phase_kernel._gemm_tuning_required_before_kernel_opt = lambda: True
         coord.phase_machine._record_phase_entry_evidence = lambda **_kwargs: None
 
@@ -1118,7 +1118,7 @@ class TestBf16DenseFallbackIsInternalToForge:
 
         monkeypatch.setattr(krh_mod, "run_gemm_tuning_handler", _fake_run_gemm)
 
-        await coord.phase_kernel._run_kernel_agent(
+        await coord.phase_kernel.run_agent(
             SimpleNamespace(task=SimpleNamespace(params={"from_phase": "FRAMEWORK_AGENT"}))
         )
 

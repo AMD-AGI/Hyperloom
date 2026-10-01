@@ -254,7 +254,7 @@ async def test_watermark_gate_reopens_exactly_when_the_roofline_it_names_finishe
     state.roofline_failure_streak = 1  # its trace analysis failed
     assert coord.phase_kernel._needs_roofline_for_watermark() is False
 
-    enqueued = await coord.phase_kernel._maybe_enqueue_watermark_roofline(
+    enqueued = await coord.phase_kernel.maybe_enqueue_watermark_roofline(
         reason="integrate_keep_watermark",
     )
 
@@ -306,7 +306,7 @@ async def test_watermark_gate_closes_on_a_condemned_stack(coord: Coordinator):
     state.gpu_trace_unsupported_reason = "no GPU kernels on this stack"
 
     assert coord.phase_kernel._needs_roofline_for_watermark() is False
-    assert await coord.phase_kernel._maybe_enqueue_watermark_roofline(reason="integrate_keep_watermark") is False
+    assert await coord.phase_kernel.maybe_enqueue_watermark_roofline(reason="integrate_keep_watermark") is False
 
 
 def test_watermark_roofline_inherits_current_best_args(coord: Coordinator):
@@ -366,11 +366,11 @@ async def test_kernel_agent_reprofiles_on_change(coord: Coordinator, monkeypatch
     """The kernel_agent task (no-GEMM path) reprofiles under its own lease when projected tput (120) diverges from the last measured trace (100), anchoring on the new snapshot."""
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
     coord.sub = _StubSub(coord.shared_state, landed_tput=120.0)
-    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
+    monkeypatch.setattr(coord.phase_kernel, "geak_enabled", lambda: False)
     monkeypatch.setattr(coord.phase_kernel, "_gemm_tuning_required_before_kernel_opt", lambda: False)
     coord.shared_state.cumulative_gain_validated = 20.0  # cur = 100 * 1.20 = 120
 
-    await coord.phase_kernel._run_kernel_agent(_kernel_agent_ctx())
+    await coord.phase_kernel.run_agent(_kernel_agent_ctx())
 
     assert len(coord.sub.tasks_run) == 1
     # The reason carries a profile fingerprint suffix so repeated kernel entries at the same gain stack are
@@ -383,7 +383,7 @@ async def test_kernel_agent_reprofiles_on_change(coord: Coordinator, monkeypatch
 async def test_kernel_agent_skips_gemm_but_still_runs_fusion(coord: Coordinator, monkeypatch):
     """Disabling GEMM tuning must not disable the independently gated fusion stage."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
-    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
+    monkeypatch.setattr(coord.phase_kernel, "geak_enabled", lambda: False)
     monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: True)
     assert coord.phase_kernel._gemm_tuning_required_before_kernel_opt() is False
 
@@ -399,7 +399,7 @@ async def test_kernel_agent_skips_gemm_but_still_runs_fusion(coord: Coordinator,
     monkeypatch.setattr(coord.phase_kernel, "_run_forge_fusion", _run_fusion)
     monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
 
-    await coord.phase_kernel._run_kernel_agent(_kernel_agent_ctx())
+    await coord.phase_kernel.run_agent(_kernel_agent_ctx())
 
     assert fusion_calls == 1
 

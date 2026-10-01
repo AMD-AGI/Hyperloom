@@ -969,7 +969,7 @@ async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir,
     validate = Mock()
     watermark = AsyncMock()
     monkeypatch.setattr(coord.writeback, "validate", validate)
-    monkeypatch.setattr(coord.phase_kernel, "_maybe_enqueue_watermark_roofline", watermark)
+    monkeypatch.setattr(coord.phase_kernel, "maybe_enqueue_watermark_roofline", watermark)
 
     await coord.writeback.promote_to_shared_state(
         "integrate_patch",
@@ -2179,7 +2179,7 @@ class TestWritebackRequiredAxes:
         record = Mock()
         watermark = AsyncMock()
         monkeypatch.setattr(stack_event, "record_validation", record)
-        monkeypatch.setattr(coord.phase_kernel, "_maybe_enqueue_watermark_roofline", watermark)
+        monkeypatch.setattr(coord.phase_kernel, "maybe_enqueue_watermark_roofline", watermark)
         candidate = self._candidate()
         outcome = wb._PromoteOutcome(verdict=Verdict.RECORDED)
         if lane == "integrate":

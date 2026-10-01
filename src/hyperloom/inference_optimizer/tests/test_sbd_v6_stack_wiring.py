@@ -195,7 +195,7 @@ def test_geak_config_promotion_records_engine_without_kernel_credit(
             "accepted_kernels": ["unloaded_candidate"] if overlay_loaded is False else [],
         }
 
-        assert coord.phase_kernel._promote_geak_from_candidate(
+        assert coord.phase_kernel.promote_geak_from_candidate(
             result, measured_tput=1100.0, overlay_loaded=overlay_loaded
         )
 
@@ -223,7 +223,7 @@ def test_geak_proven_kernel_promotion_retains_kernel_identity_and_engine(session
         coord = _coord(session_dir)
         result = {"status": "ok", "accepted_kernels": ["loaded_candidate"]}
 
-        assert coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=1100.0, overlay_loaded=True)
+        assert coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=1100.0, overlay_loaded=True)
 
         row = _rows()[0]
         assert row["backend"] == "geak"
@@ -237,7 +237,7 @@ def test_refused_geak_config_promotion_records_no_adoption(session_dir, measured
         coord = _coord(session_dir)
         result = {"status": "ok", "accepted_config": {"flags": "--attention-backend aiter"}}
 
-        assert not coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=measured)
+        assert not coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=measured)
 
         assert coord.shared_state.optimization_stack == []
         assert _rows() == []
