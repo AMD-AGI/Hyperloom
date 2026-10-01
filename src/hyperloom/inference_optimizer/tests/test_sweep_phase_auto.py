@@ -34,41 +34,17 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 # Fixtures
 @dataclass
-class _BareState:
-    """SharedState stand-in covering every attribute the SWEEP hook + helper read."""
-
-    warm_start_recipe: dict | None = None
-    baseline_config_path: str = ""
-    current_best: dict[str, Any] = field(default_factory=dict)
-    last_baseline: dict[str, Any] = field(default_factory=dict)
-    phase_history: list[dict[str, Any]] = field(default_factory=list)
-    pending_stack_validation_result: dict[str, Any] = field(default_factory=dict)
-    pending_stack_validation_apply_results: list[dict[str, Any]] = field(default_factory=list)
-    kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
-    optimization_stack: list[dict[str, Any]] = field(default_factory=list)
-    last_conc_sweep: dict[str, Any] = field(default_factory=dict)
-    last_conc_sweep_watermark: dict[str, Any] = field(default_factory=dict)
-    cumulative_gain_validated: float = 0.0
-    conc_sweep_enabled: bool = True
+class _BareState(SharedState):
     conc_sweep_concs: list[int] = field(default_factory=lambda: [1, 2, 4])
     conc_sweep_total_budget_sec: int = 60
     save_count: int = 0
-    stop_reason: str = ""
     usable_sec: float | None = None
-    macro_cycle: int = 0
 
     def session_budget_usable_sec(self, *, reserve_sec=None) -> float | None:
         return self.usable_sec
 
-    def save(self, _session_dir: Path | None) -> None:
+    def save(self, _session_dir: Path | None = None) -> None:
         self.save_count += 1
-
-    def record_conc_sweep(self, result: dict[str, Any]) -> None:
-        self.last_conc_sweep = {
-            "status": str(result.get("status") or "succeeded"),
-            "skip_reason": str(result.get("skip_reason") or ""),
-            "was_skipped": bool(result.get("was_skipped", False)),
-        }
 
 
 _STACK_ORIGINAL_SOURCE = "def kernel():\n    return 1\n"

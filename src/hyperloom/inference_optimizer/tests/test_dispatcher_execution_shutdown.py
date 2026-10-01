@@ -27,6 +27,7 @@ from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, Sqlite
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop import dispatcher as dispatcher_module
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
+from hyperloom.orchestrator.bringup.reconcile import ReconcileReport
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
@@ -55,6 +56,7 @@ def _dispatcher(tmp_path):
         sub=SubAgentRunner(locks, tasks),
         _stop=stop,
         stop_requested=stop.is_set,
+        reconciler=SimpleNamespace(last_report=ReconcileReport()),
         _BUDGET_GATED_DISPATCH_PHASES=frozenset(),
         writeback=writeback_ns,
     )

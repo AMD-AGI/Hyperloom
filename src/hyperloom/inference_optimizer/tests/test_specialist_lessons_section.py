@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +14,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb.local_store import (
     _normalise_lessons,
     _normalise_str_dicts,
 )
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.specialists.domains import (
     get_domain,
@@ -27,27 +27,7 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
 )
 
 
-@dataclass
-class _BareState:
-    last_trace_analyze: dict[str, Any] = field(default_factory=dict)
-    gpu_type: str = ""
-    tp: int = 0
-    precision: str = ""
-    conc: int = 0
-    isl: int = 0
-    osl: int = 0
-    max_model_len: int = 0
-    macro_cycle: int = 0
-    warm_start_recipe: dict[str, Any] = field(default_factory=dict)
-    warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
-    warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
-    gaps: list[dict[str, Any]] = field(default_factory=list)
-
-    def find_gap(self, _cid: str):
-        return None
-
-
-def _make_coord(tmp_path: Path, *, state: _BareState) -> Coordinator:
+def _make_coord(tmp_path: Path, *, state: SharedState) -> Coordinator:
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = state
@@ -68,7 +48,7 @@ async def test_warm_specialist_params_populates_warm_start_lessons(tmp_path: Pat
             "source_session_id": "session-A",
         },
     ]
-    coord = _make_coord(tmp_path, state=_BareState(warm_start_lessons=lessons))
+    coord = _make_coord(tmp_path, state=SharedState(warm_start_lessons=lessons))
     params: dict[str, Any] = {}
     await coord.specialist_dispatch._warm_specialist_params(params)
     assert params["warm_start_lessons"] == lessons
@@ -79,7 +59,7 @@ async def test_warm_specialist_params_omits_warm_start_lessons_when_empty(
     tmp_path: Path,
 ):
     """No lessons → no key in params (avoids leaking a misleading empty list)."""
-    coord = _make_coord(tmp_path, state=_BareState(warm_start_lessons=[]))
+    coord = _make_coord(tmp_path, state=SharedState(warm_start_lessons=[]))
     params: dict[str, Any] = {}
     await coord.specialist_dispatch._warm_specialist_params(params)
     assert "warm_start_lessons" not in params

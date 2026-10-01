@@ -23,6 +23,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 @dataclass
@@ -149,15 +150,8 @@ async def test_warm_specialist_params_fills_pr_monitor_available(tmp_path: Path)
     coord.session_dir = tmp_path
     coord.knowledge_plane = _FakeKnowledgePlane()
 
-    @dataclass
-    class _State:
-        warm_start_recipe: dict = None
-        warm_start_pitfalls: list = None
-        warm_start_lessons: list = None
-        gpu_type: str = "MI300X"
-        macro_cycle: int = 0
-
-    state = _State(
+    state = SharedState(
+        gpu_type="MI300X",
         warm_start_recipe={"backend": "sglang", "tp": 8},
         warm_start_pitfalls=["avoid --max-num-seqs 1024 on MoE"],
     )
@@ -181,15 +175,7 @@ async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path
     coord.session_dir = tmp_path
     coord.knowledge_plane = None
 
-    @dataclass
-    class _State:
-        warm_start_recipe: dict = None
-        warm_start_pitfalls: list = None
-        warm_start_lessons: list = None
-        gpu_type: str = ""
-        macro_cycle: int = 0
-
-    coord.shared_state = _State()
+    coord.shared_state = SharedState()
 
     params: dict = {"domain": "serving_specialist"}
     await coord.specialist_dispatch._warm_specialist_params(params)

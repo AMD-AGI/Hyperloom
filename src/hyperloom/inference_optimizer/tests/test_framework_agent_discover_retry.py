@@ -15,37 +15,27 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALO
 from hyperloom.orchestrator.phases import framework as _phase_framework
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 _ACTION_REGISTRY = ACTION_CATALOGUE
 
 
-class _StateStub:
-    """SharedState minimal stub for discover retry tests."""
+class _StateStub(SharedState):
+    """SharedState that counts saves instead of writing them."""
 
     def __init__(self) -> None:
-        self.phase = "FRAMEWORK"
-        self.framework_agent_phase_done = False
-        self.framework_agent_discover_failures = 0
-        self.framework_agent_batches: list[dict[str, Any]] = []
-        self.framework_agent_phase_progress: list[dict[str, Any]] = []
-        self.phase_history: list[dict[str, Any]] = []
-        self.gaps: list[dict[str, Any]] = []
-        self.model = "test-model"
-        self.framework = "sglang"
-        self.gpu_type = "MI300X"
-        self.model_class = "dense"
-        self.precision = "fp8"
-        self.macro_cycle = 0
+        super().__init__(
+            phase="FRAMEWORK",
+            framework="sglang",
+            gpu_type="MI300X",
+            model_class="dense",
+            precision="fp8",
+        )
         self._saves = 0
 
     def save(self, _session_dir: Path) -> None:
         self._saves += 1
-
-    def append_phase_history_event(self, **kwargs: Any) -> dict[str, Any]:
-        from hyperloom.orchestrator.phases import machine_state as _ms
-
-        return _ms.append_phase_history_event(self, **kwargs)
 
 
 def _event_name(row: dict[str, Any]) -> str:

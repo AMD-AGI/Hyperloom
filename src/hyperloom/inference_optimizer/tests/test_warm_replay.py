@@ -19,6 +19,7 @@ from hyperloom.orchestrator.actions.executors.baseline import restore_warm_kerne
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases import prelude as prelude_mod
 from hyperloom.orchestrator.phases.prelude import PRELUDE_ARM_DROPPED
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 @dataclass
@@ -30,46 +31,16 @@ class _StubTask:
 
 
 @dataclass
-class _StubSharedState:
-    """Minimal SharedState surface the warm-replay helpers read/write."""
+class _StubSharedState(SharedState):
+    """SharedState whose save persists the warm-replay guard so a resume can be tested against disk."""
 
     framework: str = "sglang"
     model_name: str = "DeepSeek-R1"
     gpu_type: str = "MI300X"
     baseline_tput: float = 600.0
     baseline_config_path: str = "/tmp/baseline.yaml"
-    warm_start_recipe: dict = field(default_factory=dict)
-    warm_start_context: dict = field(default_factory=dict)
-    warm_replay_attempted: bool = False
-    warm_replay_enabled: bool = True
-    warm_replay_min_confidence: float = 0.7
-    warm_replay_outcome: dict = field(default_factory=dict)
-    warm_replay_pending: dict = field(default_factory=dict)
-    warm_kernel_kb_attempted: bool = False
-    warm_kernel_kb_plan: list = field(default_factory=list)
-    baseline_accuracy: float = 0.0
-    gpu_trace_unsupported_reason: str = ""
-    warm_history_injected: bool = False
-    auto_roofline_pending_task_id: str = ""
-    stop_reason: str = ""
-    enable_roofline: bool = True
-    last_baseline: dict = field(default_factory=dict)
-    explore_search: dict = field(default_factory=dict)
-    optimization_stack: list = field(default_factory=list)
-    gain_per_stack_entry: list = field(default_factory=list)
-    cumulative_gain_validated: float = 0.0
-    cumulative_gain_validated_ts: str = ""
-    cumulative_gain_validated_stack_len: int = 0
-    current_best: dict = field(default_factory=dict)
-    tick: int = 0
     phase: str = "PRELUDE"
-    phase_history: list = field(default_factory=list)
-    macro_cycle: int = 0
     conc: int = 64
-    isl: int = 0
-    osl: int = 0
-    max_model_len: int = 0
-    last_action_failures: list = field(default_factory=list)
 
     def save(self, session_dir=None, *args, **kwargs):
         """Persist the one-shot guard so a resume can be tested against disk.
@@ -91,45 +62,6 @@ class _StubSharedState:
             ),
             encoding="utf-8",
         )
-
-    def append_phase_history_event(self, **kwargs):
-        """Forward to the production helper, as SharedState does."""
-        from hyperloom.orchestrator.phases import machine_state as _ms
-
-        return _ms.append_phase_history_event(self, **kwargs)
-
-    def record_action_failure(self, *, action, task_id, result, **kwargs):
-        self.last_action_failures.append(
-            {
-                "action": action,
-                "task_id": task_id,
-                "error_class": str((result or {}).get("error_class") or ""),
-            }
-        )
-
-    def append_stack_gain_entry(self, *, action, variant_name, new_tput, extra_server_args="", ts=None):
-        from hyperloom.common.gain_math import gain_pct
-
-        entry_gain_pct = gain_pct(float(new_tput or 0.0), float(self.baseline_tput or 0.0))
-        self.gain_per_stack_entry.append(entry_gain_pct)
-        return entry_gain_pct
-
-    def set_stop_reason(self, reason: str) -> None:
-        self.stop_reason = reason
-
-    def __getattr__(self, name: str):
-        from hyperloom.orchestrator.state import shared_state as _ss
-
-        cls = _ss.SharedState
-        for field in cls.__dataclass_fields__.values():
-            if field.name == name:
-                import dataclasses
-
-                if field.default is not dataclasses.MISSING:
-                    return field.default
-                if field.default_factory is not dataclasses.MISSING:
-                    return field.default_factory()
-        return None
 
 
 class _StubTaskRegistry:
