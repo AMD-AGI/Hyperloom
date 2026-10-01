@@ -228,7 +228,9 @@ def test_replay_logs_drive_boot_and_measured_per_replica(tmp_path):
     from hyperloom.orchestrator.actions.executors._geak_sweep import _replay_server_logs
 
     phases = _PhaseLog()
-    driver = ServerLogPhaseDriver(phases, lambda: _replay_server_logs(tmp_path))
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import _scan_logs_increment
+
+    driver = ServerLogPhaseDriver(phases, lambda: _replay_server_logs(tmp_path), scan=_scan_logs_increment)
     first = tmp_path / "replica_0" / "attempt_0" / "server.log"
     first.parent.mkdir(parents=True)
     first.write_text("loading weights\n")

@@ -28,6 +28,7 @@ from hyperloom.orchestrator.loop.coordinator_helpers import (
 )
 from ._accuracy_gate import parse_eval_results
 from ._gpu_power import ServerLogPhaseDriver, build_gpu_power_recorder, read_measured_gpu_power
+from ._subprocess_kill import _scan_logs_increment
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 log = logging.getLogger(__name__)
@@ -108,7 +109,7 @@ def _run_with_power_sampling(
     recorder = build_gpu_power_recorder(str(out_dir / "server.log"), dict(env))
     if recorder is None:
         return run()
-    driver = ServerLogPhaseDriver(recorder, lambda: _replay_server_logs(out_dir))
+    driver = ServerLogPhaseDriver(recorder, lambda: _replay_server_logs(out_dir), scan=_scan_logs_increment)
     driver.start()
     try:
         return run()
