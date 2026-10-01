@@ -14,11 +14,12 @@ workspace/report artifacts) and is selected via
 HYPERLOOM_BENCHMARK_BACKEND=bypass without touching the executors.
 
 The inferasim backend implements the same contract but produces the report from
-Infera's ``inferasim`` serving projection (analytical / anchor-calibrated, no
-GPU) instead of a real server + client. It is selected via
-HYPERLOOM_BENCHMARK_BACKEND=inferasim and lets an entire optimization session
-run without a GPU, reserving real GPU time for the final validation. See
-:mod:`inferasim_runner`.
+Infera's ``inferasim`` serving projection instead of a real server + client. It
+is selected via HYPERLOOM_BENCHMARK_BACKEND=inferasim and lets an entire
+optimization session run without a GPU, reserving real GPU time for the final
+validation. The projection is analytical by default;
+HYPERLOOM_INFERASIM_MODE=benchmark calibrates it against warmup anchors
+instead. See :mod:`inferasim_runner` and :mod:`inferasim_bridge`.
 """
 
 from __future__ import annotations

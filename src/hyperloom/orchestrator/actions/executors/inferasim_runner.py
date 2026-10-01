@@ -15,6 +15,10 @@ optimizer's gain math consume simulated runs unchanged -- so an entire
 optimization session can run without a GPU, and real GPU time is spent only on
 the final validation. That is the GPU-time reduction projected in the deck.
 
+``HYPERLOOM_INFERASIM_MODE`` picks how the numbers are produced: ``simulate``
+(default) is analytical and needs no anchor; ``benchmark`` calibrates against
+warmup anchors from ``HYPERLOOM_INFERASIM_ANCHOR`` / ``_ANCHOR_STORE``.
+
 Lifecycle/server flags (``--phase``, ``--server-lifecycle-*``) are accepted for
 drop-in compatibility and ignored: a projection has no server to persist.
 """
