@@ -21,7 +21,7 @@ from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, is_env_fault, load_boot_observation, observation_summary
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.inference_optimizer.breakdown.round_archive import ROLE_LAUNCH_CONFIG, RoundArchive
-from ..loop.server_args import _dedupe_extra_server_args
+from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
 from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from ..loop.offload import offload
 from .params import ENABLEMENT_PARAMS_BUDGET_SEC
@@ -817,7 +817,7 @@ def _rearm_on_advanced(state: Any, res: dict[str, Any]) -> None:
         merged.update({str(k): str(v) for k, v in adv_envs.items()})
         cfg["extra_envs"] = merged
         # Folded by flag keeping the last value, so this round overrides an earlier one.
-        cfg["extra_server_args"] = _dedupe_extra_server_args(
+        cfg["extra_server_args"] = dedupe_extra_server_args(
             merge_server_args(str(cfg.get("extra_server_args") or ""), adv_args)
         )
         cfg.setdefault("args_mode", "append")

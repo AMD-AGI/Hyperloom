@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import os
 import time
 import traceback
@@ -65,11 +67,10 @@ from hyperloom.inference_optimizer.trace.orchestration_trace import (
     write_mcp_setup_once,
 )
 from hyperloom.common.timeutil import format_exc_brief
+from hyperloom.inference_optimizer.model_config_utils import resolve_local_model_dir
 
 
 log = logging.getLogger(__name__)
-
-import math as _math
 
 REACTOR_TURN_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC"
 DEFAULT_REACTOR_TURN_TIMEOUT_SEC = 1800.0
@@ -78,7 +79,7 @@ DEFAULT_REACTOR_TURN_TIMEOUT_SEC = 1800.0
 def resolve_reactor_turn_timeout_sec() -> float:
     """Resolve the reactor turn's total wall-clock timeout."""
     value = env_float(REACTOR_TURN_TIMEOUT_ENV, default=DEFAULT_REACTOR_TURN_TIMEOUT_SEC)
-    if value > 0.0 and _math.isfinite(value):
+    if value > 0.0 and math.isfinite(value):
         return value
     log.warning(
         "%s=%.1f is not a positive finite number; using default %.1fs",
@@ -91,25 +92,23 @@ def resolve_reactor_turn_timeout_sec() -> float:
 
 def _infer_model_class_from_config(model_path: str) -> str:
     """Infer a deterministic model_class from local model metadata."""
-    import json as _json
-
     raw_path = (model_path or "").strip()
     payload: dict[str, Any] = {}
     if raw_path:
-        from hyperloom.inference_optimizer.model_config_utils import (
-            resolve_local_model_dir,
-        )
-
+        # ``model_path`` may be an HF repo id; resolve to the local weights dir so the config-based classification
+        # works (the raw string still feeds the keyword fallback below).
         _resolved = resolve_local_model_dir(raw_path)
         cfg = (_resolved / "config.json") if _resolved is not None else Path(raw_path) / "config.json"
         try:
             if cfg.is_file():
-                data = _json.loads(cfg.read_text(encoding="utf-8"))
+                data = json.loads(cfg.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
                     payload = data
-        except Exception:
+        except (OSError, ValueError):
             log.debug("model_class inference: failed to read %s", cfg, exc_info=True)
 
+    # A multimodal checkpoint keeps the language model one level down, so the expert counts and the LM architecture
+    # live there rather than at the top. Read both, outer first: a VL wrapper would otherwise classify as dense.
     payloads: list[dict[str, Any]] = [payload]
     for nested_key in ("text_config", "llm_config", "language_config"):
         nested = payload.get(nested_key)
@@ -1231,7 +1230,6 @@ __all__ = [
     "Coordinator",
     "CoordinatorState",
     "SharedState",
-    # Re-exported for callers/tests.
     "_infer_model_class_from_config",
     "effective_closing_grace_sec",
     # Re-exported from policy.gate; referenced via ``coordinator.<name>`` in tests.

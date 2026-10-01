@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from ..state.task_registry import Task
     from .machine import Transition
 from ..loop.proposals import PendingProposal, record_proposal
-from ..loop.server_args import _dedupe_extra_server_args
+from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
 from hyperloom.inference_optimizer.grid_server_args import (
     merge_server_args,
     tokenize_server_args_preserving_json,
@@ -2707,7 +2707,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             established = dict(getattr(self.shared_state.enablement, "accepted_config", None) or {})
             round_envs = {**{str(k): str(v) for k, v in (established.get("extra_envs") or {}).items()}, **round_envs}
             # This round last, so it overrides an inherited value for the same flag.
-            round_args = _dedupe_extra_server_args(
+            round_args = dedupe_extra_server_args(
                 merge_server_args(str(established.get("extra_server_args") or ""), round_args)
             )
         if round_args or round_envs:

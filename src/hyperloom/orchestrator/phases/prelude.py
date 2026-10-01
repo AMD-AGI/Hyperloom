@@ -31,6 +31,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
 )
 
 from . import machine_state as _phase_state
+from hyperloom.inference_optimizer.grid_server_args import merge_cumulative_extra_server_args
 from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_OTHER,
     derive_journal_outcome,
@@ -1359,11 +1360,7 @@ class PreludePhase(CoordinatorCollaborator):
                 combined_args = str(sdk_replay.get("combined_extra_server_args") or "")
                 combined_envs = dict(sdk_replay.get("combined_extra_envs") or {})
         else:
-            from ..loop.server_args import (
-                _merge_cumulative_extra_server_args,
-            )
-
-            combined_args = _merge_cumulative_extra_server_args(
+            combined_args = merge_cumulative_extra_server_args(
                 bc_args,
                 kernel_args,
                 "",

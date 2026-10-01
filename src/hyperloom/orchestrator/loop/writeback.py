@@ -15,8 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Collection, Mapping
+import yaml
 from hyperloom.common.coerce import to_float, to_int, to_str_list
-from hyperloom.common.env import env_int
+from hyperloom.common.env import env_int, is_truthy
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.launch_log_evidence import (
     launch_argv_from_log,
@@ -62,17 +63,11 @@ from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from ..state.shared_state import SharedState, resolve_graded_comparison, stack_base_params
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
-from .server_args import (
-    _dedupe_extra_server_args,
-    _merge_cumulative_extra_server_args,
-)
-from .proposal_utils import (
-    _baseline_params_fingerprint,
-    _parse_baseline_workload_extra,
-    baseline_benchmark_script,
+from hyperloom.inference_optimizer.grid_server_args import (
+    dedupe_extra_server_args,
+    merge_cumulative_extra_server_args,
 )
 from ..kernel.geak_config import (
-    _MIN_KERNEL_ENGAGED_GAIN_PCT,
     _accepted_config_as_variant,
     _accepted_config_controls,
     _geak_accepted_kernel_specs,
@@ -81,7 +76,7 @@ from ..kernel.geak_config import (
     _geak_overlay_is_loadable,
     _geak_result_has_material,
     _geak_revalidation_decision,
-    _geak_spec_name,
+    geak_spec_name,
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
 )
@@ -112,6 +107,10 @@ if TYPE_CHECKING:
 import logging as _logging
 
 log = _logging.getLogger(__name__)
+
+# Minimum over-baseline gain a same-harness revalidation must show to count as "engaged"; detects a collapse back to
+# ~baseline.
+_MIN_KERNEL_ENGAGED_GAIN_PCT: float = 2.0
 
 # Recipe snapshot severity tags (schema has no fixed enum).
 _SEVERITY_CRASH: str = "crash"
@@ -584,8 +583,91 @@ def _record_config_attempts(
     recorder.settle_proposal(proposal_ref, disposition=DISPOSITION_ATTEMPTED)
 
 
+# task.params fields fingerprinted by the self-loop guard.
+_BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
+    "benchmark_script",
+    "result_dir",
+    "extra_server_args",
+    "extra_envs",
+    "model_path",
+    "gpu_type",
+    "config_path",
+    "disable_run_eval",
+)
+
+
+def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
+    """Extract KB workload-tag fields from a baseline-materialized Magpie YAML."""
+    try:
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+    out: dict[str, Any] = {}
+    bm = cfg.get("benchmark") if isinstance(cfg, dict) else None
+    if not isinstance(bm, dict):
+        return out
+    for src, dst in (
+        ("workload_mode", "workload_mode"),
+        ("quant_scheme", "quant_scheme"),
+    ):
+        v = bm.get(src)
+        if v not in (None, "", 0):
+            out[dst] = v
+    envs = bm.get("envs") if isinstance(bm.get("envs"), dict) else {}
+    extra_args_str = ""
+    for env_key in ("EXTRA_SGLANG_ARGS", "EXTRA_VLLM_ARGS"):
+        v = envs.get(env_key)
+        if isinstance(v, str) and v.strip():
+            extra_args_str = v.strip()
+            break
+    tokens = extra_args_str.split() if extra_args_str else []
+    for i, tok in enumerate(tokens):
+        if tok in ("--max-running-requests",) and i + 1 < len(tokens):
+            try:
+                out["max_running_requests"] = int(tokens[i + 1])
+            except ValueError:
+                # Non-integer CLI value; leave the field unset.
+                pass
+        elif tok in ("--max-num-seqs",) and i + 1 < len(tokens):
+            try:
+                out["max_num_seqs"] = int(tokens[i + 1])
+            except ValueError:
+                # Non-integer CLI value; leave the field unset.
+                pass
+        elif tok == "--enable-chunked-prefill":
+            out["chunked_prefill_enabled"] = True
+        elif tok == "--disable-chunked-prefill":
+            out["chunked_prefill_enabled"] = False
+        elif tok == "--enable-torch-compile":
+            out["enable_torch_compile"] = True
+    # Torch compile may also be a separate env var.
+    if "enable_torch_compile" not in out:
+        tc_env = envs.get("ENABLE_TORCH_COMPILE")
+        if isinstance(tc_env, str):
+            out["enable_torch_compile"] = is_truthy(tc_env)
+    return out
+
+
 class WritebackCollaborator(CoordinatorCollaborator):
     """Handles result writeback: benchmark scoring, recipe finalization, and bus observations."""
+
+    @staticmethod
+    def baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any]:
+        """Project ``params`` to the keys that determine baseline behavior."""
+        params = params or {}
+        out: dict[str, Any] = {}
+        for key in _BASELINE_FINGERPRINT_KEYS:
+            if key == "extra_envs":
+                envs = params.get(key) or {}
+                if isinstance(envs, dict):
+                    out[key] = sorted([str(k), str(v)] for k, v in envs.items())
+                else:
+                    out[key] = None
+                continue
+            value = params.get(key)
+            out[key] = None if value is None else str(value)
+        return out
 
     PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0
 
@@ -1462,7 +1544,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             audit_extras: dict[str, Any] = {}
             # Stamp baseline-params fingerprint for the self-loop denial helper.
             if task.kind == "baseline":
-                audit_extras["fingerprint"] = _baseline_params_fingerprint(task.params)
+                audit_extras["fingerprint"] = self.baseline_params_fingerprint(task.params)
             self.shared_state.record_action_attempt(
                 action=task.kind,
                 task_id=task.task_id,
@@ -3247,9 +3329,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # Removal/replace winners publish their effective cumulative config
             # from ExploreExecutor. Prepending the prior current_best would
             # reintroduce flags the variant deliberately removed.
-            full_args = _dedupe_extra_server_args(full_args)
+            full_args = dedupe_extra_server_args(full_args)
         else:
-            full_args = _merge_cumulative_extra_server_args(
+            full_args = merge_cumulative_extra_server_args(
                 base_args,
                 candidate_args,
                 full_args,
@@ -3357,7 +3439,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     if bv.get("task_id"):
                         stack_entry["task_id"] = str(bv.get("task_id"))
                     if bv.get("effective_extra_server_args"):
-                        stack_entry["effective_extra_server_args"] = _dedupe_extra_server_args(
+                        stack_entry["effective_extra_server_args"] = dedupe_extra_server_args(
                             strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
                         )
                 # Stable filter label for "what kind of optimization" (backend /
@@ -3461,7 +3543,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 if bv.get(_ctrl_key):
                     current_best[_ctrl_key] = bv.get(_ctrl_key)
             if bv.get("effective_extra_server_args"):
-                current_best["effective_extra_server_args"] = _dedupe_extra_server_args(
+                current_best["effective_extra_server_args"] = dedupe_extra_server_args(
                     strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
                 )
             if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
@@ -3812,7 +3894,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "accuracy": result.get("accuracy"),
             "baseline_tput": (float(tput) if isinstance(tput, (int, float)) else None),
             # Stamp canonical params fingerprint for the self-loop denial helper.
-            "fingerprint": _baseline_params_fingerprint(task_params),
+            "fingerprint": self.baseline_params_fingerprint(task_params),
             # Record revalidation context for history.
             "is_revalidation": bool(task_params.get("reason") == ENABLEMENT_REVALIDATION_REASON),
             "enablement_succeeded": bool(getattr(self.shared_state.enablement, "succeeded", False)),
@@ -5221,7 +5303,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 # backend ignores it and the flag is silently lost.
                 if name.startswith("-"):
                     token = name if value in ("", None) else f"{name}={value}"
-                    args = _merge_cumulative_extra_server_args(args, token, "")
+                    args = merge_cumulative_extra_server_args(args, token, "")
                 else:
                     envs[name] = str(value)
         return {
@@ -6090,7 +6172,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             ``"fallback": "geak_harness"`` when only GEAK's own harness can
             deploy the candidate.
         """
-        benchmark_script = baseline_benchmark_script(self.shared_state)
+        benchmark_script = self.shared_state.accepted_baseline_script()
         recipe_generation = int(self.shared_state.working_recipe_generation or 0)
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
@@ -6166,7 +6248,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # ``expected_cfg_hash`` cannot see the overlay, so its digest travels beside it and both are re-checked after
         # the run: a dropped or altered overlay then reads as inconclusive rather than as a validated kernel win.
         expected_overlay_digest = _geak_overlay_digest(ps_overlay)
-        ps_kernels = [_geak_spec_name(k) for k in _geak_accepted_kernel_specs(ps)]
+        ps_kernels = [geak_spec_name(k) for k in _geak_accepted_kernel_specs(ps)]
         params_ps: dict[str, Any] = {
             "source": STACK_REVALIDATE_SOURCE,
             "reason": reason,
@@ -6220,7 +6302,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         Returns:
             A summary ``{"task_id", "existing"}`` or ``{"skipped", "reason"}``.
         """
-        benchmark_script = baseline_benchmark_script(self.shared_state)
+        benchmark_script = self.shared_state.accepted_baseline_script()
         # The grid is frozen from ``current_best`` now; a lift before the result lands makes it a measurement of an
         # older Recipe.
         recipe_generation = int(self.shared_state.working_recipe_generation or 0)

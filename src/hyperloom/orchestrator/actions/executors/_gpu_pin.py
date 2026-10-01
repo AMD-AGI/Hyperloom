@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""GPU pin resolution helpers for the GEAK handoff."""
+"""GPU pin and serving-fidelity resolution for the GEAK handoff."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import shlex
 from collections.abc import Mapping
 from typing import Any
 
-from hyperloom.common.env import env_float as _env_float, env_int as _env_int
+from hyperloom.common.env import env_float, env_int
 from hyperloom.common.visible_devices import (
     HIP_LEVEL_VARS,
     VISIBLE_DEVICE_VARS,
@@ -19,25 +19,6 @@ from hyperloom.common.visible_devices import (
     mask_tokens,
     parse_device_list,
 )
-
-#: Visible-device env masks, in the repo's ROCm precedence order.
-#: The pin-resolution chain, imported rather than re-declared: the same tuple
-#: and the same parser had five copies in this repo (``bus/gpu_pool``,
-#: ``policy/gate``, ``actions/executors/_ray_serving``, ``common/env_safety``,
-#: and ``loop/coordinator_helpers``) and their empty-mask semantics had
-#: already drifted apart. ``hyperloom.common.visible_devices`` is now the single
-#: definition and is dependency-free, so this pure-helper layer can use it
-#: without dragging in the SQLite connection ``gpu_pool`` owns.
-#:
-#: Note this resolver uses the FULL chain, not the three vars the
-#: capacity-counting layers read: it answers "where is this run pinned", and a
-#: run pinned with ``HSA_VISIBLE_DEVICES`` or ``GPU_DEVICE_ORDINAL`` is really
-#: pinned. Those layers keep their narrower :data:`COUNTING_VISIBLE_DEVICE_VARS`
-#: because widening them would change GPU accounting repo-wide.
-_VISIBLE_DEVICE_VARS: tuple[str, ...] = VISIBLE_DEVICE_VARS
-
-_mask_tokens = mask_tokens
-_parse_device_list = parse_device_list
 
 
 def _is_autofilled_rocr(*, value: str, recipe_envs: Mapping[str, Any]) -> bool:
@@ -71,7 +52,7 @@ def _is_autofilled_rocr(*, value: str, recipe_envs: Mapping[str, Any]) -> bool:
         ``True`` when the value equals the ``0..tp-1`` the materializer would
         have synthesized — or, absent a recipe TP, the ``0..n-1`` shape of one.
     """
-    tokens = _mask_tokens(value)
+    tokens = mask_tokens(value)
     if not tokens:
         return False
     try:
@@ -142,7 +123,7 @@ def _resolve_inner_hip_mask(
             return {
                 "var": hip_var,
                 "value": value,
-                "ids": _parse_device_list(value),
+                "ids": parse_device_list(value),
                 "count": len(effective_mask_tokens(value)),
                 "source": source,
             }
@@ -200,7 +181,7 @@ def _resolve_gpu_pin(
     """
     env = os.environ if environ is None else environ
     recipe = dict(recipe_envs or {})
-    for var in _VISIBLE_DEVICE_VARS:
+    for var in VISIBLE_DEVICE_VARS:
         for source, table in (("process_env", env), ("baseline_recipe", recipe)):
             raw = table.get(var)
             if raw is None:
@@ -236,7 +217,7 @@ def _resolve_gpu_pin(
             pin: dict[str, Any] = {
                 "var": var,
                 "value": value,
-                "ids": _parse_device_list(value),
+                "ids": parse_device_list(value),
                 "count": len(effective_mask_tokens(value)),
                 "source": source,
             }
@@ -439,7 +420,7 @@ def _resolve_handoff_tp(*, gpu_ids: str, tp: int) -> int:
     Returns:
         ``min(tp, len(gpu_ids))``, never below 1.
     """
-    advertised = len(_mask_tokens(gpu_ids))
+    advertised = len(mask_tokens(gpu_ids))
     if advertised <= 0:
         return max(int(tp or 1), 1)
     return max(min(int(tp or 1), advertised), 1)
@@ -478,7 +459,7 @@ def _resolve_serving_fidelity(
         except (TypeError, ValueError):
             mml = 0
     if mml <= 0:
-        mml = _env_int("MAX_MODEL_LEN", default=0)
+        mml = env_int("MAX_MODEL_LEN", default=0)
     if mml > 0:
         out["max_model_len"] = mml
 
@@ -488,7 +469,7 @@ def _resolve_serving_fidelity(
     except (TypeError, ValueError):
         mem = 0.0
     if mem <= 0:
-        mem = _env_float("GPU_MEMORY_UTILIZATION", default=0.0)
+        mem = env_float("GPU_MEMORY_UTILIZATION", default=0.0)
     if mem > 0:
         out["mem_fraction"] = mem
 

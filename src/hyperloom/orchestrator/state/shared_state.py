@@ -1437,6 +1437,15 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self.last_discarded_escalate_hint_ts = now_iso()
         return hint
 
+    def accepted_baseline_script(self) -> str | None:
+        """Benchmark script belonging to the accepted baseline anchor, or None."""
+        if self.baseline_benchmark_script is not None:
+            return self.baseline_benchmark_script or None
+        if self.last_baseline.get("decision") != "promoted":
+            return None
+        fingerprint = (self.last_baseline.get("extras") or {}).get("fingerprint") or {}
+        return str(fingerprint.get("benchmark_script") or "").strip() or None
+
     def current_top_bottleneck(self) -> str:
         """Return the latest roofline snapshot's ``top_bottleneck`` (\"\" when none)."""
         snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []

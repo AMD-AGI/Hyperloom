@@ -20,7 +20,7 @@ from hyperloom.orchestrator.lever import (
 )
 from hyperloom.inference_optimizer.protocol.action_surfaces import REQUEST_KIND_TO_OWNED_ACTION
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.common.timeutil import _parse_iso_unix, format_exc_brief
+from hyperloom.common.timeutil import parse_iso_unix_or_zero, format_exc_brief
 from .verdicts import (
     collapse_verdict_map,
     collapse_verdicts,
@@ -1214,7 +1214,7 @@ class IntentRouter(CoordinatorCollaborator):
         # Remaining budget = cumulative TTL minus the time already spent running.
         running_sec = 0.0
         try:
-            started = _parse_iso_unix((await self.tasks.get(task_id)).updated_at)
+            started = parse_iso_unix_or_zero((await self.tasks.get(task_id)).updated_at)
         except TaskNotFound:
             started = 0.0
         if started > 0:

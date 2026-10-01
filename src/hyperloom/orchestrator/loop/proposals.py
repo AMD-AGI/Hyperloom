@@ -4,6 +4,8 @@
 """PendingProposal and the Critic-approved path: materializing an approved proposal into a dispatched task, and writing its KEEP into the recipe KB."""
 
 from __future__ import annotations
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
@@ -13,7 +15,6 @@ from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
-from .proposal_utils import approved_proposal_idempotency_key
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import TERMINAL_STATES
 from ..collaborator import CoordinatorCollaborator
@@ -264,6 +265,16 @@ class ProposalsCollaborator(CoordinatorCollaborator):
     def __init__(self, coordinator: "Coordinator") -> None:
         super().__init__(coordinator)
         self._local_recipe_cache: tuple[int, dict[str, Any]] | None = None
+
+    def _approved_idempotency_key(self, action_name: str, params: dict[str, Any]) -> str:
+        """Content-addressed idempotency key for an approved proposal."""
+        payload: Any = (
+            self._coord.writeback.baseline_params_fingerprint(params) if action_name == "baseline" else params
+        )
+        digest = hashlib.sha1(
+            json.dumps(payload, sort_keys=True, default=str).encode(), usedforsecurity=False
+        ).hexdigest()[:16]
+        return f"approved:{action_name}:{digest}"
 
     def _kb_hardware_slug(self) -> str:
         """Topology-aware hardware dimension for the recipe ``canonical_id``."""
@@ -604,7 +615,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         lanes, ttl = self._coord.dispatcher._registry_lanes_ttl(pending.action_name)
         # Content-addressed so a batch of proposals that would launch identical work collapses to one task; a
         # terminated twin still gets a fresh key so a legitimate retry after failure is never locked out.
-        raw_key = approved_proposal_idempotency_key(pending.action_name, params)
+        raw_key = self._approved_idempotency_key(pending.action_name, params)
         task = None
         was_existing = False
         for attempt in range(_MAX_IDEMPOTENCY_ATTEMPTS):
