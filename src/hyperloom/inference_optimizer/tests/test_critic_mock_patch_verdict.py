@@ -124,7 +124,7 @@ async def test_the_autosubmitted_patch_is_integrated_and_owned(session_dir: Path
         IntentRouter(coord)._stamp_specialist_owner(params)
         await _specialist_wrote_a_patch(coord, spec_params=params)
 
-        await coord._reactor_pass("critic")
+        await coord.reactor_pass("critic")
 
         assert coord.shared_state.get_specialist_patch_verdict(SPECIALIST_ID) == "approve"
         tasks = await _integrate_tasks(coord)
@@ -147,7 +147,7 @@ async def test_the_mock_critic_approval_lands_as_the_patch_verdict(session_dir: 
         await _specialist_wrote_a_patch(coord, spec_params={"domain": "kernel", "source_phase": "EXPLORE"})
         assert coord.shared_state.get_specialist_patch_verdict(SPECIALIST_ID) == ""
 
-        await coord._reactor_pass("critic")
+        await coord.reactor_pass("critic")
 
         assert coord.shared_state.get_specialist_patch_verdict(SPECIALIST_ID) == "approve"
     finally:
