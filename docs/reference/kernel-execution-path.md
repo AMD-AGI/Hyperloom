@@ -80,7 +80,7 @@ if geak_enabled:                      # KernelPhase._geak_enabled(): order is no
 
 # 2. Forge branch — only with KERNEL_OPT_BACKEND_ORDER=forge. Two routes into
 #    one shared tail, chosen by whether GEMM tuning is due.
-if not self._coord.dispatcher._gemm_tuning_required_before_kernel_opt():
+if not self._gemm_tuning_required_before_kernel_opt():
     await self._finish_kernel_entry()
     return
 result = await run_gemm_tuning_handler({...}, session_dir=session_dir)
