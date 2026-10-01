@@ -539,7 +539,7 @@ including baseline, explore, sweep, and rebench measurements:
 
 | Variable | Default | Description |
 |---|---|---|
-| `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` | `7800` | Hard wall-clock seconds per actual spawn, including server boot and accuracy evaluation. Output cannot extend it. |
+| `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` | `7800`; under `HYPERLOOM_AGENTIC_BACKEND=mlperf`, sized to the trajectory count (see [MLPerf agentic backend](#mlperf-agentic-backend)) | Hard wall-clock seconds per actual spawn, including server boot and accuracy evaluation. Output cannot extend it. An explicit value always wins. |
 | `INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC` | `600` | Output-silence seconds after real server readiness. Not armed before readiness or for server-less scriptable workloads. |
 
 Session `--max-hours` and cancellation apply independently of benchmark limits.
@@ -871,6 +871,49 @@ scriptable frameworks (xDiT, custom) keep output-throughput grading.
 | `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to the guards. A candidate whose slow tail or output throughput sits within this band of the anchor is not considered worse on that axis; the median has its own fixed bar and is not subject to the band. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value raises `EnvValueError` naming the variable, rather than grading against a band nobody chose. |
 | `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` | Unset (fail closed) | Truthy accepts a measurement whose submission verdict is absent or undetermined (`submission_valid=None`). A measurement the scenario explicitly judged invalid (`submission_valid=False`) is always rejected regardless of this flag. Applies to every measurement the run accepts (baseline, explore, kernel, sweep), not only the baseline — an unverified measurement makes every gain derived from it unverifiable. |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Initial server-boot budget written by the persistent-server lifecycle configuration helper. Actual benchmark launches synchronize this field to `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`; this variable is not an additional benchmark deadline or a way to extend one. Non-benchmark lifecycle callers that do not perform that synchronization retain their own boot budget. |
+
+### MLPerf agentic backend
+
+`HYPERLOOM_AGENTIC_BACKEND=mlperf` (with `HYPERLOOM_AGENTX=1`) keeps Magpie's
+server lifecycle and swaps the AgentX client for the MLCommons
+`inference-endpoint` harness (`utility/run_agentic.sh`), replaying
+`agentic_combined_v6` trajectories instead of aiperf Weka traces. The backend is
+recorded at seed; resuming a session under the other backend is refused.
+
+The harness publishes no per-request OSL/E2EL series, so MLPerf sessions grade
+on **output throughput** (`HYPERLOOM_PERF_METRIC` is not honoured here) and gate
+every KEEP on the harness's inline accuracy (`scores.json` `score`) against the
+baseline's smoke score, within the usual accuracy tolerance. A round with
+unscored turns, or over the 10% error-rate ceiling, fails that gate. A baseline
+without a fully scored inline accuracy stops the session
+(`baseline_accuracy_failed`), so the gate is never left without a reference.
+
+Search runs the 150-trajectory smoke set. The canonical 613-trajectory
+submission is not run by Hyperloom: run `run_agentic.sh full` and upstream
+`check_compliance.py` on the published recipe.
+
+The AgentX switch pins `PORT=30000`, `MLPERF_AGENTIC_MODEL=kimi-k3` and
+`--served-model-name kimi-k3`, and settles `MLPERF_AGENTIC_FLOW`,
+`AGENTIC_NUM_TRAJECTORIES` and `AGENTIC_CONCURRENCY` (from the round's `CONC`)
+into the recipe. The client refuses to start if port 30000 is already
+answering, checks that the listener belongs to the server it booted, and checks
+`/v1/models` lists `kimi-k3`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_AGENTIC_BACKEND` | `aiperf` | `mlperf` selects the MLPerf agentic client. Any other value is aiperf. |
+| `MLPERF_ENDPOINTS_DIR` | `/opt/mlperf-endpoints` | Checkout of `mlcommons/endpoints` holding `utility/run_agentic.sh`. Checked at preflight. |
+| `AGENTIC_DATASET_PATH` | — (required) | Path to `agentic_combined_v6.jsonl`. Checked at preflight; its stem is recorded as the corpus. |
+| `MLPERF_TOKENIZER_DIR` | — (required) | Kimi-K3 fast-tokenizer directory the harness counts tokens with. Checked at preflight. |
+| `MLPERF_AGENTIC_FLOW` | `smoke_test` | `run_agentic.sh` flow: `smoke_test` (150 trajectories) or `full` (613). |
+| `AGENTIC_NUM_TRAJECTORIES` | Derived from the flow | Overrides the trajectory count. Sizes the benchmark timeout. |
+| `MLPERF_AGENTIC_HARDWARE` | `mi355x` | Hardware key passed to `run_agentic.sh`. |
+
+Preflight also refuses a non-SGLang framework and a model path that is not
+Kimi. With `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` unset, the benchmark cap
+defaults to `trajectories × 26 s × 2 + 1800 s` (26 s per trajectory measured on
+8×MI355X at concurrency 16, doubled for a cold first round, plus boot), and never
+below the stock 7800 s: about 9600 s for smoke and 33,700 s for `full`.
 
 AgentX profiling starts when AIPerf reports its measured phase. The legacy
 `AGENTX_PROFILE_WARMUP_S` delay is ignored. `AGENTX_PROFILE_WINDOW_S` controls

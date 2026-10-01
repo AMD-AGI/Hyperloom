@@ -2684,3 +2684,89 @@ async def test_an_explore_winner_inside_the_budget_is_promoted_by_writeback(sub_
     await coord._promote_explore(out, None, wb._PromoteOutcome())
 
     assert state.current_best["variant_name"] == "v_in_budget"
+
+
+async def _mlperf_round(
+    sub_agent_runner, tmp_path, monkeypatch, *, candidate: dict, name: str
+) -> tuple[dict, SharedState]:
+    """Run one explore variant on the MLPerf backend against a smoke baseline."""
+    _force_cold_decision(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx", agentx_backend="mlperf")
+    state.baseline_tput = 200.0
+    state.baseline_accuracy = 0.72
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=candidate["output_throughput"], perf_axes=candidate)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / f"explore-{name}"),
+            "base_tput": 200.0,
+            "grid": [{"name": name, "extra_args": f"--{name}"}],
+        },
+        idempotency_key=f"ex-{name}",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        out = (await sub.run_task(task)).result
+    return out["explore_search_update"]["tested"][canonical_fingerprint(f"--{name}", {})], state
+
+
+def _mlperf_smoke(**over) -> dict:
+    """A mapped smoke round: 150 trajectories, baseline-level accuracy, no failures."""
+    return {
+        "output_throughput": 220.0,
+        "duration": 3500.0,
+        "request_error_rate": 0.0,
+        "submission_valid": True,
+        "accuracy_score": 0.72,
+        "accuracy_missing_turns": 0,
+        **over,
+    }
+
+
+@pytest.mark.asyncio
+async def test_explore_mlperf_keeps_an_output_throughput_gain(sub_agent_runner, tmp_path, monkeypatch):
+    """+10% output throughput at the baseline's accuracy is a KEEP, graded on output throughput."""
+    tested, _ = await _mlperf_round(sub_agent_runner, tmp_path, monkeypatch, candidate=_mlperf_smoke(), name="faster")
+    assert tested["outcome"] == "KEEP"
+    assert tested["graded_objective"] == "output_throughput"
+    assert tested["gain_pct"] == pytest.approx(10.0)
+
+
+@pytest.mark.asyncio
+async def test_explore_mlperf_reverts_an_accuracy_regression(sub_agent_runner, tmp_path, monkeypatch):
+    """The throughput gain is real; the inline accuracy drop against the smoke baseline decides."""
+    tested, _ = await _mlperf_round(
+        sub_agent_runner, tmp_path, monkeypatch, candidate=_mlperf_smoke(accuracy_score=0.60), name="lossy"
+    )
+    assert tested["outcome"] == "REVERT"
+    gates = {gate["gate"]: gate for gate in tested["gates"]}
+    assert gates["accuracy"]["passed"] is False
+    assert gates["accuracy"]["observed"] == pytest.approx(0.60)
+    assert gates["accuracy"]["threshold"] == pytest.approx(0.72)
+
+
+@pytest.mark.asyncio
+async def test_explore_mlperf_reverts_when_turns_went_unscored(sub_agent_runner, tmp_path, monkeypatch):
+    tested, _ = await _mlperf_round(
+        sub_agent_runner, tmp_path, monkeypatch, candidate=_mlperf_smoke(accuracy_missing_turns=3), name="unscored"
+    )
+    assert tested["outcome"] == "REVERT"
+    accuracy = {gate["gate"]: gate for gate in tested["gates"]}["accuracy"]
+    assert accuracy["reason"] == "accuracy_drop"
+    assert accuracy["observed"] == 0.0, "an unscored turn scores the run 0.0 rather than skipping the gate"
