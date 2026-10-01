@@ -221,8 +221,6 @@ class Coordinator:
         # path.
         bind_session(self.session_dir)
         self.role_registry = role_registry or default_role_registry()
-        # KnowledgePlane owns RecipeKB.
-        self.recipe_kb: RecipeKB | None = getattr(knowledge_plane, "recipe_kb", None)
         # Orchestration prompt overrides, rebuild closure, and snapshot writes.
         self.orch_prompt = OrchestrationPrompt(overrides={})
         # Per-session optimization journal; lazy-instantiated on first use.
@@ -363,6 +361,12 @@ class Coordinator:
         self.phase_machine._ensure_phase_initialised(phase_budget_pct)
         # Recipe KB T0 defensive fallback for direct SDK/test callers; best-effort.
         self.phase_machine._ensure_recipe_kb_t0_anchored()
+
+    @property
+    def recipe_kb(self) -> RecipeKB | None:
+        """RecipeKB owned by the knowledge plane."""
+        plane = self.knowledge_plane
+        return plane.recipe_kb if plane is not None else None
 
     @property
     def router(self) -> IntentRouter:
