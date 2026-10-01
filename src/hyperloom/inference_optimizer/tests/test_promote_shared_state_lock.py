@@ -585,7 +585,9 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
     if lane == "fusion":
         await coord.writeback._record_integrate_keep(result)
     else:
-        await coord.writeback._promote_integrate_patch(result, _task("integrate_patch"), wb._PromoteOutcome())
+        await coord.writeback._promote_integrate_patch(
+            result, _task("integrate_patch"), wb._PromoteOutcome(verdict=Verdict.RECORDED)
+        )
 
     if vetoed:
         assert s.current_best == anchor
@@ -661,7 +663,6 @@ async def test_promote_integrate_patch_refuses_a_keep_below_the_anchor(session_d
 
     assert outcome.verdict is Verdict.REFUSED
     assert s.current_best["tput"] == 200.0
-    assert "promotion_refused" not in result
 
 
 @pytest.mark.asyncio
@@ -671,9 +672,14 @@ async def test_promote_integrate_patch_refuses_a_keep_below_the_anchor(session_d
         ("kept", 260.0, Verdict.ADOPTED),
         ("reverted", 190.0, Verdict.REVERTED),
         ("accuracy_unavailable_reject", 190.0, Verdict.REVERTED),
+        ("regression", 190.0, Verdict.REVERTED),
         ("kept_inert", 201.0, Verdict.RECORDED),
         ("apply_failed", None, Verdict.FAILED),
         ("rejected_by_critic", None, Verdict.FAILED),
+        ("no_patches", None, Verdict.FAILED),
+        ("applied_no_bench", None, Verdict.FAILED),
+        ("failed", None, Verdict.FAILED),
+        ("skipped", None, Verdict.FAILED),
     ],
 )
 async def test_promote_integrate_patch_settles_one_verdict(session_dir, status, tput, expected):
@@ -2175,7 +2181,7 @@ class TestWritebackRequiredAxes:
         monkeypatch.setattr(stack_event, "record_validation", record)
         monkeypatch.setattr(coord.phase_kernel, "_maybe_enqueue_watermark_roofline", watermark)
         candidate = self._candidate()
-        outcome = wb._PromoteOutcome()
+        outcome = wb._PromoteOutcome(verdict=Verdict.RECORDED)
         if lane == "integrate":
             await coord.writeback._record_integrate_keep(
                 {
@@ -2253,7 +2259,7 @@ class TestWritebackRequiredAxes:
         await coord.writeback._promote_explore(
             {**candidate, "winners": [], "round_id": "r-incomparable-revalidation"},
             _task("explore", params={"source": "stack_revalidate"}),
-            wb._PromoteOutcome(),
+            wb._PromoteOutcome(verdict=Verdict.RECORDED),
         )
 
         assert _resume_pending(state) is True

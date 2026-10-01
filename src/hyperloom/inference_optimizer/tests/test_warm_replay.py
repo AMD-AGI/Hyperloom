@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+from typing import Any
 from pathlib import Path
 import subprocess
 
@@ -1122,8 +1123,6 @@ def test_all_revert_branches_retain_pending_on_rollback_failure(
     task = _StubTask(
         params={
             "baseline_tput_anchor": 600.0,
-            "combined_current_contract": True,
-            "combined_keep_threshold_pct": 1.0,
             "extra_server_args": "--warm",
         }
     )
@@ -2103,7 +2102,6 @@ async def test_kernel_only_replay_enqueues_without_recipe(tmp_path):
     assert task is not None
     assert task.params["recipe_extra_envs"] == {}
     assert task.params["extra_envs"] == {"KERNEL_ONLY": "1"}
-    assert task.params["combined_current_contract"] is True
 
 
 @pytest.mark.asyncio
@@ -2127,24 +2125,46 @@ async def test_no_recipe_after_loaded_kernel_clears_stale_pending(tmp_path):
     assert coord.shared_state.warm_replay_pending == {}
 
 
-@pytest.mark.asyncio
-async def test_combined_threshold_uses_decaying_curve(tmp_path):
-    coord = _make_coord(tmp_path, warm_start_recipe={})
+def _settle_replay(coord: Coordinator, tput: float, **result: Any) -> dict:
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = _in_flight_outcome()
+    task = _StubTask(params={"baseline_tput_anchor": 600.0, "extra_server_args": "--attention-backend AITER"})
+    coord.phase_prelude._promote_warm_replay({"status": "succeeded", "output_throughput": tput, **result}, task=task)
+    return coord.shared_state.warm_replay_outcome
 
-    async def _prepare():
-        return {
-            "status": "prepared",
-            "pending": [{"column": "gemm"}],
-            "applied": [],
-            "extra_envs": {"KERNEL_ONLY": "1"},
-            "extra_server_args": "",
-        }
 
-    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
-    task = await coord.phase_prelude._maybe_enqueue_warm_replay(baseline_tput=600.0)
+def test_the_keep_threshold_is_the_current_cycle_threshold(tmp_path):
+    early = _make_coord(tmp_path / "early", warm_start_recipe=_warm_recipe_t1())
+    late = _make_coord(tmp_path / "late", warm_start_recipe=_warm_recipe_t1())
+    late.shared_state.macro_cycle = 9
 
-    # macro_cycle=0 → decaying curve yields 1.0%.
-    assert task.params["combined_keep_threshold_pct"] == pytest.approx(1.0)
+    # +0.5% clears the cycle-9 threshold (0.19%), not the cycle-0 one (1.0%).
+    assert _settle_replay(early, 603.0)["status"] == "drift"
+    assert _settle_replay(late, 603.0)["status"] == "reproduced"
+    assert _settle_replay(late, 603.0)["keep_threshold_pct"] == pytest.approx(0.19)
+
+
+def test_an_interactivity_session_judges_the_replay_on_interactivity(tmp_path):
+    """A throughput gain that moved no interactivity is not a KEEP under AgentX."""
+    baseline = {
+        "output_throughput": 600.0,
+        "total_throughput": 600.0,
+        "e2e_norm_intvty_p90": 20.0,
+        "e2e_norm_intvty_p50": 50.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
+    }
+    flat = _make_coord(tmp_path / "flat", warm_start_recipe=_warm_recipe_t1())
+    faster = _make_coord(tmp_path / "faster", warm_start_recipe=_warm_recipe_t1())
+    for coord in (flat, faster):
+        coord.shared_state.grading = {"objective": "e2e_norm_intvty_p90", "noise_pct": 3.0}
+        coord.shared_state.baseline_perf = dict(baseline)
+
+    measured = {**baseline, "output_throughput": 612.0, "total_throughput": 612.0}
+    improved = {**measured, "e2e_norm_intvty_p90": 23.0, "e2e_norm_intvty_p50": 57.5}
+
+    assert _settle_replay(flat, 612.0, **measured)["status"] == "drift"
+    assert _settle_replay(faster, 612.0, **improved)["status"] == "reproduced"
 
 
 @pytest.mark.asyncio
@@ -2245,8 +2265,6 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
         params={
             "baseline_tput_anchor": 600.0,
             "required_patch_timeline": True,
-            "combined_current_contract": True,
-            "combined_keep_threshold_pct": 1.0,
             "patches": [
                 {
                     "patch_file": "patch/overlays/000000/00-p.patch",
@@ -2324,8 +2342,6 @@ def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(tmp_path, monk
         params={
             "baseline_tput_anchor": 600.0,
             "required_patch_timeline": True,
-            "combined_current_contract": True,
-            "combined_keep_threshold_pct": 1.0,
             "patches": [{"patch_file": "p.patch", "patch_content": "diff"}],
             "extra_server_args": "--recipe",
             "extra_envs": {},
@@ -2398,8 +2414,6 @@ def test_a_nogit_apply_counts_as_a_replayed_overlay(tmp_path):
         params={
             "baseline_tput_anchor": 600.0,
             "required_patch_timeline": True,
-            "combined_current_contract": True,
-            "combined_keep_threshold_pct": 1.0,
             # The whole recipe is the timeline: nothing else can carry the replay.
             "patches": [{"patch_file": "p.patch", "patch_content": "diff"}],
         }
@@ -2644,8 +2658,6 @@ def test_checkout_promotion_failure_retains_pending_when_rollback_fails(tmp_path
         params={
             "baseline_tput_anchor": 600.0,
             "required_patch_timeline": True,
-            "combined_current_contract": True,
-            "combined_keep_threshold_pct": 1.0,
             "patches": [{"patch_file": "p.patch", "patch_content": "diff"}],
             "extra_server_args": "--recipe",
         }
@@ -2660,81 +2672,6 @@ def test_checkout_promotion_failure_retains_pending_when_rollback_fails(tmp_path
     assert coord.shared_state.warm_replay_pending == {"task_id": "warm"}
 
 
-def test_current_contract_threshold_preserves_local_legacy_positive_gain(tmp_path):
-    current = _make_coord(
-        tmp_path / "current",
-        warm_start_recipe=_warm_recipe_t1(),
-    )
-    current.shared_state.baseline_tput = 600.0
-    current.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
-    current.phase_prelude._promote_warm_replay(
-        {"status": "succeeded", "output_throughput": 603.0},
-        task=_StubTask(
-            params={
-                "baseline_tput_anchor": 600.0,
-                "combined_current_contract": True,
-                "combined_keep_threshold_pct": 1.0,
-                "extra_server_args": "--current",
-            }
-        ),
-    )
-    assert current.shared_state.warm_replay_outcome["status"] == "drift"
-
-    legacy = _make_coord(tmp_path / "legacy", warm_start_recipe=_warm_recipe_t1())
-    legacy.shared_state.baseline_tput = 600.0
-    legacy.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
-    legacy.phase_prelude._promote_warm_replay(
-        {"status": "succeeded", "output_throughput": 603.0},
-        task=_StubTask(
-            params={
-                "baseline_tput_anchor": 600.0,
-                "extra_server_args": "--legacy",
-            }
-        ),
-    )
-    assert legacy.shared_state.warm_replay_outcome["status"] == "reproduced"
-
-
-def test_zero_and_nonfinite_combined_thresholds(tmp_path):
-    zero = _make_coord(tmp_path / "zero", warm_start_recipe=_warm_recipe_t1())
-    zero.shared_state.baseline_tput = 600.0
-    zero.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
-    # +0.5%: clears the explicit 0.0 threshold, not the 1.0 default.
-    zero.phase_prelude._promote_warm_replay(
-        {"status": "succeeded", "output_throughput": 603.0},
-        task=_StubTask(
-            params={
-                "baseline_tput_anchor": 600.0,
-                "combined_current_contract": True,
-                "combined_keep_threshold_pct": 0.0,
-                "extra_server_args": "--zero",
-            }
-        ),
-    )
-    assert zero.shared_state.warm_replay_outcome["status"] == "reproduced"
-    assert zero.shared_state.warm_replay_outcome["keep_threshold_pct"] == 0.0
-
-    nonfinite = _make_coord(
-        tmp_path / "nan",
-        warm_start_recipe=_warm_recipe_t1(),
-    )
-    nonfinite.shared_state.baseline_tput = 600.0
-    nonfinite.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
-    nonfinite.phase_prelude._promote_warm_replay(
-        {"status": "succeeded", "output_throughput": 603.0},
-        task=_StubTask(
-            params={
-                "baseline_tput_anchor": 600.0,
-                "combined_current_contract": True,
-                "combined_keep_threshold_pct": float("inf"),
-                "extra_server_args": "--nonfinite",
-            }
-        ),
-    )
-    assert nonfinite.shared_state.warm_replay_outcome["status"] == "drift"
-    assert nonfinite.shared_state.warm_replay_outcome["keep_threshold_pct"] == 1.0
-
-
 def test_already_present_required_patch_is_not_republished(tmp_path):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
@@ -2742,8 +2679,6 @@ def test_already_present_required_patch_is_not_republished(tmp_path):
     task = _StubTask(
         params={
             "baseline_tput_anchor": 600.0,
-            "combined_current_contract": True,
-            "combined_keep_threshold_pct": 1.0,
             "extra_server_args": "--recipe",
             "required_patch_timeline": True,
             "patches": [],
@@ -2769,8 +2704,6 @@ def test_dirty_worktree_required_patch_is_republished(tmp_path):
     task = _StubTask(
         params={
             "baseline_tput_anchor": 600.0,
-            "combined_current_contract": True,
-            "combined_keep_threshold_pct": 1.0,
             "extra_server_args": "--recipe",
             "required_patch_timeline": True,
             "patches": [],
@@ -2969,11 +2902,9 @@ def test_a_replay_that_measured_and_lost_is_rejected_rather_than_failed(tmp_path
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = _in_flight_outcome()
     task = _replay_task()
-    task.params["combined_current_contract"] = True
-    task.params["combined_keep_threshold_pct"] = 5.0
     with session_scope(tmp_path):
-        # 600 -> 606 is +1%, under the 5% keep threshold.
-        coord.phase_prelude._promote_warm_replay({"status": "succeeded", "output_throughput": 606.0}, task=task)
+        # 600 -> 603 is +0.5%, under the cycle-0 keep threshold.
+        coord.phase_prelude._promote_warm_replay({"status": "succeeded", "output_throughput": 603.0}, task=task)
         events = _replay_events(tmp_path)
 
     assert coord.shared_state.warm_replay_outcome["status"] == "drift"
@@ -2988,10 +2919,8 @@ def test_a_replay_that_lost_still_records_the_config_that_lost(tmp_path):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = _in_flight_outcome()
     task = _replay_task()
-    task.params["combined_current_contract"] = True
-    task.params["combined_keep_threshold_pct"] = 5.0
     with session_scope(tmp_path):
-        coord.phase_prelude._promote_warm_replay({"status": "succeeded", "output_throughput": 606.0}, task=task)
+        coord.phase_prelude._promote_warm_replay({"status": "succeeded", "output_throughput": 603.0}, task=task)
         applied = _replay_ext(tmp_path)["applied"]
 
     assert applied["extra_server_args"] == "--attention-backend AITER"
@@ -3007,11 +2936,9 @@ def test_a_replay_that_lost_states_which_of_its_patches_landed(tmp_path):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = _in_flight_outcome()
     task = _replay_task()
-    task.params["combined_current_contract"] = True
-    task.params["combined_keep_threshold_pct"] = 5.0
     result = {
         "status": "succeeded",
-        "output_throughput": 606.0,
+        "output_throughput": 603.0,
         "warm_patch_result": {
             "patches": [
                 {

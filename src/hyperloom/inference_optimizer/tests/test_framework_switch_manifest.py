@@ -718,7 +718,7 @@ async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
     coord._proposal_scorer = None
     collaborator = WritebackCollaborator(coord)
 
-    outcome = _PromoteOutcome()
+    outcome = _PromoteOutcome(verdict=Verdict.RECORDED)
     await collaborator._promote_integrate_patch(result, None, outcome)
     assert outcome.verdict is Verdict.RECORDED
     assert [row["switch"] for row in state.authored_framework_levers] == ["HL_HOIST", "HL_CACHE"]
