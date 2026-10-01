@@ -108,12 +108,6 @@ class TestCompare:
         result = compare(a, b)
         assert result["B"]["cost_usd"] == 0.0 and result["B"]["glm_raw_tokens"] == 1100
 
-    def test_arms_that_never_validated_a_gain_fail_the_gain_test(self, tmp_path):
-        a = _arm(tmp_path / "A", None, [_row("orchestration", "claude-opus-5", 100, 10)], stop="baseline_failed")
-        b = _arm(tmp_path / "B", None, [_row("orchestration", "claude-opus-5", 10, 1)], stop="baseline_failed")
-        v = compare(a, b)["verdict"]
-        assert v["savings"] is True and v["gain_ok"] is False and v["pass"] is False
-
     def test_a_model_outside_the_priced_families_stops_the_comparison(self, tmp_path):
         a = _arm(tmp_path / "A", 5.0, [_row("orchestration", "claude-opus-5", 10, 1)])
         b = _arm(tmp_path / "B", 5.0, [_row("specialist", "qwen3-coder", 10, 1)])

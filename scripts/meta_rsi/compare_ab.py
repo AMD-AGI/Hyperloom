@@ -4,8 +4,7 @@
 """Compare two A/B arms and apply the round's comparison rule.
 
 Effect kept: B's furthest phase is not earlier than A's, B's validated gain is at least A's minus
-2 points or at least 90% of A's, and B has no failing stop reason A did not have. An arm that never
-validated a gain fails the gain test.
+2 points or at least 90% of A's, and B has no failing stop reason A did not have.
 Savings: B's Opus weighted tokens and its priced cost are both below A's (prices in
 ``metrics.py``). A model that names no priced family is an error, not a guess.
 
@@ -163,7 +162,7 @@ def arm_metrics(udp: Path, window: tuple[str, str], router_log: Path | None = No
         "session": str(sess),
         "stop_reason": state.get("stop_reason"),
         "furthest_phase": PHASES[furthest],
-        "validated_gain_pct": state.get("cumulative_gain_validated"),
+        "validated_gain_pct": state["cumulative_gain_validated"],
         "decisions": dict(decisions),
         "calls": dict(calls),
         "tokens": {k: dict(v) for k, v in sorted(tok.items())},
@@ -185,7 +184,7 @@ def arm_metrics(udp: Path, window: tuple[str, str], router_log: Path | None = No
 def verdict(a: dict, b: dict) -> dict:
     ga, gb = a["validated_gain_pct"], b["validated_gain_pct"]
     phase_ok = PHASES.index(b["furthest_phase"]) >= PHASES.index(a["furthest_phase"])
-    gain_ok = ga is not None and gb is not None and (gb >= ga - 2.0 or (ga > 0 and gb >= 0.9 * ga))
+    gain_ok = gb >= ga - 2.0 or (ga > 0 and gb >= 0.9 * ga)
     new_failure = bool(FAILING_STOPS.search(str(b["stop_reason"] or ""))) and not FAILING_STOPS.search(
         str(a["stop_reason"] or "")
     )
