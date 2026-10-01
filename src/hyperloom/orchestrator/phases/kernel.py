@@ -370,8 +370,8 @@ class KernelPhase(CoordinatorCollaborator):
         )
         profile_fingerprint = hashlib.sha256(profile_identity.encode("utf-8")).hexdigest()[:12]
         idempotency_reason = f"kernel_entry_g{stack_len}_{profile_fingerprint}"
-        task_kind = self._coord.phase_prelude._internal_analysis_kind()
-        params = self._coord.phase_prelude._internal_analysis_params(
+        task_kind = self._coord.phase_prelude.internal_analysis_kind()
+        params = self._coord.phase_prelude.internal_analysis_params(
             reason=idempotency_reason,
             inline_event=recorder.event_id if recorder is not None else "",
         )
@@ -727,7 +727,7 @@ class KernelPhase(CoordinatorCollaborator):
     async def on_enter_kernel(self, tr: "Transition") -> None:
         """Open the KERNEL timeline and enqueue the ``kernel_agent`` task that carries the phase's work."""
         state = self.shared_state
-        if not self._coord.phase_machine._kernel_enabled():
+        if not self._coord.phase_machine.kernel_enabled():
             log.info(
                 "KERNEL entry hook fired with kernel_enabled=False (from=%s)",
                 tr.from_phase or "<unknown>",
@@ -843,7 +843,7 @@ class KernelPhase(CoordinatorCollaborator):
         log.info(
             "KERNEL entry: running GEMM tuning before source-level kernel_opt",
         )
-        self._coord.phase_machine._record_phase_entry_evidence(
+        self._coord.phase_machine.record_phase_entry_evidence(
             gemm_tuning={"status": "running", "source": "kernel_entry_auto"},
         )
         run_gemm_tuning_handler = None
@@ -885,7 +885,7 @@ class KernelPhase(CoordinatorCollaborator):
                 },
             )
         )
-        self._coord.phase_machine._record_phase_entry_evidence(
+        self._coord.phase_machine.record_phase_entry_evidence(
             gemm_tuning={
                 "status": "done" if status in {"ok", "complete", "succeeded"} else status,
                 "source": "kernel_entry_auto",
@@ -1189,7 +1189,7 @@ class KernelPhase(CoordinatorCollaborator):
             prev = state.geak_result if isinstance(state.geak_result, dict) else {}
             if not _geak_rebench.geak_verdict_is_terminal(prev):
                 state.geak_result = result
-            self._coord.phase_machine._record_phase_entry_evidence(
+            self._coord.phase_machine.record_phase_entry_evidence(
                 geak={
                     "status": result.get("status"),
                     "error_class": result.get("error_class"),
@@ -1472,7 +1472,7 @@ class KernelPhase(CoordinatorCollaborator):
             }
             if runner_timeout_s is not None:
                 evidence["runner_timeout_s"] = runner_timeout_s
-            self._coord.phase_machine._record_phase_entry_evidence(geak=evidence)
+            self._coord.phase_machine.record_phase_entry_evidence(geak=evidence)
             state.save(self.session_dir)
             return True
 
@@ -1731,7 +1731,7 @@ class KernelPhase(CoordinatorCollaborator):
             # A no_gain headline over an accepted, parity-checked kernel still deserves the measurement — the rebench
             # is what decides, and without it the kernel is lost with no number attached to it.
             await self._revalidate_geak_candidate(reason="geak_e2e_accepted_kernel")
-        self._coord.phase_machine._record_phase_entry_evidence(
+        self._coord.phase_machine.record_phase_entry_evidence(
             geak={
                 "status": result.get("status"),
                 "throughput_speedup": result.get("throughput_speedup"),
@@ -4207,7 +4207,7 @@ class KernelPhase(CoordinatorCollaborator):
         if not self._needs_roofline_for_watermark():
             return False
         try:
-            task = await self._coord.phase_prelude._enqueue_internal_analysis_task(reason=reason)
+            task = await self._coord.phase_prelude.enqueue_internal_analysis_task(reason=reason)
         except Exception as exc:
             log.exception(
                 "watermark-roofline (%s): failed to enqueue: %r",

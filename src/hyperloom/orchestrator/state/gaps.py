@@ -127,7 +127,7 @@ _GAP_ATTEMPT_ARTIFACT_KEYS: tuple[str, ...] = (
 class GapRefreshCollaborator(CoordinatorCollaborator):
     """Gap-signal extraction from baselines, attempt history, and research hints."""
 
-    async def _refresh_gaps(self, *, reason: str, workload_id: str) -> None:
+    async def refresh_gaps(self, *, reason: str, workload_id: str) -> None:
         """Refresh :attr:`SharedState.gaps` from observable signals. Additive upsert deduped by canonical_id.
 
         Args:
@@ -270,7 +270,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             )
         return gaps
 
-    def _seed_gaps_from_research_hints(self) -> None:
+    def seed_gaps_from_research_hints(self) -> None:
         """Inject research hints as advisory gaps[] seeds (idempotent)."""
         from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
@@ -338,7 +338,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             return ("system", "system_specialist")
         return ("framework", authoring_domain_for_framework(framework))
 
-    def _record_explore_round_gaps(
+    def record_explore_round_gaps(
         self,
         *,
         task: "Task | None",
@@ -391,7 +391,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
                     attempt[key] = str(value)
             state.append_gap_attempt(canonical, attempt)
 
-    def _record_explore_variant_failures(
+    def record_explore_variant_failures(
         self,
         *,
         task: "Task | None",

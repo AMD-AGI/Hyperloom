@@ -41,27 +41,27 @@ class MachinePhase(CoordinatorCollaborator):
         super().__init__(coordinator)
         self._on_enter: dict[str, Any] = {}
         self._on_exit: dict[str, Any] = {}
-        self._pump_table: dict[str, Any] = {}
+        self.pump_table: dict[str, Any] = {}
 
-    def _build_dispatch_tables(self) -> None:
+    def build_dispatch_tables(self) -> None:
         """Build on_enter, on_exit, and pump dispatch tables from phase owners. Called once after all collaborators are available."""
         c = self._coord
         self._on_exit = {
             _phase_state.PHASE_KERNEL_AGENT: c.phase_kernel.close_kernel_timeline,
-            _phase_state.PHASE_FRAMEWORK_AGENT: c.phase_framework._close_framework_timeline,
+            _phase_state.PHASE_FRAMEWORK_AGENT: c.phase_framework.close_framework_timeline,
         }
         self._on_enter = {
-            _phase_state.PHASE_FRAMEWORK_AGENT: c.phase_framework._on_enter_framework,
+            _phase_state.PHASE_FRAMEWORK_AGENT: c.phase_framework.on_enter_framework,
             _phase_state.PHASE_KERNEL_AGENT: c.phase_kernel.on_enter_kernel,
-            _phase_state.PHASE_SWEEP: c.phase_sweep._on_enter_sweep,
-            _phase_state.PHASE_CLOSE: c.phase_close._on_enter_close,
+            _phase_state.PHASE_SWEEP: c.phase_sweep.on_enter_sweep,
+            _phase_state.PHASE_CLOSE: c.phase_close.on_enter_close,
         }
-        self._pump_table = {
+        self.pump_table = {
             _phase_state.PHASE_FRAMEWORK_AGENT: c.phase_framework.pump,
             _phase_state.PHASE_SWEEP: c.phase_sweep.pump,
         }
 
-    def _ensure_phase_initialised(self, budget_pct: dict[str, float] | None) -> None:
+    def ensure_phase_initialised(self, budget_pct: dict[str, float] | None) -> None:
         """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent).
 
         When *budget_pct* is given, or when state has no budget yet (fresh session),
@@ -73,7 +73,7 @@ class MachinePhase(CoordinatorCollaborator):
             state.phase_budget_pct = _phase_state.redistribute_budget_pct(
                 _phase_state.normalize_budget_pct(budget_pct),
                 optimize_enabled=self._optimize_enabled(),
-                kernel_enabled=self._kernel_enabled(),
+                kernel_enabled=self.kernel_enabled(),
             )
         current = (state.phase or "").strip().upper()
         # Only an unset phase means fresh; an unknown one would otherwise re-run PRELUDE over the earlier build's
@@ -97,9 +97,9 @@ class MachinePhase(CoordinatorCollaborator):
                     "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
                         state,
                         current_phase="",
-                        kernel_enabled=self._kernel_enabled(),
+                        kernel_enabled=self.kernel_enabled(),
                         optimize_enabled=self._optimize_enabled(),
-                        enablement_enabled=self._coord.enablement_lane._enablement_admitted(),
+                        enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
                     ),
                 },
             )
@@ -125,9 +125,9 @@ class MachinePhase(CoordinatorCollaborator):
                 "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
                     state,
                     current_phase=_phase_state.PHASE_CLOSE,
-                    kernel_enabled=self._kernel_enabled(),
+                    kernel_enabled=self.kernel_enabled(),
                     optimize_enabled=self._optimize_enabled(),
-                    enablement_enabled=self._coord.enablement_lane._enablement_admitted(),
+                    enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
                 ),
             },
         )
@@ -135,7 +135,7 @@ class MachinePhase(CoordinatorCollaborator):
         # the breakdown".
         state.close_sequence_done = False
 
-    def _ensure_recipe_kb_t0_anchored(self) -> None:
+    def ensure_recipe_kb_t0_anchored(self) -> None:
         """Defensive T0 anchor for SDK callers constructed without cli plumbing. Skips when recipe_kb is None or recipe_kb_session_id set."""
         client = self.recipe_kb
         if client is None or not getattr(client, "enabled", True):
@@ -175,7 +175,7 @@ class MachinePhase(CoordinatorCollaborator):
                 hw,
             )
 
-    def _kernel_enabled(self) -> bool:
+    def kernel_enabled(self) -> bool:
         """Whether kernel optimization is enabled for this run."""
         return bool(self.shared_state.kernel_enabled)
 
@@ -183,23 +183,23 @@ class MachinePhase(CoordinatorCollaborator):
         """Whether the optimisation phase is enabled for this run."""
         return bool(self.shared_state.framework_agent_phase_enabled)
 
-    async def _advance_phase_if_needed(self) -> None:
+    async def advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick."""
         state = self.shared_state
         kernel_facts = await self._coord.phase_kernel.exit_facts()
         optimize_enabled = self._optimize_enabled()
         # Only asked inside the phase: the query renews the open round's lease.
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
-        enablement_in_flight = in_enablement and await self._coord.enablement_lane._enablement_in_flight()
+        enablement_in_flight = in_enablement and await self._coord.enablement_lane.enablement_in_flight()
         next_phase = _phase_state.compute_next_phase(
             state,
-            kernel_enabled=self._kernel_enabled(),
+            kernel_enabled=self.kernel_enabled(),
             optimize_enabled=optimize_enabled,
-            enablement_enabled=self._coord.enablement_lane._enablement_admitted(),
+            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
             enablement_in_flight=enablement_in_flight,
             kernel_work_in_flight=kernel_facts.agent_in_flight,
         )
-        await self._coord.phase_internal._maybe_enqueue_trajectory_reviewer()
+        await self._coord.phase_internal.maybe_enqueue_trajectory_reviewer()
         if next_phase is None:
             return
         target, reason, evidence = next_phase
@@ -289,7 +289,7 @@ class MachinePhase(CoordinatorCollaborator):
         )
         if is_loopback:
             state.open_macro_cycle(no_gain_cycle_streak=int(evidence.get("no_gain_cycle_streak_effective") or 0))
-            self._coord.phase_macro_cycle._record_cycle_strategy_for_current_cycle()
+            self._coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
             log.info(
                 "Coordinator: macro-cycle reloop %d -> %d (no_gain_streak=%d, gain_anchor=%.4f)",
                 prior_cycle,
@@ -345,7 +345,7 @@ class MachinePhase(CoordinatorCollaborator):
             # got its exit evidence.
             self._coord.record_exception(stage="phase_entered", exc=exc)
         if is_loopback:
-            await self._coord.phase_macro_cycle._run_cycle_soft_restart(
+            await self._coord.phase_macro_cycle.run_cycle_soft_restart(
                 prior_cycle=prior_cycle,
                 new_cycle=state.macro_cycle,
             )
@@ -370,7 +370,7 @@ class MachinePhase(CoordinatorCollaborator):
         )
 
         if not self._on_exit:
-            self._build_dispatch_tables()
+            self.build_dispatch_tables()
 
         exit_hook = self._on_exit.get((from_phase or "").upper())
         if exit_hook:
@@ -400,7 +400,7 @@ class MachinePhase(CoordinatorCollaborator):
         cycle = int(state.macro_cycle or 0)
         log_rows = list(state.cycle_strategy_log or [])
         prior_cycles = [r for r in log_rows if isinstance(r, dict) and int(r.get("cycle", -1) or -1) != cycle]
-        focus_plan = self._coord.phase_macro_cycle._plan_cycle_focus()
+        focus_plan = self._coord.phase_macro_cycle.plan_cycle_focus()
         focus_plan["prior_cycles"] = prior_cycles[-5:]
         scoped = rebuild(
             macro_cycle=state.macro_cycle,
@@ -415,7 +415,7 @@ class MachinePhase(CoordinatorCollaborator):
         log.info("orchestration prompt re-scoped for phase=%s", phase)
         return True
 
-    def _record_phase_entry_evidence(self, **kvs: Any) -> None:
+    def record_phase_entry_evidence(self, **kvs: Any) -> None:
         """Merge ``kvs`` into the latest phase_history row's evidence dict (no-op when empty)."""
         history = self.shared_state.phase_history or []
         if not history:

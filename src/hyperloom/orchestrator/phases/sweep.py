@@ -60,18 +60,18 @@ class SweepPhase(CoordinatorCollaborator):
             state.orchestration_memory["parse_error"],
         )
 
-    async def _on_enter_sweep(self, tr: "Transition") -> None:
+    async def on_enter_sweep(self, tr: "Transition") -> None:
         """Auto-enqueue the ``conc_sweep`` task on SWEEP entry."""
         from_phase = tr.from_phase
         state = self.shared_state
         # An unwind a previous leg left owed still has the stack's patches on the
         # tree, so settle it before the drain below applies anything on top.
-        await self._coord.phase_kernel_stack._recover_interrupted_stack_validation()
+        await self._coord.phase_kernel_stack.recover_interrupted_stack_validation()
         # Drain pending KEEP integrates so sweep measures full current_best.
         if state.has_keep_pending_integrate:
-            await self._coord.phase_kernel_stack._drain_pending_keep_integrates()
+            await self._coord.phase_kernel_stack.drain_pending_keep_integrates()
         # Validate the stack for positive NEEDS_REVIEW kernels.
-        await self._coord.phase_kernel_stack._maybe_validate_positive_needs_review_stack()
+        await self._coord.phase_kernel_stack.maybe_validate_positive_needs_review_stack()
         if not state.conc_sweep_enabled:
             log.info(
                 "SWEEP entry (from=%s): conc_sweep disabled; recording terminal skip.",
@@ -107,7 +107,7 @@ class SweepPhase(CoordinatorCollaborator):
                 from_phase or "<unknown>",
                 denied,
             )
-            self._record_session_budget_conc_sweep_skip(denied=denied)
+            self.record_session_budget_conc_sweep_skip(denied=denied)
             return
         try:
             task = await self._enqueue_internal_conc_sweep_task(
@@ -134,7 +134,7 @@ class SweepPhase(CoordinatorCollaborator):
             task.params.get("concs"),
             task.params.get("total_budget_sec"),
         )
-        self._coord.phase_machine._record_phase_entry_evidence(
+        self._coord.phase_machine.record_phase_entry_evidence(
             auto_conc_sweep_enqueued=True,
             auto_conc_sweep_task_id=task.task_id,
             # Verbatim: None records "the workload picks", which is not the same statement as an empty ladder.
@@ -162,7 +162,7 @@ class SweepPhase(CoordinatorCollaborator):
                     session_rem_sec,
                     _CLOSE_RESERVE_SEC,
                 )
-                self._record_session_budget_conc_sweep_skip(
+                self.record_session_budget_conc_sweep_skip(
                     denied=f"remaining_after_close_reserve={session_rem_sec}s",
                 )
                 return None
@@ -202,7 +202,7 @@ class SweepPhase(CoordinatorCollaborator):
             )
         return task
 
-    def _record_session_budget_conc_sweep_skip(self, *, denied: object) -> None:
+    def record_session_budget_conc_sweep_skip(self, *, denied: object) -> None:
         """Stamp last_conc_sweep skipped when the session clock refused conc_sweep."""
         last = self.shared_state.last_conc_sweep or {}
         if str(last.get("status") or "").strip():
@@ -230,7 +230,7 @@ class SweepPhase(CoordinatorCollaborator):
         **evidence: Any,
     ) -> None:
         """Record a terminal conc-sweep outcome and persist state."""
-        self._coord.phase_machine._record_phase_entry_evidence(**evidence)
+        self._coord.phase_machine.record_phase_entry_evidence(**evidence)
         record: dict[str, Any] = {"status": status, "skip_reason": reason}
         if status == "skipped":
             record["was_skipped"] = True

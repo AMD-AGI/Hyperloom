@@ -150,7 +150,7 @@ class KernelStackPhase(CoordinatorCollaborator):
         """Initialise the phase with its own in-flight integrate guard."""
         super().__init__(coordinator)
 
-    async def _drain_pending_keep_integrates(self) -> None:
+    async def drain_pending_keep_integrates(self) -> None:
         """Drain pending KEEP integrates inherited from KERNEL so sweep measures full current_best. Cap 10; a dispatch failure sets ``rejected_reason=integrate_dispatch_exception`` on the per-kernel and per-task_key attempt ledgers and flips the queued record to ``dispatch_failed``; only records with no ``task_key`` are also appended to ``rejected_kernel_ids``."""
         from ..kernel.request_handlers import integrate_handler
 
@@ -377,7 +377,7 @@ class KernelStackPhase(CoordinatorCollaborator):
         self.shared_state.pending_stack_validation_result = {}
         self.shared_state.pending_stack_validation_apply_results = []
 
-    async def _recover_interrupted_stack_validation(self) -> bool:
+    async def recover_interrupted_stack_validation(self) -> bool:
         """Resume or abort a stack validation interrupted by crash."""
         self._stack_resolved_kernel_ids()
         members = self._pending_stack_members()
@@ -457,9 +457,9 @@ class KernelStackPhase(CoordinatorCollaborator):
         self._clear_pending_stack_validation_checkpoints()
         self.shared_state.save(self.session_dir)
 
-    async def _maybe_validate_positive_needs_review_stack(self) -> None:
+    async def maybe_validate_positive_needs_review_stack(self) -> None:
         """Run one E2E stack validation for multiple small positive kernel patches."""
-        if await self._recover_interrupted_stack_validation():
+        if await self.recover_interrupted_stack_validation():
             return
         entries = self._positive_needs_review_integrates()
         if len(entries) < 2:

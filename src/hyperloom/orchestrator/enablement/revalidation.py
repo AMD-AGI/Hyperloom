@@ -33,7 +33,7 @@ class _RowAlreadyLive(Exception):
 class EnablementRevalidation(CoordinatorCollaborator):
     """Re-measures a kept enablement round against a real baseline."""
 
-    async def _maybe_enqueue_enablement_baseline_revalidation(self) -> str:
+    async def maybe_enqueue_enablement_baseline_revalidation(self) -> str:
         """Enqueue one genuine baseline to revalidate a KEEP'd eval-origin patch."""
         state = self.shared_state
         if not bool(state.enablement.validation_pending):
@@ -119,7 +119,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
         state.enablement.revalidation_generation = generation
         return task_id
 
-    async def _open_row_past_spent_generations(
+    async def open_row_past_spent_generations(
         self,
         *,
         kind: str,

@@ -104,10 +104,10 @@ class ClosePhase(CoordinatorCollaborator):
             log.info("CLOSE step 0: skipped post-opt roofline (patch recovery incomplete)")
             await self._record_close_step(step, status="skipped", detail=PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
             return
-        if self._coord.phase_prelude._internal_analysis_kind() != "roofline":
+        if self._coord.phase_prelude.internal_analysis_kind() != "roofline":
             await self._record_close_step(step, status="skipped", detail="roofline_disabled")
             return
-        task = await self._coord.phase_prelude._enqueue_internal_analysis_task(reason="close_post_opt")
+        task = await self._coord.phase_prelude.enqueue_internal_analysis_task(reason="close_post_opt")
         if task is None:
             await self._record_close_step(step, status="skipped", detail="task_not_enqueued")
             return
@@ -452,7 +452,7 @@ class ClosePhase(CoordinatorCollaborator):
             )
         return pkg_path
 
-    async def _on_enter_close(self, tr: "Transition") -> None:
+    async def on_enter_close(self, tr: "Transition") -> None:
         """CLOSE sequencer (fixed order): stack revalidation → post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons."""
         from_phase = tr.from_phase
         log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
@@ -812,7 +812,7 @@ class ClosePhase(CoordinatorCollaborator):
                 status,
             )
 
-    async def _enter_closing_phase(self, *, grace_sec: float) -> Deadline:
+    async def enter_closing_phase(self, *, grace_sec: float) -> Deadline:
         """Enter report-flush phase after the wall-clock deadline (enqueue deterministic report task).
 
         Args:
@@ -899,12 +899,12 @@ class ClosePhase(CoordinatorCollaborator):
         log.info("CLOSE: no close sequence has run (reason=%s); running it now", reason)
         from .machine import Transition
 
-        await self._on_enter_close(
+        await self.on_enter_close(
             Transition(from_phase=reason, to_phase="CLOSE", reason=reason, evidence={}, loopback=False)
         )
         return True
 
-    async def _closing_report_terminal(self) -> bool:
+    async def closing_report_terminal(self) -> bool:
         """Report whether the closing phase has a finished report to wait on.
 
         An absent report task counts as finished, so the loop drops out of the

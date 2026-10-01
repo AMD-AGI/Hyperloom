@@ -679,7 +679,7 @@ class IntentRouter(CoordinatorCollaborator):
             # A Critic-rejected ENABLEMENT integrate_patch never reaches the executor, so the normal integrate-result
             # rearm never fires.
             try:
-                await self._coord.enablement_lane._maybe_rearm_enablement(
+                await self._coord.enablement_lane.maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
                 )
             except Exception:
@@ -757,11 +757,11 @@ class IntentRouter(CoordinatorCollaborator):
             )
             and params["tasks"]
         ):
-            await self._coord.specialist_dispatch._fan_out_specialist_wave(source, intent, params)
+            await self._coord.specialist_dispatch.fan_out_specialist_wave(source, intent, params)
             return
         # Specialist pre-dispatch warmup via KnowledgePlane.
         if action_name == "specialist":
-            await self._coord.specialist_dispatch._warm_specialist_params(params)
+            await self._coord.specialist_dispatch.warm_specialist_params(params)
             from ..specialists.runner import specialist_patch_preflight_error
 
             preflight_error = specialist_patch_preflight_error(

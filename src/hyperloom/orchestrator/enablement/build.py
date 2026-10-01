@@ -46,7 +46,7 @@ _ROUTING_FIELDS: tuple[str, ...] = ("routed", "probe_task_id")
 class EnablementBuild(CoordinatorCollaborator):
     """Escalates to a compiled build and routes the result back into the lane."""
 
-    async def _maybe_escalate_to_targeted_build(
+    async def maybe_escalate_to_targeted_build(
         self,
         launch_log: str,
         *,
@@ -186,7 +186,7 @@ class EnablementBuild(CoordinatorCollaborator):
         except Exception:
             log.debug("enablement: targeted-build escalation failed", exc_info=True)
 
-    async def _maybe_enqueue_specialist_requested_build(
+    async def maybe_enqueue_specialist_requested_build(
         self,
         *,
         task_id: str = "",
@@ -289,8 +289,8 @@ class EnablementBuild(CoordinatorCollaborator):
         except Exception:
             log.debug("enablement: specialist-requested build enqueue failed", exc_info=True)
 
-    async def _maybe_route_build_outcomes(self) -> None:
-        """Route terminal targeted_build rows to _maybe_rearm_enablement."""
+    async def maybe_route_build_outcomes(self) -> None:
+        """Route terminal targeted_build rows to maybe_rearm_enablement."""
         try:
             all_tasks = []
             for st in ("succeeded", "failed"):
@@ -376,7 +376,7 @@ class EnablementBuild(CoordinatorCollaborator):
         )
         # Rearm, ledger append, and manifest ack must stay together: a failed
         # rearm leaves the build unrouted and the novelty ledger unchanged.
-        await self._coord.enablement_lane._maybe_rearm_enablement(res)
+        await self._coord.enablement_lane.maybe_rearm_enablement(res)
         if novelty_key is not None:
             ledger = list(state.enablement.build_novelty or [])
             ledger.append(novelty_key)
@@ -396,7 +396,7 @@ class EnablementBuild(CoordinatorCollaborator):
         # If the runtime can't be read, it can't be launched → reverted.
         if br is None or not br.ok or not br.runtime.to_runtime_override():
             log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s", task_id)
-            await self._coord.enablement_lane._maybe_rearm_enablement(
+            await self._coord.enablement_lane.maybe_rearm_enablement(
                 {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"}
             )
             self._note_build_routed(task_id)
@@ -474,9 +474,9 @@ class EnablementBuild(CoordinatorCollaborator):
         Runs the built runtime through the enablement runnable gate without
         applying any patch.  The probe completes as an ordinary integrate_patch
         task whose enablement:True result is routed by the dispatcher through
-        _maybe_rearm_authored_lane → _maybe_rearm_enablement, producing a
+        _maybe_rearm_authored_lane → maybe_rearm_enablement, producing a
         genuine KEEP/advanced/reverted outcome.  The whole-machine GPU pool is
-        acquired via _framework_gpu_params.
+        acquired via framework_gpu_params.
 
         The probe is what declares KEEP for a build, so it must not be opened
         into a session that cannot run it: the queue scan drops a queued row the
@@ -515,7 +515,7 @@ class EnablementBuild(CoordinatorCollaborator):
             # watched this failure persisted.
             "enablement_before_observation_path": state.enablement.launch_observation_path,
             "source": "coordinator_internal",
-            **self._coord.gpu_lanes._framework_gpu_params(),
+            **self._coord.gpu_lanes.framework_gpu_params(),
             **_enablement_carrier_params(state),
         }
         # Prefer the eval-origin probe config so the re-run keeps the original workload/eval contract; fall back to
@@ -528,7 +528,7 @@ class EnablementBuild(CoordinatorCollaborator):
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("integrate_patch")
         if not lanes:
             raise RuntimeError("integrate_patch resolved to no lanes; the launch probe would run unserialised.")
-        probe_task, generation = await self._coord.enablement_revalidation._open_row_past_spent_generations(
+        probe_task, generation = await self._coord.enablement_revalidation.open_row_past_spent_generations(
             kind="integrate_patch",
             params=params,
             key_for=lambda gen: f"build_launch_probe:{build_task_id}:gen{gen}",

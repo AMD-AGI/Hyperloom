@@ -50,7 +50,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             "seen_pr_ids": seen,
             "mode": "research",
         }
-        proven = list(self._coord.phase_prelude._warm_recipe_proven_items())
+        proven = list(self._coord.phase_prelude.warm_recipe_proven_items())
         search = self.shared_state.explore_search or {}
         accepted = search.get("accepted") if isinstance(search, dict) else []
         if isinstance(accepted, list):
@@ -78,7 +78,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
                 if questions:
                     params["notes"] = "\n".join(f"- {question}" for question in questions)
                 break
-        await self._coord.specialist_dispatch._warm_specialist_params(params)
+        await self._coord.specialist_dispatch.warm_specialist_params(params)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
@@ -101,7 +101,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             )
         return task
 
-    async def _maybe_enqueue_prelude_research_scout(self) -> None:
+    async def maybe_enqueue_prelude_research_scout(self) -> None:
         """Force-dispatch the PRELUDE research scout (not LLM-proposable); writes hints skeleton first."""
         try:
             from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
@@ -116,7 +116,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             round_id=0,
         )
 
-    async def _maybe_enqueue_explore_research_scout(self) -> None:
+    async def maybe_enqueue_explore_research_scout(self) -> None:
         """Re-dispatch the scout every K config-arm rounds (append-only)."""
         state = self.shared_state
         if not bool(state.research_scout_enabled):
@@ -177,7 +177,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
                 params["static_recon_checklist_entries"] = _dicts
         except Exception:
             log.exception("static-recon: checklist seeding failed")
-        await self._coord.specialist_dispatch._warm_specialist_params(params)
+        await self._coord.specialist_dispatch.warm_specialist_params(params)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
@@ -200,7 +200,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             )
         return task
 
-    async def _maybe_enqueue_prelude_static_recon(self) -> None:
+    async def maybe_enqueue_prelude_static_recon(self) -> None:
         """Force-dispatch the PRELUDE static-recon specialist (not LLM-proposable)."""
         if not bool(self.shared_state.static_recon_enabled):
             return
@@ -208,12 +208,12 @@ class InternalTasksPhase(CoordinatorCollaborator):
             reason="prelude_initial",
         )
 
-    async def _maybe_enqueue_trajectory_reviewer(self) -> None:
+    async def maybe_enqueue_trajectory_reviewer(self) -> None:
         """On a plateau, dispatch a Coordinator-owned readonly specialist seeded with the deterministic trajectory digest to propose fresh directions."""
         if not env_bool("INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW", default=True):
             return
         state = self.shared_state
-        plateau_active = bool(self._coord.conversation._plateau_advisory_block())
+        plateau_active = bool(self._coord.conversation.plateau_advisory_block())
         if not plateau_active:
             return
         cycle = int(state.macro_cycle or 0)
@@ -226,7 +226,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             )
         except Exception:  # noqa: BLE001 — defensive
             digest = ""
-        direction, _pct = self._coord.conversation._dominant_roofline_direction()
+        direction, _pct = self._coord.conversation.dominant_roofline_direction()
         from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
 
         hint = BOTTLENECK_DOMAIN_HINTS.get(direction)
@@ -248,7 +248,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
         }
         if digest:
             params["gap_evidence"] = {"trajectory_review": digest}
-        await self._coord.specialist_dispatch._warm_specialist_params(params)
+        await self._coord.specialist_dispatch.warm_specialist_params(params)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
