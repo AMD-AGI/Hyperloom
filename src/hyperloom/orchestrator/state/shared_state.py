@@ -716,8 +716,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
     # Monotonic Coordinator tick counter; stable anchor for plateau/phase budget math.
     tick: int = 0
-    # Percent improvement still needed to reach the objective (0.0 => none/reached); fact for the "Mission progress" line, not a priority.
-    target_gap_pct: float = 0.0
 
     # Phase state machine fields ``phase`` — run-level pipeline phase
     # (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/CLOSE); Coordinator-only writer.

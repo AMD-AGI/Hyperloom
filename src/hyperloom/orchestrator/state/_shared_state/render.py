@@ -569,7 +569,7 @@ class _RenderMixin:
             f"last_action_failures={self._format_last_action_failures()}",
             f"agent_last_active={self._format_agent_last_active()}",
             f"gain_gated_action_count={int(self.gain_gated_action_count or 0)}",
-            f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
+            f"tick={int(self.tick or 0)}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
             f"closing_phase={self.closing_phase}  "

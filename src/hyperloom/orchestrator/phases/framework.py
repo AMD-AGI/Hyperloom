@@ -610,17 +610,35 @@ class FrameworkPhase(CoordinatorCollaborator):
         that did not come from the optimize exit rule -- since writing rows
         then would report an evaluation that never ran.
         """
-        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
-            ARM_CONFIG,
-            ARM_SOURCE,
-            PLATEAU_PATH_EXIT,
-        )
+        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import PLATEAU_PATH_EXIT
 
         if "config_arm_plateaued" not in evidence and "source_arm_plateaued" not in evidence:
             return
+        FrameworkPhase._record_plateau_rows(recorder, path=PLATEAU_PATH_EXIT, evidence=evidence)
+
+    def _record_advisory_plateau(self) -> None:
+        """Snapshot the plateau reading the advisory is composed from into the SBD timeline.
+
+        Recorded here rather than derived at export because the inputs are counts over a history that keeps growing:
+        a later re-derivation returns a number the agent never saw. Both arms are recorded whether or not either
+        fired -- "evaluated and did not trip" is the reading that explains a phase staying open.
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import PLATEAU_PATH_ADVISORY
+
+        recorder = self.timeline()
+        if recorder is None:
+            return
+        _, evidence = _phase_state.per_lever_dryness(self.shared_state)
+        self._record_plateau_rows(recorder, path=PLATEAU_PATH_ADVISORY, evidence=evidence)
+
+    @staticmethod
+    def _record_plateau_rows(recorder, *, path: str, evidence: dict) -> None:
+        """Record the config and source arms' plateau readings with the values they ruled on."""
+        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG, ARM_SOURCE
+
         recorder.record_plateau(
             arm=ARM_CONFIG,
-            path=PLATEAU_PATH_EXIT,
+            path=path,
             triggered=evidence.get("config_arm_plateaued"),
             inputs={
                 "recent_keep_gain_pct": evidence.get("recent_keep_gain_pct"),
@@ -636,7 +654,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         )
         recorder.record_plateau(
             arm=ARM_SOURCE,
-            path=PLATEAU_PATH_EXIT,
+            path=path,
             triggered=evidence.get("source_arm_plateaued"),
             inputs={
                 "consecutive_no_keep": evidence.get("source_consecutive_no_keep"),
@@ -2054,16 +2072,10 @@ class FrameworkPhase(CoordinatorCollaborator):
             await self._pump_framework_agent_phase()
             await self._coord.phase_internal._maybe_enqueue_explore_research_scout()
             await self._coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
+            self._record_advisory_plateau()
         except Exception as exc:
             log.exception("FRAMEWORK pump failed")
             self._coord._record_coordinator_exception(stage="framework_pump", exc=exc)
-        state = self.shared_state
-        if (getattr(state, "phase", "") or "").strip().upper() == "FRAMEWORK_AGENT":
-            try:
-                self._coord.conversation._record_advisory_plateau_from_state()
-            except Exception as exc:
-                log.exception("FRAMEWORK pump: plateau snapshot failed")
-                self._coord._record_coordinator_exception(stage="framework_pump", exc=exc)
 
     def _record_framework_agent_authored_outcome(
         self,
