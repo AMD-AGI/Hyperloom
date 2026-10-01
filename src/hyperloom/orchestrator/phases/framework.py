@@ -1715,7 +1715,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "priors": self._collect_framework_agent_candidate_priors(),
         }
         pending = await record_proposal(
-            self,
+            self._coord,
             from_agent="coordinator",
             action_name="integrate_patch",
             predicted_gain_pct=0.0,
@@ -2745,7 +2745,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "params": integrate_params,
         }
         pending = await record_proposal(
-            self,
+            self._coord,
             from_agent="coordinator",
             action_name="integrate_patch",
             predicted_gain_pct=0.0,
@@ -2890,7 +2890,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "params": integrate_params,
         }
         pending = await record_proposal(
-            self,
+            self._coord,
             from_agent="coordinator",
             action_name="integrate_patch",
             predicted_gain_pct=0.0,
