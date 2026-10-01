@@ -288,7 +288,7 @@ def _register_executors(
     )
 
     # kernel_agent: the KERNEL_AGENT phase's whole pipeline, run under the task's lanes.
-    coordinator.sub.register_executor("kernel_agent", lambda ctx: coordinator.phase_kernel._run_kernel_agent(ctx))
+    coordinator.sub.register_executor("kernel_agent", lambda ctx: coordinator.phase_kernel.run_agent(ctx))
 
     if log.isEnabledFor(logging.DEBUG):
         for required_kind in ("roofline", "profile"):

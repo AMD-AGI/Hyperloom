@@ -47,12 +47,12 @@ class MachinePhase(CoordinatorCollaborator):
         """Build on_enter, on_exit, and pump dispatch tables from phase owners. Called once after all collaborators are available."""
         c = self._coord
         self._on_exit = {
-            _phase_state.PHASE_KERNEL_AGENT: c.phase_kernel._close_kernel_timeline,
+            _phase_state.PHASE_KERNEL_AGENT: c.phase_kernel.close_kernel_timeline,
             _phase_state.PHASE_FRAMEWORK_AGENT: c.phase_framework._close_framework_timeline,
         }
         self._on_enter = {
             _phase_state.PHASE_FRAMEWORK_AGENT: c.phase_framework._on_enter_framework,
-            _phase_state.PHASE_KERNEL_AGENT: c.phase_kernel._on_enter_kernel,
+            _phase_state.PHASE_KERNEL_AGENT: c.phase_kernel.on_enter_kernel,
             _phase_state.PHASE_SWEEP: c.phase_sweep._on_enter_sweep,
             _phase_state.PHASE_CLOSE: c.phase_close._on_enter_close,
         }

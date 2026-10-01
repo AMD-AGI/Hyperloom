@@ -330,7 +330,7 @@ class KernelPhase(CoordinatorCollaborator):
     async def _maybe_reprofile_for_kernel(self) -> None:
         """Reprofile inline when projected tput diverges from the last measured trace, so the phase targets the live bottleneck."""
         before = self._last_measured_roofline_tput()
-        cur = self._current_tput_from_validated_gain()
+        cur = self.current_tput_from_validated_gain()
         profile_signature = self._current_profile_config_signature()
         config_changed = self._profile_config_changed(profile_signature)
         workload_changed = self._profile_workload_changed()
@@ -430,7 +430,7 @@ class KernelPhase(CoordinatorCollaborator):
         if snapshot_landed:
             self._record_kernel_discovered_from_cache(provenance="reprofile_snapshot")
 
-    def _geak_enabled(self) -> bool:
+    def geak_enabled(self) -> bool:
         """Whether the KERNEL_AGENT phase is delegated to the GEAK e2e optimizer."""
         from ..kernel.request_handlers import geak_selected
 
@@ -698,7 +698,7 @@ class KernelPhase(CoordinatorCollaborator):
         if agent_backend:
             tool_versions.record_tool_version(self.session_dir, tool=agent_backend)
 
-    def _close_kernel_timeline(self, tr: "Transition") -> None:
+    def close_kernel_timeline(self, tr: "Transition") -> None:
         """Close the kernel timeline event when the phase is left."""
         exit_reason = tr.reason
         recorder = self.timeline()
@@ -724,7 +724,7 @@ class KernelPhase(CoordinatorCollaborator):
             stack_removed=stack_removed,
         )
 
-    async def _on_enter_kernel(self, tr: "Transition") -> None:
+    async def on_enter_kernel(self, tr: "Transition") -> None:
         """Open the KERNEL timeline and enqueue the ``kernel_agent`` task that carries the phase's work."""
         state = self.shared_state
         if not self._coord.phase_machine._kernel_enabled():
@@ -734,7 +734,7 @@ class KernelPhase(CoordinatorCollaborator):
             )
             return
         self._open_kernel_timeline(
-            route=ROUTE_GEAK if self._geak_enabled() else ROUTE_FORGE,
+            route=ROUTE_GEAK if self.geak_enabled() else ROUTE_FORGE,
             route_reason=f"kernel_optimizer={str(state.kernel_optimizer or '')}",
             from_phase=tr.from_phase,
         )
@@ -818,7 +818,7 @@ class KernelPhase(CoordinatorCollaborator):
             "failed",
         }
 
-    async def _run_kernel_agent(self, ctx: Any) -> dict[str, Any]:
+    async def run_agent(self, ctx: Any) -> dict[str, Any]:
         """Run the KERNEL_AGENT phase's work under the ``kernel_agent`` task's lanes.
 
         Args:
@@ -829,7 +829,7 @@ class KernelPhase(CoordinatorCollaborator):
             A result payload naming the route that ran.
         """
         from_phase = str((ctx.task.params or {}).get("from_phase") or "")
-        if self._geak_enabled():
+        if self.geak_enabled():
             # GEAK owns the whole KERNEL_AGENT phase: one in-process e2e run seeded with the best config so far, then
             # hand straight to SWEEP.
             await self._run_geak_kernel_phase(from_phase=from_phase)
@@ -1845,7 +1845,7 @@ class KernelPhase(CoordinatorCollaborator):
         try:
             accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
         except ValueError as exc:
-            self._reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
+            self.reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
             return False
         # A material artifact can still be rechecked without a GEAK throughput claim.
         if result.get("status") not in ("ok",) and not _geak_has_accepted_kernel(result):
@@ -1996,7 +1996,7 @@ class KernelPhase(CoordinatorCollaborator):
             "overlay_loaded": overlay_loaded,
         }
 
-    def _reject_geak_promotion(
+    def reject_geak_promotion(
         self,
         result: dict[str, Any],
         *,
@@ -2017,7 +2017,7 @@ class KernelPhase(CoordinatorCollaborator):
         }
         self.shared_state.geak_result = rejected_result
         self.shared_state.geak_pending = {}
-        KernelPhase._reject_geak_kernel_journey(
+        KernelPhase.reject_geak_kernel_journey(
             self,
             rejected_result,
             measured_tput=measured_tput,
@@ -2037,7 +2037,7 @@ class KernelPhase(CoordinatorCollaborator):
             )
             recorder.record_geak_rebench_conclusion(final_status="no_promote", final_error=reason)
 
-    def _promote_geak_from_candidate(
+    def promote_geak_from_candidate(
         self,
         result: dict[str, Any],
         *,
@@ -2060,7 +2060,7 @@ class KernelPhase(CoordinatorCollaborator):
         try:
             accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
         except ValueError as exc:
-            self._reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
+            self.reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
             return False
 
         # The lever is stamped here, not guessed from the task kind: GEAK promotes on a proven kernel overlay OR on a
@@ -2165,7 +2165,7 @@ class KernelPhase(CoordinatorCollaborator):
             entry_extra=entry_extra,
         )
         if not lifted:
-            KernelPhase._reject_geak_promotion(
+            KernelPhase.reject_geak_promotion(
                 self,
                 result,
                 measured_tput=measured,
@@ -2188,7 +2188,7 @@ class KernelPhase(CoordinatorCollaborator):
         if overlay_loaded is not True:
             # The journey is replayed before the main-flow rebench and can therefore contain GEAK-internal KEEPs for
             # kernels that were not present in the configuration that produced ``measured``.
-            self._reject_geak_kernel_journey(
+            self.reject_geak_kernel_journey(
                 result,
                 measured_tput=measured,
                 current_best_tput=pre_geak,
@@ -2418,7 +2418,7 @@ class KernelPhase(CoordinatorCollaborator):
                 version=str(meta.get("version") or meta.get("commit") or "") or None,
             )
 
-    def _reject_geak_kernel_journey(
+    def reject_geak_kernel_journey(
         self,
         result: dict[str, Any],
         *,
@@ -4120,7 +4120,7 @@ class KernelPhase(CoordinatorCollaborator):
         except Exception:  # noqa: BLE001 - best-effort persist; drain reloads state
             pass
 
-    def _current_tput_from_validated_gain(self) -> float:
+    def current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed)."""
         state = self.shared_state
         try:
@@ -4175,7 +4175,7 @@ class KernelPhase(CoordinatorCollaborator):
                 last_rl = 0.0
             if last_rl <= 0:
                 return False
-        cur = self._current_tput_from_validated_gain()
+        cur = self.current_tput_from_validated_gain()
         if cur <= 0:
             return False
         return cur / last_rl >= ROOFLINE_WATERMARK_RATIO
@@ -4197,7 +4197,7 @@ class KernelPhase(CoordinatorCollaborator):
             pending,
         )
 
-    async def _maybe_enqueue_watermark_roofline(
+    async def maybe_enqueue_watermark_roofline(
         self,
         *,
         reason: str,
@@ -4222,13 +4222,13 @@ class KernelPhase(CoordinatorCollaborator):
             "watermark-roofline (%s): enqueued task=%s (cur=%.2f, last_roofline=%.2f, ratio>=%.2f)",
             reason,
             task.task_id,
-            self._current_tput_from_validated_gain(),
+            self.current_tput_from_validated_gain(),
             float(self.shared_state.last_roofline_tput or 0.0),
             ROOFLINE_WATERMARK_RATIO,
         )
         return True
 
-    def _cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    def cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         """Return a cached programmatic_handler result if applicable (cache key last_trace_analyze)."""
         if kind != "trace_analyze":
             return None
