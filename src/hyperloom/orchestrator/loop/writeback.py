@@ -589,10 +589,14 @@ class WritebackCollaborator(CoordinatorCollaborator):
 
     PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0
 
-    def __init__(self, coordinator: "Coordinator") -> None:
+    def __init__(self, coordinator: "Coordinator", proposal_scorer: Any = None) -> None:
         super().__init__(coordinator)
         self._lifecycle_last_save: float = 0.0
         self._lifecycle_save_min_interval_s: float = 2.0
+        self._journal: Journal | None = None
+        self._resumed_from: dict[str, Any] = {}
+        # Advisory only: scores proposals, never gates them.
+        self._proposal_scorer = proposal_scorer
 
     def _emit_lifecycle(
         self,
@@ -1739,10 +1743,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
             The per-session :class:`Journal` instance (created on first call,
             with the baseline backfilled on subsequent calls).
         """
-        existing = self._coord._journal
+        existing = self._journal
         if existing is None:
             ss = self.shared_state
-            self._coord._journal = Journal.load_or_create(
+            self._journal = Journal.load_or_create(
                 self.session_dir,
                 session_id=str(ss.recipe_kb_session_id or "") or str(ss.session_id or "") or self.session_dir.name,
                 model=str(ss.model_name or ""),
@@ -1753,7 +1757,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         else:
             # Backfill baseline once the baseline executor finishes.
             existing.update_baseline(float(self.shared_state.baseline_tput or 0.0))
-        return self._coord._journal
+        return self._journal
 
     def _pitfall_severity_for(
         self,
@@ -2960,8 +2964,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 },
             )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing.
-        if self._coord._proposal_scorer is not None and proposals:
-            scores = await self._coord._proposal_scorer.score(
+        if self._proposal_scorer is not None and proposals:
+            scores = await self._proposal_scorer.score(
                 gap={
                     "domain": domain,
                     "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
@@ -4907,12 +4911,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
         ev_count = self.bus.db.fetchone_sync("SELECT COUNT(*) AS c FROM events")
         events_present = (int(ev_count["c"]) if ev_count else 0) > 0
         state_path = SharedState.state_path(self.session_dir)
-        return {
+        self._resumed_from = {
             "is_resume": events_present or state_path.exists(),
             "event_count": int(ev_count["c"]) if ev_count else 0,
             "state_json_present": state_path.exists(),
             "rebuilt": False,  # set by replay_for_resume()
         }
+        return self._resumed_from
 
     async def replay_for_resume(self) -> dict[str, Any]:
         """Walk the event log to reconstruct ``CoordinatorState.pending_proposals``. Idempotent; a proposal is undecided when no review_verdict targets it.
@@ -4953,12 +4958,12 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
             rebuilt += 1
 
-        self._coord._resumed_from["rebuilt"] = True
-        self._coord._resumed_from["pending_restored"] = rebuilt
+        self._resumed_from["rebuilt"] = True
+        self._resumed_from["pending_restored"] = rebuilt
         return {
-            "is_resume": self._coord._resumed_from["is_resume"],
-            "event_count": self._coord._resumed_from["event_count"],
-            "state_json_present": self._coord._resumed_from["state_json_present"],
+            "is_resume": self._resumed_from["is_resume"],
+            "event_count": self._resumed_from["event_count"],
+            "state_json_present": self._resumed_from["state_json_present"],
             "pending_restored": rebuilt,
             "verdicts_seen": len(verdicts),
         }
@@ -5347,7 +5352,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         resumed session and every recovery step dedupes, so a second pass is a
         no-op.
         """
-        if not self._coord._resumed_from.get("is_resume"):
+        if not self._resumed_from.get("is_resume"):
             return {"skipped": True, "reason": "not_resume"}
         state = self.shared_state
         report: dict[str, Any] = {
@@ -6484,7 +6489,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         """
         from ..phases.machine_state import PHASE_KERNEL_AGENT
 
-        if not self._coord._resumed_from.get("is_resume"):
+        if not self._resumed_from.get("is_resume"):
             return
         state = self.shared_state
         if (state.phase or "").strip().upper() != PHASE_KERNEL_AGENT:
@@ -6520,12 +6525,12 @@ class WritebackCollaborator(CoordinatorCollaborator):
             A copy of the resume-detection dict so callers cannot mutate
             internal state.
         """
-        return dict(self._coord._resumed_from)
+        return dict(self._resumed_from)
 
     # Bounded test interface
     async def _replay_resume_if_needed(self) -> None:
         """Rebuild in-memory state once for a resumed session (replay log + abandon orphan dispatches)."""
-        if not (self._coord._resumed_from["is_resume"] and not self._coord._resumed_from["rebuilt"]):
+        if not (self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]):
             return
         await self.replay_for_resume()
         await self._resume_consistency_pass()

@@ -692,7 +692,7 @@ class ClosePhase(CoordinatorCollaborator):
     async def _await_running_close_task(self, task: Task, *, step: str) -> str:
         """Wait for an already-dispatched close-step task to reach a terminal state."""
         bound_sec = self._close_step_wait_sec(task)
-        poll_sec = float(self._coord._dispatcher_poll_sec)
+        poll_sec = float(self._coord.dispatcher.poll_sec)
         deadline = time.monotonic() + bound_sec
         log.info(
             "CLOSE step %s: task_id=%s is already running; waiting up to %.0fs for it",

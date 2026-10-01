@@ -265,11 +265,19 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         super().__init__(coordinator)
         self._local_recipe_cache: tuple[int, dict[str, Any]] | None = None
 
+    def _kb_hardware_slug(self) -> str:
+        """Topology-aware hardware dimension for the recipe ``canonical_id``."""
+        from hyperloom.orchestrator.actions.executors._multi_node_env import resolve_kb_topology
+        from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
+
+        ss = self.shared_state
+        return kb_hardware_slug(ss.gpu_type or "unknown_gpu", **resolve_kb_topology())
+
     def _workload_canonical_id(self) -> str:
         """Return the workload's canonical seven-dimension Recipe identity."""
         ss = self.shared_state
         workload = ss.model_name or "unknown_model"
-        hw = self._coord._kb_hardware_slug()
+        hw = self._kb_hardware_slug()
         framework = str(ss.framework or "")
         framework_version = str(ss.framework_version or "")
         if not framework_version and framework:
@@ -460,7 +468,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         put_kwargs: dict[str, Any] = {
             "canonical_id": cid,
             "model": ss.model_name or "unknown_model",
-            "hardware": self._coord._kb_hardware_slug(),
+            "hardware": self._kb_hardware_slug(),
             "framework_name": framework,
             "framework_version": framework_version,
             "precision": precision,

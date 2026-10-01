@@ -343,7 +343,7 @@ class MachinePhase(CoordinatorCollaborator):
             log.exception("Coordinator: _on_phase_entered hook failed")
             # This hook is also what closes the left phase's event, so a raise here is the case where that event never
             # got its exit evidence.
-            self._coord._record_coordinator_exception(stage="phase_entered", exc=exc)
+            self._coord.record_exception(stage="phase_entered", exc=exc)
         if is_loopback:
             await self._coord.phase_macro_cycle._run_cycle_soft_restart(
                 prior_cycle=prior_cycle,

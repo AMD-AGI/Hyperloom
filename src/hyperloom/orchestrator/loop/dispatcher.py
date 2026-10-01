@@ -148,6 +148,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # themselves in :meth:`run_task_registered`.
         self._inflight_actions: dict[str, _InflightAction] = {}
         self._executions: set[asyncio.Task[Any]] = set()
+        # Re-scan the queue this often while awaiting in-flight tasks so a queued GPU task starts the moment its lane
+        # frees.
+        self.poll_sec = 10.0
 
     async def close_db_after_executions(self) -> None:
         """Drain physical cleanup and completion before the entry-point loop exits.
@@ -338,7 +341,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             is what cancels the rows it can no longer fit, and the closing
             actions it exempts still have their reserve to run in.
         """
-        if self._coord._stop.is_set():
+        if self._coord.stop_requested():
             await self.cancel_inflight_actions(reason="shutdown_requested")
             return True
         usable_sec = self.shared_state.session_budget_usable_sec()
@@ -429,7 +432,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     return
                 done, _pending = await asyncio.wait(
                     [atask for _, atask, _ in inflight],
-                    timeout=self._coord._dispatcher_poll_sec,
+                    timeout=self.poll_sec,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if not done:
@@ -1195,7 +1198,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 "dispatcher: failed to append delegated_result for task=%s",
                 task.task_id,
             )
-            self._coord._record_coordinator_exception(
+            self._coord.record_exception(
                 stage="dispatcher_result",
                 exc=exc,
             )
@@ -1249,7 +1252,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     "dispatcher: promotion/unpromotable handling failed for task=%s",
                     task.task_id,
                 )
-                self._coord._record_coordinator_exception(
+                self._coord.record_exception(
                     stage="dispatcher_promote",
                     exc=exc,
                 )
@@ -1290,7 +1293,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     "dispatcher: fact-write hook failed for task=%s",
                     task.task_id,
                 )
-                self._coord._record_coordinator_exception(
+                self._coord.record_exception(
                     stage="dispatcher_fact_write",
                     exc=exc,
                 )

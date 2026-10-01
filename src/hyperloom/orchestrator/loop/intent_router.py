@@ -387,7 +387,7 @@ class IntentRouter(CoordinatorCollaborator):
             raise
         except Exception as exc:
             log.exception("intent handler for %s raised", source)
-            self._coord._record_coordinator_exception(
+            self._coord.record_exception(
                 stage="handle_intent",
                 agent=source,
                 exc=exc,
