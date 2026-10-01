@@ -888,30 +888,49 @@ async def test_close_sequencer_does_not_overwrite_caller_set_stop_reason(
     assert coord.shared_state.stop_reason == "signal"
 
 
-def test_machine_maps_non_vocab_close_reason_to_time_exhausted():
-    """Machine maps an unrecognised transition reason to 'time_exhausted' at CLOSE."""
-    from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
-    from hyperloom.orchestrator.state.shared_state import SharedState
+async def _advance_into_close(coord, monkeypatch, reason: str) -> None:
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
+        return None
 
-    state = SharedState(phase="SWEEP")
-    assert not is_valid_stop_reason("not_a_real_vocab_reason")
-    reason = "not_a_real_vocab_reason"
-    canonical = reason if reason and is_valid_stop_reason(reason) else "time_exhausted"
-    state.set_stop_reason(canonical)
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    monkeypatch.setattr(
+        machine_state,
+        "compute_next_phase",
+        lambda *_a, **_k: (machine_state.PHASE_CLOSE, reason, {"terminal": True}),
+    )
+    coord.shared_state.phase = machine_state.PHASE_SWEEP
+    await coord.phase_machine._advance_phase_if_needed()
 
-    assert state.stop_reason == "time_exhausted"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["sweep_budget_exhausted", "sweep_budget_cap"])
+async def test_a_sweep_budget_exit_closes_the_run_as_time_exhausted(tmp_path: Path, monkeypatch, reason: str):
+    coord = make_coordinator(tmp_path)
+
+    await _advance_into_close(coord, monkeypatch, reason)
+
+    assert coord.shared_state.phase == machine_state.PHASE_CLOSE
+    assert coord.shared_state.stop_reason == "time_exhausted"
 
 
-def test_machine_does_not_overwrite_already_set_stop_reason():
-    """Machine skips setting stop_reason when one is already set (not state.stop_reason guard)."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
+@pytest.mark.asyncio
+async def test_a_close_reason_outside_the_stop_vocabulary_is_refused(tmp_path: Path, monkeypatch):
+    coord = make_coordinator(tmp_path)
 
-    state = SharedState(phase="SWEEP")
-    state.set_stop_reason("signal")
-    if not state.stop_reason:
-        state.set_stop_reason("sweep_done")
+    with pytest.raises(ValueError, match="not_a_real_vocab_reason"):
+        await _advance_into_close(coord, monkeypatch, "not_a_real_vocab_reason")
 
-    assert state.stop_reason == "signal"
+    assert coord.shared_state.phase == machine_state.PHASE_SWEEP
+
+
+@pytest.mark.asyncio
+async def test_entering_close_keeps_the_stop_reason_already_set(tmp_path: Path, monkeypatch):
+    coord = make_coordinator(tmp_path)
+    coord.shared_state.set_stop_reason("signal")
+
+    await _advance_into_close(coord, monkeypatch, "sweep_done")
+
+    assert coord.shared_state.stop_reason == "signal"
 
 
 @pytest.mark.asyncio
