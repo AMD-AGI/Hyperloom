@@ -999,7 +999,7 @@ exec {shlex.quote(runner)}
     return path
 
 
-def _resolve_gemm_tuning_backend(payload: dict) -> str:
+def resolve_gemm_tuning_backend(payload: dict) -> str:
     """Resolve GEMM tuning backend under the forge-explicit-only invariant."""
     return "forge" if forge_explicitly_enabled() else "geak"
 
@@ -3822,7 +3822,7 @@ async def run_gemm_tuning_handler(
     Returns:
         A ``HandlerResult`` describing the tuning outcome.
     """
-    backend = _resolve_gemm_tuning_backend(payload)
+    backend = resolve_gemm_tuning_backend(payload)
     log.info("run_gemm_tuning: backend=%s", backend)
 
     if backend == "forge":
