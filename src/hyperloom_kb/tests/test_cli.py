@@ -182,6 +182,7 @@ def test_a_tool_embeds_every_command_with_its_own_schema_and_its_own_versions(tm
 
     assert status == 0
     assert exported["declaration"] == SCHEMA.to_dict()
+    assert exported["state"]
     assert [item["experience"]["id"] for item in exported["items"]] == [_experience(0).id]
     # Without a tool's schema, a pull has none to fall back on.
     with pytest.raises(SystemExit):
