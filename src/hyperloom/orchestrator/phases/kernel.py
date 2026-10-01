@@ -759,6 +759,65 @@ class KernelPhase(CoordinatorCollaborator):
             attempt += 1
         log.info("KERNEL entry: kernel_agent task=%s (%s)", task.task_id, task.state)
 
+    @staticmethod
+    def _skip_gemm_tuning() -> bool:
+        """Report whether GEMM tuning is disabled via the env escape hatch.
+
+        Returns:
+            bool: ``True`` when ``INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING`` is set.
+        """
+        return env_bool("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING")
+
+    def _gemm_tuning_required_before_kernel_opt(self) -> bool:
+        """Decide whether GEMM tuning must run before kernel_opt.
+
+        When using the kernelforge gemm-tune backend: eligible on any supported
+        framework (sglang / vllm / vllm-aiter), with no precision or MoE
+        pre-filter. When using GEAK: only FP8 + SGLang (legacy behavior).
+
+        Returns:
+            bool: ``True`` when GEMM tuning should run before source-level
+                ``kernel_opt``.
+        """
+        if self._skip_gemm_tuning():
+            return False
+        ss = self.shared_state
+        precision = str(ss.precision or "").strip().lower()
+        framework = str(ss.framework or "").strip().lower()
+
+        from ..kernel.request_handlers import _resolve_gemm_tuning_backend
+
+        backend = _resolve_gemm_tuning_backend({})
+
+        if backend == "forge":
+            # kernelforge gemm-tune handles any precision (bf16/fp16/fp8/fp4/mxfp4),
+            # dense or MoE, on sglang/vllm. Real e2e KEEPs span all of these —
+            # including bf16 *dense* (+11.1%) — so we must NOT pre-filter on
+            # precision/MoE here, or a category that can optimize gets silently
+            # blocked. Gate only on a supported framework and let forge itself
+            # return no_improvement when a shape can't be beaten.
+            eligible = framework in ("sglang", "vllm", "vllm-aiter")
+        else:
+            # GEAK: legacy FP8 + SGLang only.
+            eligible = precision == "fp8" and framework == "sglang"
+
+        if not eligible:
+            return False
+        last = ss.last_gemm_tuning or {}
+        status = str(last.get("status") or "").strip().lower()
+        # The fp8 -> bf16 dense retry now runs inside a single gemm call (the
+        # tuner router selects the bf16 pass as a fallback), so a completed run's
+        # status is terminal -- there is no pending second attempt to re-trigger.
+        return status not in {
+            "ok",
+            "succeeded",
+            "success",
+            "complete",
+            "completed",
+            "skipped",
+            "failed",
+        }
+
     async def _run_kernel_agent(self, ctx: Any) -> dict[str, Any]:
         """Run the KERNEL_AGENT phase's work under the ``kernel_agent`` task's lanes.
 
@@ -775,7 +834,7 @@ class KernelPhase(CoordinatorCollaborator):
             # hand straight to SWEEP.
             await self._run_geak_kernel_phase(from_phase=from_phase)
             return {"status": "ok", "route": "geak"}
-        if not self._coord.dispatcher._gemm_tuning_required_before_kernel_opt():
+        if not self._gemm_tuning_required_before_kernel_opt():
             await self._finish_kernel_entry()
             return {"status": "ok", "route": "forge_no_gemm"}
 
