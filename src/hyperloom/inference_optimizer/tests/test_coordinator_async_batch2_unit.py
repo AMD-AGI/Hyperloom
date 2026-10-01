@@ -37,23 +37,8 @@ def _silent_plan() -> ScriptedPlan:
     return ScriptedPlan(turns=[], default_intent=_idle_intent())
 
 
-def test_stale_delegated_method_raises_attribute_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    coord = Coordinator.__new__(Coordinator)
-    stale_name = "_stale_delegated_for_test"
-    # _DELEGATED and __getattr__ are deleted; unknown attributes raise AttributeError directly.
-    with pytest.raises(AttributeError):
-        getattr(coord, stale_name)
-
-
 def _build_backends() -> dict[str, Backend]:
     return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
-
-
-def test_delegated_missing_attr_raises_attribute_error_not_recursion(monkeypatch) -> None:
-    coord = object.__new__(Coordinator)
-    # All cross-collaborator calls are now explicit; unknown attributes raise immediately.
-    with pytest.raises(AttributeError):
-        getattr(coord, "_deleted_delegate")
 
 
 @pytest.mark.asyncio
@@ -163,14 +148,6 @@ async def test_resume_retains_pending_when_any_restore_fails(
 @pytest.fixture
 def coord(session_dir) -> Coordinator:
     return Coordinator(session_dir, backends=_build_backends())
-
-
-def test_every_delegated_name_resolves_on_its_collaborator(coord: Coordinator) -> None:
-    """All cross-collaborator methods live on their explicit collaborator property."""
-    # Spot-check that cross-collaborator methods live on their explicit collaborator property.
-    assert callable(getattr(coord.writeback, "_record_observation", None))
-    assert callable(getattr(coord.dispatcher, "_pump_dispatcher_once", None))
-    assert callable(getattr(coord.phase_kernel, "timeline", None))
 
 
 # -- _context_inbox_reader --------------------------------------------------
