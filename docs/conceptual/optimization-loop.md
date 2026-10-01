@@ -237,8 +237,11 @@ is in its measured phase (from server ready, and from AIPerf's measured-phase
 line under AgentX, until the client exits or the eval starts). It is averaged
 over the serving cards: those in the visible-device mask that held at least
 10% of VRAM during that phase, so a TP4 round on an unpinned eight-card host is
-averaged over its four cards. A round that was sampled but had no serving card
-or no power reading stays unmeasured. The benchmark report's `gpu_monitor`
+averaged over its four cards. A GEAK replay boots its own server once per
+replica, so its phases are read from the server logs the replay writes, with
+the same markers, and each new log counts as a fresh boot. A round that was
+sampled but had no serving card or no power reading stays unmeasured. The
+benchmark report's `gpu_monitor`
 block (`gpu_metrics.json`) is only the fallback for rounds no sampler ran on:
 on one node it reads a single card over the whole process lifetime, boot and
 idle tail included.
