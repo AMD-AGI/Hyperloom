@@ -35,12 +35,14 @@ from hyperloom.orchestrator.actions.executors._accuracy_gate import (
 from hyperloom.orchestrator.enablement.lane import EnablementLane
 from hyperloom.orchestrator.enablement.params import EnablementParams
 from hyperloom.orchestrator.enablement.revalidation import EnablementRevalidation
-from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.phases.machine_state import ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.round_store import FAILED, RoundStore
+from hyperloom.orchestrator.state.shared_state import SharedState
+
+from .conftest import make_coordinator
 
 _MISSING_ARCH_LOG = (
     "Traceback (most recent call last):\n"
@@ -132,7 +134,7 @@ async def _seed_stalled(rounds: RoundStore, n: int) -> None:
 
 def _lane(session_dir: Path, **overrides: Any):
     """A lane bound to the real dispatch, rearm and revalidation methods."""
-    state = types.SimpleNamespace(
+    state = SharedState(
         framework="sglang",
         model_name="zai-org/GLM-5",
         model_path="",
@@ -159,10 +161,7 @@ def _lane(session_dir: Path, **overrides: Any):
         phase=PHASE_ENABLEMENT,
         macro_cycle=0,
         tick=0,
-        stop_reason="",
-        save=lambda *a, **k: None,
     )
-    state.set_stop_reason = lambda value, **k: setattr(state, "stop_reason", str(value or ""))
 
     async def _noop(*_a: Any, **_k: Any) -> None:
         return None
@@ -393,12 +392,8 @@ async def test_the_stall_cap_closes_the_lane_as_failed(_bound_session):
 @pytest.mark.asyncio
 async def test_the_stall_cap_closes_the_lane_on_a_real_coordinator(_bound_session):
     """The cap's close resolves on the lane the Coordinator builds, not on a surface a test lends it."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = _bound_session
-    coord.rounds = _rounds(_bound_session)
-    coord.shared_state = SharedState(framework="sglang", enablement_mode="all", phase=PHASE_ENABLEMENT)
+    SharedState(framework="sglang", enablement_mode="all", phase=PHASE_ENABLEMENT).save(_bound_session)
+    coord = make_coordinator(_bound_session)
     coord.shared_state.enablement.launch_log = _MISSING_ARCH_LOG
     await _seed_stalled(coord.rounds, ENABLEMENT_MAX_ATTEMPTS)
     enablement_event.record_trigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="missing_model_arch")
