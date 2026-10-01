@@ -62,6 +62,7 @@ from ._grid_base import (
     TS_KILLED_OVERTIME,
     TS_SKIPPED_DEDUP,
 )
+from ._explore_screen import screen_variants
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     _MN_BACKENDS_PRIORITY,
@@ -766,6 +767,14 @@ class ExploreExecutor:
                 runnable,
                 priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
             )
+
+        # Drop the variants a cheap reduced-scale probe puts decisively behind
+        # the stack. Off by default; a no-op when the probe cannot run, or when
+        # it cannot be held in the deployment's kernel regime.
+        runnable, screened_out = screen_variants(
+            runnable, config_path, session_dir=self.session_dir
+        )
+        skipped_dup.extend(screened_out)
 
         # Seeded by the Coordinator from the durable cursor: this executor holds no
         # history of its own, so it cannot count the rounds before this one.

@@ -412,6 +412,7 @@ class AnchorChoice:
     model: str | None = None
     needs_warmup: bool = False
     real_weights: bool = False
+    served: bool = False
 
 
 def recipe_from_spec(spec: ServingSpec) -> dict[str, Any]:
@@ -497,36 +498,39 @@ def select_anchor(spec: ServingSpec) -> AnchorChoice | None:
     if not entries:
         return None
 
-    def rank(entry: dict[str, Any]) -> tuple[int, int, float]:
-        """Sort key: regime distance, then *fidelity*, then transport closeness.
+    def rank(entry: dict[str, Any]) -> tuple[int, int, int, float]:
+        """Sort key: regime distance, fidelity, provenance, transport closeness.
 
         Fidelity matters as much as regime here: a dummy-weight anchor runs the
         same kernels but with synthetic MoE routing, so its decode curve is much
         flatter than a real-weights run. Ranking it below a real-weights anchor
         in the same regime is the difference between ~2% and ~30% error against
-        measured serving.
+        measured serving. Provenance is the same argument one level down -- an
+        offline anchor does not even run the served kernels.
         """
         dist = regime.regime_distance(recipe, dict(entry.get("regime") or {}))
         real = _anchor_is_real_weights(entry["path"])
+        served = _anchor_is_served(entry["path"])
         transport = entry.get("transport") or {}
         gap = 0.0
         for axis in ("tp", "ep", "pp"):
             av, rv = transport.get(axis), recipe.get(axis)
             if av and rv:
                 gap += abs(float(av) - float(rv))
-        return (dist, 0 if real else 1, gap)
+        return (dist, 0 if real else 1, 0 if served else 1, gap)
 
     usable = [e for e in entries if anchor_curve_is_sane(e["path"])]
     if not usable:
         return None
     best = min(usable, key=rank)
-    dist, fidelity_rank, _ = rank(best)
+    dist, fidelity_rank, served_rank, _ = rank(best)
     return AnchorChoice(
         path=best["path"],
         regime_distance=int(dist),
         model=best.get("model"),
         needs_warmup=bool(dist),
         real_weights=(fidelity_rank == 0),
+        served=(served_rank == 0),
     )
 
 
@@ -568,6 +572,25 @@ def anchor_curve_is_sane(path: str) -> bool:
             return False
         peak = max(peak, decode_ms)
     return True
+
+
+def _anchor_is_served(path: str) -> bool:
+    """True when an anchor was measured against a real server, not offline vLLM.
+
+    The distinction is not cosmetic. Given identical flags the offline ``LLM()``
+    entrypoint and ``vllm serve`` resolve different attention and MoE kernels,
+    and the served decode step ran 1.9x the offline one at concurrency 8 and
+    5.5x at 128. Calibrating a served target from an offline anchor scored no
+    better than not calibrating at all, where a served anchor scored 2.2%.
+    """
+    try:
+        import json
+
+        with open(path) as fh:
+            meta = (json.load(fh) or {}).get("meta") or {}
+    except (OSError, ValueError):
+        return False
+    return "serving" in str(meta.get("derived_from") or "").lower()
 
 
 def _anchor_is_real_weights(path: str) -> bool:
@@ -764,6 +787,7 @@ def _metrics_from_results(
         extras["anchor_regime_distance"] = anchor.regime_distance
         extras["anchor_needs_warmup"] = anchor.needs_warmup
         extras["anchor_real_weights"] = anchor.real_weights
+        extras["anchor_served"] = anchor.served
 
     replica_gpus = int(getattr(perf, "replica_gpus", 0) or 0)
     extras["extrapolation"] = extrapolation_notes(
