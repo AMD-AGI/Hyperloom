@@ -1617,7 +1617,7 @@ async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatc
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
     task = Task(task_id="fact-keep", kind="explore", state="succeeded", params={}, idempotency_key="fk")
     coord.writeback._record_fact_per_task(
         task=task,
@@ -1635,7 +1635,7 @@ async def test_record_fact_per_task_writes_no_lesson_for_an_unadopted_gain(coord
 
     coord.knowledge_plane = KnowledgePlane(recipe_kb=object())
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
     task = Task(task_id="fact-refused", kind="integrate_patch", state="succeeded", params={}, idempotency_key="fx")
     coord.writeback._record_fact_per_task(
         task=task,
@@ -1652,7 +1652,7 @@ async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypat
 
     coord.knowledge_plane = KnowledgePlane(recipe_kb=object())
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
     monkeypatch.setattr(coord.writeback, "_pitfall_severity_for", lambda rd: "high")
     task = Task(task_id="fact-revert", kind="integrate_patch", state="failed", params={}, idempotency_key="fr")
     coord.writeback._record_fact_per_task(
@@ -1925,7 +1925,7 @@ async def test_recipe_kb_finalize_amends_recipe(coord: Coordinator, monkeypatch)
     coord.shared_state.cumulative_gain_validated = 12.0
     coord.shared_state.current_best = {"tput": 950.0}
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
     coord.writeback.finalize_recipe_and_journal()
     assert amends and "recipe_overrides" in amends[0]
 
@@ -2092,7 +2092,7 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
     assert coord.shared_state.last_discarded_escalate_hint == ""
 
 
-# -- _materialize_approved_proposal -----------------------------------------
+# -- materialize_approved_proposal -----------------------------------------
 def _pending(action_name: str, payload: dict, msg_id: str = "prop-1"):
     from hyperloom.orchestrator.loop.proposals import PendingProposal
 
@@ -2185,7 +2185,7 @@ async def test_materialize_explore_filters_grid(coord: Coordinator, monkeypatch)
             }
         },
     )
-    await coord.proposals._materialize_approved_proposal(
+    await coord.proposals.materialize_approved_proposal(
         pending,
         approved_variant_names={"v0"},
     )
@@ -2199,7 +2199,7 @@ async def test_materialize_sweep_stamps_base(coord: Coordinator) -> None:
     coord.shared_state.current_best = {"tput": 900.0, "extra_server_args": "--tp 1"}
     coord.shared_state.baseline_config_path = "/tmp/base.yaml"
     pending = _pending("sweep", {"params": {}}, msg_id="prop-sweep")
-    await coord.proposals._materialize_approved_proposal(pending)
+    await coord.proposals.materialize_approved_proposal(pending)
     task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
     assert task.kind == "sweep"
 
@@ -2216,7 +2216,7 @@ async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator,
         "extra_envs": {"VLLM_ROCM_USE_AITER_MHA": "1", "HIP_FORCE_DEV_KERNARG": "1"},
     }
     pending = _pending("explore", {"params": {"grid": [{"name": "v0"}]}}, msg_id="prop-env")
-    await coord.proposals._materialize_approved_proposal(pending)
+    await coord.proposals.materialize_approved_proposal(pending)
     task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
     assert task.params["base_extra_args"] == "--kv-cache-dtype fp8"
     assert task.params["base_extra_envs"] == {
@@ -2229,14 +2229,14 @@ async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator,
 async def test_materialize_duplicate_idempotency_skips(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
     pending = _pending("profile", {"params": {}}, msg_id="prop-dup")
-    await coord.proposals._materialize_approved_proposal(pending)
-    await coord.proposals._materialize_approved_proposal(pending)
+    await coord.proposals.materialize_approved_proposal(pending)
+    await coord.proposals.materialize_approved_proposal(pending)
 
 
 @pytest.mark.asyncio
 async def test_materialize_baseline_ignores_params_outside_fingerprint(coord: Coordinator) -> None:
-    await coord.proposals._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-b0"))
-    await coord.proposals._materialize_approved_proposal(
+    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-b0"))
+    await coord.proposals.materialize_approved_proposal(
         _pending("baseline", {"params": {"tag": "x"}}, msg_id="prop-b1"),
     )
     queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
@@ -2247,8 +2247,8 @@ async def test_materialize_baseline_ignores_params_outside_fingerprint(coord: Co
 
 @pytest.mark.asyncio
 async def test_materialize_baseline_distinct_envs_queue_separately(coord: Coordinator) -> None:
-    await coord.proposals._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-e0"))
-    await coord.proposals._materialize_approved_proposal(
+    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-e0"))
+    await coord.proposals.materialize_approved_proposal(
         _pending("baseline", {"params": {"extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"}}}, msg_id="prop-e1"),
     )
     queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
@@ -2257,11 +2257,11 @@ async def test_materialize_baseline_distinct_envs_queue_separately(coord: Coordi
 
 @pytest.mark.asyncio
 async def test_materialize_requeues_same_content_after_terminal_twin(coord: Coordinator) -> None:
-    await coord.proposals._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t0"))
+    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t0"))
     first = [t for t in await coord.tasks.queued() if t.kind == "baseline"][0]
     await coord.tasks.transition(first.task_id, "running")
     await coord.tasks.transition(first.task_id, "failed")
-    await coord.proposals._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t1"))
+    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t1"))
     queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
     assert len(queued) == 1
     assert queued[0].task_id != first.task_id
@@ -2424,7 +2424,7 @@ async def test_recipe_kb_finalize_merges_existing_row(coord: Coordinator, monkey
     coord.shared_state.cumulative_gain_validated = 15.0
     coord.shared_state.current_best = {"tput": 999.0}
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
     coord.writeback.finalize_recipe_and_journal()
     assert amends
     overrides = amends[0]["recipe_overrides"]

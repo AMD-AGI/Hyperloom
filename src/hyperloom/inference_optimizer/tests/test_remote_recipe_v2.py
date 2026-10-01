@@ -1222,7 +1222,7 @@ def test_local_close_ignores_ambient_kb_store(
             "_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None}
         )(),
         ensure_journal=lambda: _Journal(),
-        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
+        workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
     )
     calls: list[tuple] = []
     from hyperloom.orchestrator.knowledge import remote_recipe
@@ -1266,7 +1266,7 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
         knowledge_plane=SimpleNamespace(recipe_kb=_LegacyRecipe()),
         _journal=None,
         ensure_journal=lambda: _Journal(),
-        proposals=SimpleNamespace(_workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
+        proposals=SimpleNamespace(workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
     )
     calls: list[tuple] = []
     from hyperloom.orchestrator.knowledge import remote_recipe
@@ -1339,7 +1339,7 @@ def test_remote_close_transport_failure_is_nonfatal(
             "_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None}
         )(),
         ensure_journal=lambda: _Journal(),
-        proposals=SimpleNamespace(_workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
+        proposals=SimpleNamespace(workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
     )
     from hyperloom.orchestrator.knowledge import remote_recipe
 
@@ -1392,7 +1392,7 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
         knowledge_plane=None,
         _journal=None,
         ensure_journal=lambda: (_ for _ in ()).throw(AssertionError("journal must not be finalized")),
-        proposals=SimpleNamespace(_workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
+        proposals=SimpleNamespace(workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
     )
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example")

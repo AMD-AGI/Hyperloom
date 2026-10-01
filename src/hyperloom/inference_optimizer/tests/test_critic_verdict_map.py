@@ -232,7 +232,7 @@ class _BareSharedState:
     save_count: int = 0
     # Empty string means "nothing in flight"; the auto-roofline dispatch gate is a no-op.
     auto_roofline_pending_task_id: str = ""
-    # Fields read by _inject_explore_runtime_params and related helpers.
+    # Fields read by inject_explore_runtime_params and related helpers.
     baseline_runtime_sec: float = 0.0
     baseline_accuracy: float = 0.0
     baseline_warm_runtime_sec: float = 0.0
@@ -309,7 +309,7 @@ def coord(tmp_path: Path):
     ) -> None:
         materialise_calls.append((pending, approved_variant_names))
 
-    c.proposals._materialize_approved_proposal = _mat  # type: ignore[method-assign]
+    c.proposals.materialize_approved_proposal = _mat  # type: ignore[method-assign]
     return c
 
 
@@ -1674,7 +1674,7 @@ def test_collapse_verdict_map_with_no_proceedable_variant_stays_reject():
     assert names is None
 
 
-# 4. _materialize_approved_proposal — filter semantics (unit)
+# 4. materialize_approved_proposal — filter semantics (unit)
 @pytest.mark.asyncio
 async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     """Pin the ``approved_variant_names`` filter contract independently."""
@@ -1718,7 +1718,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
         current_best: dict = field(default_factory=dict)
 
     coord.shared_state = _MoreState()
-    await coord.proposals._materialize_approved_proposal(
+    await coord.proposals.materialize_approved_proposal(
         pending,
         approved_variant_names={"v_a", "v_c"},
     )
@@ -1756,7 +1756,7 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
         current_best: dict = field(default_factory=dict)
 
     coord.shared_state = _MoreState()
-    await coord.proposals._materialize_approved_proposal(pending, approved_variant_names={"no-such-variant"})
+    await coord.proposals.materialize_approved_proposal(pending, approved_variant_names={"no-such-variant"})
     assert create_calls == []
     kinds = [call.args[2].get("kind") for call in coord.writeback.record_observation.await_args_list]
     assert "proposal_materialize_skipped" in kinds
@@ -1804,7 +1804,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
         current_best: dict = field(default_factory=dict)
 
     coord.shared_state = _MoreState()
-    await coord.proposals._materialize_approved_proposal(pending)
+    await coord.proposals.materialize_approved_proposal(pending)
     grid = create_calls[0]["params"]["grid"]
     names = [v["name"] for v in grid]
     assert names == ["v_a", "v_b", "v_c"]

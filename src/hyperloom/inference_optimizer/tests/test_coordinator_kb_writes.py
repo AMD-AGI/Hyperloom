@@ -67,17 +67,17 @@ def _expected_cid() -> str:
 
 
 def test_workload_canonical_id_defined_and_consistent(tmp_path: Path) -> None:
-    """``_workload_canonical_id`` exists and agrees with ``recipe_canonical_id``."""
+    """``workload_canonical_id`` exists and agrees with ``recipe_canonical_id``."""
     coord = _make_coordinator(tmp_path)
-    assert hasattr(coord.proposals, "_workload_canonical_id")
-    assert coord.proposals._workload_canonical_id() == _expected_cid()
-    assert coord.proposals._workload_canonical_id() == _expected_cid()
+    assert hasattr(coord.proposals, "workload_canonical_id")
+    assert coord.proposals.workload_canonical_id() == _expected_cid()
+    assert coord.proposals.workload_canonical_id() == _expected_cid()
 
 
 def test_kb_amend_recipe_persists_lesson(tmp_path: Path) -> None:
     """Appending a lesson lands in the local KB."""
     coord = _make_coordinator(tmp_path)
-    coord.proposals._kb_amend_recipe(
+    coord.proposals.kb_amend_recipe(
         append_lesson={"statement": "raise tp to 8", "measured_impact": "+12%"},
     )
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
@@ -88,7 +88,7 @@ def test_kb_amend_recipe_persists_lesson(tmp_path: Path) -> None:
 
 def test_kb_amend_recipe_persists_pitfall(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
-    coord.proposals._kb_amend_recipe(
+    coord.proposals.kb_amend_recipe(
         append_pitfall={"description": "ep=8 OOMs on 30B"},
     )
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
@@ -116,7 +116,7 @@ def test_kb_amend_recipe_is_noop_in_remote_mode(tmp_path: Path) -> None:
             }
         )
     )
-    coord.proposals._kb_amend_recipe(append_lesson={"statement": "must not write", "measured_impact": ""})
+    coord.proposals.kb_amend_recipe(append_lesson={"statement": "must not write", "measured_impact": ""})
 
 
 def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> None:
@@ -211,10 +211,10 @@ def test_kb_amend_recipe_stamps_architecture_tags(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     coord.shared_state.model_architectures = ["LlamaForCausalLM"]
     coord.shared_state.model_type = "llama"
-    coord.proposals._kb_amend_recipe(
+    coord.proposals.kb_amend_recipe(
         append_lesson={"statement": "raise tp to 8", "measured_impact": "+12%"},
     )
-    row = coord.recipe_kb.get_recipe(canonical_id=coord.proposals._workload_canonical_id())
+    row = coord.recipe_kb.get_recipe(canonical_id=coord.proposals.workload_canonical_id())
     assert row is not None
     assert row.get("architectures") == ["LlamaForCausalLM"]
     assert row.get("model_type") == "llama"
@@ -223,7 +223,7 @@ def test_kb_amend_recipe_stamps_architecture_tags(tmp_path: Path) -> None:
 def test_kb_amend_recipe_skips_empty_architecture_tags(tmp_path: Path) -> None:
     """With no config.json tags the amend must NOT stamp empty ``architectures`` / ``model_type`` keys."""
     coord = _make_coordinator(tmp_path)
-    coord.proposals._kb_amend_recipe(
+    coord.proposals.kb_amend_recipe(
         append_lesson={"statement": "raise tp to 8", "measured_impact": "+12%"},
     )
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
@@ -293,7 +293,7 @@ def test_local_store_preserves_session_provenance(tmp_path: Path) -> None:
     assert s["stack_len"] == 3
 
 
-# _kb_amend_recipe reads the LOCAL row and preserves T0-stamped extras + audit fields; appends accumulate instead of
+# kb_amend_recipe reads the LOCAL row and preserves T0-stamped extras + audit fields; appends accumulate instead of
 # clobbering.
 def test_amend_preserves_t0_extras_and_audit(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
@@ -309,7 +309,7 @@ def test_amend_preserves_t0_extras_and_audit(tmp_path: Path) -> None:
         authority="AUTHORITATIVE",
         confidence=0.99,
     )
-    coord.proposals._kb_amend_recipe(
+    coord.proposals.kb_amend_recipe(
         append_lesson={"statement": "x", "measured_impact": "+1%"},
     )
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
@@ -323,8 +323,8 @@ def test_amend_appends_lessons_cumulatively(tmp_path: Path) -> None:
     """Local read-modify-write accumulates, not overwrites."""
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
-    coord.proposals._kb_amend_recipe(append_lesson={"statement": "first", "measured_impact": "+1%"})
-    coord.proposals._kb_amend_recipe(append_lesson={"statement": "second", "measured_impact": "+2%"})
+    coord.proposals.kb_amend_recipe(append_lesson={"statement": "first", "measured_impact": "+1%"})
+    coord.proposals.kb_amend_recipe(append_lesson={"statement": "second", "measured_impact": "+2%"})
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert [l["statement"] for l in row["lessons"]] == ["first", "second"]
 
@@ -692,14 +692,14 @@ def test_kb_amend_recipe_is_noop_under_agentx(tmp_path: Path, monkeypatch) -> No
             raise AssertionError(f"AgentX amend reached the recipe KB: {name}")
 
     coord.knowledge_plane = KnowledgePlane(recipe_kb=_ForbiddenRecipeKB())
-    coord.proposals._kb_amend_recipe(append_lesson={"statement": "must not reach the KB", "measured_impact": "+9%"})
+    coord.proposals.kb_amend_recipe(append_lesson={"statement": "must not reach the KB", "measured_impact": "+9%"})
 
 
 def test_kb_amend_recipe_still_writes_without_agentx(tmp_path: Path, monkeypatch) -> None:
     """The gate must not cost the synthetic path its knowledge."""
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     coord = _make_coordinator(tmp_path)
-    coord.proposals._kb_amend_recipe(append_lesson={"statement": "synthetic still recorded", "measured_impact": "+1%"})
+    coord.proposals.kb_amend_recipe(append_lesson={"statement": "synthetic still recorded", "measured_impact": "+1%"})
 
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     assert row is not None, "the AgentX gate must not silence the synthetic path"
@@ -708,7 +708,7 @@ def test_kb_amend_recipe_still_writes_without_agentx(tmp_path: Path, monkeypatch
 
 
 def test_finalize_recipe_is_skipped_under_agentx(tmp_path, monkeypatch) -> None:
-    """The sink the _kb_amend_recipe gate cannot reach."""
+    """The sink the kb_amend_recipe gate cannot reach."""
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     coord = _make_coordinator(tmp_path)
 
