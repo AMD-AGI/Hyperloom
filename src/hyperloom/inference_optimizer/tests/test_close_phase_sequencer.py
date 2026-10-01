@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.breakdown.collectors.v6_close import collect_v6_close
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
@@ -190,7 +191,7 @@ def coord(tmp_path: Path):
     c.shared_state = _BareState()
     c.tasks = _StubTaskRegistry()
     c.sub = _StubSubAgentRunner()
-    c.recipe_kb = None
+    c.knowledge_plane = KnowledgePlane(recipe_kb=None)
     c.knowledge_plane = None
     c.role_registry = {}
     c._journal = None
@@ -604,7 +605,7 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
         str(tmp_path / "session-packages"),
     )
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.recipe_kb = _StubRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     coord.shared_state.recipe_kb_session_id = "sid-test"
     coord.shared_state.model_name = "model"
     coord.shared_state.gpu_type = "mi300x"
@@ -665,7 +666,7 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
     """
     monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.recipe_kb = _StubRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     coord.shared_state.recipe_kb_session_id = "sid-test"
     coord.shared_state.model_name = "model"
     coord.shared_state.gpu_type = "mi300x"
@@ -714,7 +715,7 @@ async def test_close_sequencer_records_the_recipe_publication_under_close(
     """
     monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.recipe_kb = _StubRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     coord.shared_state.recipe_kb_session_id = "sid-test"
     coord.shared_state.model_name = "model"
     coord.shared_state.gpu_type = "mi300x"
@@ -745,7 +746,7 @@ async def test_close_sequencer_records_degraded_when_a_step_fails(
     """``degraded`` now means a step failed, which is what it always read as."""
     monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.recipe_kb = _StubRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     coord.shared_state.recipe_kb_session_id = "sid-test"
 
     class _FailingRunner(_StubSubAgentRunner):
@@ -1133,7 +1134,7 @@ async def test_recipe_kb_t4_hook_short_circuits_when_sequencer_done(tmp_path: Pa
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=SimpleNamespace(recipe_kb=_StubRecipeKB()),
+        knowledge_plane=KnowledgePlane(recipe_kb=_StubRecipeKB()),
     )
     coord.shared_state.recipe_kb_session_id = "sid-stop-skip"
     coord.shared_state.close_sequence_done = True
@@ -1157,7 +1158,7 @@ async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Pa
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=SimpleNamespace(recipe_kb=_StubRecipeKB()),
+        knowledge_plane=KnowledgePlane(recipe_kb=_StubRecipeKB()),
     )
     coord.shared_state.recipe_kb_session_id = "sid-fallback"
     coord.shared_state.close_sequence_done = False
@@ -1233,7 +1234,7 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=SimpleNamespace(config=config),
+        knowledge_plane=KnowledgePlane(config=config),
     )
     coord.shared_state.recipe_kb_session_id = ""
     coord.shared_state.close_sequence_done = True
@@ -1274,7 +1275,7 @@ async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=SimpleNamespace(config=config),
+        knowledge_plane=KnowledgePlane(config=config),
     )
     coord.shared_state.close_sequence_done = True
     coord.shared_state.recipe_finalize_status = "failed"
@@ -1311,7 +1312,7 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb(tmp_path: Path):
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=SimpleNamespace(config=config),
+        knowledge_plane=KnowledgePlane(config=config),
     )
     coord.shared_state.recipe_kb_session_id = "local-session"
     coord.shared_state.close_sequence_done = False
@@ -1346,7 +1347,7 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb_sid(tmp_path: Pat
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=SimpleNamespace(config=config, recipe_kb=_StubRecipeKB()),
+        knowledge_plane=KnowledgePlane(config=config, recipe_kb=_StubRecipeKB()),
     )
     coord.shared_state.recipe_kb_session_id = "  "
     coord.shared_state.close_sequence_done = False

@@ -13,6 +13,7 @@ import subprocess
 
 import pytest
 
+from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
 from hyperloom.orchestrator.actions.executors.baseline import restore_warm_kernel_snapshots
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -185,7 +186,7 @@ def _make_coord(
     coord.tasks = _StubTaskRegistry()
     coord._journal = None
     coord.knowledge_plane = None
-    coord.recipe_kb = None
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=None)
     return coord
 
 

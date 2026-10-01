@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import (
     MockBackend,
@@ -38,14 +39,13 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
         "orchestration": MockBackend(idle),
         "critic": MockBackend(idle),
     }
-    from types import SimpleNamespace
 
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"))
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=SimpleNamespace(recipe_kb=kb),
+        knowledge_plane=KnowledgePlane(recipe_kb=kb),
     )
     ss = coord.shared_state
     ss.model_name = _MODEL
@@ -106,7 +106,7 @@ def test_kb_amend_recipe_is_noop_in_remote_mode(tmp_path: Path) -> None:
         def __getattr__(self, name: str):
             raise AssertionError(f"remote amend accessed RecipeKB: {name}")
 
-    coord.recipe_kb = _ForbiddenRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_ForbiddenRecipeKB())
     coord.knowledge_plane = SimpleNamespace(
         config=KnowledgeConfig.from_env(
             {
@@ -691,7 +691,7 @@ def test_kb_amend_recipe_is_noop_under_agentx(tmp_path: Path, monkeypatch) -> No
         def __getattr__(self, name: str):
             raise AssertionError(f"AgentX amend reached the recipe KB: {name}")
 
-    coord.recipe_kb = _ForbiddenRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_ForbiddenRecipeKB())
     coord.proposals._kb_amend_recipe(append_lesson={"statement": "must not reach the KB", "measured_impact": "+9%"})
 
 
