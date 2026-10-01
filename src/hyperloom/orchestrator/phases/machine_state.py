@@ -269,14 +269,14 @@ def is_long_run(state: Any) -> bool:
 def _cumulative_gain_validated(state: Any) -> float:
     """Return ``state.cumulative_gain_validated``, defensively coerced to float."""
     try:
-        return float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+        return float(state.cumulative_gain_validated or 0.0)
     except (TypeError, ValueError):
         return 0.0
 
 
 def target_was_reached(state: Any) -> bool:
     """Whether the run objective has been met."""
-    return bool(str(getattr(state, "target_reached_at", "") or "").strip())
+    return bool(str(state.target_reached_at or "").strip())
 
 
 def _cycle_reloop_min_remaining_sec(
@@ -461,7 +461,7 @@ def _now_unix(state: Any) -> float:
 
 def _phase_started_unix(state: Any) -> float:
     """Return the Unix timestamp the current phase started, defensively coerced."""
-    raw = getattr(state, "phase_started_unix", 0.0)
+    raw = state.phase_started_unix
     try:
         return float(raw or 0.0)
     except (TypeError, ValueError):
@@ -470,12 +470,12 @@ def _phase_started_unix(state: Any) -> float:
 
 def _resume_boundary_unix(state: Any) -> float:
     """Return when the current run leg began, i.e. the most recent ``--resume``."""
-    return max(0.0, to_unix(getattr(state, "resumed_ts", ""), 0.0) or 0.0)
+    return max(0.0, to_unix(state.resumed_ts, 0.0) or 0.0)
 
 
 def _kernel_idle_since_unix(state: Any) -> float:
     """Return when the current KERNEL idle streak opened, defensively coerced."""
-    raw = getattr(state, "kernel_idle_since_unix", 0.0)
+    raw = state.kernel_idle_since_unix
     try:
         return max(0.0, float(raw or 0.0))
     except (TypeError, ValueError):
@@ -484,7 +484,7 @@ def _kernel_idle_since_unix(state: Any) -> float:
 
 def _pending_escalate_hint(state: Any) -> str:
     """Return a pending escalate hint to act on this tick (unknown hints → empty)."""
-    raw = str(getattr(state, "pending_escalate_hint", "") or "").strip()
+    raw = str(state.pending_escalate_hint or "").strip()
     if not raw:
         return ""
     if is_valid_escalate_hint(raw):
@@ -495,7 +495,7 @@ def _pending_escalate_hint(state: Any) -> str:
 def _max_minutes(state: Any) -> float:
     """Return the session's configured ``max_minutes`` budget, defensively coerced."""
     try:
-        return float(getattr(state, "max_minutes", 0) or 0)
+        return float(state.max_minutes or 0)
     except (TypeError, ValueError):
         return 0.0
 
@@ -503,7 +503,7 @@ def _max_minutes(state: Any) -> float:
 def _budget_minutes(state: Any) -> float:
     """Wall-clock minutes the PER-PHASE budget fractions apply to (R2)."""
     try:
-        cm = float(getattr(state, "cycle_minutes", 0) or 0)
+        cm = float(state.cycle_minutes or 0)
     except (TypeError, ValueError):
         cm = 0.0
     if cm > 0 and is_long_run(state):
@@ -553,7 +553,7 @@ def phase_cumulative_seconds(
     if not target:
         return 0.0
     accumulated = 0.0
-    totals = getattr(state, "phase_elapsed_totals", None)
+    totals = state.phase_elapsed_totals
     if isinstance(totals, dict):
         try:
             accumulated = max(0.0, float(totals.get(target, 0.0) or 0.0))
@@ -670,8 +670,8 @@ def session_remaining_seconds(
     if mm <= 0:
         return None
     try:
-        charged = max(0.0, float(getattr(state, "elapsed_charged_sec", 0.0) or 0.0))
-        anchor = float(getattr(state, "leg_anchor_unix", 0.0) or 0.0)
+        charged = max(0.0, float(state.elapsed_charged_sec or 0.0))
+        anchor = float(state.leg_anchor_unix or 0.0)
     except (TypeError, ValueError):
         return None
     now = float(now_unix) if now_unix is not None else time.time()
@@ -679,7 +679,7 @@ def session_remaining_seconds(
         return max(0.0, mm * 60.0 - (charged + max(0.0, now - anchor)))
     if charged > 0.0:
         return max(0.0, mm * 60.0 - charged)
-    started = to_unix(str(getattr(state, "start_ts", "") or "").strip())
+    started = to_unix(str(state.start_ts or "").strip())
     if started is None:
         return None
     return max(0.0, mm * 60.0 - max(0.0, now - started))
@@ -760,7 +760,7 @@ _SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "c
 # per-phase judgments
 def warm_replay_in_flight(state: Any) -> bool:
     """True while the PRELUDE warm-recipe replay task has not finished (PRELUDE must not exit until False — GPU contention)."""
-    outcome = getattr(state, "warm_replay_outcome", None) or {}
+    outcome = state.warm_replay_outcome or {}
     if not isinstance(outcome, dict):
         return False
     return str(outcome.get("status") or "").strip() == "in_flight"
@@ -862,18 +862,18 @@ def compute_kernel_progress_fingerprint(
             )
     attempts.sort()
 
-    last_opt = getattr(state, "last_kernel_opt", None)
+    last_opt = state.last_kernel_opt
     last_opt = last_opt if isinstance(last_opt, dict) else {}
-    stack = getattr(state, "optimization_stack", None)
-    pending = getattr(state, "pending_kernel_integrations", None)
-    controller = getattr(state, "kernel_rewrite_controller_result", None)
+    stack = state.optimization_stack
+    pending = state.pending_kernel_integrations
+    controller = state.kernel_rewrite_controller_result
     controller = controller if isinstance(controller, dict) else {}
     payload = {
         "attempts": attempts,
         "inflight": sorted(str(task_id) for task_id in (inflight_task_ids or ())),
         "last_kernel_opt": [str(last_opt.get(field, "")) for field in _LAST_KERNEL_OPT_PROGRESS_FIELDS],
         "pending_integrations": sorted(str(key) for key in pending) if isinstance(pending, dict) else [],
-        "rejected": sorted(str(kid) for kid in (getattr(state, "rejected_kernel_ids", None) or [])),
+        "rejected": sorted(str(kid) for kid in (state.rejected_kernel_ids or [])),
         "stack_len": len(stack) if isinstance(stack, list) else 0,
         "rewrite_controller": [
             str(controller.get("macro_cycle", "")),
@@ -888,7 +888,7 @@ def compute_kernel_progress_fingerprint(
 
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
-    if bool(getattr(state, "has_keep_pending_integrate", False)):
+    if state.has_keep_pending_integrate:
         return True
 
     if _controller_phase_terminal(state):
@@ -896,14 +896,13 @@ def kernel_work_pending(state: Any) -> bool:
     if _geak_phase_terminal(state):
         return False
 
-    untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
-    if callable(untried_hot) and bool(untried_hot()):
+    if state.untried_hot_reusable_kernels():
         return True
 
-    rejected = {str(x) for x in (getattr(state, "rejected_kernel_ids", None) or [])}
+    rejected = {str(x) for x in (state.rejected_kernel_ids or [])}
     integrated_entries: list[dict[str, Any]] = []
     integrated_sources: set[str] = set()
-    for entry in getattr(state, "optimization_stack", None) or []:
+    for entry in state.optimization_stack or []:
         if not isinstance(entry, dict):
             continue
         if str(entry.get("action") or "") == "integrate":
@@ -912,7 +911,7 @@ def kernel_work_pending(state: Any) -> bool:
             if source_file:
                 integrated_sources.add(source_file)
 
-    attempts = getattr(state, "kernel_opt_task_attempts", None) or {}
+    attempts = state.kernel_opt_task_attempts or {}
     if not isinstance(attempts, dict):
         return False
     for ledger_id, attempt in attempts.items():
@@ -1029,10 +1028,7 @@ def append_phase_evidence_row(history: Any, *, key: str, row: dict[str, Any]) ->
 
 def session_usable_seconds(state: Any) -> float | None:
     """Seconds a unit of work may still claim, from the session's own accounting."""
-    getter = getattr(state, "session_budget_usable_sec", None)
-    if callable(getter):
-        return getter()
-    return session_remaining_seconds(state)
+    return state.session_budget_usable_sec()
 
 
 def prelude_affordable_seconds(state: Any) -> tuple[float | None, dict[str, Any]]:
@@ -1067,13 +1063,13 @@ def prelude_can_afford(
 
 def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
     """Pull operator-tuned plateau thresholds off :attr:`SharedState.plateau_overrides` (empty → library defaults)."""
-    overrides = getattr(state, "plateau_overrides", None) or {}
+    overrides = state.plateau_overrides or {}
     return dict(overrides) if isinstance(overrides, dict) else {}
 
 
 def _lever_attempts(state: Any, *levers: str) -> list[dict[str, Any]]:
     """This cycle's attempts on the given levers, in the order they were recorded."""
-    rows = _rows_for_current_cycle(getattr(state, "attempts", None) or [], state)
+    rows = _rows_for_current_cycle(state.attempts or [], state)
     return [r for r in rows if str(r.get("lever_kind") or "") in levers]
 
 
@@ -1153,7 +1149,7 @@ def _patch_lever_dry(state: Any, overrides: dict[str, Any]) -> tuple[bool, dict[
         overrides.get("framework_no_keep_streak", DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK),
     )
     streak = _trailing_no_keep(_lever_attempts(state, LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR))
-    exhausted = bool(getattr(state, "framework_agent_phase_done", False))
+    exhausted = bool(state.framework_agent_phase_done)
     return (streak >= streak_floor or exhausted), {
         "source_consecutive_no_keep": streak,
         "source_threshold": streak_floor,
@@ -1234,15 +1230,15 @@ def _base_workflow_predicate_inputs(
     enablement_in_flight: bool,
 ) -> dict[str, Any]:
     hint = _pending_escalate_hint(state) or None
-    last_conc = getattr(state, "last_conc_sweep", None) or {}
+    last_conc = state.last_conc_sweep or {}
     sweep_closeout_status = str(last_conc.get("status") or "").lower() if isinstance(last_conc, dict) else ""
     return {
         "current_phase": current,
         "now_unix": now_unix,
         "global": {
-            "stop_reason": str(getattr(state, "stop_reason", "") or "").strip(),
-            "closing_phase": bool(getattr(state, "closing_phase", False)),
-            "target_reached_at": str(getattr(state, "target_reached_at", "") or ""),
+            "stop_reason": str(state.stop_reason or "").strip(),
+            "closing_phase": bool(state.closing_phase),
+            "target_reached_at": str(state.target_reached_at or ""),
             "sweep_closeout_status": sweep_closeout_status,
             "session_remaining_sec": (
                 session_remaining_seconds(state, now_unix=now_unix) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None
@@ -1269,18 +1265,18 @@ def _base_workflow_predicate_inputs(
 
 
 def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
-    outcome = getattr(state, "warm_replay_outcome", None) or {}
+    outcome = state.warm_replay_outcome or {}
     warm_status = str(outcome.get("status") or "").strip() if isinstance(outcome, dict) else ""
     return {
-        "failure_streak": int(getattr(state, "baseline_failure_streak", 0) or 0),
+        "failure_streak": int(state.baseline_failure_streak or 0),
         "warm_replay_status": warm_status,
-        "measure_round_dropped": bool(getattr(state, "baseline_measure_round_dropped", False)),
-        "tput": _number(getattr(state, "baseline_tput", 0.0)) or 0.0,
+        "measure_round_dropped": bool(state.baseline_measure_round_dropped),
+        "tput": _number(state.baseline_tput) or 0.0,
         "session_usable_sec": session_usable_seconds(state),
         "phase_spent_sec": phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
-        "runtime_sec": _positive_number(getattr(state, "baseline_runtime_sec", 0.0)),
-        "post_ready_runtime_sec": _positive_number(getattr(state, "baseline_post_ready_runtime_sec", 0.0)),
-        "warm_runtime_sec": _positive_number(getattr(state, "baseline_warm_runtime_sec", 0.0)),
+        "runtime_sec": _positive_number(state.baseline_runtime_sec),
+        "post_ready_runtime_sec": _positive_number(state.baseline_post_ready_runtime_sec),
+        "warm_runtime_sec": _positive_number(state.baseline_warm_runtime_sec),
     }
 
 
@@ -1295,10 +1291,8 @@ def _framework_predicate_inputs(
         for key, value in evidence.items()
         if key not in {"config_arm_plateaued", "source_arm_plateaued", "switch_bottleneck"}
     }
-    plateau["attempt_count"] = len(_rows_for_current_cycle(getattr(state, "attempts", None) or [], state))
-    plateau["specialist_round_count"] = len(
-        _rows_for_current_cycle(getattr(state, "specialist_rounds", None) or [], state)
-    )
+    plateau["attempt_count"] = len(_rows_for_current_cycle(state.attempts or [], state))
+    plateau["specialist_round_count"] = len(_rows_for_current_cycle(state.specialist_rounds or [], state))
     return plateau, _budget_predicate_inputs(state, now_unix=now_unix)
 
 
@@ -1308,13 +1302,13 @@ def _kernel_predicate_inputs(
     now_unix: float,
     kernel_work_in_flight: bool,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    controller = getattr(state, "kernel_rewrite_controller_result", None) or {}
+    controller = state.kernel_rewrite_controller_result or {}
     if not isinstance(controller, dict):
         controller = {}
     pending = {
         "kernel_work_pending": bool(kernel_work_pending(state)),
         "kernel_agent_in_flight": bool(kernel_work_in_flight),
-        "optimizer": str(getattr(state, "kernel_optimizer", "") or "").strip().lower(),
+        "optimizer": str(state.kernel_optimizer or "").strip().lower(),
         "controller_cycle": int(
             _number(controller.get("macro_cycle", -1)) if _number(controller.get("macro_cycle", -1)) is not None else -1
         ),
@@ -1324,11 +1318,11 @@ def _kernel_predicate_inputs(
         "controller_reason": str(controller.get("reason") or ""),
     }
     plateau = {
-        "idle_ticks": int(getattr(state, "kernel_idle_ticks", 0) or 0),
+        "idle_ticks": int(state.kernel_idle_ticks or 0),
         "idle_since_unix": _kernel_idle_since_unix(state),
         "idle_max_ticks": _kernel_idle_max_ticks(),
         "idle_min_seconds": _kernel_idle_min_seconds(),
-        "rejected_kernel_count": len(getattr(state, "rejected_kernel_ids", None) or []),
+        "rejected_kernel_count": len(state.rejected_kernel_ids or []),
     }
     return pending, plateau, _budget_predicate_inputs(state, now_unix=now_unix)
 
@@ -1338,12 +1332,12 @@ def _sweep_predicate_inputs(
     *,
     now_unix: float,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    last_conc = getattr(state, "last_conc_sweep", None) or {}
+    last_conc = state.last_conc_sweep or {}
     if not isinstance(last_conc, dict):
         last_conc = {}
     summary = last_conc.get("summary") if isinstance(last_conc.get("summary"), dict) else {}
     cycle = int(state.macro_cycle or 0)
-    saturated = getattr(state, "saturated_directions", None) or {}
+    saturated = state.saturated_directions or {}
     saturated_facts = (
         {str(key): bool(value.get("saturated")) for key, value in saturated.items() if isinstance(value, dict)}
         if isinstance(saturated, dict)
@@ -1358,9 +1352,9 @@ def _sweep_predicate_inputs(
         "summary_present": bool(summary),
         "reloop": {
             "current_gain_pct": _cumulative_gain_validated(state),
-            "gain_at_cycle_start_pct": _number(getattr(state, "gain_at_cycle_start", 0.0)) or 0.0,
+            "gain_at_cycle_start_pct": _number(state.gain_at_cycle_start) or 0.0,
             "min_gain_pct": decaying_keep_threshold_pct(cycle),
-            "prior_no_gain_cycle_streak": int(getattr(state, "no_gain_cycle_streak", 0) or 0),
+            "prior_no_gain_cycle_streak": int(state.no_gain_cycle_streak or 0),
             "max_cycles": DEFAULT_MAX_MACRO_CYCLES,
             "no_gain_cycles": DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES,
             "saturated_directions": saturated_facts,
@@ -1399,7 +1393,7 @@ def workflow_predicate_inputs(
         enablement = state.enablement
         inputs["baseline"] = {"tput": _number(state.baseline_tput) or 0.0}
         inputs["pending_work"] = {
-            "validation_pending": bool(getattr(enablement, "validation_pending", False)),
+            "validation_pending": bool(enablement.validation_pending),
             "enablement_in_flight": bool(enablement_in_flight),
         }
     elif current == PHASE_FRAMEWORK_AGENT:

@@ -30,8 +30,8 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
     def _negative_ledger_domain_counts(self, *, recent_cycles: int = 3) -> dict[str, int]:
         """Summarise recent negative explore-ledger pressure by specialist domain."""
         state = self.shared_state
-        cur_cycle = int(getattr(state, "macro_cycle", 0) or 0)
-        search = getattr(state, "explore_search", {}) or {}
+        cur_cycle = int(state.macro_cycle or 0)
+        search = state.explore_search or {}
         rows: list[Any] = []
         if isinstance(search, dict):
             tested = search.get("tested") or {}
@@ -67,18 +67,18 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
 
         state = self.shared_state
-        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        cycle = int(state.macro_cycle or 0)
         domains = sorted({v[0] for v in BOTTLENECK_DOMAIN_HINTS.values()} | {"freeform_specialist"})
         scores: dict[str, float] = {d: 0.0 for d in domains}
         reasons: dict[str, list[str]] = {d: [] for d in domains}
-        shift = getattr(state, "bottleneck_shift", {}) or {}
+        shift = state.bottleneck_shift or {}
         to_domain = str(shift.get("to_domain") or "").strip()
         if to_domain:
             scores.setdefault(to_domain, 0.0)
             reasons.setdefault(to_domain, [])
             scores[to_domain] += 5.0
             reasons[to_domain].append(f"matches current bottleneck shift to {shift.get('to') or to_domain}")
-        sat = getattr(state, "saturated_directions", {}) or {}
+        sat = state.saturated_directions or {}
         if isinstance(sat, dict):
             for domain, row in sat.items():
                 if not isinstance(row, dict):
@@ -94,7 +94,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
                 else:
                     scores[d] += 1.0
                     reasons[d].append("not saturated in latest roofline snapshot")
-        log_rows = list(getattr(state, "cycle_strategy_log", []) or [])
+        log_rows = list(state.cycle_strategy_log or [])
         tried = {str(r.get("focus") or "") for r in log_rows if isinstance(r, dict)}
         for row in log_rows:
             if not isinstance(row, dict):
@@ -132,7 +132,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
                 for k, v in (sat.items() if isinstance(sat, dict) else [])
                 if isinstance(v, dict) and bool(v.get("saturated"))
             ),
-            "gain_at_start": float(getattr(state, "gain_at_cycle_start", 0.0) or 0.0),
+            "gain_at_start": float(state.gain_at_cycle_start or 0.0),
             "gain_delta": None,
         }
 
@@ -140,7 +140,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         """Append/update the advisory cycle-strategy row for the current cycle."""
         state = self.shared_state
         planned = self._plan_cycle_focus()
-        log_rows = [r for r in (getattr(state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
+        log_rows = [r for r in (state.cycle_strategy_log or []) if isinstance(r, dict)]
         cycle = int(planned.get("cycle", 0) or 0)
         replaced = False
         for idx, row in enumerate(log_rows):

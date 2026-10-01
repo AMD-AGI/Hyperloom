@@ -568,7 +568,7 @@ class KernelPhase(CoordinatorCollaborator):
         base_run_id = str(
             result.get("task_id")
             or (Path(workspace).name if workspace else "")
-            or f"gemm-c{int(getattr(self.shared_state, 'macro_cycle', 0) or 0)}"
+            or f"gemm-c{int(self.shared_state.macro_cycle or 0)}"
         )
         tuned_file = str(result.get("tuned_file") or result.get("config_path") or "")
         # _validate_gemm_tuning_e2e writes the validated gain to e2e_gain_pct, not gain_pct -- no
@@ -735,7 +735,7 @@ class KernelPhase(CoordinatorCollaborator):
             return
         self._open_kernel_timeline(
             route=ROUTE_GEAK if self._geak_enabled() else ROUTE_FORGE,
-            route_reason=f"kernel_optimizer={str(getattr(state, 'kernel_optimizer', '') or '')}",
+            route_reason=f"kernel_optimizer={str(state.kernel_optimizer or '')}",
             from_phase=tr.from_phase,
         )
         lanes, catalogue_ttl = self._coord.dispatcher._registry_lanes_ttl("kernel_agent")
@@ -743,7 +743,7 @@ class KernelPhase(CoordinatorCollaborator):
         remaining = _phase_state.phase_budget_remaining_seconds(state)
         ttl = int(remaining) if remaining is not None and remaining > 0 else catalogue_ttl
         # A resumed session re-enters the phase whose earlier task already settled, so only a live row is reused.
-        base_key = f"kernel_agent_c{int(getattr(state, 'macro_cycle', 0) or 0)}"
+        base_key = f"kernel_agent_c{int(state.macro_cycle or 0)}"
         attempt = 0
         while True:
             task, was_existing = await self.tasks.create_or_return_existing(
@@ -1720,9 +1720,7 @@ class KernelPhase(CoordinatorCollaborator):
         if skip_reason is not None:
             await self._revalidate_on_geak_harness(decline_reason=str(skip_reason))
             return
-        task = _covered_step(
-            "explore", params, idempotency_key=f"geak-revalidate-c{int(getattr(state, 'macro_cycle', 0) or 0)}"
-        )
+        task = _covered_step("explore", params, idempotency_key=f"geak-revalidate-c{int(state.macro_cycle or 0)}")
         try:
             result = await self.sub.execute_covered(task)
         except FuturesCancelledError as exc:
@@ -3908,7 +3906,7 @@ class KernelPhase(CoordinatorCollaborator):
         """Gate the forge-fusion step in KERNEL entry."""
         if env_bool("HYPERLOOM_SKIP_FUSION"):
             return False
-        framework = str(getattr(self.shared_state, "framework", "") or "sglang").strip().lower()
+        framework = str(self.shared_state.framework or "sglang").strip().lower()
         if framework not in ("sglang", "vllm", "vllm-aiter"):
             return False
         trace = str(self.shared_state.last_profile_trace or "").strip()

@@ -27,19 +27,15 @@ class InternalTasksPhase(CoordinatorCollaborator):
         round_id: int,
     ) -> "Task | None":
         """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round, returns None when the scout is disabled."""
-        if not bool(getattr(self.shared_state, "research_scout_enabled", True)):
+        if not bool(self.shared_state.research_scout_enabled):
             return None
         idempotency_key = f"internal-research-scout-round{int(round_id)}"
         seen = sorted(
-            {
-                str(item).strip()
-                for item in (getattr(self.shared_state, "research_scout_seen_pr_ids", []) or [])
-                if str(item).strip()
-            }
+            {str(item).strip() for item in (self.shared_state.research_scout_seen_pr_ids or []) if str(item).strip()}
         )
         params: dict[str, Any] = {
             "domain": "research_scout_specialist",
-            "source_phase": str(getattr(self.shared_state, "phase", "") or "PRELUDE").strip().upper(),
+            "source_phase": str(self.shared_state.phase or "PRELUDE").strip().upper(),
             "gap_canonical_id": f"gap.research_scout.round{int(round_id)}",
             "gap_symptom": (
                 "Collect proven priors (reference launch scripts, model "
@@ -55,7 +51,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             "mode": "research",
         }
         proven = list(self._coord.phase_prelude._warm_recipe_proven_items())
-        search = getattr(self.shared_state, "explore_search", None) or {}
+        search = self.shared_state.explore_search or {}
         accepted = search.get("accepted") if isinstance(search, dict) else []
         if isinstance(accepted, list):
             for variant in accepted:
@@ -73,7 +69,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
         ]
         if recipe_sites:
             params["recipe_sites"] = recipe_sites
-        rounds = getattr(self.shared_state, "specialist_rounds", None) or []
+        rounds = self.shared_state.specialist_rounds or []
         if isinstance(rounds, list):
             for row in reversed(rounds):
                 if not isinstance(row, dict) or row.get("domain") != "research_scout_specialist":
@@ -113,7 +109,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             _research_hints.write_hints_skeleton(self.session_dir)
         except Exception:
             log.exception("research-scout: hints skeleton write failed")
-        if not bool(getattr(self.shared_state, "research_scout_enabled", True)):
+        if not bool(self.shared_state.research_scout_enabled):
             return
         await self._enqueue_internal_research_scout_task(
             reason="prelude_initial",
@@ -123,13 +119,13 @@ class InternalTasksPhase(CoordinatorCollaborator):
     async def _maybe_enqueue_explore_research_scout(self) -> None:
         """Re-dispatch the scout every K config-arm rounds (append-only)."""
         state = self.shared_state
-        if not bool(getattr(state, "research_scout_enabled", True)):
+        if not bool(state.research_scout_enabled):
             return
-        interval = max(1, int(getattr(state, "research_scout_interval", 3) or 3))
+        interval = max(1, int(state.research_scout_interval or 3))
         round_id = int((state.explore_search or {}).get("cursor") or 0)
         if round_id <= 0 or (round_id % interval) != 0:
             return
-        if int(getattr(state, "research_scout_last_round", -1)) == round_id:
+        if int(state.research_scout_last_round) == round_id:
             return
         await self._enqueue_internal_research_scout_task(
             reason="explore_periodic",
@@ -143,12 +139,12 @@ class InternalTasksPhase(CoordinatorCollaborator):
     ) -> "Task | None":
         """Enqueue the Coordinator-owned read-only static-recon specialist task."""
         state = self.shared_state
-        if not bool(getattr(state, "static_recon_enabled", True)):
+        if not bool(state.static_recon_enabled):
             return None
         idempotency_key = "internal-static-recon-prelude"
         params: dict[str, Any] = {
             "domain": "static_recon_specialist",
-            "source_phase": str(getattr(state, "phase", "") or "PRELUDE").strip().upper(),
+            "source_phase": str(state.phase or "PRELUDE").strip().upper(),
             "gap_canonical_id": "gap.static_recon.prelude",
             "gap_symptom": (
                 "Grep the framework source for un-bridged capability switches "
@@ -168,11 +164,11 @@ class InternalTasksPhase(CoordinatorCollaborator):
             from ..knowledge import static_recon_checklist as _src_recon
 
             _entries = _src_recon.entries_for(
-                model_class=str(getattr(state, "model_class", "") or ""),
-                gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                model_class=str(state.model_class or ""),
+                gpu_type=str(state.gpu_type or ""),
                 precision=_src_recon.workload_precision(state),
             )
-            _entries = _src_recon.filter_entries_for_model(_entries, dict(getattr(state, "model_info", None) or {}))
+            _entries = _src_recon.filter_entries_for_model(_entries, dict(state.model_info or {}))
             _rendered = _src_recon.render_checklist_for_prompt(_entries)
             if _rendered:
                 params["static_recon_checklist"] = _rendered
@@ -193,7 +189,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
         )
         if not was_existing:
             try:
-                state.static_recon_runs = int(getattr(state, "static_recon_runs", 0) or 0) + 1
+                state.static_recon_runs = int(state.static_recon_runs or 0) + 1
                 self.shared_state.save(self.session_dir)
             except Exception:
                 log.exception("static-recon: bookkeeping save failed")
@@ -206,7 +202,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
 
     async def _maybe_enqueue_prelude_static_recon(self) -> None:
         """Force-dispatch the PRELUDE static-recon specialist (not LLM-proposable)."""
-        if not bool(getattr(self.shared_state, "static_recon_enabled", True)):
+        if not bool(self.shared_state.static_recon_enabled):
             return
         await self._enqueue_internal_static_recon_task(
             reason="prelude_initial",
@@ -220,7 +216,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
         plateau_active = bool(self._coord.conversation._plateau_advisory_block())
         if not plateau_active:
             return
-        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        cycle = int(state.macro_cycle or 0)
         try:
             from ..knowledge import trajectory_reviewer as _trajectory_reviewer
 
@@ -237,7 +233,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
         domain = hint[0] if hint else "serving_specialist"
         params: dict[str, Any] = {
             "domain": domain,
-            "source_phase": str(getattr(state, "phase", "") or "INTERNAL").strip().upper(),
+            "source_phase": str(state.phase or "INTERNAL").strip().upper(),
             "gap_canonical_id": f"gap.trajectory_review.cycle{cycle}",
             "gap_symptom": (
                 "The search has plateaued. Review the optimization trajectory "

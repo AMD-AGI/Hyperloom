@@ -332,7 +332,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         if blob and blob.strip():
             return blob
         # Fallback: read the path recorded on last_trace_analyze.
-        lta = getattr(self.shared_state, "last_trace_analyze", {}) or {}
+        lta = self.shared_state.last_trace_analyze or {}
         path = str(lta.get("analysis_md_path") or "")
         if path:
             try:
@@ -564,7 +564,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
     def _plateau_advisory_block(self) -> str:
         """Render the plateau-judgment advisory block for the current phase."""
         state = self.shared_state
-        phase = (getattr(state, "phase", "") or "").strip().upper()
+        phase = (state.phase or "").strip().upper()
         lines: list[str] = []
         if phase == _phase_state.PHASE_FRAMEWORK_AGENT:
             # The advisory reads the same predicate the exit rule does, so the
@@ -612,7 +612,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         """Return ``(direction, pct)`` for the most-saturated roofline direction in the latest snapshot; ``("", 0.0)`` when no snapshot is available."""
         from hyperloom.inference_optimizer.roofline_snapshot import dominant_direction
 
-        snaps = getattr(self.shared_state, "roofline_snapshots", None) or []
+        snaps = self.shared_state.roofline_snapshots or []
         if not snaps or not isinstance(snaps[-1], dict):
             return "", 0.0
         return dominant_direction(snaps[-1])
@@ -620,19 +620,19 @@ class ConversationCollaborator(CoordinatorCollaborator):
     def _bottleneck_redirect_advisory_block(self) -> str:
         """Render the R3 cyclic bottleneck-redirect advisory (optimisation phase only)."""
         state = self.shared_state
-        if (getattr(state, "phase", "") or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+        if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return ""
-        sat = getattr(state, "saturated_directions", {}) or {}
+        sat = state.saturated_directions or {}
         saturated = {
             str(k): v
             for k, v in (sat.items() if isinstance(sat, dict) else [])
             if isinstance(v, dict) and bool(v.get("saturated"))
         }
-        cycle = int(getattr(state, "macro_cycle", 0) or 0)
-        has_switch = bool(getattr(state, "pending_bottleneck_switch", False))
+        cycle = int(state.macro_cycle or 0)
+        has_switch = bool(state.pending_bottleneck_switch)
         if not has_switch and not saturated:
             return ""
-        prev = str(getattr(state, "last_cycle_bottleneck", "") or "")
+        prev = str(state.last_cycle_bottleneck or "")
         cur_top = state.current_top_bottleneck()
         direction, pct = self._dominant_roofline_direction()
         lines: list[str] = []
@@ -652,7 +652,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             lines.append(f"  plateaued_bottleneck={prev} (avoid re-targeting)")
         if cur_top:
             lines.append(f"  current_top_bottleneck={cur_top}")
-        shift = getattr(state, "bottleneck_shift", {}) or {}
+        shift = state.bottleneck_shift or {}
         if isinstance(shift, dict) and (shift.get("from") or shift.get("to")):
             lines.append(
                 f"  bottleneck_shift: {shift.get('from') or 'unknown'} → {shift.get('to') or 'unknown'} "
@@ -677,11 +677,11 @@ class ConversationCollaborator(CoordinatorCollaborator):
         """Render the decaying acceptance bar and prior measured gains as evidence."""
         state = self.shared_state
         keep = _phase_state.resolve_keep_threshold(state)
-        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        cycle = int(state.macro_cycle or 0)
         if cycle < 1:
             return ""
         stable = keep / 2.0
-        search = getattr(state, "explore_search", None) or {}
+        search = state.explore_search or {}
         entries: list[dict[str, Any]] = []
         if isinstance(search, dict):
             tested = search.get("tested") or {}
@@ -718,7 +718,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
     def _target_gap_advisory_block(self) -> str:
         """Build the advisory \"External target gap\" prompt block (current-best vs competitor target; never gates)."""
         state = self.shared_state
-        if not bool(getattr(state, "target_advisory_enabled", True)):
+        if not bool(state.target_advisory_enabled):
             return ""
         from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
@@ -731,7 +731,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
     def _current_primary_gap(self) -> str | None:
         """Resolve latency/throughput; None when advisory is off or unavailable. Fail-soft."""
         state = self.shared_state
-        if not bool(getattr(state, "target_advisory_enabled", True)):
+        if not bool(state.target_advisory_enabled):
             return None
         try:
             from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
@@ -754,7 +754,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         """Collect proposal_set rows from the most recent specialist rounds (deduped by name; fail-soft)."""
         rounds = [
             r
-            for r in (getattr(self.shared_state, "specialist_rounds", []) or [])
+            for r in (self.shared_state.specialist_rounds or [])
             if isinstance(r, dict) and isinstance(r.get("proposal_set"), list)
         ]
         out: list[dict[str, Any]] = []
@@ -785,7 +785,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         hints = _research_hints.load_hints(self.session_dir)
         rounds = [
             row
-            for row in reversed(getattr(self.shared_state, "specialist_rounds", []) or [])
+            for row in reversed(self.shared_state.specialist_rounds or [])
             if isinstance(row, dict) and (row.get("new_findings") or row.get("residual_questions"))
         ]
         if not hints and not rounds:

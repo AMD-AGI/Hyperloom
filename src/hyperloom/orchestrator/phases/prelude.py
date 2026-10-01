@@ -187,8 +187,7 @@ class PreludePhase(CoordinatorCollaborator):
 
     def _measured_analysis_cost_sec(self) -> float:
         """Expected cost of the initial roofline/profile arm, in seconds."""
-        registry = getattr(self, "action_registry", None)
-        meta = registry.get(self._internal_analysis_kind()) if registry is not None else None
+        meta = self.action_registry.get(self._internal_analysis_kind())
         return (
             expected_action_cost_minutes(
                 meta,
@@ -1140,8 +1139,7 @@ class PreludePhase(CoordinatorCollaborator):
                     "status": "rollback_failed",
                     "rollback_errors": list(rollback.get("errors") or []),
                 }
-                if hasattr(state, "set_stop_reason"):
-                    state.set_stop_reason("warm_replay_rollback_failed")
+                state.set_stop_reason("warm_replay_rollback_failed")
             self._skip_warm_replay(
                 code=SKIP_KERNEL_PREPARATION_FAILED,
                 outcome={
@@ -1302,8 +1300,7 @@ class PreludePhase(CoordinatorCollaborator):
                         "status": "rollback_failed",
                         "rollback_errors": list(rollback.get("errors") or []),
                     }
-                    if hasattr(state, "set_stop_reason"):
-                        state.set_stop_reason("warm_replay_rollback_failed")
+                    state.set_stop_reason("warm_replay_rollback_failed")
                 blocking_roots = unusable or [root for root in recorded_roots if root]
                 self._skip_warm_replay(
                     code=SKIP_FRAMEWORK_ROOT_MISSING,
@@ -1398,8 +1395,7 @@ class PreludePhase(CoordinatorCollaborator):
                     "status": "rollback_failed",
                     "rollback_errors": list(rollback.get("errors") or []),
                 }
-                if hasattr(state, "set_stop_reason"):
-                    state.set_stop_reason("warm_replay_rollback_failed")
+                state.set_stop_reason("warm_replay_rollback_failed")
             target_workload_shape = {
                 "conc": int(state.conc or 0),
                 "isl": int(state.isl or 0),
@@ -1469,8 +1465,7 @@ class PreludePhase(CoordinatorCollaborator):
                     "status": "rollback_failed",
                     "rollback_errors": list(rollback.get("errors") or []),
                 }
-                if hasattr(state, "set_stop_reason"):
-                    state.set_stop_reason("warm_replay_rollback_failed")
+                state.set_stop_reason("warm_replay_rollback_failed")
             self._skip_warm_replay(
                 code=SKIP_ENQUEUE_FAILED,
                 outcome={

@@ -68,7 +68,7 @@ class SweepPhase(CoordinatorCollaborator):
         # tree, so settle it before the drain below applies anything on top.
         await self._coord.phase_kernel_stack._recover_interrupted_stack_validation()
         # Drain pending KEEP integrates so sweep measures full current_best.
-        if getattr(state, "has_keep_pending_integrate", False):
+        if state.has_keep_pending_integrate:
             await self._coord.phase_kernel_stack._drain_pending_keep_integrates()
         # Validate the stack for positive NEEDS_REVIEW kernels.
         await self._coord.phase_kernel_stack._maybe_validate_positive_needs_review_stack()
@@ -152,8 +152,7 @@ class SweepPhase(CoordinatorCollaborator):
         # Clamp total_budget_sec to the remaining session wall-clock budget so a long conc_sweep cannot outlive
         # --max-hours.
         _CLOSE_RESERVE_SEC = 120
-        _rem_fn = getattr(state, "remaining_minutes", None)
-        session_rem = _rem_fn() if callable(_rem_fn) else None
+        session_rem = state.remaining_minutes()
         clamped_budget: int | None
         if session_rem is not None:
             session_rem_sec = int(max(0.0, session_rem * 60.0) - _CLOSE_RESERVE_SEC)

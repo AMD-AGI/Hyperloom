@@ -182,8 +182,7 @@ class ClosePhase(CoordinatorCollaborator):
         fact finalize skips.
         """
         state = self.shared_state
-        has_unvalidated_keeps = getattr(state, "optimization_stack_has_unvalidated_keeps", None)
-        if not (callable(has_unvalidated_keeps) and has_unvalidated_keeps()):
+        if not state.optimization_stack_has_unvalidated_keeps():
             await self._record_close_step("stack_revalidation", status="done", detail="no_unvalidated_keeps")
             return
         step = "stack_revalidation"
@@ -241,7 +240,7 @@ class ClosePhase(CoordinatorCollaborator):
             await self._abandon_close_task(task, reason="close_stack_revalidation_lanes_busy")
             await self._record_close_step(step, status="skipped", task_id=task_id, detail="lanes_busy")
             return
-        validated = not has_unvalidated_keeps()
+        validated = not state.optimization_stack_has_unvalidated_keeps()
         await self._record_close_step(
             step,
             status="done" if validated else "failed",
@@ -326,10 +325,7 @@ class ClosePhase(CoordinatorCollaborator):
             _close_out.record_geak_candidate(
                 self.session_dir,
                 pending=state.geak_pending if isinstance(state.geak_pending, dict) else {},
-                revalidation_pending=bool(
-                    callable(getattr(state, "optimization_stack_has_unvalidated_keeps", None))
-                    and state.optimization_stack_has_unvalidated_keeps()
-                ),
+                revalidation_pending=state.optimization_stack_has_unvalidated_keeps(),
             )
         except Exception:
             log.debug("CLOSE: geak candidate record failed", exc_info=True)
@@ -683,9 +679,7 @@ class ClosePhase(CoordinatorCollaborator):
         """How long CLOSE waits for a close-step task to reach a terminal state."""
         from ..loop.time_budget import expected_action_cost_minutes
 
-        registry = getattr(self, "action_registry", None)
-        kind = str(getattr(task, "kind", "") or "")
-        meta = registry.get(kind) if registry is not None else None
+        meta = self.action_registry.get(task.kind)
         typical_sec = expected_action_cost_minutes(meta) * 60.0
         return min(_CLOSE_STEP_WAIT_CEILING_SEC, max(_CLOSE_STEP_WAIT_FLOOR_SEC, typical_sec))
 
