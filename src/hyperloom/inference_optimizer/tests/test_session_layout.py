@@ -401,7 +401,7 @@ def test_patches_path(tmp_path):
 
 
 def test_agent_prompt_snapshot_path(tmp_path):
-    assert agent_prompt_snapshot(tmp_path, "orchestration") == (
+    assert agent_prompt_snapshot(tmp_path, "orchestration", macro_cycle=0) == (
         tmp_path / "agents" / "orchestration" / "system_prompt.c0.snapshot.md"
     )
 
