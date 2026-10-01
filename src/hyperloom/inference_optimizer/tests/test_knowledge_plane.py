@@ -54,17 +54,12 @@ async def test_on_enter_the_optimisation_phase_runs_without_plane(tmp_path: Path
 
 
 def _make_bare_shared_state():
-    from dataclasses import dataclass, field
+    from dataclasses import dataclass
+
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     @dataclass
-    class _SS:
-        phase: str = ""
-        baseline_tput: float = 0.0
-        last_roofline_tput: float = 0.0
-        last_trace_analyze: dict = field(default_factory=dict)
-        cumulative_gain_validated: float = 0.0
-        auto_roofline_pending_task_id: str = ""
-        phase_history: list = field(default_factory=list)
+    class _SS(SharedState):
         save_count: int = 0
 
         def save(self, _session_dir):

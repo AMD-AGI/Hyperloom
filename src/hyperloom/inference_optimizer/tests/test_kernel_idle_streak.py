@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 @pytest.fixture
@@ -228,9 +229,7 @@ async def test_streak_state_is_cleared_outside_kernel(kernel_coordinator):
 
 
 def test_fingerprint_ignores_fields_that_are_not_progress():
-    from types import SimpleNamespace
-
-    base = SimpleNamespace(
+    base = SharedState(
         kernel_opt_task_attempts={"k000": {"last_decision": "", "last_micro_speedup": 1.0}},
         rejected_kernel_ids=[],
         last_kernel_opt={},
@@ -249,9 +248,7 @@ def test_fingerprint_ignores_fields_that_are_not_progress():
 
 
 def test_fingerprint_tracks_inflight_task_ids():
-    from types import SimpleNamespace
-
-    state = SimpleNamespace(
+    state = SharedState(
         kernel_opt_task_attempts={},
         rejected_kernel_ids=[],
         last_kernel_opt={},

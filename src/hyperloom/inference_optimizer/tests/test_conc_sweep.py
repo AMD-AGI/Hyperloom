@@ -1164,22 +1164,14 @@ def test_sweep_exits_based_on_ladder_status():
     """The concurrency ladder is the only sweep, so its status is the phase's."""
     from hyperloom.orchestrator.phases.machine_state import compute_next_phase
 
-    class _State:
-        last_conc_sweep = {}
-        phase = "SWEEP"
-        phase_started_ts = "2026-06-02T10:00:00+00:00"
-        phase_started_unix = 0.0
-        max_minutes = 360
-        phase_budget_pct = {"SWEEP": 0.50}
-        phase_elapsed_totals = {}
-        macro_cycle = 0
-        saturated_directions = {}
-        cumulative_gain_validated = 0.0
-        gain_at_cycle_start = 0.0
-        no_gain_cycle_streak = 0
-        target_reached_at = ""
-        stop_reason = ""
-        closing_phase = False
+    def _State(last_conc_sweep=None):
+        return SharedState(
+            last_conc_sweep=last_conc_sweep or {},
+            phase="SWEEP",
+            phase_started_ts="2026-06-02T10:00:00+00:00",
+            max_minutes=360,
+            phase_budget_pct={"SWEEP": 0.50},
+        )
 
     def _next(state):
         # optimize_enabled=False blocks cycle_reloop so the sweep status drives the exit.
@@ -1188,8 +1180,7 @@ def test_sweep_exits_based_on_ladder_status():
     # Nothing recorded => don't exit (budget remaining).
     assert _next(_State()) is None
 
-    _State.last_conc_sweep = {"status": "succeeded"}
-    result = _next(_State())
+    result = _next(_State({"status": "succeeded"}))
     assert result is not None
     _target, reason, evidence = result
     assert reason == "sweep_done", reason
@@ -1197,12 +1188,10 @@ def test_sweep_exits_based_on_ladder_status():
 
     # Skipped also counts as "done" (the action reached a terminal decision).
     for terminal in ("partial", "completed", "skipped"):
-        _State.last_conc_sweep = {"status": terminal}
-        result = _next(_State())
+        result = _next(_State({"status": terminal}))
         assert result is not None and result[1] == "sweep_done", terminal
 
-    _State.last_conc_sweep = {"status": "failed"}
-    result = _next(_State())
+    result = _next(_State({"status": "failed"}))
     assert result is not None
     _target, reason, evidence = result
     assert reason == "sweep_failed"
