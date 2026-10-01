@@ -1295,7 +1295,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # explore-round gap update: append per-variant KEEP/REVERT, then re-run the global refresh.
         if task.kind == "explore":
             result_dict = result.result if isinstance(result.result, dict) else {}
-            workload_id = self._coord.proposals._workload_canonical_id()
+            workload_id = self._coord.proposals.workload_canonical_id()
             self._coord.gap_refresh._record_explore_round_gaps(
                 task=task,
                 result=result_dict,

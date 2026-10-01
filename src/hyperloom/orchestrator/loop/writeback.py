@@ -1953,13 +1953,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 stack_depth=len(self.shared_state.optimization_stack or []),
                 measured_at=now_iso,
             )
-            live = self._coord.proposals._read_local_recipe_row()
-            recipe_overrides = self._coord.proposals._kb_best_config_overrides_for_keep(
+            live = self._coord.proposals.read_local_recipe_row()
+            recipe_overrides = self._coord.proposals.kb_best_config_overrides_for_keep(
                 live=live,
                 best_config_candidate=best_config_candidate,
                 throughput_after=throughput_after,
             )
-            self._coord.proposals._kb_amend_recipe(
+            self._coord.proposals.kb_amend_recipe(
                 append_lesson={
                     "statement": statement,
                     "measured_impact": impact,
@@ -1976,7 +1976,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 severity=severity,
                 kind="pitfall",
             )
-            self._coord.proposals._kb_amend_recipe(
+            self._coord.proposals.kb_amend_recipe(
                 append_pitfall={
                     "description": description,
                     "severity": severity,
@@ -2053,7 +2053,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             change=change,
             gain_pct=gain_pct,
             throughput_after=throughput_after,
-            best_config_candidate=self._coord.proposals._extract_kept_best_config(
+            best_config_candidate=self._coord.proposals.extract_kept_best_config(
                 task=task,
                 result_dict=result_dict,
             ),
@@ -2219,7 +2219,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             change=change,
             gain_pct=gain_pct,
             throughput_after=throughput_after,
-            best_config_candidate=self._coord.proposals._extract_kept_best_config(
+            best_config_candidate=self._coord.proposals.extract_kept_best_config(
                 task=task,
                 variant_attrs=change_attrs,
             ),
@@ -2791,7 +2791,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             try:
                 from ..knowledge.remote_recipe import HyperloomRemoteKB
 
-                remote_cid = self._coord.proposals._workload_canonical_id()
+                remote_cid = self._coord.proposals.workload_canonical_id()
                 remote_result = HyperloomRemoteKB.from_env().write(
                     remote_cid,
                     self.shared_state,
@@ -2881,7 +2881,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             merged_sessions: list[dict[str, Any]] = list(my_sessions)
             existing_row: dict[str, Any] = {}
             if self.recipe_kb is not None:
-                cid = self._coord.proposals._workload_canonical_id()
+                cid = self._coord.proposals.workload_canonical_id()
                 # Read exactly the local store's authority row.
                 try:
                     existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
@@ -2932,7 +2932,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             if has_validated_win and my_tput > live_tput:
                 overrides["best_config"] = attrs["best_config"]
                 overrides["best_throughput"] = my_tput
-            self._coord.proposals._kb_amend_recipe(
+            self._coord.proposals.kb_amend_recipe(
                 recipe_overrides=overrides,
                 provenance_details={
                     "phase": "close_finalize",
@@ -3121,7 +3121,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 },
             )
         await self._coord.gap_refresh._refresh_gaps(
-            reason="specialist_done", workload_id=self._coord.proposals._workload_canonical_id()
+            reason="specialist_done", workload_id=self._coord.proposals.workload_canonical_id()
         )
         if bool((task.params or {}).get("enablement")) and isinstance(done_payload.get("needs_targeted_build"), dict):
             await self._coord.enablement_build._maybe_enqueue_specialist_requested_build(
@@ -3903,7 +3903,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             audit_extras["eval_probe"] = result["eval_probe"]
         # seed the gaps[] ledger from baseline.
         await self._coord.gap_refresh._refresh_gaps(
-            reason="baseline_done", workload_id=self._coord.proposals._workload_canonical_id()
+            reason="baseline_done", workload_id=self._coord.proposals.workload_canonical_id()
         )
         if self.shared_state.baseline_tput > 0:
             await self.drain_queued_baselines(reason="baseline_established")
@@ -6258,7 +6258,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             params_ps["config_path"] = self.shared_state.baseline_config_path
         if benchmark_script:
             params_ps["benchmark_script"] = benchmark_script
-        self._coord.proposals._inject_explore_runtime_params(params_ps)
+        self._coord.proposals.inject_explore_runtime_params(params_ps)
         return params_ps
 
     async def enqueue_internal_stack_rebench(
@@ -6326,7 +6326,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if benchmark_script:
             params["benchmark_script"] = benchmark_script
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("explore")
-        self._coord.proposals._inject_explore_runtime_params(params)
+        self._coord.proposals.inject_explore_runtime_params(params)
         task, existing = await self.tasks.create_or_return_existing(
             kind="explore",
             params=params,
