@@ -861,7 +861,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
             f"(snapshot #{base_id}). PR #321 retired the legacy "
             "close-phase auto-roofline; refreshes are now driven by a "
             "10% gain watermark over `last_roofline_tput` (see "
-            "`Coordinator._maybe_enqueue_watermark_roofline`). The "
+            "`KernelPhase.maybe_enqueue_watermark_roofline`). The "
             "watermark did not cross during this session, so the "
             "PRELUDE bootstrap snapshot is the only datapoint available "
             "for the report._"
@@ -894,7 +894,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         "Before/after comparison of TraceLens Executive Summaries. "
         "The baseline snapshot was captured at PRELUDE; the latest "
         "snapshot was captured after a +10% gain watermark refresh "
-        "(see `Coordinator._maybe_enqueue_watermark_roofline`)."
+        "(see `KernelPhase.maybe_enqueue_watermark_roofline`)."
     )
     lines.append("")
     # The ceiling is normally a session constant, but a runtime dtype / quantization change moves it — and then the
