@@ -98,6 +98,48 @@ from ._workload_envs import (
 log = logging.getLogger(__name__)
 
 
+# The warmup round exists to leave the server hot so the decision round is
+# measured warm, and to run the accuracy gate. Its throughput number is read for
+# success/failure and then discarded. It nevertheless runs a full-length
+# benchmark: ``_workload_envs`` sizes ``NUM_PROMPTS`` at ``CONC`` times a factor
+# of 10/5/3/2 depending on sequence length, so the round Arbor throws away is
+# five to ten waves of the concurrency.
+#
+# One wave is enough to warm. It fills every slot and decodes a full OSL, and
+# measurements taken immediately after a four-token warmup show no ordered
+# difference from ones taken after a full benchmark (see Infera's
+# ``warmup_cost.py``). The accuracy gate is a separate workload and does not
+# read ``NUM_PROMPTS``, so it is unaffected.
+#
+# Set ``INFERENCE_OPTIMIZER_EXPLORE_SHORT_WARMUP=0`` to restore the full-length
+# warmup round.
+WARMUP_WAVES = 1
+
+
+def _short_warmup_enabled() -> bool:
+    raw = os.environ.get("INFERENCE_OPTIMIZER_EXPLORE_SHORT_WARMUP")
+    return (raw if raw is not None else "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _warmup_num_prompts(config_path: Any) -> int | None:
+    """How many prompts a warmup round needs: one wave of the concurrency.
+
+    Returns ``None`` when the concurrency cannot be read, which leaves the
+    warmup round at whatever length ``_workload_envs`` would have chosen. That
+    is the safe direction: the failure mode is the warmup we already run.
+    """
+    try:
+        with Path(config_path).open(encoding="utf-8") as fp:
+            cfg = yaml.safe_load(fp) or {}
+        envs = (cfg.get("benchmark") or {}).get("envs") or {}
+        conc = int(envs.get("CONC", 0) or 0)
+    except Exception:  # noqa: BLE001 — best-effort; fall back to the long warmup
+        return None
+    if conc <= 0:
+        return None
+    return max(conc * WARMUP_WAVES, conc)
+
+
 _now_iso = functools.partial(now_iso, "auto")
 
 
@@ -900,6 +942,28 @@ class ExploreExecutor:
                     if use_warm_decision:
                         warmup_slot = slot / "warmup_round"
                         warmup_slot.mkdir(parents=True, exist_ok=True)
+                        # The warmup's throughput is discarded below, so it only
+                        # has to reach steady state and run the accuracy gate.
+                        # Shorten it to one wave of the concurrency instead of
+                        # the five to ten a measured round would use.
+                        warmup_prompts = (
+                            _warmup_num_prompts(config_path) if _short_warmup_enabled() else None
+                        )
+                        if warmup_prompts is not None:
+                            warmup_envs = dict(warmup_gv.extra_envs)
+                            warmup_envs["NUM_PROMPTS"] = str(warmup_prompts)
+                            warmup_gv = _carry_variant_metadata(
+                                warmup_gv,
+                                GridVariant(
+                                    name=gv.name,
+                                    extra_server_args=warmup_gv.extra_server_args,
+                                    extra_envs=warmup_envs,
+                                    note=gv.note,
+                                    remove_args=run_remove_args,
+                                    unset_envs=run_unset_envs,
+                                    args_mode=str(getattr(gv, "args_mode", "append") or "append"),
+                                ),
+                            )
                         warmup_results = await run_grid(
                             base_yaml_path=config_path,
                             base_extra_args=stack_extra_args,
