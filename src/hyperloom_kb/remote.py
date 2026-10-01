@@ -132,6 +132,14 @@ class ListPage:
     has_more: bool
 
 
+@dataclass(frozen=True)
+class ExportPage(ListPage):
+    """An export page, with the last write position of what it pages and, for one schema, that schema."""
+
+    head: int = 0
+    declaration: ExperienceDeclaration | None = None
+
+
 def _int(value: JsonValue, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise RemoteClientError(f"Experience service {name} is invalid")
@@ -375,7 +383,7 @@ class RemoteClient:
 
     def export_page(
         self, *, after: int = 0, limit: int = 100, schema_ref: str | None = None, include_excluded: bool = False
-    ) -> ListPage:
+    ) -> ExportPage:
         """One page of complete records, ``{"sequence", "experience"}``, in the service's write order; the records
         are chosen as ``list_experiences`` chooses them."""
 
@@ -383,10 +391,18 @@ class RemoteClient:
         items = payload.get("items")
         if not isinstance(items, list):
             raise RemoteClientError("Experience export response is invalid")
-        return ListPage(
+        declaration = None
+        if schema_ref is not None:
+            try:
+                declaration = ExperienceDeclaration.from_dict(payload.get("declaration"))
+            except ValueError as exc:
+                raise RemoteClientError(f"Experience export response has no valid declaration: {exc}") from exc
+        return ExportPage(
             items=tuple(item for item in items if isinstance(item, dict)),
             next_cursor=_int(payload.get("next_cursor"), "next_cursor"),
             has_more=payload.get("has_more") is True,
+            head=_int(payload.get("head"), "head"),
+            declaration=declaration,
         )
 
     @staticmethod
@@ -426,25 +442,33 @@ class RemoteClient:
     def push(self) -> dict[str, JsonValue]:
         """Ask this service to send every Experience written here and not yet pushed to its global KB."""
 
-        return self._sync("/v1/push")
+        return self._sync("/v1/push", {})
 
-    def pull(self) -> dict[str, JsonValue]:
-        """Ask this service to store every global-KB Experience of its declaration it does not hold yet."""
+    def pull(self, schema_ref: str) -> dict[str, JsonValue]:
+        """Ask this service to bring one schema to everything its global KB holds of it.
 
-        return self._sync("/v1/pull")
+        ``saved`` names the label the state before the pull was saved under, when no label held it.
+        """
 
-    def _sync(self, path: str) -> dict[str, JsonValue]:
+        return self._sync("/v1/pull", {"schema_ref": schema_ref})
+
+    def _sync(self, path: str, body: dict[str, JsonValue]) -> dict[str, JsonValue]:
         # Each request handles one bounded batch, so no single request outlives the client timeout.
         totals = dict.fromkeys(_SYNC_COUNTS, 0)
         rejected: list[JsonValue] = []
+        saved: JsonValue = None
         while True:
-            report = self._request("POST", path, {})
+            report = self._request("POST", path, body)
             for key in _SYNC_COUNTS:
                 totals[key] += _int(report.get(key, 0), key)
             batch_rejected = report.get("rejected")
             rejected.extend(batch_rejected if isinstance(batch_rejected, list) else ())
+            saved = saved or report.get("saved")
             if report.get("status") != "completed" or report.get("has_more") is not True:
-                return {**report, **totals, "rejected": rejected}
+                result = {**report, **totals, "rejected": rejected}
+                if "saved" in report:
+                    result["saved"] = saved
+                return result
 
 
 class RemoteExperienceSession:

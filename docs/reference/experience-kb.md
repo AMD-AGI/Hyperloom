@@ -107,6 +107,7 @@ collection spools without waiting on the service. Requests to a loopback service
 | `kb.sqlite3` | Write order for listing and export; rebuilt from `canonical/` when lost. |
 | `sync.sqlite3` | Push and pull progress per global KB. Losing it makes the next push and pull resend everything, which the idempotent writes absorb. |
 | `state.sqlite3` | Labels, exclusions and their history, and what a restore set outside the current state. Without it every stored Experience is in the state and none is excluded. |
+| `identity.json` | The home's `kb_id`, made when it is first served. It moves with the home; a new home is a new KB. |
 | `spool/` | Writes the service has not accepted yet. |
 | `service.log` | The service's log. |
 | `service.lock` | Held by the one service serving this home; names its pid and port. |
@@ -161,11 +162,27 @@ from a proxy in front of it) is reported under `rejected` and skipped. A
 workspace `push` first delivers the spool, so writes made while the local
 service was down are pushed too.
 
-**Pull** fetches, for each schema the local service holds, the global KB's
-Experiences of that schema it has not fetched before. Other schemas stay on the
-global KB. Pulled Experiences are readable immediately.
+**Pull** names one schema and brings its state to everything the global KB
+holds of it: the Experiences not fetched before, and every one of that schema
+known to be on the global KB (pulled earlier or pushed from here) that a
+restore set outside the state. Exclusions stand. The global KB's declaration of
+the schema is registered when the local service lacks it; other schemas stay as
+they are. When the current state is not what its label saved, the pull first
+labels it (reason `before_pull`) and reports that label as `saved`, so
+restoring it undoes the pull. A workspace `pull` names the schema its packaged
+mapping writes.
 
-Both run in bounded batches; the client repeats them until nothing is left.
+**Identity.** Every service has a `kb_id`, made when its home is first served
+and kept with the home. The first push or pull to a global KB records its
+`kb_id`; a later sync where that URL answers with another `kb_id`, such as a
+redeployed global KB, is refused, as is a pull from a global KB that holds
+less of the schema than this service already pulled, such as one restored from
+an older backup, and any sync with a service that reports no `kb_id`, which
+predates this. A refused sync reports `status: refused` with the reason and
+changes nothing.
+
+Both run in bounded batches; the client repeats them until nothing is left, and
+a pull labels its state once, before its first batch.
 With `HYPERLOOM_KB_AUTO_PUSH=1`, the end of every run pushes; a failed automatic
 push is logged as a warning and never fails the run. A switch value that is not
 a boolean, or auto push without a global KB, is a warning at launch, and that
@@ -178,11 +195,16 @@ each workspace which keys to add. By hand, on the host:
 
 ```bash
 export HYPERLOOM_KB_TOKEN=...   # generate once and keep it
-python -m hyperloom_kb --host 0.0.0.0 --port 8787 --home /srv/hyperloom-global-kb
+python -m hyperloom_kb --name team-hub --host 0.0.0.0 --port 8787 --home /srv/hyperloom-global-kb
 ```
+
+A global KB is the same service as a local one, with the same labels,
+restores, and exclusions; its state decides what its export, and so every pull,
+brings.
 
 | Flag | Default | Meaning |
 |---|---|---|
+| `--name` | empty | A display name; the service's identity stays its `kb_id`. |
 | `--host`, `--port` | `127.0.0.1`, `8787` | Bind address. |
 | `--home` | `~/.local/share/hyperloom-kb` | State directory, laid out as above. |
 | `--declaration` | packaged `inference-recipe-v1` | The schema a read searches when it names none. |
@@ -201,7 +223,7 @@ network, put a TLS-terminating proxy in front of it and hand out its
 | `GET /v1/list` | page through Experience summaries in write order | `list_experiences()` |
 | `GET /v1/export` | page through complete Experiences in write order | `export_page()` |
 | `POST /v1/push` | push one batch to this service's global KB | `push()` |
-| `POST /v1/pull` | pull one batch from this service's global KB | `pull()` |
+| `POST /v1/pull` | pull one batch of one schema from this service's global KB | `pull()` |
 | `GET /v1/labels` | a schema's labels, current label, and whether its state changed since | `labels()` |
 | `POST /v1/labels` | label a schema's current state | `create_label()` |
 | `DELETE /v1/labels/{label_id}` | delete a label | `delete_label()` |
@@ -209,7 +231,7 @@ network, put a TLS-terminating proxy in front of it and hand out its
 | `GET /v1/exclusions` | a schema's exclusions and their history | `exclusions()` |
 | `POST /v1/exclusions` | exclude an Experience from reads | `exclude()` |
 | `DELETE /v1/exclusions/{experience_id}` | lift an exclusion | `include()` |
-| `GET /health` | liveness, schemas, corpus size, process, settings digest | `health()` |
+| `GET /health` | identity, liveness, schemas, corpus size, process, settings digest | `health()` |
 
 Every request, including `/health`, sends `Authorization: Bearer <token>`.
 Unknown request fields are rejected, so a misspelled field fails loudly. A
@@ -224,7 +246,7 @@ request body may be up to 256 MiB; Experiences themselves have no size limit.
 | 409 | `sync_unavailable` | push or pull on a service started without a global KB | after configuring one |
 | 500 | `internal_error` | storage or service failure | yes |
 
-400, 409, and 500 bodies include a `detail` string.
+400, 404, 409, and 500 bodies include a `detail` string.
 
 ### `PUT /v1/experiences/{id}`
 
@@ -306,24 +328,31 @@ only Experiences written to this service; `include_excluded=true` adds the ones
 reads do not see, so a page may hold fewer items than `limit`.
 
 ```json
-{"items": [{"sequence": 1, "experience_id": "exp-...", "...": "..."}], "next_cursor": 1, "has_more": false}
+{"items": [{"sequence": 1, "experience_id": "exp-...", "...": "..."}], "next_cursor": 1, "has_more": false, "head": 1}
 ```
 
 `/v1/list` items are summaries plus `sequence`; `/v1/export` items are
-`{"sequence": 1, "experience": <complete Experience>}`.
+`{"sequence": 1, "experience": <complete Experience>}`. An export page also
+carries `head`, the last write position of what it pages, and, with a
+`schema_ref`, that schema's `declaration`.
 
 ### `POST /v1/push` and `POST /v1/pull`
 
-Body: `{}`. The service contacts the global KB it was started with.
+Body: `{}` for a push, `{"schema_ref": "schema:sha256:..."}` for a pull. The
+service contacts the global KB it was started with.
 
 ```json
 {"status": "completed", "global_url": "https://global-kb.example", "created": 2, "unchanged": 0, "skipped": 1, "held_back": 0, "rejected": [], "has_more": false}
 ```
 
 `skipped` counts pulled Experiences a push does not send back; `held_back`
-counts Experiences written here that this push left for when reads see them. `status` is
+counts Experiences written here that this push left for when reads see them. A
+pull also answers its `schema_ref` and `saved`: the label the state before the
+pull was saved under, or `null` when its label already held it. `status` is
 `incomplete`, with an `error`, when the global KB stopped answering; the batch
-up to that point is kept.
+up to that point is kept. It is `refused`, with the reason, when the global KB
+is another one than this service synced with, holds less than it pulled, or
+reports no identity.
 
 ### Labels and exclusions
 
@@ -348,11 +377,13 @@ a label a restore made, whose `name` says so with its time.
 ### `GET /health`
 
 ```json
-{"status": "ok", "schema_ref": "schema:sha256:...", "experience_count": 3, "schemas": {"schema:sha256:...": 3}, "pid": 4242, "config_digest": "..."}
+{"status": "ok", "kb_id": "kb-...", "name": "team-hub", "schema_ref": "schema:sha256:...", "experience_count": 3, "schemas": {"schema:sha256:...": 3}, "pid": 4242, "config_digest": "..."}
 ```
 
-`schema_ref` is the default read schema; `config_digest` fingerprints the
-settings the service started with.
+`kb_id` identifies the service's home and `name` is only for people.
+`schema_ref` is the default read schema;
+`experience_count` and `schemas` count what reads see; `config_digest`
+fingerprints the settings the service started with.
 
 ## Client failure behavior
 
