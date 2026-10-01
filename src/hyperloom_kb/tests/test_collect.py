@@ -76,11 +76,13 @@ def _attempt(attempt_id: str, **fields: Any) -> dict[str, Any]:
     return row
 
 
-def _sbd(*attempts: dict[str, Any], benchmark_mode: str = "throughput") -> dict[str, Any]:
+def _sbd(
+    *attempts: dict[str, Any], benchmark_mode: str = "throughput", objective: str = "output_throughput"
+) -> dict[str, Any]:
     return {
         "metadata": {
             "session": {"session_id": "run-mistral-1"},
-            "grading": {"benchmark_mode": benchmark_mode},
+            "grading": {"benchmark_mode": benchmark_mode, "objective": objective},
             "task_config": {
                 "model_name": "Mistral-7B-Instruct-v0.3",
                 "gpu_type": "mi300x",
@@ -332,6 +334,13 @@ def test_document_skip_rule_blocks_every_unit() -> None:
     assert report["blocked_reason"] == "agentx_experience_identity_not_supported"
     assert set(_skipped(report).values()) == {"agentx_experience_identity_not_supported"}
     assert report["counts"]["units"] == 2
+
+
+@pytest.mark.parametrize("objective", ["e2e_norm_intvty_p90", ""])
+def test_a_session_not_graded_on_throughput_publishes_nothing(objective: str) -> None:
+    report = _dry(_sbd(_attempt("a"), objective=objective))
+    assert report["blocked_reason"] == "session_not_graded_on_throughput"
+    assert report["collected"] == []
 
 
 def test_credentials_are_never_collected() -> None:

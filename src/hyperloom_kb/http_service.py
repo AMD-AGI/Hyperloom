@@ -74,7 +74,9 @@ READ_POLICY_VERSION = "shared-experience-read@v1"
 DEFAULT_HOME = Path("~/.local/share/hyperloom-kb").expanduser()
 # A transport guard, not a data policy: Experiences of any size are stored.
 _MAX_REQUEST_BYTES = 256 * 1024 * 1024
-_READ_FIELDS = frozenset({"decision", "context", "outcome", "limit", "schema_ref", "content_inline_limit"})
+_READ_FIELDS = frozenset(
+    {"decision", "context", "outcome", "limit", "schema_ref", "content_inline_limit", "render_budget_chars"}
+)
 _WRITE_FIELDS = frozenset({"experience", "declaration"})
 
 
@@ -407,11 +409,13 @@ class ExperienceHTTPService:
         limit: int = DEFAULT_READ_LIMIT,
         schema_ref: str | None = None,
         content_inline_limit: int | None = None,
+        render_budget_chars: int | None = None,
     ) -> dict[str, JsonValue]:
         """Search one schema's Experiences, this service's default schema unless ``schema_ref`` names another.
 
-        With ``content_inline_limit``, a ``change.content`` over that many bytes is rendered as a reference and its
-        text is returned under ``contents``.
+        With ``content_inline_limit``, a free-text field over that many bytes is rendered as a reference and its
+        text is returned under ``contents``. With ``render_budget_chars``, the block carries whole records while
+        they fit and names only those in ``rendered_refs``.
         """
 
         decision = _required_text(decision, "decision")
@@ -420,6 +424,8 @@ class ExperienceHTTPService:
         limit = _bounded_int(limit, "limit", minimum=1, maximum=MAX_READ_LIMIT)
         if content_inline_limit is not None:
             content_inline_limit = _bounded_int(content_inline_limit, "content_inline_limit", minimum=0)
+        if render_budget_chars is not None:
+            render_budget_chars = _bounded_int(render_budget_chars, "render_budget_chars", minimum=1)
         view = self._views[declaration.schema_ref]
         if selected_outcome != MIXED_OUTCOME:
             view = QueryViewBuilder().restrict(
@@ -458,7 +464,7 @@ class ExperienceHTTPService:
             provider_refs=provider_refs,
             ranking_policy_ref="weighted-signal-sum@v1",
             max_groups=limit,
-            render_budget_chars=None,
+            render_budget_chars=render_budget_chars,
         )
         executor = QueryExecutor(
             LocalRetrievalService(
@@ -493,8 +499,11 @@ class ExperienceHTTPService:
                 if contribution.experience_id == reference.id
             ]
             experiences.append(item)
+        # Records the budget left out were rendered too; only what the block references comes back.
         contents: list[JsonValue] = [
-            {"ref": ref, "bytes": len(text.encode()), "content": text} for ref, text in external.items()
+            {"ref": ref, "bytes": len(text.encode()), "content": text}
+            for ref, text in external.items()
+            if ref in result.prompt_block
         ]
         response.update(
             {
@@ -558,6 +567,7 @@ class ExperienceHTTPService:
             "schemas": dict(counts),
             "pid": os.getpid(),
             "config_digest": self._config_digest,
+            "home": str(self.config.home.resolve()),
         }
 
 
@@ -648,6 +658,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     ),
                     schema_ref=None if schema_ref is None else _required_text(schema_ref, "schema_ref"),
                     content_inline_limit=cast(int | None, body.get("content_inline_limit")),
+                    render_budget_chars=cast(int | None, body.get("render_budget_chars")),
                 ),
             )
             return

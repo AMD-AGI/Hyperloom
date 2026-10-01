@@ -251,20 +251,25 @@ def test_expired_or_released_lease_is_rejected(monkeypatch: pytest.MonkeyPatch) 
         read.query({}, view=ref, lease_id=current.lease_id)
 
 
-def test_render_reports_truncation() -> None:
-    schema, experiences, views, ref, first, _, _ = setup()
+def test_a_render_budget_keeps_whole_records_and_names_only_those_it_shows() -> None:
+    schema, experiences, views, ref, first, _, other = setup()
     read = LocalRetrievalService(experiences, views)
     lease = read.acquire_view(schema.schema_ref)
+    both = (first.id, other.id)
+    full = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=None)
+    first_only = read.render((first.id,), view=ref, lease_id=lease.lease_id, budget_chars=None)
 
-    rendered = read.render(
-        (first.id,),
-        view=ref,
-        lease_id=lease.lease_id,
-        budget_chars=80,
+    fits_one = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=len(full.text) - 1)
+    fits_none = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=len(first_only.text) - 1)
+    fits_all = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=len(full.text))
+
+    assert (fits_one.text, [item.id for item in fits_one.rendered_refs], fits_one.truncated) == (
+        first_only.text,
+        [first.id],
+        True,
     )
-
-    assert rendered.truncated is True
-    assert rendered.text.endswith("… [truncated]")
+    assert (fits_none.text, fits_none.rendered_refs, fits_none.truncated) == ("", (), True)
+    assert (fits_all.text, fits_all.truncated) == (full.text, False)
 
 
 def test_complete_renderer_without_budget_keeps_every_field() -> None:

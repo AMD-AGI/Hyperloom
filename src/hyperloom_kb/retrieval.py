@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol, TypeAlias, cast, runtime_checkable
+from typing import Protocol, TypeAlias, runtime_checkable
 
 from hyperloom_kb.query_view import (
     CapabilityState,
@@ -306,7 +306,11 @@ class LocalRetrievalService:
         lease_id: str,
         budget_chars: int | None = 4_000,
     ) -> RenderedResult:
-        """Render representatives; ``budget_chars=None`` never truncates."""
+        """Render representatives whole, in order, while they fit ``budget_chars``; ``None`` renders every one.
+
+        A record is never cut: the first one that does not fit and every one after it are left out, and only the
+        records rendered are named in ``rendered_refs``, so nothing reads as shown that the prompt did not carry.
+        """
 
         snapshot = self._leased_view(view, lease_id)
         if budget_chars is not None and budget_chars <= 0:
@@ -322,15 +326,21 @@ class LocalRetrievalService:
             if record.content_hash != snapshot.experience_hashes.get(experience_id):
                 raise ViewUnavailable(f"{experience_id} content does not match pinned Query View")
             experiences.append(record.experience)
-        blocks = [self._renderer(experience, snapshot) for experience in experiences]
-        text = "\n\n".join(blocks)
-        truncated = budget_chars is not None and len(text) > budget_chars
-        if budget_chars is not None and truncated:
-            text = text[: max(0, budget_chars - 14)].rstrip() + "\n… [truncated]"
+        blocks: list[str] = []
+        shown: list[Experience] = []
+        used = 0
+        for experience in experiences:
+            block = self._renderer(experience, snapshot)
+            size = len(block) + (len("\n\n") if blocks else 0)
+            if budget_chars is not None and used + size > budget_chars:
+                break
+            blocks.append(block)
+            shown.append(experience)
+            used += size
         return RenderedResult(
-            text=text,
-            rendered_refs=tuple(RenderedRef(experience.id, "representative") for experience in experiences),
-            truncated=truncated,
+            text="\n\n".join(blocks),
+            rendered_refs=tuple(RenderedRef(experience.id, "representative") for experience in shown),
+            truncated=len(shown) < len(experiences),
         )
 
     def result(
@@ -421,6 +431,18 @@ def content_ref(content: str) -> str:
     return "sha256:" + hashlib.sha256(content.encode()).hexdigest()
 
 
+def _free_text_slots(record: dict[str, JsonValue]) -> list[tuple[dict[str, JsonValue], str]]:
+    change = record.get("change")
+    alternatives = record.get("alternatives")
+    slots: list[tuple[dict[str, JsonValue], str]] = [(record, "reasoning"), (record, "reflection")]
+    if isinstance(change, dict):
+        slots += [(change, "summary"), (change, "content")]
+    for alternative in alternatives if isinstance(alternatives, list) else []:
+        if isinstance(alternative, dict):
+            slots += [(alternative, "option"), (alternative, "why_not")]
+    return [(container, key) for container, key in slots if key in container]
+
+
 def render_complete_experience(
     experience: Experience,
     view: QueryView,
@@ -430,20 +452,21 @@ def render_complete_experience(
 ) -> str:
     """Render every canonical field plus full Repeat Group annotations.
 
-    A ``change.content`` longer than ``inline_limit`` bytes renders as a reference to its text, which is put in
-    ``external`` under that reference: the record stays complete while the prompt carries only its size.
+    A free-text field (``reasoning``, ``reflection``, ``change.summary``, ``change.content``, or an alternative)
+    longer than ``inline_limit`` bytes renders as a reference to its text, which is put in ``external`` under that
+    reference: the record stays complete while the prompt carries only its size.
     """
 
     group_key = view.experience_groups[experience.id]
     annotations = view.groups[group_key].annotations
     record = experience.to_dict()
-    content = experience.change.content if experience.change is not None else ""
-    if inline_limit is not None and external is not None and len(content.encode()) > inline_limit:
-        ref = content_ref(content)
-        external[ref] = content
-        cast(dict[str, JsonValue], record["change"])["content"] = (
-            f"<external content {ref}, {len(content.encode())} bytes>"
-        )
+    if inline_limit is not None and external is not None:
+        for container, key in _free_text_slots(record):
+            text = container[key]
+            if isinstance(text, str) and len(text.encode()) > inline_limit:
+                ref = content_ref(text)
+                external[ref] = text
+                container[key] = f"<external content {ref}, {len(text.encode())} bytes>"
     return "\n".join(
         (
             f"Experience {experience.id}",

@@ -571,7 +571,9 @@ python -m hyperloom.inference_optimizer.experience_kb_service pull   # the globa
 
 Report the one summary line each prints (global URL; `created`, `unchanged`,
 `skipped`, `rejected`) and never the token. A push resumes where an earlier one
-stopped and never sends back what was pulled. With `HYPERLOOM_KB_AUTO_PUSH=1`,
+stopped and never sends back what was pulled. Push and pull use the service as
+it runs and never restart it under a running session; when they warn that its
+settings differ, `experience_kb_service ensure` or the next launch applies them. With `HYPERLOOM_KB_AUTO_PUSH=1`,
 every run pushes after its Experiences are written locally; a failed automatic
 push is only a warning, and the next push sends what it missed. An unusable
 switch value or a missing global KB is a launch warning, and that run does not
@@ -589,7 +591,9 @@ Every written Experience is readable by the next read. Retrieved evidence is
 advisory and never replaces the measured benchmark baseline. A read failure
 soft-degrades to the original prompt. An AgentX run neither reads nor writes
 Experiences: the Experience schema cannot yet tell its workload from a
-synthetic one.
+synthetic one. Neither does a run graded on anything but output throughput
+(for example `HYPERLOOM_PERF_METRIC=intvty_v1`), since every Experience records
+the throughput objective.
 
 Every complete measured attempt is written idempotently when the session
 breakdown is written. Rendered Experience references from an orchestration
@@ -603,10 +607,12 @@ injected Experience set changes:
 `consumer` is `orchestration` or `specialist`; `domain` and `gap_canonical_id`
 identify the specialist dispatch and are empty for orchestration.
 `prompt_block` is the injected text; each Experience appears in it under an
-`Experience <id>` heading with its complete record. A `change.content` over
-2 KiB, typically a source patch, appears as `<external content sha256:...>`
-and is written whole under `<session>/experience_kb/contents/`, each patch
-also as its own file; the block ends with those paths. The injected agents
+`Experience <id>` heading with its complete record. A free-text field over
+2 KiB, typically a source patch in `change.content`, appears as
+`<external content sha256:...>` and is written whole under
+`<session>/experience_kb/contents/`, each patch also as its own file; the block
+ends with those paths. Records are injected whole while they fit 40,000
+characters; the rest of a read is left out, never cut. The injected agents
 cite the Experiences that shaped a proposal in its `experience_citations`,
 which reach the measured Experience's `provenance.extra`. `experiences` holds one
 summary per injected Experience, in `experience_ids` order: `experience_id`,

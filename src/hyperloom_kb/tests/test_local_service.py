@@ -132,7 +132,33 @@ def test_a_loopback_service_is_reached_directly_despite_an_environment_proxy(mon
 def test_a_stale_service_inside_this_process_is_refused_rather_than_signalled(tmp_path: Path) -> None:
     with _serving(tmp_path, _other_declaration(), TOKEN) as port:
         with pytest.raises(LocalServiceError, match="no process to restart"):
+            ensure_local_service(
+                _config(port, tmp_path), tmp_path / "other-service", env=_env_without_planner_gateway(tmp_path)
+            )
+
+
+def test_a_service_holding_another_workspaces_data_is_refused_and_left_serving(tmp_path: Path) -> None:
+    with _serving(tmp_path, load_declaration(PACKAGED_DECLARATION), TOKEN) as port:
+        with pytest.raises(LocalServiceError, match="give this workspace its own port"):
             ensure_local_service(_config(port, tmp_path), tmp_path / "home", env=_env_without_planner_gateway(tmp_path))
+        assert RemoteClient(_config(port, tmp_path)).health()["status"] == "ok"
+    assert not (tmp_path / "home").exists()
+
+
+def test_a_caller_that_must_not_restart_gets_the_stale_service_as_it_runs(tmp_path: Path) -> None:
+    config = _config(_free_port(), tmp_path)
+    home = tmp_path / "home"
+    before = _env_without_planner_gateway(tmp_path)
+    after = {**before, "HYPERLOOM_GLOBAL_KB_URL": "https://global.example", "HYPERLOOM_GLOBAL_KB_TOKEN": "global"}
+    first = ensure_local_service(config, home, env=before)
+    try:
+        kept = ensure_local_service(config, home, env=after, restart=False)
+
+        assert (kept.process, kept.restarted, kept.stale) == (None, False, "it was started with other settings")
+        assert first.process is not None and first.process.poll() is None
+        assert kept.health["pid"] == first.process.pid
+    finally:
+        _stop(first)
 
 
 def _stop(service: LocalService) -> None:
@@ -179,7 +205,7 @@ def test_a_service_serving_an_older_declaration_is_restarted_with_the_packaged_o
     env = _env_without_planner_gateway(tmp_path)
     older = subprocess.Popen(
         [sys.executable, "-m", "hyperloom_kb", "--declaration", str(declaration)]
-        + ["--home", str(tmp_path / "older"), "--port", str(port)],
+        + ["--home", str(tmp_path / "home"), "--port", str(port)],
         env={**env, "HYPERLOOM_KB_TOKEN": TOKEN, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -207,6 +233,14 @@ def test_a_service_that_cannot_start_is_reported_with_its_log(tmp_path: Path) ->
         ensure_local_service(_config(_free_port(), tmp_path), home, env=_env_without_planner_gateway(tmp_path))
 
     assert "Traceback" in (home / "service.log").read_text(encoding="utf-8")
+
+
+def test_a_home_that_cannot_hold_the_service_is_a_local_service_error(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(LocalServiceError, match="cannot start the Experience service"):
+        ensure_local_service(_config(_free_port(), tmp_path), home, env=_env_without_planner_gateway(tmp_path))
 
 
 @pytest.mark.parametrize("url", ["http://kb.example:8787", "https://127.0.0.1:8787"])

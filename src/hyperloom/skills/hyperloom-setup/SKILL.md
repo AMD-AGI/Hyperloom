@@ -245,8 +245,9 @@ Write the Anthropic keys plus the common keys:
   PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.experience_kb_service init-env
   ```
 
-  It points `HYPERLOOM_KB_URL` at the local service (`http://127.0.0.1:8787`)
-  and generates `HYPERLOOM_KB_TOKEN`, but only for a key that is missing or
+  It points `HYPERLOOM_KB_URL` at the workspace's own local service
+  (`http://127.0.0.1:<port>`, a port derived from the workspace path) and
+  generates `HYPERLOOM_KB_TOKEN`, but only for a key that is missing or
   still `<PLEASE_FILL_IN>`; it keeps every other value. It prints only whether
   each key was `written` or `kept`, never the token.
 - `Global Experience KB` (only when the user has one in Step 2):
@@ -456,7 +457,8 @@ and rerun this step. Do not continue to a demo until it succeeds.
 
 When the `.env` settings the service uses change (the Anthropic gateway, model,
 or global KB), the next run of this step or of an optimize launch restarts it
-with them.
+with them. Push and pull never restart it, so run this step before them after
+such a change.
 
 ### Global Experience KB
 

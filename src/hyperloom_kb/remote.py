@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import ipaddress
 import json
 import logging
@@ -37,7 +38,18 @@ from hyperloom_kb.schema import (
 
 log = logging.getLogger(__name__)
 
-_PERMANENT_HTTP_STATUSES = frozenset({HTTPStatus.BAD_REQUEST, HTTPStatus.CONFLICT})
+# Statuses about the request itself, which no retry changes: a proxy in front of a service answers an oversized
+# record with 413, and that record must not hold back every write after it.
+_PERMANENT_HTTP_STATUSES = frozenset(
+    {
+        HTTPStatus.BAD_REQUEST,
+        HTTPStatus.CONFLICT,
+        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        HTTPStatus.REQUEST_URI_TOO_LONG,
+        HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+        HTTPStatus.UNPROCESSABLE_ENTITY,
+    }
+)
 _SYNC_COUNTS = ("created", "unchanged", "skipped")
 _DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -82,13 +94,16 @@ class RemoteConfig:
         env: Mapping[str, str] | None = None,
         *,
         spool_root: Path | None = None,
+        timeout_seconds: float | None = None,
     ) -> RemoteConfig | None:
         values = os.environ if env is None else env
         base_url = str(values.get("HYPERLOOM_KB_URL") or "").strip()
         if not base_url:
             return None
         config = cls(base_url=base_url, token=str(values.get("HYPERLOOM_KB_TOKEN") or ""))
-        return config if spool_root is None else replace(config, spool_root=Path(spool_root))
+        if spool_root is not None:
+            config = replace(config, spool_root=Path(spool_root))
+        return config if timeout_seconds is None else replace(config, timeout_seconds=timeout_seconds)
 
 
 @dataclass(frozen=True)
@@ -135,6 +150,9 @@ class RemoteClient:
         self.config = config
         # An environment proxy cannot reach this host's loopback, and urllib proxies it unless NO_PROXY lists it.
         self._opener = opener or (_DIRECT.open if is_loopback(config.base_url) else urllib.request.urlopen)
+        # Set by a write the service could not take, cleared by one it took: until then every publish spools without
+        # a request, so an unreachable service costs one timeout rather than one per write.
+        self._spooling = False
 
     def _request(
         self,
@@ -165,7 +183,7 @@ class RemoteClient:
                 f"Experience service returned HTTP {exc.code}: {detail}",
                 retryable=exc.code not in _PERMANENT_HTTP_STATUSES,
             ) from exc
-        except (OSError, TimeoutError, ValueError) as exc:
+        except (OSError, TimeoutError, ValueError, http.client.HTTPException) as exc:
             raise RemoteClientError(f"Experience service request failed with {type(exc).__name__}") from exc
         if not isinstance(payload, dict):
             raise RemoteClientError("Experience service response is not an object")
@@ -183,6 +201,7 @@ class RemoteClient:
         limit: int | None = None,
         schema_ref: str | None = None,
         content_inline_limit: int | None = None,
+        render_budget_chars: int | None = None,
     ) -> RemoteReadResult:
         body: dict[str, JsonValue] = {"decision": decision, "context": dict(context)}
         if outcome is not None:
@@ -193,6 +212,8 @@ class RemoteClient:
             body["schema_ref"] = schema_ref
         if content_inline_limit is not None:
             body["content_inline_limit"] = content_inline_limit
+        if render_budget_chars is not None:
+            body["render_budget_chars"] = render_budget_chars
         try:
             payload = self._request("POST", "/v1/read", body)
             refs = payload.get("rendered_refs")
@@ -238,15 +259,21 @@ class RemoteClient:
         return self._write_result(payload, experience.id)
 
     def publish(self, experience: Experience, *, declaration: ExperienceDeclaration | None = None) -> RemoteWriteResult:
-        """Write one complete Experience; spool only retryable failures, with the declaration they need later."""
+        """Write one complete Experience; spool only retryable failures, with the declaration they need later.
 
-        try:
-            return self.write(experience, declaration=declaration)
-        except RemoteClientError as exc:
-            if not exc.retryable:
-                raise
-            self._spool(experience.id, self._write_body(experience, declaration))
-            return RemoteWriteResult("spooled", experience.id)
+        Once a write on this client fails retryably, later publishes spool without a request until ``flush_spool``
+        delivers one.
+        """
+
+        if not self._spooling:
+            try:
+                return self.write(experience, declaration=declaration)
+            except RemoteClientError as exc:
+                if not exc.retryable:
+                    raise
+                self._spooling = True
+        self._spool(experience.id, self._write_body(experience, declaration))
+        return RemoteWriteResult("spooled", experience.id)
 
     def _spool(self, experience_id: str, body: dict[str, JsonValue]) -> None:
         root = self.config.spool_root
@@ -309,9 +336,11 @@ class RemoteClient:
                 result = self.write(experience, declaration=declaration)
             except RemoteClientError as exc:
                 if exc.retryable:
+                    self._spooling = True
                     break
                 self._reject_spooled(path, str(exc))
                 continue
+            self._spooling = False
             path.unlink()
             results.append(result)
         return tuple(results)

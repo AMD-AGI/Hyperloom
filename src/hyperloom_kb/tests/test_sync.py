@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import io
 import threading
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from email.message import Message
 from pathlib import Path
 from typing import Any
 
@@ -171,6 +173,33 @@ def test_a_push_the_global_kb_drops_resumes_where_it_stopped(tmp_path: Path) -> 
     assert "URLError" in str(interrupted["error"])
     assert (resumed["status"], resumed["created"], resumed["unchanged"]) == ("completed", 2, 0)
     assert pushed == {_experience(schema, seq).id for seq in range(3)}
+
+
+def test_a_record_a_proxy_refuses_as_too_large_never_holds_back_the_rest(tmp_path: Path) -> None:
+    puts: list[str] = []
+
+    def refuses_the_second_write(request: urllib.request.Request, **options: Any) -> Any:
+        if request.get_method() == "PUT":
+            puts.append(request.full_url)
+            if len(puts) == 2:
+                body = io.BytesIO(b"<html>413 Request Entity Too Large</html>")
+                raise urllib.error.HTTPError(request.full_url, 413, "Request Entity Too Large", Message(), body)
+        return urllib.request.urlopen(request, **options)
+
+    schema = _declaration()
+    with _serving(_service(tmp_path / "global", schema, GLOBAL_TOKEN)) as global_url:
+        local_app = _service(tmp_path / "local", schema, LOCAL_TOKEN, global_url, opener=refuses_the_second_write)
+        with _serving(local_app) as local_url:
+            local = _client(local_url, LOCAL_TOKEN, tmp_path)
+            for seq in range(3):
+                local.write(_experience(schema, seq))
+            pushed = local.push()
+            again = local.push()
+
+    refused = puts[1].rsplit("/", 1)[-1]
+    assert (pushed["status"], pushed["created"]) == ("completed", 2)
+    assert [item["experience_id"] for item in pushed["rejected"]] == [refused]
+    assert (again["status"], again["created"], again["rejected"]) == ("completed", 0, [])
 
 
 def test_a_service_without_a_global_kb_refuses_to_sync(tmp_path: Path) -> None:

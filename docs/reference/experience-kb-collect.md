@@ -183,4 +183,6 @@ Maps Hyperloom `session_breakdown.json` (SBD V6) to the packaged
   ordered as `patch_path`, `patches_applied`, `patches_reverted` without
   duplicates.
 
-AgentX sessions are skipped until their Experience identity is supported.
+AgentX sessions are skipped until their Experience identity is supported, and a
+session whose `metadata.grading.objective` is not `output_throughput` is
+skipped because every Experience records `e2e_throughput@v1`.

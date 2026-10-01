@@ -17,7 +17,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.experience_kb_service import auto_push, check_auto_push, spool_root
+from hyperloom.inference_optimizer.experience_kb_service import (
+    REQUEST_TIMEOUT_SECONDS,
+    auto_push,
+    check_auto_push,
+    spool_root,
+)
 from hyperloom_kb import ConfigurationError, RemoteClientError, experience_kb_from_env
 from hyperloom_kb.collect import MappingError, SourceDocumentError, collect, load_mapping
 
@@ -40,12 +45,12 @@ def mapping_schema_ref() -> str:
 
 
 def validate_config() -> None:
-    """Fail before a run starts when a configured Experience KB could not accept its Experiences."""
+    """Raise when a configured Experience KB could not accept this run's Experiences, so launch can warn of it."""
 
     if not enabled():
         return
     expected = mapping_schema_ref()
-    target = experience_kb_from_env(spool_root=spool_root())
+    target = experience_kb_from_env(spool_root=spool_root(), timeout_seconds=REQUEST_TIMEOUT_SECONDS)
     if target.schema_ref != expected:
         raise ConfigurationError(
             f"{MAPPING} produces {expected}, but the configured Experience KB validates {target.schema_ref}"
@@ -60,7 +65,7 @@ def collect_session(session_dir: Path, breakdown: Mapping[str, Any]) -> None:
     if not enabled():
         return
     try:
-        target = experience_kb_from_env(spool_root=spool_root())
+        target = experience_kb_from_env(spool_root=spool_root(), timeout_seconds=REQUEST_TIMEOUT_SECONDS)
         report = collect(MAPPING, breakdown, kb=target, receipt=Path(session_dir) / RECEIPT)
     except (ConfigurationError, MappingError, RemoteClientError, SourceDocumentError, OSError):
         log.warning(

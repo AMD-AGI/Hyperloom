@@ -302,6 +302,13 @@ def test_planner_rejects_more_than_eight_signals() -> None:
         planner.plan(_request(schema), schema)
 
 
+def test_a_planner_call_gives_up_after_twenty_seconds_unless_configured_otherwise() -> None:
+    env = {"ANTHROPIC_BASE_URL": "https://planner.example", "ANTHROPIC_API_KEY": "secret", "CLAUDE_MODEL": "m"}
+
+    assert PlannerGatewayConfig.from_env(env).timeout_seconds == 20.0
+    assert PlannerGatewayConfig.from_env({**env, "LOCAL_KB_PLANNER_TIMEOUT_SECONDS": "45"}).timeout_seconds == 45.0
+
+
 def test_anthropic_backend_reports_truncated_tool_output() -> None:
     backend = AnthropicPlannerBackend(
         PlannerGatewayConfig(

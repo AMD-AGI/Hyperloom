@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -256,6 +257,7 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
         "schemas": {schema.schema_ref: 1},
         "pid": os.getpid(),
         "config_digest": "",
+        "home": str((tmp_path / "service").resolve()),
     }
 
 
@@ -289,6 +291,34 @@ def test_a_read_can_reference_large_change_content_instead_of_inlining_it(tmp_pa
     assert patch not in referenced.prompt_block
     assert _record_json(inline.prompt_block, large.id) == large.to_dict()
     assert inline.contents == ()
+
+
+def test_a_read_budget_carries_whole_records_and_only_the_contents_they_reference(tmp_path: Path) -> None:
+    schema = _declaration()
+    records = [
+        replace(_experience(schema, seq=seq, knob=knob), reasoning=f"Measured {knob} under load. " * 120)
+        for seq, knob in enumerate(("page_size", "chunk"))
+    ]
+    refs = {record.id: "sha256:" + hashlib.sha256(record.reasoning.encode()).hexdigest() for record in records}
+
+    with RunningServer(_app(tmp_path / "service", schema)) as url:
+        client = _client(url, tmp_path)
+        for record in records:
+            client.publish(record)
+        full = client.read(DECISION, _read_context(), content_inline_limit=2048)
+        starts = [match.start() for match in re.finditer(r"^Experience exp-", full.prompt_block, re.MULTILINE)]
+        one_record = starts[1] - starts[0] - len("\n\n")
+        budgeted = client.read(DECISION, _read_context(), content_inline_limit=2048, render_budget_chars=one_record)
+        nothing_fits = client.read(DECISION, _read_context(), content_inline_limit=2048, render_budget_chars=1)
+
+    assert {item["ref"] for item in full.contents} == set(refs.values())
+    assert all(record.reasoning not in full.prompt_block for record in records)
+    [shown] = budgeted.rendered_refs
+    assert _record_json(budgeted.prompt_block, shown.id)["reasoning"].startswith(f"<external content {refs[shown.id]}")
+    assert [item["ref"] for item in budgeted.contents] == [refs[shown.id]]
+    assert "render_budget_reached" in budgeted.warnings
+    assert (nothing_fits.prompt_block, nothing_fits.rendered_refs, nothing_fits.contents) == ("", (), ())
+    assert "render_budget_reached" in nothing_fits.warnings
 
 
 def test_read_defaults_to_ten_mixed_and_filters_by_outcome(tmp_path: Path) -> None:
@@ -540,6 +570,32 @@ def test_unavailable_service_fails_open_and_flushes_spool_idempotently(tmp_path:
     assert [item.status for item in flushed] == ["created"]
     assert replay.status == "unchanged"
     assert not tuple(spool.glob("spool-*.json"))
+
+
+def test_a_client_that_lost_its_service_spools_without_waiting_until_a_flush_delivers(tmp_path: Path) -> None:
+    schema = _declaration()
+    records = [_experience(schema, seq=seq, knob=f"knob_{seq}") for seq in range(3)]
+    attempts: list[str] = []
+    reachable = False
+
+    def opener(request: urllib.request.Request, **options: Any) -> Any:
+        attempts.append(request.get_method())
+        if not reachable:
+            raise urllib.error.URLError("offline")
+        return urllib.request.urlopen(request, **options)
+
+    with RunningServer(_app(tmp_path / "service", schema)) as url:
+        client = RemoteClient(RemoteConfig(url, TOKEN, spool_root=tmp_path / "spool"), opener=opener)
+        spooled = [client.publish(record).status for record in records]
+        tried_while_offline = list(attempts)
+        reachable = True
+        flushed = [item.status for item in client.flush_spool()]
+        after = client.publish(records[0]).status
+
+    assert spooled == ["spooled"] * 3
+    assert tried_while_offline == ["PUT"]
+    assert flushed == ["created"] * 3
+    assert after == "unchanged"
 
 
 def test_rejected_spool_file_does_not_block_later_writes(tmp_path: Path) -> None:

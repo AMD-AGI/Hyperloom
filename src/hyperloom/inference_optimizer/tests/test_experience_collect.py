@@ -311,7 +311,7 @@ def _document(timeline: list[dict[str, Any]]) -> dict[str, Any]:
                 "precision": "bf16",
                 "architecture": {"model_type": "qwen3", "model_class": "Qwen3ForCausalLM"},
             },
-            "grading": {"benchmark_mode": "synthetic"},
+            "grading": {"benchmark_mode": "synthetic", "objective": "output_throughput"},
         },
         "timeline": timeline,
     }

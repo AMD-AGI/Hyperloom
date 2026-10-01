@@ -37,6 +37,8 @@ class LocalService:
     # Only set when this call started the service; a service that was already serving is not ours to hold.
     process: subprocess.Popen[bytes] | None = None
     restarted: bool = False
+    # Why a service left serving runs with other settings than the caller's; empty when they match.
+    stale: str = ""
 
 
 def _address(url: str) -> tuple[str, int]:
@@ -55,7 +57,6 @@ def _listening(host: str, port: int) -> bool:
 
 
 def _spawn(host: str, port: int, home: Path, token: str, env: Mapping[str, str]) -> subprocess.Popen[bytes]:
-    home.mkdir(parents=True, exist_ok=True)
     child_env = dict(env)
     child_env["HYPERLOOM_KB_TOKEN"] = token
     package_root = str(Path(__file__).resolve().parent.parent)
@@ -71,15 +72,19 @@ def _spawn(host: str, port: int, home: Path, token: str, env: Mapping[str, str])
         "--port",
         str(port),
     ]
-    with (home / LOG_NAME).open("ab") as log:
-        return subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            env=child_env,
-            start_new_session=True,
-        )
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+        with (home / LOG_NAME).open("ab") as log:
+            return subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                env=child_env,
+                start_new_session=True,
+            )
+    except OSError as exc:
+        raise LocalServiceError(f"cannot start the Experience service from {home}: {exc}") from exc
 
 
 def _wait_until_listening(
@@ -119,6 +124,17 @@ def _stale(health: Mapping[str, JsonValue], env: Mapping[str, str]) -> str:
     return ""
 
 
+def _require_home(health: Mapping[str, JsonValue], home: Path, host: str, port: int) -> None:
+    """Refuse a service that holds another workspace's data, such as one a copied ``.env`` points at."""
+
+    served = health.get("home")
+    if isinstance(served, str) and Path(served).resolve() != home.resolve():
+        raise LocalServiceError(
+            f"the Experience service on {host}:{port} serves {served}, not {home}; "
+            "give this workspace its own port in HYPERLOOM_KB_URL"
+        )
+
+
 def _stop(health: Mapping[str, JsonValue], host: str, port: int, timeout_seconds: float) -> None:
     pid = health.get("pid")
     # A service in this very process (an embedded server) is never ours to signal.
@@ -142,10 +158,13 @@ def ensure_local_service(
     *,
     env: Mapping[str, str] | None = None,
     timeout_seconds: float = DEFAULT_START_TIMEOUT_SECONDS,
+    restart: bool = True,
 ) -> LocalService:
-    """Serve ``config.base_url`` from ``home`` with ``env``'s settings, restarting a service started otherwise.
+    """Serve ``config.base_url`` from ``home`` with ``env``'s settings.
 
-    Only a service that answers with this client's token is reused or restarted; anything else on the port is refused.
+    Only a service that answers with this client's token and serves ``home`` is reused; anything else on the port is
+    refused. One started with other settings is restarted, keeping its data, unless ``restart`` is false: then it is
+    left serving and returned with why it is stale, so a caller that only needs it answering never stops it under a run.
     """
 
     host, port = _address(config.base_url)
@@ -154,13 +173,18 @@ def ensure_local_service(
     restarted = False
     if _listening(host, port):
         health = _health(config)
-        if not _stale(health, launch_env):
+        _require_home(health, home, host, port)
+        reason = _stale(health, launch_env)
+        if not reason:
             return LocalService(health)
+        if not restart:
+            return LocalService(health, stale=reason)
         _stop(health, host, port, timeout_seconds)
         restarted = True
     process = _spawn(host, port, home, config.token, launch_env)
     _wait_until_listening(process, host, port, home / LOG_NAME, timeout_seconds)
     health = _health(config)
+    _require_home(health, home, host, port)
     if reason := _stale(health, launch_env):
         raise LocalServiceError(f"the Experience service on {host}:{port} is not usable: {reason}")
     return LocalService(health, process, restarted)
