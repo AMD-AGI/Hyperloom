@@ -20,6 +20,7 @@ def _writeback(tmp_path: Path, state: SharedState) -> WritebackCollaborator:
     # session_dir and shared_state are read-only properties that delegate to _coord;
     # provide a minimal stub so the factory works without a full Coordinator.
     from types import SimpleNamespace
+
     writer._coord = SimpleNamespace(session_dir=tmp_path, shared_state=state)
     return writer
 

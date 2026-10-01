@@ -40,6 +40,7 @@ from .mcp_emit_intent import (
     payload_contract,
 )
 
+
 def build_output_instructions(allowed_intents: Iterable[IntentType]) -> str:
     """Render the transport contract for one role's intent set."""
     from hyperloom.inference_optimizer.protocol.intent import IntentType as _IT

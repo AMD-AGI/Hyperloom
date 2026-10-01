@@ -233,7 +233,9 @@ def _lane(session_dir: Path, **overrides: Any):
             _maybe_route_build_outcomes=_noop,
         ),
         enablement_revalidation=types.SimpleNamespace(
-            _maybe_enqueue_enablement_baseline_revalidation=lambda: fake._maybe_enqueue_enablement_baseline_revalidation(),
+            _maybe_enqueue_enablement_baseline_revalidation=lambda: (
+                fake._maybe_enqueue_enablement_baseline_revalidation()
+            ),
         ),
         specialist_dispatch=types.SimpleNamespace(
             _warm_specialist_params=lambda *a, **k: fake._warm_specialist_params(*a, **k),

@@ -117,9 +117,7 @@ def test_normalize_budget_pct_falls_back_to_defaults():
 
 
 def test_prelude_exits_on_baseline_tput():
-    state = SharedState(
-        baseline_tput=0.0, phase="PRELUDE", phase_budget_pct={}, phase_started_unix=0.0, max_minutes=0
-    )
+    state = SharedState(baseline_tput=0.0, phase="PRELUDE", phase_budget_pct={}, phase_started_unix=0.0, max_minutes=0)
     assert phase_state.compute_next_phase(state) is None
     state.baseline_tput = 1234.5
     out = phase_state.compute_next_phase(state)
