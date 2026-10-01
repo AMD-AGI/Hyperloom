@@ -581,7 +581,7 @@ async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
         assert lease is not None
         before = await c.tasks.get(task.task_id)
 
-        await c.router._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -635,7 +635,7 @@ async def test_extend_lease_does_not_regrant_elapsed_time(coordinator_with_mocks
             (started_iso, task.task_id),
         )
 
-        await c.router._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -686,7 +686,7 @@ async def test_extend_lease_late_grant_keeps_new_increment_for_lanes_and_gpus(co
         started_iso = datetime.fromtimestamp(time.time() - 3000, tz=timezone.utc).isoformat()
         await c.db.execute("UPDATE tasks SET updated_at=? WHERE task_id=?", (started_iso, task.task_id))
 
-        await c.router._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -733,7 +733,7 @@ async def test_extend_lease_reports_degraded_when_gpu_refresh_fails(coordinator_
 
         c.writeback._record_observation = _capture  # type: ignore[method-assign]
 
-        await c.router._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -767,7 +767,7 @@ async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mo
         await c.tasks.transition(task.task_id, "running")
         _sub.clear_wall_budget_extension(task.task_id)
 
-        await c.router._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -777,7 +777,7 @@ async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mo
         assert _sub.wall_budget_extension(task.task_id) == 600.0
 
         # Repeated extensions accumulate on the live deadline.
-        await c.router._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -820,7 +820,7 @@ async def test_extend_lease_survives_wall_budget_grant_failure(coordinator_with_
 
         c.writeback._record_observation = _capture  # type: ignore[method-assign]
         try:
-            await c.router._handle_intent(
+            await c.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.EXTEND_LEASE,
@@ -874,7 +874,7 @@ async def test_extend_lease_survives_unreadable_running_age(coordinator_with_moc
 
         c.tasks.get = _get  # type: ignore[method-assign]
 
-        await c.router._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -906,7 +906,7 @@ async def test_extend_lease_rejects_non_running_task(coordinator_with_mocks):
             idempotency_key="k-extend-2",
             lease_ttl_sec=1800,
         )
-        await c.router._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -929,7 +929,7 @@ async def test_send_message_to_specialist_writes_inbox(coordinator_with_mocks):
 
     c = coordinator_with_mocks
     try:
-        await c.router._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.SEND_MESSAGE,
@@ -963,7 +963,7 @@ async def test_send_message_to_specialist_prefers_worktree_inbox(coordinator_wit
         workspace = runs_dir(c.session_dir, "specialist", "task-wt")
         (workspace / "worktree").mkdir(parents=True, exist_ok=True)
 
-        await c.router._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.SEND_MESSAGE,
@@ -1012,7 +1012,7 @@ async def test_extend_lease_also_pushes_gpu_rows(coordinator_with_mocks):
             ),
         )
 
-        await c.router._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,

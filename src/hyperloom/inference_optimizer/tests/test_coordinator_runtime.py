@@ -704,7 +704,7 @@ async def test_coordinator_review_verdict_approve_creates_task(session_dir):
                 "reasoning": "matches kb-1",
             },
         )
-        await c.router._handle_intent("critic", verdict)
+        await c.router.handle_intent("critic", verdict)
 
         # Decided proposals are removed from pending_proposals on verdict.
         # Verify via the decision bus event instead.
@@ -728,7 +728,7 @@ async def test_coordinator_review_verdict_reject_no_task(session_dir):
     try:
         await c.tick(1)
         proposal_id = next(iter(c.state.pending_proposals.keys()))
-        await c.router._handle_intent(
+        await c.router.handle_intent(
             "critic",
             Intent(
                 type=IntentType.REVIEW_VERDICT,
@@ -959,7 +959,7 @@ async def test_coordinator_prune_branch_cancels_family_and_records_advisory(sess
         a = await c.tasks.create(kind="baseline", params={}, idempotency_key="ka")
         b = await c.tasks.create(kind="baseline", params={}, idempotency_key="kb")
 
-        await c.router._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
@@ -974,7 +974,7 @@ async def test_coordinator_prune_branch_cancels_family_and_records_advisory(sess
         assert "baseline" in c.shared_state.pruned_families
 
         # Future propose_action carries an advisory but is not dropped.
-        await c.router._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PROPOSE_ACTION,
@@ -996,7 +996,7 @@ async def test_coordinator_prune_branch_queued_scope_drains_without_retiring(ses
         a = await c.tasks.create(kind="baseline", params={}, idempotency_key="qa")
         b = await c.tasks.create(kind="baseline", params={"tag": "x"}, idempotency_key="qb")
 
-        await c.router._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,

@@ -353,7 +353,7 @@ class TestIntentPathsAreGated:
             recorded.append(denied)
 
         monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
-        await coord.router._handle_delegate("orchestration", _delegate(_EXPENSIVE_ACTION, "d-budget"))
+        await coord.router.handle_delegate("orchestration", _delegate(_EXPENSIVE_ACTION, "d-budget"))
         assert [d.rule for d in recorded] == ["time_budget"]
         assert [t for t in await coord.tasks.queued() if t.kind == _EXPENSIVE_ACTION] == []
 
@@ -365,7 +365,7 @@ class TestIntentPathsAreGated:
     ):
         _set_budget(coord, minutes=600)
         monkeypatch.setattr(coord.shared_state, "is_pruned", lambda a: False)
-        await coord.router._handle_delegate("orchestration", _delegate(_EXPENSIVE_ACTION, "d-ok"))
+        await coord.router.handle_delegate("orchestration", _delegate(_EXPENSIVE_ACTION, "d-ok"))
         assert [t for t in await coord.tasks.queued() if t.kind == _EXPENSIVE_ACTION]
 
     @pytest.mark.asyncio

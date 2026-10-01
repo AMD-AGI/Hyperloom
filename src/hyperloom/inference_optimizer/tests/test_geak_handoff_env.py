@@ -133,8 +133,8 @@ async def test_handoff_transports_current_best_launch_controls(
 @pytest.mark.parametrize(
     ("current", "observed_flags", "expected_max_len", "expected_mem"),
     [
-        ({"extra_server_args": "", "args_mode": "replace"}, "", 0, 0.0),
-        ({"remove_args": ["--max-model-len", "--gpu-memory-utilization"]}, "", 0, 0.0),
+        ({"extra_server_args": "", "args_mode": "replace"}, "", None, None),
+        ({"remove_args": ["--max-model-len", "--gpu-memory-utilization"]}, "", None, None),
         (
             {"extra_server_args": "--max-model-len 4096 --gpu-memory-utilization 0.7", "args_mode": "replace"},
             "",
@@ -161,5 +161,9 @@ async def test_handoff_serving_fidelity_respects_current_best_launch_controls(
         observed_flags=observed_flags,
     )
 
-    assert handoff["max_model_len"] == expected_max_len
-    assert handoff["mem_fraction"] == pytest.approx(expected_mem)
+    if expected_max_len is None:
+        assert "max_model_len" not in handoff
+        assert "mem_fraction" not in handoff
+    else:
+        assert handoff["max_model_len"] == expected_max_len
+        assert handoff["mem_fraction"] == pytest.approx(expected_mem)

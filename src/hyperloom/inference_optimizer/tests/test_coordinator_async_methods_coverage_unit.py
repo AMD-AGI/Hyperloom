@@ -939,7 +939,7 @@ async def test_fan_out_wave_rejects_invalid_entries(coord: Coordinator, monkeypa
     called = []
     monkeypatch.setattr(
         coord.router,
-        "_handle_delegate",
+        "handle_delegate",
         lambda *a, **k: called.append(a),
     )
     intent = Intent(type=IntentType.DELEGATE, payload={"idempotency_key": "w", "action_name": "specialist"})

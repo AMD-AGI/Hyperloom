@@ -173,7 +173,7 @@ async def test_handle_request_emits_start_and_end(session_dir, monkeypatch, tmp_
                 "params": {"trace_input": "/tmp/trace-A.json.gz"},
             },
         )
-        await c.router._handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", intent)
 
         ta_events = [e for e in c.shared_state.lifecycle if e["step"] == "trace_analyze"]
         assert len(ta_events) == 2, f"expected START + END, got {ta_events}"
@@ -232,7 +232,7 @@ async def test_handle_request_end_surfaces_tracelens_report_paths(
                 "params": {"trace_input": "/tmp/trace-B.json.gz"},
             },
         )
-        await c.router._handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", intent)
 
         end = [e for e in c.shared_state.lifecycle if e["step"] == "trace_analyze" and e["status"] == "END"][-1]
         for key, val in report_fields.items():
@@ -264,7 +264,7 @@ async def test_handle_request_failed_handler_emits_error(session_dir, monkeypatc
                 "params": {"trace_input": "/tmp/t.json.gz"},
             },
         )
-        await c.router._handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", intent)
 
         ta_events = [e for e in c.shared_state.lifecycle if e["step"] == "trace_analyze"]
         assert [e["status"] for e in ta_events] == ["START", "ERROR"]
@@ -343,7 +343,7 @@ async def test_handle_request_cache_hit_emits_lone_end(session_dir, monkeypatch)
                 "params": {"trace_input": "/tmp/trace.json.gz"},
             },
         )
-        await c.router._handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", intent)
 
         ta = [e for e in c.shared_state.lifecycle if e["step"] == "trace_analyze"]
         # A cache hit never runs the handler: exactly one END, no START.
@@ -390,7 +390,7 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
             type=IntentType.REQUEST,
             payload={"target_agent": "kernel_agent", "kind": "integrate", "params": {"patch_path": "/tmp/p.patch"}},
         )
-        await c.router._handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", intent)
 
         ig = [e for e in c.shared_state.lifecycle if e["step"] == "integrate"]
         assert [e["status"] for e in ig] == ["END"], f"want lone END, got {ig}"
