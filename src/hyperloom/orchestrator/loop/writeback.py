@@ -38,7 +38,6 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     Journal,
     JournalEntry,
     OUTCOME_KEEP,
-    OUTCOME_NO_PROMOTE,
     OUTCOME_REVERT,
     Verdict,
     classify_change_kind,
@@ -364,7 +363,7 @@ class _PromoteOutcome:
     ``adopted_variants`` names, by fingerprint, the explore winners whose lift
     landed."""
 
-    verdict: Verdict = Verdict.RECORDED
+    verdict: Verdict
     adopted_variants: set[str] = field(default_factory=set)
     changed: bool = False
     audit_decision: str | None = None
@@ -1189,8 +1188,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
             bool: ``True`` when the result should go through
                 :meth:`_promote_to_shared_state`.
         """
-        if not isinstance(result, dict):
-            return False
         if task_kind == "baseline":
             # A baseline whose accuracy eval failed measured throughput but must
             # not anchor; route it to _handle_unpromotable_result for enablement.
@@ -1702,6 +1699,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
             round_id = str(result_dict.get("round_id") or "")
             for vo in per_variant:
+                adopted = str(vo.get("fingerprint") or "") in adopted_variants
                 outcome = str(vo.get("outcome") or "") if isinstance(vo, dict) else ""
                 if outcome and outcome not in _NON_ATTEMPT_OUTCOMES:
                     metrics = vo.get("metrics") if isinstance(vo.get("metrics"), dict) else {}
@@ -1712,7 +1710,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         fingerprint=str(vo.get("fingerprint") or ""),
                         variant_name=str(vo.get("variant_name") or ""),
                         outcome=outcome,
-                        adopted=str(vo.get("fingerprint") or "") in adopted_variants,
+                        adopted=adopted,
                         gain_pct=metrics.get("gain_pct"),
                         before_tput=metrics.get("base_tput"),
                         after_tput=metrics.get("tput"),
@@ -1723,7 +1721,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     task=task,
                     source_session_id=source_session_id,
                     variant_outcome=vo,
-                    adopted=str(vo.get("fingerprint") or "") in adopted_variants,
+                    adopted=adopted,
                 )
         else:
             self._record_fact_per_task(
@@ -2056,16 +2054,15 @@ class WritebackCollaborator(CoordinatorCollaborator):
         """
         journal = self._ensure_journal()
         outcome_raw = str(variant_outcome.get("outcome") or "")
+        if outcome_raw == "SKIPPED_DEDUP":
+            return
         if outcome_raw == "KEEP":
-            outcome = OUTCOME_KEEP if adopted else OUTCOME_NO_PROMOTE
-        # ``KEEP_UNSTABLE`` is only reachable for a session recorded before the
-        # per-KEEP confirmation round was removed; it still reads as a revert.
-        elif outcome_raw in ("REVERT", "FAILED", "KEEP_UNSTABLE"):
-            outcome = OUTCOME_REVERT
-        elif outcome_raw == "SKIPPED_DEDUP":
-            return  # nothing to journal
+            verdict = Verdict.ADOPTED if adopted else Verdict.REFUSED
+        elif outcome_raw in ("REVERT", "FAILED"):
+            verdict = Verdict.REVERTED
         else:
-            outcome = OUTCOME_NO_PROMOTE
+            verdict = Verdict.REFUSED
+        outcome = derive_journal_outcome(verdict, variant_outcome)
         variant_name = str(variant_outcome.get("variant_name") or "")
         metrics = variant_outcome.get("metrics") or {}
         gain_pct = to_float(metrics.get("gain_pct") if isinstance(metrics, dict) else None)
@@ -3528,7 +3525,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         handler_name = self._PROMOTE_HANDLERS.get(task_kind)
         if handler_name is None:
             return _PromoteOutcome(verdict=Verdict.RECORDED)
-        outcome = _PromoteOutcome()
+        outcome = _PromoteOutcome(verdict=Verdict.RECORDED)
         await getattr(self, handler_name)(result, task, outcome)
         # sweep / conc_sweep already recorded + saved + returned via their handler.
         if outcome.early_return:
@@ -3925,7 +3922,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote a profile result: trace path / status, optional current_best, roofline anchor."""
-        outcome.verdict = Verdict.RECORDED
         changed = False
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
@@ -4101,7 +4097,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote a roofline result: audit + failure streak + roofline anchor (reads last_trace_analyze)."""
-        outcome.verdict = Verdict.RECORDED
         changed = False
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
@@ -4883,7 +4878,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
         conc_sweep event carries the skip reason, the budget verdict and the
         summary instead.
         """
-        outcome.verdict = Verdict.RECORDED
         outcome.early_return = True
         # Write last_conc_sweep so the SWEEP exit logic can distinguish an honest sweep_done from a no-pair sweep_failed.
         self.shared_state.record_conc_sweep(result)
