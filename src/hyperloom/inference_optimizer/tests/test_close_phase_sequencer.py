@@ -1388,7 +1388,7 @@ async def test_report_failure_emits_lifecycle_error_and_records_failed_step(tmp_
     async def _enqueue_fails(*, reason: str) -> None:
         raise RuntimeError("db down")
 
-    coord.writeback._emit_lifecycle = _emit  # type: ignore[method-assign]
+    coord.writeback.emit_lifecycle = _emit  # type: ignore[method-assign]
     close._record_close_step = _record  # type: ignore[method-assign]
     close._enqueue_internal_report_task = _enqueue_fails  # type: ignore[method-assign]
 

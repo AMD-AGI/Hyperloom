@@ -520,7 +520,7 @@ def test_close_skips_a_stack_that_grew_after_validation(tmp_path: Path) -> None:
     def _must_not_finalize_journal():
         raise AssertionError("an unvalidated working recipe reached journal finalization")
 
-    coord.writeback._ensure_journal = _must_not_finalize_journal
+    coord.writeback.ensure_journal = _must_not_finalize_journal
 
     outcome = coord.writeback.finalize_recipe_and_journal()
 
@@ -553,7 +553,7 @@ def test_lift_then_validation_leaves_the_recipe_publishable(tmp_path: Path) -> N
     state.baseline_tput = 1000.0
     state.current_best = {"action": "baseline", "tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
 
-    assert coord.writeback._lift_to_current_best(
+    assert coord.writeback.lift_to_current_best(
         "explore",
         1100.0,
         {"name": "page16", "extra_server_args": "--page-size 16", "candidate_extra_server_args": "--page-size 16"},

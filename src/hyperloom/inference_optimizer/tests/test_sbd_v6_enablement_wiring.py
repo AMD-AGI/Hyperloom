@@ -174,7 +174,7 @@ def _lane(session_dir: Path, **overrides: Any):
         session_dir=str(session_dir),
         run_deadline=None,
         _warm_specialist_params=_noop,
-        _record_observation=_noop,
+        record_observation=_noop,
         _maybe_enqueue_specialist_requested_build=_noop,
         _maybe_escalate_to_targeted_build=_noop,
         _read_enablement_source_context=lambda _sig: "",
@@ -244,7 +244,7 @@ def _lane(session_dir: Path, **overrides: Any):
             _framework_gpu_params=lambda: fake._framework_gpu_params(),
         ),
         writeback=types.SimpleNamespace(
-            _record_observation=lambda *a, **k: fake._record_observation(*a, **k),
+            record_observation=lambda *a, **k: fake.record_observation(*a, **k),
         ),
         dispatcher=types.SimpleNamespace(
             _time_budget_denial_for_action=lambda a: fake._time_budget_denial_for_action(a),

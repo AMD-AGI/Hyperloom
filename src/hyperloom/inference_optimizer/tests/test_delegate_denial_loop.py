@@ -150,7 +150,7 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
                 type=IntentType.DELEGATE,
                 payload={"action_name": "baseline", "target_proposal_msg_id": "proposal-42"},
             )
-            await coordinator.writeback._record_policy_denied(
+            await coordinator.writeback.record_policy_denied(
                 "orchestration",
                 intent,
                 PolicyDenied("denied", rule="phase_action_not_allowed", hint="wait"),
@@ -181,13 +181,13 @@ async def test_policy_denial_streak_records_streak_at_two(session_dir):
 
         intent = _delegate(action="backends", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
-        await c.writeback._record_policy_denied(
+        await c.writeback.record_policy_denied(
             "orchestration",
             intent,
             pd,
             action_name="backends",
         )
-        await c.writeback._record_policy_denied(
+        await c.writeback.record_policy_denied(
             "orchestration",
             intent,
             pd,
@@ -212,7 +212,7 @@ async def test_policy_denial_streak_no_longer_prunes_family_at_five(session_dir)
         intent = _delegate(action="params", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
         for _ in range(5):
-            await c.writeback._record_policy_denied(
+            await c.writeback.record_policy_denied(
                 "orchestration",
                 intent,
                 pd,
@@ -240,7 +240,7 @@ async def test_policy_denial_streak_no_longer_stops_run_at_ten(session_dir):
         intent = _delegate(action="backends", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
         for _ in range(10):
-            await c.writeback._record_policy_denied(
+            await c.writeback.record_policy_denied(
                 "orchestration",
                 intent,
                 pd,
@@ -266,7 +266,7 @@ async def test_successful_delegate_resets_policy_denial_streak(session_dir):
 
         intent = _delegate(key="k-reset")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
-        await c.writeback._record_policy_denied(
+        await c.writeback.record_policy_denied(
             "orchestration",
             intent,
             pd,

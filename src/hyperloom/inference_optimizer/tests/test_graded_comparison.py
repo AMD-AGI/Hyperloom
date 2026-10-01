@@ -497,7 +497,7 @@ def baseline_writer(monkeypatch, tmp_path):
     coord = make_coordinator(tmp_path, shared_state_overrides={"framework": "vllm", "benchmark_mode": "agentx"})
     writer = coord.writeback
     monkeypatch.setattr(coord.gap_refresh, "_refresh_gaps", AsyncMock())
-    monkeypatch.setattr(writer, "_drain_queued_baselines", AsyncMock())
+    monkeypatch.setattr(writer, "drain_queued_baselines", AsyncMock())
     monkeypatch.setattr(writer, "_should_run_prelude_bootstrap", lambda _tput: False)
     monkeypatch.setattr(coord.shared_state, "record_baseline_roofline_ceiling", Mock())
     return writer, _PromoteOutcome(verdict=Verdict.RECORDED)

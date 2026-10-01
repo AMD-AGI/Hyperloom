@@ -99,7 +99,7 @@ async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, 
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
     c.phase_kernel._record_geak_kernel_journey = lambda _result: None
-    summary = c.writeback._geak_rebench_params(reason="unit")
+    summary = c.writeback.geak_rebench_params(reason="unit")
     assert summary["fallback"] == "geak_harness"
     await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
@@ -126,7 +126,7 @@ async def test_agentx_2b_dispatch_uses_canonical_recipe_not_geak_client(coordina
         "accepted_config": {"flags": "--candidate", "env": ""},
     }
 
-    params = c.writeback._geak_rebench_params(reason="unit")
+    params = c.writeback.geak_rebench_params(reason="unit")
 
     assert params.get("geak_fallback") is True
     assert params["config_path"] == st.baseline_config_path
@@ -160,7 +160,7 @@ async def test_geak_rebench_preserves_native_base_removal_controls(
     if args_mode is not None:
         st.current_best.update(remove_args=remove_args, unset_envs=unset_envs, args_mode=args_mode)
     st.geak_result = {}
-    native = await c.writeback._enqueue_internal_stack_rebench(reason="resume")
+    native = await c.writeback.enqueue_internal_stack_rebench(reason="resume")
     native_row = await c.tasks.get(str(native["task_id"]))
     base_keys = {"base_remove_args", "base_unset_envs", "base_args_mode"}
     native_controls = {key: value for key, value in native_row.params.items() if key in base_keys}
@@ -179,7 +179,7 @@ async def test_geak_rebench_preserves_native_base_removal_controls(
             "env": "SGLANG_USE_AITER=1",
         },
     }
-    enqueued = c.writeback._geak_rebench_params(reason="geak_e2e_win")
+    enqueued = c.writeback.geak_rebench_params(reason="geak_e2e_win")
 
     assert enqueued.get("geak_fallback") is True
     assert enqueued["grid"][0]["extra_args"] == "--fp8-gemm-backend aiter"
@@ -302,7 +302,7 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     state.baseline_tput = 100.0
     state.current_best = {"tput": 110.0, **current}
     state.geak_result = {"schema_version": 2, "status": "ok", "accepted_config": accepted}
-    enqueued = coordinator.writeback._geak_rebench_params(reason="launch_controls_regression")
+    enqueued = coordinator.writeback.geak_rebench_params(reason="launch_controls_regression")
     task = await coordinator.tasks.create(kind="explore", params=enqueued, idempotency_key="geak-revalidate-c0")
     calls = []
     fingerprints = []
@@ -368,7 +368,7 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     state.geak_result = {}
     state.save(coordinator.session_dir)
     coordinator.shared_state = SharedState.load_or_init(coordinator.session_dir)
-    resumed = await coordinator.writeback._enqueue_internal_stack_rebench(reason="launch_controls_resume")
+    resumed = await coordinator.writeback.enqueue_internal_stack_rebench(reason="launch_controls_resume")
     resume_task = await coordinator.tasks.get(str(resumed["task_id"]))
     await ExploreExecutor(session_dir=coordinator.session_dir)(
         SimpleNamespace(task=resume_task, extra={"shared_state": coordinator.shared_state})
@@ -410,7 +410,7 @@ async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     )
     st.current_best = {"extra_server_args": "--incumbent", **controls}
 
-    params = c.writeback._geak_rebench_params(reason="geak_e2e_win")
+    params = c.writeback.geak_rebench_params(reason="geak_e2e_win")
     task = await c.tasks.create(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
     entry = task.params["grid"][0]
     ran = GridVariant(
@@ -436,7 +436,7 @@ async def test_structured_environment_alone_dispatches_geak_rebench(coordinator)
     st.baseline_tput = 100.0
     st.geak_result = {"status": "ok", "accepted_config": {"env_map": {"SGLANG_USE_AITER": "1"}}}
 
-    params = coordinator.writeback._geak_rebench_params(reason="geak_e2e_win")
+    params = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
     entry = params["grid"][0]
     ran = GridVariant(str(entry["name"]), str(entry["extra_args"]), dict(entry["extra_envs"]))
     assert params["geak_fallback"] is True
@@ -451,7 +451,7 @@ async def test_empty_structured_environment_does_not_rebench_legacy_values(coord
     st.baseline_tput = 100.0
     st.geak_result = {"status": "ok", "accepted_config": {"env_map": {}, "env": legacy_env}}
 
-    enqueued = coordinator.writeback._geak_rebench_params(reason="geak_e2e_win")
+    enqueued = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
     assert enqueued == {"skipped": True, "reason": "geak_no_material"}
     assert not await coordinator.tasks.queued()
 
@@ -460,7 +460,7 @@ async def test_empty_structured_environment_does_not_rebench_legacy_values(coord
 @pytest.mark.parametrize("env_map", [None, [], {"SGLANG_USE_AITER": 1}, {"BAD-NAME": "1"}, {"VALID": "a\0b"}])
 async def test_malformed_structured_environment_does_not_dispatch(coordinator, env_map) -> None:
     coordinator.shared_state.geak_result = {"status": "ok", "accepted_config": {"env_map": env_map}}
-    result = coordinator.writeback._geak_rebench_params(reason="geak_e2e_win")
+    result = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
     assert result == {"skipped": True, "reason": "geak_invalid_config"}
     assert coordinator.shared_state.geak_result["revalidation_status"] == "no_promote"
     assert not coordinator.shared_state.geak_pending
@@ -474,7 +474,7 @@ async def test_malformed_structured_environment_does_not_dispatch(coordinator, e
 )
 async def test_artifact_only_result_requires_its_own_harness(coordinator, material) -> None:
     coordinator.shared_state.geak_result = {"status": "ok", **material}
-    enqueued = coordinator.writeback._geak_rebench_params(reason="geak_e2e_win")
+    enqueued = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
     assert enqueued == {"skipped": True, "reason": "geak_material_requires_harness", "fallback": "geak_harness"}
     assert not await coordinator.tasks.queued()
 
@@ -492,7 +492,7 @@ async def test_recovered_empty_map_closes_without_fallback(coordinator, tmp_path
     async def _must_not_fallback(**_kwargs):
         pytest.fail("empty optimization must not launch a fallback")
 
-    monkeypatch.setattr(c.writeback, "_validate_geak_via_geak_harness", _must_not_fallback)
+    monkeypatch.setattr(c.writeback, "validate_geak_via_geak_harness", _must_not_fallback)
     await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert c.shared_state.geak_result["revalidation_status"] == "no_material"
@@ -580,7 +580,7 @@ async def test_resume_stack_revalidate_promotes_material_geak_candidate(coordina
     )
     st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
 
-    await c.writeback._promote_to_shared_state(
+    await c.writeback.promote_to_shared_state(
         task.kind,
         {
             "output_throughput": 120.0,
@@ -624,7 +624,7 @@ async def test_resume_stack_revalidate_rejects_same_config_noise(coordinator) ->
     )
     st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
 
-    await c.writeback._promote_to_shared_state(
+    await c.writeback.promote_to_shared_state(
         task.kind,
         {
             "output_throughput": 120.0,
@@ -688,7 +688,7 @@ async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordin
     )
     st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
 
-    await c.writeback._promote_to_shared_state(
+    await c.writeback.promote_to_shared_state(
         task.kind,
         {
             "output_throughput": 120.0,
@@ -986,9 +986,7 @@ async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path,
         monkeypatch.undo()
 
     assert revalidations == ["geak_e2e_win_recovered"]
-    assert (
-        c.writeback._geak_rebench_params(reason="check")["grid"][0]["extra_args"] == fresh["accepted_config"]["flags"]
-    )
+    assert c.writeback.geak_rebench_params(reason="check")["grid"][0]["extra_args"] == fresh["accepted_config"]["flags"]
     assert st.geak_result["final_throughput_tok_s"] == pytest.approx(fresh["final_throughput_tok_s"])
 
 
@@ -1033,11 +1031,11 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
     monkeypatch.setattr(state, "session_budget_usable_sec", lambda **_kwargs: session_remaining_sec)
     if source == "geak":
         state.geak_result = {"status": "ok", "accepted_config": {"flags": "--mem-fraction-static 0.9"}}
-        params = coordinator.writeback._geak_rebench_params(reason="runtime_budget_regression")
+        params = coordinator.writeback.geak_rebench_params(reason="runtime_budget_regression")
         task = await coordinator.tasks.create(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
     else:
         state.current_best = {"extra_server_args": "--mem-fraction-static 0.9"}
-        enqueued = await coordinator.writeback._enqueue_internal_stack_rebench(reason="runtime_budget_regression")
+        enqueued = await coordinator.writeback.enqueue_internal_stack_rebench(reason="runtime_budget_regression")
         task = await coordinator.tasks.get(str(enqueued["task_id"]))
     calls = []
 
@@ -1085,7 +1083,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     state.baseline_tput = 0.0
     for name, tput in [("sglang_custom.sh", 100.0), ("rejected_script.sh", 90.0)]:
         task = await coordinator.tasks.create(kind="baseline", params={"benchmark_script": name}, idempotency_key=name)
-        await coordinator.writeback._promote_to_shared_state(
+        await coordinator.writeback.promote_to_shared_state(
             "baseline", {"output_throughput": tput, "materialized_config": str(baseline)}, task=task
         )
     assert state.baseline_tput == 100.0
@@ -1096,7 +1094,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
             params={"reason": "enablement_eval_revalidation", "benchmark_script": "sglang_custom.sh"},
             idempotency_key="revalidate-baseline",
         )
-        await coordinator.writeback._promote_to_shared_state(
+        await coordinator.writeback.promote_to_shared_state(
             "baseline", {"output_throughput": 105.0, "materialized_config": str(baseline)}, task=task
         )
     state.save(coordinator.session_dir)
@@ -1108,10 +1106,10 @@ async def test_internal_stack_rebench_preserves_baseline_script(
         state.current_best = {"extra_server_args": "--mem-fraction-static 0.9"}
     monkeypatch.setenv("GPU_TYPE", "mi355x")
     if source == "geak":
-        params = coordinator.writeback._geak_rebench_params(reason="script_regression")
+        params = coordinator.writeback.geak_rebench_params(reason="script_regression")
         task = await coordinator.tasks.create(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
     else:
-        enqueued = await coordinator.writeback._enqueue_internal_stack_rebench(reason="script_regression")
+        enqueued = await coordinator.writeback.enqueue_internal_stack_rebench(reason="script_regression")
         task = await coordinator.tasks.get(str(enqueued["task_id"]))
     calls = []
 
@@ -1186,7 +1184,7 @@ async def test_invalid_config_with_real_artifact_is_rejected_before_rebench(coor
         "accepted_config": config,
         "accepted_kernels": ["real_kernel"],
     }
-    result = coordinator.writeback._geak_rebench_params(reason="invalid_config")
+    result = coordinator.writeback.geak_rebench_params(reason="invalid_config")
     assert result == {"skipped": True, "reason": "geak_invalid_config"}
     assert coordinator.shared_state.geak_result["revalidation_status"] == "no_promote"
     assert "accepted_config" in coordinator.shared_state.geak_result["revalidation_error"]
@@ -1312,7 +1310,7 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
         idempotency_key="geak-revalidate-c0",
         task_id="refused-rebench",
     )
-    await c.writeback._promote_to_shared_state(
+    await c.writeback.promote_to_shared_state(
         rebench.kind,
         {"output_throughput": 150.0, "best_variant": {"fingerprint": "mismatched-hash"}, "winners": []},
         task=rebench,

@@ -151,7 +151,7 @@ class _ReapStub:
         self.shared_state = SimpleNamespace(phase="PRELUDE", macro_cycle=0)
         _outer = self
         self.writeback = SimpleNamespace(
-            _handle_unpromotable_result=lambda task, result: _outer._handle_unpromotable_result(task, result)
+            handle_unpromotable_result=lambda task, result: _outer._handle_unpromotable_result(task, result)
         )
 
     async def _noop_async(self, *_args: Any, **_kwargs: Any) -> None:

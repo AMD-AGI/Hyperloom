@@ -72,7 +72,7 @@ def test_a_real_lift_records_the_anchor_it_beat(session_dir):
     with session_scope(session_dir):
         coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
 
-        assert coord.writeback._lift_to_current_best("explore", 1100.0, {"name": "page-size-64"}) is True
+        assert coord.writeback.lift_to_current_best("explore", 1100.0, {"name": "page-size-64"}) is True
 
         rows = _rows()
         assert len(rows) == 1
@@ -87,8 +87,8 @@ def test_a_real_lift_records_the_anchor_it_beat(session_dir):
 def test_the_row_index_matches_the_stack_the_lift_appended_to(session_dir):
     with session_scope(session_dir):
         coord = _coord(session_dir)
-        coord.writeback._lift_to_current_best("explore", 1100.0, {"name": "first"})
-        coord.writeback._lift_to_current_best("explore", 1200.0, {"name": "second"})
+        coord.writeback.lift_to_current_best("explore", 1100.0, {"name": "first"})
+        coord.writeback.lift_to_current_best("explore", 1200.0, {"name": "second"})
 
         rows = _rows()
         stack = coord.shared_state.optimization_stack
@@ -100,8 +100,8 @@ def test_the_row_index_matches_the_stack_the_lift_appended_to(session_dir):
 def test_a_chain_of_real_lifts_reconciles_against_its_own_baseline(session_dir):
     with session_scope(session_dir):
         coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
-        coord.writeback._lift_to_current_best("explore", 1100.0, {"name": "first"})
-        coord.writeback._lift_to_current_best("integrate", 1250.0, {"name": "second"})
+        coord.writeback.lift_to_current_best("explore", 1100.0, {"name": "first"})
+        coord.writeback.lift_to_current_best("integrate", 1250.0, {"name": "second"})
 
         ext, status = stack_event.assemble_stack_ext(stack_event_parts(), event=stack_event.stack_event_id())
         assert ext["attributed_gain_pct"] == 25.0
@@ -126,7 +126,7 @@ def test_a_degraded_agentx_lift_is_refused(session_dir, monkeypatch):
         }
 
         assert (
-            coord.writeback._lift_to_current_best(
+            coord.writeback.lift_to_current_best(
                 "explore",
                 1100.0,
                 {
@@ -145,15 +145,15 @@ def test_a_refused_lift_records_nothing(session_dir):
     with session_scope(session_dir):
         coord = _coord(session_dir, baseline=1000.0, anchor=1200.0)
 
-        assert coord.writeback._lift_to_current_best("explore", 1100.0, {"name": "loser"}) is False
+        assert coord.writeback.lift_to_current_best("explore", 1100.0, {"name": "loser"}) is False
         assert _rows() == []
 
 
 def test_an_already_stacked_config_is_not_recorded_twice(session_dir):
     with session_scope(session_dir):
         coord = _coord(session_dir)
-        coord.writeback._lift_to_current_best("explore", 1100.0, {"name": "same"})
-        coord.writeback._lift_to_current_best("explore", 1200.0, {"name": "same"})
+        coord.writeback.lift_to_current_best("explore", 1100.0, {"name": "same"})
+        coord.writeback.lift_to_current_best("explore", 1200.0, {"name": "same"})
 
         assert len(coord.shared_state.optimization_stack) == 1
         assert len(_rows()) == 1
@@ -162,7 +162,7 @@ def test_an_already_stacked_config_is_not_recorded_twice(session_dir):
 def test_the_lift_carries_the_backend_onto_the_row(session_dir):
     with session_scope(session_dir):
         coord = _coord(session_dir)
-        coord.writeback._lift_to_current_best(
+        coord.writeback.lift_to_current_best(
             "gemm_tuning",
             1150.0,
             {"name": "tuned-gemm"},
@@ -247,7 +247,7 @@ def test_refused_geak_config_promotion_records_no_adoption(session_dir, measured
 def test_a_real_session_validation_records_the_whole_stack_figure(session_dir):
     with session_scope(session_dir):
         coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
-        coord.writeback._lift_to_current_best("explore", 1100.0, {"name": "first"})
+        coord.writeback.lift_to_current_best("explore", 1100.0, {"name": "first"})
         # Directly record validation (method consolidated into validate() in 484318bd3).
         from hyperloom.inference_optimizer.breakdown.recorder import stack_event as _se
 
@@ -287,7 +287,7 @@ def test_a_spool_that_cannot_be_written_does_not_refuse_the_adoption(session_dir
             lambda *_a, **_k: (_ for _ in ()).throw(OSError("spool down")),
         )
 
-        assert coord.writeback._lift_to_current_best("explore", 1100.0, {"name": "kept"}) is True
+        assert coord.writeback.lift_to_current_best("explore", 1100.0, {"name": "kept"}) is True
         assert len(coord.shared_state.optimization_stack) == 1
 
 

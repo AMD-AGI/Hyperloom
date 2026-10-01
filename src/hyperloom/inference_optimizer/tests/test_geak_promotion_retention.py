@@ -182,11 +182,11 @@ async def test_geak_acceptance_requires_native_retention(
         returned = coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=True)
         assert returned is accepted
     elif lane == "2a":
-        returned = await coord.writeback._validate_geak_via_geak_harness(reason="retention regression")
+        returned = await coord.writeback.validate_geak_via_geak_harness(reason="retention regression")
         assert returned["validated"] is accepted
         assert len(sweep_calls) == 1
     else:
-        await coord.writeback._promote_to_shared_state(
+        await coord.writeback.promote_to_shared_state(
             "explore",
             {"output_throughput": 120.0, "best_variant": measurement, "winners": []},
             task=rebench_task(result),
@@ -242,13 +242,13 @@ async def test_fallback_rejection_is_conclusive_and_not_validated(promotion, mon
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", replay)
     if via_orchestrator:
-        await coord.writeback._promote_to_shared_state(
+        await coord.writeback.promote_to_shared_state(
             "explore",
             {"output_throughput": 120.0, "best_variant": {"fingerprint": "different"}, "winners": []},
             task=rebench_task(result),
         )
     else:
-        returned = await coord.writeback._validate_geak_via_geak_harness(reason="retention regression")
+        returned = await coord.writeback.validate_geak_via_geak_harness(reason="retention regression")
         assert returned == {
             "validated": False,
             "status": "no_promote",
@@ -345,13 +345,13 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", fresh_replay)
     if through_recheck:
-        await coord.writeback._promote_to_shared_state(
+        await coord.writeback.promote_to_shared_state(
             "explore",
             {"status": "succeeded", "output_throughput": None, "winners": []},
             task=rebench_task(result),
         )
     else:
-        await coord.writeback._validate_geak_via_geak_harness(reason="native_recheck_unavailable")
+        await coord.writeback.validate_geak_via_geak_harness(reason="native_recheck_unavailable")
     assert state.current_best["tput"] == 110.0
     assert state.geak_pending == {}
     assert state.geak_result["revalidation_status"] == "no_promote"

@@ -937,7 +937,7 @@ def test_promote_warm_replay_refused_by_the_lift_is_not_reproduced(tmp_path):
     assert coord.shared_state.current_best == prior_best
     assert coord.shared_state.cumulative_gain_validated == 0.0
     assert coord.shared_state.cumulative_gain_validated_ts == ""
-    journal = coord.writeback._ensure_journal()
+    journal = coord.writeback.ensure_journal()
     assert not [e for e in journal.entries if e.outcome == OUTCOME_KEEP]
 
 
@@ -1218,7 +1218,7 @@ def test_promote_warm_replay_failed_records_outcome(tmp_path):
 def test_failed_replay_is_routed_to_promote_not_unpromotable(tmp_path):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     assert (
-        coord.writeback._is_promotable_result(
+        coord.writeback.is_promotable_result(
             "replay_warm_recipe",
             {"status": "failed", "error_class": "crash"},
         )
@@ -1228,7 +1228,7 @@ def test_failed_replay_is_routed_to_promote_not_unpromotable(tmp_path):
         "flag is cleared; otherwise PRELUDE never exits"
     )
     assert (
-        coord.writeback._is_promotable_result(
+        coord.writeback.is_promotable_result(
             "replay_warm_recipe",
             {"status": "succeeded", "output_throughput": 700.0},
         )
@@ -1421,10 +1421,10 @@ async def test_failed_replay_clears_in_flight_via_full_routing(tmp_path):
 
     failed = {"status": "failed", "error_class": "timeout", "error": "killed"}
     task = _StubTask(kind="replay_warm_recipe")
-    if coord.writeback._is_promotable_result(task.kind, failed):
-        await coord.writeback._promote_to_shared_state(task.kind, failed, task=task)
+    if coord.writeback.is_promotable_result(task.kind, failed):
+        await coord.writeback.promote_to_shared_state(task.kind, failed, task=task)
     else:
-        await coord.writeback._handle_unpromotable_result(task, failed)
+        await coord.writeback.handle_unpromotable_result(task, failed)
 
     assert warm_replay_in_flight(coord.shared_state) is False, (
         "failed replay left warm_replay_in_flight True → PRELUDE would never exit"

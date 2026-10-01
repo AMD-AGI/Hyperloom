@@ -45,7 +45,7 @@ async def test_promote_baseline_sets_anchor_and_current_best(coord: Coordinator)
     coord.shared_state.auto_roofline_pending_task_id = "pending-x"
     coord.shared_state.baseline_failure_streak = 2
     coord.shared_state.baseline_arg_error_streak = 1
-    await coord.writeback._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "baseline",
         {
             "output_throughput": 1000.0,
@@ -73,7 +73,7 @@ async def test_promote_single_round_baseline_clears_stale_warm_runtime(coord: Co
     coord.shared_state.auto_roofline_pending_task_id = "pending-x"
     coord.shared_state.baseline_warm_runtime_sec = 7.5
 
-    await coord.writeback._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "baseline",
         {
             "output_throughput": 1000.0,
@@ -89,7 +89,7 @@ async def test_promote_single_round_baseline_clears_stale_warm_runtime(coord: Co
 @pytest.mark.asyncio
 async def test_promote_baseline_carries_the_boot_and_benchmark_split(coord: Coordinator) -> None:
     """The two figures that let later work be priced on what it will spend."""
-    await coord.writeback._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "baseline",
         {
             "output_throughput": 1000.0,
@@ -110,7 +110,7 @@ async def test_promote_baseline_clears_a_split_a_later_round_did_not_report(
     """A stale split would be subtracted from a fresh total and called the boot."""
     coord.shared_state.baseline_post_ready_runtime_sec = 550.0
 
-    await coord.writeback._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "baseline",
         {
             "output_throughput": 1000.0,
@@ -127,7 +127,7 @@ async def test_promote_baseline_carries_a_dropped_hot_pass_to_the_session(
     coord: Coordinator,
 ) -> None:
     """The marker drives a session-level decision, so it has to reach the session."""
-    await coord.writeback._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "baseline",
         {
             "output_throughput": 1000.0,
@@ -138,7 +138,7 @@ async def test_promote_baseline_carries_a_dropped_hot_pass_to_the_session(
     )
     assert coord.shared_state.baseline_measure_round_dropped is True
 
-    await coord.writeback._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "baseline",
         {
             "output_throughput": 1200.0,
@@ -158,7 +158,7 @@ class TestAHotPassCorrectsAColdAnchor:
         coord.shared_state.baseline_tput = 1000.0
         coord.shared_state.baseline_measure_round_dropped = True
 
-        await coord.writeback._promote_to_shared_state(
+        await coord.writeback.promote_to_shared_state(
             "baseline",
             {
                 "output_throughput": 980.0,
@@ -181,7 +181,7 @@ class TestAHotPassCorrectsAColdAnchor:
         coord.shared_state.baseline_tput = 1000.0
         coord.shared_state.baseline_measure_round_dropped = True
 
-        await coord.writeback._promote_to_shared_state(
+        await coord.writeback.promote_to_shared_state(
             "baseline",
             {
                 "output_throughput": 980.0,
@@ -199,7 +199,7 @@ class TestAHotPassCorrectsAColdAnchor:
         coord.shared_state.baseline_tput = 1000.0
         coord.shared_state.baseline_measure_round_dropped = False
 
-        await coord.writeback._promote_to_shared_state(
+        await coord.writeback.promote_to_shared_state(
             "baseline",
             {
                 "output_throughput": 980.0,
@@ -229,11 +229,11 @@ async def test_unpromotable_baseline_fast_arg_errors_stop_after_two(
         "error": "ValueError: Unknown attention backend: ROCM_FLASH",
     }
 
-    await coord.writeback._handle_unpromotable_result(task, result)
+    await coord.writeback.handle_unpromotable_result(task, result)
     assert coord.shared_state.baseline_arg_error_streak == 1
     assert coord.shared_state.stop_reason != "baseline_arg_error"
 
-    await coord.writeback._handle_unpromotable_result(task, result)
+    await coord.writeback.handle_unpromotable_result(task, result)
     assert coord.shared_state.baseline_arg_error_streak == 2
     assert coord.shared_state.baseline_failure_streak == 0
     assert coord.shared_state.stop_reason == "baseline_arg_error"
@@ -262,7 +262,7 @@ async def test_unpromotable_baseline_agentx_preflight_stops_immediately(
         "error": "AgentX preflight failed: HYPERLOOM_AGENTX is on but aiperf was not found.",
     }
 
-    await coord.writeback._handle_unpromotable_result(task, result)
+    await coord.writeback.handle_unpromotable_result(task, result)
 
     assert coord.shared_state.stop_reason == AGENTX_PREFLIGHT_STOP_REASON
     # No launch log is stashed: the FRAMEWORK pump reads a non-blank log as "there is something here to author
@@ -290,13 +290,13 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
     subproc = {"status": "failed", "error_class": "subprocess_nonzero", "error": "boom"}
     argerr = {"status": "failed", "error_class": "fast_exit_arg_error", "error": "bad arg"}
 
-    await coord.writeback._handle_unpromotable_result(_task(), subproc)
-    await coord.writeback._handle_unpromotable_result(_task(), argerr)
+    await coord.writeback.handle_unpromotable_result(_task(), subproc)
+    await coord.writeback.handle_unpromotable_result(_task(), argerr)
     assert coord.shared_state.stop_reason not in (
         "baseline_failed",
         "baseline_arg_error",
     )
-    await coord.writeback._handle_unpromotable_result(_task(), subproc)
+    await coord.writeback.handle_unpromotable_result(_task(), subproc)
     assert coord.shared_state.baseline_failure_streak == 2
     assert coord.shared_state.baseline_total_failures == 3
     assert coord.shared_state.stop_reason == "baseline_failed"
@@ -305,7 +305,7 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
 @pytest.mark.asyncio
 async def test_promote_profile_succeeded_records_trace(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
-    await coord.writeback._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "profile",
         {
             "status": "succeeded",
@@ -322,7 +322,7 @@ async def test_promote_profile_failed_clears_trace(coord: Coordinator) -> None:
     coord.shared_state.last_profile_trace = "/tmp/old.trace.json"
     coord.shared_state.last_profile_args = "--old-backend"
     coord.shared_state.last_profile_workload = {"framework": "vllm"}
-    await coord.writeback._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "profile",
         {
             "status": "failed",
@@ -338,7 +338,7 @@ async def test_promote_profile_failed_clears_trace(coord: Coordinator) -> None:
 @pytest.mark.asyncio
 async def test_promote_profile_does_not_reuse_unready_merged_trace(coord: Coordinator) -> None:
     coord.shared_state.last_profile_trace = "/tmp/old.trace.json"
-    await coord.writeback._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "profile",
         {
             "status": "failed",
@@ -354,9 +354,9 @@ async def test_promote_profile_does_not_reuse_unready_merged_trace(coord: Coordi
 @pytest.mark.asyncio
 async def test_promote_roofline_succeeded_and_skipped_and_failed(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
-    await coord.writeback._promote_to_shared_state("roofline", {"status": "succeeded"})
-    await coord.writeback._promote_to_shared_state("roofline", {"status": "skipped"})
-    await coord.writeback._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state("roofline", {"status": "succeeded"})
+    await coord.writeback.promote_to_shared_state("roofline", {"status": "skipped"})
+    await coord.writeback.promote_to_shared_state(
         "roofline",
         {
             "status": "failed",
@@ -370,7 +370,7 @@ async def test_promote_roofline_succeeded_and_skipped_and_failed(coord: Coordina
 @pytest.mark.asyncio
 async def test_promote_explore_with_winner(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
-    await coord.writeback._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "explore",
         {
             "winners": [{"name": "v0", "extra_server_args": "--tp 1", "tput": 900.0}],
@@ -704,7 +704,7 @@ def test_record_fact_per_task_keep_and_revert(coord: Coordinator) -> None:
         result_dict={"error_class": "boom", "reason": "bad"},
         verdict=Verdict.FAILED,
     )
-    outcomes = [entry.outcome for entry in coord.writeback._ensure_journal().entries[-2:]]
+    outcomes = [entry.outcome for entry in coord.writeback.ensure_journal().entries[-2:]]
     assert outcomes == ["KEEP", "no_promote"]
 
 
@@ -734,7 +734,7 @@ def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator
         },
         verdict=Verdict.REVERTED,
     )
-    entry = coord.writeback._ensure_journal().entries[-1]
+    entry = coord.writeback.ensure_journal().entries[-1]
     assert entry.outcome == OUTCOME_REVERT
     assert entry.gain_pct == -0.44
     assert entry.reason and "keep_threshold" in entry.reason
@@ -757,15 +757,15 @@ def test_record_fact_kept_integrate_patch_journals_keep(coord: Coordinator) -> N
         result_dict={"status": "kept", "delta_pct": 6.2, "output_throughput": 1100.0},
         verdict=Verdict.ADOPTED,
     )
-    entry = coord.writeback._ensure_journal().entries[-1]
+    entry = coord.writeback.ensure_journal().entries[-1]
     assert entry.outcome == OUTCOME_KEEP
     assert entry.gain_pct == 6.2
 
 
 def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coordinator) -> None:
     """A reverted integrate_patch stays promotable so it still runs the pending_integrate cleanup in _promote_to_shared_state."""
-    assert coord.writeback._is_promotable_result("integrate_patch", {"status": "reverted"}) is True
-    assert coord.writeback._is_promotable_result("integrate_patch", {"status": "failed"}) is False
+    assert coord.writeback.is_promotable_result("integrate_patch", {"status": "reverted"}) is True
+    assert coord.writeback.is_promotable_result("integrate_patch", {"status": "failed"}) is False
 
 
 # -- _compose_prompt additional branches -----------------------------------
@@ -1022,6 +1022,6 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
         },
         adopted=False,
     )
-    by_name = {entry.variant_name: entry.outcome for entry in coord.writeback._ensure_journal().entries}
+    by_name = {entry.variant_name: entry.outcome for entry in coord.writeback.ensure_journal().entries}
     # An executor KEEP whose lift did not land adopted nothing.
     assert by_name == {"v1": "KEEP", "v2": "REVERT", "v3": "no_promote"}

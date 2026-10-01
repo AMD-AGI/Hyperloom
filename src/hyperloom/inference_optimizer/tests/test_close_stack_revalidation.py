@@ -26,7 +26,7 @@ def coordinator(tmp_path, monkeypatch):
     state = c.shared_state
     state.baseline_tput = 1000.0
     state.current_best = {"action": "baseline", "tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
-    assert c.writeback._lift_to_current_best(
+    assert c.writeback.lift_to_current_best(
         "explore",
         1100.0,
         {"name": "page16", "extra_server_args": "--page-size 16", "candidate_extra_server_args": "--page-size 16"},
@@ -96,17 +96,17 @@ async def test_a_successful_rebench_validates_the_stack_close_then_publishes(coo
 async def test_a_rebench_of_an_older_generation_cannot_overwrite_a_newer_validation(coordinator) -> None:
     c = coordinator
     state = c.shared_state
-    summary = await c.writeback._enqueue_internal_stack_rebench(reason="unit", idempotency_key="unit-rebench")
+    summary = await c.writeback.enqueue_internal_stack_rebench(reason="unit", idempotency_key="unit-rebench")
     task = await c.tasks.get(summary["task_id"])
     assert task.params["recipe_generation"] == 1
-    assert c.writeback._lift_to_current_best(
+    assert c.writeback.lift_to_current_best(
         "explore",
         1300.0,
         {"name": "page32", "extra_server_args": "--page-size 32", "candidate_extra_server_args": "--page-size 32"},
     )
     assert c.writeback.validate(1300.0, {"output_throughput": 1300.0})
 
-    await c.writeback._promote_to_shared_state(
+    await c.writeback.promote_to_shared_state(
         "explore",
         {"status": "succeeded", "output_throughput": 1100.0, "winners": []},
         task=task,

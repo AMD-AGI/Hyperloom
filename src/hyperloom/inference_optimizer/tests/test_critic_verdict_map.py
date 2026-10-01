@@ -298,7 +298,7 @@ def coord(tmp_path: Path):
     c.state = CoordinatorState()
     c.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     c.bus = _StubBus()
-    c.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
+    c.writeback.record_observation = AsyncMock()  # type: ignore[method-assign]
     materialise_calls: list[tuple[PendingProposal, set[str] | None]] = []
     c._materialise_calls = materialise_calls  # type: ignore[attr-defined]
 
@@ -461,7 +461,7 @@ async def test_verdict_for_unknown_proposal_logs_observation(coord):
         },
     )
     await coord.router._handle_review_verdict("critic", intent)
-    coord.writeback._record_observation.assert_awaited()
+    coord.writeback.record_observation.assert_awaited()
     assert coord._materialise_calls == []
 
 
@@ -477,7 +477,7 @@ async def test_an_approve_after_the_timeout_deny_creates_nothing(coord):
 
     await coord.router._handle_review_verdict("critic", intent)
 
-    (call,) = coord.writeback._record_observation.await_args_list
+    (call,) = coord.writeback.record_observation.await_args_list
     assert call.args[2]["kind"] == "verdict_for_unknown_proposal"
     assert coord._materialise_calls == []
     assert [m for m in coord.bus.messages if m.topic == "review_verdict"] == []
@@ -619,7 +619,7 @@ async def test_a_held_reject_is_recorded_not_silently_corrected(coord, caplog):
     with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.intent_router"):
         await coord.router._handle_review_verdict("critic", intent)
     assert any("held to its rule" in r.getMessage() for r in caplog.records)
-    kinds = [call.args[2].get("kind") for call in coord.writeback._record_observation.await_args_list]
+    kinds = [call.args[2].get("kind") for call in coord.writeback.record_observation.await_args_list]
     assert "verdict_downgraded_to_rule_verdict" in kinds
 
 
@@ -656,7 +656,7 @@ async def test_a_rule_named_only_in_prose_still_holds_the_verdict(coord):
     await coord.router._handle_review_verdict("critic", intent)
     assert _posted_verdict(coord) == "advise"
     assert len(coord._materialise_calls) == 1
-    kinds = [call.args[2].get("kind") for call in coord.writeback._record_observation.await_args_list]
+    kinds = [call.args[2].get("kind") for call in coord.writeback.record_observation.await_args_list]
     assert "verdict_downgraded_to_rule_verdict" in kinds
 
 
@@ -1311,7 +1311,7 @@ async def test_a_variant_resting_only_on_the_cited_rule_still_gives_up_its_rejec
 
     assert _posted_verdict(coord) == "advise"
     assert len(coord._materialise_calls) == 1
-    kinds = [call.args[2].get("kind") for call in coord.writeback._record_observation.await_args_list]
+    kinds = [call.args[2].get("kind") for call in coord.writeback.record_observation.await_args_list]
     assert "verdict_downgraded_to_rule_verdict" in kinds
 
 
@@ -1684,7 +1684,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     coord.state = CoordinatorState()
     coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     coord.bus = _StubBus()
-    coord.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
+    coord.writeback.record_observation = AsyncMock()  # type: ignore[method-assign]
 
     create_calls: list[dict[str, Any]] = []
 
@@ -1737,7 +1737,7 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
     coord.state = CoordinatorState()
     coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     coord.bus = _StubBus()
-    coord.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
+    coord.writeback.record_observation = AsyncMock()  # type: ignore[method-assign]
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
@@ -1758,7 +1758,7 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
     coord.shared_state = _MoreState()
     await coord.proposals._materialize_approved_proposal(pending, approved_variant_names={"no-such-variant"})
     assert create_calls == []
-    kinds = [call.args[2].get("kind") for call in coord.writeback._record_observation.await_args_list]
+    kinds = [call.args[2].get("kind") for call in coord.writeback.record_observation.await_args_list]
     assert "proposal_materialize_skipped" in kinds
 
 
@@ -1770,7 +1770,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     coord.state = CoordinatorState()
     coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     coord.bus = _StubBus()
-    coord.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
+    coord.writeback.record_observation = AsyncMock()  # type: ignore[method-assign]
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
@@ -1834,8 +1834,8 @@ def _delegate_coord(tmp_path: Path):
     c.state = CoordinatorState()
     c.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     c.bus = _StubBus()
-    c.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
-    c.writeback._record_policy_denied = AsyncMock()  # type: ignore[method-assign]
+    c.writeback.record_observation = AsyncMock()  # type: ignore[method-assign]
+    c.writeback.record_policy_denied = AsyncMock()  # type: ignore[method-assign]
     c.dispatcher._admission_denial_for_action = lambda *a, **k: None  # type: ignore[method-assign]
     c.dispatcher._registry_lanes_ttl = lambda _name: (set(), 0)  # type: ignore[method-assign]
     c.policy = None

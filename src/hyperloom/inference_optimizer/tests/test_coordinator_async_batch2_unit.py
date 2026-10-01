@@ -755,7 +755,7 @@ async def test_ordinary_integrate_completion_blocks_unconfirmed_before_promotion
     original_stack = list(coord.shared_state.optimization_stack)
     original_levers = list(coord.shared_state.authored_framework_levers)
     with pytest.raises(RuntimeError, match="integrate.*recovery") as caught:
-        await coord.writeback._promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+        await coord.writeback.promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
 
     assert isinstance(caught.value, IntegrateRecoveryIncomplete)
     assert coord.shared_state.pending_integrate == candidate.pending
@@ -778,7 +778,7 @@ async def test_ordinary_integrate_completion_rejects_recovery_errors_even_with_t
         phase=phase, status="kept" if phase == "accepted" else "reverted", recovery_errors=["stash restore failed"]
     )
     with pytest.raises(RuntimeError, match="integrate.*recovery"):
-        await coord.writeback._promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+        await coord.writeback.promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
     assert coord.shared_state.pending_integrate == candidate.pending
     assert coord.shared_state.current_best == candidate.anchor
     assert candidate.backup.exists()
@@ -789,7 +789,7 @@ async def test_ordinary_integrate_completion_restore_error_blocks_without_marker
     candidate = await ordinary_integrate_completion(error_class="integrate_restore_incomplete")
     coord.shared_state.pending_integrate = {}
     with pytest.raises(RuntimeError, match="integrate.*recovery"):
-        await coord.writeback._promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+        await coord.writeback.promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
     assert coord.shared_state.current_best == candidate.anchor
     assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 
@@ -802,7 +802,7 @@ async def test_ordinary_integrate_completion_legacy_keep_with_stash_error_retain
     candidate.result["stash_restore_error"] = "user changes remain in stash after restore failed"
 
     with pytest.raises(RuntimeError, match="integrate.*recovery") as caught:
-        await coord.writeback._promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+        await coord.writeback.promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
 
     assert isinstance(caught.value, IntegrateRecoveryIncomplete)
     assert coord.shared_state.pending_integrate == candidate.pending
@@ -832,7 +832,7 @@ async def test_ordinary_integrate_completion_clears_only_confirmed_matching_mark
     coord, ordinary_integrate_completion, phase, status, promoted
 ):
     candidate = await ordinary_integrate_completion(phase=phase, status=status)
-    await coord.writeback._promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+    await coord.writeback.promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
 
     assert coord.shared_state.pending_integrate == {}
     assert not coord.shared_state.stop_reason
@@ -849,7 +849,7 @@ async def test_ordinary_integrate_completion_apply_only_retains_ungraded_recover
     coord, ordinary_integrate_completion, phase
 ):
     candidate = await ordinary_integrate_completion(phase=phase, status="applied_no_bench")
-    await coord.writeback._promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+    await coord.writeback.promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
 
     assert coord.shared_state.pending_integrate == candidate.pending
     assert coord.shared_state.current_best == candidate.anchor
@@ -866,7 +866,7 @@ async def test_ordinary_integrate_completion_does_not_clear_unidentified_or_othe
     coord, ordinary_integrate_completion, marker_task_id, missing_task
 ):
     candidate = await ordinary_integrate_completion(phase="restored", status="reverted", marker_task_id=marker_task_id)
-    await coord.writeback._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "integrate_patch", candidate.result, task=None if missing_task else candidate.task
     )
     assert coord.shared_state.pending_integrate == candidate.pending
@@ -1291,7 +1291,7 @@ async def test_resume_stack_revalidate_promote_clears_flag_and_sets_watermark(co
     ]
     coord.shared_state.cumulative_gain_validated_stack_len = 0
     task = SimpleNamespace(task_id="tr-1", params={"source": "stack_revalidate"})
-    await coord.writeback._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "explore",
         {"winners": [], "best_variant": None, "output_throughput": 121.0},
         task=task,
@@ -1310,7 +1310,7 @@ async def test_resume_revalidate_failed_rebench_keeps_flag_set(coord: Coordinato
     ]
     coord.shared_state.cumulative_gain_validated_stack_len = 0
     task = SimpleNamespace(task_id="tr-fail", params={"source": "stack_revalidate"})
-    await coord.writeback._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "explore",
         {"winners": [], "best_variant": None, "output_throughput": 0.0},
         task=task,
@@ -1325,7 +1325,7 @@ async def test_integrate_patch_keep_promotes_stack_and_clears_pending(coord: Coo
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.pending_integrate = {"task_id": "ti-1"}
     task = SimpleNamespace(task_id="ti-1", params={})
-    await coord.writeback._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "integrate_patch",
         {
             "status": "kept",
@@ -1767,7 +1767,7 @@ def _ptask(tid: str, kind: str) -> Task:
 @pytest.mark.asyncio
 async def test_record_specialist_result_with_proposals(coord: Coordinator) -> None:
     task = _ptask("rec-spec-1", "specialist")
-    await coord.writeback._record_specialist_result(
+    await coord.writeback.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
@@ -1785,7 +1785,7 @@ async def test_record_specialist_result_with_proposals(coord: Coordinator) -> No
 @pytest.mark.asyncio
 async def test_record_specialist_result_seeds_gaps_from_static_recon(coord: Coordinator) -> None:
     task = _ptask("rec-spec-recon", "specialist")
-    await coord.writeback._record_specialist_result(
+    await coord.writeback.record_specialist_result(
         task=task,
         done_payload={
             "domain": "static_recon_specialist",
@@ -1813,7 +1813,7 @@ async def test_record_specialist_result_logs_ungrounded_patches(coord: Coordinat
     line for its task, which is rendered once.
     """
     task = _ptask("rec-spec-ug", "specialist")
-    await coord.writeback._record_specialist_result(
+    await coord.writeback.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
@@ -1838,7 +1838,7 @@ async def test_record_specialist_result_no_dead_research_evidence_log(
 
     task = _ptask("rec-spec-dead", "specialist")
     with caplog.at_level(logging.ERROR):
-        await coord.writeback._record_specialist_result(
+        await coord.writeback.record_specialist_result(
             task=task,
             done_payload={
                 "domain": "kernel_agent",
@@ -1859,7 +1859,7 @@ async def test_record_specialist_result_harvests_findings(coord: Coordinator, mo
         harvested.append(done_payload)
 
     monkeypatch.setattr(coord.writeback, "_harvest_specialist_findings", harvest)
-    await coord.writeback._record_specialist_result(
+    await coord.writeback.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
@@ -1882,7 +1882,7 @@ async def test_record_specialist_result_with_scorer(coord: Coordinator) -> None:
 
     coord.writeback._proposal_scorer = _Scorer()
     task = _ptask("rec-spec-3", "specialist")
-    await coord.writeback._record_specialist_result(
+    await coord.writeback.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
@@ -1945,7 +1945,7 @@ async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> N
     async def _rec(source, intent, denied):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
+    monkeypatch.setattr(coord.writeback, "record_policy_denied", _rec)
     await coord.router.handle_intent("orchestration", _idle_intent())
     assert recorded
 
@@ -2300,7 +2300,7 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
     async def _rec(source, intent, denied, action_name=None):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
+    monkeypatch.setattr(coord.writeback, "record_policy_denied", _rec)
     await coord.router.handle_delegate("orchestration", _delegate("explore", "d-seq"))
     assert recorded
 
@@ -2315,7 +2315,7 @@ async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monk
     async def _rec(source, intent, denied, action_name=None):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
+    monkeypatch.setattr(coord.writeback, "record_policy_denied", _rec)
     # Same key while the first task is still queued (non-terminal) -> denied.
     await coord.router.handle_delegate("orchestration", _delegate("explore", "d-same"))
     assert recorded

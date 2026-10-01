@@ -250,28 +250,28 @@ def test_pitfall_severity_for(coord: Coordinator) -> None:
 
 
 def test_is_promotable_result(coord: Coordinator) -> None:
-    assert coord.writeback._is_promotable_result("sweep", {"status": "succeeded"}) is True
-    assert coord.writeback._is_promotable_result("sweep", {"status": "failed"}) is False
-    assert coord.writeback._is_promotable_result("replay_warm_recipe", {"status": "failed"}) is True
-    assert coord.writeback._is_promotable_result("explore", {"status": "ok"}) is True
-    assert coord.writeback._is_promotable_result("explore", {"status": "failed"}) is False
+    assert coord.writeback.is_promotable_result("sweep", {"status": "succeeded"}) is True
+    assert coord.writeback.is_promotable_result("sweep", {"status": "failed"}) is False
+    assert coord.writeback.is_promotable_result("replay_warm_recipe", {"status": "failed"}) is True
+    assert coord.writeback.is_promotable_result("explore", {"status": "ok"}) is True
+    assert coord.writeback.is_promotable_result("explore", {"status": "failed"}) is False
 
 
 def test_is_promotable_result_baseline_eval_failed(coord: Coordinator) -> None:
     measured = {"output_throughput": 1000.0, "completed_requests": 10}
-    assert coord.writeback._is_promotable_result("baseline", measured) is True
+    assert coord.writeback.is_promotable_result("baseline", measured) is True
     eval_failed = {**measured, "baseline_eval_failed": True}
-    assert coord.writeback._is_promotable_result("baseline", eval_failed) is False
+    assert coord.writeback.is_promotable_result("baseline", eval_failed) is False
     # profile with the same key still promotes (blocker is baseline-only).
-    assert coord.writeback._is_promotable_result("profile", eval_failed) is True
+    assert coord.writeback.is_promotable_result("profile", eval_failed) is True
 
 
 # -- phase / id helpers ----------------------------------------------------
 def test_journal_entry_phase(coord: Coordinator) -> None:
     coord.shared_state.phase = ""
-    assert coord.writeback._journal_entry_phase() == "UNKNOWN"
+    assert coord.writeback.journal_entry_phase() == "UNKNOWN"
     coord.shared_state.phase = "framework_agent"
-    assert coord.writeback._journal_entry_phase() == "FRAMEWORK_AGENT"
+    assert coord.writeback.journal_entry_phase() == "FRAMEWORK_AGENT"
 
 
 def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
