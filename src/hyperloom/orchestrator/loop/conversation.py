@@ -198,15 +198,11 @@ class ConversationCollaborator(CoordinatorCollaborator):
         integration = integration_for(self, self.session_dir)
         if integration is None:
             return ""
-        try:
-            evidence = await asyncio.to_thread(
-                integration.read_for_framework,
-                self.shared_state,
-                untested_proposals=untested_proposals,
-            )
-        except Exception:
-            log.exception("Coordinator: Experience KB read failed")
-            return ""
+        evidence = await asyncio.to_thread(
+            integration.read_for_framework,
+            self.shared_state,
+            untested_proposals=untested_proposals,
+        )
         self._kb_last_read = evidence
         if evidence.status != "completed" or not evidence.prompt_block:
             return ""

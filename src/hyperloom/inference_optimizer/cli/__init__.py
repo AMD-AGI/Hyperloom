@@ -1527,17 +1527,21 @@ def _persist_preflight_failure_artifacts(
 
 def _start_experience_kb() -> None:
     """Bring the workspace's Experience KB service to serving, then check its Experiences can be collected."""
-    from hyperloom_kb import LocalServiceError
+    from hyperloom_kb import ConfigurationError, LocalServiceError, RemoteClientError
+    from hyperloom_kb.collect import MappingError
 
     from ..experience_collect import validate_config as validate_experience_collection
     from ..experience_kb_service import ensure_service
 
+    # The run must not depend on the Experience KB: reads come back empty and writes are spooled or skipped.
     try:
         ensure_service()
-    except LocalServiceError as exc:
-        # The run must not depend on the service: reads come back empty and writes wait in the spool.
+    except (LocalServiceError, RemoteClientError) as exc:
         log.warning("Experience KB service is not serving (%s); Experience writes are spooled until it is", exc)
-    validate_experience_collection()
+    try:
+        validate_experience_collection()
+    except (ConfigurationError, MappingError, RemoteClientError) as exc:
+        log.warning("Experience KB cannot take this run's Experiences (%s); the run continues without them", exc)
 
 
 async def _run_optimize(args: argparse.Namespace) -> int:

@@ -92,7 +92,9 @@ hyperloom-kb-collect --mapping hyperloom-sbd-v6 \
 AgentX sessions are skipped until the Experience declaration can represent
 their benchmark mode and workload identity. For the same reason an AgentX run
 reads no Experience: every one it could be shown was measured on the synthetic
-workload.
+workload. A session graded on anything but output throughput is skipped and
+reads nothing too: every Experience records `e2e_throughput@v1`, and its
+KEEP/REVERT decisions answer another objective.
 
 ## Configuration
 

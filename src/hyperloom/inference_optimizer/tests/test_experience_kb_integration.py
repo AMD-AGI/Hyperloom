@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import http.client
 import json
+import logging
 import sys
 from types import SimpleNamespace
 
 from hyperloom.inference_optimizer.experience_collect import mapping_schema_ref
 from hyperloom.inference_optimizer.experience_kb import (
     CONTENT_INLINE_LIMIT,
+    RENDER_BUDGET_CHARS,
     ExperienceKBEvidence,
     ExperienceKBIntegration,
     integration_for,
@@ -40,9 +43,9 @@ class FakeClient:
     def __init__(self) -> None:
         self.calls = []
 
-    def read(self, decision, context, *, schema_ref, content_inline_limit):
+    def read(self, decision, context, *, schema_ref, content_inline_limit, render_budget_chars):
         assert schema_ref == _SCHEMA
-        assert content_inline_limit == CONTENT_INLINE_LIMIT
+        assert (content_inline_limit, render_budget_chars) == (CONTENT_INLINE_LIMIT, RENDER_BUDGET_CHARS)
         self.calls.append((decision, context))
         return SimpleNamespace(
             read_id=f"read-{len(self.calls)}",
@@ -196,8 +199,12 @@ def test_reads_speak_the_service_read_contract_through_the_real_sdk(tmp_path) ->
     assert request.full_url == "https://kb.example/v1/read"
     assert request.get_header("Authorization") == "Bearer service-token"
     body = json.loads(request.data)
-    assert set(body) == {"decision", "context", "schema_ref", "content_inline_limit"}
-    assert (body["schema_ref"], body["content_inline_limit"]) == (_SCHEMA, CONTENT_INLINE_LIMIT)
+    assert set(body) == {"decision", "context", "schema_ref", "content_inline_limit", "render_budget_chars"}
+    assert (body["schema_ref"], body["content_inline_limit"], body["render_budget_chars"]) == (
+        _SCHEMA,
+        CONTENT_INLINE_LIMIT,
+        RENDER_BUDGET_CHARS,
+    )
     assert evidence.status == "completed"
     assert evidence.read_id == response["read_id"]
     assert evidence.prompt_block == response["prompt_block"]
@@ -214,7 +221,7 @@ def test_a_referenced_change_reaches_the_prompt_as_session_files(tmp_path) -> No
     reads = []
 
     class _Client:
-        def read(self, decision, context, *, schema_ref, content_inline_limit):
+        def read(self, decision, context, *, schema_ref, content_inline_limit, render_budget_chars):
             reads.append(content_inline_limit)
             return SimpleNamespace(
                 read_id=f"read-{len(reads)}",
@@ -253,8 +260,46 @@ def test_bootstrap_uses_only_service_url_and_token(tmp_path) -> None:
     assert isinstance(integration.client, RemoteClient)
     assert integration.client.config.base_url == "https://kb.example"
     assert integration.client.config.token == "service-token"
+    # A read waits on the service no longer than the planner it waits behind is allowed to take.
+    assert integration.client.config.timeout_seconds == 30.0
     # A run reads the schema its packaged mapping writes.
     assert integration.schema_ref == mapping_schema_ref()
+
+
+def test_a_service_that_keeps_failing_reads_stops_being_read_for_the_session(tmp_path, caplog) -> None:
+    statuses = iter(["unavailable", "completed", "failed", "unavailable", "failed", "completed"])
+    calls = []
+
+    class _Client:
+        def read(self, decision, context, **_options):
+            calls.append(decision)
+            status = next(statuses)
+            return SimpleNamespace(
+                read_id=f"read-{len(calls)}",
+                status=status,
+                prompt_block="",
+                rendered_refs=(),
+                warnings=() if status == "completed" else ("planner gateway timed out",),
+                experiences=(),
+                contents=(),
+            )
+
+    integration = ExperienceKBIntegration(_Client(), tmp_path, _SCHEMA)
+    with caplog.at_level(logging.WARNING):
+        evidence = [integration.read_for_framework(_state(tick)) for tick in range(1, 8)]
+
+    assert len(calls) == 5
+    assert [item.status for item in evidence] == [
+        "unavailable",
+        "completed",
+        "failed",
+        "unavailable",
+        "failed",
+        "unavailable",
+        "unavailable",
+    ]
+    assert evidence[-1].warnings == ("experience_kb_reads_off_for_session",)
+    assert caplog.text.count("Experience KB reads are off for the rest of this session") == 1
 
 
 def _evidence(*experience_ids: str, tick: int = 7) -> ExperienceKBEvidence:
@@ -442,6 +487,23 @@ def test_specialist_dispatch_reads_only_in_framework_agent_and_fails_open(tmp_pa
     assert "EXPERIENCE KB" not in user
 
 
+def test_a_service_that_drops_mid_response_never_stops_a_turn_or_a_dispatch(tmp_path) -> None:
+    def cut_off(*_args, **_kwargs):
+        raise http.client.IncompleteRead(b"{", 100)
+
+    client = RemoteClient(RemoteConfig("http://127.0.0.1:9", "service-token"), opener=cut_off)
+    integration = ExperienceKBIntegration(client, tmp_path, mapping_schema_ref())
+    state = SharedState(tick=6, phase="FRAMEWORK_AGENT")
+    coordinator = _kb_coordinator(tmp_path, state, integration)
+    params = {"domain": "serving_specialist"}
+
+    assert asyncio.run(coordinator._kb_prompt_block("proposal")) == ""
+    asyncio.run(coordinator._warm_specialist_params(params))
+
+    assert not {"experience_kb_block", "kb_read_id", "kb_rendered_refs"} & set(params)
+    assert state.experience_kb_injections == []
+
+
 def test_a_specialist_read_that_matched_nothing_still_travels_with_the_dispatch(tmp_path) -> None:
     state = SharedState(tick=5, phase="FRAMEWORK_AGENT")
     empty = ExperienceKBEvidence(
@@ -481,6 +543,17 @@ def test_an_agentx_run_reads_no_experience_since_none_of_its_own_is_published(tm
     assert coordinator._kb_integration is None
     assert not {"experience_kb_block", "kb_read_id", "kb_rendered_refs"} & set(params)
     assert state.experience_kb_injections == []
+
+
+def test_only_a_run_graded_on_throughput_reads_throughput_experiences(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_KB_URL", "https://kb.example")
+    monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "service-token")
+
+    def owner(objective: str) -> SimpleNamespace:
+        return SimpleNamespace(shared_state=SharedState(phase="FRAMEWORK_AGENT", grading={"objective": objective}))
+
+    assert isinstance(integration_for(owner("output_throughput"), tmp_path), ExperienceKBIntegration)
+    assert integration_for(owner("e2e_norm_intvty_p90"), tmp_path) is None
 
 
 def test_proposal_exposure_only_uses_current_orchestration_tick() -> None:

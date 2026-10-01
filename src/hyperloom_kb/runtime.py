@@ -88,13 +88,16 @@ def experience_kb_from_env(
     *,
     spool_root: Path | None = None,
     declaration: ExperienceDeclaration | None = None,
+    timeout_seconds: float | None = None,
 ) -> ConfiguredExperienceKB:
     """Bootstrap the Experience service named by ``HYPERLOOM_KB_URL``, or a no-op facade.
 
     The collector writes ``declaration``'s schema, the packaged one by default; the service registers it on first write.
     """
 
-    remote_config = RemoteConfig.from_env(os.environ if env is None else env, spool_root=spool_root)
+    remote_config = RemoteConfig.from_env(
+        os.environ if env is None else env, spool_root=spool_root, timeout_seconds=timeout_seconds
+    )
     if remote_config is None:
         return NoOpExperienceKB()
     client = RemoteClient(remote_config)

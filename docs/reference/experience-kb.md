@@ -26,7 +26,7 @@ Experiences from other logs in [Experience collection](experience-kb-collect.md)
 
 | Variable | Set by | Meaning |
 |---|---|---|
-| `HYPERLOOM_KB_URL` | `hyperloom-setup` | The workspace's local service, `http://127.0.0.1:8787` by default. A loopback URL is a service the workspace starts itself; any other URL is used as is. Unset disables Experience reads and writes. |
+| `HYPERLOOM_KB_URL` | `hyperloom-setup` | The workspace's local service: `http://127.0.0.1:<port>`, with a port between 20000 and 29999 derived from the workspace path, so workspaces on one host do not share one. A loopback URL is a service the workspace starts itself; any other URL is used as is. Unset disables Experience reads and writes. |
 | `HYPERLOOM_KB_TOKEN` | `hyperloom-setup` | The local service's generated access token. |
 | `HYPERLOOM_GLOBAL_KB_URL` | the user | The global KB to push to and pull from. Optional. |
 | `HYPERLOOM_GLOBAL_KB_TOKEN` | the user | The global KB's access token. Required with `HYPERLOOM_GLOBAL_KB_URL`. |
@@ -63,17 +63,35 @@ It looks at what answers on `HYPERLOOM_KB_URL`:
 
 - nothing: it starts `python -m hyperloom_kb` over `$USER_DATA_PATH/experience-kb`
   and waits for it to serve;
-- a service that answers with this workspace's token, the packaged
-  declaration, and the settings in `.env`: it reuses it;
+- a service that answers with this workspace's token and data home, the
+  packaged declaration, and the settings in `.env`: it reuses it;
 - such a service started with other settings, or serving another default
   declaration: it restarts it, keeping its data. Settings are compared by their
   effect, so the same key under another variable name does not restart it;
-- anything else on the port, such as another user's service: it refuses, and
-  the user picks another port in `HYPERLOOM_KB_URL`.
+- a service holding another workspace's data, as a copied `.env` would point
+  at, or anything else on the port, such as another user's service: it refuses
+  without stopping it, and the user picks another port in `HYPERLOOM_KB_URL`.
 
-An optimize launch whose service cannot start logs a warning and continues:
-reads return nothing, and writes wait in the spool until a later launch finds
-the service serving. Requests to a loopback service never go through an
+Only an optimize launch and `ensure` restart a service. `push` and `pull`,
+including the automatic push at the end of a run, use the service as it runs
+and warn when its settings differ from theirs, so a push from a shell never
+stops the service a running session reads from.
+
+No Experience KB problem stops a run. An optimize launch whose service cannot
+start, whose `.env` names the service without its token, or whose service
+validates another schema logs a warning and continues: reads return nothing,
+and writes wait in the spool until a later launch finds the service serving.
+A read the service cannot answer, even one cut off mid-response, leaves the
+prompt as it would be without the Experience KB.
+
+A run waits on its local service at most 30 seconds per read, write, or health
+check, and the service gives its planner 20 seconds
+(`LOCAL_KB_PLANNER_TIMEOUT_SECONDS`); a read measured 4–6 seconds. After three
+reads in a row that do not complete, the session stops reading, so a hung
+service or gateway costs a run a few timeouts, not one per orchestration turn
+and specialist dispatch. The session breakdown writes its Experiences off the
+coordinator's event loop, and once one write spools, the rest of that
+collection spools without waiting on the service. Requests to a loopback service never go through an
 `HTTP_PROXY` or `HTTPS_PROXY` from the environment.
 
 `$USER_DATA_PATH/experience-kb` holds:
@@ -104,7 +122,8 @@ packaged mapping produces. Listing and export cover every schema unless a
 to this global KB yet, with its declaration. It never sends an Experience that
 was pulled from a global KB, and it stops at the first failure the global KB may
 recover from, keeping its place so the next push resumes there. An Experience
-the global KB rejects for good is reported under `rejected` and skipped. A
+the global KB rejects for good (400, 409, 413, 414, 415 or 422, including a 413
+from a proxy in front of it) is reported under `rejected` and skipped. A
 workspace `push` first delivers the spool, so writes made while the local
 service was down are pushed too.
 
@@ -187,7 +206,8 @@ content under an existing id is 409.
 | `schema_ref` | no | the service's `--declaration` | the one schema to search |
 | `outcome` | no | `mixed` | `keep`, `revert`, another declared decision, or `mixed` |
 | `limit` | no | `10` | maximum Experiences to return, 1–100 |
-| `content_inline_limit` | no | none (all inline) | bytes above which a `change.content` is rendered as a reference instead of inline |
+| `content_inline_limit` | no | none (all inline) | bytes above which a free-text field (`reasoning`, `reflection`, `change.summary`, `change.content`, an alternative) is rendered as a reference instead of inline |
+| `render_budget_chars` | no | none (every record) | characters the rendered records may fill; records are rendered whole, in rank order, while they fit |
 
 The service's planner turns `decision` and `context` into weighted query
 signals, then ranks candidates by exact field matches plus lexical fuzzy
@@ -218,13 +238,19 @@ and Repeat Group annotations, never condensed, under an
 `Experience <id>` heading. A producer that acts on a read records the returned
 `rendered_refs` in the resulting Experience.
 
-With `content_inline_limit`, a longer `change.content` appears in the record as
+With `content_inline_limit`, a longer free-text field appears in the record as
 `<external content sha256:<hex>, <n> bytes>`, and `contents` carries its text:
 `[{"ref": "sha256:<hex>", "bytes": <n>, "content": "..."}]`. Hyperloom asks for
 2048 bytes, writes each one under `<session>/experience_kb/contents/<hex>.txt`
 (and each patch of a source change as its own file beside it), and lists those
 paths at the end of the injected block, so an agent reads a large patch only
 when it needs it.
+
+With `render_budget_chars`, a record is never cut: the first one that does not
+fit, and every one ranked after it, is left out, `rendered_refs` and `contents`
+name only the records rendered, and `warnings` carries `render_budget_reached`.
+Hyperloom asks for 40,000 characters, so the block an orchestration turn or a
+specialist prompt carries stays bounded whatever the records hold.
 
 Each item in `experiences`, and in `/v1/list`, is a summary:
 `experience_id`, `source_run_id`, `change_summary`, `decision`,
@@ -267,9 +293,12 @@ settings the service started with.
 
 - `read()` never raises for service failures; it returns `status="unavailable"`
   with an empty `prompt_block` and the reason in `warnings`.
-- `publish()` raises `RemoteClientError` for permanent rejections (400, 409).
+- `publish()` raises `RemoteClientError` for permanent rejections (400, 409,
+  413, 414, 415, 422).
   Any other failure spools the write, with its declaration, and returns
   `status="spooled"`; Hyperloom's spool is `$USER_DATA_PATH/experience-kb/spool`.
+  After that, the client spools every later `publish()` without a request until
+  `flush_spool()` delivers one.
 - `flush_spool()` replays spooled writes and stops at the first retryable
   failure; files the service rejects for good move to `spool/rejected/`.
   Hyperloom flushes at every launch and before every workspace `push`.

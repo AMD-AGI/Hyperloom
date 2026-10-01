@@ -109,6 +109,8 @@ PLANNER_TOOL_INPUT_SCHEMA: dict[str, JsonValue] = {
     },
 }
 PLANNER_PROMPT_HASH = hashlib.sha256(PLANNER_SYSTEM_PROMPT.encode()).hexdigest()
+# A planner call measured 4-6 s; a gateway slower than this fails the read rather than stalling the decision it feeds.
+DEFAULT_PLANNER_TIMEOUT_SECONDS = 20.0
 _SCHEMA_REF_PREFIX = "schema:sha256:"
 
 
@@ -129,7 +131,7 @@ class PlannerGatewayConfig:
     base_url: str
     api_key: str
     model: str
-    timeout_seconds: float = 120.0
+    timeout_seconds: float = DEFAULT_PLANNER_TIMEOUT_SECONDS
     max_output_tokens: int = 1_400
 
     def __post_init__(self) -> None:
@@ -162,7 +164,7 @@ class PlannerGatewayConfig:
             base_url,
             api_key,
             model,
-            float(source.get("LOCAL_KB_PLANNER_TIMEOUT_SECONDS") or 120),
+            float(source.get("LOCAL_KB_PLANNER_TIMEOUT_SECONDS") or DEFAULT_PLANNER_TIMEOUT_SECONDS),
             int(source.get("LOCAL_KB_PLANNER_MAX_OUTPUT_TOKENS") or 1_400),
         )
 
@@ -1136,11 +1138,14 @@ class KnowledgeReadService:
         finally:
             if lease is not None:
                 self._executor.release_view(lease)
+        warnings = tuple(f"capability_unavailable:{item.value}" for item in execution.unavailable_capabilities)
+        if execution.rendered.truncated:
+            warnings += ("render_budget_reached",)
         return ReadResult(
             ReadStatus.COMPLETED,
             _prompt_block(execution),
             execution.rendered.rendered_refs,
-            tuple(f"capability_unavailable:{item.value}" for item in execution.unavailable_capabilities),
+            warnings,
         )
 
 

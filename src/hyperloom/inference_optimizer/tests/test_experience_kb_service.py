@@ -15,7 +15,7 @@ import pytest
 import hyperloom
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
 from hyperloom.inference_optimizer import cli, experience_collect, experience_kb_service
-from hyperloom_kb import GLOBAL_TOKEN_ENV, GLOBAL_URL_ENV, LocalService, LocalServiceError
+from hyperloom_kb import ConfigurationError, GLOBAL_TOKEN_ENV, GLOBAL_URL_ENV, LocalService, LocalServiceError
 
 _PACKAGE = Path(hyperloom.__file__).parent
 
@@ -38,11 +38,30 @@ def test_init_env_points_a_new_workspace_at_the_local_service(tmp_path: Path, ca
 
     values = _env_values(env_file)
     assert values["USER_DATA_PATH"] == "/data"
-    assert values["HYPERLOOM_KB_URL"] == "http://127.0.0.1:8787"
+    assert values["HYPERLOOM_KB_URL"] == experience_kb_service.local_url(tmp_path)
     assert len(values["HYPERLOOM_KB_TOKEN"]) >= 32
     output = capsys.readouterr().out
     assert output == "HYPERLOOM_KB_URL: written\nHYPERLOOM_KB_TOKEN: written\n"
     assert values["HYPERLOOM_KB_TOKEN"] not in output
+
+
+def test_each_workspace_gets_its_own_local_port_and_keeps_it(tmp_path: Path) -> None:
+    first, second = tmp_path / "alice" / "workspace", tmp_path / "bob" / "workspace"
+    urls = {}
+    for workspace in (first, second):
+        workspace.mkdir(parents=True)
+        experience_kb_service.init_env(workspace / ".env")
+        urls[workspace] = _env_values(workspace / ".env")["HYPERLOOM_KB_URL"]
+
+    ports = {int(url.rsplit(":", 1)[1]) for url in urls.values()}
+    assert all(url.startswith("http://127.0.0.1:") for url in urls.values())
+    assert len(ports) == 2 and ports <= set(experience_kb_service.LOCAL_PORTS)
+    assert experience_kb_service.local_url(first) == urls[first]
+
+    port = int(urls[first].rsplit(":", 1)[1])
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", port))
+        assert experience_kb_service.local_url(first) != urls[first]
 
 
 def test_init_env_keeps_configured_values_and_replaces_placeholders(tmp_path: Path) -> None:
@@ -73,8 +92,8 @@ def test_init_env_keeps_configured_values_and_replaces_placeholders(tmp_path: Pa
 def started(monkeypatch) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
 
-    def ensure_local_service(config, home, *, env):
-        calls.append({"url": config.base_url, "home": home, "env": env})
+    def ensure_local_service(config, home, *, env, restart):
+        calls.append({"url": config.base_url, "home": home, "env": env, "restart": restart})
         return LocalService({"status": "ok", "experience_count": 3})
 
     monkeypatch.setattr(experience_kb_service, "ensure_local_service", ensure_local_service)
@@ -132,6 +151,30 @@ def test_a_launch_continues_when_the_service_cannot_serve(monkeypatch, caplog) -
 
     assert validated == [True]
     assert "Experience writes are spooled" in caplog.text
+
+
+def test_a_launch_continues_when_the_workspace_names_a_service_without_its_token(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("HYPERLOOM_KB_URL", f"http://127.0.0.1:{_free_port()}")
+    monkeypatch.delenv("HYPERLOOM_KB_TOKEN", raising=False)
+
+    with caplog.at_level(logging.WARNING):
+        cli._start_experience_kb()
+
+    assert "HYPERLOOM_KB_TOKEN must be configured" in caplog.text
+    assert "the run continues without them" in caplog.text
+
+
+def test_a_launch_continues_when_the_service_validates_another_schema(monkeypatch, caplog) -> None:
+    def other_schema() -> None:
+        raise ConfigurationError("hyperloom-sbd-v6 produces schema:sha256:a, but the service validates schema:sha256:b")
+
+    monkeypatch.setattr(experience_kb_service, "ensure_service", lambda: None)
+    monkeypatch.setattr(experience_collect, "validate_config", other_schema)
+
+    with caplog.at_level(logging.WARNING):
+        cli._start_experience_kb()
+
+    assert "the run continues without them" in caplog.text
 
 
 def _push_report(**overrides: Any) -> dict[str, Any]:
@@ -215,6 +258,38 @@ def test_setup_then_launch_start_one_service_for_the_workspace(monkeypatch, tmp_
     finally:
         service.process.terminate()
         service.process.wait(timeout=10)
+
+
+def test_a_push_never_stops_the_service_a_run_may_be_reading_from(monkeypatch, tmp_path: Path, caplog, capsys) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"HYPERLOOM_KB_URL=http://127.0.0.1:{_free_port()}\n", encoding="utf-8")
+    experience_kb_service.init_env(env_file)
+    for key, value in _env_values(env_file).items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "data"))
+    for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", GLOBAL_URL_ENV, GLOBAL_TOKEN_ENV):
+        monkeypatch.delenv(key, raising=False)
+    launched = experience_kb_service.ensure_service()
+    relaunched: LocalService | None = None
+    assert launched is not None and launched.process is not None
+    try:
+        monkeypatch.setenv(GLOBAL_URL_ENV, "https://global.example")
+        monkeypatch.setenv(GLOBAL_TOKEN_ENV, "global-token")
+        with caplog.at_level(logging.WARNING):
+            assert experience_kb_service.main(["push"]) == 1
+
+        assert launched.process.poll() is None
+        assert "runs with other settings" in caplog.text
+        assert "started without a global Experience KB" in capsys.readouterr().err
+
+        relaunched = experience_kb_service.ensure_service()
+        assert relaunched is not None and relaunched.restarted
+        assert launched.process.wait(timeout=10) is not None
+    finally:
+        for service in (launched, relaunched):
+            if service is not None and service.process is not None and service.process.poll() is None:
+                service.process.terminate()
+                service.process.wait(timeout=10)
 
 
 def test_skills_describe_the_service_by_the_commands_and_variables_it_reads() -> None:

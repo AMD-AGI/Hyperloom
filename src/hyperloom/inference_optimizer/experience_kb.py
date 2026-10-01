@@ -17,14 +17,21 @@ from typing import Any
 
 from hyperloom.common.perf_metric import agentx_active
 from hyperloom.inference_optimizer.experience_collect import mapping_schema_ref
-from hyperloom_kb import RemoteClient, RemoteClientError, RemoteConfig
+from hyperloom.inference_optimizer.experience_kb_service import REQUEST_TIMEOUT_SECONDS
+from hyperloom_kb import ConfigurationError, RemoteClient, RemoteClientError, RemoteConfig
+from hyperloom_kb.collect import MappingError
 
 log = logging.getLogger(__name__)
 
 _FRAMEWORK_DECISION = "Select the next framework optimization to benchmark."
 _SPECIALIST_DECISION = "Propose framework optimizations for this specialist investigation."
-# A change.content over this many bytes reaches the prompt as a file under the session, not inline.
+# A free-text field over this many bytes reaches the prompt as a file under the session, not inline.
 CONTENT_INLINE_LIMIT = 2048
+# The injected records, rendered whole, stop before this many characters in every prompt that carries them.
+RENDER_BUDGET_CHARS = 40_000
+# A service or planner gateway this many reads in a row could not answer stays unread for the session, so a hung
+# gateway costs a run a few read timeouts rather than one per orchestration turn and specialist dispatch.
+READS_OFF_AFTER_FAILURES = 3
 CONTENT_DIR = Path("experience_kb") / "contents"
 
 
@@ -138,6 +145,7 @@ class ExperienceKBIntegration:
         self.schema_ref = schema_ref
         self._cache_tick: int | None = None
         self._by_context: dict[str, ExperienceKBEvidence] = {}
+        self._failed_in_a_row = 0
 
     @classmethod
     def from_env(
@@ -149,13 +157,14 @@ class ExperienceKBIntegration:
         if not str(values.get("HYPERLOOM_KB_URL") or "").strip():
             return None
         try:
-            config = RemoteConfig.from_env(values)
-        except RemoteClientError:
+            config = RemoteConfig.from_env(values, timeout_seconds=REQUEST_TIMEOUT_SECONDS)
+            schema_ref = mapping_schema_ref()
+        except (RemoteClientError, ConfigurationError, MappingError):
             log.exception("Experience service configuration is invalid; reads are disabled")
             return None
         if config is None:
             return None
-        return cls(RemoteClient(config), Path(session_dir), mapping_schema_ref())
+        return cls(RemoteClient(config), Path(session_dir), schema_ref)
 
     def _manifest_context(self) -> dict[str, Any]:
         path = self.session_dir / "manifest.json"
@@ -291,9 +300,29 @@ class ExperienceKBIntegration:
         cached = self._by_context.get(context_hash)
         if cached is not None:
             return cached
+        if self._failed_in_a_row >= READS_OFF_AFTER_FAILURES:
+            return ExperienceKBEvidence(
+                tick=tick,
+                read_id="",
+                status="unavailable",
+                prompt_block="",
+                rendered_refs=(),
+                warnings=("experience_kb_reads_off_for_session",),
+            )
         result = self.client.read(
-            decision, context, schema_ref=self.schema_ref, content_inline_limit=CONTENT_INLINE_LIMIT
+            decision,
+            context,
+            schema_ref=self.schema_ref,
+            content_inline_limit=CONTENT_INLINE_LIMIT,
+            render_budget_chars=RENDER_BUDGET_CHARS,
         )
+        self._failed_in_a_row = 0 if result.status == "completed" else self._failed_in_a_row + 1
+        if self._failed_in_a_row == READS_OFF_AFTER_FAILURES:
+            log.warning(
+                "Experience KB reads are off for the rest of this session after %d failed reads: %s",
+                READS_OFF_AFTER_FAILURES,
+                "; ".join(result.warnings) or result.status,
+            )
         legend = _materialize_contents(self.session_dir / CONTENT_DIR, result.contents)
         evidence = ExperienceKBEvidence(
             tick=tick,
@@ -319,14 +348,27 @@ class ExperienceKBIntegration:
         return self._read(state, _SPECIALIST_DECISION, self.build_specialist_context(state, params))
 
 
+def _reads_off_reason(state: Any) -> str:
+    """Why this run must not read Experiences, or ``""``: it reads only what the mapping would publish of it."""
+    from hyperloom.common.perf_metric import GRADED_OUTPUT
+    from hyperloom.inference_optimizer.breakdown.session_facts import grading_block
+
+    # The schema cannot tell an agentic workload from a synthetic one: the mapping publishes no AgentX Experience,
+    # so an AgentX run must not read the synthetic ones either.
+    if agentx_active(benchmark_mode=getattr(state, "benchmark_mode", "")):
+        return "its schema cannot represent an AgentX workload"
+    objective = str(grading_block(state).get("objective") or "")
+    if objective != GRADED_OUTPUT:
+        return f"it is graded on {objective or 'no recorded objective'}, and Experiences record throughput only"
+    return ""
+
+
 def integration_for(owner: Any, session_dir: str | Path) -> ExperienceKBIntegration | None:
     """Return ``owner``'s one Experience service integration, bootstrapping it on first use."""
     if hasattr(owner, "_kb_integration"):
         return owner._kb_integration
-    # The schema cannot tell an agentic workload from a synthetic one: the mapping publishes no AgentX Experience,
-    # so an AgentX run must not read the synthetic ones either.
-    if agentx_active(benchmark_mode=getattr(owner.shared_state, "benchmark_mode", "")):
-        log.info("Experience KB reads are off for this AgentX run: its schema cannot represent an AgentX workload")
+    if reason := _reads_off_reason(owner.shared_state):
+        log.info("Experience KB reads are off for this run: %s", reason)
         owner._kb_integration = None
     else:
         owner._kb_integration = ExperienceKBIntegration.from_env(session_dir)

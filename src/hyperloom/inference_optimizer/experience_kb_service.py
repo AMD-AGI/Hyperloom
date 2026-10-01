@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import re
 import secrets
+import socket
 import sys
 from pathlib import Path
 
@@ -32,7 +34,12 @@ from hyperloom_kb.schema import JsonValue
 
 log = logging.getLogger(__name__)
 
-LOCAL_URL = "http://127.0.0.1:8787"
+# A workspace's service port is drawn from here, below the ephemeral range a later client socket could take.
+LOCAL_PORTS = range(20_000, 30_000)
+# What a run waits on the local service for one read, write, or health check: above the planner's 20 s default, so a
+# read fails only when the planner does. Push and pull keep the client default, since the service forwards a whole
+# batch to the global KB inside one request.
+REQUEST_TIMEOUT_SECONDS = 30.0
 SERVICE_DIR = "experience-kb"
 AUTO_PUSH_ENV = "HYPERLOOM_KB_AUTO_PUSH"
 _PLACEHOLDER = "<PLEASE_FILL_IN>"
@@ -49,11 +56,37 @@ def spool_root() -> Path:
     return service_home() / "spool"
 
 
+def _port_is_free(port: int) -> bool:
+    with socket.socket() as probe:
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def local_url(workspace: Path) -> str:
+    """The loopback URL of ``workspace``'s own service: a port derived from its path, past any port in use.
+
+    Two workspaces on one host land on different ports even while neither service runs.
+    """
+
+    start = int(hashlib.sha256(str(workspace.resolve()).encode()).hexdigest(), 16) % len(LOCAL_PORTS)
+    for offset in range(len(LOCAL_PORTS)):
+        port = LOCAL_PORTS[(start + offset) % len(LOCAL_PORTS)]
+        if _port_is_free(port):
+            return f"http://127.0.0.1:{port}"
+    raise LocalServiceError(f"no free port in {LOCAL_PORTS.start}-{LOCAL_PORTS.stop - 1} for the Experience service")
+
+
 def init_env(env_file: Path) -> dict[str, str]:
-    """Point ``env_file`` at the local service with a generated token, keeping any value it already sets."""
+    """Point ``env_file`` at its workspace's local service with a generated token, keeping any value it already sets."""
 
     lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.is_file() else []
-    defaults = {"HYPERLOOM_KB_URL": LOCAL_URL, "HYPERLOOM_KB_TOKEN": secrets.token_urlsafe(32)}
+    defaults = {
+        "HYPERLOOM_KB_URL": local_url(env_file.resolve().parent),
+        "HYPERLOOM_KB_TOKEN": secrets.token_urlsafe(32),
+    }
     status: dict[str, str] = {}
     for key, default in defaults.items():
         assignment = re.compile(rf"^\s*(?:export\s+)?{key}\s*=(.*)$")
@@ -73,27 +106,38 @@ def init_env(env_file: Path) -> dict[str, str]:
     return status
 
 
-def ensure_service() -> LocalService | None:
-    """Bring the configured loopback service to serving; any other URL names a service this workspace does not run."""
+def ensure_service(*, restart: bool = True) -> LocalService | None:
+    """Bring the configured loopback service to serving; any other URL names a service this workspace does not run.
 
-    config = RemoteConfig.from_env()
+    ``restart`` applies this environment's settings to a service started with others, which a launch does. Without it
+    such a service keeps serving, and the result says why it is stale.
+    """
+
+    config = RemoteConfig.from_env(timeout_seconds=REQUEST_TIMEOUT_SECONDS)
     if config is None or not is_loopback(config.base_url):
         return None
     env = dict(os.environ)
     if not any(env.get(key) for key in _PLANNER_MODEL_KEYS):
         env["LOCAL_KB_PLANNER_MODEL"] = DEFAULT_CLAUDE_MODEL
-    return ensure_local_service(config, service_home(), env=env)
+    return ensure_local_service(config, service_home(), env=env, restart=restart)
 
 
 def sync_with_global(direction: str) -> dict[str, JsonValue]:
-    """``push`` or ``pull`` through the workspace's local service, first bringing it to the current settings."""
+    """``push`` or ``pull`` through the workspace's local service as it runs; a run it may be serving is never stopped."""
 
     if global_config_from_env(os.environ) is None:
         raise SyncUnavailable(f"{GLOBAL_URL_ENV} is not configured")
     config = RemoteConfig.from_env(spool_root=spool_root())
     if config is None or not is_loopback(config.base_url):
         raise SyncUnavailable("HYPERLOOM_KB_URL does not name a local Experience KB service")
-    ensure_service()
+    service = ensure_service(restart=False)
+    if service is not None and service.stale:
+        log.warning(
+            "The Experience KB service runs with other settings than this environment's (%s); %s uses it as it "
+            "runs, and the next optimize launch or `ensure` applies them",
+            service.stale,
+            direction,
+        )
     client = RemoteClient(config)
     if direction == "pull":
         return client.pull()
@@ -122,7 +166,7 @@ def auto_push() -> None:
         return
     try:
         report = sync_with_global("push")
-    except (LocalServiceError, RemoteClientError, SyncUnavailable) as exc:
+    except (LocalServiceError, RemoteClientError, SyncUnavailable, OSError) as exc:
         log.warning("Experience KB auto push failed; the next push sends these Experiences: %s", exc)
         return
     if report["status"] != "completed" or report["rejected"]:
@@ -181,11 +225,12 @@ def main(argv: list[str] | None = None) -> int:
 
 __all__ = [
     "AUTO_PUSH_ENV",
-    "LOCAL_URL",
+    "LOCAL_PORTS",
     "SERVICE_DIR",
     "auto_push",
     "ensure_service",
     "init_env",
+    "local_url",
     "main",
     "service_home",
     "spool_root",
