@@ -772,8 +772,6 @@ class FrameworkPhase(CoordinatorCollaborator):
         # An authored patch awaiting Critic review (or a candidate awaiting its pre-screen verdict) keeps the phase
         # open, but only while the proposal targets a still-unprocessed candidate.
         for p in self.state.pending_proposals.values():
-            if getattr(p, "decided", False):
-                continue
             if getattr(p, "action_name", "") != "integrate_patch":
                 continue
             payload = getattr(p, "payload", None) or {}

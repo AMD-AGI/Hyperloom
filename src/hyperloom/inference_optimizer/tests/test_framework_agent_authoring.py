@@ -366,16 +366,6 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     }
     assert asyncio.run(stub._framework_agent_authoring_inflight()) is False
 
-    # A decided proposal does NOT count even if framework-owned.
-    stub.state.pending_proposals = {
-        "m4": SimpleNamespace(
-            action_name="integrate_patch",
-            decided=True,
-            payload={"framework_agent_candidate_id": _CAND_ID},
-        ),
-    }
-    assert asyncio.run(stub._framework_agent_authoring_inflight()) is False
-
 
 def test_record_authored_outcome_writes_progress(
     tmp_path: Path,
