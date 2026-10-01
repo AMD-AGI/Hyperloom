@@ -185,6 +185,20 @@ def test_cli_init_and_status_report_the_round(rsi_config_dict, tmp_path, capsys)
     assert "fetch" in out and "pending" in out and "agent spend: $0.00 of $10" in out
 
 
+def test_status_marks_an_arm_compared_as_it_stands(rsi_config_dict, tmp_path, capsys):
+    cfg_path = tmp_path / "round.yaml"
+    cfg_path.write_text(yaml.safe_dump(rsi_config_dict))
+    state = RoundState.load(tmp_path / "round")
+    state.data["ab"] = {
+        "A": {"status": "finished", "attempt": 1},
+        "B": {"status": "finished", "attempt": 2, "partial": True},
+    }
+    state.save()
+    assert main(["status", "--config", str(cfg_path)]) == 0
+    out = capsys.readouterr().out
+    assert "arm A: finished (attempt 1" in out and "arm B: finished, partial (attempt 2" in out
+
+
 def test_cli_rejects_a_bad_configuration(tmp_path, capsys):
     cfg_path = tmp_path / "round.yaml"
     cfg_path.write_text("round_dir: /tmp/x\n")

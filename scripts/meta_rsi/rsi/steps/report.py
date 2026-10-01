@@ -63,7 +63,8 @@ def report(ctx: RoundContext) -> dict:
     outcomes = ctx.path("implement.json")
     outcomes.write_text(json.dumps(ctx.state.data.get("implement", {}), indent=1))
     inputs = [ctx.round_dir / name for name in REPORT_INPUTS if (ctx.round_dir / name).exists()]
-    inputs += [outcomes, *sorted((ctx.round_dir / "results").glob("*.json"))]
+    inputs += [outcomes, *sorted((ctx.round_dir / "replay").glob("*.txt"))]
+    inputs += sorted((ctx.round_dir / "results").glob("*.json"))
     prompt = prompts.REPORT.format(inputs="\n".join(f"- {p}" for p in inputs))
     result = ctx.run_agent(agent_spec(ctx, "report", "report", prompt, cwd=ctx.round_dir, tools=READ_TOOLS))
     if result.is_error or not result.text.strip():

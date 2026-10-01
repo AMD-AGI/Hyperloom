@@ -4,7 +4,18 @@
 """Round locations shared by the Meta RSI scripts, read from the environment.
 
 Every location comes from an explicit variable; nothing defaults to a particular machine. The
-rsi driver (``python -m meta_rsi.rsi``) sets these variables for each step it runs.
+rsi driver (``python -m meta_rsi.rsi``) sets these variables from round.yaml for each step it
+runs; export them yourself only to run a script by hand. They are inputs of these scripts, not
+Hyperloom settings.
+
+* ``PULSE_ROUND_DIR``, ``PULSE_BUNDLES``, ``PULSE_RECENT_SINCE``: required by the analyses.
+* ``PULSE_LOCAL_SESSIONS`` (``:``-separated session roots): required by ``an_local.py``;
+  ``PULSE_MODELS_DIR``: required by ``select_scenario.py``, where ``PULSE_EXCLUDE_ROOTS`` (default
+  none) and ``PULSE_MIN_MODEL_B`` (default 30, billions of parameters) narrow the pick.
+* ``PULSE_LOCAL_SPECIALIST_GLOB``: optional extra specialist logs for ``an_specialist.py``.
+* ``PULSE_API_KEY`` (or the key file ``PULSE_KEY_FILE``), ``PULSE_API_BASE`` (default: the
+  hosted Pulse API) and ``PULSE_SOCKS`` (default: direct): Pulse access for ``pulse.py`` and
+  ``fetch_all.sh``, which also reads ``TIERS``, ``JOBS`` (16) and ``MIN_FREE_GB`` (200).
 """
 
 from __future__ import annotations

@@ -37,7 +37,9 @@ checks:
   timeout_min: 120                        # bound on each pytest run; the default suite takes ~30 min serially
 
 replay:
-  commands: []                            # e.g. [[python3, an_replay_levers.py]], run with PYTHONPATH=<candidate>/src
+  # Offline estimates of the landed levers, e.g. [[python3, /path/to/replay.py, --round, /data/meta_rsi/round-2]].
+  # Each runs from scripts/meta_rsi with PYTHONPATH=<candidate>/src; its stdout goes to replay/ and into the report.
+  commands: []
 
 ab:
   python: /venvs/hyperloom/bin/python     # interpreter that runs `hyperloom.inference_optimizer.cli optimize`

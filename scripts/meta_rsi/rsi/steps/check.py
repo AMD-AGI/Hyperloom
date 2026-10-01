@@ -54,11 +54,12 @@ def suite(ctx: RoundContext) -> dict:
 
 
 def compare(ctx: RoundContext) -> dict:
-    """Compare every arm with the control (the first arm); the rule's outcome is advisory."""
-    arms = ctx.config.ab.arms
+    """Compare every arm with the control (the first arm), with each arm's run record; the rule is advisory."""
+    arms, records = ctx.config.ab.arms, ctx.state.data.get("ab", {})
     control, verdicts = arms[0], {}
     for arm in arms[1:]:
         result = compare_arms(arm_dir(ctx, control.name), arm_dir(ctx, arm.name), ctx.config.router_log)
+        result["runs"] = {a.name: records.get(a.name, {}) for a in (control, arm)}
         pair = f"{control.name}_vs_{arm.name}"
         ctx.path("results", f"{pair}.json").write_text(json.dumps(result, indent=1, default=str))
         verdicts[pair] = result["verdict"]

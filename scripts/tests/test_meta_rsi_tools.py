@@ -19,7 +19,7 @@ from meta_rsi.metrics import cost_usd, price_family
 from meta_rsi.rsi.config import parse_config
 from meta_rsi.rsi.pipeline import RoundContext, StepFailed
 from meta_rsi.rsi.state import RoundState
-from meta_rsi.rsi.steps import data
+from meta_rsi.rsi.steps import check, data
 from meta_rsi.rsi.steps.check import failed_tests
 from meta_rsi.rsi.steps.data import scenario_args
 
@@ -119,6 +119,16 @@ class TestCompare:
         b = _arm(tmp_path / "B", 5.0, [_row("specialist", "qwen3-coder", 10, 1)])
         with pytest.raises(SystemExit, match="'qwen3-coder' names no single family"):
             compare(a, b)
+
+    def test_the_compare_step_carries_each_arms_run_record(self, rsi_config_dict):
+        cfg = parse_config(rsi_config_dict)
+        ctx = RoundContext(config=cfg, state=RoundState.load(cfg.round_dir), log=lambda _m: None)
+        for name, gain in (("A", 9.0), ("B", 8.0)):
+            _arm(cfg.ab.sessions_dir / name, gain, [_row("orchestration", "claude-opus-5", 10, 1)])
+        ctx.state.data["ab"] = {"A": {"status": "finished", "attempt": 1}, "B": {"status": "finished", "partial": True}}
+        check.compare(ctx)
+        runs = json.loads((cfg.round_dir / "results" / "A_vs_B.json").read_text())["runs"]
+        assert runs == {"A": {"status": "finished", "attempt": 1}, "B": {"status": "finished", "partial": True}}
 
 
 @pytest.mark.parametrize(

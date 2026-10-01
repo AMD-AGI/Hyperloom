@@ -82,9 +82,11 @@ REPORT = """Write the round report in Markdown from these files:
 {inputs}
 
 Sections: Summary; Data; Where the tokens go; Changes (one row per landed lever with its commits, \
-evidence and off switch, then the dropped levers with the reason); Validation (scenario, arms, the \
-comparison numbers, the diagnosis); Limitations. Give numbers exactly as the files state them and \
-present the comparison rule's outcome as advisory. Reply with the Markdown only."""
+evidence and off switch, then the dropped levers with the reason); Validation (the offline replays, \
+the scenario, the arms, the comparison numbers, the diagnosis; an arm whose run record says \
+"partial" was interrupted and is compared as it stands, so say so); Limitations. Give numbers \
+exactly as the files state them and present the comparison rule's outcome as advisory. Reply with \
+the Markdown only."""
 
 
 def implement_prompt(lever: dict, branch: str, lint: str, base: str, problem: str = "") -> str:

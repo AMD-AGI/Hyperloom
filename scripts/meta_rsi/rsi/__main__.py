@@ -55,7 +55,8 @@ def _status(config: RoundConfig) -> None:
         detail = rec.error.splitlines()[0] if rec.error else ""
         print(f"{step.name:10s} {step.kind:6s} {rec.status:8s} {rec.finished or rec.started:20s} {detail}")
     for name, arm in state.data.get("ab", {}).items():
-        print(f"arm {name}: {arm.get('status')} (attempt {arm.get('attempt')}, pid {arm.get('pid')})")
+        partial = ", partial" if arm.get("partial") else ""
+        print(f"arm {name}: {arm.get('status')}{partial} (attempt {arm.get('attempt')}, pid {arm.get('pid')})")
     print(f"agent spend: ${state.agent_cost_usd:.2f} of ${config.agent.total_budget_usd:g}")
 
 

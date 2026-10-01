@@ -191,6 +191,17 @@ class TestSuite:
 
 
 class TestClosingSteps:
+    def test_the_report_reads_the_offline_replays(self, ctx):
+        (ctx.round_dir / "replay").mkdir(parents=True)
+        (ctx.round_dir / "replay" / "00.txt").write_text("idle gate skips 31% of ticks\n")
+        prompts_seen = []
+        ctx.agent = lambda spec: (
+            prompts_seen.append(spec.prompt)
+            or AgentResult(text="# Report\n", is_error=False, turns=1, cost_usd=0.0, usage={})
+        )
+        report.report(ctx)
+        assert str(ctx.round_dir / "replay" / "00.txt") in prompts_seen[0]
+
     def test_a_diagnosis_session_that_ended_in_error_fails_the_step(self, ctx):
         (ctx.round_dir / "results").mkdir(parents=True)
         (ctx.round_dir / "results" / "A_vs_B.json").write_text("{}")
