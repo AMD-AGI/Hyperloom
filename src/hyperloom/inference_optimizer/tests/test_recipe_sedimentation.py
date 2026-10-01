@@ -192,7 +192,7 @@ def test_warm_recipe_proven_items(tmp_path):
             },
         },
     }
-    proven = coord.phase_prelude._warm_recipe_proven_items()
+    proven = coord.phase_prelude.warm_recipe_proven_items()
     names = {p["name"] for p in proven}
     assert names == {"mtp_on", "fp8_kv"}
     mtp = next(p for p in proven if p["name"] == "mtp_on")
@@ -201,7 +201,7 @@ def test_warm_recipe_proven_items(tmp_path):
 
 def test_warm_recipe_proven_items_empty_without_recipe(tmp_path):
     coord = _make_coordinator(tmp_path)
-    assert coord.phase_prelude._warm_recipe_proven_items() == []
+    assert coord.phase_prelude.warm_recipe_proven_items() == []
 
 
 def test_experience_rows_survive_the_kb_round_trip(tmp_path):
@@ -366,7 +366,7 @@ def test_proven_items_reach_the_scout_through_a_stored_recipe(tmp_path):
         "hw": "h",
         "recipe": store.get_recipe(canonical_id=cid) or {},
     }
-    proven = coord.phase_prelude._warm_recipe_proven_items()
+    proven = coord.phase_prelude.warm_recipe_proven_items()
     assert {p["name"] for p in proven} == {"mtp_on", "fp8_kv"}
     assert next(p for p in proven if p["name"] == "mtp_on")["source"] == "https://pr/123"
 

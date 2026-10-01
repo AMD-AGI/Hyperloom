@@ -1511,7 +1511,7 @@ async def test_compose_prompt_has_no_specialist_status_block(coord: Coordinator)
         idempotency_key="visible-spec",
     )
     await coord.tasks.transition(spec.task_id, "running")
-    out = await coord.conversation._compose_prompt("orchestration")
+    out = await coord.conversation.compose_prompt("orchestration")
     assert "Specialist health" not in out
     assert "stale" not in out.lower()
 
@@ -1530,7 +1530,7 @@ async def test_running_tasks_reader_sees_live_specialist(coord: Coordinator) -> 
     assert "serving_specialist" in out
 
 
-# -- _fan_out_specialist_wave (valid entries) -------------------------------
+# -- fan_out_specialist_wave (valid entries) -------------------------------
 @pytest.mark.asyncio
 async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatch) -> None:
     seen: list[dict] = []
@@ -1543,7 +1543,7 @@ async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatc
         type=IntentType.DELEGATE,
         payload={"idempotency_key": "wave", "action_name": "specialist"},
     )
-    await coord.specialist_dispatch._fan_out_specialist_wave(
+    await coord.specialist_dispatch.fan_out_specialist_wave(
         "orchestration",
         intent,
         {
@@ -1559,7 +1559,7 @@ async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatc
     assert seen[0]["mode"] == "patch"
 
 
-# -- _warm_specialist_params (rich state) -----------------------------------
+# -- warm_specialist_params (rich state) -----------------------------------
 @pytest.mark.asyncio
 async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypatch) -> None:
     state = coord.shared_state
@@ -1584,7 +1584,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
             "attempts": [{"r": 1}],
         },
     )
-    monkeypatch.setattr(coord.conversation, "_target_gap_advisory_block", lambda: "GAP-NOTES")
+    monkeypatch.setattr(coord.conversation, "target_gap_advisory_block", lambda: "GAP-NOTES")
     from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-TEXT")
@@ -1597,7 +1597,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
     monkeypatch.setattr(fp, "resolve_framework_tree", lambda framework: "/src/root/vllm/")
 
     params: dict = {"domain": "kernel_agent", "gap_canonical_id": "g1"}
-    await coord.specialist_dispatch._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert params["framework_version"] == "0.4.1"
     assert params["target_gap_notes"] == "GAP-NOTES"
     assert params["research_hints"] == "HINTS-TEXT"
@@ -1664,7 +1664,7 @@ async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypat
     assert amends and "append_pitfall" in amends[0]
 
 
-# -- _plateau_advisory_block (triggered) ------------------------------------
+# -- plateau_advisory_block (triggered) ------------------------------------
 @pytest.mark.asyncio
 async def test_plateau_advisory_reports_the_config_arm_alone_as_not_a_plateau(coord: Coordinator, monkeypatch) -> None:
     """One dry arm is not a plateau: the phase stays open on the other lever."""
@@ -1691,7 +1691,7 @@ async def test_plateau_advisory_reports_the_config_arm_alone_as_not_a_plateau(co
             },
         ),
     )
-    out = coord.conversation._plateau_advisory_block()
+    out = coord.conversation.plateau_advisory_block()
     assert "OPTIMIZE config arm plateaued" in out
     assert "Only one arm is dry" in out
 
@@ -1721,7 +1721,7 @@ async def test_plateau_advisory_reports_the_source_arm_alone_as_not_a_plateau(co
             },
         ),
     )
-    out = coord.conversation._plateau_advisory_block()
+    out = coord.conversation.plateau_advisory_block()
     assert "OPTIMIZE source arm plateaued" in out
     assert "Only one arm is dry" in out
 
@@ -1752,14 +1752,14 @@ async def test_plateau_advisory_both_arms_dry_states_the_advance(coord: Coordina
             },
         ),
     )
-    out = coord.conversation._plateau_advisory_block()
+    out = coord.conversation.plateau_advisory_block()
     assert "OPTIMIZE config arm plateaued" in out
     assert "OPTIMIZE source arm plateaued" in out
     assert "Only one arm is dry" not in out
     assert "KERNEL_AGENT" in out
 
 
-# -- _record_specialist_result ----------------------------------------------
+# -- record_specialist_result ----------------------------------------------
 def _ptask(tid: str, kind: str) -> Task:
     return Task(task_id=tid, kind=kind, state="running", params={}, idempotency_key=f"{tid}-k")
 
@@ -1981,7 +1981,7 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
     assert len(seen) == len(routes)
 
 
-# -- _advance_phase_if_needed -----------------------------------------------
+# -- advance_phase_if_needed -----------------------------------------------
 @pytest.mark.asyncio
 async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeypatch) -> None:
     import hyperloom.orchestrator.phases.machine_state as ps
@@ -1989,7 +1989,7 @@ async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeyp
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "x", {}))
 
-    await coord.phase_machine._advance_phase_if_needed()
+    await coord.phase_machine.advance_phase_if_needed()
 
 
 @pytest.mark.asyncio
@@ -2007,7 +2007,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord.phase_machine._advance_phase_if_needed()
+    await coord.phase_machine.advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
 
 
@@ -2025,7 +2025,7 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord.phase_machine._advance_phase_if_needed()
+    await coord.phase_machine.advance_phase_if_needed()
     assert coord.shared_state.stop_reason == "target_reached"
 
 
@@ -2042,7 +2042,7 @@ async def test_advance_phase_hint_survives_arrival_at_its_consumer(coord: Coordi
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord.phase_machine._advance_phase_if_needed()
+    await coord.phase_machine.advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
     assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
 
@@ -2060,7 +2060,7 @@ async def test_advance_phase_hint_discarded_when_not_headed_to_its_consumer(coor
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord.phase_machine._advance_phase_if_needed()
+    await coord.phase_machine.advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "SWEEP"
     assert coord.shared_state.pending_escalate_hint == ""
     assert coord.shared_state.last_discarded_escalate_hint == "skip_to_kernel"
@@ -2086,7 +2086,7 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord.phase_machine._advance_phase_if_needed()
+    await coord.phase_machine.advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "KERNEL_AGENT"
     assert coord.shared_state.pending_escalate_hint == ""
     assert coord.shared_state.last_discarded_escalate_hint == ""
@@ -2321,7 +2321,7 @@ async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monk
     assert recorded
 
 
-# -- _maybe_autosubmit_specialist_patches early returns ---------------------
+# -- maybe_autosubmit_specialist_patches early returns ---------------------
 def _make_real_patch(coord: Coordinator, sid: str) -> None:
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
@@ -2339,7 +2339,7 @@ async def test_autosubmit_returns_when_verdict_exists(coord: Coordinator, monkey
     monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict", lambda s: {"verdict": "approve"})
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv1")
     n_before = len(coord.state.pending_proposals)
-    await coord.phase_framework._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": ["kernel.py"]},
     )
@@ -2362,14 +2362,14 @@ async def test_autosubmit_returns_when_review_in_flight(coord: Coordinator) -> N
     )
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv2")
     n_before = len(coord.state.pending_proposals)
-    await coord.phase_framework._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": ["kernel.py"]},
     )
     assert len(coord.state.pending_proposals) == n_before
 
 
-# -- _promote_warm_replay branches ------------------------------------------
+# -- promote_warm_replay branches ------------------------------------------
 def _warm_task():
     from hyperloom.orchestrator.state.task_registry import Task
 
@@ -2385,7 +2385,7 @@ def _warm_task():
 def test_promote_warm_replay_already_pushed(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
     coord.shared_state.optimization_stack = [{"action": "replay_warm_recipe"}]
-    coord.phase_prelude._promote_warm_replay(
+    coord.phase_prelude.promote_warm_replay(
         {"status": "succeeded", "output_throughput": 900.0},
         task=_warm_task(),
     )
@@ -2431,7 +2431,7 @@ async def test_recipe_kb_finalize_merges_existing_row(coord: Coordinator, monkey
     assert any(s.get("session_id") == "other-session" for s in overrides["sessions"])
 
 
-# -- _on_enter_close 7-step sequencer ---------------------------------------
+# -- on_enter_close 7-step sequencer ---------------------------------------
 @pytest.mark.asyncio
 async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch) -> None:
     async def _fake_run(task, **kw):
@@ -2443,7 +2443,7 @@ async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch
     from hyperloom.orchestrator.phases.machine import Transition
 
     coord.shared_state.set_stop_reason("target_reached")
-    await coord.phase_close._on_enter_close(
+    await coord.phase_close.on_enter_close(
         Transition(from_phase="SWEEP", to_phase="CLOSE", reason="SWEEP", evidence={}, loopback=False)
     )
     assert coord.shared_state.close_sequence_done is True
@@ -2646,7 +2646,7 @@ async def test_autosubmit_patch_carries_atomic_config_lever(coord: Coordinator) 
     sid = "spec-atomic-lever"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-atomic")
-    await coord.phase_framework._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2673,7 +2673,7 @@ async def test_autosubmit_patch_omits_non_atomic_config_lever(coord: Coordinator
     sid = "spec-plain-lever"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-plain")
-    await coord.phase_framework._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2706,7 +2706,7 @@ async def test_enablement_patch_carries_its_companion_lever_even_when_not_atomic
         params={"enablement": True},
         idempotency_key="kv-enablement",
     )
-    await coord.phase_framework._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2732,7 +2732,7 @@ async def test_optimization_patch_still_omits_a_non_atomic_lever(coord: Coordina
     sid = "spec-opt-lever"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-opt")
-    await coord.phase_framework._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2767,7 +2767,7 @@ async def test_enablement_round_inherits_the_flags_earlier_rounds_established(co
         params={"enablement": True},
         idempotency_key="kv-inherit",
     )
-    await coord.phase_framework._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2795,7 +2795,7 @@ async def test_this_round_overrides_an_inherited_flag(coord: Coordinator) -> Non
         params={"enablement": True},
         idempotency_key="kv-override",
     )
-    await coord.phase_framework._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2816,7 +2816,7 @@ async def test_optimization_rounds_inherit_nothing(coord: Coordinator) -> None:
     sid = "spec-no-inherit"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-noinherit")
-    await coord.phase_framework._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": ["kernel.py"], "proposal_set": [{"name": "opt", "extra_args": ""}]},
     )

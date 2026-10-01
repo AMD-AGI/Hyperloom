@@ -421,7 +421,7 @@ async def test_advance_phase_emits_enter_marker(session_dir, monkeypatch):
 
         monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _noop)
 
-        await c.phase_machine._advance_phase_if_needed()
+        await c.phase_machine.advance_phase_if_needed()
 
         enter = [e for e in c.shared_state.lifecycle if e["status"] == "ENTER"]
         assert len(enter) == 1, f"want one ENTER, got {c.shared_state.lifecycle}"
@@ -492,7 +492,7 @@ async def test_on_enter_close_emits_report_end(session_dir, monkeypatch):
             lambda: None,
         )
 
-        await c.phase_close._on_enter_close(
+        await c.phase_close.on_enter_close(
             Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}, loopback=False)
         )
 
@@ -565,7 +565,7 @@ async def test_on_enter_close_emits_report_error_for_failed_task(
             lambda: None,
         )
 
-        await c.phase_close._on_enter_close(
+        await c.phase_close.on_enter_close(
             Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}, loopback=False)
         )
 
@@ -637,7 +637,7 @@ async def test_on_enter_close_emits_report_error_for_exception(
             lambda: None,
         )
 
-        await c.phase_close._on_enter_close(
+        await c.phase_close.on_enter_close(
             Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}, loopback=False)
         )
 

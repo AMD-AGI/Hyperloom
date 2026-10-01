@@ -569,7 +569,7 @@ def test_a_copy_the_archive_refused_is_named_nowhere(_bound_session):
 def test_an_unreadable_spool_on_finish_does_not_raise(_bound_session, monkeypatch):
     """Lane teardown must not raise when the close-time spool read fails.
 
-    Callers (``close_lane_event``, ``_settle_enablement_round``) do not
+    Callers (``close_lane_event``, ``settle_enablement_round``) do not
     guard ``finish``, and a raise after ``stop_reason`` / ``state.save`` would
     leave the lane half torn down.
     """

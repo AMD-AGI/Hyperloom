@@ -207,7 +207,7 @@ async def test_the_block_is_injected_only_in_the_optimisation_phase(coord, phase
     coord.shared_state.phase = phase
     coord.shared_state.macro_cycle = 0
     coord.shared_state.specialist_rounds = [_round([{"name": "queued", "extra_args": "--a 1"}])]
-    out = await coord.conversation._compose_prompt("orchestration")
+    out = await coord.conversation.compose_prompt("orchestration")
     assert ("=== Untested proposals (current cycle) ===" in out) is expected
 
 
@@ -218,8 +218,8 @@ async def test_the_block_is_repeated_on_every_turn(coord):
     coord.shared_state.macro_cycle = 0
     coord.shared_state.specialist_rounds = [_round([{"name": "queued", "extra_args": "--a 1"}])]
 
-    first = await coord.conversation._compose_prompt("orchestration")
-    second = await coord.conversation._compose_prompt("orchestration")
+    first = await coord.conversation.compose_prompt("orchestration")
+    second = await coord.conversation.compose_prompt("orchestration")
 
     for out in (first, second):
         assert "=== Shared session state ===" in out

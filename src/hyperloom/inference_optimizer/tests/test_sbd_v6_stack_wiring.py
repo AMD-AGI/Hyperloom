@@ -5,7 +5,7 @@
 
 ``test_sbd_v6_stack_ledger.py`` pins what the ledger computes; these pin that the
 orchestrator feeds it. ``throughput_before`` exists only inside
-``_lift_to_current_best``, so a test that supplies its own has assumed the claim.
+``lift_to_current_best``, so a test that supplies its own has assumed the claim.
 """
 
 from __future__ import annotations

@@ -26,7 +26,7 @@ from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, Scr
 
 
 def _tr(reason: str) -> Transition:
-    """Minimal Transition for driving _close_framework_timeline in tests."""
+    """Minimal Transition for driving close_framework_timeline in tests."""
     return Transition(
         from_phase="FRAMEWORK_AGENT",
         to_phase="SWEEP",
@@ -74,7 +74,7 @@ def test_open_records_the_resolved_policy(session_dir: Path, legacy_timeout_over
     state.plateau_overrides = {"explore_lookback": 7, "explore_keep_gain_pct": 1.25}
 
     coord.phase_framework._open_framework_timeline()
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     policy = _events(session_dir)[0]["ext"]["policy"]
     assert policy["keep_threshold_pct"] is not None
@@ -93,7 +93,7 @@ def test_force_exit_budget_pct_is_reported_unresolved(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.phase_framework._open_framework_timeline()
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     assert _events(session_dir)[0]["ext"]["policy"]["force_exit_budget_pct"] is None
 
@@ -177,7 +177,7 @@ def test_advisory_plateau_snapshots_both_arms(session_dir: Path):
     coord.phase_framework._open_framework_timeline()
 
     coord.phase_framework._record_advisory_plateau()
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     advisory = [row for row in _events(session_dir)[0]["ext"]["plateau"] if row["path"] == "advisory"]
     assert {row["arm"] for row in advisory} == {"config", "source"}
@@ -207,7 +207,7 @@ def test_discovery_round_records_its_run_and_both_outcomes(session_dir: Path):
             ]
         },
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     ext = _events(session_dir)[0]["ext"]
     run = ext["runs"][0]
@@ -241,7 +241,7 @@ def test_failed_discovery_round_records_the_failure(session_dir: Path):
         done_payload={},
         run_error="worktree checkout failed",
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_no_more_leverage"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
     event = _events(session_dir)[0]
     run = event["ext"]["runs"][0]
@@ -264,7 +264,7 @@ def test_terminal_row_settles_the_proposal(session_dir: Path):
         rationale="patch did not apply",
         provenance="pump",
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_no_more_leverage"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
     terminal = _events(session_dir)[0]["ext"]["proposals"][0]["terminal"]
     assert terminal["disposition"] == "dropped"
@@ -284,7 +284,7 @@ def test_critic_denial_records_the_review_and_the_drop(session_dir: Path):
         action_name="integrate_patch",
     )
     asyncio.run(coord.phase_framework.record_critic_denial(pending, "touches the serving loop"))
-    coord.phase_framework._close_framework_timeline(_tr("optimize_no_more_leverage"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
     proposal = _events(session_dir)[0]["ext"]["proposals"][0]
     # The Critic's own word for it: a field spelled two ways cannot be selected on.
@@ -330,7 +330,7 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
     asyncio.run(
         coord.writeback.fact_write_hook(task=task, result=result, verdict=Verdict.ADOPTED, adopted_variants={"fp1"})
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     attempts = {row["fingerprint"]: row for row in _events(session_dir)[0]["ext"]["attempts"]}
     # The deduped variant was never measured, so it is not in the funnel.
@@ -370,7 +370,7 @@ async def test_a_raising_pump_is_named_on_the_event(session_dir: Path, monkeypat
     coord.phase_framework._open_framework_timeline()
 
     await coord.phase_framework.pump()
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     event = _events(session_dir)[0]
     assert event["status"] == "failed"
@@ -407,7 +407,7 @@ def test_the_config_arms_grid_lands_a_run_row(session_dir: Path):
             verdict=Verdict.REVERTED,
         )
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     run = _events(session_dir)[0]["ext"]["runs"][0]
     assert run["run_id"] == "t-exp-1"
@@ -436,7 +436,7 @@ def test_a_grid_that_measured_nothing_still_lands_a_run_row(session_dir: Path):
             verdict=Verdict.FAILED,
         )
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     event = _events(session_dir)[0]
     assert event["ext"]["attempts"] == []
@@ -486,7 +486,7 @@ def test_a_config_variants_accuracy_is_reported_as_well_as_gated(session_dir: Pa
             verdict=Verdict.REVERTED,
         )
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     attempts = {row["fingerprint"]: row for row in _events(session_dir)[0]["ext"]["attempts"]}
     assert attempts["fp1"]["accuracy"] == {
@@ -534,7 +534,7 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
         },
         adopted=True,
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_no_more_leverage"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
     ext = _events(session_dir)[0]["ext"]
     attempt = ext["attempts"][0]
@@ -582,7 +582,7 @@ def _authored_outcome(coord, result: dict) -> dict:
         result=result,
         adopted=result.get("status") == "kept",
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_no_more_leverage"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
     return _events(coord.session_dir)[0]["ext"]["attempts"][0]
 
 
@@ -632,7 +632,7 @@ def test_absent_accuracy_gate_writes_no_gate_row(session_dir: Path):
         result={"status": "reverted", "base_tput": 100.0, "output_throughput": 99.0, "delta_pct": -1.0},
         adopted=False,
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_no_more_leverage"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
     attempt = _events(session_dir)[0]["ext"]["attempts"][0]
     assert attempt["gates"] == []
@@ -674,7 +674,7 @@ def test_a_proposed_grid_lands_with_its_producer(session_dir: Path):
             {"provenance": "llm_direct", "extra_server_args": "--foo 4"},
         ],
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     proposal = _events(session_dir)[0]["ext"]["proposals"][0]
     assert proposal["proposal_id"] == msg_id
@@ -694,7 +694,7 @@ def test_a_specialist_labelled_grid_names_its_domain(session_dir: Path):
     coord.phase_framework._open_framework_timeline()
 
     _propose_grid(coord, [{"provenance": "specialist:attention", "scope": "domain"}])
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     proposal = _events(session_dir)[0]["ext"]["proposals"][0]
     assert proposal["producer"] == "specialist"
@@ -708,7 +708,7 @@ def test_a_seeded_grid_is_not_the_agents_idea(session_dir: Path):
     coord.phase_framework._open_framework_timeline()
 
     _propose_grid(coord, [{"provenance": "default_grid"}])
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     assert _events(session_dir)[0]["ext"]["proposals"][0]["producer"] == "seed_grid"
 
@@ -719,7 +719,7 @@ def test_a_mixed_grid_is_the_assemblers(session_dir: Path):
     coord.phase_framework._open_framework_timeline()
 
     _propose_grid(coord, [{"provenance": "specialist:attention"}, {"provenance": "default_grid"}])
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     proposal = _events(session_dir)[0]["ext"]["proposals"][0]
     assert proposal["producer"] == "orchestration_agent"
@@ -745,7 +745,7 @@ def test_a_rejected_grid_is_reviewed_and_dropped(session_dir: Path):
             approved_variant_names=None,
         )
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_no_more_leverage"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
     proposal = _events(session_dir)[0]["ext"]["proposals"][0]
     assert proposal["critic_review"]["verdict"] == "reject"
@@ -792,7 +792,7 @@ def test_a_review_records_the_grounds_the_critic_stated(session_dir: Path):
             "alternative_action": "shrink the grid",
         },
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_no_more_leverage"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
     review = _events(session_dir)[0]["ext"]["proposals"][0]["critic_review"]
     assert review["verdict"] == "advise"
@@ -823,7 +823,7 @@ def test_a_verdict_held_to_its_rule_keeps_both_readings(session_dir: Path):
             "failure_reason_code": "specialist_quantitative_claim_violation",
         },
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_no_more_leverage"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
     review = _events(session_dir)[0]["ext"]["proposals"][0]["critic_review"]
     assert review["verdict"] == "reject"
@@ -855,7 +855,7 @@ def test_a_per_variant_review_records_every_variants_ruling(session_dir: Path):
             }
         },
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_no_more_leverage"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
     review = _events(session_dir)[0]["ext"]["proposals"][0]["critic_review"]
     rows = {row["variant_name"]: row for row in review["variants"]}
@@ -882,7 +882,7 @@ def test_a_ruling_the_critic_could_not_ground_says_so(session_dir: Path):
             "reasoning": "required_context missing: model manifest",
         },
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_no_more_leverage"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
     review = _events(session_dir)[0]["ext"]["proposals"][0]["critic_review"]
     assert review["reviewer"] == "critic_unavailable"
@@ -924,7 +924,7 @@ def test_a_patch_review_lands_on_the_candidate_it_judged(session_dir: Path):
             payload={"verdict": "reject", "failure_reason_code": "serving_loop_touched"},
         )
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_no_more_leverage"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
     proposals = _events(session_dir)[0]["ext"]["proposals"]
     assert [row["proposal_id"] for row in proposals] == ["cand-42"]
@@ -956,7 +956,7 @@ def test_the_review_carries_what_it_was_grounded_in(session_dir: Path):
             "write": {"trigger": "review_verdict", "status": "dead_lettered", "detail": "kb unreachable"},
         },
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_no_more_leverage"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
     review = _events(session_dir)[0]["ext"]["proposals"][0]["critic_review"]
     # Merged onto the ruling the verdict seam already wrote, not beside it.
@@ -1022,7 +1022,7 @@ def test_measured_variants_settle_their_grid(session_dir: Path):
             verdict=Verdict.ADOPTED,
         )
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     ext = _events(session_dir)[0]["ext"]
     proposal = ext["proposals"][0]
@@ -1059,7 +1059,7 @@ def test_a_measured_variant_keeps_the_name_a_reader_knows_it_by(session_dir: Pat
             verdict=Verdict.ADOPTED,
         )
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     attempt = _events(session_dir)[0]["ext"]["attempts"][0]
     assert attempt["variant_name"] == "chunked-prefill"
@@ -1089,7 +1089,7 @@ def test_every_applied_patch_is_recorded_not_just_the_primary(session_dir: Path)
         },
         adopted=True,
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_no_more_leverage"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
     attempt = _events(session_dir)[0]["ext"]["attempts"][0]
     assert attempt["patches_applied"] == ["patches/pr-7.patch", "patches/pr-7-fixup.patch"]
@@ -1141,7 +1141,7 @@ def test_config_gates_and_stack_come_from_the_round_that_ruled(session_dir: Path
             verdict=Verdict.REVERTED,
         )
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     attempt = _events(session_dir)[0]["ext"]["attempts"][0]
     # The stack it launched on, which already carries an earlier KEEP.
@@ -1186,7 +1186,7 @@ def test_an_ungated_keep_does_not_claim_an_accuracy_pass(session_dir: Path):
             adopted_variants={"fpu"},
         )
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     attempt = _events(session_dir)[0]["ext"]["attempts"][0]
     assert attempt["validation_basis"] == "keep_verdict_unscored"
@@ -1223,7 +1223,7 @@ def test_a_config_keep_the_lift_refused_is_not_adopted(session_dir: Path):
             verdict=Verdict.REFUSED,
         )
     )
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     attempt = _events(session_dir)[0]["ext"]["attempts"][0]
     assert attempt["outcome"] == "KEEP"
@@ -1239,6 +1239,6 @@ def test_no_recorder_leaves_the_phase_alone(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
 
-    coord.phase_framework._close_framework_timeline(_tr("optimize_budget_cap"))
-    assert coord.conversation._plateau_advisory_block() is not None
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
+    assert coord.conversation.plateau_advisory_block() is not None
     assert _events(session_dir) == []

@@ -99,7 +99,7 @@ async def test_coordinator_marks_bottleneck_switch_on_plateau(cyclic_coordinator
     st.framework_agent_phase_done = src.framework_agent_phase_done
     st.roofline_snapshots = src.roofline_snapshots
 
-    await c.phase_machine._advance_phase_if_needed()
+    await c.phase_machine.advance_phase_if_needed()
 
     # Exhausted optimisation leverage switches lever to KERNEL.
     assert st.phase == ps.PHASE_KERNEL_AGENT
@@ -159,11 +159,11 @@ def test_cycle_strategy_planner_avoids_saturated_focus(cyclic_coordinator):
         "kernel_switch_specialist": {"saturated": True, "within_pct": 98.0},
         "comm_specialist": {"saturated": False},
     }
-    c.phase_macro_cycle._record_cycle_strategy_for_current_cycle()
+    c.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
     row = st.cycle_strategy_log[-1]
     assert row["cycle"] == 2
     assert row["focus"] != "kernel_switch_specialist"
-    strategy = c.phase_macro_cycle._plan_cycle_focus()
+    strategy = c.phase_macro_cycle.plan_cycle_focus()
     assert strategy["focus"] != "kernel_switch_specialist"
     assert "focus" in strategy
 

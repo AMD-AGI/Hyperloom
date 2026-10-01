@@ -157,14 +157,8 @@ class _ReapStub:
     async def _noop_async(self, *_args: Any, **_kwargs: Any) -> None:
         return None
 
-    def _is_promotable_result(self, *_args: Any, **_kwargs: Any) -> bool:
-        return False
-
     async def _handle_unpromotable_result(self, task: Any, _result: Any) -> None:
         self.unpromotable.append(task.task_id)
-
-    async def _fact_write_hook(self, **_kwargs: Any) -> None:
-        return None
 
     def record_exception(self, **_kwargs: Any) -> None:
         return None

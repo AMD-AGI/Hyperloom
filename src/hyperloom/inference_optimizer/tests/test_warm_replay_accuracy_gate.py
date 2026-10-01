@@ -72,7 +72,7 @@ class TestScoreIsFoundWhereTheDoubleRunWritesIt:
     def test_a_warmup_round_score_is_read(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
         result = _double_run_dirs(tmp_path, warmup_score=0.89)
-        coord.phase_prelude._promote_warm_replay(result, task=_risky_task())
+        coord.phase_prelude.promote_warm_replay(result, task=_risky_task())
 
         outcome = coord.shared_state.warm_replay_outcome
         assert outcome["eval_ran"] is True
@@ -82,7 +82,7 @@ class TestScoreIsFoundWhereTheDoubleRunWritesIt:
     def test_a_collapsed_warmup_round_score_blocks_promotion(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
         result = _double_run_dirs(tmp_path, warmup_score=0.0076)
-        coord.phase_prelude._promote_warm_replay(result, task=_risky_task())
+        coord.phase_prelude.promote_warm_replay(result, task=_risky_task())
 
         assert _promoted(coord) is False
         outcome = coord.shared_state.warm_replay_outcome
@@ -92,7 +92,7 @@ class TestScoreIsFoundWhereTheDoubleRunWritesIt:
     def test_no_results_file_anywhere_records_that_no_eval_ran(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
         result = _double_run_dirs(tmp_path, warmup_score=None)
-        coord.phase_prelude._promote_warm_replay(result, task=_risky_task())
+        coord.phase_prelude.promote_warm_replay(result, task=_risky_task())
 
         outcome = coord.shared_state.warm_replay_outcome
         assert outcome["eval_ran"] is False
@@ -104,7 +104,7 @@ class TestWarmReplayRejectsBrokenConfigs:
     def test_a_collapsed_score_blocks_promotion(self, tmp_path):
         """The case observed 45 times: big throughput win, ruined accuracy."""
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
-        coord.phase_prelude._promote_warm_replay(
+        coord.phase_prelude.promote_warm_replay(
             {"status": "succeeded", "output_throughput": 738.0, "accuracy": 0.20},
             task=_risky_task(),
         )
@@ -116,7 +116,7 @@ class TestWarmReplayRejectsBrokenConfigs:
     def test_an_intact_score_still_promotes(self, tmp_path):
         """The gate must not cost a genuine win."""
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
-        coord.phase_prelude._promote_warm_replay(
+        coord.phase_prelude.promote_warm_replay(
             {"status": "succeeded", "output_throughput": 738.0, "accuracy": 0.89},
             task=_risky_task(),
         )
@@ -127,7 +127,7 @@ class TestWarmReplayRejectsBrokenConfigs:
     def test_a_drop_within_tolerance_is_not_a_regression(self, tmp_path, drop):
         """Healthy run-to-run spread reaches 0.037 in the observed pool, so the 0.05 tolerance must survive it."""
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
-        coord.phase_prelude._promote_warm_replay(
+        coord.phase_prelude.promote_warm_replay(
             {
                 "status": "succeeded",
                 "output_throughput": 738.0,
@@ -143,7 +143,7 @@ class TestEveryReplayIsJudged:
 
     def test_a_config_with_no_high_risk_knob_is_still_judged(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
-        coord.phase_prelude._promote_warm_replay(
+        coord.phase_prelude.promote_warm_replay(
             {"status": "succeeded", "output_throughput": 738.0, "accuracy": 0.20},
             task=_safe_task(),
         )
@@ -152,7 +152,7 @@ class TestEveryReplayIsJudged:
 
     def test_a_sound_config_with_no_high_risk_knob_promotes(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
-        coord.phase_prelude._promote_warm_replay(
+        coord.phase_prelude.promote_warm_replay(
             {"status": "succeeded", "output_throughput": 738.0, "accuracy": 0.89},
             task=_safe_task(),
         )
@@ -164,7 +164,7 @@ class TestAbsentEvidenceDoesNotBlock:
 
     def test_a_missing_verdict_still_promotes_and_is_marked(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
-        coord.phase_prelude._promote_warm_replay(
+        coord.phase_prelude.promote_warm_replay(
             {"status": "succeeded", "output_throughput": 738.0},
             task=_risky_task(),
         )
@@ -183,7 +183,7 @@ class TestAbsentEvidenceDoesNotBlock:
             json.dumps({"results": {"gsm8k": {"unknown_metric": 1.0}}}),
             encoding="utf-8",
         )
-        coord.phase_prelude._promote_warm_replay(result, task=_risky_task())
+        coord.phase_prelude.promote_warm_replay(result, task=_risky_task())
 
         assert _promoted(coord) is True
         outcome = coord.shared_state.warm_replay_outcome
@@ -200,7 +200,7 @@ class TestAbsentEvidenceDoesNotBlock:
             "{ this is not json",
             encoding="utf-8",
         )
-        coord.phase_prelude._promote_warm_replay(result, task=_risky_task())
+        coord.phase_prelude.promote_warm_replay(result, task=_risky_task())
 
         assert _promoted(coord) is True
         outcome = coord.shared_state.warm_replay_outcome
@@ -219,7 +219,7 @@ class TestAbsentEvidenceDoesNotBlock:
             raise OSError("results directory vanished mid-read")
 
         monkeypatch.setattr(_accuracy_gate, "parse_eval_results", _raise)
-        coord.phase_prelude._promote_warm_replay(result, task=_risky_task())
+        coord.phase_prelude.promote_warm_replay(result, task=_risky_task())
 
         assert _promoted(coord) is True
         outcome = coord.shared_state.warm_replay_outcome
@@ -229,7 +229,7 @@ class TestAbsentEvidenceDoesNotBlock:
 
     def test_a_passing_replay_records_no_eval_error(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
-        coord.phase_prelude._promote_warm_replay(
+        coord.phase_prelude.promote_warm_replay(
             {"status": "succeeded", "output_throughput": 738.0, "accuracy": 0.89},
             task=_risky_task(),
         )
@@ -237,7 +237,7 @@ class TestAbsentEvidenceDoesNotBlock:
 
     def test_no_baseline_missing_verdict_still_promotes(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, 0.0)
-        coord.phase_prelude._promote_warm_replay(
+        coord.phase_prelude.promote_warm_replay(
             {"status": "succeeded", "output_throughput": 738.0},
             task=_risky_task(),
         )
@@ -247,7 +247,7 @@ class TestAbsentEvidenceDoesNotBlock:
     def test_no_baseline_collapsed_score_rejected_by_absolute_floor(self, tmp_path):
         """``--no-eval`` sessions carry no baseline reference; a collapsed replay must still be caught by the enablement absolute floor."""
         coord = _coord_with_baseline(tmp_path, 0.0)
-        coord.phase_prelude._promote_warm_replay(
+        coord.phase_prelude.promote_warm_replay(
             {"status": "succeeded", "output_throughput": 738.0, "accuracy": 0.20},
             task=_risky_task(),
         )
@@ -258,7 +258,7 @@ class TestAbsentEvidenceDoesNotBlock:
 
     def test_no_baseline_sound_score_passes_absolute_floor(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, 0.0)
-        coord.phase_prelude._promote_warm_replay(
+        coord.phase_prelude.promote_warm_replay(
             {"status": "succeeded", "output_throughput": 738.0, "accuracy": 0.89},
             task=_risky_task(),
         )
@@ -270,7 +270,7 @@ class TestAccuracyIsRecordedOnSuccess:
 
     def test_a_passing_replay_records_both_scores(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
-        coord.phase_prelude._promote_warm_replay(
+        coord.phase_prelude.promote_warm_replay(
             {"status": "succeeded", "output_throughput": 738.0, "accuracy": 0.89},
             task=_risky_task(),
         )
@@ -281,7 +281,7 @@ class TestAccuracyIsRecordedOnSuccess:
 
     def test_the_promoted_stack_entry_carries_the_score(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
-        coord.phase_prelude._promote_warm_replay(
+        coord.phase_prelude.promote_warm_replay(
             {"status": "succeeded", "output_throughput": 738.0, "accuracy": 0.89},
             task=_risky_task(),
         )

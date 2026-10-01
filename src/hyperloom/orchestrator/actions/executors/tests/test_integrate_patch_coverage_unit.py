@@ -1299,7 +1299,7 @@ async def test_no_patches_forwards_ungrounded_patches(tmp_path, monkeypatch):
     """When a patch could not be grounded, the integrate result must carry
     ``patches_ungrounded`` so framework.py can surface it in the next round's
     mandate.  Without this forwarding the field stays in done_payload and is
-    never read by _maybe_rearm_enablement."""
+    never read by maybe_rearm_enablement."""
     session = tmp_path / "s"
     session.mkdir()
     ws = session / "runs" / "specialist" / "spec"

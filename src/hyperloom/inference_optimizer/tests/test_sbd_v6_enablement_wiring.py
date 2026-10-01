@@ -173,14 +173,14 @@ def _lane(session_dir: Path, **overrides: Any):
         rounds=overrides.get("rounds") or _rounds(session_dir),
         session_dir=str(session_dir),
         run_deadline=None,
-        _warm_specialist_params=_noop,
+        warm_specialist_params=_noop,
         record_observation=_noop,
-        _maybe_enqueue_specialist_requested_build=_noop,
-        _maybe_escalate_to_targeted_build=_noop,
+        maybe_enqueue_specialist_requested_build=_noop,
+        maybe_escalate_to_targeted_build=_noop,
         _read_enablement_source_context=lambda _sig: "",
         _derive_checkpoint_weight_facts=lambda _log: "",
-        _framework_gpu_params=lambda: {},
-        _framework_authoring_lanes_ttl=lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
+        framework_gpu_params=lambda: {},
+        framework_authoring_lanes_ttl=lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
         time_budget_denial_for_action=lambda _action: None,
         action_registry=ACTION_CATALOGUE,
         knowledge_plane=None,
@@ -190,31 +190,31 @@ def _lane(session_dir: Path, **overrides: Any):
     )
     for name in ("registry_lanes_ttl",):
         setattr(fake, name, types.MethodType(getattr(DispatcherCollaborator, name), fake))
-    for name in ("_build_enablement_specialist_params", "_discover_enablement_candidate_refs"):
+    for name in ("build_enablement_specialist_params", "_discover_enablement_candidate_refs"):
         setattr(fake, name, types.MethodType(getattr(EnablementParams, name), fake))
     for name in (
         "_maybe_enqueue_enablement_specialist",
         "_maybe_record_enablement_human_review",
-        "_maybe_rearm_enablement",
+        "maybe_rearm_enablement",
     ):
         setattr(fake, name, types.MethodType(getattr(EnablementLane, name), fake))
     for name in (
-        "_maybe_enqueue_enablement_baseline_revalidation",
+        "maybe_enqueue_enablement_baseline_revalidation",
         "_open_revalidation_row",
-        "_open_row_past_spent_generations",
+        "open_row_past_spent_generations",
         "_open_round_past_spent_generations",
     ):
         setattr(fake, name, types.MethodType(getattr(EnablementRevalidation, name), fake))
     # The round ledger's own surface: the cap, the lease and the settle all live on it.
     for name in (
-        "_enablement_admitted",
+        "enablement_admitted",
         "_check_argv_terminal",
         "_check_environment_terminal",
-        "_enablement_in_flight",
+        "enablement_in_flight",
         "_round_has_live_work",
         "_open_authoring_round",
         "_renew_enablement_round",
-        "_settle_enablement_round",
+        "settle_enablement_round",
         "close_lane_event",
     ):
         setattr(fake, name, types.MethodType(getattr(EnablementLane, name), fake))
@@ -224,24 +224,24 @@ def _lane(session_dir: Path, **overrides: Any):
         run_deadline=None,
         record_exception=lambda *_a, **_k: None,
         enablement_params=types.SimpleNamespace(
-            _build_enablement_specialist_params=lambda *a, **k: fake._build_enablement_specialist_params(*a, **k),
+            build_enablement_specialist_params=lambda *a, **k: fake.build_enablement_specialist_params(*a, **k),
         ),
         enablement_build=types.SimpleNamespace(
-            _maybe_enqueue_specialist_requested_build=lambda: fake._maybe_enqueue_specialist_requested_build(),
-            _maybe_escalate_to_targeted_build=lambda *a, **k: fake._maybe_escalate_to_targeted_build(*a, **k),
-            _maybe_route_build_outcomes=_noop,
+            maybe_enqueue_specialist_requested_build=lambda: fake.maybe_enqueue_specialist_requested_build(),
+            maybe_escalate_to_targeted_build=lambda *a, **k: fake.maybe_escalate_to_targeted_build(*a, **k),
+            maybe_route_build_outcomes=_noop,
         ),
         enablement_revalidation=types.SimpleNamespace(
-            _maybe_enqueue_enablement_baseline_revalidation=lambda: (
-                fake._maybe_enqueue_enablement_baseline_revalidation()
+            maybe_enqueue_enablement_baseline_revalidation=lambda: (
+                fake.maybe_enqueue_enablement_baseline_revalidation()
             ),
         ),
         specialist_dispatch=types.SimpleNamespace(
-            _warm_specialist_params=lambda *a, **k: fake._warm_specialist_params(*a, **k),
+            warm_specialist_params=lambda *a, **k: fake.warm_specialist_params(*a, **k),
         ),
         gpu_lanes=types.SimpleNamespace(
-            _framework_authoring_lanes_ttl=lambda *a, **k: fake._framework_authoring_lanes_ttl(*a, **k),
-            _framework_gpu_params=lambda: fake._framework_gpu_params(),
+            framework_authoring_lanes_ttl=lambda *a, **k: fake.framework_authoring_lanes_ttl(*a, **k),
+            framework_gpu_params=lambda: fake.framework_gpu_params(),
         ),
         writeback=types.SimpleNamespace(
             record_observation=lambda *a, **k: fake.record_observation(*a, **k),
@@ -310,7 +310,7 @@ async def test_the_dispatch_opens_the_lane_the_trigger_missed(_bound_session):
 async def test_two_dispatches_are_two_rounds_on_one_event(_bound_session):
     lane = _lane(_bound_session)
     first = await lane._maybe_enqueue_enablement_specialist()
-    await lane._maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": first})
+    await lane.maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": first})
     second = await lane._maybe_enqueue_enablement_specialist()
 
     assert len(_events(_bound_session)) == 1
@@ -324,7 +324,7 @@ async def test_a_kept_round_records_the_patch_it_landed(_bound_session):
     lane = _lane(_bound_session)
     task_id = await lane._maybe_enqueue_enablement_specialist()
 
-    await lane._maybe_rearm_enablement(
+    await lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "kept",
@@ -354,7 +354,7 @@ async def test_an_advanced_round_records_the_gap_it_revealed(_bound_session):
     lane = _lane(_bound_session)
     task_id = await lane._maybe_enqueue_enablement_specialist()
 
-    await lane._maybe_rearm_enablement(
+    await lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -378,7 +378,7 @@ async def test_the_stall_cap_closes_the_lane_as_failed(_bound_session):
     for _ in range(ENABLEMENT_MAX_ATTEMPTS):
         task_id = await lane._maybe_enqueue_enablement_specialist()
         lane.shared_state.enablement.last_specialist_task_id = task_id
-        await lane._maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": task_id})
+        await lane.maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": task_id})
     await lane._maybe_enqueue_enablement_specialist()
 
     assert lane.shared_state.stop_reason == "enablement_attempts_exhausted"
@@ -414,7 +414,7 @@ async def test_a_kept_round_does_not_close_the_lane(_bound_session):
     lane = _lane(_bound_session)
     lane.shared_state.enablement.last_specialist_task_id = "spec-1"
 
-    await lane._maybe_rearm_enablement(
+    await lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "kept",
@@ -443,7 +443,7 @@ async def test_the_rearm_hands_the_round_its_archive(_bound_session):
     config.parent.mkdir(parents=True)
     config.write_text("tp: 8\n", encoding="utf-8")
 
-    await lane._maybe_rearm_enablement(
+    await lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "kept",
@@ -469,7 +469,7 @@ async def test_a_snapshot_that_raised_leaves_the_row_silent(_bound_session, monk
     lane = _lane(_bound_session)
     lane.shared_state.enablement.last_specialist_task_id = "spec-1"
 
-    await lane._maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": "spec-1"})
+    await lane.maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": "spec-1"})
 
     # Absent, not empty: an archive that blew up did not establish that
     # nothing landed. The round is still ruled.
@@ -614,7 +614,7 @@ async def test_the_revalidation_enqueue_records_the_window_it_opened(_bound_sess
         accepted_config_path="/s/accepted.yaml",
     )
 
-    task_id = await lane._maybe_enqueue_enablement_baseline_revalidation()
+    task_id = await lane.maybe_enqueue_enablement_baseline_revalidation()
 
     assert task_id
     rows = _ext()["revalidations"]["rows"]
@@ -664,7 +664,7 @@ async def test_a_lane_with_no_session_bound_still_dispatches(tmp_path, monkeypat
     lane = _lane(tmp_path)
 
     task_id = await lane._maybe_enqueue_enablement_specialist()
-    await lane._maybe_rearm_enablement({"enablement": True, "status": "kept", "specialist_task_id": task_id})
+    await lane.maybe_rearm_enablement({"enablement": True, "status": "kept", "specialist_task_id": task_id})
 
     assert task_id
     assert lane.shared_state.enablement.validation_pending is True
@@ -734,17 +734,17 @@ async def test_a_raising_pump_is_named_on_the_event(_bound_session):
 
     fake = types.SimpleNamespace(
         shared_state=types.SimpleNamespace(phase=PHASE_ENABLEMENT),
-        _maybe_route_build_outcomes=_boom,
-        _maybe_enqueue_enablement_baseline_revalidation=_ok,
+        maybe_route_build_outcomes=_boom,
+        maybe_enqueue_enablement_baseline_revalidation=_ok,
         _maybe_enqueue_enablement_specialist=_ok,
         record_exception=_record,
     )
     fake._coord = types.SimpleNamespace(
-        enablement_build=types.SimpleNamespace(_maybe_route_build_outcomes=_boom),
-        enablement_revalidation=types.SimpleNamespace(_maybe_enqueue_enablement_baseline_revalidation=_ok),
+        enablement_build=types.SimpleNamespace(maybe_route_build_outcomes=_boom),
+        enablement_revalidation=types.SimpleNamespace(maybe_enqueue_enablement_baseline_revalidation=_ok),
         record_exception=_record,
     )
-    await EnablementLane._pump_enablement_safely(fake)
+    await EnablementLane.pump_enablement_safely(fake)
     enablement_event.finish(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="kept")
 
     event = _events(_bound_session)[0]
@@ -769,7 +769,7 @@ async def test_a_kept_round_leaves_the_lane_open_for_its_revalidation(tmp_path):
     """
     lane = _lane(tmp_path)
 
-    await lane._maybe_rearm_enablement(
+    await lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "kept",

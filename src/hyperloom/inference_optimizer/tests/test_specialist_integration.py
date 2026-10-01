@@ -140,7 +140,7 @@ async def test_register_executors_omits_specialist_when_capacity_zero(
     assert "specialist" not in coord.sub.registry
 
 
-# 3. SpecialistDispatchCollaborator._warm_specialist_params populates task params
+# 3. SpecialistDispatchCollaborator.warm_specialist_params populates task params
 @pytest.mark.asyncio
 async def test_warm_specialist_params_fills_pr_monitor_available(tmp_path: Path):
     """Warmup populates pr_monitor_available and warm-start fields."""
@@ -158,7 +158,7 @@ async def test_warm_specialist_params_fills_pr_monitor_available(tmp_path: Path)
     coord.shared_state = state
 
     params: dict = {"domain": "serving_specialist"}
-    await coord.specialist_dispatch._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
 
     assert params["pr_monitor_available"] is True
     assert params["warm_start_recipe"]["backend"] == "sglang"
@@ -178,7 +178,7 @@ async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path
     coord.shared_state = SharedState()
 
     params: dict = {"domain": "serving_specialist"}
-    await coord.specialist_dispatch._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert params["pr_monitor_available"] is False
 
 

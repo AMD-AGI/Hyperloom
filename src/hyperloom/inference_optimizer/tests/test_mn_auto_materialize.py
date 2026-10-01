@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``FrameworkPhase._maybe_materialize_mn_explore``."""
+"""Unit tests for ``FrameworkPhase.maybe_materialize_mn_explore``."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def _task(task_id="task-abcdef1234"):
 
 def _run(self_obj, *, domain, proposals, task=None):
     asyncio.run(
-        FrameworkPhase._maybe_materialize_mn_explore(
+        FrameworkPhase.maybe_materialize_mn_explore(
             self_obj,
             task=task or _task(),
             domain=domain,

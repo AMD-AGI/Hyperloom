@@ -54,7 +54,7 @@ def test_extract_launch_log_empty_on_none_or_blank():
     assert _extract_enablement_launch_log({"error": "   "}) == ""
 
 
-# ---- _build_enablement_specialist_params (uses build_mandate) ----
+# ---- build_enablement_specialist_params (uses build_mandate) ----
 
 
 def _fake_self(tmp_path, **state_kw):
@@ -107,7 +107,7 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch, tmp_path):
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.launch_observation_path = "/s/reports/bringup/round-abc-000.json"
-    params = fake.enablement_params._build_enablement_specialist_params(_MISSING_ARCH_LOG)
+    params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None
     assert params["domain"] == "enablement_specialist"
     assert params["source_phase"] == "ENABLEMENT"
@@ -129,7 +129,7 @@ def test_build_params_threads_eval_origin_carriers(monkeypatch, tmp_path):
     fake.shared_state.enablement.accuracy_floor = 0.3
     fake.shared_state.enablement.probe_config_path = "/runs/baseline/materialized.yaml"
     fake.shared_state.enablement.eval_contract_fingerprint = "abc123"
-    params = fake.enablement_params._build_enablement_specialist_params(_MISSING_ARCH_LOG)
+    params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None
     assert params["enablement_origin"] == "eval"
     assert params["enablement_accuracy_floor"] == 0.3
@@ -149,7 +149,7 @@ def test_build_params_seeds_no_deterministic_shared_venv_mutation(monkeypatch, t
     """An arch-miss round must NOT auto-seed ANY shared-venv mutation."""
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path, model_name="deepseek-ai/DeepSeek-V4-Flash")
-    params = fake.enablement_params._build_enablement_specialist_params(_TRANSFORMERS_UNRECOGNIZED_LOG)
+    params = fake.enablement_params.build_enablement_specialist_params(_TRANSFORMERS_UNRECOGNIZED_LOG)
     assert params is not None
     assert params["enablement_failure_kind"] == "missing_model_arch"
     setup = params.get("enablement_setup_commands") or []
@@ -172,7 +172,7 @@ def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch, tmp_
     ]
     _stub_enumerate(monkeypatch, cands)
     fake = _enqueue_self(tmp_path)
-    params = fake.enablement_params._build_enablement_specialist_params(_MISSING_ARCH_LOG)
+    params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None
     # Enablement-intent PR ranks first and its html_url is threaded through.
     assert params["enablement_candidate_refs"][0] == "http://x/2"
@@ -181,7 +181,7 @@ def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch, tmp_
 def test_build_params_degrades_gracefully_when_discovery_raises(monkeypatch, tmp_path):
     _stub_enumerate(monkeypatch, RuntimeError("network down"))
     fake = _enqueue_self(tmp_path)
-    params = fake.enablement_params._build_enablement_specialist_params(_MISSING_ARCH_LOG)
+    params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None
     # Discovery failure -> repos-only mandate, no candidate refs.
     assert params["enablement_candidate_refs"] == []
@@ -191,7 +191,7 @@ def test_build_params_dispatches_even_for_unknown_failure(monkeypatch, tmp_path)
     """Q1: a non-blank UNKNOWN log still dispatches (kind is advisory, not a gate)."""
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
-    params = fake.enablement_params._build_enablement_specialist_params(
+    params = fake.enablement_params.build_enablement_specialist_params(
         "some brand-new failure the rule table has never seen xyz"
     )
     assert params is not None
@@ -202,7 +202,7 @@ def test_build_params_dispatches_even_for_unknown_failure(monkeypatch, tmp_path)
 
 def test_build_params_none_for_blank_log(tmp_path):
     fake = _enqueue_self(tmp_path)
-    assert fake.enablement_params._build_enablement_specialist_params("   ") is None
+    assert fake.enablement_params.build_enablement_specialist_params("   ") is None
 
 
 # ---- _maybe_enqueue_enablement_specialist (one-shot gate) ----
@@ -282,8 +282,8 @@ def _enqueue_self(tmp_path, **state_kw):
     coord._run_deadline = state_kw.get("run_deadline")
     coord.enablement_params._read_enablement_source_context = lambda _sig: ""
     coord.enablement_params._derive_checkpoint_weight_facts = lambda _log: ""
-    coord.gpu_lanes._framework_gpu_params = lambda: {}
-    coord.gpu_lanes._framework_authoring_lanes_ttl = lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec)
+    coord.gpu_lanes.framework_gpu_params = lambda: {}
+    coord.gpu_lanes.framework_authoring_lanes_ttl = lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec)
     coord.dispatcher.time_budget_denial_for_action = lambda _action: None
     return coord
 
@@ -396,7 +396,7 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch, tmp_p
     first_params = (await fake.tasks.get(tid1)).params
 
     # Simulate the authored patch being REVERTED -> the rearm settles the round.
-    await fake.enablement_lane._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
+    await fake.enablement_lane.maybe_rearm_enablement({"enablement": True, "status": "reverted"})
     assert await fake.rounds.held() is None
     assert fake.shared_state.enablement.succeeded is False
 
@@ -492,7 +492,7 @@ async def test_in_flight_defers_on_undecided_integrate_proposal(tmp_path):
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-done")
     fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done")
-    assert await fake.enablement_lane._enablement_in_flight() is True
+    assert await fake.enablement_lane.enablement_in_flight() is True
 
 
 @pytest.mark.asyncio
@@ -502,11 +502,11 @@ async def test_in_flight_ignores_a_ruled_integrate_proposal(tmp_path):
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-done")
     fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done")
-    assert await fake.enablement_lane._enablement_in_flight() is True
+    assert await fake.enablement_lane.enablement_in_flight() is True
 
     del fake.state.pending_proposals["m-spec-done"]
 
-    assert await fake.enablement_lane._enablement_in_flight() is False
+    assert await fake.enablement_lane.enablement_in_flight() is False
 
 
 @pytest.mark.asyncio
@@ -515,7 +515,7 @@ async def test_in_flight_defers_on_queued_integrate_task(tmp_path):
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-done")
     await _seed_task(fake, "ip-1", kind="integrate_patch", params={"specialist_task_id": "spec-done"})
-    assert await fake.enablement_lane._enablement_in_flight() is True
+    assert await fake.enablement_lane.enablement_in_flight() is True
 
 
 @pytest.mark.asyncio
@@ -523,7 +523,7 @@ async def test_in_flight_ignores_integrate_task_for_other_specialist(tmp_path):
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-done")
     await _seed_task(fake, "ip-1", kind="integrate_patch", params={"specialist_task_id": "spec-other"})
-    assert await fake.enablement_lane._enablement_in_flight() is False
+    assert await fake.enablement_lane.enablement_in_flight() is False
 
 
 @pytest.mark.asyncio
@@ -546,7 +546,7 @@ async def test_no_false_stall_while_integrate_proposal_pending(monkeypatch, tmp_
 async def test_rearm_kept_opens_revalidation_window(monkeypatch, tmp_path):
     fake = _enqueue_self(tmp_path, enablement_revalidation_generation=1)
     await _hold_round(fake, "spec-1")
-    await fake.enablement_lane._maybe_rearm_enablement({"enablement": True, "status": "kept"})
+    await fake.enablement_lane.maybe_rearm_enablement({"enablement": True, "status": "kept"})
     # A KEEP always opens the revalidation window; succeeded is set by promote.
     assert fake.shared_state.enablement.validation_pending is True
     assert fake.shared_state.enablement.succeeded is False
@@ -572,7 +572,7 @@ async def test_revalidation_enqueues_genuine_baseline(tmp_path):
         enablement_probe_config_path="/runs/baseline/materialized.yaml",
         enablement_accuracy_floor=0.3,
     )
-    tid = await fake.enablement_revalidation._maybe_enqueue_enablement_baseline_revalidation()
+    tid = await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
     assert tid
     # The revalidation is a bring-up, so it holds a round of its own.
     held = await fake.rounds.held()
@@ -595,7 +595,7 @@ async def test_revalidation_prefers_accepted_config_over_probe(tmp_path):
         enablement_accepted_config_path="/runs/specialist/accepted.yaml",
         enablement_accuracy_floor=0.3,
     )
-    tid = await fake.enablement_revalidation._maybe_enqueue_enablement_baseline_revalidation()
+    tid = await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
     assert tid
     created = await fake.tasks.get(tid)
     assert created.params["config_path"] == "/runs/specialist/accepted.yaml"
@@ -615,7 +615,7 @@ async def test_revalidation_carries_active_runtime(tmp_path):
         enablement_accepted_config_path="/runs/specialist/accepted.yaml",
         enablement_active_runtime=rt.to_state(),
     )
-    tid = await fake.enablement_revalidation._maybe_enqueue_enablement_baseline_revalidation()
+    tid = await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
     assert tid
     created = await fake.tasks.get(tid)
     rt_override = created.params.get("runtime_override")
@@ -634,7 +634,7 @@ async def test_revalidation_skips_when_already_tracked(tmp_path):
     )
     # Put the tracked task in the running list so it appears alive.
     await _seed_task(fake, "existing-spec-1", kind="baseline", state="running")
-    result = await fake.enablement_revalidation._maybe_enqueue_enablement_baseline_revalidation()
+    result = await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
     assert result == "existing-spec-1"
     assert await _queued_of_kind(fake, "baseline") == []
 
@@ -649,7 +649,7 @@ async def test_revalidation_skips_when_tracked_task_in_flight(tmp_path):
         enablement_revalidation_task_id="reval-in-flight",
     )
     await _seed_task(fake, "reval-in-flight", kind="baseline", state="running")
-    result = await fake.enablement_revalidation._maybe_enqueue_enablement_baseline_revalidation()
+    result = await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
     assert result == "reval-in-flight"
     assert await _queued_of_kind(fake, "baseline") == []
 
@@ -673,7 +673,7 @@ async def test_revalidation_forwards_accepted_config(accepted_config, tmp_path):
         enablement_accepted_config_path="/runs/specialist/accepted.yaml",
         enablement_accepted_config=accepted_config,
     )
-    tid = await fake.enablement_revalidation._maybe_enqueue_enablement_baseline_revalidation()
+    tid = await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
     params = (await fake.tasks.get(tid)).params
     for key in ("extra_envs", "extra_server_args", "remove_args", "unset_envs", "args_mode"):
         assert params.get(key) == accepted_config.get(key), key
@@ -685,7 +685,7 @@ async def test_rearm_kept_stores_accepted_config(tmp_path):
     fake = _enqueue_self(tmp_path, enablement_origin="eval")
     await _hold_round(fake, "spec-1")
     effective = {"extra_envs": {"VLLM_ROCM_USE_AITER_FP4BMM": "0"}, "args_mode": "append"}
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {
             "status": "kept",
             "enablement": True,
@@ -709,7 +709,7 @@ async def test_rearm_kept_replaces_the_observations_a_probe_could_not_make(tmp_p
     fake.shared_state.enablement.installed_versions_at_keep = {"torch": "2.6"}
     fake.shared_state.enablement.launch_evidence = {"recipe_digest": "sha256:old"}
 
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {"status": "kept", "enablement": True, "specialist_task_id": "spec-1"}
     )
 
@@ -725,7 +725,7 @@ async def test_rearm_kept_leaves_the_accepted_stack_records_a_round_did_not_touc
     fake.shared_state.enablement.roots = [{"id": "r1", "path": "/fr"}]
     fake.shared_state.enablement.base_sha = "a" * 40
 
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {"status": "kept", "enablement": True, "specialist_task_id": "spec-1"}
     )
 
@@ -745,7 +745,7 @@ async def test_rearm_kept_points_accepted_config_at_the_archived_copy(tmp_path):
     fake.shared_state.reference_model = ""
     fake.shared_state.tp = 8
     fake.shared_state.max_model_len = 0
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {
             "status": "kept",
             "enablement": True,
@@ -764,7 +764,7 @@ async def test_rearm_kept_holds_the_source_path_when_the_copy_does_not_land(tmp_
     """With no copy there is no archive path to record, so the live one stands."""
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-1")
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {
             "status": "kept",
             "enablement": True,
@@ -781,7 +781,7 @@ async def test_rearm_kept_records_patches_in_stack(tmp_path):
     """KEEP patches are added to kept_patches so a revalidation-rearmed round inherits them."""
     fake = _enqueue_self(tmp_path, enablement_origin="eval")
     fake.shared_state.enablement.kept_rounds = [{"patches": ["/prior/advance.patch"], "artifacts": []}]
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {
             "status": "kept",
             "enablement": True,
@@ -797,7 +797,7 @@ async def test_rearm_kept_records_patches_in_stack(tmp_path):
 async def test_rearm_ignores_non_enablement(monkeypatch, tmp_path):
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-1")
-    await fake.enablement_lane._maybe_rearm_enablement({"status": "reverted"})
+    await fake.enablement_lane.maybe_rearm_enablement({"status": "reverted"})
     # No enablement marker -> state untouched, and the round is still held.
     assert await fake.rounds.held() is not None
     assert fake.shared_state.enablement.succeeded is False
@@ -811,7 +811,7 @@ async def test_rearm_advanced_stacks_patch_and_reclassifies(monkeypatch, tmp_pat
         "ValueError: Following weights were not initialized from checkpoint: "
         "{'model.layers.19.self_attn.indexer.k_norm.weight'}"
     )
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -837,7 +837,7 @@ async def test_rearm_advanced_dedups_stacked_patches(monkeypatch, tmp_path):
         tmp_path,
         enablement_kept_patches=["/s/runs/specialist/t1/patches/001_qk_rope.patch"],
     )
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -861,7 +861,7 @@ async def test_rearm_advanced_stacks_setup_commands(monkeypatch, tmp_path):
     """Q3: applied setup commands are stacked on advance for durable replay next round."""
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.setup_commands = []
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -879,7 +879,7 @@ async def test_rearm_kept_stacks_setup_commands(monkeypatch, tmp_path):
     """Q3: a runnable KEEP also records the setup commands it relied on."""
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.setup_commands = ["apt-get install -y gh"]
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "kept",
@@ -899,7 +899,7 @@ def test_build_params_threads_base_setup_commands_when_stacked(monkeypatch, tmp_
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.setup_commands = ["pip install -U transformers"]
-    params = fake.enablement_params._build_enablement_specialist_params(_MISSING_ARCH_LOG)
+    params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None
     assert params["enablement_setup_commands"] == ["pip install -U transformers"]
     assert "PRIOR ENABLEMENT PROGRESS" in params["notes"]
@@ -913,7 +913,7 @@ def test_build_params_notes_prior_patches_for_mandate(monkeypatch, tmp_path):
     fake.shared_state.enablement.kept_patches = [
         "/s/runs/specialist/t1/patches/001_qk_rope.patch",
     ]
-    params = fake.enablement_params._build_enablement_specialist_params(_MISSING_ARCH_LOG)
+    params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None
     assert "PRIOR ENABLEMENT PROGRESS" in params["notes"]
     assert "001_qk_rope.patch" in params["notes"]
@@ -959,7 +959,7 @@ async def test_enqueue_noop_when_not_in_enablement_phase(monkeypatch, tmp_path):
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     fake = _enqueue_self(tmp_path, phase="PRELUDE")
-    assert await fake.enablement_lane._pump_enablement_safely() is None
+    assert await fake.enablement_lane.pump_enablement_safely() is None
     assert await _queued_of_kind(fake, "specialist") == []
 
 
@@ -1139,14 +1139,14 @@ def _make_coord_with_phase(session_dir) -> "Coordinator":
 
 @pytest.mark.asyncio
 async def test_rearm_authored_lane_delegates_enablement(session_dir):
-    """_maybe_rearm_authored_lane with lane=enablement calls _maybe_rearm_enablement."""
+    """_maybe_rearm_authored_lane with lane=enablement calls maybe_rearm_enablement."""
     coord = _make_coord_with_phase(session_dir)
     called = []
 
     async def _fake_rearm(res):
         called.append(res)
 
-    coord.enablement_lane._maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
+    coord.enablement_lane.maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
 
     res = {"status": "apply_failed", "lane": "enablement", "enablement": True}
     await coord.phase_framework._maybe_rearm_authored_lane(res)
@@ -1215,7 +1215,7 @@ async def test_rearm_authored_lane_enablement_apply_failed_is_not_counted_as_per
     async def _fake_rearm(res):
         rearm_called.append(res)
 
-    coord.enablement_lane._maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
+    coord.enablement_lane.maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
 
     # Even when lane=enablement is absent but enablement=True is present, should delegate.
     res = {"status": "apply_failed", "enablement": True}
@@ -1229,7 +1229,7 @@ async def test_rearm_authored_lane_enablement_apply_failed_is_not_counted_as_per
 async def test_rearm_advanced_accumulates_config_only_envs(monkeypatch, tmp_path):
     """An advanced round that carries only env changes (no patch) is recorded."""
     fake = _enqueue_self(tmp_path)
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -1249,7 +1249,7 @@ async def test_rearm_advanced_accumulates_config_only_envs(monkeypatch, tmp_path
 async def test_rearm_advanced_merges_repeated_config_rounds(monkeypatch, tmp_path):
     """Successive advanced rounds accumulate envs without overwriting prior ones."""
     fake = _enqueue_self(tmp_path)
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -1259,7 +1259,7 @@ async def test_rearm_advanced_merges_repeated_config_rounds(monkeypatch, tmp_pat
             "setup_commands_applied": [],
         }
     )
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -1281,7 +1281,7 @@ async def test_rearm_advanced_merges_args_by_flag_not_substring(tmp_path):
     """A prefix flag survives, and a restated flag overrides instead of duplicating."""
     fake = _enqueue_self(tmp_path)
     for args in ("--enable-chunked-prefill --tp 4", "--enable-chunked", "--tp 8"):
-        await fake.enablement_lane._maybe_rearm_enablement(
+        await fake.enablement_lane.maybe_rearm_enablement(
             {
                 "enablement": True,
                 "status": "advanced",
@@ -1313,7 +1313,7 @@ async def test_rearm_advanced_stacks_artifacts(monkeypatch, tmp_path):
         "backup": "/s/runs/integrate_patch/t1/artifact_backups/000_server_args.py.bak",
         "source": "/s/runs/specialist/spec-1/worktree/artifacts/server_args.py",
     }
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -1341,7 +1341,7 @@ async def test_rearm_advanced_deduplicates_artifacts(monkeypatch, tmp_path):
     # Pre-load the prior round's artifact into state.
     fake.shared_state.enablement.kept_artifacts = [art]
     # Second advanced round returns the same artifact (the base was re-applied).
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -1379,7 +1379,7 @@ async def test_rearm_records_the_rounds_disposition_on_the_executions_it_perform
             fs_root="/nonexistent-probe-root",
         )
     ]
-    await fake.enablement_lane._maybe_rearm_enablement(
+    await fake.enablement_lane.maybe_rearm_enablement(
         {"enablement": True, "status": status, "specialist_task_id": "spec-1", "patches_applied": []}
     )
     row = fake.shared_state.enablement.setup_executions[0]

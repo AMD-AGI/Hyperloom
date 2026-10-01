@@ -283,16 +283,16 @@ def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
 
 def test_kernel_enabled(coord: Coordinator) -> None:
     coord.shared_state.kernel_enabled = True
-    assert coord.phase_machine._kernel_enabled() is True
+    assert coord.phase_machine.kernel_enabled() is True
     coord.shared_state.kernel_enabled = False
-    assert coord.phase_machine._kernel_enabled() is False
+    assert coord.phase_machine.kernel_enabled() is False
 
 
 def test_internal_analysis_kind(coord: Coordinator) -> None:
     coord.shared_state.enable_roofline = True
-    assert coord.phase_prelude._internal_analysis_kind() == "roofline"
+    assert coord.phase_prelude.internal_analysis_kind() == "roofline"
     coord.shared_state.enable_roofline = False
-    assert coord.phase_prelude._internal_analysis_kind() == "profile"
+    assert coord.phase_prelude.internal_analysis_kind() == "profile"
 
 
 # -- watermark / tput projection ------------------------------------------
@@ -400,8 +400,8 @@ def test_extract_gaps_symptom_uses_excerpt(coord: Coordinator) -> None:
 
 # -- advisory blocks (empty-guard paths) ----------------------------------
 def test_advisory_blocks_empty_by_default(coord: Coordinator) -> None:
-    assert coord.conversation._plateau_advisory_block() == ""
-    assert coord.conversation._target_gap_advisory_block() == ""
+    assert coord.conversation.plateau_advisory_block() == ""
+    assert coord.conversation.target_gap_advisory_block() == ""
     assert coord.conversation._current_primary_gap() is None
     assert coord.conversation._priors_match_advisory_block() == ""
 
@@ -477,7 +477,7 @@ def test_recent_proposed_variants_dedup(coord: Coordinator) -> None:
 # -- warm recipe + workload tags ------------------------------------------
 def test_warm_recipe_proven_items(coord: Coordinator) -> None:
     coord.shared_state.warm_start_recipe = {}
-    assert coord.phase_prelude._warm_recipe_proven_items() == []
+    assert coord.phase_prelude.warm_recipe_proven_items() == []
     coord.shared_state.warm_start_recipe = {
         "recipe": {
             "attrs": {
@@ -489,7 +489,7 @@ def test_warm_recipe_proven_items(coord: Coordinator) -> None:
             }
         },
     }
-    out = coord.phase_prelude._warm_recipe_proven_items()
+    out = coord.phase_prelude.warm_recipe_proven_items()
     assert out == [{"name": "fp8", "source": "kb"}]
 
 

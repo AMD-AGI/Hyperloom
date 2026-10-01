@@ -369,7 +369,7 @@ async def test_compose_prompt_orchestration_receives_failure_rows(session_dir):
                 },
             )
         )
-        prompt = await c.conversation._compose_prompt("orchestration")
+        prompt = await c.conversation.compose_prompt("orchestration")
         assert "failure:" in prompt
     finally:
         await c.stop()
@@ -403,7 +403,7 @@ async def test_compose_prompt_critic_does_not_receive_failure_rows(session_dir):
                 },
             )
         )
-        prompt = await c.conversation._compose_prompt("critic")
+        prompt = await c.conversation.compose_prompt("critic")
         assert "failure:" not in prompt
     finally:
         await c.stop()
@@ -442,7 +442,7 @@ def test_format_variant_line_ws_and_log_appear_with_real_task_id():
 
 
 def test_killed_overtime_enters_failures_and_mints_gap():
-    """_record_explore_variant_failures writes to failures[] and last_action_failures; _extract_gaps_from_attempts then
+    """record_explore_variant_failures writes to failures[] and last_action_failures; _extract_gaps_from_attempts then
     produces a #fail:explore:killed_overtime gap.
     """
     from dataclasses import dataclass, field as dc_field
@@ -478,7 +478,7 @@ def test_killed_overtime_enters_failures_and_mints_gap():
             }
         ],
     }
-    c.gap_refresh._record_explore_variant_failures(task=task, result=result)
+    c.gap_refresh.record_explore_variant_failures(task=task, result=result)
 
     # 1. Failure evidence was recorded.
     assert len(c.shared_state.failures) == 1
