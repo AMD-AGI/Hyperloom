@@ -13,6 +13,7 @@ from hyperloom.orchestrator.roles import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 
@@ -329,7 +330,7 @@ def test_extract_gaps_from_baseline_empty(coord: Coordinator) -> None:
 def test_extract_gaps_from_baseline_populated(coord: Coordinator) -> None:
     ss = coord.shared_state
     ss.baseline_tput = 100.0
-    ss.target_gap_pct = 12.0
+    coord._current_objective = TargetGainObjective(target_gain_pct=12.0)
     ss.baseline_failure_streak = 2
     gaps = coord.gap_refresh._extract_gaps_from_baseline(coord.proposals._workload_canonical_id())
     ids = {g["canonical_id"].split("#")[-1] for g in gaps}
