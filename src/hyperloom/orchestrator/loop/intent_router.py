@@ -296,7 +296,7 @@ class IntentRouter(CoordinatorCollaborator):
             from ..specialists.profile import MODE_PATCH, resolve_specialist_profile
 
             gap_layer = str(params.get("gap_layer") or "").strip().lower()
-            active_phase = str(getattr(self.shared_state, "phase", "") or "").strip().upper()
+            active_phase = str(self.shared_state.phase or "").strip().upper()
             # Layer first, phase last: both lanes share one phase, so the live phase no longer says which lever a
             # specialist moves.
             if gap_layer == "framework":
@@ -766,7 +766,7 @@ class IntentRouter(CoordinatorCollaborator):
 
             preflight_error = specialist_patch_preflight_error(
                 params,
-                framework_repo_path=str(getattr(self.shared_state, "framework_repo_path", "") or ""),
+                framework_repo_path=str(self.shared_state.framework_repo_path or ""),
             )
             if preflight_error:
                 if self.shared_state.add_pruned_family("source_patch"):
@@ -927,7 +927,7 @@ class IntentRouter(CoordinatorCollaborator):
         from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_trace_analyze_request
 
         record_trace_analyze_request(
-            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            macro_cycle=int(self.shared_state.macro_cycle or 0),
             run_id=str(getattr(request_msg, "msg_id", "") or ""),
             status=str(result.get("status") or ""),
             result=result,
@@ -935,7 +935,7 @@ class IntentRouter(CoordinatorCollaborator):
             request_msg_id=str(getattr(request_msg, "msg_id", "") or ""),
             trace_input=str(payload.get("trace_path") or payload.get("trace_input") or ""),
             top_k=payload.get("top_k"),
-            snapshot=getattr(self.shared_state, "last_trace_analyze", None),
+            snapshot=self.shared_state.last_trace_analyze,
             cache_hit=cache_hit,
         )
 
@@ -957,7 +957,7 @@ class IntentRouter(CoordinatorCollaborator):
         await self.bus.append_and_seq(request_msg)
 
         if target_agent == "kernel_agent":
-            if not bool(getattr(self.shared_state, "kernel_enabled", True)):
+            if not bool(self.shared_state.kernel_enabled):
                 _fail_result = {
                     "status": "failed",
                     "error_class": "agent_disabled",

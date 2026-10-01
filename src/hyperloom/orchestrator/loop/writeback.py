@@ -1713,8 +1713,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             any_changed = True
         # Mirror the promote-path roofline failure handling: bump streak, clear gate, warn.
         if task.kind == "roofline":
-            if hasattr(self.shared_state, "roofline_failure_streak"):
-                self.shared_state.roofline_failure_streak += 1
+            self.shared_state.roofline_failure_streak += 1
             if self.shared_state.auto_roofline_pending_task_id == task.task_id:
                 self.shared_state.auto_roofline_pending_task_id = ""
             any_changed = True
@@ -2520,7 +2519,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "workload": workload_tags,
             "sessions": [
                 {
-                    "session_id": str(getattr(ss, "recipe_kb_session_id", "") or self.session_dir.name),
+                    "session_id": str(ss.recipe_kb_session_id or self.session_dir.name),
                     "gain_pct": cumulative_validated,
                     "stack_len": validated_stack_len or len(opt_stack),
                     # arbor-shape provenance so the session row is self-describing (before/after tput + knobs).
@@ -2614,12 +2613,12 @@ class WritebackCollaborator(CoordinatorCollaborator):
     ) -> dict[str, Any]:
         """Idempotently publish terminal Recipe state and persist its outcome."""
         state = self.shared_state
-        prior = dict(getattr(state, "recipe_finalize_outcome", {}) or {})
-        prior_status = str(getattr(state, "recipe_finalize_status", "") or prior.get("status") or "")
+        prior = dict(state.recipe_finalize_outcome or {})
+        prior_status = str(state.recipe_finalize_status or prior.get("status") or "")
         if prior_status in {"written", "skipped", "disabled"}:
             return prior
 
-        attempts = int(getattr(state, "recipe_finalize_attempts", 0) or 0) + 1
+        attempts = int(state.recipe_finalize_attempts or 0) + 1
         state.recipe_finalize_attempts = attempts
         state.recipe_finalize_status = "pending"
         # Opened before the write is tried, so an attempt that never settles
@@ -2674,9 +2673,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
         recipe was scoped to. ``source`` is ``close`` or ``t4_fallback``.
         """
         state = self.shared_state
-        current_best = getattr(state, "current_best", {}) or {}
+        current_best = state.current_best or {}
         tput = current_best.get("tput") if isinstance(current_best, dict) else None
-        validated_gain = getattr(state, "cumulative_gain_validated", None)
+        validated_gain = state.cumulative_gain_validated
         result_type = str(outcome.get("result_type") or "")
         if result_type == _close_out.RESULT_UNVALIDATED_RECIPE:
             # The throughput and the gain belong to different Recipes here.
@@ -2722,12 +2721,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # figures when nothing was lifted since the last validation. Otherwise
         # every sink below -- journal, local KB, remote KB -- would pair the
         # newer config with the older gain, so none of them runs.
-        has_unvalidated_keeps = getattr(self.shared_state, "optimization_stack_has_unvalidated_keeps", None)
-        if callable(has_unvalidated_keeps) and has_unvalidated_keeps():
+        if self.shared_state.optimization_stack_has_unvalidated_keeps():
             ss = self.shared_state
             log.warning(
                 "Recipe finalize skipped: working recipe is not validated (stack=%s/%s generation=%s/%s)",
-                len(getattr(ss, "optimization_stack", None) or []),
+                len(ss.optimization_stack or []),
                 ss.cumulative_gain_validated_stack_len,
                 ss.working_recipe_generation,
                 ss.validated_recipe_generation,
@@ -2774,7 +2772,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         from hyperloom.common.perf_metric import agentx_active
 
         if (
-            agentx_active(benchmark_mode=getattr(self.shared_state, "benchmark_mode", ""))
+            agentx_active(benchmark_mode=self.shared_state.benchmark_mode)
             and config.mode is not KnowledgeStoreMode.REMOTE
         ):
             return {
@@ -2788,9 +2786,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # writer. T0 and runtime amendment are intentionally absent.
             remote_cid = ""
             remote_sid = str(
-                getattr(self.shared_state, "recipe_kb_session_id", "")
-                or getattr(self.shared_state, "session_id", "")
-                or self.session_dir.name
+                self.shared_state.recipe_kb_session_id or self.shared_state.session_id or self.session_dir.name
             )
             try:
                 from ..knowledge.remote_recipe import HyperloomRemoteKB
@@ -2859,8 +2855,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "result_type": _close_out.RESULT_KB_DISABLED,
             }
         ss = self.shared_state
-        model_name = getattr(ss, "model_name", "") or ""
-        gpu_type = getattr(ss, "gpu_type", "") or ""
+        model_name = ss.model_name or ""
+        gpu_type = ss.gpu_type or ""
         if not model_name or not gpu_type:
             log.info(
                 "recipe KB finalize_recipe: missing model/hardware (model=%r hardware=%r); skipping update_recipe",
@@ -2941,7 +2937,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 provenance_details={
                     "phase": "close_finalize",
                     "evidence": [
-                        f"log:session-{getattr(ss, 'recipe_kb_session_id', '') or self.session_dir.name}",
+                        f"log:session-{ss.recipe_kb_session_id or self.session_dir.name}",
                     ],
                 },
             )
@@ -3358,7 +3354,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             if not already_stacked:
                 source_phase = str(
                     (bv.get("source_phase") if isinstance(bv, dict) else "")
-                    or (getattr(self.shared_state, "phase", "") if task_kind != "integrate_patch" else "")
+                    or (self.shared_state.phase if task_kind != "integrate_patch" else "")
                     or ""
                 ).strip()
                 # The phase fallback above inherits whatever is live at
@@ -3653,7 +3649,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         """Promote a baseline result: anchor tput / accuracy / config and bootstrap PRELUDE."""
         from hyperloom.common.perf_metric import stamp_output_per_gpu
 
-        stamp_output_per_gpu(result, getattr(self.shared_state, "tp", None))
+        stamp_output_per_gpu(result, self.shared_state.tp)
         changed = False
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
@@ -3684,7 +3680,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # rounds until the clock kills it.
         hot_pass_ran = result.get("measure_round_runtime_sec")
         corrects_a_cold_anchor = (
-            bool(getattr(self.shared_state, "baseline_measure_round_dropped", False))
+            bool(self.shared_state.baseline_measure_round_dropped)
             and isinstance(hot_pass_ran, (int, float))
             and hot_pass_ran > 0
         )
@@ -3712,7 +3708,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     acc = result.get("accuracy")
                     floor = float(getattr(self.shared_state.enablement, "accuracy_floor", 0.0) or 0.0)
                     generation = int(getattr(self.shared_state.enablement, "revalidation_generation", 0) or 0)
-                    eval_off = bool(getattr(self.shared_state, "eval_disabled", False))
+                    eval_off = bool(self.shared_state.eval_disabled)
                     if accuracy_meets_floor(acc, floor) or eval_off:
                         self.shared_state.enablement.succeeded = True
                         self.shared_state.enablement.validation_pending = False
@@ -3805,7 +3801,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             if isinstance(warm_runtime_raw, (int, float)) and warm_runtime_raw > 0:
                 self.shared_state.baseline_warm_runtime_sec = float(warm_runtime_raw)
                 changed = True
-            elif float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0) != 0.0:
+            elif float(self.shared_state.baseline_warm_runtime_sec or 0.0) != 0.0:
                 self.shared_state.baseline_warm_runtime_sec = 0.0
                 changed = True
             # Whether this baseline had to keep its cold figure because the budget
@@ -3816,7 +3812,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # figure, so a resumed session with a fresh clock is not held to the
             # earlier leg's shortfall.
             measure_round_dropped = bool(result.get("measure_round_dropped"))
-            if measure_round_dropped != bool(getattr(self.shared_state, "baseline_measure_round_dropped", False)):
+            if measure_round_dropped != bool(self.shared_state.baseline_measure_round_dropped):
                 self.shared_state.baseline_measure_round_dropped = measure_round_dropped
                 changed = True
             # Promote the cold round's boot/benchmark split. Cleared the same way
@@ -3827,14 +3823,14 @@ class WritebackCollaborator(CoordinatorCollaborator):
             if isinstance(post_ready_raw, (int, float)) and post_ready_raw > 0:
                 self.shared_state.baseline_post_ready_runtime_sec = float(post_ready_raw)
                 changed = True
-            elif float(getattr(self.shared_state, "baseline_post_ready_runtime_sec", 0.0) or 0.0) != 0.0:
+            elif float(self.shared_state.baseline_post_ready_runtime_sec or 0.0) != 0.0:
                 self.shared_state.baseline_post_ready_runtime_sec = 0.0
                 changed = True
         # current_best.tput follows the same hot baseline contract so the
         # gain numerator and denominator stay aligned. Once the stack carries a
         # validated layer, current_best belongs to the stack top and a baseline
         # must not reset it back to the bare reference config.
-        if anchor_accepted and not (getattr(self.shared_state, "optimization_stack", None) or []):
+        if anchor_accepted and not (self.shared_state.optimization_stack or []):
             anchor_tput = float(self.shared_state.baseline_tput or 0.0)
             current_best = {
                 "action": "baseline",
@@ -4220,8 +4216,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "degraded": bool(result.get("degraded", False)),
             }
             # Reset the roofline failure streak on a successful snapshot.
-            if hasattr(self.shared_state, "roofline_failure_streak"):
-                self.shared_state.roofline_failure_streak = 0
+            self.shared_state.roofline_failure_streak = 0
             # Re-anchor the 10% watermark step on the projected current tput --
             # but only for a roofline that actually produced an analysis. The
             # anchor is what stops the watermark firing again until throughput
@@ -4251,8 +4246,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "error": result.get("error"),
             }
             # Bump the failure streak (mirrors the audit ledger for prompt renderers).
-            if hasattr(self.shared_state, "roofline_failure_streak"):
-                self.shared_state.roofline_failure_streak += 1
+            self.shared_state.roofline_failure_streak += 1
             changed = True
             log.warning(
                 "Auto-roofline %s failed (reason=%s phase=%s "
@@ -4447,11 +4441,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         decision = "fallback"
                 if native_rejection:
                     decision = "no_promote"
-                ps = (
-                    self.shared_state.geak_result
-                    if isinstance(getattr(self.shared_state, "geak_result", None), dict)
-                    else {}
-                )
+                ps = self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
                 # A rebench that beats current_best is only a KERNEL gain when
                 # GEAK actually produced something. Without a material product
                 # (kernel/head/overlay/patch or a config delta vs the pre-KERNEL
@@ -4615,16 +4605,14 @@ class WritebackCollaborator(CoordinatorCollaborator):
                             "reason": repr(exc),
                         }
                         geak_result = (
-                            self.shared_state.geak_result
-                            if isinstance(getattr(self.shared_state, "geak_result", None), dict)
-                            else {}
+                            self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
                         )
                     if not bool(fallback_result.get("validated")):
                         from ..phases.geak_rebench import INCOMPARABLE_REVALIDATION
 
                         geak_result = (
                             dict(self.shared_state.geak_result)
-                            if isinstance(getattr(self.shared_state, "geak_result", None), dict)
+                            if isinstance(self.shared_state.geak_result, dict)
                             else {}
                         )
                         # 2a reports a refusal it will repeat for this workload
@@ -4777,7 +4765,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         self, result: dict, task: "Task | None", *, kept_flag: bool
     ) -> dict[str, Any] | None:
         """Return the matching, completed marker without performing recovery."""
-        pending = getattr(self.shared_state, "pending_integrate", None)
+        pending = self.shared_state.pending_integrate
         task_id = str(getattr(task, "task_id", "") or "")
         matches = isinstance(pending, dict) and bool(task_id) and pending.get("task_id") == task_id
         failed = (
@@ -5380,7 +5368,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # Full engine flags must come from the same promoted measurement, not a
         # search over historical benchmarks with a similar throughput.
         if not isinstance(measurement, Mapping):
-            state_measurement = getattr(self.shared_state, "current_best_measurement", None)
+            state_measurement = self.shared_state.current_best_measurement
             measurement = (
                 state_measurement
                 if isinstance(state_measurement, Mapping) and state_measurement
@@ -5403,12 +5391,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "source_snapshots": source_snapshots,
             "overlay_pythonpath": materialized.get("final_overlay") or "",
             "overlay_digest": _geak_overlay_digest(str(materialized.get("final_overlay") or "")),
-            "base_launch_recipe": str(getattr(self.shared_state, "baseline_config_path", "") or ""),
-            "base_launch_recipe_digest": self._launch_recipe_digest(
-                str(getattr(self.shared_state, "baseline_config_path", "") or "")
-            ),
+            "base_launch_recipe": str(self.shared_state.baseline_config_path or ""),
+            "base_launch_recipe_digest": self._launch_recipe_digest(str(self.shared_state.baseline_config_path or "")),
             # Backward-compatible alias for existing GEAK v2 consumers.
-            "launch_recipe": str(getattr(self.shared_state, "baseline_config_path", "") or ""),
+            "launch_recipe": str(self.shared_state.baseline_config_path or ""),
             # Additive evidence record. Consumers can distinguish a captured
             # launch from a declaration resolved without a new CLI line.
             "measurement_evidence": dict(measurement.get("launch_evidence") or {}),
@@ -5442,7 +5428,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "fixes": [],
             "warnings": [],
         }
-        active_inferencex = str(getattr(state, "active_inferencex_path", "") or "").strip()
+        active_inferencex = str(state.active_inferencex_path or "").strip()
         if active_inferencex:
             if Path(active_inferencex).is_dir():
                 os.environ["INFERENCEX_PATH"] = active_inferencex
@@ -5453,8 +5439,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         "path": active_inferencex,
                     }
                 )
-                if hasattr(state, "set_stop_reason"):
-                    state.set_stop_reason("active_inferencex_checkout_missing")
+                state.set_stop_reason("active_inferencex_checkout_missing")
         # (0) Interrupted stack unwind: its members are still applied to the
         # framework tree. SWEEP entry is where this used to be retried, so
         # everything a resumed leg benchmarked before reaching SWEEP measured
@@ -5500,10 +5485,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
             resume_state_durable = False
             log.exception("Coordinator: pre-outbox resume save failed")
             report["warnings"].append({"kind": "resume_pre_outbox_save_failed"})
-        pending_kb_before = len(getattr(state, "kb_stage_outbox", []) or [])
+        pending_kb_before = len(state.kb_stage_outbox or [])
         if pending_kb_before and resume_state_durable:
             self._drain_agent_keep_outbox()
-            pending_kb_after = len(getattr(state, "kb_stage_outbox", []) or [])
+            pending_kb_after = len(state.kb_stage_outbox or [])
             if pending_kb_after:
                 report["warnings"].append(
                     {
@@ -5522,8 +5507,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # (4) Validation-watermark compensation: unvalidated KEEPs are reported
         # in the warning block; the CLOSE trigger enqueues the revalidation.
         if state.optimization_stack_has_unvalidated_keeps():
-            stack = [e for e in (getattr(state, "optimization_stack", []) or []) if isinstance(e, dict)]
-            vlen = int(getattr(state, "cumulative_gain_validated_stack_len", 0) or 0)
+            stack = [e for e in (state.optimization_stack or []) if isinstance(e, dict)]
+            vlen = int(state.cumulative_gain_validated_stack_len or 0)
             report["warnings"].append(
                 {
                     "kind": "resume_unvalidated_keeps",
@@ -5667,10 +5652,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         contents no resume can account for.
         """
         state = self.shared_state
-        if not (
-            getattr(state, "pending_stack_validation_result", None)
-            or getattr(state, "pending_stack_validation_apply_results", None)
-        ):
+        if not (state.pending_stack_validation_result or state.pending_stack_validation_apply_results):
             return
         try:
             recovered = await self._coord.phase_kernel_stack._recover_interrupted_stack_validation()
@@ -5717,7 +5699,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # Event retention can erase a KEEP. A promoted stack row is
         # independent positive evidence; a terminal/missing task without
         # its result is not evidence that a candidate was rejected.
-        stack = getattr(state, "optimization_stack", None) or []
+        stack = state.optimization_stack or []
         if any(isinstance(row, dict) and row.get("task_id") == task_id for row in stack):
             state.pending_integrate = {}
             state.save(self.session_dir)
@@ -5801,7 +5783,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             report: The resume report dict to append fixes/warnings to.
         """
         state = self.shared_state
-        pending = getattr(state, "pending_integrate", {}) or {}
+        pending = state.pending_integrate or {}
         if not (isinstance(pending, dict) and pending):
             return
         task_id = str(pending.get("task_id") or "")
@@ -5861,7 +5843,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
     ) -> None:
         """Rollback a combined PRELUDE set whose verdict was lost to a crash."""
         state = self.shared_state
-        pending = getattr(state, "warm_replay_pending", {}) or {}
+        pending = state.warm_replay_pending or {}
         if not isinstance(pending, dict) or not pending:
             return
         rollback = self._coord.phase_prelude._rollback_combined_warm({}, None)
@@ -5874,8 +5856,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "errors": errors,
                 }
             )
-            if hasattr(state, "set_stop_reason"):
-                state.set_stop_reason("warm_replay_rollback_failed")
+            state.set_stop_reason("warm_replay_rollback_failed")
             state.save(self.session_dir)
             return
         task_id = str(pending.get("task_id") or "").strip()
@@ -5916,12 +5897,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         "error": f"{type(exc).__name__}:{exc}",
                     }
                 )
-                if hasattr(state, "set_stop_reason"):
-                    state.set_stop_reason("warm_replay_rollback_failed")
+                state.set_stop_reason("warm_replay_rollback_failed")
                 state.save(self.session_dir)
                 return
         state.warm_replay_outcome = {
-            **dict(getattr(state, "warm_replay_outcome", {}) or {}),
+            **dict(state.warm_replay_outcome or {}),
             "status": "failed",
             "reason": "interrupted_combined_validation_rolled_back",
             # This terminal branch never runs ``_promote_warm_replay``, which is
@@ -5959,7 +5939,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         from ..enablement.runtime.targeted_build import kill_build_pgroup
 
         state = self.shared_state
-        pending = getattr(state, "pending_targeted_build", {}) or {}
+        pending = state.pending_targeted_build or {}
         if not (isinstance(pending, dict) and pending):
             return
         task_id = str(pending.get("task_id") or "")
@@ -6174,7 +6154,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         """
         benchmark_script = self.shared_state.accepted_baseline_script()
         recipe_generation = int(self.shared_state.working_recipe_generation or 0)
-        ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
+        ps = self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
         ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
         # ``no_gain`` is a verdict on GEAK's headline basis, not on its kernels: an accepted, positive-delta kernel is
@@ -6389,7 +6369,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "status": "incomparable",
                 "reason": "geak_harness_unsupported_canonical_workload",
             }
-        ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
+        ps = self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
         if str(ps.get("status") or "") != "ok" and not _geak_has_accepted_kernel(ps):
             return {"validated": False, "skipped": True, "reason": "no_geak_result"}
         from hyperloom.common.jsonio import read_json

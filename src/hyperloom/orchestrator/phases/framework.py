@@ -543,7 +543,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         from hyperloom.inference_optimizer.breakdown.recorder.framework_event import make_framework_recorder
 
         state = self.shared_state
-        recorder = make_framework_recorder(macro_cycle=int(getattr(state, "macro_cycle", 0) or 0))
+        recorder = make_framework_recorder(macro_cycle=int(state.macro_cycle or 0))
         self._framework_timeline_recorder = recorder
         if recorder is None:
             return
@@ -557,7 +557,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         the phase never applied.
         """
         state = self.shared_state
-        overrides = getattr(state, "plateau_overrides", None) or {}
+        overrides = state.plateau_overrides or {}
         if not isinstance(overrides, dict):
             overrides = {}
         return {
@@ -681,7 +681,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         state = self.shared_state
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
-        if bool(getattr(state, "framework_agent_phase_done", False)):
+        if bool(state.framework_agent_phase_done):
             return
         # Skip if a framework task is already queued or running.
         queued = await self.tasks.queued()
@@ -719,7 +719,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         if next_candidate is None:
             # Hold the phase open while authored patches are still benched or reviewed; only when a batch was
             # discovered (an LLM-proposed integrate_patch must not keep FRAMEWORK open).
-            discovered_batch = bool(getattr(state, "framework_agent_batches", None) or [])
+            discovered_batch = bool(state.framework_agent_batches or [])
             if discovered_batch and await self._framework_agent_authoring_inflight():
                 return
             # Minimum supply: with the pool empty and no discovery in flight, ask for one.
@@ -737,7 +737,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                     {
                         "title": title,
                         "repo": "(local source)",
-                        "framework": str(getattr(state, "framework", "") or "").strip().lower(),
+                        "framework": str(state.framework or "").strip().lower(),
                         "gap_description": gap,
                         "gap_keywords": keywords,
                     },
@@ -748,7 +748,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                     return
             self._record_framework_agent_phase_done(
                 reason="no_candidates_and_discovery_exhausted",
-                failure_count=int(getattr(state, "framework_agent_discover_failures", 0) or 0),
+                failure_count=int(state.framework_agent_discover_failures or 0),
             )
             state.framework_agent_phase_done = True
             state.save(self.session_dir)
@@ -857,7 +857,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         spec_tid = str(getattr(spec_task, "task_id", "") or "")
         try:
             if spec_tid and cand_id:
-                if not isinstance(getattr(state, "framework_agent_specialist_candidate_map", None), dict):
+                if not isinstance(state.framework_agent_specialist_candidate_map, dict):
                     state.framework_agent_specialist_candidate_map = {}
                 state.framework_agent_specialist_candidate_map[spec_tid] = cand_id
                 state.save(self.session_dir)
@@ -903,7 +903,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "gap_canonical_id": gap_cid,
             "gap_symptom": (title or f"Author a framework source patch inspired by {pr_url or cand_id}"),
             "gap_layer": "framework",
-            "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
+            "framework": str(candidate.get("framework") or state.framework or "").strip().lower(),
             "task_kind": "framework_authoring",
             "source_phase": "FRAMEWORK_AGENT",
             "pr_lead": {"title": title, "url": pr_url, "diff_url": diff_url},
@@ -1160,7 +1160,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         # perf_explore lane: reauthor from original specialist worktree.
         gap_cid = ""
         gap_symptom = ""
-        framework_name = str(getattr(state, "framework", "") or "").strip().lower()
+        framework_name = str(state.framework or "").strip().lower()
         if specialist_task_id:
             try:
                 spec_task = await self.tasks.get(specialist_task_id)
@@ -1263,14 +1263,14 @@ class FrameworkPhase(CoordinatorCollaborator):
         """Set of candidate keys that already carry a terminal progress row."""
         return {
             self._framework_candidate_key(p)
-            for p in (getattr(self.shared_state, "framework_agent_phase_progress", None) or [])
+            for p in (self.shared_state.framework_agent_phase_progress or [])
             if isinstance(p, dict) and self._framework_candidate_key(p)
         }
 
     def _unprocessed_framework_agent_candidates(self) -> list[dict[str, Any]]:
         """Return all not-yet-processed candidates in the latest batch (order preserved)."""
         state = self.shared_state
-        batches = getattr(state, "framework_agent_batches", None) or []
+        batches = state.framework_agent_batches or []
         if not batches:
             return []
         latest = batches[-1]
@@ -1298,11 +1298,11 @@ class FrameworkPhase(CoordinatorCollaborator):
         """Pick the authoring domain that matches the session's framework kind."""
         from ..specialists.domains import authoring_domain_for_framework
 
-        return authoring_domain_for_framework(getattr(self.shared_state, "framework", ""))
+        return authoring_domain_for_framework(self.shared_state.framework)
 
     def _render_rewrite_evidence_for_prompt(self) -> str:
         """Render the measured host-side rewrite evidence as prompt lines."""
-        path = str(getattr(self.shared_state, "last_framework_rewrite_evidence", "") or "").strip()
+        path = str(self.shared_state.last_framework_rewrite_evidence or "").strip()
         if not path:
             return ""
         try:
@@ -1323,7 +1323,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "rollout loop and ask, for each call inside it, whether the result "
             "can change across iterations."
         )
-        status = str(getattr(self.shared_state, "last_framework_rewrite_evidence_status", "") or "").strip()
+        status = str(self.shared_state.last_framework_rewrite_evidence_status or "").strip()
         if status == "no_candidates":
             return (
                 "The host-side probe ran and found no rewrite candidates. Treat "
@@ -1337,7 +1337,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 f"not deliver any: {status}. This is a broken instrument, NOT a "
                 "measured negative -- do not conclude the loop is clean. " + read_the_source
             )
-        if str(getattr(self.shared_state, "last_framework_rewrite_evidence", "") or "").strip():
+        if str(self.shared_state.last_framework_rewrite_evidence or "").strip():
             # Reached only when a document is on record but rendering it produced nothing, so the evidence exists and
             # this prompt cannot show it.
             return (
@@ -1357,10 +1357,10 @@ class FrameworkPhase(CoordinatorCollaborator):
             from ..actions.executors._framework_gap_composer import compose_gap
 
             return compose_gap(
-                framework=str(getattr(state, "framework", "") or ""),
-                gpu_type=str(getattr(state, "gpu_type", "") or ""),
-                model_class=str(getattr(state, "model_class", "") or ""),
-                precision=str(getattr(state, "precision", "") or ""),
+                framework=str(state.framework or ""),
+                gpu_type=str(state.gpu_type or ""),
+                model_class=str(state.model_class or ""),
+                precision=str(state.precision or ""),
                 rewrite_evidence_path=state.last_framework_rewrite_evidence or None,
             )
         except Exception:
@@ -1376,7 +1376,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         """Dispatch a candidate-free authoring specialist (no upstream PR lead)."""
         state = self.shared_state
         # A local-exploration round has no upstream lead to key on, so its id counts the rounds already settled.
-        progress = getattr(state, "framework_agent_phase_progress", None) or []
+        progress = state.framework_agent_phase_progress or []
         settled = sum(
             1
             for p in progress
@@ -1385,7 +1385,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         cand_id = self._framework_candidate_key(candidate) or f"{LOCAL_EXPLORE_CANDIDATE_PREFIX}{settled}"
         gap = str(candidate.get("gap_description") or "").strip()
         gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework.local_explore.{cand_id}"
-        framework = str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower()
+        framework = str(candidate.get("framework") or state.framework or "").strip().lower()
         # Route by framework kind.
         domain = self._authoring_specialist_domain()
         rewrite_arm = domain == "framework_rewrite_specialist"
@@ -1483,7 +1483,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         """All candidate ids already discovered into any prior batch (dedup for new batches)."""
         state = self.shared_state
         ids: set[str] = set()
-        batches = getattr(state, "framework_agent_batches", None) or []
+        batches = state.framework_agent_batches or []
         if not isinstance(batches, list):
             return ids
         for batch in batches:
@@ -1498,7 +1498,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 if cid:
                     ids.add(cid)
         # Fold in PR ids the research scout already mined so the two mechanisms never re-process a PR.
-        for pid in getattr(state, "research_scout_seen_pr_ids", None) or []:
+        for pid in state.research_scout_seen_pr_ids or []:
             pid = str(pid or "").strip()
             if pid:
                 ids.add(pid)
@@ -1507,7 +1507,7 @@ class FrameworkPhase(CoordinatorCollaborator):
     def _build_framework_working_memory(self) -> dict[str, Any]:
         """Summarise the most recent tried candidates from the progress ledger (deterministic, zero-LLM)."""
         state = self.shared_state
-        progress = getattr(state, "framework_agent_phase_progress", None) or []
+        progress = state.framework_agent_phase_progress or []
         rows = [p for p in progress if isinstance(p, dict) and self._framework_candidate_key(p)]
         tried: list[dict[str, Any]] = []
         for row in rows[-self._FRAMEWORK_TRIED_MEMORY_CAP :]:
@@ -1540,12 +1540,12 @@ class FrameworkPhase(CoordinatorCollaborator):
             # Classify this phase's candidate outcomes so the report / robustness can tell "discovered nothing"
             # (empty_discovery) apart from "tested candidates but none kept" (tested_no_keep).
             summary = summarize_candidate_outcomes(
-                getattr(state, "framework_agent_phase_progress", None),
+                state.framework_agent_phase_progress,
             )
             outcome_class = str(summary.get("outcome_class") or "empty_discovery")
 
             # Consecutive empty-discovery tracking → advisory ("framework phase ineffective").
-            prev_empty = int(getattr(state, "framework_consecutive_empty_discoveries", 0) or 0)
+            prev_empty = int(state.framework_consecutive_empty_discoveries or 0)
             if outcome_class == "empty_discovery":
                 consecutive_empty = prev_empty + 1
             else:
@@ -1572,9 +1572,9 @@ class FrameworkPhase(CoordinatorCollaborator):
                 evidence={
                     "event": "framework_agent_phase_done",
                     "failure_count": int(failure_count),
-                    "empty_count": int(getattr(state, "framework_agent_empty_discoveries", 0) or 0),
+                    "empty_count": int(state.framework_agent_empty_discoveries or 0),
                     "retry_limit": int(DISCOVER_FAILURE_RETRY_LIMIT),
-                    "batches_discovered": len(getattr(state, "framework_agent_batches", None) or []),
+                    "batches_discovered": len(state.framework_agent_batches or []),
                     "outcome_class": outcome_class,
                     "candidate_outcomes": summary.get("by_status") or {},
                     "keeps": int(summary.get("keeps") or 0),
@@ -1605,13 +1605,13 @@ class FrameworkPhase(CoordinatorCollaborator):
             "base_tput": resolve_grading_anchor_tput(state),
             # Same decaying bar the explore and integrate_patch dispatch paths inject.
             "keep_threshold_pct": _phase_state.resolve_keep_threshold(state),
-            "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
+            "framework": str(candidate.get("framework") or state.framework or "").strip().lower(),
             # Source patches require the accuracy gate for KEEP.
             "require_accuracy_for_keep": True,
-            "accuracy_baseline": float(getattr(state, "baseline_accuracy", 0.0) or 0.0),
+            "accuracy_baseline": float(state.baseline_accuracy or 0.0),
             # The lane templates from the shipped default config, which materializes RUN_EVAL=true and would override
             # the session's choice.
-            "disable_run_eval": bool(getattr(state, "eval_disabled", False)),
+            "disable_run_eval": bool(state.eval_disabled),
         }
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
         lanes, ttl = self._coord.dispatcher._registry_lanes_ttl("integrate_patch")
@@ -1651,7 +1651,7 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     def _collect_framework_agent_candidate_priors(self) -> dict[str, Any]:
         """Return compact session-local priors for the Critic gate."""
-        raw_progress = getattr(self.shared_state, "framework_agent_phase_progress", None) or []
+        raw_progress = self.shared_state.framework_agent_phase_progress or []
         terminal = {
             "kept",
             "kept_inert",
@@ -1697,7 +1697,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 return
         # Repeated-review backstop: count how many times this candidate has been sent for review.
         if cand_id:
-            counts = getattr(self.shared_state, "framework_agent_review_counts", None)
+            counts = self.shared_state.framework_agent_review_counts
             if not isinstance(counts, dict):
                 counts = {}
                 self.shared_state.framework_agent_review_counts = counts
@@ -1844,7 +1844,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         if not cand_id:
             return False
         state = self.shared_state
-        progress = getattr(state, "framework_agent_phase_progress", None)
+        progress = state.framework_agent_phase_progress
         if not isinstance(progress, list):
             progress = []
             state.framework_agent_phase_progress = progress
@@ -1859,7 +1859,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "gain_pct": (float(gain_pct) if isinstance(gain_pct, (int, float)) else 0.0),
             "provenance": str(provenance or ""),
             "ts": datetime.now(timezone.utc).isoformat(),
-            "cycle": int(getattr(state, "macro_cycle", 0) or 0),
+            "cycle": int(state.macro_cycle or 0),
         }
         # Merge caller-supplied extras (e.g. ``error`` / ``review_submissions``) onto the row too, without clobbering
         # the canonical fields above, so downstream consumers see the same detail the decision.json carries.
@@ -1998,7 +1998,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             tp = getattr(t, "params", None) or {}
             if str(tp.get("framework_agent_candidate_id") or "") == cand_id:
                 return
-        attempts = getattr(self.shared_state, "specialist_reauthor_attempts", None)
+        attempts = self.shared_state.specialist_reauthor_attempts
         if not isinstance(attempts, dict):
             attempts = {}
             self.shared_state.specialist_reauthor_attempts = attempts
@@ -2106,7 +2106,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             return
         # Resolve the FRAMEWORK candidate id (a PR URL) that this authored patch belongs to.
         spec_tid = str(params.get("specialist_task_id") or "")
-        cand_map = getattr(self.shared_state, "framework_agent_specialist_candidate_map", None)
+        cand_map = self.shared_state.framework_agent_specialist_candidate_map
         mapped_cand = ""
         if isinstance(cand_map, dict) and spec_tid:
             mapped_cand = str(cand_map.get(spec_tid) or "")
@@ -2115,13 +2115,13 @@ class FrameworkPhase(CoordinatorCollaborator):
         )
         batch_id = str(params.get("framework_batch_id") or "")
         if not batch_id:
-            batches = getattr(self.shared_state, "framework_agent_batches", None) or []
+            batches = self.shared_state.framework_agent_batches or []
             if isinstance(batches, list) and batches and isinstance(batches[-1], dict):
                 batch_id = str(batches[-1].get("batch_id") or "")
         delta_pct = res.get("delta_pct")
         new_tput = res.get("output_throughput")
         gain = float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0
-        progress = getattr(self.shared_state, "framework_agent_phase_progress", None)
+        progress = self.shared_state.framework_agent_phase_progress
         if not isinstance(progress, list):
             progress = []
             self.shared_state.framework_agent_phase_progress = progress
@@ -2377,14 +2377,14 @@ class FrameworkPhase(CoordinatorCollaborator):
         """Dispatch the candidate-discovery specialist when the pool is empty."""
         state = self.shared_state
         limit = int(DISCOVER_FAILURE_RETRY_LIMIT)
-        empties = int(getattr(state, "framework_agent_empty_discoveries", 0) or 0)
-        failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0)
+        empties = int(state.framework_agent_empty_discoveries or 0)
+        failures = int(state.framework_agent_discover_failures or 0)
         if empties >= limit or failures >= limit:
             return False
         if await self._candidate_discovery_inflight():
             return True
         gap, keywords = self._compose_framework_local_explore_gap()
-        framework = str(getattr(state, "framework", "") or "").strip().lower()
+        framework = str(state.framework or "").strip().lower()
         params: dict[str, Any] = {
             "domain": "candidate_discovery_specialist",
             "source_phase": "FRAMEWORK_AGENT",
@@ -2439,7 +2439,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             return
         state = self.shared_state
         if run_error:
-            failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0) + 1
+            failures = int(state.framework_agent_discover_failures or 0) + 1
             state.framework_agent_discover_failures = failures
             _record_run(
                 self,
@@ -2469,12 +2469,12 @@ class FrameworkPhase(CoordinatorCollaborator):
         # A round that ran is proof the lane works, whatever it came back with.
         state.framework_agent_discover_failures = 0
         if not candidates:
-            empties = int(getattr(state, "framework_agent_empty_discoveries", 0) or 0) + 1
+            empties = int(state.framework_agent_empty_discoveries or 0) + 1
             state.framework_agent_empty_discoveries = empties
             log.info("FRAMEWORK: discovery returned no usable candidates (streak=%d)", empties)
         else:
             state.framework_agent_empty_discoveries = 0
-            batches = getattr(state, "framework_agent_batches", None)
+            batches = state.framework_agent_batches
             if not isinstance(batches, list):
                 batches = []
                 state.framework_agent_batches = batches

@@ -265,7 +265,7 @@ class Coordinator:
         self.gpu_specialist_pool = SpecialistGpuPool(
             self.db,
             gpu_ids=resolve_gpu_specialist_devices(
-                int(getattr(self.shared_state, "gpu_specialist_capacity", 0) or 0),
+                int(self.shared_state.gpu_specialist_capacity or 0),
                 serving_tp=self.dispatcher._resolve_serving_tp(),
             ),
         )
@@ -320,7 +320,7 @@ class Coordinator:
         self._last_maintenance_ts: float = time.monotonic()
 
         # Pin a per-macro-cycle budget window so per-phase budget fractions apply per cycle.
-        if float(getattr(self.shared_state, "cycle_minutes", 0) or 0) <= 0:
+        if float(self.shared_state.cycle_minutes or 0) <= 0:
             _cycle_hours = env_float("INFERENCE_OPTIMIZER_CYCLE_HOURS", default=DEFAULT_CYCLE_HOURS)
             self.shared_state.cycle_minutes = max(1.0, _cycle_hours * 60.0)
 
@@ -787,7 +787,7 @@ class Coordinator:
 
     def _seconds_until_session_bound(self) -> float | None:
         """Seconds left on the active run or closing bound; ``None`` if unbounded."""
-        if bool(getattr(self.shared_state, "closing_phase", False)):
+        if bool(self.shared_state.closing_phase):
             bound = self._closing_deadline
         else:
             bound = self._run_deadline

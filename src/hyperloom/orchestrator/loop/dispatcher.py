@@ -379,8 +379,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 )
         except Exception:
             log.exception("dispatcher: dead-running task reclaim failed")
-        report = getattr(getattr(self._coord, "reconciler", None), "last_report", None)
-        dead_tasks.extend(getattr(report, "failed_tasks", ()))
+        dead_tasks.extend(self._coord.reconciler.last_report.failed_tasks)
         if dead_tasks:
             try:
                 await self._account_dead_holder_failures(dead_tasks, reason="dead_holder_pump")
@@ -467,13 +466,10 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Returns:
             list[str]: New queued task ids created by reconcile (may be empty).
         """
-        gate = getattr(self.sub, "policy", None)
-        state = getattr(self, "shared_state", None)
-        if gate is None or state is None:
+        gate = self.sub.policy
+        if gate is None:
             return []
-        get_verdict = getattr(state, "get_specialist_patch_verdict", None)
-        if get_verdict is None:
-            return []
+        get_verdict = self.shared_state.get_specialist_patch_verdict
 
         created: list[str] = []
         try:
@@ -775,8 +771,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             # no registered executor. Kernel-owned kinds are legitimately
             # unregistered under --no-kernel, so they are excluded to avoid a
             # false positive. Dispatch is unchanged.
-            _coord = object.__getattribute__(self, "_coord")
-            _execs = getattr(getattr(_coord, "sub", None), "executor_registry", None)
+            _execs = self._coord.sub.executor_registry
             if (
                 isinstance(_execs, dict)
                 and _execs
@@ -1429,8 +1424,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             return None
         if self.shared_state.stop_reason:
             return None
-        reg = getattr(self, "action_registry", None)
-        meta = reg.get(action) if reg is not None else None
+        meta = self.action_registry.get(action)
         if meta is None:
             if fallback_cost_minutes is None:
                 return None
