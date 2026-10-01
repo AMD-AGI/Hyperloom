@@ -319,7 +319,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         retry_params["_auto_retry_attempt"] = next_attempt
         retry_params["_auto_retry_reason"] = f"{ftype.value}: {error}"[:300]
 
-        # Mirror _handle_delegate lane/ttl resolution so the retry task holds the
+        # Mirror handle_delegate lane/ttl resolution so the retry task holds the
         # same pools as the original and cannot run concurrently with serving.
         lanes, ttl = self._coord.dispatcher._registry_lanes_ttl("specialist")
         from .profile import resolve_specialist_profile, uses_whole_machine_gpu_lane
@@ -441,7 +441,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         """Fan a specialist delegate carrying ``params.tasks=[...]`` into N
         standard free-form specialist dispatches (scope=freeform, lane=cpu,
         mode=research defaults). Each fanned task is re-dispatched through the
-        normal ``_handle_delegate`` path. Per-task idempotency keys derive from
+        normal ``handle_delegate`` path. Per-task idempotency keys derive from
         the wave key. Each entry must pass the same structural checks as
         :func:`validate_freeform_wave_task` (the PolicyGate runs these first).
 
@@ -502,7 +502,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         Note:
             Side-effecting: may dispatch a domain specialist via
-            ``_handle_intent`` and mutate per-anchor throttle counters on
+            ``handle_intent`` and mutate per-anchor throttle counters on
             ``shared_state``. Returns nothing.
         """
         state = self.shared_state

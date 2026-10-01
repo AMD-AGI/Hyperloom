@@ -352,7 +352,7 @@ class IntentRouter(CoordinatorCollaborator):
         params["source_phase"] = owner
         return owner
 
-    async def _handle_intent(self, source: str, intent: Intent) -> None:
+    async def handle_intent(self, source: str, intent: Intent) -> None:
         """Validate an emitted intent through PolicyGate, then route it."""
         try:
             self.policy.validate_intent(source, intent)
@@ -365,7 +365,7 @@ class IntentRouter(CoordinatorCollaborator):
             handlers: dict[IntentType, Any] = {
                 IntentType.PROPOSE_ACTION: self._handle_propose_action,
                 IntentType.REVIEW_VERDICT: self._handle_review_verdict,
-                IntentType.DELEGATE: self._handle_delegate,
+                IntentType.DELEGATE: self.handle_delegate,
                 IntentType.REQUEST: self._handle_request,
                 IntentType.EXTEND_LEASE: self._handle_extend_lease,
                 IntentType.PRUNE_BRANCH: self._handle_prune_branch,
@@ -690,7 +690,7 @@ class IntentRouter(CoordinatorCollaborator):
         elif verdict == "needs_review":
             await self._coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, advisory)
 
-    async def _handle_delegate(self, source: str, intent: Intent) -> None:
+    async def handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
         if self.shared_state.is_pruned(action_name):
@@ -1367,11 +1367,3 @@ class IntentRouter(CoordinatorCollaborator):
                 dict(intent.payload),
             )
         )
-
-    async def handle_intent(self, source: str, intent: Intent) -> None:
-        """Public entry point for intent routing; delegates to :meth:`_handle_intent`."""
-        await self._handle_intent(source, intent)
-
-    async def handle_delegate(self, source: str, intent: Intent) -> None:
-        """Public entry point for delegate routing; delegates to :meth:`_handle_delegate`."""
-        await self._handle_delegate(source, intent)
