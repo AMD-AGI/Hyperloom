@@ -123,14 +123,30 @@ class TestSnapshotAndCaches:
 
     def test_a_cache_that_cannot_be_removed_stops_the_step(self, tmp_path, monkeypatch):
         cache = tmp_path / "cache"
-        cache.mkdir()
+        (cache / "kernel").mkdir(parents=True)
 
         def refuse(path):
             raise PermissionError(13, "Permission denied", str(path))
 
         monkeypatch.setattr(ab.shutil, "rmtree", refuse)
         with pytest.raises(StepFailed, match="cannot clear"):
-            ab.clear_caches((cache, tmp_path / "absent"))
+            ab.clear_caches((tmp_path / "absent", cache))
+
+    def test_a_symlinked_cache_is_emptied_through_its_link(self, tmp_path):
+        target = tmp_path / "scratch" / "triton"
+        (target / "kernel").mkdir(parents=True)
+        (target / "index.json").write_text("{}")
+        link = tmp_path / "home" / ".triton" / "cache"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(target)
+        ab.clear_caches((link,))
+        assert link.is_symlink() and target.is_dir() and not any(target.iterdir())
+
+    def test_a_cache_entry_that_is_not_a_directory_stops_the_step(self, tmp_path):
+        stray = tmp_path / "cache.db"
+        stray.write_text("")
+        with pytest.raises(StepFailed, match="not a directory"):
+            ab.clear_caches((stray,))
 
 
 class TestRunArm:
@@ -145,7 +161,7 @@ class TestRunArm:
         calls = []
 
         def launch(c, arm, _scenario):
-            calls.append(("launch", cache.exists()))
+            calls.append(("launch", any(cache.iterdir())))
             _session(ab.arm_dir(c, arm.name), stop_reason="time_exhausted")
             return Exited()
 

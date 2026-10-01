@@ -293,11 +293,19 @@ def restore_snapshot(snapshot_dir: Path) -> None:
 
 
 def clear_caches(caches: tuple[Path, ...]) -> None:
+    """Empty each configured cache directory, keeping it in place; a symlinked one through its target."""
     for cache in caches:
-        if not cache.exists():
+        root = cache.resolve()
+        if not root.exists():
             continue
+        if not root.is_dir():
+            raise StepFailed(f"ab.clear_caches entry {cache} is not a directory")
         try:
-            shutil.rmtree(cache)
+            for entry in root.iterdir():
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
         except OSError as exc:
             raise StepFailed(f"cannot clear {cache} before the arm: {exc}") from exc
 
