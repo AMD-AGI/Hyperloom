@@ -60,8 +60,8 @@ from ..kernel.geak_config import (
     _accepted_config_controls,
 )
 from ..actions.executors._gpu_pin import (
-    _coerce_tp,
-    _resolve_gpu_pin,
+    coerce_tp,
+    resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
     _resolve_handoff_tp,
@@ -785,9 +785,9 @@ class KernelPhase(CoordinatorCollaborator):
         precision = str(ss.precision or "").strip().lower()
         framework = str(ss.framework or "").strip().lower()
 
-        from ..kernel.request_handlers import _resolve_gemm_tuning_backend
+        from ..kernel.request_handlers import resolve_gemm_tuning_backend
 
-        backend = _resolve_gemm_tuning_backend({})
+        backend = resolve_gemm_tuning_backend({})
 
         if backend == "forge":
             # kernelforge gemm-tune handles any precision (bf16/fp16/fp8/fp4/mxfp4),
@@ -1276,9 +1276,9 @@ class KernelPhase(CoordinatorCollaborator):
         _recipe_envs = self._read_recipe_bench_envs(_recipe_path)
         bench_protocol = self._resolve_bench_protocol(_recipe_path, envs=_recipe_envs)
         # Preserve the run's actual GPU pin; {} means the whole machine.
-        gpu_pin = _resolve_gpu_pin(recipe_envs=_recipe_envs)
+        gpu_pin = resolve_gpu_pin(recipe_envs=_recipe_envs)
         # Resolve TP and GPU ids together so the values cannot disagree.
-        _tp = _coerce_tp(_recipe_envs.get("TP"), os.environ.get("TP"))
+        _tp = coerce_tp(_recipe_envs.get("TP"), os.environ.get("TP"))
         # Clamp ids to the visible mask, then TP to the resulting device set.
         _gpu_ids = _resolve_handoff_gpu_ids(gpu_pin=gpu_pin, tp=_tp)
         _tp = _resolve_handoff_tp(gpu_ids=_gpu_ids, tp=_tp)
@@ -3054,9 +3054,9 @@ class KernelPhase(CoordinatorCollaborator):
         """Whether the fp8 block-scale CK backend switch should be E2E-validated."""
         if not isinstance(result, dict):
             return False
-        from ..kernel.request_handlers import _resolve_gemm_tuning_backend
+        from ..kernel.request_handlers import resolve_gemm_tuning_backend
 
-        backend = str(result.get("backend") or _resolve_gemm_tuning_backend({})).strip().lower()
+        backend = str(result.get("backend") or resolve_gemm_tuning_backend({})).strip().lower()
         if backend != "forge":
             return False
         framework = str(self.shared_state.framework or "").strip().lower()

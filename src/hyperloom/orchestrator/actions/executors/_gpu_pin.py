@@ -115,7 +115,7 @@ def _resolve_inner_hip_mask(
             value = _mask_value(raw)
             if not value:
                 # Set but empty is terminal here too, for the same reason it is
-                # in :func:`_resolve_gpu_pin`: ``HIP="" + CUDA=4,5`` exposes
+                # in :func:`resolve_gpu_pin`: ``HIP="" + CUDA=4,5`` exposes
                 # zero devices, so the CUDA mask must not be picked up as the
                 # inner one. Reported as a zero-device inner mask, which drives
                 # the whole pin to ``count == 0``.
@@ -130,7 +130,7 @@ def _resolve_inner_hip_mask(
     return {}
 
 
-def _resolve_gpu_pin(
+def resolve_gpu_pin(
     *,
     recipe_envs: Mapping[str, Any] | None = None,
     environ: Mapping[str, str] | None = None,
@@ -275,7 +275,7 @@ def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> s
     field it reads.
 
     Args:
-        gpu_pin: The :func:`_resolve_gpu_pin` result (``{}``/``None`` = unpinned).
+        gpu_pin: The :func:`resolve_gpu_pin` result (``{}``/``None`` = unpinned).
         tp: Tensor-parallel size; ``<= 1`` is treated as 1.
 
     Returns:
@@ -334,7 +334,7 @@ def _pin_renumbers_devices(pin: Mapping[str, Any] | None) -> bool:
     decides.
 
     Args:
-        pin: The :func:`_resolve_gpu_pin` result.
+        pin: The :func:`resolve_gpu_pin` result.
 
     Returns:
         ``True`` for any ROCr-level pin, whatever its source.
@@ -363,7 +363,7 @@ def _resolve_handoff_gpu_ids_space(*, gpu_pin: Mapping[str, Any] | None) -> str:
     placeholders in that case and a consumer must not launch on them.
 
     Args:
-        gpu_pin: The :func:`_resolve_gpu_pin` result (``{}``/``None`` = unpinned).
+        gpu_pin: The :func:`resolve_gpu_pin` result (``{}``/``None`` = unpinned).
 
     Returns:
         ``"none"`` when the pin exposes zero devices, ``"logical"`` when the
@@ -376,7 +376,7 @@ def _resolve_handoff_gpu_ids_space(*, gpu_pin: Mapping[str, Any] | None) -> str:
     return "logical" if _pin_renumbers_devices(pin) else "absolute"
 
 
-def _coerce_tp(*args: Any, default: int = 1) -> int:
+def coerce_tp(*args: Any, default: int = 1) -> int:
     """First positional that parses as a positive int, else ``default``.
 
     Every candidate is guarded, so no caller has to wrap ``int()`` in a
