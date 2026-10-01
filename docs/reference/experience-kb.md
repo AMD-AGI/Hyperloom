@@ -104,8 +104,9 @@ It looks at what answers on `HYPERLOOM_KB_URL`:
   and waits for it to serve;
 - a service that answers with this workspace's token and data home, the
   packaged declaration, and the settings in `.env`: it reuses it;
-- such a service started with other settings, or serving another default
-  declaration: it restarts it, keeping its data. Settings are compared by their
+- such a service started with other settings, serving another default
+  declaration, or running other Experience KB code, such as one started before
+  an upgrade: it restarts it, keeping its data. Settings are compared by their
   effect, so the same key under another variable name does not restart it;
 - a service holding another workspace's data, as a copied `.env` would point
   at, or anything else on the port, such as another user's service: it refuses
@@ -186,7 +187,9 @@ exclusion lifted. With no label yet, any non-empty state counts as unlabelled.
 
 Push sends only Experiences written here that reads see; one written here but
 excluded, or outside the state, is held back and sent by the first push after
-reads see it. A push cannot take back what it already sent. List and export
+reads see it. One that was excluded is sent only after an include releases it,
+even when a restore to a label without that exclusion lets reads see it again.
+A push cannot take back what it already sent. List and export
 name only Experiences written here, and of those only what reads see unless
 `include_excluded` asks for the rest.
 
@@ -208,8 +211,11 @@ restore set outside the state. Exclusions stand. The global KB's declaration of
 the schema is registered when the local service lacks it; other schemas stay as
 they are. When the current state is not what its label saved, the pull first
 labels it (reason `before_pull`) and reports that label as `saved`, so
-restoring it undoes the pull. A workspace `pull` names the schema its packaged
-mapping writes.
+restoring it undoes the pull. When the global KB's exclusions or restores have
+changed what it shows of the schema since the last pull, the pull pages the
+schema from its start again, so an Experience the global KB shows again arrives
+too and the ones already here count as `unchanged`. A workspace `pull` names
+the schema its packaged mapping writes.
 
 **Identity.** Every service has a `kb_id`, made when its home is first served
 and kept with the home. The first push or pull to a global KB records its
@@ -376,7 +382,9 @@ reads do not see, so a page may hold fewer items than `limit`.
 `/v1/list` items are summaries plus `sequence`; `/v1/export` items are
 `{"sequence": 1, "experience": <complete Experience>}`. An export page also
 carries `head`, the last write position of what it pages, and, with a
-`schema_ref`, that schema's `declaration`.
+`schema_ref`, that schema's `declaration` and its `state`, an opaque value that
+changes whenever exclusions or restores change which stored Experiences of the
+schema the service shows.
 
 ### `POST /v1/push` and `POST /v1/pull`
 
@@ -420,13 +428,14 @@ with its time.
 ### `GET /health`
 
 ```json
-{"status": "ok", "kb_id": "kb-...", "name": "team-hub", "schema_ref": "schema:sha256:...", "experience_count": 3, "schemas": {"schema:sha256:...": 3}, "pid": 4242, "config_digest": "..."}
+{"status": "ok", "kb_id": "kb-...", "name": "team-hub", "schema_ref": "schema:sha256:...", "experience_count": 3, "schemas": {"schema:sha256:...": 3}, "pid": 4242, "config_digest": "...", "code_digest": "..."}
 ```
 
 `kb_id` identifies the service's home and `name` is only for people.
 `schema_ref` is the default read schema;
 `experience_count` and `schemas` count what reads see; `config_digest`
-fingerprints the settings the service started with.
+fingerprints the settings the service started with, and `code_digest` the
+Experience KB code it runs.
 
 ## Client failure behavior
 

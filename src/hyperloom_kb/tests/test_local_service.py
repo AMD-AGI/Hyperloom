@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+import hyperloom_kb
 from hyperloom_kb import (
     PACKAGED_DECLARATION,
     ExperienceDeclaration,
@@ -38,6 +40,7 @@ from hyperloom_kb import (
     is_loopback,
     load_declaration,
 )
+from hyperloom_kb.http_service import code_digest
 
 TOKEN = "local-service-token"
 
@@ -219,6 +222,42 @@ def test_a_service_serving_an_older_declaration_is_restarted_with_the_packaged_o
         assert older.wait(timeout=10) is not None
         assert current.restarted
         assert current.health["schema_ref"] == load_declaration(PACKAGED_DECLARATION).schema_ref
+    finally:
+        older.kill()
+        older.wait(timeout=10)
+        _stop(current)
+
+
+def test_a_service_started_from_other_code_is_restarted_by_a_launch_and_kept_by_a_side_command(
+    tmp_path: Path,
+) -> None:
+    older_code = tmp_path / "older"
+    shutil.copytree(
+        Path(hyperloom_kb.__file__).parent,
+        older_code / "hyperloom_kb",
+        ignore=shutil.ignore_patterns("tests", "__pycache__"),
+    )
+    with (older_code / "hyperloom_kb" / "remote.py").open("a", encoding="utf-8") as source:
+        source.write("\n# as released before an upgrade\n")
+    port = _free_port()
+    env = _env_without_planner_gateway(tmp_path)
+    older = subprocess.Popen(
+        [sys.executable, "-m", "hyperloom_kb", "--home", str(tmp_path / "home"), "--port", str(port)],
+        env={**env, "HYPERLOOM_KB_TOKEN": TOKEN, "PYTHONPATH": str(older_code)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    current = LocalService({})
+    try:
+        while not _reachable(port):
+            assert older.poll() is None
+        kept = ensure_local_service(_config(port, tmp_path), tmp_path / "home", env=env, restart=False)
+        assert (kept.stale, older.poll()) == ("it runs other Experience KB code than this client", None)
+
+        current = ensure_local_service(_config(port, tmp_path), tmp_path / "home", env=env)
+
+        assert older.wait(timeout=10) is not None
+        assert current.restarted and current.health["code_digest"] == code_digest()
     finally:
         older.kill()
         older.wait(timeout=10)
