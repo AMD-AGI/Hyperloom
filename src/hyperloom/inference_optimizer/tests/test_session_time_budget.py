@@ -1305,6 +1305,56 @@ class TestThePumpStopsWorkItCannotWaitFor:
         promoted.assert_awaited_once()
 
 
+async def _start_unjoined_action(coord: Coordinator, *, key: str) -> Task:
+    """Dispatch a kernel_agent task, which no pump joins, and wait until it is under way."""
+    task, started = await _queue_action(coord, kind="kernel_agent", key=key)
+    assert await coord.dispatcher._spawn_fitting_queued(exclude_ids=set()) == []
+    await asyncio.wait_for(started.wait(), timeout=5.0)
+    return task
+
+
+class TestThePumpOnlyCancelsWhatItSpawned:
+    """The registry is dispatcher-wide; the pump's exit sweep is not."""
+
+    @pytest.mark.asyncio
+    async def test_a_tick_with_nothing_queued_leaves_an_unjoined_action_running(self, coord: Coordinator):
+        _set_budget(coord, minutes=600)
+        unjoined = await _start_unjoined_action(coord, key="unjoined-idle")
+        try:
+            await asyncio.wait_for(coord.dispatcher._pump_dispatcher_once(), timeout=10.0)
+
+            assert unjoined.task_id in coord.dispatcher._inflight_actions
+        finally:
+            await coord.dispatcher.cancel_inflight_actions(reason="test")
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_pump_takes_its_own_and_only_its_own(self, coord: Coordinator):
+        _quick_poll(coord)
+        _set_budget(coord, minutes=600)
+        unjoined = await _start_unjoined_action(coord, key="unjoined-own")
+        _task, spawned, pump = await _start_action_under_pump(coord, kind=_CLOSING_ACTION, key="own-spawn")
+        try:
+            pump.cancel()
+            await _settle(pump)
+
+            assert spawned.cancelled()
+            assert unjoined.task_id in coord.dispatcher._inflight_actions
+        finally:
+            await coord.dispatcher.cancel_inflight_actions(reason="test")
+
+    @pytest.mark.asyncio
+    async def test_a_shutdown_still_reaches_an_unjoined_action(self, coord: Coordinator):
+        _set_budget(coord, minutes=600)
+        unjoined = await _start_unjoined_action(coord, key="unjoined-stop")
+        handle = coord.dispatcher._inflight_actions[unjoined.task_id]
+        coord._stop.set()
+
+        await asyncio.wait_for(coord.dispatcher._pump_dispatcher_once(), timeout=10.0)
+
+        assert handle.scope.cancelled
+        assert handle.atask.cancelled()
+
+
 class TestCoordinatorStop:
     """Teardown closes the database, so it cannot leave actions using it."""
 

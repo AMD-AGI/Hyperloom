@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.breakdown.collectors.v6_close import collect_v6_close
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
@@ -694,6 +695,9 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
     # Named by the artifact_package step from the path it was handed, not
     # parsed back out of that step's free-text detail.
     assert recorded["artifacts"]["artifact_package_path"].endswith(".zip")
+    warnings: list[str] = []
+    collect_v6_close(warnings, recorded=recorded)
+    assert warnings == []
 
 
 @pytest.mark.asyncio

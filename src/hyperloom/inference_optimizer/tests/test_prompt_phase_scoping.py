@@ -91,6 +91,29 @@ def _build(registry: dict, phase: str) -> str:
     )
 
 
+def test_cycle_strategy_is_rendered_in_place_of_the_default_arc(registry):
+    strategy = {
+        "focus": "moe_dispatch",
+        "score": 2.5,
+        "rationale": "not saturated in latest roofline snapshot",
+        "prior_cycles": [{"cycle": 1, "focus": "attention", "gain_delta": 1.2, "saturated_at_start": []}],
+    }
+    prompt = build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=default_enabled_actions(no_kernel=False),
+        macro_cycle=2,
+        cycle_strategy=strategy,
+        phase="FRAMEWORK_AGENT",
+        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
+    )
+
+    assert "focus=moe_dispatch" in prompt
+    assert "rationale: not saturated in latest roofline snapshot" in prompt
+    assert "previous cycles:" in prompt
+    assert "cycle=1 focus=attention" in prompt
+    assert "Default arc" not in prompt
+
+
 # Phase-scoped modules render only where the behaviour exists
 def test_kernel_request_reference_only_in_kernel_phase(registry):
     """Kernel REQUEST payload templates are legal only in KERNEL_AGENT."""
@@ -352,6 +375,48 @@ def test_phase_seam_snapshots_the_scope_it_installed(tmp_path):
 
     snapshot = tmp_path / "agents" / "orchestration" / "system_prompt.c3.EXPLORE.snapshot.md"
     assert snapshot.read_text(encoding="utf-8") == "PROMPT[phase=EXPLORE]"
+
+
+@pytest.mark.asyncio
+async def test_the_reseeded_override_is_what_the_orchestration_turn_loads(tmp_path):
+    handler, coord, _calls = _machine_with_stub_coordinator(tmp_path)
+
+    assert handler._reseed_orch_prompt_for_phase("EXPLORE") is True
+
+    assert await coord.conversation._load_system_prompt("orchestration") == "PROMPT[phase=EXPLORE]"
+
+
+def test_cycle_strategy_rows_do_not_nest_the_prior_cycles(tmp_path):
+    """The prior rows are rendered into the prompt, never stored inside the next row."""
+    handler, coord, calls = _machine_with_stub_coordinator(tmp_path)
+    state = coord.shared_state
+    for cycle in range(1, 5):
+        state.macro_cycle = cycle
+        coord.phase_macro_cycle._record_cycle_strategy_for_current_cycle()
+        handler._reseed_orch_prompt_for_phase("EXPLORE")
+
+    assert [row["cycle"] for row in state.cycle_strategy_log] == [1, 2, 3, 4]
+    assert all("prior_cycles" not in row for row in state.cycle_strategy_log)
+    assert len(calls[-1]["cycle_strategy"]["prior_cycles"]) == 3
+
+
+@pytest.mark.parametrize(
+    ("macro_cycle", "target_reached_at"),
+    [(0, ""), (_ps.DEFAULT_MAX_MACRO_CYCLES - 1, ""), (0, "2026-01-01T00:00:00+00:00")],
+    ids=["open", "last_cycle", "target_reached"],
+)
+def test_reloop_line_and_transition_agree_at_the_cycle_limits(macro_cycle, target_reached_at):
+    s = _render_state(_ps.PHASE_SWEEP)
+    s.macro_cycle = macro_cycle
+    s.target_reached_at = target_reached_at
+    s.last_conc_sweep = {"status": "succeeded", "summary": {"successful_pairs": 1}}
+    transition = _ps.compute_next_phase(s)
+    loops_back = bool(transition) and transition[0] == _ps.PHASE_FRAMEWORK_AGENT
+
+    reloop, _ = _ps.cycle_reloop_decision(s)
+
+    assert reloop is loops_back
+    assert f"cycle_reloop_feasible={'true' if reloop else 'false'}" in _ps.phase_status_summary(s)
 
 
 def test_phase_seam_snapshot_never_overwrites_the_boot_file(tmp_path):
