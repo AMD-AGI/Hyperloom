@@ -371,18 +371,11 @@ async def restart_server_for_round(
         else:
             os.environ.pop("HYPERLOOM_MN_UNSET_FWD_ENV", None)
 
-        # Multi-node TraceLens SGLang patch fan-out (fail-soft).
-        from ._server_patcher import resolve_sglang_shape_mode
+        # Multi-node TraceLens SGLang patch fan-out (fail-soft). Each pod picks
+        # roofline (< 0.5.18) or sglang_gc_patch (>= 0.5.18) from its own SGLang.
         from ._workload_envs import _tracelens_patch_enabled
 
-        _sglang_shape_mode_val = resolve_sglang_shape_mode()
-        if _sglang_shape_mode_val == "sitecustomize":
-            # sitecustomize mode: shapes come from the no-patch tool; skip the patch fan-out.
-            log.info(
-                "restart_server_for_round: SGLang shape mode=sitecustomize; "
-                "skipping TraceLens patch fan-out (shapes via kernel_shape_tool)."
-            )
-        elif _tracelens_patch_enabled() and (os.environ.get("TRACELENS_ROOT", "").strip()):
+        if _tracelens_patch_enabled() and (os.environ.get("TRACELENS_ROOT", "").strip()):
             try:
                 from hyperloom.inference_optimizer.multi_node.cli import cmd_apply_tracelens_patch
 
@@ -407,9 +400,9 @@ async def restart_server_for_round(
                 if patch_rc != 0:
                     log.warning(
                         "restart_server_for_round: TraceLens SGLang patch fan-out "
-                        "returned rc=%d; proceeding with restart (trace will be "
-                        "unannotated; tracelens splitter may report "
-                        "trace_split_no_steady_state until patches succeed)",
+                        "returned rc=%d; proceeding with restart (trace may be "
+                        "unannotated, or CUDA-graph capture may IndexError on "
+                        ">= 0.5.18, until patches succeed)",
                         patch_rc,
                     )
             except Exception as exc:  # noqa: BLE001 - fail-soft envelope
