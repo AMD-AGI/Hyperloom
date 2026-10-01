@@ -326,7 +326,7 @@ def _enqueue_self(**state_kw):
         tasks=TaskRegistry(db),
         rounds=RoundStore(db),
         session_dir=state_kw.get("session_dir", "/tmp/session"),
-        _run_deadline=state_kw.get("run_deadline", None),
+        run_deadline=state_kw.get("run_deadline", None),
         _warm_specialist_params=_warm,
         _record_observation=_record_obs,
         observations=observations,

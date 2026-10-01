@@ -45,6 +45,7 @@ def _dispatcher(tmp_path):
         _record_intervention_for_task=lambda *_args: None,
         _record_observation=AsyncMock(),
     )
+    stop = asyncio.Event()
     coord = SimpleNamespace(
         db=db,
         locks=locks,
@@ -52,12 +53,13 @@ def _dispatcher(tmp_path):
         shared_state=state,
         bus=MessageBus(db),
         sub=SubAgentRunner(locks, tasks),
-        _stop=asyncio.Event(),
-        _dispatcher_poll_sec=0.01,
+        _stop=stop,
+        stop_requested=stop.is_set,
         _BUDGET_GATED_DISPATCH_PHASES=frozenset(),
         writeback=writeback_ns,
     )
     dispatcher = DispatcherCollaborator(coord)
+    dispatcher.poll_sec = 0.01
     dispatcher._cancel_queued_task_over_budget = AsyncMock(return_value=False)
     return dispatcher
 

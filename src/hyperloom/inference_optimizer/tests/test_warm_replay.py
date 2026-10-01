@@ -184,7 +184,6 @@ def _make_coord(
     coord.shared_state.warm_replay_enabled = warm_replay_enabled
     coord.shared_state.warm_replay_min_confidence = warm_replay_min_confidence
     coord.tasks = _StubTaskRegistry()
-    coord._journal = None
     coord.knowledge_plane = None
     coord.knowledge_plane = KnowledgePlane(recipe_kb=None)
     return coord

@@ -478,8 +478,6 @@ def test_agentx_baseline_grades_requests_with_run_eval_off(tmp_path, rate, expec
 
     coordinator = object.__new__(Coordinator)
     coordinator.knowledge_plane = None
-    coordinator._journal = None
-    coordinator._proposal_scorer = None
     assert coordinator.writeback._is_promotable_result("baseline", result) is (expected == 1.0)
 
 

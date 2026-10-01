@@ -38,8 +38,6 @@ def _coord(tmp_path):
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.knowledge_plane = None
-    coord._journal = None
-    coord._proposal_scorer = None
     return coord.phase_kernel
 
 
@@ -120,8 +118,6 @@ def test_an_ancestor_named_like_geak_does_not_exclude_a_real_baseline(tmp_path):
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = session
     coord.knowledge_plane = None
-    coord._journal = None
-    coord._proposal_scorer = None
     phase = coord.phase_kernel
     got = phase._observed_replay_shape(168.99)
     assert got["observed_isl"] == 112_019

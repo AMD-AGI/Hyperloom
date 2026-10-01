@@ -173,7 +173,7 @@ def _lane(session_dir: Path, **overrides: Any):
         tasks=_FakeTasks(),
         rounds=overrides.get("rounds") or _rounds(session_dir),
         session_dir=str(session_dir),
-        _run_deadline=None,
+        run_deadline=None,
         _warm_specialist_params=_noop,
         _record_observation=_noop,
         _maybe_enqueue_specialist_requested_build=_noop,
@@ -222,8 +222,8 @@ def _lane(session_dir: Path, **overrides: Any):
     # Wire a minimal _coord so collaborator methods that use self._coord.sub.method can reach
     # the overrides the test placed directly on fake.
     fake._coord = types.SimpleNamespace(
-        _run_deadline=None,
-        _record_coordinator_exception=lambda *_a, **_k: None,
+        run_deadline=None,
+        record_exception=lambda *_a, **_k: None,
         enablement_params=types.SimpleNamespace(
             _build_enablement_specialist_params=lambda *a, **k: fake._build_enablement_specialist_params(*a, **k),
         ),
@@ -742,12 +742,12 @@ async def test_a_raising_pump_is_named_on_the_event(_bound_session):
         _maybe_route_build_outcomes=_boom,
         _maybe_enqueue_enablement_baseline_revalidation=_ok,
         _maybe_enqueue_enablement_specialist=_ok,
-        _record_coordinator_exception=_record,
+        record_exception=_record,
     )
     fake._coord = types.SimpleNamespace(
         enablement_build=types.SimpleNamespace(_maybe_route_build_outcomes=_boom),
         enablement_revalidation=types.SimpleNamespace(_maybe_enqueue_enablement_baseline_revalidation=_ok),
-        _record_coordinator_exception=_record,
+        record_exception=_record,
     )
     await EnablementLane._pump_enablement_safely(fake)
     enablement_event.finish(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="kept")

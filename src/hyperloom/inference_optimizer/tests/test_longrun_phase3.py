@@ -125,7 +125,7 @@ async def test_soft_restart_can_be_disabled(tmp_path, monkeypatch):
         "critic": MockCriticBackend(),
     }
     c = Coordinator(sd, backends=backends)
-    assert c._cycle_soft_restart is False
+    assert c.phase_macro_cycle._soft_restart_enabled is False
 
     st = c.shared_state
     _arm_sweep_loopback(st)

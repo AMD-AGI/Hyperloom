@@ -196,8 +196,6 @@ def coord(tmp_path: Path):
     c.knowledge_plane = KnowledgePlane(recipe_kb=None)
     c.knowledge_plane = None
     c.role_registry = {}
-    c._journal = None
-    c._proposal_scorer = None
     return c
 
 
@@ -420,7 +418,7 @@ def _clock_advancing_by(monkeypatch: pytest.MonkeyPatch, step_sec: float) -> Non
 async def test_a_running_task_is_waited_for_not_re_run(coord, terminal_state: str):
     """``running -> running`` is not a transition the registry has; asking for it kills the step."""
     coord.tasks = _FinishesWhileWaiting(terminal_state)
-    coord._dispatcher_poll_sec = 0.01
+    coord.dispatcher.poll_sec = 0.01
     coord.shared_state.max_minutes = 60
 
     state = await coord.phase_close._run_close_task(_running_report_row(coord), step="1 (report)")
@@ -435,7 +433,7 @@ async def test_a_running_task_that_never_lands_is_reported_not_waited_on_forever
     monkeypatch: pytest.MonkeyPatch,
 ):
     """The wait is patient, not unbounded: a step that never lands is recorded, not awaited forever."""
-    coord._dispatcher_poll_sec = 0.0
+    coord.dispatcher.poll_sec = 0.0
     coord.shared_state.max_minutes = 60
     _clock_advancing_by(monkeypatch, step_sec=30.0)
 
@@ -502,7 +500,7 @@ async def test_the_wait_for_a_running_report_outlives_a_short_session_reserve(
 ):
     """A ten-minute session reserves twelve seconds for CLOSE; no report is written in twelve seconds."""
     coord.tasks = _FinishesWhileWaiting("succeeded", lands_on=5)
-    coord._dispatcher_poll_sec = 0.0
+    coord.dispatcher.poll_sec = 0.0
     coord.shared_state.max_minutes = 10
     assert coord.shared_state.closing_reserve_sec() == pytest.approx(12.0)
     # Five looks at five simulated seconds apiece: past the reserve, inside the two minutes the catalogue prices a
@@ -547,7 +545,7 @@ def test_an_extravagantly_priced_step_is_capped(coord):
 async def test_the_sequencer_records_the_state_a_running_report_ended_in(coord):
     """End to end: the waited-for report is reported like any other outcome."""
     coord.tasks = _FinishesWhileWaiting("succeeded")
-    coord._dispatcher_poll_sec = 0.01
+    coord.dispatcher.poll_sec = 0.01
     coord.shared_state.max_minutes = 60
     coord.shared_state.phase_history = [_close_phase_history_row()]
     _running_report_row(coord)

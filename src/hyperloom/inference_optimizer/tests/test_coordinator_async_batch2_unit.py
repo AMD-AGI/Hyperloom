@@ -200,7 +200,7 @@ def test_recent_outcomes_reader_clamps_top_k(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_resume_consistency_marks_unvalidated_keeps(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.optimization_stack = [
         {
             "action": "explore",
@@ -231,7 +231,7 @@ async def test_resume_consistency_marks_unvalidated_keeps(coord: Coordinator) ->
 @pytest.mark.asyncio
 async def test_resume_consistency_leaves_current_best_alone(coord: Coordinator) -> None:
     """Resume must not rewrite the config; a stack replay loses ablated envs."""
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.optimization_stack = [
         {
             "action": "explore",
@@ -270,7 +270,7 @@ async def test_resume_restores_promoted_inferencex_checkout(
 ) -> None:
     active = tmp_path / "active-inferencex"
     active.mkdir()
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.active_inferencex_path = str(active)
     # setenv, not delenv: delenv of an absent name arms no undo, so the value the resume pass exports below would leak
     # into every later test.
@@ -527,7 +527,7 @@ async def test_reused_output_directory_never_reuses_prior_attempt_preimages(coor
 async def test_failed_pending_restore_blocks_resume_before_followup_actions(coord, pending_candidate, monkeypatch):
     candidate = await pending_candidate(two_artifacts=True)
     Path(candidate.result["artifacts_applied"][0]["backup"]).unlink()
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
 
     async def forbidden(*_args, **_kwargs):
         pytest.fail("resume continued after an incomplete restore")
@@ -598,7 +598,7 @@ def crashed_integrate_window(coord: Coordinator, pending_candidate):
                 },
             )
         coord.shared_state = SharedState.load_or_init(coord.session_dir)
-        coord._resumed_from["is_resume"] = True
+        coord.writeback._resumed_from["is_resume"] = True
         return candidate
 
     return crash
@@ -876,7 +876,7 @@ async def test_ordinary_integrate_completion_does_not_clear_unidentified_or_othe
 
 @pytest.mark.asyncio
 async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     await coord.bus.append_and_seq(
         Message.new(
             "coordinator",
@@ -919,7 +919,7 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
 
 @pytest.mark.asyncio
 async def test_resume_consistency_replays_pending_integrate_keep(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.pending_integrate = {"task_id": "ti-pending", "specialist_task_id": "spec-pending"}
     await coord.bus.append_and_seq(
         Message.new(
@@ -955,7 +955,7 @@ async def test_resume_consistency_replays_pending_integrate_keep(coord: Coordina
 
 @pytest.mark.asyncio
 async def test_resume_consistency_rolls_back_pending_integrate(coord: Coordinator, monkeypatch) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     await coord.tasks.create(kind="integrate_patch", params={}, idempotency_key="ti-roll", task_id="ti-roll")
     coord.shared_state.pending_integrate = {
         "task_id": "ti-roll",
@@ -978,7 +978,7 @@ async def test_resume_consistency_rolls_back_pending_integrate(coord: Coordinato
 
 @pytest.mark.asyncio
 async def test_resume_consistency_clears_stale_pending_integrate(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.pending_integrate = {"task_id": "ti-stale"}
 
     report = await coord.writeback._resume_consistency_pass()
@@ -994,7 +994,7 @@ async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unreadable event log must not be treated as 'no KEEP exists'."""
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     sentinel = {
         "task_id": "ti-unreadable",
         "framework_source_root": "/tmp/framework",
@@ -1026,7 +1026,7 @@ async def test_resume_consistency_discards_orphaned_integrate_keep_missing_works
     coord: Coordinator,
     tmp_path: Path,
 ) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     missing_workspace = tmp_path / "missing-workspace"
     await coord.bus.append_and_seq(
         Message.new(
@@ -1057,7 +1057,7 @@ async def test_resume_consistency_discards_orphaned_integrate_keep_missing_works
 
 @pytest.mark.asyncio
 async def test_resume_consistency_discards_orphan_when_workspace_missing(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     await coord.bus.append_and_seq(
         Message.new(
             "coordinator",
@@ -1087,7 +1087,7 @@ async def test_resume_consistency_discards_orphan_when_workspace_missing(coord: 
 
 @pytest.mark.asyncio
 async def test_resume_consistency_explore_orphan_alerts_not_replayed(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     await coord.bus.append_and_seq(
         Message.new(
             "coordinator",
@@ -1117,7 +1117,7 @@ async def test_resume_consistency_explore_orphan_alerts_not_replayed(coord: Coor
 @pytest.mark.asyncio
 async def test_resume_consistency_framework_keep_in_stack_is_not_orphaned(coord: Coordinator) -> None:
     """A landed framework KEEP reconciles against its own stack entry."""
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.optimization_stack = [
         {
             "action": "framework",
@@ -1155,7 +1155,7 @@ async def test_resume_consistency_framework_keep_in_stack_is_not_orphaned(coord:
 @pytest.mark.asyncio
 async def test_resume_consistency_framework_keep_absent_from_stack_still_alerts(coord: Coordinator) -> None:
     """The reconciliation fix must not suppress a genuinely missing framework KEEP."""
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     await coord.bus.append_and_seq(
         Message.new(
             "coordinator",
@@ -1184,7 +1184,7 @@ async def test_resume_consistency_framework_keep_absent_from_stack_still_alerts(
 
 @pytest.mark.asyncio
 async def test_resume_consistency_replays_pending_integrate_with_kept_result(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.pending_integrate = {"task_id": "ti-half", "specialist_task_id": "spec-half"}
     await coord.bus.append_and_seq(
@@ -1225,7 +1225,7 @@ async def test_resume_refuses_legacy_patch_without_task_evidence(coord: Coordina
         return True, ""
 
     monkeypatch.setattr(ip, "_git_apply_reverse", _fake_reverse)
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.pending_integrate = {
         "task_id": "ti-crash",
         "specialist_task_id": "spec-crash",
@@ -1243,7 +1243,7 @@ async def test_resume_refuses_legacy_patch_without_task_evidence(coord: Coordina
 
 @pytest.mark.asyncio
 async def test_resume_consistency_clears_stale_pending_integrate_with_specialist_id(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.pending_integrate = {"task_id": "ti-stale", "specialist_task_id": "spec-stale"}
 
     report = await coord.writeback._resume_consistency_pass()
@@ -1254,7 +1254,7 @@ async def test_resume_consistency_clears_stale_pending_integrate_with_specialist
 
 @pytest.mark.asyncio
 async def test_resume_consistency_enqueues_stack_rebench_for_unvalidated(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.optimization_stack = [
         {
@@ -1882,7 +1882,7 @@ async def test_record_specialist_result_with_scorer(coord: Coordinator) -> None:
             calls.append({"proposals": proposals, "task_id": task_id})
             return {"models": ["m1"], "ranking": [0]}
 
-    coord._proposal_scorer = _Scorer()
+    coord.writeback._proposal_scorer = _Scorer()
     task = _ptask("rec-spec-3", "specialist")
     await coord.writeback._record_specialist_result(
         task=task,

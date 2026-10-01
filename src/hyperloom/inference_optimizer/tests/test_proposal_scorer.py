@@ -339,9 +339,8 @@ def _coord(tmp_path: Path, scorer):
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = _StubSharedState()
-    c._proposal_scorer = scorer
+    c.writeback._proposal_scorer = scorer
     c.knowledge_plane = None
-    c._journal = None
     c.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
     return c
 
