@@ -179,7 +179,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             return
         self.db.close()
 
-    def _registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
+    def registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
         """Resolve ``(requires_lanes, lease_ttl_sec)`` from the action catalogue; lanes filtered to KNOWN_LANES.
 
         Args:
@@ -195,7 +195,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         lanes = [lane for lane in meta.requires_lanes if lane in KNOWN_LANES]
         return lanes, meta.lease_ttl_sec
 
-    def _cycle_idem_suffix(self) -> str:
+    def cycle_idem_suffix(self) -> str:
         """Idempotency-key suffix scoping a per-cycle internal singleton to the
         current macro-cycle. Empty for cycle 0 (the first macro-cycle).
 
@@ -394,7 +394,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         except Exception:
             log.exception("dispatcher: cancelled policy-denied integrate_patch reconcile failed")
 
-    async def _pump_dispatcher_once(self) -> None:
+    async def pump_dispatcher_once(self) -> None:
         """Dispatch queued tasks respecting per-lane capacity, re-scanning for
         newly-fittable tasks while in-flight tasks run.
 
@@ -539,7 +539,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         """Spawn every currently lane-fitting queued task not already in flight.
 
         Pure dispatch — per-task completion bookkeeping is handled by
-        :meth:`_reap_dispatched_task`. Applies the capacity /
+        :meth:`reap_dispatched_task`. Applies the capacity /
         GPU-specialist-lease gating; each lease is bound to its task_id.
 
         Args:
@@ -672,11 +672,11 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                             default_gpu_count = gpu_pool.capacity or 1
                         else:
                             # Bench specialist: size to the serving TP.
-                            default_gpu_count = self._resolve_serving_tp() or gpu_pool.capacity or 1
+                            default_gpu_count = self.resolve_serving_tp() or gpu_pool.capacity or 1
                     else:
                         gpu_pool = self.gpu_specialist_pool
                         # Default gpu_count to the serving TP; explicit wins.
-                        default_gpu_count = self._resolve_serving_tp() or 1
+                        default_gpu_count = self.resolve_serving_tp() or 1
                     try:
                         gpu_count = int(params.get("gpu_count", default_gpu_count) or default_gpu_count)
                     except (TypeError, ValueError):
@@ -684,7 +684,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     # A bench-capable specialist floors gpu_count up to the
                     # serving TP; others keep their explicit count.
                     bench = is_truthy(params.get("bench"))
-                    serving_tp = self._resolve_serving_tp() or 0
+                    serving_tp = self.resolve_serving_tp() or 0
                     if bench and serving_tp > 0 and gpu_count < serving_tp:
                         log.info(
                             "specialist %s: bench=true with gpu_count=%d < serving "
@@ -698,7 +698,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                         gpu_count = serving_tp
                     # Iron law: kill <= gpu_lease TTL <= gpu_research_lane TTL,
                     # measured from the same deadline carried down to the reaper.
-                    gpu_ttl_sec = self._gpu_lease_ttl_sec(
+                    gpu_ttl_sec = self.gpu_lease_ttl_sec(
                         int(task.lease_ttl_sec or 0),
                         deadline=specialist_deadline,
                     )
@@ -793,7 +793,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     gpu_lease=gpu_lease,
                     gpu_specialist_lease=gpu_specialist_lease,
                     cancel_scope=cancel_scope,
-                    on_complete=partial(self._reap_dispatched_task, task) if join_in_pump else None,
+                    on_complete=partial(self.reap_dispatched_task, task) if join_in_pump else None,
                 ),
             )
             self._inflight_actions[task.task_id] = _InflightAction(task.kind, atask, cancel_scope)
@@ -1065,7 +1065,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         shape = Deadline.after(self._specialist_wall_budget_sec(needs_gpu=needs_gpu, params=params))
         return shape.tightened_to(self.shared_state.session_deadline())
 
-    def _resolve_serving_tp(self) -> int:
+    def resolve_serving_tp(self) -> int:
         """Resolve the live serving process's TP size (cards it holds).
 
         Used for the serving-disjoint specialist pool (B1) and as the default
@@ -1078,7 +1078,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         """
         return int(self.shared_state.tp or 0)
 
-    def _gpu_lease_ttl_sec(
+    def gpu_lease_ttl_sec(
         self,
         floor_ttl_sec: int = 0,
         *,
@@ -1149,7 +1149,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 task.kind,
             )
 
-    async def _reap_dispatched_task(self, task: Task, result: SubAgentResult) -> None:
+    async def reap_dispatched_task(self, task: Task, result: SubAgentResult) -> None:
         """Run completion bookkeeping for one finished dispatched task.
 
         Performs post-completion bookkeeping: specialist auto-retry,
@@ -1390,7 +1390,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             )
         return None
 
-    def _time_budget_denial_for_action(
+    def time_budget_denial_for_action(
         self,
         action_name: str,
         *,
@@ -1451,7 +1451,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             ),
         )
 
-    def _admission_denial_for_action(
+    def admission_denial_for_action(
         self,
         action_name: str,
     ) -> PolicyDenied | None:
@@ -1472,7 +1472,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         denied = self._sequence_denial_for_action(action_name)
         if denied is not None:
             return denied
-        return self._time_budget_denial_for_action(action_name)
+        return self.time_budget_denial_for_action(action_name)
 
     async def _cancel_queued_task_over_budget(self, task: Task) -> bool:
         """Drop a queued task the budget can no longer fit, before it takes a lane.
@@ -1493,7 +1493,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # An uncatalogued kind is priced by the lease its enqueue sized, the
         # only cost estimate it has.
         ttl_sec = int(getattr(task, "lease_ttl_sec", 0) or 0)
-        denied = self._time_budget_denial_for_action(
+        denied = self.time_budget_denial_for_action(
             task.kind,
             fallback_cost_minutes=(ttl_sec / 60.0) if ttl_sec > 0 else None,
         )
@@ -1535,7 +1535,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             self._coord.phase_sweep._record_session_budget_conc_sweep_skip(denied=denied)
         return True
 
-    def _sequence_denial_for_request(
+    def sequence_denial_for_request(
         self,
         target_agent: str,
         kind: str,

@@ -1443,7 +1443,7 @@ class PreludePhase(CoordinatorCollaborator):
             "workload_compatibility": workload_compatibility,
         }
         try:
-            lanes, ttl = self._coord.dispatcher._registry_lanes_ttl("replay_warm_recipe")
+            lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("replay_warm_recipe")
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind="replay_warm_recipe",
                 params=params,
@@ -2572,12 +2572,12 @@ class PreludePhase(CoordinatorCollaborator):
         if params is None:
             return None
         kind = self._internal_analysis_kind()
-        lanes, ttl = self._coord.dispatcher._registry_lanes_ttl(kind)
+        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(kind)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=kind,
             params=params,
             idempotency_key=(
-                f"internal-analysis-{reason}{self._coord.dispatcher._cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}"
+                f"internal-analysis-{reason}{self._coord.dispatcher.cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}"
             ),
             requires_lanes=lanes,
             lease_ttl_sec=ttl,

@@ -612,7 +612,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             inject_stack_base_params(params, self.shared_state, anchor=True)
             if self.shared_state.baseline_config_path:
                 params.setdefault("config_path", self.shared_state.baseline_config_path)
-        lanes, ttl = self._coord.dispatcher._registry_lanes_ttl(pending.action_name)
+        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(pending.action_name)
         # Content-addressed so a batch of proposals that would launch identical work collapses to one task; a
         # terminated twin still gets a fresh key so a legitimate retry after failure is never locked out.
         raw_key = self._approved_idempotency_key(pending.action_name, params)
