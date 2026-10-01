@@ -354,7 +354,7 @@ class Coordinator:
         # work is not skipped just because the session deadline has passed.
         self._closing_deadline: Deadline | None = None
         self._signals: SignalDrain | None = None
-        # Latest objective wired by run(); refreshes target_gap_pct each tick. None outside a run.
+        # Latest objective wired by run(); None outside a run.
         self._current_objective: Objective | None = None
 
         # Initialise phase machine (fresh session enters PRELUDE). Idempotent.
@@ -367,6 +367,11 @@ class Coordinator:
         """RecipeKB owned by the knowledge plane."""
         plane = self.knowledge_plane
         return plane.recipe_kb if plane is not None else None
+
+    def target_gap_pct(self) -> float:
+        """Percent improvement still needed to reach the run objective; 0.0 outside a run."""
+        objective = self._current_objective
+        return objective.gap_pct(self.shared_state) if objective is not None else 0.0
 
     @property
     def router(self) -> IntentRouter:
@@ -706,7 +711,6 @@ class Coordinator:
             log.exception("phase advance before reactors failed")
             self._record_coordinator_exception(stage="advance_phase_pre_reactor", exc=exc)
         in_closing = bool(self.shared_state.closing_phase)
-        self.conversation._refresh_target_gap_pct()
         # One reactor + dispatcher pass; during closing skip LLM passes.
         if not in_closing:
             for name in self._tick_roles:

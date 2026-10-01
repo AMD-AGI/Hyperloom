@@ -369,11 +369,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
         )
         append_conversation(session_dir=self.session_dir, record=record)
 
-    def _refresh_target_gap_pct(self) -> None:
-        """Update target_gap_pct from the current objective."""
-        obj = self._coord._current_objective
-        self.shared_state.target_gap_pct = obj.gap_pct(self.shared_state) if obj is not None else 0.0
-
     async def _compose_prompt(self, agent_name: str) -> str:
         """Compose the prompt for *agent_name*: session context + inbox tail (with canonical msg_id per inbox row)."""
         sections: list[str] = []
@@ -410,6 +405,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
         sections.append("=== Shared session state ===")
         sections.append(self.shared_state.to_prompt_summary())
+        sections.append(f"target_gap_pct={self._coord.target_gap_pct():.2f}")
         sections.append("=== Resource pools ===")
         sections.append(resource_pools_summary(self.shared_state))
         if agent_name == "orchestration":
@@ -609,73 +605,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
             "arm until the plateau / budget gate fires."
         )
         return "\n".join(lines)
-
-    def _record_advisory_plateau_from_state(self) -> None:
-        """Snapshot the current plateau reading from shared state into the SBD timeline.
-
-        Both arms are recorded whether or not either fired, so an untripped
-        evaluation is visible as such in the breakdown.
-        """
-        _, evidence = _phase_state.per_lever_dryness(self.shared_state)
-        config_dry = bool(evidence.get("config_arm_plateaued"))
-        source_dry = bool(evidence.get("source_arm_plateaued"))
-        self._record_advisory_plateau(
-            config=(config_dry, evidence),
-            source=(source_dry, evidence),
-        )
-
-    def _record_advisory_plateau(
-        self,
-        *,
-        config: tuple[bool, dict],
-        source: tuple[bool, dict],
-    ) -> None:
-        """Snapshot the plateau reading this advisory was composed from.
-
-        Recorded here rather than derived at export because the inputs are
-        counts over a history that keeps growing: a later re-derivation reads
-        winners and candidates that landed after the advisory fired, and
-        returns a number the agent never saw. Both arms are recorded whether or
-        not either fired -- "evaluated and did not trip" is the reading that
-        explains a phase staying open.
-        """
-        recorder = self._coord.phase_framework.timeline()
-        if recorder is None:
-            return
-        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
-            ARM_CONFIG,
-            ARM_SOURCE,
-            PLATEAU_PATH_ADVISORY,
-        )
-
-        config_dry, config_ev = config
-        source_dry, source_ev = source
-        recorder.record_plateau(
-            arm=ARM_CONFIG,
-            path=PLATEAU_PATH_ADVISORY,
-            triggered=config_dry,
-            inputs={
-                "recent_keep_gain_pct": config_ev.get("recent_keep_gain_pct"),
-                "empty_streak": config_ev.get("empty_streak"),
-                "winners_seen": config_ev.get("winners_seen"),
-                "specialist_rounds_seen": config_ev.get("specialist_rounds_seen"),
-            },
-            thresholds={
-                "keep_gain_threshold_pct": config_ev.get("keep_gain_threshold_pct"),
-                "empty_streak_threshold": config_ev.get("empty_streak_threshold"),
-                "lookback": config_ev.get("lookback"),
-            },
-        )
-        recorder.record_plateau(
-            arm=ARM_SOURCE,
-            path=PLATEAU_PATH_ADVISORY,
-            triggered=source_dry,
-            inputs={
-                "consecutive_no_keep": source_ev.get("source_consecutive_no_keep"),
-                "candidates_exhausted": source_ev.get("source_candidates_exhausted"),
-            },
-            thresholds={"no_keep_streak_threshold": source_ev.get("source_threshold")},
-        )
 
     def _dominant_roofline_direction(self) -> tuple[str, float]:
         """Return ``(direction, pct)`` for the most-saturated roofline direction in the latest snapshot; ``("", 0.0)`` when no snapshot is available."""

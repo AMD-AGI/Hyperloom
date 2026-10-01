@@ -177,7 +177,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         gaps: list[dict[str, Any]] = []
         if state.baseline_tput <= 0:
             return gaps
-        target_gap = float(getattr(state, "target_gap_pct", 0.0) or 0.0)
+        target_gap = self._coord.target_gap_pct()
         if target_gap > 0.0:
             severity = "high" if target_gap >= 10.0 else "medium" if target_gap >= 3.0 else "low"
             gaps.append(
