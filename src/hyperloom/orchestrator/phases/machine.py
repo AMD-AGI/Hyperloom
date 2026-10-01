@@ -196,6 +196,9 @@ class MachinePhase(CoordinatorCollaborator):
     async def _advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick."""
         state = self.shared_state
+        if state.closing_phase and state.phase == _phase_state.PHASE_CLOSE and not state.close_sequence_done:
+            await self.ensure_close_sequence(reason="time_exhausted")
+            return
         await self._track_kernel_idle_streak()
         optimize_enabled = self._optimize_enabled()
         # Only asked inside the phase: the query renews the open round's lease.
@@ -388,9 +391,21 @@ class MachinePhase(CoordinatorCollaborator):
                 a history that kept growing after the decision.
         """
         self._reseed_orch_prompt_for_phase(to_phase)
+        self._on_phase_left(from_phase=from_phase, reason=reason, evidence=evidence)
 
-        # The machine has entry hooks only, so the phase being left closes its own timeline event here rather than in
-        # a hook of its own.
+        target = (to_phase or "").upper()
+        if target == _phase_state.PHASE_FRAMEWORK_AGENT:
+            await self.phase_framework.on_enter(from_phase=from_phase)
+        elif target == _phase_state.PHASE_KERNEL_AGENT:
+            await self._on_enter_kernel(from_phase=from_phase)
+        elif target == _phase_state.PHASE_SWEEP:
+            await self._on_enter_sweep(from_phase=from_phase)
+        elif target == _phase_state.PHASE_CLOSE:
+            await self._on_enter_close(from_phase=from_phase)
+
+    def _on_phase_left(self, *, from_phase: str, reason: str, evidence: dict[str, Any] | None) -> None:
+        """Settle the internal timeline owned by the phase being left."""
+
         if (from_phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT:
             try:
                 self._close_kernel_timeline(exit_reason=str(reason or ""))
@@ -407,16 +422,6 @@ class MachinePhase(CoordinatorCollaborator):
                 )
             except Exception:
                 log.debug("Coordinator: framework timeline close failed", exc_info=True)
-
-        target = (to_phase or "").upper()
-        if target == _phase_state.PHASE_FRAMEWORK_AGENT:
-            await self.phase_framework.on_enter(from_phase=from_phase)
-        elif target == _phase_state.PHASE_KERNEL_AGENT:
-            await self._on_enter_kernel(from_phase=from_phase)
-        elif target == _phase_state.PHASE_SWEEP:
-            await self._on_enter_sweep(from_phase=from_phase)
-        elif target == _phase_state.PHASE_CLOSE:
-            await self._on_enter_close(from_phase=from_phase)
 
     def _reseed_orch_prompt_for_phase(self, to_phase: str) -> bool:
         """Re-scope the orchestration system prompt to the phase being entered."""

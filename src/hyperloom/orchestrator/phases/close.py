@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..state.task_registry import IllegalTransition, Task, TaskNotFound
+from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
 from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
@@ -911,6 +912,41 @@ class ClosePhase(CoordinatorCollaborator):
                 status,
             )
 
+    async def _record_terminal_close_transition(self) -> str:
+        """Establish CLOSE ownership without dispatching the sequencer or optimization work."""
+        state = self.shared_state
+        prior = state.phase
+        if prior == _phase_state.PHASE_CLOSE:
+            return prior
+        enablement_in_flight = False
+        if prior == _phase_state.PHASE_ENABLEMENT:
+            round_row = await self.rounds.held()
+            enablement_in_flight = round_row is not None and await self._round_has_live_work(round_row.holder_task_id)
+        kernel_in_flight = prior == _phase_state.PHASE_KERNEL_AGENT and await self._kernel_agent_in_flight()
+        now = time.time()
+        target, reason, evidence = _phase_state.compute_next_phase(
+            state,
+            kernel_enabled=self._kernel_enabled(),
+            optimize_enabled=self._optimize_enabled(),
+            enablement_enabled=self._enablement_admitted(),
+            budget_pct=self._phase_budget_pct,
+            enablement_in_flight=enablement_in_flight,
+            kernel_work_in_flight=kernel_in_flight,
+            now_unix=now,
+        )
+        assert target == _phase_state.PHASE_CLOSE
+        if state.pending_escalate_hint == ESCALATE_HINT_SKIP_TO_CLOSE:
+            state.consume_pending_escalate_hint()
+        elif state.pending_escalate_hint:
+            state.discard_pending_escalate_hint()
+        _phase_state.record_phase_transition(state, to_phase=target, reason=reason, evidence=evidence, ts_unix=now)
+        self._on_phase_left(from_phase=prior, reason=reason, evidence=evidence)
+        _phase_state.record_lifecycle_event(
+            state, step=target, status=_phase_state.LIFECYCLE_STATUS_ENTER, phase=target, detail=f"reason={reason}"
+        )
+        state.save(self.session_dir)
+        return prior
+
     async def _enter_closing_phase(self, *, grace_sec: float) -> Deadline:
         """Enter report-flush phase after the wall-clock deadline (enqueue deterministic report task).
 
@@ -925,6 +961,7 @@ class ClosePhase(CoordinatorCollaborator):
         closing_deadline = Deadline.after(grace_sec)
         self.shared_state.closing_phase = True
         self.shared_state.closing_started_unix = closing_started
+        await self._record_terminal_close_transition()
         self.shared_state.save(self.session_dir)
 
         log.info(
@@ -988,7 +1025,7 @@ class ClosePhase(CoordinatorCollaborator):
         no report at all. Idempotent via ``close_sequence_done``.
 
         Args:
-            reason: What terminated the run, recorded as the entry's from-phase.
+            reason: What terminated the run, used for logging.
 
         Returns:
             bool: ``True`` when this call ran the sequence.
@@ -996,7 +1033,8 @@ class ClosePhase(CoordinatorCollaborator):
         if self.shared_state.close_sequence_done:
             return False
         log.info("CLOSE: no close sequence has run (reason=%s); running it now", reason)
-        await self._on_enter_close(from_phase=reason)
+        prior = await self._record_terminal_close_transition()
+        await self._on_enter_close(from_phase=prior)
         return True
 
     async def _closing_report_terminal(self) -> bool:
