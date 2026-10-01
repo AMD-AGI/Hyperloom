@@ -716,11 +716,7 @@ def phase_status_summary(
     ]
     # Whether deferring work to a later cycle is still a real option.
     if phase in (PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
-        frozen_now = float(now_unix if now_unix is not None else _now_unix(state))
-        reloop_inputs = workflow_predicate_inputs(state, now_unix=frozen_now)
-        reloop_inputs["sweep_result"], _ = _sweep_predicate_inputs(state, now_unix=frozen_now)
-        reloop, evidence = _reloop_decision(reloop_inputs)
-        feasible = reloop and state.framework_agent_phase_enabled
+        feasible, evidence = cycle_reloop_decision(state, now_unix=now_unix)
         reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
         threshold = evidence.get("min_remaining_sec_effective")
         if threshold is not None:
@@ -1640,6 +1636,15 @@ def _reloop_decision(inputs: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
     return True, evidence
 
 
+def cycle_reloop_decision(state: Any, *, now_unix: float | None = None) -> tuple[bool, dict[str, Any]]:
+    """Whether another macro-cycle can open from here, with the evidence the decision rests on."""
+    frozen_now = float(now_unix if now_unix is not None else _now_unix(state))
+    inputs = workflow_predicate_inputs(state, now_unix=frozen_now)
+    inputs["sweep_result"], _ = _sweep_predicate_inputs(state, now_unix=frozen_now)
+    reloop, evidence = _reloop_decision(inputs)
+    return reloop and state.framework_agent_phase_enabled, evidence
+
+
 def compute_next_phase(
     state: Any,
     *,
@@ -1960,10 +1965,9 @@ def record_phase_transition(
     now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
     now_unix = float(ts_unix if ts_unix is not None else _time.time())
     from_phase = (state.phase or "").strip().upper()
-    # Read before the loopback's bump can be observed here: it increments
-    # ``macro_cycle`` on the way out of a phase, so the cycle in scope at the
-    # transition is not always the one the outgoing phase ran in.
     prev_cycle = state.macro_cycle
+    # The loopback opens the next cycle right after this row is recorded; the entered phase already belongs to it.
+    entry_cycle = prev_cycle + 1 if (evidence or {}).get("loopback") else prev_cycle
     # Bank the finished segment for EVERY phase so the budget guards can charge
     # a phase for the whole run instead of the current entry.
     bank_phase_segment(state, until_unix=now_unix)
@@ -1974,7 +1978,7 @@ def record_phase_transition(
         evidence=evidence,
         ts=now_ts,
         ts_unix=now_unix,
-        cycle=state.macro_cycle,
+        cycle=entry_cycle,
     )
     history = list(state.phase_history or [])
     history.append(row)
@@ -2009,7 +2013,7 @@ def record_phase_transition(
             )
         phase_event.record_entry(
             phase=str(row.get("to_phase") or ""),
-            macro_cycle=state.macro_cycle,
+            macro_cycle=entry_cycle,
             sequence=len(history),
             from_phase=from_phase,
             reason=str(row.get("reason") or ""),
@@ -2140,6 +2144,7 @@ __all__ = [
     "apply_escalate_budget_bump",
     "bank_phase_segment",
     "compute_next_phase",
+    "cycle_reloop_decision",
     "initial_workflow_predicate_inputs",
     "replay_next_phase",
     "workflow_predicate_inputs",

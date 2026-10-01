@@ -7,7 +7,9 @@ from __future__ import annotations
 import logging as _logging
 from typing import Any
 from ..state.task_registry import Task
+from ..state.orchestration_memory import CYCLE_DIRECTIVE_REQUEST, build_cycle_memory
 from ..collaborator import CoordinatorCollaborator
+from . import machine_state as _phase_state
 
 log = _logging.getLogger(__name__)
 
@@ -28,6 +30,32 @@ def _conc_sweep_lease_ttl_sec(clamped_budget: int | None) -> int:
 
 class SweepPhase(CoordinatorCollaborator):
     """SWEEP phase handler: drives concurrency sweep and roofline analysis."""
+
+    async def pump(self) -> None:
+        """Ask Orchestration, once per macro-cycle, how the next cycle should open."""
+        state = self.shared_state
+        if (
+            "orchestration" not in self.backends
+            or self._coord.orch_prompt.is_user_supplied
+            or state.orchestration_memory.get("for_cycle") == state.macro_cycle
+        ):
+            return
+        feasible, _ = _phase_state.cycle_reloop_decision(state)
+        if not feasible:
+            return
+        replies: list[Any] = []
+
+        async def _directive_turn() -> None:
+            replies.append(await self._coord._reactor_pass("orchestration", request=CYCLE_DIRECTIVE_REQUEST))
+
+        await self._coord._await_within_session_bound(_directive_turn, stage="reactor:orchestration")
+        state.orchestration_memory = build_cycle_memory(replies[0] if replies else None, cycle=state.macro_cycle)
+        log.info(
+            "cycle %d handoff: directive=%r parse_error=%r",
+            state.macro_cycle,
+            state.orchestration_memory["next_cycle_directive"][:80],
+            state.orchestration_memory["parse_error"],
+        )
 
     async def _on_enter_sweep(self, tr: "Transition") -> None:
         """Auto-enqueue the ``conc_sweep`` task on SWEEP entry."""

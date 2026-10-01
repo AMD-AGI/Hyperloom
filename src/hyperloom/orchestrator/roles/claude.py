@@ -19,7 +19,6 @@ from hyperloom.common.llm_config import claude_sdk_env_options
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentValidationError,
-    NoIntentEmitted,
     validate_envelope,
 )
 from ..prompts.transport import TRANSPORT_TOOLS
@@ -258,7 +257,6 @@ class ClaudeBackend:
         tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
-        allow_no_intent: bool = False,
     ) -> BackendTurnResult:
         """Run a single backend turn against Claude and parse the result."""
         full_prompt = self._compose_prompt(prompt)
@@ -372,14 +370,7 @@ class ClaudeBackend:
                 "output_tokens": output_tokens,
             }
         )
-        if not intents and not self.raw_completion and not allow_no_intent:
-            error = NoIntentEmitted(
-                f"claude reply contained no parseable emit_intent tool_use "
-                f"blocks (raw_text_len={len(raw_text)}, tool_blocks={tool_block_count})"
-            )
-            self._finish_turn_diagnostic(outcome="no_intent", error=error)
-            raise error
-        self._finish_turn_diagnostic(outcome="succeeded")
+        self._finish_turn_diagnostic(outcome="succeeded" if intents or self.raw_completion else "no_intent")
         return BackendTurnResult(
             intents=intents,
             raw_text=raw_text,
