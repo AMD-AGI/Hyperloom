@@ -705,7 +705,6 @@ async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.session.optimization_journal import Verdict
     from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _PromoteOutcome
 
-    from types import SimpleNamespace
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     result, _, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)

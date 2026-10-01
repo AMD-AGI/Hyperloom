@@ -20,7 +20,6 @@ from hyperloom.orchestrator.enablement.recipe.steps import select_linked_build
 from hyperloom.orchestrator.enablement.build import _repo_matches_targeted_build_component
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.enablement.params import EnablementParams
-from hyperloom.orchestrator.enablement.build import EnablementBuild
 
 
 # Fixture: extend the shared build_coord with framework-phase routing methods

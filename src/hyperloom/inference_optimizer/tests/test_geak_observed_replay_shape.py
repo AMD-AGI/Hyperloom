@@ -16,7 +16,6 @@ derived from the canonical result rather than hardcoded corpus percentiles.
 
 import json
 
-from hyperloom.orchestrator.phases.kernel import KernelPhase
 
 
 def _result(dirpath, *, tput, completed, tin, tout):

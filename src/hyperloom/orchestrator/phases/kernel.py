@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from hyperloom.common.env import env_bool, env_float, env_int
@@ -70,6 +70,10 @@ from ..actions.executors._gpu_pin import (
     _resolve_serving_fidelity,
 )
 from ..collaborator import CoordinatorCollaborator
+
+if TYPE_CHECKING:
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import KernelEventRecorder
+    from .machine import Transition
 
 log = _logging.getLogger(__name__)
 
@@ -635,7 +639,6 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _close_kernel_timeline(self, tr: "Transition") -> None:
         """Close the kernel timeline event when the phase is left."""
-        from .machine import Transition  # noqa: F401 — type reference only
         exit_reason = tr.reason
         recorder = self.timeline()
         if recorder is None:
@@ -662,7 +665,6 @@ class KernelPhase(CoordinatorCollaborator):
 
     async def _on_enter_kernel(self, tr: "Transition") -> None:
         """Open the KERNEL timeline and enqueue the ``kernel_agent`` task that carries the phase's work."""
-        from .machine import Transition  # noqa: F401 — type reference only
         state = self.shared_state
         if not self._coord.phase_machine._kernel_enabled():
             log.info(
