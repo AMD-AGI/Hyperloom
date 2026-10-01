@@ -30,6 +30,7 @@ from hyperloom_kb import (
     global_config_from_env,
     is_loopback,
 )
+from hyperloom_kb.cli import add_commands, run_command
 from hyperloom_kb.schema import JsonValue
 
 log = logging.getLogger(__name__)
@@ -122,23 +123,29 @@ def ensure_service(*, restart: bool = True) -> LocalService | None:
     return ensure_local_service(config, service_home(), env=env, restart=restart)
 
 
-def sync_with_global(direction: str) -> dict[str, JsonValue]:
-    """``push`` or ``pull`` through the workspace's local service as it runs; a run it may be serving is never stopped."""
+def _workspace_client(command: str) -> RemoteClient:
+    """The workspace's local service as it runs, started when nothing serves it; a run it may serve is never stopped."""
 
-    if global_config_from_env(os.environ) is None:
-        raise SyncUnavailable(f"{GLOBAL_URL_ENV} is not configured")
     config = RemoteConfig.from_env(spool_root=spool_root())
     if config is None or not is_loopback(config.base_url):
-        raise SyncUnavailable("HYPERLOOM_KB_URL does not name a local Experience KB service")
+        raise LocalServiceError("HYPERLOOM_KB_URL does not name a local Experience KB service")
     service = ensure_service(restart=False)
     if service is not None and service.stale:
         log.warning(
             "The Experience KB service runs with other settings than this environment's (%s); %s uses it as it "
             "runs, and the next optimize launch or `ensure` applies them",
             service.stale,
-            direction,
+            command,
         )
-    client = RemoteClient(config)
+    return RemoteClient(config)
+
+
+def sync_with_global(direction: str) -> dict[str, JsonValue]:
+    """``push`` or ``pull`` through the workspace's local service as it runs; a run it may be serving is never stopped."""
+
+    if global_config_from_env(os.environ) is None:
+        raise SyncUnavailable(f"{GLOBAL_URL_ENV} is not configured")
+    client = _workspace_client(direction)
     if direction == "pull":
         from hyperloom.inference_optimizer.experience_collect import mapping_schema_ref
 
@@ -189,6 +196,8 @@ def _summary(direction: str, report: dict[str, JsonValue]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from hyperloom.inference_optimizer.experience_collect import mapping_schema_ref
+
     parser = argparse.ArgumentParser(prog="python -m hyperloom.inference_optimizer.experience_kb_service")
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init-env", help="Write the local service URL and a generated token into .env.")
@@ -200,12 +209,20 @@ def main(argv: list[str] | None = None) -> int:
         help="Bring this workspace's schema to everything the global KB holds of it; an unlabelled state is labelled "
         "first, so the pull can be undone.",
     )
+    add_commands(commands, schema_ref=mapping_schema_ref())
     args = parser.parse_args(argv)
 
     if args.command == "init-env":
         for key, status in init_env(args.env_file).items():
             print(f"{key}: {status}")
         return 0
+    if hasattr(args, "run"):
+        try:
+            client = _workspace_client(args.command)
+        except (LocalServiceError, RemoteClientError) as exc:
+            print(f"Experience KB {args.command} failed: {exc}", file=sys.stderr)
+            return 1
+        return run_command(client, args)
     if args.command in ("push", "pull"):
         try:
             report = sync_with_global(args.command)

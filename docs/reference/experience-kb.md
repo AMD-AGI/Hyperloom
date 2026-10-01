@@ -47,13 +47,52 @@ container in docker mode), with `.env` loaded:
 python -m hyperloom.inference_optimizer.experience_kb_service init-env  # write the local URL and a generated token into .env
 python -m hyperloom.inference_optimizer.experience_kb_service ensure    # start the local service unless it already serves
 python -m hyperloom.inference_optimizer.experience_kb_service push      # send this workspace's new Experiences to the global KB
-python -m hyperloom.inference_optimizer.experience_kb_service pull      # store the global KB's Experiences of this workspace's schemas
+python -m hyperloom.inference_optimizer.experience_kb_service pull      # bring this workspace's schema to everything the global KB holds of it
 ```
 
 `init-env` only fills a key that is missing or `<PLEASE_FILL_IN>`, and prints
 whether each key was written or kept, never the token. `push` and `pull` print
 one line with the global URL and the `created`, `unchanged`, `skipped`, and
-`rejected` counts, and exit 1 when they stopped early or rejected an Experience.
+`rejected` counts, plus `held_back` for a push and, for a pull, the label it
+saved the state under, and exit 1 when they stopped early, were refused, or
+rejected an Experience.
+
+The same entry point runs every other [`hyperloom-kb`](#the-hyperloom-kb-command)
+command on the workspace's service (`health`, `labels`, `label`, `restore`,
+`exclude`, `include`, `exclusions`, `list`, `export`), starting it when
+nothing serves and defaulting to the schema the workspace's runs write. Its
+own `push` first delivers the workspace's spool.
+
+## The `hyperloom-kb` command
+
+`hyperloom-kb`, or `python -m hyperloom_kb.cli`, operates whatever service
+`HYPERLOOM_KB_URL` names, authenticated with `HYPERLOOM_KB_TOKEN`; a local and
+a global service take the same commands. Each prints its JSON result.
+
+| Command | Request |
+|---|---|
+| `health` | `GET /health` |
+| `push` | `POST /v1/push`, repeated until done |
+| `pull --schema REF` | `POST /v1/pull`, repeated until done |
+| `labels [--schema REF]` | `GET /v1/labels` |
+| `label [--schema REF] [--name NAME]` | `POST /v1/labels` |
+| `restore LABEL_ID` | `POST /v1/restore` |
+| `exclude EXPERIENCE_ID --reason TEXT` | `POST /v1/exclusions` |
+| `include EXPERIENCE_ID` | `DELETE /v1/exclusions/{experience_id}` |
+| `exclusions [--schema REF]` | `GET /v1/exclusions` |
+| `list`, `export` `[--schema REF] [--include-excluded] [--after N] [--limit N]` | one page of `GET /v1/list`, `GET /v1/export` |
+
+It exits 0 when the command worked, 1 when the service refused the request or
+a push or pull stopped early, was refused, or rejected an Experience, and 2
+when the URL or token is not configured.
+
+A tool embeds the same commands in its own CLI: `add_commands(subparsers,
+schema_ref=...)` registers each one whose name the tool has not registered
+itself, defaulting every command that names no schema to `schema_ref`, and
+`run_command(client, args)` runs one, with the same output and exit status.
+Hyperloom's workspace commands are built this way, with their own `push` and
+`pull`. The `hyperloom-kb` skill, installed beside `hyperloom-setup`,
+describes each command for an agent.
 
 ## The local service
 
@@ -374,8 +413,9 @@ label or Experience they name.
 | `DELETE /v1/exclusions/{experience_id}` | | `{"experience_id", "status": "included" or "not_excluded"}` |
 
 A label is `{"label_id", "schema_ref", "name", "reason", "created_at",
-"member_count", "excluded_count"}`; `reason` is `manual`, or `before_restore` for
-a label a restore made, whose `name` says so with its time.
+"member_count", "excluded_count"}`; `reason` is `manual`, or `before_restore`
+or `before_pull` for a label a restore or a pull made, whose `name` says so
+with its time.
 
 ### `GET /health`
 

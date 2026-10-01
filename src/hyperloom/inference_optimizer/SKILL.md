@@ -565,12 +565,19 @@ Experiences, run in the optimizer's environment, with `.env` loaded:
 
 ```bash
 python -m hyperloom.inference_optimizer.experience_kb_service push   # this workspace's Experiences not pushed yet
-python -m hyperloom.inference_optimizer.experience_kb_service pull   # the global KB's Experiences of this workspace's schemas
+python -m hyperloom.inference_optimizer.experience_kb_service pull   # everything the global KB holds of this workspace's schema
 ```
 
 Report the one summary line each prints (global URL; `created`, `unchanged`,
-`skipped`, `rejected`) and never the token. A push resumes where an earlier one
-stopped and never sends back what was pulled. Push and pull use the service as
+`skipped`, `rejected`, and `held_back` for a push) and never the token. A pull
+takes effect for reads at once; when it labelled the state before it, the line
+names that label, and restoring it undoes the pull. A push resumes where an
+earlier one stopped, never sends back what was pulled, and holds back what
+reads do not see. When the user asks to label the workspace's KB, roll it
+back, undo a pull, or exclude or include an Experience, run the `hyperloom-kb`
+skill's commands through this same entry point, such as
+`experience_kb_service restore <label_id>`: they print the same JSON and
+default to this workspace's schema. Push and pull use the service as
 it runs and never restart it under a running session; when they warn that its
 settings differ, `experience_kb_service ensure` or the next launch applies them. With `HYPERLOOM_KB_AUTO_PUSH=1`,
 every run pushes after its Experiences are written locally; a failed automatic
