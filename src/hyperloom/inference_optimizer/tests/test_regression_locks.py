@@ -306,6 +306,18 @@ async def test_no_intent_turn_advances_cursor(session_dir):
 
 
 @pytest.mark.asyncio
+async def test_a_turn_without_intents_is_recorded_as_an_observation(session_dir):
+    c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(raw_text="thinking out loud")))
+    try:
+        await c._reactor_pass("orchestration")
+
+        observations = await c.bus.tail(n=50, topic="observation")
+        assert any((o.payload or {}).get("kind") == "no_intent_emitted" for o in observations)
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_backend_error_turn_does_not_advance_cursor(session_dir):
     """A failed backend call leaves the messages its prompt rendered unread."""
     c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(raise_error=BackendError("gateway down"))))

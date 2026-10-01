@@ -260,6 +260,26 @@ class _PhaseStateMixin:
         self.last_conc_sweep = {}
         self.discard_pending_escalate_hint()
 
+    def open_macro_cycle(self, *, no_gain_cycle_streak: int | None = None) -> int:
+        """Finish the current macro-cycle's strategy row, start the next cycle, and reset its per-cycle state.
+
+        Returns:
+            int: The new ``macro_cycle``.
+        """
+        finished = self.macro_cycle
+        gain_delta = round(self.cumulative_gain_validated - self.gain_at_cycle_start, 6)
+        rows = [r for r in self.cycle_strategy_log if isinstance(r, dict)]
+        for row in rows:
+            if row.get("cycle") == finished and row.get("gain_delta") is None:
+                row["gain_delta"] = gain_delta
+        self.cycle_strategy_log = rows[-50:]
+        self.macro_cycle = finished + 1
+        if no_gain_cycle_streak is not None:
+            self.no_gain_cycle_streak = no_gain_cycle_streak
+        self.gain_at_cycle_start = self.cumulative_gain_validated
+        self.reset_per_cycle_plateau_state()
+        return self.macro_cycle
+
     def note_explore_outcome(self, *, promoted: bool) -> None:
         """Update the plateau proxy after one explore task (KEEP resets, no-promote increments)."""
         if promoted:

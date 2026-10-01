@@ -390,6 +390,6 @@ async def test_claude_backend_retries_transient_then_succeeds():
     backend.call_timeout_s = 5.0
     backend.mcp_tool_name = EMIT_INTENT_TOOL_QUALIFIED
 
-    result = await backend.run("hi", allow_no_intent=True)
+    result = await backend.run("hi")
     assert state["n"] == 2  # one transient failure, one success
     assert len(result.intents) == 1

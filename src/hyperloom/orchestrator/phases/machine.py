@@ -53,6 +53,7 @@ class MachinePhase(CoordinatorCollaborator):
         }
         self._pump_table = {
             _phase_state.PHASE_FRAMEWORK_AGENT: c.phase_framework.pump,
+            _phase_state.PHASE_SWEEP: c.phase_sweep.pump,
         }
 
     def _ensure_phase_initialised(self, budget_pct: dict[str, float] | None) -> None:
@@ -313,27 +314,31 @@ class MachinePhase(CoordinatorCollaborator):
                 state.last_cycle_bottleneck,
             )
         is_loopback = bool(isinstance(evidence, dict) and evidence.get("loopback"))
-        if is_loopback:
-            prior_cycle = int(state.macro_cycle or 0)
-            self._coord.phase_macro_cycle._apply_macro_cycle_reloop(evidence)
-            await self._coord.phase_macro_cycle._run_cycle_soft_restart(
-                prior_cycle=prior_cycle,
-                new_cycle=int(state.macro_cycle or 0),
-            )
-        # Also persist the no-gain streak on a cyclic-mode terminal close so a subsequent resume sees the convergence
-        # state.
-        elif (
-            target == _phase_state.PHASE_CLOSE
+        # Persist the no-gain streak on a cyclic-mode terminal close so a subsequent resume sees the convergence state.
+        if (
+            not is_loopback
+            and target == _phase_state.PHASE_CLOSE
             and isinstance(evidence, dict)
             and "no_gain_cycle_streak_effective" in evidence
         ):
             state.no_gain_cycle_streak = int(evidence.get("no_gain_cycle_streak_effective", 0) or 0)
+        prior_cycle = state.macro_cycle
         _phase_state.record_phase_transition(
             state,
             to_phase=target,
             reason=reason,
             evidence=evidence,
         )
+        if is_loopback:
+            state.open_macro_cycle(no_gain_cycle_streak=int(evidence.get("no_gain_cycle_streak_effective") or 0))
+            self._coord.phase_macro_cycle._record_cycle_strategy_for_current_cycle()
+            log.info(
+                "Coordinator: macro-cycle reloop %d -> %d (no_gain_streak=%d, gain_anchor=%.4f)",
+                prior_cycle,
+                state.macro_cycle,
+                state.no_gain_cycle_streak,
+                state.gain_at_cycle_start,
+            )
         # Mirror the phase boundary into the operator-facing lifecycle log using the ENTER status (a point-in-time
         # marker, not a START/END interval).
         _phase_state.record_lifecycle_event(
@@ -381,6 +386,11 @@ class MachinePhase(CoordinatorCollaborator):
             # This hook is also what closes the left phase's event, so a raise here is the case where that event never
             # got its exit evidence.
             self._coord._record_coordinator_exception(stage="phase_entered", exc=exc)
+        if is_loopback:
+            await self._coord.phase_macro_cycle._run_cycle_soft_restart(
+                prior_cycle=prior_cycle,
+                new_cycle=state.macro_cycle,
+            )
 
     async def _on_phase_entered(
         self,
@@ -412,6 +422,13 @@ class MachinePhase(CoordinatorCollaborator):
         if entry_hook:
             await entry_hook(tr)
 
+    def _cycle_directive(self) -> str:
+        """The directive Orchestration wrote at the previous cycle's handoff, or empty."""
+        memory = self.shared_state.orchestration_memory
+        if memory.get("for_cycle") == self.shared_state.macro_cycle - 1:
+            return str(memory.get("next_cycle_directive") or "")
+        return ""
+
     def _reseed_orch_prompt_for_phase(self, to_phase: str) -> bool:
         """Re-scope the orchestration system prompt to the phase being entered."""
         phase = (to_phase or "").strip().upper()
@@ -429,7 +446,7 @@ class MachinePhase(CoordinatorCollaborator):
         focus_plan["prior_cycles"] = prior_cycles[-5:]
         scoped = rebuild(
             macro_cycle=state.macro_cycle,
-            cycle_directive=str(state.orchestration_memory.get("next_cycle_directive", "") or ""),
+            cycle_directive=self._cycle_directive(),
             cycle_strategy=focus_plan,
             phase=phase,
         )

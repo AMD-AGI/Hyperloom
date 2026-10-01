@@ -147,47 +147,6 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             log_rows.append(planned)
         state.cycle_strategy_log = log_rows[-50:]
 
-    def _apply_macro_cycle_reloop(self, evidence: dict[str, Any]) -> None:
-        """Open a new macro-cycle on a SWEEP loopback into FRAMEWORK_AGENT.
-
-        Increments ``macro_cycle``, persists the no-gain streak + per-cycle gain
-        anchor, and resets per-cycle counters (including re-opening FRAMEWORK) for
-        a fresh budget / plateau evaluation. The explore ledger is preserved.
-
-        Args:
-            evidence: The loopback evidence dict from ``compute_next_phase``;
-                may carry ``no_gain_cycle_streak_effective`` which is persisted
-                onto the new cycle.
-        """
-        state = self.shared_state
-        prior_cycle = int(getattr(state, "macro_cycle", 0) or 0)
-        prev_delta = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0) - float(
-            getattr(state, "gain_at_cycle_start", 0.0) or 0.0
-        )
-        rows = [r for r in (getattr(state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
-        for row in rows:
-            if int(row.get("cycle", -1) or -1) == prior_cycle and row.get("gain_delta") is None:
-                row["gain_delta"] = round(prev_delta, 6)
-        state.cycle_strategy_log = rows[-50:]
-        state.macro_cycle = prior_cycle + 1
-        if isinstance(evidence, dict) and "no_gain_cycle_streak_effective" in evidence:
-            state.no_gain_cycle_streak = int(evidence.get("no_gain_cycle_streak_effective", 0) or 0)
-        # Anchor gain for the cycle we are about to start.
-        try:
-            state.gain_at_cycle_start = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            state.gain_at_cycle_start = 0.0
-        # Reset per-cycle counters.
-        state.reset_per_cycle_plateau_state()
-        self._record_cycle_strategy_for_current_cycle()
-        log.info(
-            "Coordinator: macro-cycle reloop %d → %d (no_gain_streak=%d, gain_anchor=%.4f)",
-            prior_cycle,
-            state.macro_cycle,
-            state.no_gain_cycle_streak,
-            state.gain_at_cycle_start,
-        )
-
     async def _run_cycle_soft_restart(
         self,
         *,
@@ -215,10 +174,6 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             "prior_cycle": int(prior_cycle),
             "new_cycle": int(new_cycle),
         }
-        # Capture the LLM-authored directive for the new cycle (best-effort).
-        # Prompt reseed happens in _on_phase_entered after the cycle bump.
-        memory_captured = await self._coord.cycle_memory._capture_cycle_memory()
-        summary["memory_captured"] = memory_captured
         # Reap leases, reclaim orphaned running tasks, prune DB.
         await run_lease_and_db_reclaim(self, summary, reason="cycle_soft_restart")
         log.info(

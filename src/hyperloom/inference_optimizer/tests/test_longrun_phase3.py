@@ -129,12 +129,10 @@ async def test_soft_restart_can_be_disabled(tmp_path, monkeypatch):
 
     st = c.shared_state
     _arm_sweep_loopback(st)
-    memory_before = dict(st.orchestration_memory or {})
 
     await c.phase_machine._advance_phase_if_needed()
 
     assert st.macro_cycle == 1
-    assert st.orchestration_memory == memory_before
     observations = await c.bus.tail(n=50, topic="observation")
     assert not any((o.payload or {}).get("kind") == "cycle_soft_restart" for o in observations)
 

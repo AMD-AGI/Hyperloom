@@ -431,12 +431,6 @@ class Coordinator:
         return self._collaborator("_phase_macro_cycle", MacroCycleCollaborator)
 
     @property
-    def cycle_memory(self):
-        from ..loop.cycle_memory import CycleMemoryCollaborator
-
-        return self._collaborator("_cycle_memory", CycleMemoryCollaborator)
-
-    @property
     def specialist_dispatch(self):
         from ..specialists.dispatch import SpecialistDispatchCollaborator
 
@@ -1028,11 +1022,17 @@ class Coordinator:
                 log.exception("Coordinator: closing the %s backend failed", name)
 
     # Reactor
-    async def _reactor_pass(self, agent_name: str) -> None:
-        """Run one reactor turn for ``agent_name`` and route its intents."""
+    async def _reactor_pass(self, agent_name: str, *, request: str = "") -> BackendTurnResult | None:
+        """Run one reactor turn for ``agent_name``, route its intents, and return the turn's result.
+
+        ``request`` is appended to the composed prompt; a turn that carries one may legitimately reply without
+        intents.
+        """
         backend = self.backends[agent_name]
         sys_prompt = await self.conversation._load_system_prompt(agent_name)
         prompt = await self.conversation._compose_prompt(agent_name)
+        if request:
+            prompt = f"{prompt}\n\n{request}"
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
         _set_trace_ctx = getattr(backend, "set_trace_context", None)
@@ -1102,12 +1102,19 @@ class Coordinator:
         self.conversation._record_reactor_conversation(agent_name, result)
         for intent in result.intents:
             await self.router.handle_intent(agent_name, intent)
+        if not result.intents and not request:
+            await self.writeback._record_observation(
+                "coordinator",
+                "observation",
+                {"kind": "no_intent_emitted", "agent": agent_name, "error": "the turn emitted no intents"},
+            )
         await self.conversation._advance_rendered_cursor(agent_name)
         if agent_name == "orchestration":
             state = self.shared_state
             state.last_discarded_escalate_hint = ""
             state.last_discarded_escalate_hint_ts = ""
         self.shared_state.agent_last_active[agent_name] = time.time()
+        return result
 
     def _trace_mcp_setup(self, *, agent_name: str, backend: Backend) -> None:
         """Persist orchestration MCP setup once per session."""

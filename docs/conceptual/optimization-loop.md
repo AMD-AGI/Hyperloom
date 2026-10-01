@@ -327,11 +327,12 @@ unconditional full state projection (mission, `SharedState`, gaps,
 warm-start, scores, and the inbox events since the last turn), so the
 turn never depends on what an earlier turn happened to remember.
 
-- **Working memory**: At each macro-cycle boundary the Coordinator asks
-  the agent for a one-turn handoff summary and persists it to
-  `state.json` (`orchestration_memory`). Later projections paste it back,
-  and it feeds `next_cycle_directive`; when the agent produces nothing
-  usable, a deterministic fallback directive is derived from state.
+- **Cycle directive**: While SWEEP is open and another macro-cycle is
+  still feasible, the Coordinator appends one handoff request to an ordinary
+  Orchestration turn. The reply, plain text and no intent required, is stored
+  as `orchestration_memory` (`next_cycle_directive`, `for_cycle`,
+  `parse_error`) and reseeds the next cycle's system prompt once FRAMEWORK is
+  entered; a turn that produced nothing usable leaves the directive empty.
 - **Context tools**: A read-only MCP surface lets the agent pull what the
   projection leaves out — finished outcomes (`get_recent_outcomes`),
   in-flight work (`get_running_tasks`), failure packets (`get_failure` /

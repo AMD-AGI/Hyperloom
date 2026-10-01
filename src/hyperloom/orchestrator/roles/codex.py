@@ -40,13 +40,6 @@ from .mcp_emit_intent import (
     payload_contract,
 )
 
-# Prepended to a turn that runs without the enforced schema.
-_PER_TURN_SCHEMA_OVERRIDE = (
-    "THIS TURN ONLY: ignore the OUTPUT FORMAT block in your instructions. "
-    "Do not emit an intent envelope. Reply exactly as the message below asks."
-)
-
-
 def build_output_instructions(allowed_intents: Iterable[IntentType]) -> str:
     """Render the transport contract for one role's intent set."""
     from hyperloom.inference_optimizer.protocol.intent import IntentType as _IT
@@ -88,10 +81,6 @@ def decode_intent_envelope(text: str) -> dict[str, Any]:
         ) from exc
     if not isinstance(envelope, dict) or not isinstance(envelope.get("intents"), list):
         raise NoIntentEmitted("codex reply is valid JSON but carries no 'intents' list")
-    # An empty list satisfies validate_envelope, so without this the tick is recorded as a success that did nothing
-    # and the backend's error streak is reset.
-    if not envelope["intents"]:
-        raise NoIntentEmitted("codex reply carried an empty 'intents' list")
     decoded: list[Any] = []
     for index, item in enumerate(envelope["intents"]):
         if not isinstance(item, dict):
@@ -166,20 +155,15 @@ class CodexBackend:
         system_prompt: str | None = None,
         tools: list[str] | None = None,
         max_turns: int = 1,
-        allow_no_intent: bool = False,
     ) -> BackendTurnResult:
         """Run one Codex Agent SDK turn and parse its enforced intent envelope."""
-        output_schema = None if allow_no_intent else build_intent_envelope_schema(self.allowed_intents)
-        # Dropping the schema is not enough on its own: the thread's developer instructions carry the OUTPUT FORMAT
-        # block for the life of the thread and cannot be scoped out for one turn, so a checkpoint turn asking for a
-        # different JSON shape would be answered with an intent envelope.
-        turn_prompt = f"{_PER_TURN_SCHEMA_OVERRIDE}\n\n{prompt}" if allow_no_intent else prompt
+        output_schema = build_intent_envelope_schema(self.allowed_intents)
 
         async def _one_attempt() -> Any:
             """Acquire the session and run one turn under the retry policy."""
             session = await self._session_for(system_prompt)
             return await session.turn(
-                turn_prompt,
+                prompt,
                 timeout_sec=self.call_timeout_s,
                 output_schema=output_schema,
             )
@@ -240,8 +224,6 @@ class CodexBackend:
             "response": sdk_result.text,
         }
 
-        if allow_no_intent:
-            return BackendTurnResult(intents=[], raw_text=sdk_result.text, metadata=metadata)
         envelope = decode_intent_envelope(sdk_result.text)
         try:
             intents = validate_envelope(envelope)

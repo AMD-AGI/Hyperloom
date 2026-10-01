@@ -770,7 +770,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only _refresh_gaps); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
     gaps: list[dict[str, Any]] = field(default_factory=list)
 
-    # Orchestration working memory — macro-cycle handoff summary; only ``next_cycle_directive`` is read back (into the next cycle's CYCLE DIRECTIVE section), the rest is run-report evidence. Coordinator-only writer.
+    # The SWEEP handoff turn's result: ``next_cycle_directive``, its ``for_cycle``, and ``parse_error``. Coordinator-only writer.
     orchestration_memory: dict[str, Any] = field(default_factory=dict)
 
     # Non-field instance attr (set in load_or_init / save): session dir for breakdown instrumentation.
