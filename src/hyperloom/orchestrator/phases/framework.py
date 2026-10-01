@@ -2052,6 +2052,8 @@ class FrameworkPhase(CoordinatorCollaborator):
         """
         try:
             await self._pump_framework_agent_phase()
+            await self._coord.phase_internal._maybe_enqueue_explore_research_scout()
+            await self._coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
         except Exception as exc:
             log.exception("FRAMEWORK pump failed")
             self._coord._record_coordinator_exception(stage="framework_pump", exc=exc)

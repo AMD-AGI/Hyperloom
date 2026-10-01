@@ -18,6 +18,7 @@ import uuid
 from concurrent.futures import CancelledError as FuturesCancelledError
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -205,11 +206,64 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
     )
 
 
+@dataclass(frozen=True)
+class KernelExitFacts:
+    """What the phase machine's KERNEL exit reads from the task queue."""
+
+    agent_in_flight: bool
+
+
 class KernelPhase(CoordinatorCollaborator):
     """KERNEL_AGENT phase handler: drives kernel-level optimization tasks."""
 
     # Relative-change floor for the pre-GEAK reprofile: effectively "any change", absorbing float noise.
     _REPROFILE_CHANGE_TOL: float = 1e-5
+
+    async def exit_facts(self) -> KernelExitFacts:
+        """Advance the idle streak for this tick and report the facts the KERNEL exit decision reads."""
+        await self._track_idle_streak()
+        in_kernel = str(self.shared_state.phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT
+        return KernelExitFacts(agent_in_flight=in_kernel and await self._agent_in_flight())
+
+    async def _inflight_task_ids(self) -> tuple[str, ...]:
+        """Return the ids of queued/running tasks doing KERNEL-lane work."""
+        kinds = _phase_state.PHASE_ALLOWED_ACTIONS[_phase_state.PHASE_KERNEL_AGENT]
+        tasks = list(await self.tasks.queued()) + list(await self.tasks.running())
+        return tuple(
+            sorted(str(task.task_id) for task in tasks if str(getattr(task, "kind", "") or "").strip() in kinds)
+        )
+
+    async def _agent_in_flight(self) -> bool:
+        """Whether the ``kernel_agent`` task is queued or running."""
+        tasks = list(await self.tasks.queued()) + list(await self.tasks.running())
+        return any(task.kind == "kernel_agent" for task in tasks)
+
+    async def _track_idle_streak(self) -> None:
+        """Advance or reset the KERNEL idle-streak counters for this tick."""
+        state = self.shared_state
+        if str(state.phase or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
+            state.kernel_idle_ticks = 0
+            state.kernel_progress_fingerprint = ""
+            state.kernel_idle_since_unix = 0.0
+            return
+        now = time.time()
+        inflight = await self._inflight_task_ids()
+        fingerprint = _phase_state.compute_kernel_progress_fingerprint(
+            state,
+            inflight_task_ids=inflight,
+        )
+        if fingerprint != str(state.kernel_progress_fingerprint or ""):
+            state.kernel_progress_fingerprint = fingerprint
+            state.kernel_idle_ticks = 0
+            state.kernel_idle_since_unix = now
+            return
+        if inflight or _phase_state.kernel_inline_step_running(state, now_unix=now):
+            state.kernel_idle_since_unix = now
+            return
+        # Only reachable after a tick that opened the streak above, so ``kernel_idle_since_unix`` is already stamped
+        # whenever the counter is non-zero — the pairing the guard's wall-clock floor relies on.
+        state.kernel_idle_ticks = int(state.kernel_idle_ticks or 0) + 1
+
     _kernel_timeline_recorder: "KernelEventRecorder | None" = None
 
     @staticmethod
