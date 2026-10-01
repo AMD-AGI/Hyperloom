@@ -140,7 +140,9 @@ def sync_with_global(direction: str) -> dict[str, JsonValue]:
         )
     client = RemoteClient(config)
     if direction == "pull":
-        return client.pull()
+        from hyperloom.inference_optimizer.experience_collect import mapping_schema_ref
+
+        return client.pull(mapping_schema_ref())
     # Writes spooled while the service was down belong to this workspace too; deliver them before pushing.
     client.flush_spool()
     return client.push()
@@ -180,6 +182,9 @@ def _summary(direction: str, report: dict[str, JsonValue]) -> str:
     counts = ", ".join(f"{report[key]} {key}" for key in keys)
     rejected = report["rejected"] if isinstance(report["rejected"], list) else []
     line = f"Experience KB {direction} with {report['global_url']}: {counts}, {len(rejected)} rejected"
+    saved = report.get("saved")
+    if isinstance(saved, dict):
+        line += f"; the state before it is saved as label {saved['label_id']} ({saved['name']})"
     return line if report["status"] == "completed" else f"{line}; stopped: {report.get('error', '')}"
 
 
@@ -190,7 +195,11 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument("--env-file", type=Path, default=Path(".env"))
     commands.add_parser("ensure", help="Start the local service unless it already serves, then check its health.")
     commands.add_parser("push", help="Send the Experiences written here and not yet pushed to the global KB.")
-    commands.add_parser("pull", help="Store the global KB's Experiences of this declaration that are not held here.")
+    commands.add_parser(
+        "pull",
+        help="Bring this workspace's schema to everything the global KB holds of it; an unlabelled state is labelled "
+        "first, so the pull can be undone.",
+    )
     args = parser.parse_args(argv)
 
     if args.command == "init-env":
