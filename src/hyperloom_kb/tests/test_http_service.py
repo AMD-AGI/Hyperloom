@@ -41,6 +41,7 @@ from hyperloom_kb import (
     RemoteClientError,
     RemoteConfig,
     RemoteExperienceKB,
+    RenderedRef,
     create_http_server,
     derive_experience_id,
     experience_kb_from_env,
@@ -244,7 +245,7 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
     assert read.status == "completed"
     assert read.read_id.startswith("read-")
     assert [item.id for item in read.rendered_refs] == [experience.id]
-    assert _record_json(read.prompt_block, experience.id) == experience.to_dict()
+    assert _record_json(read.prompt_block, experience.id) == experience.knowledge()
     assert "… [truncated]" not in read.prompt_block
     assert read.experiences[0]["experience_id"] == experience.id
     assert read.experiences[0]["decision"] == "keep"
@@ -264,6 +265,33 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
         "config_digest": "",
         "home": str((tmp_path / "service").resolve()),
     }
+
+
+def test_what_shaped_a_decision_stays_in_the_record_but_never_reaches_a_prompt(tmp_path: Path) -> None:
+    schema = _declaration()
+    cited = "exp-0123456789abcdef0123456789abcdef"
+    experience = replace(
+        _experience(schema),
+        rendered_refs=(RenderedRef(cited, "representative"),),
+        provenance=Provenance(
+            "service-test",
+            "1",
+            extra={
+                "kb_read_id": "read-0123456789abcdef",
+                "experience_citations": [{"id": cited, "stance": "adopt", "claim": "Kept on the same model."}],
+            },
+        ),
+    )
+    with RunningServer(_app(tmp_path / "service", schema)) as url:
+        client = _client(url, tmp_path)
+        client.publish(experience)
+        read = client.read(DECISION, _read_context())
+        [exported] = client.export_page().items
+
+    assert _record_json(read.prompt_block, experience.id) == experience.knowledge()
+    for recorded in ("provenance", "rendered_refs", "kb_read_id", "experience_citations", cited, "run_id"):
+        assert recorded not in read.prompt_block
+    assert exported["experience"] == experience.to_dict()
 
 
 def test_a_read_can_reference_large_change_content_instead_of_inlining_it(tmp_path: Path) -> None:
@@ -290,11 +318,11 @@ def test_a_read_can_reference_large_change_content_instead_of_inlining_it(tmp_pa
     placeholder = f"<external content {ref}, {len(patch.encode())} bytes>"
     record = _record_json(referenced.prompt_block, large.id)
     assert record["change"]["content"] == placeholder
-    assert {**record, "change": {**record["change"], "content": patch}} == large.to_dict()
-    assert _record_json(referenced.prompt_block, small.id) == small.to_dict()
+    assert {**record, "change": {**record["change"], "content": patch}} == large.knowledge()
+    assert _record_json(referenced.prompt_block, small.id) == small.knowledge()
     assert referenced.contents == ({"ref": ref, "bytes": len(patch.encode()), "content": patch},)
     assert patch not in referenced.prompt_block
-    assert _record_json(inline.prompt_block, large.id) == large.to_dict()
+    assert _record_json(inline.prompt_block, large.id) == large.knowledge()
     assert inline.contents == ()
 
 

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import pytest
 
 from hyperloom_kb import (
+    METADATA_FIELDS,
     Alternative,
     CandidateHit,
     CapabilityState,
@@ -272,7 +273,7 @@ def test_a_render_budget_keeps_whole_records_and_names_only_those_it_shows() -> 
     assert (fits_all.text, fits_all.truncated) == (full.text, False)
 
 
-def test_complete_renderer_without_budget_keeps_every_field() -> None:
+def test_complete_renderer_without_budget_keeps_every_knowledge_field_and_no_metadata() -> None:
     schema = declaration()
     experiences = InMemoryExperienceStore()
     views = InMemoryQueryViewStore()
@@ -306,8 +307,9 @@ def test_complete_renderer_without_budget_keeps_every_field() -> None:
 
     assert rendered.truncated is False
     assert rendered.text.startswith(f"Experience {record.id}\n")
-    record_json = rendered.text.split("\nRecord:\n", 1)[1]
-    assert json.loads(record_json) == record.to_dict()
+    record_json = json.loads(rendered.text.split("\nRecord:\n", 1)[1])
+    assert record_json == record.knowledge()
+    assert not METADATA_FIELDS & set(record_json)
     annotations_json = rendered.text.split("Repeat Group Annotations:\n", 1)[1].split("\nRecord:\n", 1)[0]
     assert json.loads(annotations_json)["decision_counts"] == {"keep": 1}
 

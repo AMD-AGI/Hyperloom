@@ -644,6 +644,43 @@ class Provenance:
         )
 
 
+#: Top-level record fields that say what was learned: the conditions, the decision and why, what changed, and
+#: what came of it. A read shows an agent these.
+KNOWLEDGE_FIELDS = frozenset(
+    {
+        "identity",
+        "objective",
+        "baseline_identity",
+        "baseline_value",
+        "preconditions",
+        "reasoning",
+        "alternatives",
+        "change",
+        "outcome",
+        "reflection",
+    }
+)
+#: Top-level record fields that keep the record: its identity, lifecycle, lineage, and how it came to be,
+#: including the reads that shaped its decision. They stay in the record and never reach a prompt.
+METADATA_FIELDS = frozenset(
+    {
+        "kind",
+        "id",
+        "schema_ref",
+        "schema_version",
+        "status",
+        "created_at",
+        "completed_at",
+        "run_id",
+        "seq",
+        "parent_id",
+        "supersedes",
+        "rendered_refs",
+        "provenance",
+    }
+)
+
+
 @dataclass(frozen=True)
 class Experience:
     id: str
@@ -795,6 +832,11 @@ class Experience:
             "reflection": self.reflection,
             "provenance": self.provenance.to_dict(),
         }
+
+    def knowledge(self) -> dict[str, JsonValue]:
+        """The record's ``KNOWLEDGE_FIELDS``, exactly as ``to_dict`` holds them."""
+
+        return {name: value for name, value in self.to_dict().items() if name in KNOWLEDGE_FIELDS}
 
     @classmethod
     def from_dict(cls, value: Any) -> Experience:
@@ -1092,6 +1134,8 @@ def derive_schema_ref(declaration: ExperienceDeclaration) -> str:
 
 __all__ = [
     "CURRENT_SCHEMA_VERSION",
+    "KNOWLEDGE_FIELDS",
+    "METADATA_FIELDS",
     "Alternative",
     "Change",
     "ConstraintResult",
