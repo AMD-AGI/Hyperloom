@@ -3038,7 +3038,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "proposals_total": len(proposals),
                 },
             )
-        await self._coord.gap_refresh._refresh_gaps(reason="specialist_done")
+        await self._coord.gap_refresh._refresh_gaps(
+            reason="specialist_done", workload_id=self._coord.proposals._workload_canonical_id()
+        )
         if bool((task.params or {}).get("enablement")) and isinstance(done_payload.get("needs_targeted_build"), dict):
             await self._coord.enablement_build._maybe_enqueue_specialist_requested_build(
                 task_id=str(task.task_id or ""),
@@ -3818,7 +3820,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if result.get("eval_probe"):
             audit_extras["eval_probe"] = result["eval_probe"]
         # seed the gaps[] ledger from baseline.
-        await self._coord.gap_refresh._refresh_gaps(reason="baseline_done")
+        await self._coord.gap_refresh._refresh_gaps(
+            reason="baseline_done", workload_id=self._coord.proposals._workload_canonical_id()
+        )
         if self.shared_state.baseline_tput > 0:
             await self._drain_queued_baselines(reason="baseline_established")
         # Standalone baseline-arm roofline ceiling (pure CPU): backs up the

@@ -1297,15 +1297,17 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # explore-round gap update: append per-variant KEEP/REVERT, then re-run the global refresh.
         if task.kind == "explore":
             result_dict = result.result if isinstance(result.result, dict) else {}
+            workload_id = self._coord.proposals._workload_canonical_id()
             self._coord.gap_refresh._record_explore_round_gaps(
                 task=task,
                 result=result_dict,
+                workload_id=workload_id,
             )
             self._coord.gap_refresh._record_explore_variant_failures(
                 task=task,
                 result=result_dict,
             )
-            await self._coord.gap_refresh._refresh_gaps(reason="explore_round")
+            await self._coord.gap_refresh._refresh_gaps(reason="explore_round", workload_id=workload_id)
 
     @staticmethod
     def _lanes_fit(
