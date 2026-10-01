@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from hyperloom.common.deadline import Deadline
 import logging as _logging
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
@@ -20,6 +20,9 @@ from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..state.task_registry import IllegalTransition, Task, TaskNotFound
 from ..collaborator import CoordinatorCollaborator
+
+if TYPE_CHECKING:
+    from .machine import Transition
 
 log = _logging.getLogger(__name__)
 
@@ -452,7 +455,6 @@ class ClosePhase(CoordinatorCollaborator):
 
     async def _on_enter_close(self, tr: "Transition") -> None:
         """CLOSE sequencer (fixed order): stack revalidation → post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons."""
-        from .machine import Transition  # noqa: F401 — type reference only
         from_phase = tr.from_phase
         log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
         # Opened before anything can record a step into it. It stands at

@@ -5,11 +5,14 @@
 
 from __future__ import annotations
 import logging as _logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from ..state.task_registry import Task
 from ..state.orchestration_memory import CYCLE_DIRECTIVE_REQUEST, build_cycle_memory
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
+
+if TYPE_CHECKING:
+    from .machine import Transition
 
 log = _logging.getLogger(__name__)
 
@@ -59,7 +62,6 @@ class SweepPhase(CoordinatorCollaborator):
 
     async def _on_enter_sweep(self, tr: "Transition") -> None:
         """Auto-enqueue the ``conc_sweep`` task on SWEEP entry."""
-        from .machine import Transition  # noqa: F401 — type reference only
         from_phase = tr.from_phase
         state = self.shared_state
         # An unwind a previous leg left owed still has the stack's patches on the

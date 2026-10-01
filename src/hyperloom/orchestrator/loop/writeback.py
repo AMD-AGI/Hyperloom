@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Collection, Mapping
+from typing import TYPE_CHECKING, Any, Collection, Mapping
 from hyperloom.common.coerce import to_float, to_int, to_str_list
 from hyperloom.common.env import env_int
 from hyperloom.common.io import append_jsonl
@@ -107,6 +107,9 @@ from ..knowledge.agent_kb import PatchKB
 from .proposals import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
 from ..collaborator import CoordinatorCollaborator
+
+if TYPE_CHECKING:
+    from .coordinator import Coordinator
 import logging as _logging
 
 log = _logging.getLogger(__name__)

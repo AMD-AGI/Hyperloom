@@ -12,7 +12,6 @@ from typing import Any
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
-from hyperloom.common.perf_metric import VERDICT_KEEP
 
 log = logging.getLogger(__name__)
 

@@ -20,6 +20,7 @@ from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
+    from .machine import Transition
 from ..loop.proposals import PendingProposal, record_proposal
 from ..loop.server_args import _dedupe_extra_server_args
 from hyperloom.inference_optimizer.grid_server_args import (
@@ -586,7 +587,6 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     def _close_framework_timeline(self, tr: "Transition") -> None:
         """Close the FRAMEWORK timeline event when the phase is left."""
-        from .machine import Transition  # noqa: F401 — type reference only
         exit_reason = tr.reason
         evidence: dict | None = tr.evidence if tr.evidence else None
         recorder = self.timeline()
@@ -647,7 +647,6 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     async def _on_enter_framework(self, tr: "Transition") -> None:
         """FRAMEWORK entry hook: trigger the per-batch pump once on entry; later batches are driven from the main tick."""
-        from .machine import Transition  # noqa: F401 — type reference only
         log.info(
             "OPTIMIZE entry (from=%s): pumping initial batch",
             tr.from_phase or "<unknown>",
