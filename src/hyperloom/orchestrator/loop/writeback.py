@@ -1148,7 +1148,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
     ) -> bool:
         """Validate cumulative gain and fire a watermark roofline when it updates."""
         if self.validate(new_tput, measurement, source=source, measurement_basis=measurement_basis):
-            await self._coord.phase_kernel._maybe_enqueue_watermark_roofline(reason=watermark_reason)
+            await self._coord.phase_kernel.maybe_enqueue_watermark_roofline(reason=watermark_reason)
             return True
         return False
 
@@ -4087,7 +4087,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             changed = True
         # On a successful profile, re-anchor last_roofline_tput and clear the pending field.
         if measurement_status == "succeeded":
-            anchor_tput = self._coord.phase_kernel._current_tput_from_validated_gain()
+            anchor_tput = self._coord.phase_kernel.current_tput_from_validated_gain()
             if anchor_tput > 0:
                 self.shared_state.last_roofline_tput = float(anchor_tput)
                 changed = True
@@ -4226,7 +4226,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # taken here. Leaving the anchor alone lets the watermark re-arm and
             # take a real one.
             if str((self.shared_state.last_trace_analyze or {}).get("analysis_md_text") or ""):
-                anchor_tput = self._coord.phase_kernel._current_tput_from_validated_gain()
+                anchor_tput = self._coord.phase_kernel.current_tput_from_validated_gain()
                 if anchor_tput > 0:
                     self.shared_state.last_roofline_tput = float(anchor_tput)
             else:
@@ -4501,7 +4501,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         promotion_result.pop(key, None)
                         if key in rebench_measurement:
                             promotion_result[key] = rebench_measurement[key]
-                    promoted = self._coord.phase_kernel._promote_geak_from_candidate(
+                    promoted = self._coord.phase_kernel.promote_geak_from_candidate(
                         promotion_result,
                         measured_tput=float(measured),
                         provenance="geak_orch_harness_validated",
@@ -4544,7 +4544,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     ps_stamped["revalidation_status"] = "no_material"
                     self.shared_state.geak_result = ps_stamped
                     self._record_geak_rebench_conclusion(final_status="no_material")
-                    self._coord.phase_kernel._reject_geak_kernel_journey(
+                    self._coord.phase_kernel.reject_geak_kernel_journey(
                         ps_stamped,
                         measured_tput=float(measured),
                         current_best_tput=(float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0),
@@ -4574,7 +4574,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     # Persist the closed verdict so a later KERNEL entry does
                     # not recover stale result.json and re-enqueue this already
                     # adjudicated candidate (#1240).
-                    self._coord.phase_kernel._reject_geak_promotion(
+                    self._coord.phase_kernel.reject_geak_promotion(
                         ps,
                         measured_tput=float(measured) if measured_ok else 0.0,
                         current_best_tput=float(cb_tput or 0.0),
@@ -6167,7 +6167,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             ps_flags, ps_envs = _accepted_config_as_variant(ps_cfg)
             ps_has_material = ps_admissible and _geak_result_has_material(ps)
         except ValueError as exc:
-            self._coord.phase_kernel._reject_geak_promotion(
+            self._coord.phase_kernel.reject_geak_promotion(
                 ps, measured_tput=0.0, current_best_tput=0.0, reason=str(exc)
             )
             self.shared_state.save(self.session_dir)
@@ -6451,7 +6451,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             elif not accuracy_passed(baseline_accuracy, float(replay_accuracy)):
                 accuracy_failure = "accuracy_drop"
         if accuracy_failure:
-            self._coord.phase_kernel._reject_geak_promotion(
+            self._coord.phase_kernel.reject_geak_promotion(
                 {
                     **ps,
                     "fallback_result": res,
@@ -6489,7 +6489,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     overlay_digest_before,
                     _geak_overlay_digest(ps_overlay_2a),
                 )
-            accepted = self._coord.phase_kernel._promote_geak_from_candidate(
+            accepted = self._coord.phase_kernel.promote_geak_from_candidate(
                 ps,
                 measured_tput=measured,
                 provenance="geak_same_harness_geak",
@@ -6541,7 +6541,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
           * completed-this-phase -> the kernel work is done; the phase machine
             exits KERNEL automatically on the next tick (agent settled, no pending work)
             with no e2e re-run;
-          * not-completed -> re-enter ``_on_enter_kernel``; its own entry guard
+          * not-completed -> re-enter ``on_enter_kernel``; its own entry guard
             promotes an existing OK ``result.json`` (crash-before-handback) and
             re-runs the e2e only when there is genuinely nothing to recover
             (run_e2e itself then continues from the pinned eval_dir on disk).
@@ -6556,7 +6556,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         if (state.phase or "").strip().upper() != PHASE_KERNEL_AGENT:
             return
-        if not (self._coord.phase_machine._kernel_enabled() and self._coord.phase_kernel._geak_enabled()):
+        if not (self._coord.phase_machine._kernel_enabled() and self._coord.phase_kernel.geak_enabled()):
             return
         history = state.phase_history or []
         row = history[-1] if history else {}
@@ -6575,7 +6575,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         )
         from hyperloom.orchestrator.phases.machine import Transition
 
-        await self._coord.phase_kernel._on_enter_kernel(
+        await self._coord.phase_kernel.on_enter_kernel(
             Transition(from_phase="resume", to_phase="KERNEL_AGENT", reason="resume", evidence={}, loopback=False)
         )
 

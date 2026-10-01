@@ -1009,7 +1009,7 @@ class IntentRouter(CoordinatorCollaborator):
             merged_payload = {**intent.payload, **params}
             # Roofline data is read from the last_trace_analyze cache rather than auto-injected here.
             cache_hit_source = None
-            cached_result = self._coord.phase_kernel._cached_kernel_request(kind, merged_payload)
+            cached_result = self._coord.phase_kernel.cached_kernel_request(kind, merged_payload)
             if cached_result is not None:
                 result = cached_result
                 cache_hit_source = "shared_state_cache"
