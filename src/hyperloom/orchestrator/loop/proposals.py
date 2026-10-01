@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
+from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
@@ -40,7 +41,7 @@ class PendingProposal:
 
 
 async def record_proposal(
-    coord: Any,
+    coord: "Coordinator",
     *,
     from_agent: str,
     action_name: str,
@@ -70,12 +71,76 @@ async def record_proposal(
         payload=payload,
     )
     coord.state.pending_proposals[msg.msg_id] = pending
-    # Import here to keep the module importable without the orchestrator runtime.
-    from .intent_router import _record_phase_proposal, _record_config_proposal
-
     _record_phase_proposal(coord, pending)
     _record_config_proposal(coord, pending)
     return pending
+
+
+def _record_phase_proposal(coord: "Coordinator", pending: PendingProposal) -> None:
+    """Record one proposal against the phase that raised it.
+
+    Every proposal, not only the ones a framework arm claims: this is the row
+    the Critic's ruling is filed on.
+    """
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+    state = coord.shared_state
+    if not pending.proposal_msg_id or not state.phase:
+        return
+    params = pending.payload.get("params") if isinstance(pending.payload.get("params"), dict) else {}
+    phase_event.record_proposal(
+        proposal_msg_id=pending.proposal_msg_id,
+        action=pending.action_name,
+        phase=state.phase,
+        macro_cycle=state.macro_cycle,
+        from_agent=pending.from_agent,
+        tick=state.tick,
+        predicted_gain_pct=pending.predicted_gain_pct,
+        candidate_id=pending.payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id"),
+        variant_name=pending.payload.get("variant_name") or params.get("variant_name"),
+    )
+
+
+def _record_config_proposal(coord: "Coordinator", pending: PendingProposal) -> None:
+    """Record one config-arm grid on the framework event, as it is proposed.
+
+    Recorded at proposal time rather than at approval, so a grid the Critic
+    denies is still on record as a thing the phase pursued and dropped. One row
+    per grid, not per variant: the measured attempts point back at the grid
+    through their ``proposal_ref``.
+    """
+    if pending.action_name != "explore" or not pending.proposal_msg_id:
+        return
+    recorder = coord.phase_framework.timeline()
+    if recorder is None:
+        return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+        ARM_CONFIG,
+        PRODUCER_ORCHESTRATION,
+        STEP_PROPOSED,
+        producer_for_provenance,
+    )
+
+    params = pending.payload.get("params") or {}
+    grid = [row for row in (params.get("grid") or []) if isinstance(row, dict)]
+    labels = {str(row.get("provenance") or "").strip() for row in grid}
+    if len(labels) == 1:
+        producer, producer_ref = producer_for_provenance(next(iter(labels)))
+    else:
+        # A grid mixing provenances was assembled by the orchestration agent.
+        # Each variant keeps its own label on its attempt, so naming the
+        # assembler here loses nothing.
+        producer, producer_ref = PRODUCER_ORCHESTRATION, ""
+    scopes = {str(row.get("scope") or "").strip() for row in grid if str(row.get("scope") or "").strip()}
+    recorder.record_proposal(
+        pending.proposal_msg_id,
+        arm=ARM_CONFIG,
+        producer=producer,
+        producer_ref=producer_ref,
+        lever_kind=LEVER_CONFIG,
+        scope=scopes.pop() if len(scopes) == 1 else "",
+    )
+    recorder.record_proposal_step(pending.proposal_msg_id, step=STEP_PROPOSED, outcome="submitted")
 
 
 def apply_critic_grid_filter(

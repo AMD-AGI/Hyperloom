@@ -15,7 +15,6 @@ from typing import Any
 
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen, review_row_id, verdict_subject
 from hyperloom.orchestrator.lever import (
-    LEVER_CONFIG,
     patch_lever_kind,
     patch_owner_phase,
 )
@@ -96,51 +95,6 @@ def _lifecycle_paths(payload: Any) -> dict[str, str]:
 log = __import__("logging").getLogger(__name__)
 
 
-def _record_config_proposal(router: Any, pending: Any) -> None:
-    """Record one config-arm grid on the framework event, as it is proposed.
-
-    Recorded at proposal time rather than at approval, so a grid the Critic
-    denies is still on record as a thing the phase pursued and dropped. One row
-    per grid, not per variant: the measured attempts point back at the grid
-    through their ``proposal_ref``.
-    """
-    if str(getattr(pending, "action_name", "") or "") != "explore":
-        return
-    proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
-    if not proposal_id:
-        return
-    recorder = router._coord.phase_framework.timeline()
-    if recorder is None:
-        return
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
-        ARM_CONFIG,
-        PRODUCER_ORCHESTRATION,
-        STEP_PROPOSED,
-        producer_for_provenance,
-    )
-
-    params = (getattr(pending, "payload", None) or {}).get("params") or {}
-    grid = [row for row in (params.get("grid") or []) if isinstance(row, dict)]
-    labels = {str(row.get("provenance") or "").strip() for row in grid}
-    if len(labels) == 1:
-        producer, producer_ref = producer_for_provenance(next(iter(labels)))
-    else:
-        # A grid mixing provenances was assembled by the orchestration agent.
-        # Each variant keeps its own label on its attempt, so naming the
-        # assembler here loses nothing.
-        producer, producer_ref = PRODUCER_ORCHESTRATION, ""
-    scopes = {str(row.get("scope") or "").strip() for row in grid if str(row.get("scope") or "").strip()}
-    recorder.record_proposal(
-        proposal_id,
-        arm=ARM_CONFIG,
-        producer=producer,
-        producer_ref=producer_ref,
-        lever_kind=LEVER_CONFIG,
-        scope=scopes.pop() if len(scopes) == 1 else "",
-    )
-    recorder.record_proposal_step(proposal_id, step=STEP_PROPOSED, outcome="submitted")
-
-
 def _variant_review_rows(
     payload: Mapping[str, Any] | None,
     held_by_name: Mapping[str, str] | None,
@@ -176,52 +130,6 @@ def _variant_review_rows(
             }
         )
     return rows
-
-
-def _phase_scope(router: Any) -> tuple[str, int]:
-    """The phase and macro cycle a proposal is being raised in.
-
-    ``("", 0)`` when the stand-in carries no state.
-    """
-    state = getattr(router, "shared_state", None) or getattr(router, "state", None)
-    phase = str(getattr(state, "phase", "") or "")
-    try:
-        cycle = int(getattr(state, "macro_cycle", 0) or 0)
-    except (TypeError, ValueError):
-        cycle = 0
-    return phase, cycle
-
-
-def _record_phase_proposal(router: Any, pending: Any) -> None:
-    """Record one proposal against the phase that raised it.
-
-    Every proposal, not only the ones a framework arm claims: this is the row
-    the Critic's ruling is filed on.
-    """
-    proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
-    if not proposal_id:
-        return
-    phase, macro_cycle = _phase_scope(router)
-    if not phase:
-        return
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-
-        payload = getattr(pending, "payload", None) or {}
-        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
-        phase_event.record_proposal(
-            proposal_msg_id=proposal_id,
-            action=str(getattr(pending, "action_name", "") or ""),
-            phase=phase,
-            macro_cycle=macro_cycle,
-            from_agent=str(getattr(pending, "from_agent", "") or ""),
-            tick=int(getattr(getattr(router, "shared_state", None), "tick", 0) or 0),
-            predicted_gain_pct=getattr(pending, "predicted_gain_pct", None),
-            candidate_id=payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id"),
-            variant_name=payload.get("variant_name") or params.get("variant_name"),
-        )
-    except Exception:
-        log.debug("phase timeline: proposal row failed for %s", proposal_id, exc_info=True)
 
 
 def _record_phase_proposal_review(
@@ -543,7 +451,7 @@ class IntentRouter(CoordinatorCollaborator):
         from .proposals import record_proposal
 
         await record_proposal(
-            self,
+            self._coord,
             from_agent=source,
             action_name=action_name,
             predicted_gain_pct=float(intent.payload.get("predicted_gain_pct", 0.0)),
