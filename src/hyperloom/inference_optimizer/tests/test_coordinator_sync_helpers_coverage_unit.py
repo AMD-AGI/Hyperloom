@@ -324,7 +324,7 @@ def test_needs_roofline_for_watermark_guards(coord: Coordinator) -> None:
 # -- gap extraction --------------------------------------------------------
 def test_extract_gaps_from_baseline_empty(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 0.0
-    assert coord.gap_refresh._extract_gaps_from_baseline(coord.proposals._workload_canonical_id()) == []
+    assert coord.gap_refresh._extract_gaps_from_baseline(coord.proposals.workload_canonical_id()) == []
 
 
 def test_extract_gaps_from_baseline_populated(coord: Coordinator) -> None:
@@ -332,7 +332,7 @@ def test_extract_gaps_from_baseline_populated(coord: Coordinator) -> None:
     ss.baseline_tput = 100.0
     coord._current_objective = TargetGainObjective(target_gain_pct=12.0)
     ss.baseline_failure_streak = 2
-    gaps = coord.gap_refresh._extract_gaps_from_baseline(coord.proposals._workload_canonical_id())
+    gaps = coord.gap_refresh._extract_gaps_from_baseline(coord.proposals.workload_canonical_id())
     ids = {g["canonical_id"].split("#")[-1] for g in gaps}
     assert "throughput_below_target" in ids
     assert "baseline_unstable" in ids
@@ -350,7 +350,7 @@ def test_extract_gaps_from_attempts(coord: Coordinator) -> None:
     ]
     ss.params_no_promote_streak = 6
     ss.explore_search = {"winners_history": []}
-    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.proposals._workload_canonical_id())
+    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.proposals.workload_canonical_id())
     cids = {g["canonical_id"] for g in gaps}
     # distinct variant_names produce separate gaps; each has one attempt
     fail_gaps = [g for g in gaps if "fail:kernel_opt:oom" in g["canonical_id"]]
@@ -372,7 +372,7 @@ def test_extract_gaps_no_variant_collapses(coord: Coordinator) -> None:
     ]
     ss.params_no_promote_streak = 0
     ss.explore_search = {}
-    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.proposals._workload_canonical_id())
+    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.proposals.workload_canonical_id())
     fail_gaps = [g for g in gaps if "fail:explore:server_init_dead" in g["canonical_id"]]
     assert len(fail_gaps) == 1
     assert len(fail_gaps[0]["attempts"]) == 2
@@ -392,7 +392,7 @@ def test_extract_gaps_symptom_uses_excerpt(coord: Coordinator) -> None:
     ]
     ss.params_no_promote_streak = 0
     ss.explore_search = {}
-    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.proposals._workload_canonical_id())
+    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.proposals.workload_canonical_id())
     fail_gaps = [g for g in gaps if "fail:explore:server_init_dead" in g["canonical_id"]]
     assert fail_gaps
     assert "mla_gluon" in fail_gaps[0]["symptom"]
@@ -625,10 +625,10 @@ def test_workload_canonical_id_and_anchor(coord: Coordinator) -> None:
     ss.gpu_type = "mi300x"
     ss.framework = "sglang"
     ss.precision = "fp8"
-    cid = coord.proposals._workload_canonical_id()
+    cid = coord.proposals.workload_canonical_id()
     assert cid.startswith("inference:")
     assert "mi300x" in cid
-    assert coord.proposals._workload_canonical_id() == cid
+    assert coord.proposals.workload_canonical_id() == cid
 
 
 # -- framework candidate selection -------------------------------------

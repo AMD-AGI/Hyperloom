@@ -1286,7 +1286,7 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
 def test_internal_sweep_idempotency_key_does_not_collide_with_llm_path():
     """The manual sweep helper key must never collide with the LLM approved key."""
     internal_key = "internal-sweep-phase_entry"
-    # Mirror the format _materialize_approved_proposal builds
+    # Mirror the format materialize_approved_proposal builds
     llm_key = "approved-msg_abc123"
     assert internal_key != llm_key
     assert not llm_key.startswith("internal-")

@@ -1124,7 +1124,7 @@ def test_inject_explore_runtime_params_includes_baseline_accuracy():
         shared_state = SharedState(baseline_accuracy=0.81)
 
     params: dict[str, Any] = {}
-    ProposalsCollaborator(DummyCoordinator())._inject_explore_runtime_params(params)
+    ProposalsCollaborator(DummyCoordinator()).inject_explore_runtime_params(params)
     assert params["accuracy_baseline"] == pytest.approx(0.81)
 
 
