@@ -350,13 +350,13 @@ def test_phase_seam_snapshots_the_scope_it_installed(tmp_path):
 
     assert handler._reseed_orch_prompt_for_phase("EXPLORE") is True
 
-    snapshot = tmp_path / "agents" / "orchestration" / "system_prompt.c0.EXPLORE.snapshot.md"
+    snapshot = tmp_path / "agents" / "orchestration" / "system_prompt.c3.EXPLORE.snapshot.md"
     assert snapshot.read_text(encoding="utf-8") == "PROMPT[phase=EXPLORE]"
 
 
 def test_phase_seam_snapshot_never_overwrites_the_boot_file(tmp_path):
     """The unsuffixed file stays the boot scope so existing readers keep working."""
-    boot = tmp_path / "agents" / "orchestration" / "system_prompt.c0.snapshot.md"
+    boot = tmp_path / "agents" / "orchestration" / "system_prompt.c3.snapshot.md"
     boot.parent.mkdir(parents=True, exist_ok=True)
     boot.write_text("BOOT", encoding="utf-8")
     handler, _coord, _calls = _machine_with_stub_coordinator(tmp_path)

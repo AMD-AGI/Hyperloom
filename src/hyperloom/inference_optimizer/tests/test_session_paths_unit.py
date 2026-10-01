@@ -109,7 +109,7 @@ def test_research_and_competitor_paths():
 
 def test_agent_paths():
     assert sp.agent_dir(SD, "critic") == SD / "agents" / "critic"
-    assert sp.agent_prompt_snapshot(SD, "critic").name == "system_prompt.c0.snapshot.md"
+    assert sp.agent_prompt_snapshot(SD, "critic").name == "system_prompt.snapshot.md"
     assert sp.agent_mcp_setup_path(SD, "orchestration").name == "mcp_setup.json"
 
 
