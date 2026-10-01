@@ -62,6 +62,12 @@ class TestConfig:
     def test_stopping_a_ray_cluster_is_opt_in(self, rsi_config_dict):
         assert parse_config(rsi_config_dict).ab.stop_ray is False
 
+    def test_test_runs_are_bounded_by_a_positive_timeout(self, rsi_config_dict):
+        assert parse_config(rsi_config_dict).checks.timeout_min > 0
+        rsi_config_dict["checks"]["timeout_min"] = 0
+        with pytest.raises(ConfigError, match="timeout_min"):
+            parse_config(rsi_config_dict)
+
 
 class TestState:
     def test_records_survive_a_reload(self, tmp_path):

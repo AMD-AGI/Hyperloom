@@ -34,6 +34,7 @@ checks:
   python: /venvs/hyperloom/bin/python     # interpreter with the target repo's test dependencies
   lint: [ruff, check]
   allow_new_failures: false
+  timeout_min: 120                        # bound on each pytest run; the default suite takes ~30 min serially
 
 replay:
   commands: []                            # e.g. [[python3, an_replay_levers.py]], run with PYTHONPATH=<candidate>/src

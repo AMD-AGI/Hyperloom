@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 from meta_rsi.rsi import prompts
@@ -117,6 +118,8 @@ def findings(ctx: RoundContext) -> dict:
             add_dirs=(analysis,),
         )
         result = ctx.run_agent(spec)
+        if result.is_error:
+            raise StepFailed(f"the findings agent ended with an error: {result.error}")
         try:
             data = extract_json(result.text)
         except ValueError as exc:
@@ -162,13 +165,19 @@ def check_lever(ctx: RoundContext, cand: Path, base_sha: str, result: AgentResul
     if not tests:
         return "the reply named no tests"
     env = {**ctx.agent_env(), "PYTHONPATH": str(cand / "src")}
-    run = ctx.runner.run(
-        [str(checks.python), "-m", "pytest", "-q", "-p", "no:cacheprovider", *tests],
-        cwd=cand,
-        env=env,
-        log=log,
-        check=False,
-    )
+    try:
+        run = ctx.runner.run(
+            [str(checks.python), "-m", "pytest", "-q", "-p", "no:cacheprovider", *tests],
+            cwd=cand,
+            env=env,
+            log=log,
+            check=False,
+            timeout=60 * checks.timeout_min,
+        )
+    except StepFailed as exc:
+        if not isinstance(exc.__cause__, subprocess.TimeoutExpired):
+            raise
+        return f"the named tests did not finish within checks.timeout_min ({checks.timeout_min:g} min)"
     if run.returncode != 0:
         return f"the named tests failed:\n{_tail(run.stdout + run.stderr)}"
     return ""

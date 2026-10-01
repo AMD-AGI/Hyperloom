@@ -20,6 +20,10 @@ Failure taxonomy:
 * a run of consecutive transport failures pauses every worker until a probe
   gets through, instead of spending the target list on timeouts.
 
+census, census-retry and fetch exit 0 when every item got an answer, 3 when some were
+deferred (rerunning the command picks up only what is missing), and 2 when the run stopped
+early: the key was refused, the service stayed down, or the disk floor was reached.
+
 Subcommands::
 
     python pulse.py facets --last-days 180
@@ -49,6 +53,8 @@ from pathlib import Path
 
 DEFAULT_BASE = "https://global.primus-safe.amd.com/hyperloom/api"
 PAGE = 200
+EXIT_STOPPED = 2
+EXIT_PARTIAL = 3
 
 
 class Deferred(Exception):
@@ -478,6 +484,7 @@ def cmd_census(args) -> int:
         )
 
     counts: dict[str, int] = {}
+    stopped = False
     t_start = time.time()
     with gzip.open(out, "at", encoding="utf-8") as sink, cf.ThreadPoolExecutor(args.jobs) as pool:
         futures = [pool.submit(work, n) for n in todo]
@@ -486,6 +493,7 @@ def cmd_census(args) -> int:
                 row = fut.result()
             except (AuthError, Aborted) as exc:
                 print(f"stopping: {exc}", file=sys.stderr)
+                stopped = True
                 for f in futures:
                     f.cancel()
                 break
@@ -498,7 +506,13 @@ def cmd_census(args) -> int:
                 print(f"[{i}/{len(todo)}] {counts} {rate:.1f}/s pauses={api.outage.pauses}", flush=True)
     rows.close()
     print("done:", counts)
-    return 1 if counts.get("deferred") else 0
+    return _exit_status(stopped, counts.get("deferred", 0))
+
+
+def _exit_status(stopped: bool, unanswered: int) -> int:
+    if stopped:
+        return EXIT_STOPPED
+    return EXIT_PARTIAL if unanswered else 0
 
 
 def _ls_row(api: Pulse, target: str, key: str, resolved: dict | None, t0: float) -> dict:
@@ -586,6 +600,7 @@ def cmd_census_retry(args) -> int:
             return dict(name=name, status="deferred", error=str(exc), secs=round(time.time() - t0, 2))
 
     counts: dict[str, int] = {}
+    stopped = False
     t_start = time.time()
     with gzip.open(out, "at", encoding="utf-8") as sink, cf.ThreadPoolExecutor(args.jobs) as pool:
         futures = [pool.submit(work, n) for n in todo]
@@ -594,6 +609,7 @@ def cmd_census_retry(args) -> int:
                 row = fut.result()
             except (AuthError, Aborted) as exc:
                 print(f"stopping: {exc}", file=sys.stderr)
+                stopped = True
                 for f in futures:
                     f.cancel()
                 break
@@ -606,7 +622,7 @@ def cmd_census_retry(args) -> int:
                 print(f"[{i}/{len(todo)}] {counts} {rate:.1f}/s pauses={api.outage.pauses}", flush=True)
     rows.close()
     print("done:", counts)
-    return 1 if counts.get("deferred") else 0
+    return _exit_status(stopped, counts.get("deferred", 0))
 
 
 # -------------------------------------------------------------------- fetch
@@ -637,7 +653,7 @@ def cmd_fetch(args) -> int:
     )
     if free - need < args.min_free_gb * 1e9:
         print("refusing: the fetch would take free space below the floor", file=sys.stderr)
-        return 2
+        return EXIT_STOPPED
     stop = threading.Event()
 
     def work(pair):
@@ -663,6 +679,7 @@ def cmd_fetch(args) -> int:
 
     counts: dict[str, int] = {}
     got = 0
+    refused = False
     t_start = time.time()
     with cf.ThreadPoolExecutor(args.jobs) as pool:
         futures = [pool.submit(work, pair) for pair in todo]
@@ -671,6 +688,7 @@ def cmd_fetch(args) -> int:
                 row = fut.result()
             except (AuthError, Aborted) as exc:
                 print(f"stopping: {exc}", file=sys.stderr)
+                refused = True
                 stop.set()
                 for f in futures:
                     f.cancel()
@@ -689,7 +707,8 @@ def cmd_fetch(args) -> int:
                 )
     rows.close()
     print("done:", counts)
-    return 1 if any(counts.get(k) for k in ("deferred", "sha_mismatch", "skipped_stop")) else 0
+    stopped = refused or bool(counts.get("skipped_stop"))
+    return _exit_status(stopped, counts.get("deferred", 0) + counts.get("sha_mismatch", 0))
 
 
 def main(argv=None) -> int:

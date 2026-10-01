@@ -6,25 +6,39 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
-from meta_rsi.rsi.pipeline import SCRIPTS_DIR, RoundContext, StepFailed
+from meta_rsi.pulse import EXIT_PARTIAL
+from meta_rsi.rsi.pipeline import LOG_TAIL_LINES, SCRIPTS_DIR, RoundContext, StepFailed
 
 ANALYSES = ("an_ledger.py", "an_global.py", "an_era.py", "an_idle.py", "an_specialist.py")
 
 
-def _script(ctx: RoundContext, name: str, *args: str, log: str, check: bool = True, env: dict | None = None) -> str:
+def _partial(ctx: RoundContext, what: str, proc: subprocess.CompletedProcess) -> bool:
+    """Whether a Pulse command left deferred items; any exit but complete or partial stops the step."""
+    if proc.returncode == EXIT_PARTIAL:
+        ctx.log(f"{what}: some items were deferred; continuing with the rest (rerun fetch to fill them in)")
+        return True
+    if proc.returncode != 0:
+        tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-LOG_TAIL_LINES:])
+        raise StepFailed(f"{what} exited {proc.returncode}:\n{tail}")
+    return False
+
+
+def _script(
+    ctx: RoundContext, name: str, *args: str, log: str, partial_ok: bool = False, env: dict | None = None
+) -> bool:
+    """Run one of the round's scripts; True when it left deferred items, which only ``partial_ok`` accepts."""
     proc = ctx.runner.run(
         [sys.executable, str(SCRIPTS_DIR / name), *args],
         cwd=SCRIPTS_DIR,
         env=env or ctx.script_env(),
         log=ctx.path("logs", f"{log}.log"),
-        check=check,
+        check=not partial_ok,
     )
-    if not check and proc.returncode != 0:
-        ctx.log(f"{name} exited {proc.returncode}; continuing (partial results are expected)")
-    return proc.stdout
+    return partial_ok and _partial(ctx, " ".join([name, *args[:1]]), proc)
 
 
 def _pulse_env(ctx: RoundContext) -> dict[str, str]:
@@ -57,7 +71,7 @@ def fetch(ctx: RoundContext) -> dict:
         env=env,
     )
     _script(ctx, "targets.py", log="fetch", env=env)
-    _script(
+    partial = _script(
         ctx,
         "pulse.py",
         "census",
@@ -66,10 +80,10 @@ def fetch(ctx: RoundContext) -> dict:
         "--out",
         str(census / "ls.jsonl.gz"),
         log="fetch",
-        check=False,
+        partial_ok=True,
         env=env,
     )
-    _script(
+    partial |= _script(
         ctx,
         "pulse.py",
         "census-retry",
@@ -80,15 +94,20 @@ def fetch(ctx: RoundContext) -> dict:
         "--out",
         str(census / "retry.jsonl.gz"),
         log="fetch",
-        check=False,
+        partial_ok=True,
         env=env,
     )
     _script(ctx, "build_plan.py", log="fetch", env=env)
-    ctx.runner.run(
-        ["bash", str(SCRIPTS_DIR / "fetch_all.sh")], cwd=SCRIPTS_DIR, env=env, log=ctx.path("logs", "fetch.log")
+    bundles = ctx.runner.run(
+        ["bash", str(SCRIPTS_DIR / "fetch_all.sh")],
+        cwd=SCRIPTS_DIR,
+        env=env,
+        log=ctx.path("logs", "fetch.log"),
+        check=False,
     )
+    partial |= _partial(ctx, "fetch_all.sh", bundles)
     recent = (root / "targets_recent.txt").read_text().split()
-    return {"recent_sessions": len(recent)}
+    return {"recent_sessions": len(recent), "partial": partial}
 
 
 def analyze(ctx: RoundContext) -> dict:

@@ -15,6 +15,7 @@ from meta_rsi.rsi.steps.levers import ensure_worktrees
 
 SHOWN_FAILURES = 20
 SUMMARY_LINE = re.compile(r"^(?:FAILED|ERROR) (\S+)", re.M)
+PYTEST_VERDICT_EXITS = (0, 1)  # pytest.ExitCode.OK and TESTS_FAILED; 2-5 mean the session never judged every test
 
 
 def failed_tests(pytest_output: str) -> set[str]:
@@ -31,7 +32,13 @@ def suite(ctx: RoundContext) -> dict:
         tree = ctx.worktree(which)
         env = {**ctx.agent_env(), "PYTHONPATH": str(tree / "src")}
         cmd = [str(checks.python), "-m", "pytest", *checks.pytest_args, "-rfE"]
-        proc = ctx.runner.run(cmd, cwd=tree, env=env, log=ctx.path("logs", f"suite-{which}.log"), check=False)
+        log = ctx.path("logs", f"suite-{which}.log")
+        proc = ctx.runner.run(cmd, cwd=tree, env=env, log=log, check=False, timeout=60 * checks.timeout_min)
+        if proc.returncode not in PYTEST_VERDICT_EXITS:
+            raise StepFailed(
+                f"pytest exited {proc.returncode} on the {which} tree without judging every test "
+                f"(interrupted collection, usage error or nothing collected); see {log}"
+            )
         failed[which] = failed_tests(proc.stdout)
     new = sorted(failed["candidate"] - failed["base"])
     summary = {

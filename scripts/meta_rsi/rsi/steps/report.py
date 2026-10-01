@@ -45,6 +45,8 @@ def diagnose(ctx: RoundContext) -> dict:
     result = ctx.run_agent(
         agent_spec(ctx, "diagnose", "diagnose", prompt, cwd=ctx.round_dir, tools=READ_TOOLS, add_dirs=dirs)
     )
+    if result.is_error:
+        raise StepFailed(f"the diagnose agent ended with an error: {result.error}")
     try:
         data = extract_json(result.text)
     except ValueError as exc:

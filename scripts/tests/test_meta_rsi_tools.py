@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -12,8 +13,12 @@ import sys
 from pathlib import Path
 
 import pytest
+from meta_rsi import pulse
 from meta_rsi.compare_ab import compare
-from meta_rsi.rsi.pipeline import StepFailed
+from meta_rsi.rsi.config import parse_config
+from meta_rsi.rsi.pipeline import RoundContext, StepFailed
+from meta_rsi.rsi.state import RoundState
+from meta_rsi.rsi.steps import data
 from meta_rsi.rsi.steps.check import failed_tests
 from meta_rsi.rsi.steps.data import scenario_args
 
@@ -101,6 +106,91 @@ class TestCompare:
         b = _arm(tmp_path / "B", 5.0, [_row("specialist", "glm-5-3", 1000, 100)])
         result = compare(a, b)
         assert result["B"]["cost_usd"] == 0.0 and result["B"]["glm_raw_tokens"] == 1100
+
+
+class TestPulseExits:
+    @pytest.mark.parametrize(
+        ("raised", "status"),
+        [(None, 0), (pulse.Deferred("timed out"), pulse.EXIT_PARTIAL), (pulse.AuthError("401"), pulse.EXIT_STOPPED)],
+    )
+    def test_census_tells_complete_partial_and_stopped_runs_apart(self, tmp_path, monkeypatch, raised, status):
+        class Api:
+            class outage:
+                pauses = 0
+
+            def ls(self, name):
+                if raised:
+                    raise raised
+                return {"archive_status": "ok", "files": []}
+
+        monkeypatch.setattr(pulse, "Pulse", Api)
+        targets = tmp_path / "targets.txt"
+        targets.write_text("a\nb\n")
+        args = argparse.Namespace(targets=str(targets), out=str(tmp_path / "ls.jsonl.gz"), jobs=2)
+        assert pulse.cmd_census(args) == status
+
+    @pytest.mark.parametrize(
+        ("codes", "status", "tiers_run"), [("0 0 0", 0, 3), ("0 3 0", 3, 3), ("0 2 0", 2, 2), ("1", 1, 1)]
+    )
+    def test_fetch_all_passes_the_fetch_status_on_and_stops_at_a_tier_that_stopped(
+        self, tmp_path, codes, status, tiers_run
+    ):
+        stub = tmp_path / "bin" / "python3"
+        stub.parent.mkdir()
+        stub.write_text(
+            '#!/usr/bin/env bash\nn=$(wc -l < "$CALLS")\necho "$*" >> "$CALLS"\ncodes=($STUB_CODES)\nexit "${codes[$n]:-0}"\n'
+        )
+        stub.chmod(0o755)
+        calls = tmp_path / "calls.txt"
+        calls.write_text("")
+        env = {k: v for k, v in os.environ.items() if k not in ("TIERS", "PULSE_KEY_FILE")}
+        env.update(
+            PATH=f"{stub.parent}:{os.environ['PATH']}",
+            PULSE_ROUND_DIR=str(tmp_path),
+            PULSE_BUNDLES=str(tmp_path / "bundles"),
+            PULSE_API_KEY="ak-test",
+            CALLS=str(calls),
+            STUB_CODES=codes,
+        )
+        proc = subprocess.run(["bash", str(SCRIPTS / "fetch_all.sh")], env=env, capture_output=True, text=True)
+        assert proc.returncode == status, proc.stdout + proc.stderr
+        assert len(calls.read_text().splitlines()) == tiers_run
+
+
+class ScriptRunner:
+    """Answers the fetch step's commands: Pulse census runs and fetch_all.sh exit as told, the rest succeed."""
+
+    def __init__(self, census: int, bundles: int):
+        self.census, self.bundles = census, bundles
+
+    def run(self, cmd, check=True, **_kwargs):
+        if cmd[-1].endswith("fetch_all.sh"):
+            code = self.bundles
+        else:
+            code = self.census if cmd[2:3] in (["census"], ["census-retry"]) else 0
+        if check and code:
+            raise StepFailed(f"{cmd[1]} exited {code}")
+        return subprocess.CompletedProcess(cmd, code, "", "boom\n" if code else "")
+
+
+@pytest.mark.parametrize(
+    ("census", "bundles", "outcome"),
+    [(0, 0, False), (3, 0, True), (0, 3, True), (2, 0, "pulse.py census exited 2"), (0, 2, "fetch_all.sh exited 2")],
+)
+def test_fetch_goes_on_past_deferred_items_and_stops_on_a_stopped_run(
+    rsi_config_dict, monkeypatch, census, bundles, outcome
+):
+    monkeypatch.setenv("PULSE_API_KEY", "ak-test")
+    cfg = parse_config(rsi_config_dict)
+    ctx = RoundContext(config=cfg, state=RoundState.load(cfg.round_dir), log=lambda _m: None)
+    ctx.runner = ScriptRunner(census, bundles)
+    cfg.round_dir.mkdir(parents=True)
+    (cfg.round_dir / "targets_recent.txt").write_text("s1\ns2\n")
+    if isinstance(outcome, bool):
+        assert data.fetch(ctx) == {"recent_sessions": 2, "partial": outcome}
+    else:
+        with pytest.raises(StepFailed, match=outcome):
+            data.fetch(ctx)
 
 
 def test_failed_tests_come_from_the_short_test_summary():

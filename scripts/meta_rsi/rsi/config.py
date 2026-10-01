@@ -70,6 +70,7 @@ class Checks:
     pytest_args: tuple[str, ...] = DEFAULT_PYTEST_ARGS
     lint: tuple[str, ...] = ("ruff", "check")
     allow_new_failures: bool = False
+    timeout_min: float = 120.0
 
 
 @dataclass(frozen=True)
@@ -195,12 +196,16 @@ def _agent(raw: dict) -> Agent:
 
 def _checks(raw: dict) -> Checks:
     s = _section(raw, "checks")
-    return Checks(
+    checks = Checks(
         python=_path(_require(s, "python", "checks"), "checks.python"),
         pytest_args=tuple(str(a) for a in s.get("pytest_args") or DEFAULT_PYTEST_ARGS),
         lint=tuple(str(a) for a in s.get("lint") or ("ruff", "check")),
         allow_new_failures=bool(s.get("allow_new_failures", False)),
+        timeout_min=float(s.get("timeout_min", 120.0)),
     )
+    if checks.timeout_min <= 0:
+        raise ConfigError("checks.timeout_min must be positive")
+    return checks
 
 
 def _arms(value: Any) -> tuple[Arm, ...]:

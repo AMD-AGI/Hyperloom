@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract tests for the findings and implement steps, with a fake agent in a throwaway repository."""
+"""Contract tests for the agent steps and the suite check, with a fake agent in a throwaway repository."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from meta_rsi.rsi.agent import AgentResult
 from meta_rsi.rsi.config import parse_config
 from meta_rsi.rsi.pipeline import RoundContext, StepFailed
 from meta_rsi.rsi.state import RoundState
-from meta_rsi.rsi.steps import levers
+from meta_rsi.rsi.steps import check, levers, report
 
 LEVER = {
     "id": "trim-prompt",
@@ -108,6 +108,15 @@ class TestFindings:
         with pytest.raises(StepFailed, match="unusable"):
             levers.findings(ctx)
 
+    def test_a_session_that_ended_in_error_fails_the_step_even_with_a_draft_reply(self, ctx):
+        draft = _reply({"levers": [LEVER]})
+        ctx.agent = lambda spec: AgentResult(
+            text=draft.text, is_error=True, turns=60, cost_usd=1.0, usage={}, error="error_max_turns"
+        )
+        with pytest.raises(StepFailed, match="ended with an error: error_max_turns"):
+            levers.findings(ctx)
+        assert not (ctx.round_dir / "levers.json").exists()
+
 
 class TestImplement:
     def _start(self, ctx):
@@ -135,6 +144,15 @@ class TestImplement:
         ctx.agent = _committing_agent("assert VALUE == 1", commit=False)
         assert "no commit was made" in levers.implement_one(ctx, LEVER, base)["reason"]
 
+    def test_tests_that_hang_count_as_a_failed_attempt(self, rsi_config_dict, ctx):
+        rsi_config_dict["checks"]["timeout_min"] = 0.02
+        rsi_config_dict["agent"]["implement_attempts"] = 1
+        ctx.config = parse_config(rsi_config_dict)
+        _cand, base = self._start(ctx)
+        ctx.agent = _committing_agent("__import__('time').sleep(30)")
+        outcome = levers.implement_one(ctx, LEVER, base)
+        assert outcome["status"] == "dropped" and "did not finish within checks.timeout_min" in outcome["reason"]
+
     def test_the_step_resets_a_lever_left_running_by_a_dead_driver(self, ctx):
         cand, base = self._start(ctx)
         (ctx.round_dir / "levers.json").write_text(json.dumps({"levers": [LEVER]}))
@@ -146,3 +164,44 @@ class TestImplement:
         assert levers.implement(ctx) == {"landed": ["trim-prompt"], "dropped": []}
         assert not (cand / "src" / "half.py").exists()
         assert _git(cand, "log", "--format=%s", f"{base}..HEAD") == "perf(lever): trim the prompt"
+
+
+class TestSuite:
+    def _candidate_test(self, ctx, body: str) -> None:
+        levers.ensure_worktrees(ctx)
+        cand = ctx.worktree("candidate")
+        (cand / "tests" / "test_candidate.py").write_text(f"def test_candidate():\n    {body}\n")
+        _git(cand, "add", "-A")
+        _git(cand, "commit", "-qm", "candidate test")
+
+    def test_a_tree_whose_suite_never_judged_a_test_fails_the_step(self, ctx):
+        with pytest.raises(StepFailed, match="pytest exited 5 on the base tree"):
+            check.suite(ctx)
+
+    def test_a_failure_only_the_candidate_has_fails_the_step(self, ctx):
+        repo = ctx.config.target.repo
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_base.py").write_text("def test_base():\n    assert True\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "base test")
+        self._candidate_test(ctx, "assert False")
+        with pytest.raises(StepFailed, match="1 tests fail only on the candidate:\ntests/test_candidate.py"):
+            check.suite(ctx)
+        assert json.loads((ctx.round_dir / "suite" / "suite.json").read_text())["base_failures"] == 0
+
+
+class TestClosingSteps:
+    def test_a_diagnosis_session_that_ended_in_error_fails_the_step(self, ctx):
+        (ctx.round_dir / "results").mkdir(parents=True)
+        (ctx.round_dir / "results" / "A_vs_B.json").write_text("{}")
+        ctx.agent = lambda spec: AgentResult(
+            text='{"summary": "draft", "differences": []}',
+            is_error=True,
+            turns=60,
+            cost_usd=1.0,
+            usage={},
+            error="error_max_budget_usd",
+        )
+        with pytest.raises(StepFailed, match="ended with an error: error_max_budget_usd"):
+            report.diagnose(ctx)
+        assert not (ctx.round_dir / "diagnosis.json").exists()
