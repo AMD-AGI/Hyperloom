@@ -62,8 +62,8 @@ GPU lease rather than a policy deny.
 ## Coordinator-owned: not LLM-proposable
 
 `roofline` and `profile` are Coordinator-managed actions. They are not
-in the LLM-proposable action set for any phase, so no LLM proposal for
-either can succeed. To run a plain profile instead of a full roofline,
+in the LLM-proposable action set for any phase, so any LLM proposal for
+either is denied at PolicyGate with `rule="coordinator_managed_action"`. To run a plain profile instead of a full roofline,
 the operator launches with `--no-enable-roofline` (the Coordinator then
 auto-enqueues a `profile` task in PRELUDE and at every watermark
 crossing); there is no LLM-driven path.

@@ -111,7 +111,7 @@ The optimizer should:
    last_roofline_tput >= 1.10`; compound). Default is `roofline` (profile +
    trace_analyze + analysis.md); `--no-enable-roofline` switches to plain
    `profile`. The LLM cannot propose either — both names are Coordinator-managed
-   and not in the LLM-proposable action set for any phase. Concurrent GPU work
+   and a proposal for either is denied with `rule="coordinator_managed_action"`. Concurrent GPU work
    is serialised by the lane /
    GPU lease rather than a policy deny, so explore / kernel dispatches keep
    flowing while analysis refreshes. Each analysis also stamps a decode roofline
