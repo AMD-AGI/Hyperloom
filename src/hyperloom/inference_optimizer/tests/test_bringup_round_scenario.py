@@ -199,7 +199,7 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         (EnablementBuild, "_maybe_escalate_to_targeted_build"),
     ):
         setattr(shim, name, types.MethodType(getattr(owner, name), shim))
-    # EnablementLane methods now access collaborators via self._coord; route them back to the shim.
+    # Collaborator access goes through self._coord, so route it back to the shim.
     shim._coord = types.SimpleNamespace(
         run_deadline=None,
         enablement_params=shim,

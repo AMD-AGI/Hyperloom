@@ -16,6 +16,7 @@ import pytest
 import hyperloom.inference_optimizer.model_config_utils as mcu_mod
 import hyperloom.orchestrator.kernel.request_handlers as krh_mod
 import hyperloom.orchestrator.phases.kernel as kernel_phase_mod
+from hyperloom.common.env import EnvValueError
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
@@ -468,6 +469,28 @@ class TestQueueFusionSiblings:
         # The fusion-specific keep bar rides on the record rather than the integrate default.
         assert rec_a["keep_threshold_pct"] == pytest.approx(expected)
         assert by_source["/repo/b.py"]["fusion_env_flags"] == {"ZAYA_FUSED_B": "1"}
+
+    @pytest.mark.asyncio
+    async def test_an_invalid_keep_pct_raises(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_FUSION_KEEP_PCT", "invalid")
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+
+        with pytest.raises(EnvValueError, match="HYPERLOOM_FUSION_KEEP_PCT"):
+            await phase._integrate_fusion(
+                {
+                    "patches": [
+                        {
+                            "kernel_name": "fuse_a",
+                            "patch_path": "/out/fuse_a.patch",
+                            "target_file": "/repo/a.py",
+                            "micro_speedup": 1.4,
+                            "kind": "fusion",
+                        }
+                    ]
+                }
+            )
 
     @pytest.mark.asyncio
     async def test_empty_nomination_is_a_clean_no_op(self, tmp_path):
@@ -1826,6 +1849,13 @@ class TestKernelE2EMeasurementPromotion:
             "extra_envs": {},
             "keep_threshold_pct": 0.0,
         }
+
+    @pytest.mark.asyncio
+    async def test_gemm_paired_pairs_rejects_an_invalid_value(self, coord, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_GEMM_PAIRED_PAIRS", "invalid")
+
+        with pytest.raises(EnvValueError, match="HYPERLOOM_GEMM_PAIRED_PAIRS"):
+            await KernelPhase(coord)._confirm_gemm_gain_paired({}, {}, config_path="", budget_minutes=1)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("second_keep", [False, True], ids=["keep-revert", "keep-keep"])

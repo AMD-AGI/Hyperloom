@@ -382,7 +382,6 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
         idempotency_key="geak-axis-rejection",
     )
     state.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
-    # resume_pending_revalidation removed; unvalidated keeps tracked via optimization_stack
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
 
     def fake_measure(cmd, *args, **kwargs):
