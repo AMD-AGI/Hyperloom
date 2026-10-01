@@ -78,6 +78,22 @@ def test_an_event_that_starts_nothing_cannot_cancel_a_run(workflow: dict) -> Non
     assert workflow["jobs"]["e2e"]["needs"] == "resolve"
 
 
+def test_a_run_that_ends_early_still_closes_its_check(workflow: dict) -> None:
+    """REGRESSION GUARD. A cancelled or killed job never reaches the dispatch step's
+    terminal status, and the commit kept `ci-e2e/run` pending for good. The backstop
+    runs on every outcome and stands down only on the marker the script writes."""
+    assert _WORKFLOW is not None
+    backstop = next(
+        step for step in workflow["jobs"]["e2e"]["steps"] if step.get("name") == "Backstop terminal commit status"
+    )
+    assert backstop["if"] == "always()"
+    assert 'context:"ci-e2e/run"' in backstop["run"]
+    marker = "ci_e2e_status_terminal"
+    assert marker in backstop["run"]
+    script = (_WORKFLOW.parents[1] / "scripts" / "ci-e2e-dispatch.sh").read_text(encoding="utf-8")
+    assert marker in script
+
+
 def test_every_trigger_still_resolves_to_a_group(concurrency_group: str) -> None:
     """Each trigger must contribute a key, or runs collide repo-wide."""
     for key in (

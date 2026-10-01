@@ -217,6 +217,35 @@ jobs:
           chmod +x .github/scripts/ci-e2e-dispatch.sh
           .github/scripts/ci-e2e-dispatch.sh
 
+      # The dispatch step posts the terminal status itself. A job that ends without
+      # one -- cancelled, or killed mid-run -- would otherwise leave the check pending
+      # on the commit for good.
+      - name: Backstop terminal commit status
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_URL: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ needs.resolve.outputs.head_sha }}
+          DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          if [ -f "${RUNNER_TEMP}/ci_e2e_status_terminal" ]; then exit 0; fi
+          uid="$(cat "${RUNNER_TEMP}/e2e_session_uid" 2>/dev/null || true)"
+          case "$JOB_STATUS" in
+            success) state=success; desc="CI E2E run passed; terminal status backfilled" ;;
+            cancelled) state=error; desc="CI E2E cancelled before a terminal run state" ;;
+            *) state=failure; desc="CI E2E job ${JOB_STATUS} before a terminal run state" ;;
+          esac
+          [ -n "$uid" ] && desc="${desc}; uid=${uid}"
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$API_URL/repos/$REPO/statuses/$SHA" \
+            -d "$(jq -n --arg s "$state" --arg d "${desc:0:139}" --arg u "$DETAILS_URL" \
+              '{state:$s, description:$d, context:"ci-e2e/run", target_url:$u}')"
+
       # If the job is cancelled (manual stop, or a newer commit via concurrency
       # cancel-in-progress), GitHub still runs this step — cancel the workload so the
       # GPU run doesn't leak. Reliable even when the main step is hard-killed.

@@ -101,17 +101,25 @@ STATUS_INTERVAL_S="${STATUS_INTERVAL_S:-300}"
 STATUS_CONTEXT="${STATUS_CONTEXT:-ci-e2e/run}"
 GH_API="${GH_API:-https://api.github.com}"
 gh_status_on() { [ -n "${GH_STATUS_TOKEN:-}" ] && [ -n "${GH_STATUS_REPO:-}" ] && [ -n "${GH_STATUS_SHA:-}" ]; }
+# Written once a terminal status is accepted. The workflow's backstop step posts one
+# itself when the job ends without it -- cancelled, or killed mid-run -- so the check
+# never stays pending on the commit.
+TERMINAL_MARKER="${E2E_TERMINAL_MARKER:-${RUNNER_TEMP:-/tmp}/ci_e2e_status_terminal}"
+rm -f "$TERMINAL_MARKER" 2>/dev/null || true
 post_status() { # state(pending|success|failure|error)  description
   gh_status_on || return 0
-  local desc="${2:0:139}"
-  curl -sS -X POST \
+  local desc="${2:0:139}" code
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
     -H "Authorization: Bearer ${GH_STATUS_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
     "${GH_API}/repos/${GH_STATUS_REPO}/statuses/${GH_STATUS_SHA}" \
     -d "$(jq -n --arg s "$1" --arg d "$desc" --arg u "${GH_STATUS_DETAILS_URL:-}" --arg c "$STATUS_CONTEXT" \
         '{state:$s, description:$d, context:$c} + (if $u=="" then {} else {target_url:$u} end)')" \
-    >/dev/null 2>&1 || true
+    2>/dev/null || echo 000)"
+  if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
+    [ "$1" != "pending" ] && { : > "$TERMINAL_MARKER"; } 2>/dev/null || true
+  fi
 }
 
 # ---- GitHub PR report comment (optional) ----------------------------------
