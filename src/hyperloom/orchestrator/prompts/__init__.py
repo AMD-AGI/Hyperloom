@@ -28,8 +28,8 @@ def write_prompt_snapshot(
     role: str,
     body: str,
     *,
+    macro_cycle: int,
     phase: str = "",
-    macro_cycle: int = 0,
 ) -> None:
     """Persist a role's effective system prompt for audit / drift inspection."""
     try:
