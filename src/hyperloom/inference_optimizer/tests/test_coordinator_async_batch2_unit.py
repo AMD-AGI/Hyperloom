@@ -1991,10 +1991,6 @@ async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeyp
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "x", {}))
 
-    async def _scout():
-        return None
-
-    monkeypatch.setattr(coord.phase_internal, "_maybe_enqueue_explore_research_scout", _scout)
     await coord.phase_machine._advance_phase_if_needed()
 
 
