@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# Round configuration for `python -m meta_rsi.rsi`. Every path is a placeholder: the driver has no
+# machine defaults and fails on a missing required value.
+
+round_dir: /data/meta_rsi/round-2
+
+target:
+  repo: /src/Hyperloom                    # git repository the levers land in
+  base_ref: origin/main
+  branch: meta-rsi/round-2                # created from base_ref in <round_dir>/worktrees/candidate
+
+data:
+  bundles_dir: /data/meta_rsi/round-2-bundles
+  recent_since: "2026-10-01"              # sessions started on or after this date are "recent"
+  last_days: 15
+  key_file: ~/.config/hyperloom-pulse/key # or set PULSE_API_KEY
+  socks: ""                               # host:port when the Pulse API is reachable only through a proxy
+  models_dir: /models                     # needed to pick the scenario from local runs
+  local_sessions: [/data/hyperloom-sessions]
+  exclude_roots: [/data/hyperloom-sessions/me]   # e.g. the operator's own sessions
+
+agent:
+  model: claude-opus-5
+  env_file: /secure/anthropic.env         # KEY=VALUE credentials for agents and arms; keep it out of git
+  total_budget_usd: 150
+  budget_usd: {findings: 20, implement: 30, diagnose: 10, report: 10}
+  max_turns: {findings: 60, implement: 150, diagnose: 60, report: 40}
+  max_levers: 4
+  implement_attempts: 3
+
+checks:
+  python: /venvs/hyperloom/bin/python     # interpreter with the target repo's test dependencies
+  lint: [ruff, check]
+  allow_new_failures: false
+
+replay:
+  commands: []                            # e.g. [[python3, an_replay_levers.py]], run with PYTHONPATH=<candidate>/src
+
+ab:
+  python: /venvs/hyperloom/bin/python     # interpreter that runs `hyperloom.inference_optimizer.cli optimize`
+  sessions_dir: /data/meta_rsi/round-2-arms
+  scenario: ""                            # a JSON file with {"args": [...]}; empty picks one from local runs
+  hours: 6
+  extra_args: [--no-warm-replay, --degraded-kb, --degraded-pr]
+  arms:
+    - {name: A, tree: base}
+    - {name: B, tree: candidate}
+    - {name: C, tree: candidate, models: {specialist: glm-5-3}}
+  snapshot:
+    dir: /data/meta_rsi/framework-snapshot
+    paths: [/usr/local/lib/python3.12/dist-packages/vllm, /usr/local/lib/python3.12/dist-packages/aiter]
+  clear_caches: [~/.cache/vllm/torch_compile_cache, ~/.triton/cache]
+  kernel_agent_env: /data/hyperloom/runtime/kernel-agent.env.sh   # written by the repo's install.sh
+  env:
+    ANTHROPIC_BASE_URL: http://localhost:30500
+    HYPERLOOM_TRACE_ANALYSIS_ROUTE: bypass
+  min_free_gb: 50
+  on_interrupt: rerun                     # or keep: compare an interrupted arm as it stands
+
+compare:
+  router_log: ""                          # model router request log, for per-route request counts
+
+publish:
+  push: false
+  remote: origin
