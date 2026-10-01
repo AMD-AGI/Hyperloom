@@ -115,8 +115,6 @@ class _Stub:
         coord.framework_agent_discover_timeout_sec = 0.0
         coord.framework_gpu_pool = None
         coord.knowledge_plane = None
-        coord._journal = None
-        coord._proposal_scorer = None
         # Override methods the FrameworkPhase calls back through the coordinator.
         coord._record_observation = self._record_observation  # type: ignore[method-assign]
         object.__setattr__(self, "_coord", coord)
@@ -656,7 +654,7 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
     stub._is_promotable_result = lambda *_args, **_kwargs: False
     stub._handle_unpromotable_result = _noop_async
     stub._fact_write_hook = _noop_async
-    stub._record_coordinator_exception = lambda **_kwargs: None
+    stub.record_exception = lambda **_kwargs: None
     task = SimpleNamespace(
         task_id="integrate-cross-phase",
         kind="integrate_patch",

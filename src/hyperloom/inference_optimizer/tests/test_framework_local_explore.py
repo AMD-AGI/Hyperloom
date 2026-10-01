@@ -111,8 +111,6 @@ class _Stub:
         coord.framework_gpu_pool = None
         coord.bus = _Bus()
         coord.knowledge_plane = None
-        coord._journal = None
-        coord._proposal_scorer = None
         object.__setattr__(self, "_coord", coord)
 
     def __getattr__(self, name: str) -> Any:

@@ -51,10 +51,8 @@ def _coord(tmp_path: Path, **state_kwargs) -> Coordinator:
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = SharedState(**state_kwargs)
-    coord._journal = None
     coord.knowledge_plane = None
     coord.knowledge_plane = KnowledgePlane(recipe_kb=None)
-    coord._proposal_scorer = None
     return coord
 
 

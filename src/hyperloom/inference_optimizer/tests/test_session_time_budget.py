@@ -1198,7 +1198,7 @@ class TestTheRunnerRecordsACancellation:
 
 def _quick_poll(coord: Coordinator) -> None:
     """Shorten the pump's re-scan interval so a pump test is not a wall-clock test."""
-    coord._dispatcher_poll_sec = 0.05
+    coord.dispatcher.poll_sec = 0.05
 
 
 class TestThePumpStopsWorkItCannotWaitFor:

@@ -628,7 +628,7 @@ def resume_coord(resume_session_dir):
 async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
     import subprocess
 
-    resume_coord._resumed_from["is_resume"] = True
+    resume_coord.writeback._resumed_from["is_resume"] = True
 
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True)
     pgid = os.getpgid(proc.pid)
@@ -674,7 +674,7 @@ async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
 
 @pytest.mark.asyncio
 async def test_resume_no_pending_is_noop(resume_coord):
-    resume_coord._resumed_from["is_resume"] = True
+    resume_coord.writeback._resumed_from["is_resume"] = True
     resume_coord.shared_state.pending_targeted_build = {}
     report = await resume_coord.writeback._resume_consistency_pass()
     assert not any(isinstance(f, dict) and f.get("kind") == "reclaimed_pending_targeted_build" for f in report["fixes"])

@@ -1365,7 +1365,7 @@ async def test_resume_settles_state_before_draining_kb_outbox(
 ):
     """The outbox drains after the recovery pass, from the durable config."""
     coord = _coord(session_dir)
-    coord._resumed_from = {"is_resume": True}
+    coord.writeback._resumed_from = {"is_resume": True}
     coord.shared_state.optimization_stack = [
         {
             "action": "explore",

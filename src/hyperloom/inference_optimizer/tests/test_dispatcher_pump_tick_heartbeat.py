@@ -43,7 +43,7 @@ async def test_pump_joins_long_work_without_a_supervisor_stamp(tmp_path, monkeyp
     release = asyncio.Event()
     entered = asyncio.Event()
     coord = await _build_coord(tmp_path)
-    coord._dispatcher_poll_sec = 0.02
+    coord.dispatcher.poll_sec = 0.02
     assert not hasattr(coord.reconciler, "stamp_progress")
     reaped = AsyncMock(wraps=coord.dispatcher._reap_dispatched_task)
     monkeypatch.setattr(coord.dispatcher, "_reap_dispatched_task", reaped)

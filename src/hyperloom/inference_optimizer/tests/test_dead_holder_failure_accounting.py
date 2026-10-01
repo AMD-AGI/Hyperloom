@@ -166,7 +166,7 @@ class _ReapStub:
     async def _fact_write_hook(self, **_kwargs: Any) -> None:
         return None
 
-    def _record_coordinator_exception(self, **_kwargs: Any) -> None:
+    def record_exception(self, **_kwargs: Any) -> None:
         return None
 
 

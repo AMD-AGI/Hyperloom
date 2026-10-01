@@ -164,7 +164,7 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         tasks=tasks,
         rounds=rounds,
         session_dir=str(session),
-        _run_deadline=None,
+        run_deadline=None,
         _warm_specialist_params=_noop,
         _record_observation=_noop,
         action_registry=ACTION_CATALOGUE,
@@ -178,7 +178,6 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         # on the shim since property descriptors don't apply to SimpleNamespace.
         knowledge_plane=None,
         recipe_kb=None,
-        _proposal_scorer=None,
     )
     for owner, name in (
         (EnablementParams, "_build_enablement_specialist_params"),
@@ -202,7 +201,7 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         setattr(shim, name, types.MethodType(getattr(owner, name), shim))
     # EnablementLane methods now access collaborators via self._coord; route them back to the shim.
     shim._coord = types.SimpleNamespace(
-        _run_deadline=None,
+        run_deadline=None,
         enablement_params=shim,
         enablement_build=shim,
         specialist_dispatch=shim,
