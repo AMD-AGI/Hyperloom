@@ -427,9 +427,11 @@ async def test_a_baseline_that_keeps_failing_reaches_the_prelude_terminal(
     assert state.baseline_failure_streak == 3
     assert state.stop_reason == "baseline_failed"
     out = machine_state.compute_next_phase(state)
-    assert out is not None and out[0] == "CLOSE"
-    assert out[1] in {"prelude_baseline_failed", "baseline_failed"}
-    assert out[2]["predicate_inputs"]["baseline"]["failure_streak"] == 3
+    assert out is not None
+    target, reason, evidence = out
+    assert (target, reason) == ("CLOSE", "baseline_failed")
+    assert evidence["terminal"] is True
+    assert evidence["predicate_inputs"]["baseline"]["failure_streak"] == 3
     # The fourth attempt was never played: the session stopped on the third.
     assert len(played) == 3
     assert launches.served == 3
