@@ -59,6 +59,7 @@ def _export(client: RemoteClient, args: argparse.Namespace) -> dict[str, JsonVal
     }
     if page.declaration is not None:
         result["declaration"] = page.declaration.to_dict()
+        result["state"] = page.state
     return result
 
 

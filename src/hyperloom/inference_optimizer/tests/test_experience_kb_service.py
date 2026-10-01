@@ -9,7 +9,7 @@ import json
 import logging
 import socket
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -142,6 +142,18 @@ def test_ensure_reports_a_service_that_cannot_serve(monkeypatch, capsys) -> None
     captured = capsys.readouterr()
     assert "did not answer as this Experience service" in captured.err
     assert "workspace-token" not in captured.err + captured.out
+
+
+def test_ensure_says_when_it_restarted_a_stale_service(monkeypatch, capsys) -> None:
+    def restart(*_args: Any, **_kwargs: Any) -> LocalService:
+        return LocalService({"experience_count": 14}, cast(Any, object()), restarted=True)
+
+    monkeypatch.setattr(experience_kb_service, "ensure_local_service", restart)
+    monkeypatch.setenv("HYPERLOOM_KB_URL", "http://127.0.0.1:8787")
+    monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "workspace-token")
+
+    assert experience_kb_service.main(["ensure"]) == 0
+    assert "Experience KB service restarted at http://127.0.0.1:8787: 14 Experiences" in capsys.readouterr().out
 
 
 def test_a_launch_continues_when_the_service_cannot_serve(monkeypatch, caplog) -> None:

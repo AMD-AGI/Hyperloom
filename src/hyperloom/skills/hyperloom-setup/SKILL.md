@@ -452,7 +452,8 @@ set +a
 PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.experience_kb_service ensure
 ```
 
-It prints whether the service was started or already running, never the token.
+It prints whether the service was started, restarted, or already running,
+never the token.
 If it fails, report its message; when another process already serves that port
 with a different token, ask the user to set another port in `HYPERLOOM_KB_URL`
 and rerun this step. Do not continue to a demo until it succeeds.

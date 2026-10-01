@@ -242,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     if service is None:
         print("HYPERLOOM_KB_URL does not name a local Experience KB service", file=sys.stderr)
         return 1
-    state = "started" if service.process is not None else "already running"
+    state = "restarted" if service.restarted else "started" if service.process is not None else "already running"
     print(
         f"Experience KB service {state} at {os.environ['HYPERLOOM_KB_URL']}: "
         f"{service.health.get('experience_count', 0)} Experiences under {service_home()}"
