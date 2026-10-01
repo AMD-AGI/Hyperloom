@@ -3,19 +3,21 @@
 
 """Round locations shared by the Meta RSI scripts, read from the environment.
 
-Every location comes from an explicit variable; nothing defaults to a particular machine. The
-rsi driver (``python -m meta_rsi.rsi``) sets these variables from round.yaml for each step it
-runs; export them yourself only to run a script by hand. They are inputs of these scripts, not
-Hyperloom settings.
+Every location comes from an explicit variable; nothing defaults to a particular machine. These
+are inputs of the scripts, not Hyperloom settings. The rsi driver (``python -m meta_rsi.rsi``)
+runs each script with its own environment plus the round's values from round.yaml.
 
-* ``PULSE_ROUND_DIR``, ``PULSE_BUNDLES``, ``PULSE_RECENT_SINCE``: required by the analyses.
-* ``PULSE_LOCAL_SESSIONS`` (``:``-separated session roots): required by ``an_local.py``;
-  ``PULSE_MODELS_DIR``: required by ``select_scenario.py``, where ``PULSE_EXCLUDE_ROOTS`` (default
-  none) and ``PULSE_MIN_MODEL_B`` (default 30, billions of parameters) narrow the pick.
-* ``PULSE_LOCAL_SPECIALIST_GLOB``: optional extra specialist logs for ``an_specialist.py``.
-* ``PULSE_API_KEY`` (or the key file ``PULSE_KEY_FILE``), ``PULSE_API_BASE`` (default: the
-  hosted Pulse API) and ``PULSE_SOCKS`` (default: direct): Pulse access for ``pulse.py`` and
-  ``fetch_all.sh``, which also reads ``TIERS``, ``JOBS`` (16) and ``MIN_FREE_GB`` (200).
+* Set by the driver from round.yaml: ``PULSE_ROUND_DIR``, ``PULSE_BUNDLES`` and
+  ``PULSE_RECENT_SINCE`` (required by the analyses); ``PULSE_LOCAL_SESSIONS`` (``:``-separated
+  session roots, required by ``an_local.py``); ``PULSE_MODELS_DIR`` (required by
+  ``select_scenario.py``) and ``PULSE_EXCLUDE_ROOTS`` (default none); ``PULSE_API_KEY`` (unless
+  already exported) or the key file ``PULSE_KEY_FILE``, ``PULSE_API_BASE`` (default: the hosted
+  Pulse API) and ``PULSE_SOCKS`` (default: direct) for ``pulse.py`` and ``fetch_all.sh``.
+* Not in round.yaml; export them before running the driver to change them:
+  ``PULSE_MIN_MODEL_B`` (default 30, billions of parameters) for ``select_scenario.py``,
+  ``PULSE_LOCAL_SPECIALIST_GLOB`` (optional extra specialist logs) for ``an_specialist.py``, and
+  ``TIERS`` (default tier1 tier2 tier3), ``JOBS`` (16) and ``MIN_FREE_GB`` (200) for
+  ``fetch_all.sh``.
 """
 
 from __future__ import annotations
