@@ -26,6 +26,14 @@ Design notes
   InferaSim model preset (``HYPERLOOM_INFERASIM_MODEL``) or a full workload YAML
   (``HYPERLOOM_INFERASIM_WORKLOAD``); a best-effort heuristic maps common HF
   model paths to presets so the common cases work with zero extra config.
+* Two projection modes, picked by ``HYPERLOOM_INFERASIM_MODE``. ``simulate``
+  (the default) is purely analytical: no anchor is read, so no warmup server is
+  ever booted to produce one. ``benchmark`` calibrates against the nearest
+  in-regime warmup anchor (``HYPERLOOM_INFERASIM_ANCHOR`` /
+  ``_ANCHOR_STORE`` / ``_ANCHOR_SCALING``). EXPLORE only needs candidates
+  ordered correctly, and simulate mode orders them about as well as benchmark
+  mode does while costing no anchor runs; benchmark mode is for when the
+  absolute numbers matter.
 """
 
 from __future__ import annotations
@@ -54,6 +62,11 @@ ENV_ANCHOR = "HYPERLOOM_INFERASIM_ANCHOR"  # single GPU anchor JSON (calibration
 ENV_ANCHOR_SCALING = "HYPERLOOM_INFERASIM_ANCHOR_SCALING"  # comma-sep TP-scaling anchors
 ENV_ANCHOR_STORE = "HYPERLOOM_INFERASIM_ANCHOR_STORE"  # dir of warmup anchors (auto-select)
 ENV_SERVING_MODEL = "HYPERLOOM_INFERASIM_SERVING_MODEL"  # continuous (default) | static
+ENV_MODE = "HYPERLOOM_INFERASIM_MODE"  # simulate (default) | benchmark
+
+MODE_SIMULATE = "simulate"
+MODE_BENCHMARK = "benchmark"
+_MODES = (MODE_SIMULATE, MODE_BENCHMARK)
 
 _DEFAULT_GPU_ARCH = "mi355x"
 # Per-GPU HBM by arch (GB); only used when HBM is not supplied explicitly.
@@ -444,6 +457,21 @@ def recipe_from_spec(spec: ServingSpec) -> dict[str, Any]:
     }
 
 
+def projection_mode() -> str:
+    """Return the projection mode named by ``HYPERLOOM_INFERASIM_MODE``.
+
+    Unset or blank means ``simulate``. Anything else unrecognised is an error
+    rather than a fallback: a typo for ``benchmark`` would otherwise quietly
+    drop calibration and report analytical numbers as if they were anchored.
+    """
+    raw = str(os.environ.get(ENV_MODE) or "").strip().lower()
+    if not raw:
+        return MODE_SIMULATE
+    if raw not in _MODES:
+        raise InferasimBridgeError(f"{ENV_MODE}={raw!r} is not one of {', '.join(_MODES)}")
+    return raw
+
+
 def select_anchor(spec: ServingSpec) -> AnchorChoice | None:
     """Pick the closest in-regime warmup anchor for ``spec``.
 
@@ -468,7 +496,7 @@ def select_anchor(spec: ServingSpec) -> AnchorChoice | None:
         from infera.projection.core.projection.inference_projection.search.anchor_store import (
             AnchorStore,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise InferasimBridgeError(f"cannot import InferaSim AnchorStore: {exc}") from exc
 
     store = AnchorStore(store_root)
@@ -670,7 +698,7 @@ def _ensure_infera_importable() -> None:
         import infera.projection  # noqa: F401
 
         return
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise InferasimBridgeError(
             f"cannot import Infera 'infera.projection' (set {ENV_ROOT} to the Infera "
             f"checkout or pip install amd-infera[projection]): {exc}"
@@ -718,13 +746,14 @@ def _build_argv(spec: ServingSpec, workload: str, anchor: AnchorChoice | None = 
     if hbm_gb:
         argv += ["--hbm-capacity-gb", str(hbm_gb)]
 
-    if anchor is not None and Path(anchor.path).is_file():
-        argv += ["--load-benchmark", anchor.path]
-        argv += ["--profiling-mode", "both"]  # calibrate + report source
-    scaling = os.environ.get(ENV_ANCHOR_SCALING)
-    if scaling:
-        for path in [p.strip() for p in scaling.split(",") if p.strip()]:
-            argv += ["--load-benchmark-scaling", path]
+    if projection_mode() == MODE_BENCHMARK:
+        if anchor is not None and Path(anchor.path).is_file():
+            argv += ["--load-benchmark", anchor.path]
+            argv += ["--profiling-mode", "both"]  # calibrate + report source
+        scaling = os.environ.get(ENV_ANCHOR_SCALING)
+        if scaling:
+            for path in [p.strip() for p in scaling.split(",") if p.strip()]:
+                argv += ["--load-benchmark-scaling", path]
 
     # Force parallelism via config overrides so an explicit workload YAML is
     # honored regardless of its baked-in values.
@@ -746,7 +775,8 @@ def project(spec: ServingSpec) -> ProjMetrics:
         launch_projection_from_cli,
     )
 
-    anchor = select_anchor(spec)
+    mode = projection_mode()
+    anchor = select_anchor(spec) if mode == MODE_BENCHMARK else None
     argv = _build_argv(spec, workload, anchor)
     # Template reads INFERASIM_* env; also expose TP/PP/EP for template default
     # interpolation (overrides above still win for explicit workloads).
@@ -763,7 +793,7 @@ def project(spec: ServingSpec) -> ProjMetrics:
         results = launch_projection_from_cli(args, overrides)
     except InferasimBridgeError:
         raise
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise InferasimBridgeError(f"InferaSim projection failed: {exc}") from exc
     finally:
         for key, val in prev_env.items():
@@ -777,10 +807,16 @@ def project(spec: ServingSpec) -> ProjMetrics:
         raise InferasimBridgeError("InferaSim returned no performance projection")
     mem = results.get("memory")
 
-    return _metrics_from_results(spec, perf, mem, anchor)
+    return _metrics_from_results(spec, perf, mem, anchor, mode)
 
 
-def _metrics_from_results(spec: ServingSpec, perf: Any, mem: Any, anchor: AnchorChoice | None = None) -> ProjMetrics:
+def _metrics_from_results(
+    spec: ServingSpec,
+    perf: Any,
+    mem: Any,
+    anchor: AnchorChoice | None = None,
+    mode: str = MODE_SIMULATE,
+) -> ProjMetrics:
     """Map InferaSim result objects onto benchmark measurement fields."""
     output_tps = float(getattr(perf, "decode_throughput_tps", 0.0) or 0.0)
     osl = max(1, spec.osl)
@@ -794,6 +830,7 @@ def _metrics_from_results(spec: ServingSpec, perf: Any, mem: Any, anchor: Anchor
         mem_gb = total_bytes / (1024.0**3)
     extras = dict(getattr(perf, "extras", {}) or {})
     max_conc = int(extras.get("concurrency_used", 0) or extras.get("concurrency", 0) or spec.conc)
+    extras["projection_mode"] = mode
     if anchor is not None:
         # Provenance so a session can audit which warmup anchor served this
         # candidate and whether it stayed inside the anchor's regime.

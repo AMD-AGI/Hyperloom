@@ -507,3 +507,50 @@ def test_select_anchor_rejects_insane_anchor(tmp_path, monkeypatch):
     monkeypatch.setenv(ib.ENV_ANCHOR, str(good))
     choice = ib.select_anchor(ib.ServingSpec(framework="vllm", model_path="m"))
     assert choice is not None and choice.path == str(good)
+
+
+@pytest.mark.parametrize(
+    "raw, mode",
+    [(None, "simulate"), ("", "simulate"), ("simulate", "simulate"), ("Benchmark", "benchmark")],
+)
+def test_projection_mode_defaults_to_simulate(monkeypatch, raw, mode):
+    if raw is None:
+        monkeypatch.delenv(ib.ENV_MODE, raising=False)
+    else:
+        monkeypatch.setenv(ib.ENV_MODE, raw)
+    assert ib.projection_mode() == mode
+
+
+def test_projection_mode_rejects_an_unknown_name(monkeypatch):
+    """A typo for benchmark must not quietly fall back to uncalibrated numbers."""
+    monkeypatch.setenv(ib.ENV_MODE, "benchmrak")
+    with pytest.raises(ib.InferasimBridgeError):
+        ib.projection_mode()
+
+
+def _anchored_argv(tmp_path, monkeypatch, mode: str | None) -> list[str]:
+    anchor = tmp_path / "anchor.json"
+    _write_curve(anchor, [(16, 12.0), (64, 20.0)])
+    scaling = tmp_path / "scaling.json"
+    _write_curve(scaling, [(16, 6.0), (64, 10.0)])
+    monkeypatch.setenv(ib.ENV_ANCHOR_SCALING, str(scaling))
+    if mode is None:
+        monkeypatch.delenv(ib.ENV_MODE, raising=False)
+    else:
+        monkeypatch.setenv(ib.ENV_MODE, mode)
+    choice = ib.AnchorChoice(path=str(anchor), regime_distance=0, model="m")
+    return ib._build_argv(ib.ServingSpec(framework="vllm", model_path="m"), "w.yaml", choice)
+
+
+def test_simulate_mode_reads_no_anchor(tmp_path, monkeypatch):
+    """The default projection is analytical even when anchors are configured."""
+    argv = _anchored_argv(tmp_path, monkeypatch, None)
+    assert "--load-benchmark" not in argv
+    assert "--load-benchmark-scaling" not in argv
+    assert argv[argv.index("--profiling-mode") + 1] == "simulate"
+
+
+def test_benchmark_mode_calibrates_against_the_anchor(tmp_path, monkeypatch):
+    argv = _anchored_argv(tmp_path, monkeypatch, "benchmark")
+    assert argv[argv.index("--load-benchmark") + 1] == str(tmp_path / "anchor.json")
+    assert argv[argv.index("--load-benchmark-scaling") + 1] == str(tmp_path / "scaling.json")
