@@ -22,7 +22,7 @@ from functools import partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TextIO, cast
 from urllib.parse import parse_qs, urlsplit
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
@@ -72,6 +72,8 @@ MAX_LIST_LIMIT = 500
 MAX_EXPORT_LIMIT = 100
 READ_POLICY_VERSION = "shared-experience-read@v1"
 DEFAULT_HOME = Path("~/.local/share/hyperloom-kb").expanduser()
+# Held by the one service process that serves a home, for as long as it serves it.
+SERVICE_LOCK = "service.lock"
 # A transport guard, not a data policy: Experiences of any size are stored.
 _MAX_REQUEST_BYTES = 256 * 1024 * 1024
 _READ_FIELDS = frozenset(
@@ -714,6 +716,36 @@ def create_http_server(
     return server
 
 
+@contextmanager
+def _sole_service(home: Path) -> Iterator[TextIO]:
+    """Hold ``home`` for this process, or exit naming the service that does.
+
+    A service pages its index but answers from an in-memory mirror of the corpus, so a second service on the same
+    home would serve, page, and push a different set of Experiences than the first.
+    """
+
+    import fcntl
+
+    home.mkdir(parents=True, exist_ok=True)
+    with (home / SERVICE_LOCK).open("a+", encoding="utf-8") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.seek(0)
+            holder = lock.read().strip() or "another process"
+            raise SystemExit(
+                f"another Experience service ({holder}) already serves {home}; start this one with another --home"
+            ) from None
+        yield lock
+
+
+def _record_holder(lock: TextIO, port: int) -> None:
+    lock.seek(0)
+    lock.truncate()
+    lock.write(f"pid {os.getpid()}, port {port}\n")
+    lock.flush()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--declaration", type=Path, default=PACKAGED_DECLARATION)
@@ -742,30 +774,32 @@ def main(argv: list[str] | None = None) -> int:
         )
     if settings.global_problem:
         log.warning("Push and pull are unavailable: %s", settings.global_problem)
-    app = ExperienceHTTPService(
-        HTTPServiceConfig(args.home, os.environ.get("HYPERLOOM_KB_TOKEN", "")),
-        load_declaration(args.declaration),
-        planner,
-        global_kb=None if settings.global_kb is None else RemoteClient(settings.global_kb),
-        config_digest=settings.digest(),
-    )
-    for seed in args.seed_jsonl:
-        log.info("seeded %s: %s", seed, _canonical(app.seed(seed)))
-    server = create_http_server(app, args.host, args.port)
-    print(
-        _canonical(
-            {
-                "event": "experience_kb_listening",
-                "host": args.host,
-                "port": server.server_address[1],
-                "home": str(args.home),
-                "schema_ref": app.declaration.schema_ref,
-            }
-        ),
-        flush=True,
-    )
-    with server, suppress(KeyboardInterrupt):
-        server.serve_forever()
+    with _sole_service(args.home.expanduser()) as lock:
+        app = ExperienceHTTPService(
+            HTTPServiceConfig(args.home, os.environ.get("HYPERLOOM_KB_TOKEN", "")),
+            load_declaration(args.declaration),
+            planner,
+            global_kb=None if settings.global_kb is None else RemoteClient(settings.global_kb),
+            config_digest=settings.digest(),
+        )
+        for seed in args.seed_jsonl:
+            log.info("seeded %s: %s", seed, _canonical(app.seed(seed)))
+        server = create_http_server(app, args.host, args.port)
+        _record_holder(lock, server.server_address[1])
+        print(
+            _canonical(
+                {
+                    "event": "experience_kb_listening",
+                    "host": args.host,
+                    "port": server.server_address[1],
+                    "home": str(args.home),
+                    "schema_ref": app.declaration.schema_ref,
+                }
+            ),
+            flush=True,
+        )
+        with server, suppress(KeyboardInterrupt):
+            server.serve_forever()
     return 0
 
 
