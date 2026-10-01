@@ -34,41 +34,20 @@ from hyperloom.orchestrator.phases.close import (
     _CLOSE_STEP_WAIT_CEILING_SEC,
     _CLOSE_STEP_WAIT_FLOOR_SEC,
 )
-from hyperloom.orchestrator.state.shared_state import effective_closing_grace_sec
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 from .conftest import make_coordinator
 
 
-class _BareState:
-    """SharedState stand-in for CLOSE sequencer tests.
+@dataclass
+class _BareState(SharedState):
+    """SharedState in the CLOSE phase that counts saves instead of writing them."""
 
-    Extends SharedState with test helpers (save counter, set_stop_reason).
-    """
+    phase: str = "CLOSE"
+    save_count: int = 0
 
-    def __init__(self, **kwargs):
-        from hyperloom.orchestrator.state.shared_state import SharedState
-
-        self._ss = SharedState(phase="CLOSE", **kwargs)
-        self.save_count = 0
-        self.closing_grace_sec: float | None = None
-
-    def __getattr__(self, name: str):
-        return getattr(self._ss, name)
-
-    def __setattr__(self, name: str, value) -> None:
-        if name in ("save_count", "closing_grace_sec", "_ss"):
-            object.__setattr__(self, name, value)
-        else:
-            setattr(self._ss, name, value)
-
-    def save(self, _session_dir: Path | None) -> None:
+    def save(self, _session_dir: Path | None = None) -> None:
         self.save_count += 1
-
-    def set_stop_reason(self, reason: str) -> None:
-        self._ss.stop_reason = reason
-
-    def closing_reserve_sec(self) -> float:
-        return effective_closing_grace_sec(int(self._ss.max_minutes), self.closing_grace_sec)
 
 
 @dataclass
