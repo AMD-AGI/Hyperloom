@@ -692,12 +692,12 @@ class Coordinator:
         self.shared_state.increment_tick()
         try:
             # A phase-entry hook may have finished early (for example a GEAK no_gain run exits KERNEL immediately).
-            await self._await_within_session_bound(
+            await self.await_within_session_bound(
                 self.phase_machine.advance_phase_if_needed,
                 stage="advance_phase_pre_reactor",
             )
             if self.shared_state.pending_escalate_hint.strip():
-                await self._await_within_session_bound(
+                await self.await_within_session_bound(
                     self.phase_machine.advance_phase_if_needed,
                     stage="advance_phase_hint",
                 )
@@ -710,8 +710,8 @@ class Coordinator:
             for name in self._tick_roles:
                 if self.stop_requested():
                     break
-                await self._await_within_session_bound(
-                    lambda n=name: self._reactor_pass(n),
+                await self.await_within_session_bound(
+                    lambda n=name: self.reactor_pass(n),
                     stage=f"reactor:{name}",
                 )
         if not self.stop_requested():
@@ -727,7 +727,7 @@ class Coordinator:
             await self.enablement_lane.pump_enablement_safely()
         # phase machine advance; runs even in_closing so CLOSE is recorded.
         try:
-            await self._await_within_session_bound(
+            await self.await_within_session_bound(
                 self.phase_machine.advance_phase_if_needed,
                 stage="advance_phase",
             )
@@ -833,7 +833,7 @@ class Coordinator:
         """Authoritative in-process stop classification."""
         return self._stop_classification
 
-    async def _await_within_session_bound(
+    async def await_within_session_bound(
         self,
         factory: Callable[[], Awaitable[Any]],
         *,
@@ -1024,7 +1024,7 @@ class Coordinator:
                 log.exception("Coordinator: closing the %s backend failed", name)
 
     # Reactor
-    async def _reactor_pass(self, agent_name: str, *, request: str = "") -> BackendTurnResult | None:
+    async def reactor_pass(self, agent_name: str, *, request: str = "") -> BackendTurnResult | None:
         """Run one reactor turn for ``agent_name``, route its intents, and return the turn's result.
 
         ``request`` is appended to the composed prompt; a turn that carries one may legitimately reply without
