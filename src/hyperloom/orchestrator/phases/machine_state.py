@@ -716,8 +716,10 @@ def phase_status_summary(
     ]
     # Whether deferring work to a later cycle is still a real option.
     if phase in (PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
-        _wpi = workflow_predicate_inputs(state, now_unix=float(now_unix if now_unix is not None else _now_unix(state)))
-        reloop, evidence = _reloop_decision(_wpi)
+        frozen_now = float(now_unix if now_unix is not None else _now_unix(state))
+        reloop_inputs = workflow_predicate_inputs(state, now_unix=frozen_now)
+        reloop_inputs["sweep_result"], _ = _sweep_predicate_inputs(state, now_unix=frozen_now)
+        reloop, evidence = _reloop_decision(reloop_inputs)
         feasible = reloop and state.framework_agent_phase_enabled
         reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
         threshold = evidence.get("min_remaining_sec_effective")
