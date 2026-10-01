@@ -138,14 +138,15 @@ def test_pull_stores_the_global_kb_records_and_never_pushes_them_back(tmp_path: 
             again = local.pull()
             local.write(_experience(schema, 0))
             pushed = local.push()
-            held = _ids(local)
+            listed = _ids(local)
+            readable = local.health()["experience_count"]
 
     assert (pulled["status"], pulled["created"], pulled["rejected"]) == ("completed", 3, [])
     assert (again["created"], again["unchanged"]) == (0, 0)
     assert (pushed["created"], pushed["skipped"]) == (1, 3)
-    assert held == {_experience(schema, 0).id} | {
-        _experience(schema, seq, run_id="teammate-run").id for seq in range(3)
-    }
+    # Reads see what was pulled; list and export name only what was written here.
+    assert readable == 4
+    assert listed == {_experience(schema, 0).id}
 
 
 def test_a_push_the_global_kb_drops_resumes_where_it_stopped(tmp_path: Path) -> None:
@@ -256,7 +257,7 @@ def test_a_workspace_that_switched_schema_keeps_and_syncs_both(tmp_path: Path) -
     assert (pushed["created"], pulled["created"]) == (2, 2)
     assert health["schema_ref"] == second.schema_ref
     assert health["schemas"] == {first.schema_ref: 2, second.schema_ref: 2}
-    assert first_ids == {_experience(first, 1, run_id="run-1").id, _experience(first, 0, run_id="teammate-first").id}
+    assert first_ids == {_experience(first, 1, run_id="run-1").id}
 
 
 def test_a_write_of_an_unregistered_schema_needs_its_declaration(tmp_path: Path) -> None:

@@ -26,6 +26,7 @@ from typing import Any, TextIO, cast
 from urllib.parse import parse_qs, urlsplit
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
+from hyperloom_kb.local_state import LABEL_MANUAL, LocalState, UnknownStateItem
 from hyperloom_kb.knowledge_read import (
     AnthropicPlannerBackend,
     KnowledgeReadService,
@@ -175,6 +176,13 @@ def _query_text(query: Mapping[str, list[str]], name: str) -> str | None:
     return _required_text(values[0], name) if values else None
 
 
+def _query_flag(query: Mapping[str, list[str]], name: str) -> bool:
+    raw = query.get(name, ["false"])[0].strip().lower()
+    if raw not in ("true", "false"):
+        raise HTTPServiceError(f"{name} must be true or false")
+    return raw == "true"
+
+
 def _reject_unknown(body: Mapping[str, JsonValue], allowed: frozenset[str]) -> None:
     unknown = sorted(set(body) - allowed)
     if unknown:
@@ -309,14 +317,17 @@ class ExperienceHTTPService:
         )
         self._experience_service.register_schema(declaration)
         self._index = ExperienceIndex(config.home / "kb.sqlite3")
+        self._state = LocalState(config.home / "state.sqlite3")
+        self._ledger = SyncLedger(config.home / "sync.sqlite3")
         self._planner = planner
         self._write_lock = threading.RLock()
         self._mirror = InMemoryExperienceStore()
         self._declarations: dict[str, ExperienceDeclaration] = {}
         self._views: dict[str, QueryView] = {}
+        self._visible: dict[str, frozenset[str]] = {}
         for registered in self._experience_service.list_schemas():
             self._load(registered)
-        self._sync = GlobalSync(self, SyncLedger(config.home / "sync.sqlite3"), global_kb)
+        self._sync = GlobalSync(self, self._ledger, global_kb)
 
     def _load(self, declaration: ExperienceDeclaration) -> None:
         schema_ref = declaration.schema_ref
@@ -327,14 +338,31 @@ class ExperienceHTTPService:
             if record.experience.id not in indexed:
                 self._index.register(record.experience.id, schema_ref)
         self._declarations[schema_ref] = declaration
-        self._views[schema_ref] = self._build_view(declaration)
+        self._refresh(declaration)
 
-    def _build_view(self, declaration: ExperienceDeclaration) -> QueryView:
-        return QueryViewBuilder().build(
+    def _stored_ids(self, schema_ref: str) -> frozenset[str]:
+        return frozenset(record.experience.id for record in self._mirror.list_experiences(schema_ref))
+
+    def _refresh(self, declaration: ExperienceDeclaration) -> None:
+        """Rebuild what reads of ``declaration``'s schema see from its stored Experiences and their state."""
+
+        records = self._mirror.list_experiences(declaration.schema_ref)
+        visible = self._state.visible(declaration.schema_ref, {record.experience.id for record in records})
+        self._views[declaration.schema_ref] = QueryViewBuilder().build(
             declaration,
-            self._mirror.list_experiences(declaration.schema_ref),
+            tuple(record for record in records if record.experience.id in visible),
             fuzzy_ready=True,
         )
+        self._visible[declaration.schema_ref] = visible
+
+    def is_visible(self, experience: Experience) -> bool:
+        return experience.id in self._visible.get(experience.schema_ref, frozenset())
+
+    def held(self, experience_id: str) -> Experience:
+        stored = self._mirror.get_experience(experience_id)
+        if stored is None:
+            raise UnknownStateItem(f"Experience {experience_id} is not held here")
+        return stored.experience
 
     @property
     def schema_refs(self) -> tuple[str, ...]:
@@ -352,14 +380,8 @@ class ExperienceHTTPService:
                 self._experience_service.register_schema(declaration)
                 self._load(declaration)
 
-    def _stored(self, experience_id: str) -> Experience:
-        stored = self._mirror.get_experience(experience_id)
-        if stored is None:
-            raise RuntimeError(f"Experience {experience_id} is missing from the service corpus")
-        return stored.experience
-
     def _decision(self, experience_id: str) -> str:
-        outcome = self._stored(experience_id).outcome
+        outcome = self.held(experience_id).outcome
         return outcome.decision if outcome is not None else ""
 
     def _outcome(self, value: Any, declaration: ExperienceDeclaration) -> str:
@@ -381,7 +403,7 @@ class ExperienceHTTPService:
             result = self._experience_service.submit_complete(experience)
             if self._mirror.get_experience(experience.id) is None:
                 self._mirror.insert_complete(result.record.experience)
-                self._views[schema.schema_ref] = self._build_view(schema)
+                self._refresh(schema)
             self._index.register(experience.id, experience.schema_ref)
         return {
             "status": result.status.value,
@@ -492,7 +514,7 @@ class ExperienceHTTPService:
         }
         experiences: list[JsonValue] = []
         for reference in result.rendered_refs:
-            item = _summary(self._stored(reference.id))
+            item = _summary(self.held(reference.id))
             group = groups.get(reference.id)
             item["score"] = group.score if group is not None else 0.0
             item["why_matched"] = [
@@ -520,18 +542,26 @@ class ExperienceHTTPService:
         )
         return response
 
+    def _listed(self, experience: Experience, include_excluded: bool) -> bool:
+        """List and export name what was written here, and of that only what reads see unless ``include_excluded``."""
+
+        return not self._ledger.pulled(experience.id) and (include_excluded or self.is_visible(experience))
+
     def list_experiences(
         self,
         *,
         after: int = 0,
         limit: int = 100,
         schema_ref: str | None = None,
+        include_excluded: bool = False,
     ) -> dict[str, JsonValue]:
         after = _bounded_int(after, "after", minimum=0)
         limit = _bounded_int(limit, "limit", minimum=1, maximum=MAX_LIST_LIMIT)
-        page, next_cursor, has_more = self._index.page(schema_ref, after=after, limit=limit)
+        records, next_cursor, has_more = self.records_after(after, limit, schema_ref)
         items: list[JsonValue] = [
-            {"sequence": sequence, **_summary(self._stored(experience_id))} for sequence, experience_id in page
+            {"sequence": sequence, **_summary(experience)}
+            for sequence, experience in records
+            if self._listed(experience, include_excluded)
         ]
         return {"items": items, "next_cursor": next_cursor, "has_more": has_more}
 
@@ -541,18 +571,82 @@ class ExperienceHTTPService:
         """Complete Experiences in write order after the ``after`` sequence, of one schema or of all of them."""
 
         page, next_cursor, has_more = self._index.page(schema_ref, after=after, limit=limit)
-        return tuple((sequence, self._stored(experience_id)) for sequence, experience_id in page), next_cursor, has_more
+        return tuple((sequence, self.held(experience_id)) for sequence, experience_id in page), next_cursor, has_more
 
     def export(
-        self, *, after: int = 0, limit: int = MAX_EXPORT_LIMIT, schema_ref: str | None = None
+        self,
+        *,
+        after: int = 0,
+        limit: int = MAX_EXPORT_LIMIT,
+        schema_ref: str | None = None,
+        include_excluded: bool = False,
     ) -> dict[str, JsonValue]:
         after = _bounded_int(after, "after", minimum=0)
         limit = _bounded_int(limit, "limit", minimum=1, maximum=MAX_EXPORT_LIMIT)
         records, next_cursor, has_more = self.records_after(after, limit, schema_ref)
         items: list[JsonValue] = [
-            {"sequence": sequence, "experience": experience.to_dict()} for sequence, experience in records
+            {"sequence": sequence, "experience": experience.to_dict()}
+            for sequence, experience in records
+            if self._listed(experience, include_excluded)
         ]
         return {"items": items, "next_cursor": next_cursor, "has_more": has_more}
+
+    def _schema_ref(self, schema_ref: str | None) -> str:
+        return self.declaration_for(schema_ref or self.declaration.schema_ref).schema_ref
+
+    def labels(self, schema_ref: str | None = None) -> dict[str, JsonValue]:
+        """``schema_ref``'s labels, newest first, its current label, and whether the state changed since it."""
+
+        schema = self._schema_ref(schema_ref)
+        current, modified = self._state.current(schema, self._stored_ids(schema))
+        return {
+            "schema_ref": schema,
+            "current_label_id": None if current is None else current.label_id,
+            "modified": modified,
+            "labels": [label.to_dict() for label in self._state.labels(schema)],
+        }
+
+    def create_label(self, *, schema_ref: str | None = None, name: str = "") -> dict[str, JsonValue]:
+        schema = self._schema_ref(schema_ref)
+        with self._write_lock:
+            return self._state.label(schema, self._stored_ids(schema), name=name, reason=LABEL_MANUAL).to_dict()
+
+    def delete_label(self, label_id: str) -> dict[str, JsonValue]:
+        with self._write_lock:
+            self._state.delete_label(label_id)
+        return {"deleted": label_id}
+
+    def restore(self, label_id: str) -> dict[str, JsonValue]:
+        """Make ``label_id``'s state current; a current state no label holds is labelled first and named in
+        ``saved``."""
+
+        with self._write_lock:
+            label = self._state.get_label(label_id)
+            saved = self._state.restore(label, self._stored_ids(label.schema_ref))
+            self._refresh(self.declaration_for(label.schema_ref))
+        return {"restored": label.to_dict(), "saved": None if saved is None else saved.to_dict()}
+
+    def exclude(self, experience_id: str, reason: str) -> dict[str, JsonValue]:
+        with self._write_lock:
+            experience = self.held(experience_id)
+            self._state.exclude(experience.schema_ref, experience.id, reason)
+            self._refresh(self.declaration_for(experience.schema_ref))
+        return {"experience_id": experience_id, "status": "excluded"}
+
+    def include(self, experience_id: str) -> dict[str, JsonValue]:
+        with self._write_lock:
+            experience = self.held(experience_id)
+            lifted = self._state.include(experience.schema_ref, experience.id)
+            self._refresh(self.declaration_for(experience.schema_ref))
+        return {"experience_id": experience_id, "status": "included" if lifted else "not_excluded"}
+
+    def exclusions(self, schema_ref: str | None = None) -> dict[str, JsonValue]:
+        schema = self._schema_ref(schema_ref)
+        return {
+            "schema_ref": schema,
+            "exclusions": list(self._state.exclusions(schema)),
+            "history": list(self._state.exclusion_history(schema)),
+        }
 
     def push(self) -> dict[str, JsonValue]:
         return self._sync.push()
@@ -624,6 +718,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     after=_query_int(query, "after", 0),
                     limit=_query_int(query, "limit", 100),
                     schema_ref=_query_text(query, "schema_ref"),
+                    include_excluded=_query_flag(query, "include_excluded"),
                 ),
             )
             return
@@ -634,8 +729,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                     after=_query_int(query, "after", 0),
                     limit=_query_int(query, "limit", MAX_EXPORT_LIMIT),
                     schema_ref=_query_text(query, "schema_ref"),
+                    include_excluded=_query_flag(query, "include_excluded"),
                 ),
             )
+            return
+        if self._dispatch_state(app, parsed.path, query):
             return
         if self.command == "POST" and parsed.path in ("/v1/push", "/v1/pull"):
             _reject_unknown(self._body(), frozenset())
@@ -679,9 +777,54 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         self._write(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
+    def _dispatch_state(self, app: ExperienceHTTPService, path: str, query: Mapping[str, list[str]]) -> bool:
+        """Serve the label and exclusion routes; ``False`` when ``path`` is none of them."""
+
+        labels, exclusions = "/v1/labels", "/v1/exclusions"
+        if self.command == "GET" and path == labels:
+            self._write(HTTPStatus.OK, app.labels(_query_text(query, "schema_ref")))
+        elif self.command == "POST" and path == labels:
+            body = self._body()
+            _reject_unknown(body, frozenset({"schema_ref", "name"}))
+            schema_ref, name = body.get("schema_ref"), body.get("name", "")
+            if not isinstance(name, str):
+                raise HTTPServiceError("name must be a string")
+            self._write(
+                HTTPStatus.OK,
+                app.create_label(
+                    schema_ref=None if schema_ref is None else _required_text(schema_ref, "schema_ref"),
+                    name=name.strip(),
+                ),
+            )
+        elif self.command == "DELETE" and path.startswith(f"{labels}/"):
+            self._write(HTTPStatus.OK, app.delete_label(path.removeprefix(f"{labels}/")))
+        elif self.command == "POST" and path == "/v1/restore":
+            body = self._body()
+            _reject_unknown(body, frozenset({"label_id"}))
+            self._write(HTTPStatus.OK, app.restore(_required_text(body.get("label_id"), "label_id")))
+        elif self.command == "GET" and path == exclusions:
+            self._write(HTTPStatus.OK, app.exclusions(_query_text(query, "schema_ref")))
+        elif self.command == "POST" and path == exclusions:
+            body = self._body()
+            _reject_unknown(body, frozenset({"experience_id", "reason"}))
+            self._write(
+                HTTPStatus.OK,
+                app.exclude(
+                    _required_text(body.get("experience_id"), "experience_id"),
+                    _required_text(body.get("reason"), "reason"),
+                ),
+            )
+        elif self.command == "DELETE" and path.startswith(f"{exclusions}/"):
+            self._write(HTTPStatus.OK, app.include(path.removeprefix(f"{exclusions}/")))
+        else:
+            return False
+        return True
+
     def _handle(self) -> None:
         try:
             self._dispatch()
+        except UnknownStateItem as exc:
+            self._write(HTTPStatus.NOT_FOUND, {"error": "not_found", "detail": str(exc)})
         except ImmutableExperienceConflict as exc:
             self._write(HTTPStatus.CONFLICT, {"error": "conflict", "detail": str(exc)})
         except SyncUnavailable as exc:
@@ -703,6 +846,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._handle()
 
     def do_PUT(self) -> None:
+        self._handle()
+
+    def do_DELETE(self) -> None:
         self._handle()
 
 
