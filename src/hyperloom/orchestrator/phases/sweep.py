@@ -49,9 +49,9 @@ class SweepPhase(CoordinatorCollaborator):
         replies: list[Any] = []
 
         async def _directive_turn() -> None:
-            replies.append(await self._coord._reactor_pass("orchestration", request=CYCLE_DIRECTIVE_REQUEST))
+            replies.append(await self._coord.reactor_pass("orchestration", request=CYCLE_DIRECTIVE_REQUEST))
 
-        await self._coord._await_within_session_bound(_directive_turn, stage="reactor:orchestration")
+        await self._coord.await_within_session_bound(_directive_turn, stage="reactor:orchestration")
         state.orchestration_memory = build_cycle_memory(replies[0] if replies else None, cycle=state.macro_cycle)
         log.info(
             "cycle %d handoff: directive=%r parse_error=%r",
