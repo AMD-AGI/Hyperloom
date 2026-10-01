@@ -112,6 +112,8 @@ from hyperloom_kb.runtime import (
 )
 from hyperloom_kb.schema import (
     CURRENT_SCHEMA_VERSION,
+    KNOWLEDGE_FIELDS,
+    METADATA_FIELDS,
     Alternative,
     Change,
     ConstraintResult,
@@ -167,6 +169,8 @@ __all__ = [
     "Alternative",
     "AnthropicPlannerBackend",
     "CURRENT_SCHEMA_VERSION",
+    "KNOWLEDGE_FIELDS",
+    "METADATA_FIELDS",
     "CandidateHit",
     "CandidateProvider",
     "CapabilityState",

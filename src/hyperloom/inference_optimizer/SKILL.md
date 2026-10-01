@@ -606,7 +606,9 @@ injected Experience set changes:
 `consumer` is `orchestration` or `specialist`; `domain` and `gap_canonical_id`
 identify the specialist dispatch and are empty for orchestration.
 `prompt_block` is the injected text; each Experience appears in it under an
-`Experience <id>` heading with its complete record. A free-text field over
+`Experience <id>` heading with every knowledge field of its record, never its
+metadata: its provenance, including the citations and read that shaped it, and
+its `rendered_refs` stay in the record. A free-text field over
 2 KiB, typically a source patch in `change.content`, appears as
 `<external content sha256:...>` and is written whole under
 `<session>/experience_kb/contents/`, each patch also as its own file; the block
