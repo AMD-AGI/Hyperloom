@@ -27,13 +27,12 @@ _PATCH = """\
 diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
 --- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
 +++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-@@ -1,3 +1,6 @@
+@@ -1,2 +1,5 @@
 +def _set_profile_trace_tag(self):
 +    return "_profile_runner_name"
 +
  def capture():
      return 1
- 
 """
 
 
@@ -47,14 +46,7 @@ def _editable_install(root: Path) -> Path:
 
 
 def _gc_tree(tracelens: Path, version_dir: str = "sglang_0_5_21") -> None:
-    patches = (
-        tracelens
-        / "examples"
-        / "custom_workflows"
-        / "inference_analysis"
-        / "sglang_gc_patch"
-        / version_dir
-    )
+    patches = tracelens / "examples" / "custom_workflows" / "inference_analysis" / "sglang_gc_patch" / version_dir
     patches.mkdir(parents=True)
     (patches / "decode_cuda_graph_runner.patch").write_text(_PATCH, encoding="utf-8")
 

@@ -324,8 +324,7 @@ def _apply_on_pod(
             if patches_dir is None:
                 result["status"] = "failed"
                 result["error"] = (
-                    f"no sglang_gc_patch set for SGLang {version!r} under "
-                    f"{Path(tracelens_root, *_GC_PATCH_TREE_REL)}"
+                    f"no sglang_gc_patch set for SGLang {version!r} under {Path(tracelens_root, *_GC_PATCH_TREE_REL)}"
                 )
                 return result
         else:

@@ -345,8 +345,7 @@ def _ensure_sglang_gc_patched(
     if version is None:
         if _gc_patch_deferred_to_pods():
             log.info(
-                "_server_patcher: sglang not importable on this controller; "
-                "graph-capture patch is applied on the pods"
+                "_server_patcher: sglang not importable on this controller; graph-capture patch is applied on the pods"
             )
             return True
         log.warning("_server_patcher: sglang not importable; skip graph-capture patch")
