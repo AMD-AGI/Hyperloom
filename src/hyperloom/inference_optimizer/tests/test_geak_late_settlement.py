@@ -22,7 +22,7 @@ def test_rejection_annotations_do_not_reopen_an_adjudicated_candidate(promotion)
     result["final_throughput_tok_s"] = 150.0
     raw = deepcopy(result)
     coord.phase_kernel._record_geak_candidate(result)
-    coord.phase_kernel._reject_geak_promotion(
+    coord.phase_kernel.reject_geak_promotion(
         result, measured_tput=120.0, current_best_tput=110.0, reason="accuracy_drop"
     )
     coord.shared_state.save(coord.session_dir)

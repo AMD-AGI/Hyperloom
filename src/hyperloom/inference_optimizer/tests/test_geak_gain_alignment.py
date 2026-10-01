@@ -375,7 +375,7 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         measured = None
         measurement.pop("tput")
     elif case == "lift_refused":
-        monkeypatch.setattr(coord.phase_kernel, "_promote_geak_from_candidate", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(coord.phase_kernel, "promote_geak_from_candidate", lambda *_args, **_kwargs: False)
 
     async def _must_not_launch(**_kwargs):
         raise AssertionError("Inconclusive AgentX 2b must not launch GEAK 2a")
@@ -863,7 +863,7 @@ def test_record_candidate_writes_pending_not_headline(tmp_path: Path) -> None:
 
 
 def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None:
-    """`_promote_geak_from_candidate` lifts the headline from a MEASURED tput (never the self-reported number) and clears the pending candidate."""
+    """`promote_geak_from_candidate` lifts the headline from a MEASURED tput (never the self-reported number) and clears the pending candidate."""
     base = 2844.209
     measured = 3270.0
     coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
@@ -871,7 +871,7 @@ def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None
     coord.shared_state.geak_result = result
     coord.phase_kernel._record_geak_candidate(result)
     assert coord.shared_state.geak_pending.get("status") == "awaiting_rebench"
-    coord.phase_kernel._promote_geak_from_candidate(
+    coord.phase_kernel.promote_geak_from_candidate(
         result,
         measured_tput=measured,
     )
@@ -898,7 +898,7 @@ def test_promote_with_a_proven_overlay_stamps_the_kernel_lever(tmp_path: Path) -
     result = _ok_result(final=3236.489)
     result["accepted_kernels"] = ["fused_moe"]
     coord.shared_state.geak_result = result
-    coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=3270.0, overlay_loaded=True)
+    coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=3270.0, overlay_loaded=True)
 
     entry = next(e for e in coord.shared_state.optimization_stack if e.get("action") == "geak_e2e")
     assert entry["lever_kind"] == "kernel"
@@ -951,7 +951,7 @@ def test_the_route_level_lift_is_claimed_once_from_the_anchor_it_beat(tmp_path: 
     result["kernel_journey_path"] = _journey_with_validated_keeps(tmp_path, [1.05])
 
     with session_scope(tmp_path):
-        coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=3400.0, overlay_loaded=True)
+        coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=3400.0, overlay_loaded=True)
         rows = [
             r
             for r in stack_event_parts().get("stack_adoption") or []
@@ -1280,7 +1280,7 @@ def test_promote_with_dead_overlay_leaves_no_kernel_names_in_stack_entry(tmp_pat
     result["accepted_kernels"] = ["c0_triton"]
     result["accepted_heads"] = ["fused_moe_kernel"]
 
-    coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=measured, overlay_loaded=False)
+    coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=measured, overlay_loaded=False)
 
     entry = next(e for e in coord.shared_state.optimization_stack if e.get("action") == "geak_e2e")
     # ``_lift_to_current_best`` drops empty values, so "no proof" reads as no lane at all rather than an empty one --
@@ -1296,7 +1296,7 @@ def test_promote_with_loaded_overlay_keeps_kernel_names_in_stack_entry(tmp_path:
     result = _ok_result(final=3236.489)
     result["accepted_kernels"] = ["c0_triton"]
 
-    coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=3270.0, overlay_loaded=True)
+    coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=3270.0, overlay_loaded=True)
 
     entry = next(e for e in coord.shared_state.optimization_stack if e.get("action") == "geak_e2e")
     assert entry["accepted_kernels"] == ["c0_triton"]

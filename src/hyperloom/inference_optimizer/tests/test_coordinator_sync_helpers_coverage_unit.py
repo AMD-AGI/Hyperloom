@@ -298,10 +298,10 @@ def test_internal_analysis_kind(coord: Coordinator) -> None:
 # -- watermark / tput projection ------------------------------------------
 def test_current_tput_from_validated_gain(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 0.0
-    assert coord.phase_kernel._current_tput_from_validated_gain() == 0.0
+    assert coord.phase_kernel.current_tput_from_validated_gain() == 0.0
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.cumulative_gain_validated = 10.0
-    assert coord.phase_kernel._current_tput_from_validated_gain() == pytest.approx(110.0)
+    assert coord.phase_kernel.current_tput_from_validated_gain() == pytest.approx(110.0)
 
 
 def test_needs_roofline_for_watermark_guards(coord: Coordinator) -> None:

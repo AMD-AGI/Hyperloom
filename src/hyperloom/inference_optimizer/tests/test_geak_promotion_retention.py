@@ -179,7 +179,7 @@ async def test_geak_acceptance_requires_native_retention(
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", replay)
     if lane == "direct":
-        returned = coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=True)
+        returned = coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=True)
         assert returned is accepted
     elif lane == "2a":
         returned = await coord.writeback.validate_geak_via_geak_harness(reason="retention regression")
@@ -290,7 +290,7 @@ def test_geak_promotion_retains_fresh_launch_controls(promotion, effective_flags
         },
     }
 
-    assert coord.phase_kernel._promote_geak_from_candidate(
+    assert coord.phase_kernel.promote_geak_from_candidate(
         result, measured_tput=120.0, measurement_provenance=measurement, overlay_loaded=False
     )
     state.save(coord.session_dir)
@@ -381,7 +381,7 @@ def test_geak_complete_config_survives_direct_promotion(promotion):
     result["accepted_config"] = {"flags": "", "env_map": {}, "args_mode": "replace"}
     coord.phase_kernel._record_geak_candidate({**result, "final_throughput_tok_s": 120.0})
     assert coord.shared_state.geak_pending["args_mode"] == "replace"
-    assert coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
+    assert coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
     assert coord.shared_state.current_best["extra_server_args"] == ""
     assert coord.shared_state.current_best["args_mode"] == "replace"
 
@@ -398,7 +398,7 @@ def test_geak_replay_without_launch_fields_preserves_stack_controls(promotion, a
         unset_envs=["SGLANG_AITER_MLA_PERSIST"],
     )
     result["accepted_config"] = {"flags": "--mem-fraction-static 0.95", "env_map": {}, "args_mode": accepted_mode}
-    assert coord.phase_kernel._promote_geak_from_candidate(
+    assert coord.phase_kernel.promote_geak_from_candidate(
         result, measured_tput=120.0, measurement_provenance={"accuracy": 0.9}, overlay_loaded=False
     )
     best = state.current_best
@@ -420,7 +420,7 @@ def test_geak_replay_removal_retains_other_inherited_flags(promotion):
     coord.shared_state.baseline_config_path = str(recipe)
     coord.shared_state.current_best["extra_server_args"] = "--chunked-prefill-size 1024"
     result["accepted_config"] = {"remove_args": ["--disable-radix-cache"]}
-    assert coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
+    assert coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
     best = coord.shared_state.current_best
     assert best["extra_server_args"] == "--mem-fraction-static 0.7 --chunked-prefill-size 1024"
     assert best["args_mode"] == "replace"
@@ -437,7 +437,7 @@ def test_complete_geak_return_distinguishes_omitted_and_empty_removals(promotion
     }
     if returned_removals is not None:
         result["accepted_config"]["remove_args"] = returned_removals
-    assert coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
+    assert coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
     best = coord.shared_state.current_best
     removed = returned_removals != []
     assert best["extra_server_args"] == (
@@ -469,7 +469,7 @@ def test_legacy_readdition_survives_retention_and_rematerialization(promotion, e
     result["accepted_config"] = {"flags": readded, "env_map": {}}
     if explicit_append:
         result["accepted_config"]["args_mode"] = "append"
-    assert coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
+    assert coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
     state.save(coord.session_dir)
     best = SharedState.load_or_init(coord.session_dir).current_best
     assert canonical_fingerprint(best["extra_server_args"], {}) == canonical_fingerprint(

@@ -145,7 +145,7 @@ async def test_drain_pending_keep_integrates_records_result_once(
         "hyperloom.orchestrator.kernel.request_handlers.integrate_handler",
         _fake_integrate_handler,
     )
-    c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
+    c.phase_kernel.maybe_enqueue_watermark_roofline = _noop_roofline
 
     await c.phase_kernel_stack._drain_pending_keep_integrates()
 
@@ -654,7 +654,7 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
         return None
 
     c.phase_kernel_stack._run_kernel_stack_validation_e2e = _fake_stack_validation
-    c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
+    c.phase_kernel.maybe_enqueue_watermark_roofline = _noop_roofline
 
     await c.phase_kernel_stack._maybe_validate_positive_needs_review_stack()
 
@@ -738,7 +738,7 @@ async def test_recovers_pending_stack_validation_after_crash(tmp_path: Path):
         return None
 
     c.phase_kernel_stack._run_kernel_stack_validation_e2e = _should_not_run
-    c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
+    c.phase_kernel.maybe_enqueue_watermark_roofline = _noop_roofline
 
     await c.phase_kernel_stack._recover_interrupted_stack_validation()
 
@@ -833,7 +833,7 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
         return None
 
     c.phase_kernel_stack._run_kernel_stack_validation_e2e = _fake_stack_validation
-    c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
+    c.phase_kernel.maybe_enqueue_watermark_roofline = _noop_roofline
 
     await c.phase_sweep._on_enter_sweep(
         Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
@@ -888,7 +888,7 @@ async def test_drain_uses_current_best_tput_not_baseline(
         "hyperloom.orchestrator.kernel.request_handlers.integrate_handler",
         _fake_integrate_handler,
     )
-    c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
+    c.phase_kernel.maybe_enqueue_watermark_roofline = _noop_roofline
 
     await c.phase_kernel_stack._drain_pending_keep_integrates()
 
@@ -1647,13 +1647,13 @@ async def test_stack_members_invalid_recovery_preserves_pending_evidence(tmp_pat
     original_manifest = manifest.read_bytes()
     revert = Mock(return_value={"status": "ok"})
     monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", revert)
-    c.phase_kernel._maybe_enqueue_watermark_roofline = AsyncMock()
+    c.phase_kernel.maybe_enqueue_watermark_roofline = AsyncMock()
 
     with session_scope(tmp_path), pytest.raises(ValueError, match="(?i)stack|member"):
         await c.phase_kernel_stack._recover_interrupted_stack_validation()
 
     revert.assert_not_called()
-    c.phase_kernel._maybe_enqueue_watermark_roofline.assert_not_called()
+    c.phase_kernel.maybe_enqueue_watermark_roofline.assert_not_called()
     assert c.shared_state.to_dict() == before
     assert state_path.read_bytes() == original
     assert manifest.read_bytes() == original_manifest
@@ -1696,7 +1696,7 @@ def historical_stack_coord(tmp_path, monkeypatch):
                 "gain_pct": gain,
             }
         )
-    c.phase_kernel._maybe_enqueue_watermark_roofline = AsyncMock()
+    c.phase_kernel.maybe_enqueue_watermark_roofline = AsyncMock()
     return c
 
 
@@ -1803,14 +1803,14 @@ async def test_stack_members_recovery_rejects_changed_patch_with_unchanged_valid
     )
     stack[0]["patch_path"] = str(tmp_path / "different.patch")
     before = deepcopy(c.shared_state.to_dict())
-    c.phase_kernel._maybe_enqueue_watermark_roofline = AsyncMock()
+    c.phase_kernel.maybe_enqueue_watermark_roofline = AsyncMock()
     monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
 
     with pytest.raises(ValueError, match="(?i)stack|member"):
         await c.phase_kernel_stack._recover_interrupted_stack_validation()
 
     assert c.shared_state.to_dict() == before
-    c.phase_kernel._maybe_enqueue_watermark_roofline.assert_not_called()
+    c.phase_kernel.maybe_enqueue_watermark_roofline.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -39,7 +39,7 @@ def _coordinator(session_dir: Path):
             "critic": MockCriticBackend(),
         },
     )
-    coord.sub.register_executor("kernel_agent", coord.phase_kernel._run_kernel_agent)
+    coord.sub.register_executor("kernel_agent", coord.phase_kernel.run_agent)
     return coord
 
 

@@ -331,7 +331,7 @@ async def test_handle_request_cache_hit_emits_lone_end(session_dir, monkeypatch)
         cached = {"status": "ok", "candidates_path": "/tmp/cached_kc.json"}
         monkeypatch.setattr(
             c.phase_kernel,
-            "_cached_kernel_request",
+            "cached_kernel_request",
             lambda kind, payload: cached,
         )
 
@@ -371,7 +371,7 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
         )
         monkeypatch.setattr(
             c.phase_kernel,
-            "_cached_kernel_request",
+            "cached_kernel_request",
             lambda kind, payload: None,
         )
         rejection = {

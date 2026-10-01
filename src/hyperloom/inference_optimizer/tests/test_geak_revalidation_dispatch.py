@@ -362,7 +362,7 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     if current.get("extra_envs", {}).get("SGLANG_USE_AITER"):
         assert envs["SGLANG_USE_AITER"] == "1"
     assert len(result["winners"]) == 1
-    assert coordinator.phase_kernel._promote_geak_from_candidate(
+    assert coordinator.phase_kernel.promote_geak_from_candidate(
         state.geak_result, measured_tput=120.0, measurement_provenance=result["best_variant"], overlay_loaded=False
     )
     state.geak_result = {}

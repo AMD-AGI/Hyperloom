@@ -191,9 +191,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
             lambda _self, _env_var, env_value: env_value,
         )
 
-        await c.phase_kernel._run_kernel_agent(
-            SimpleNamespace(task=SimpleNamespace(params={"from_phase": "FRAMEWORK_AGENT"}))
-        )
+        await c.phase_kernel.run_agent(SimpleNamespace(task=SimpleNamespace(params={"from_phase": "FRAMEWORK_AGENT"})))
 
         assert calls
         assert c.shared_state.gemm_tuning_attempts
