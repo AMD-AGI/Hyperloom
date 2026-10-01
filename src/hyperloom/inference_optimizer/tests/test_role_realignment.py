@@ -13,7 +13,7 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES
-from hyperloom.common.timeutil import _parse_iso_unix
+from hyperloom.common.timeutil import parse_iso_unix_or_zero
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -597,9 +597,9 @@ async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
         assert [r["lane"] for r in rows] == ["research_lane"]
         # The lane must expire at the REMAINING budget (cumulative TTL minus the elapsed run time), not at now + the
         # full cumulative TTL.
-        expires_in = _parse_iso_unix(str(rows[0]["expires_at"])) - time.time()
+        expires_in = parse_iso_unix_or_zero(str(rows[0]["expires_at"])) - time.time()
         assert expires_in <= 2400
-        started = _parse_iso_unix(updated.updated_at)
+        started = parse_iso_unix_or_zero(updated.updated_at)
         remaining_budget = 2400 - (time.time() - started)
         assert abs(expires_in - remaining_budget) < 5
     finally:
@@ -644,7 +644,7 @@ async def test_extend_lease_does_not_regrant_elapsed_time(coordinator_with_mocks
         )
 
         rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
-        expires_in = _parse_iso_unix(str(rows[0]["expires_at"])) - time.time()
+        expires_in = parse_iso_unix_or_zero(str(rows[0]["expires_at"])) - time.time()
         # 1800 + 600 cumulative, 1000 already spent -> ~1400s left, not 2400.
         assert 1300 < expires_in < 1450
     finally:
@@ -697,7 +697,7 @@ async def test_extend_lease_late_grant_keeps_new_increment_for_lanes_and_gpus(co
         lane_rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
         gpu_rows = await c.db.fetchall("SELECT expires_at FROM gpu_leases WHERE task_id=?", (task.task_id,))
         for row in [*lane_rows, *gpu_rows]:
-            expires_in = _parse_iso_unix(str(row["expires_at"])) - time.time()
+            expires_in = parse_iso_unix_or_zero(str(row["expires_at"])) - time.time()
             assert 550 < expires_in < 650
     finally:
         await c.stop()
@@ -886,7 +886,7 @@ async def test_extend_lease_survives_unreadable_running_age(coordinator_with_moc
         # Lane still moved — falling back to the full TTL is the safe direction (a lease that outlives the task beats
         # one reaped mid-run).
         rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
-        assert _parse_iso_unix(str(rows[0]["expires_at"])) > time.time()
+        assert parse_iso_unix_or_zero(str(rows[0]["expires_at"])) > time.time()
         updated = await c.tasks.get(task.task_id)
         assert updated.lease_ttl_sec == 2400
     finally:

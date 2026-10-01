@@ -26,10 +26,7 @@ from hyperloom.orchestrator.roles import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.proposal_utils import (
-    _BASELINE_FINGERPRINT_KEYS,
-    _baseline_params_fingerprint,
-)
+from hyperloom.orchestrator.loop.writeback import _BASELINE_FINGERPRINT_KEYS, WritebackCollaborator
 from hyperloom.orchestrator.loop.proposals import ProposalsCollaborator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.objective import TargetGainObjective
@@ -2056,20 +2053,20 @@ def test_fingerprint_keys_covers_recovery_surface():
 
 
 def test_fingerprint_normalizes_extra_envs_order():
-    fp1 = _baseline_params_fingerprint({"extra_envs": {"A": "1", "B": "2"}})
-    fp2 = _baseline_params_fingerprint({"extra_envs": {"B": "2", "A": "1"}})
+    fp1 = WritebackCollaborator.baseline_params_fingerprint({"extra_envs": {"A": "1", "B": "2"}})
+    fp2 = WritebackCollaborator.baseline_params_fingerprint({"extra_envs": {"B": "2", "A": "1"}})
     assert fp1 == fp2
     assert fp1["extra_envs"] == [["A", "1"], ["B", "2"]]
 
 
 def test_fingerprint_missing_keys_become_none_or_empty():
-    fp = _baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
+    fp = WritebackCollaborator.baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
     assert fp["benchmark_script"] == "sglang_mi300x.sh"
     assert fp["result_dir"] is None
     assert fp["extra_server_args"] is None
     assert fp["extra_envs"] == []
     assert fp["model_path"] is None
-    fp_with_empty = _baseline_params_fingerprint(
+    fp_with_empty = WritebackCollaborator.baseline_params_fingerprint(
         {
             "benchmark_script": "sglang_mi300x.sh",
             "extra_envs": {},
@@ -2079,7 +2076,7 @@ def test_fingerprint_missing_keys_become_none_or_empty():
 
 
 def test_fingerprint_stringifies_scalar_values():
-    fp = _baseline_params_fingerprint(
+    fp = WritebackCollaborator.baseline_params_fingerprint(
         {
             "benchmark_script": "sglang_mi300x.sh",
             "model_path": "/path/models/DeepSeek-R1",
@@ -2090,10 +2087,10 @@ def test_fingerprint_stringifies_scalar_values():
 
 
 def test_fingerprint_different_overrides_produce_different_fingerprints():
-    a = _baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
-    b = _baseline_params_fingerprint({"benchmark_script": "dsr1_fp8_mi300x.sh"})
-    c = _baseline_params_fingerprint({"result_dir": "/workspace"})
-    d = _baseline_params_fingerprint({"extra_server_args": "--mem-fraction-static 0.9"})
+    a = WritebackCollaborator.baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
+    b = WritebackCollaborator.baseline_params_fingerprint({"benchmark_script": "dsr1_fp8_mi300x.sh"})
+    c = WritebackCollaborator.baseline_params_fingerprint({"result_dir": "/workspace"})
+    d = WritebackCollaborator.baseline_params_fingerprint({"extra_server_args": "--mem-fraction-static 0.9"})
     encoded = {json.dumps(x, sort_keys=True) for x in (a, b, c, d)}
     assert len(encoded) == 4
 

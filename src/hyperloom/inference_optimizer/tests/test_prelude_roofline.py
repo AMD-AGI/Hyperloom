@@ -264,9 +264,7 @@ async def test_watermark_gate_reopens_exactly_when_the_roofline_it_names_finishe
 
 def test_watermark_stops_re_arming_once_retries_are_spent(coord: Coordinator):
     """A roofline leg costs the better part of an hour, so a collector that is broken rather than flaky must not be allowed to spend the session on it."""
-    from hyperloom.orchestrator.kernel.geak_config import (
-        _MAX_ROOFLINE_FAILURE_RETRIES,
-    )
+    from hyperloom.orchestrator.phases.kernel import MAX_ROOFLINE_FAILURE_RETRIES
 
     state = coord.shared_state
     state.baseline_tput = 100.0
@@ -274,10 +272,10 @@ def test_watermark_stops_re_arming_once_retries_are_spent(coord: Coordinator):
     state.last_roofline_tput = 0.0
     state.auto_roofline_pending_task_id = ""
 
-    state.roofline_failure_streak = _MAX_ROOFLINE_FAILURE_RETRIES
+    state.roofline_failure_streak = MAX_ROOFLINE_FAILURE_RETRIES
     assert coord.phase_kernel._needs_roofline_for_watermark() is True
 
-    state.roofline_failure_streak = _MAX_ROOFLINE_FAILURE_RETRIES + 1
+    state.roofline_failure_streak = MAX_ROOFLINE_FAILURE_RETRIES + 1
     assert coord.phase_kernel._needs_roofline_for_watermark() is False
 
 
@@ -713,3 +711,9 @@ async def _latch_after(coord: Coordinator, monkeypatch, handler) -> Any:
     await coord.phase_kernel._run_kernel_opt_nomination()
 
     return coord.shared_state.kernel_auto_pass_cycle
+
+
+def test_roofline_watermark_ratio():
+    from hyperloom.orchestrator.phases.kernel import ROOFLINE_WATERMARK_RATIO
+
+    assert ROOFLINE_WATERMARK_RATIO == 1.10
