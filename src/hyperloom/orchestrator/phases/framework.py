@@ -702,10 +702,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             # Hold the phase open while authored patches are still benched or reviewed; only when a batch was
             # discovered (an LLM-proposed integrate_patch must not keep FRAMEWORK open).
             discovered_batch = bool(getattr(state, "framework_agent_batches", None) or [])
-            if (
-                discovered_batch
-                and await self._framework_agent_authoring_inflight()
-            ):
+            if discovered_batch and await self._framework_agent_authoring_inflight():
                 return
             # Minimum supply: with the pool empty and no discovery in flight, ask for one.
             if await self._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty"):

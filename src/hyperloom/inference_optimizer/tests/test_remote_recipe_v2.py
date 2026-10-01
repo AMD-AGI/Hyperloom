@@ -1181,7 +1181,9 @@ def test_degraded_kb_skips_remote_close_writer(
         shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=SimpleNamespace(kb_disabled=True),
-        _journal=type("_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None})(),
+        _journal=type(
+            "_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None}
+        )(),
         _ensure_journal=lambda: _Journal(),
     )
     from hyperloom.orchestrator.knowledge import remote_recipe
@@ -1216,7 +1218,9 @@ def test_local_close_ignores_ambient_kb_store(
         shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=None,
-        _journal=type("_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None})(),
+        _journal=type(
+            "_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None}
+        )(),
         _ensure_journal=lambda: _Journal(),
         _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
     )
@@ -1331,7 +1335,9 @@ def test_remote_close_transport_failure_is_nonfatal(
         shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=None,
-        _journal=type("_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None})(),
+        _journal=type(
+            "_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None}
+        )(),
         _ensure_journal=lambda: _Journal(),
         proposals=SimpleNamespace(_workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
     )

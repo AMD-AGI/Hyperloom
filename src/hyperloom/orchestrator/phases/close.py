@@ -901,7 +901,10 @@ class ClosePhase(CoordinatorCollaborator):
             return False
         log.info("CLOSE: no close sequence has run (reason=%s); running it now", reason)
         from .machine import Transition
-        await self._on_enter_close(Transition(from_phase=reason, to_phase="CLOSE", reason=reason, evidence={}, loopback=False))
+
+        await self._on_enter_close(
+            Transition(from_phase=reason, to_phase="CLOSE", reason=reason, evidence={}, loopback=False)
+        )
         return True
 
     async def _closing_report_terminal(self) -> bool:

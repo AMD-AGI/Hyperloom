@@ -201,9 +201,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         Args:
             from_phase: The phase being left; only a SWEEP origin starts a cycle.
         """
-        if (from_phase or "").upper() == _phase_state.PHASE_SWEEP and int(
-            self.shared_state.macro_cycle or 0
-        ) > 0:
+        if (from_phase or "").upper() == _phase_state.PHASE_SWEEP and int(self.shared_state.macro_cycle or 0) > 0:
             task = await self._coord.phase_prelude._enqueue_internal_analysis_task(
                 reason="cycle_start",
             )

@@ -706,9 +706,7 @@ def _make_params_fake(**kw):
         ),
     )
     fake = types.SimpleNamespace(shared_state=state, session_dir="/tmp")
-    fake.__dict__["_coord"] = types.SimpleNamespace(
-        gpu_lanes=types.SimpleNamespace(_framework_gpu_params=lambda: {})
-    )
+    fake.__dict__["_coord"] = types.SimpleNamespace(gpu_lanes=types.SimpleNamespace(_framework_gpu_params=lambda: {}))
     fake._build_enablement_specialist_params = types.MethodType(
         EnablementParams._build_enablement_specialist_params, fake
     )

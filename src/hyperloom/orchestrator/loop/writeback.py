@@ -4836,7 +4836,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 )
                 if lifted:
                     await self._validate_and_watermark(
-                        new_tput, measurement, source="integrate_patch_keep",
+                        new_tput,
+                        measurement,
+                        source="integrate_patch_keep",
                         watermark_reason="integrate_patch_keep_watermark",
                     )
             changed = True
@@ -6507,7 +6509,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "evidence on the current phase row); recover-from-disk or re-run."
         )
         from hyperloom.orchestrator.phases.machine import Transition
-        await self._coord.phase_kernel._on_enter_kernel(Transition(from_phase="resume", to_phase="KERNEL_AGENT", reason="resume", evidence={}, loopback=False))
+
+        await self._coord.phase_kernel._on_enter_kernel(
+            Transition(from_phase="resume", to_phase="KERNEL_AGENT", reason="resume", evidence={}, loopback=False)
+        )
 
     @property
     def resumed_from(self) -> dict[str, Any]:

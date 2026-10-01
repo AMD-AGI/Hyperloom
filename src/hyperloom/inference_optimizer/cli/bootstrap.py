@@ -264,8 +264,11 @@ def _seed_shared_state(
         compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
-        **({} if getattr(args, "warm_replay_min_confidence", None) is None
-           else {"warm_replay_min_confidence": float(args.warm_replay_min_confidence)}),
+        **(
+            {}
+            if getattr(args, "warm_replay_min_confidence", None) is None
+            else {"warm_replay_min_confidence": float(args.warm_replay_min_confidence)}
+        ),
         max_minutes=int((args.max_hours or 0) * 60),
         research_lane_capacity=research_lane_capacity,
         gpu_specialist_capacity=gpu_specialist_capacity,
@@ -318,7 +321,9 @@ def _snapshot_system_prompts(
         write_prompt_snapshot(session_dir, role, body, macro_cycle=macro_cycle)
     boot_phase = orchestration_phase.strip()
     if boot_phase and "orchestration" in prompts:
-        write_prompt_snapshot(session_dir, "orchestration", prompts["orchestration"], phase=boot_phase, macro_cycle=macro_cycle)
+        write_prompt_snapshot(
+            session_dir, "orchestration", prompts["orchestration"], phase=boot_phase, macro_cycle=macro_cycle
+        )
 
 
 def _print_session_skeleton(session_dir: Path) -> None:

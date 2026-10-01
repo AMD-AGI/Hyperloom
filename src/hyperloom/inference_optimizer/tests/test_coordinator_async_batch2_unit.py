@@ -2446,6 +2446,7 @@ async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch
 
     monkeypatch.setattr(coord.sub, "run_task", _fake_run)
     from hyperloom.orchestrator.phases.machine import Transition
+
     coord.shared_state.set_stop_reason("target_reached")
     await coord.phase_close._on_enter_close(
         Transition(from_phase="SWEEP", to_phase="CLOSE", reason="SWEEP", evidence={}, loopback=False)

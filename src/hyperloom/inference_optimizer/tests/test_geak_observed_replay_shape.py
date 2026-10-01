@@ -17,7 +17,6 @@ derived from the canonical result rather than hardcoded corpus percentiles.
 import json
 
 
-
 def _result(dirpath, *, tput, completed, tin, tout):
     dirpath.mkdir(parents=True, exist_ok=True)
     (dirpath / "inferencex_result.json").write_text(
