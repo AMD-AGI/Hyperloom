@@ -134,18 +134,19 @@ def test_pull_stores_the_global_kb_records_and_never_pushes_them_back(tmp_path: 
             shared.write(_experience(schema, seq, run_id="teammate-run"))
         with _serving(_service(tmp_path / "local", schema, LOCAL_TOKEN, global_url)) as local_url:
             local = _client(local_url, LOCAL_TOKEN, tmp_path)
-            pulled = local.pull()
-            again = local.pull()
+            pulled = local.pull(schema.schema_ref)
+            again = local.pull(schema.schema_ref)
             local.write(_experience(schema, 0))
             pushed = local.push()
-            held = _ids(local)
+            listed = _ids(local)
+            readable = local.health()["experience_count"]
 
     assert (pulled["status"], pulled["created"], pulled["rejected"]) == ("completed", 3, [])
     assert (again["created"], again["unchanged"]) == (0, 0)
     assert (pushed["created"], pushed["skipped"]) == (1, 3)
-    assert held == {_experience(schema, 0).id} | {
-        _experience(schema, seq, run_id="teammate-run").id for seq in range(3)
-    }
+    # Reads see what was pulled; list and export name only what was written here.
+    assert readable == 4
+    assert listed == {_experience(schema, 0).id}
 
 
 def test_a_push_the_global_kb_drops_resumes_where_it_stopped(tmp_path: Path) -> None:
@@ -203,9 +204,10 @@ def test_a_record_a_proxy_refuses_as_too_large_never_holds_back_the_rest(tmp_pat
 
 
 def test_a_service_without_a_global_kb_refuses_to_sync(tmp_path: Path) -> None:
-    with _serving(_service(tmp_path / "local", _declaration(), LOCAL_TOKEN)) as local_url:
+    schema = _declaration()
+    with _serving(_service(tmp_path / "local", schema, LOCAL_TOKEN)) as local_url:
         local = _client(local_url, LOCAL_TOKEN, tmp_path)
-        for operation in (local.push, local.pull):
+        for operation in (local.push, lambda: local.pull(schema.schema_ref)):
             with pytest.raises(RemoteClientError, match="started without a global Experience KB") as refused:
                 operation()
             assert refused.value.retryable is False
@@ -224,7 +226,7 @@ def test_a_global_kb_keeps_every_user_schema_and_each_user_pulls_back_its_own(tm
         # A second workspace of alice's pulls alice's schema only.
         with _serving(_service(tmp_path / "alice-2", schemas["alice"], LOCAL_TOKEN, global_url)) as local_url:
             teammate = _client(local_url, LOCAL_TOKEN, tmp_path)
-            pulled = teammate.pull()
+            pulled = teammate.pull(schemas["alice"].schema_ref)
             held = teammate.health()["schemas"]
 
     assert set(shared["schemas"]) >= {schema.schema_ref for schema in schemas.values()}
@@ -247,16 +249,17 @@ def test_a_workspace_that_switched_schema_keeps_and_syncs_both(tmp_path: Path) -
             local = _client(local_url, LOCAL_TOKEN, tmp_path)
             local.write(_experience(second, 1, run_id="run-2"), declaration=second)
             pushed = local.push()
-            pulled = local.pull()
+            pulled = [local.pull(schema.schema_ref) for schema in (first, second)]
             first_ids = {
                 str(item["experience_id"]) for item in local.list_experiences(schema_ref=first.schema_ref).items
             }
             health = local.health()
 
-    assert (pushed["created"], pulled["created"]) == (2, 2)
+    assert pushed["created"] == 2
+    assert [report["created"] for report in pulled] == [1, 1]
     assert health["schema_ref"] == second.schema_ref
     assert health["schemas"] == {first.schema_ref: 2, second.schema_ref: 2}
-    assert first_ids == {_experience(first, 1, run_id="run-1").id, _experience(first, 0, run_id="teammate-first").id}
+    assert first_ids == {_experience(first, 1, run_id="run-1").id}
 
 
 def test_a_write_of_an_unregistered_schema_needs_its_declaration(tmp_path: Path) -> None:

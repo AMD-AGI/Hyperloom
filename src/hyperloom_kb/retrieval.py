@@ -450,16 +450,18 @@ def render_complete_experience(
     inline_limit: int | None = None,
     external: dict[str, str] | None = None,
 ) -> str:
-    """Render every canonical field plus full Repeat Group annotations.
+    """Render every knowledge field of the record, never condensed, plus full Repeat Group annotations.
 
-    A free-text field (``reasoning``, ``reflection``, ``change.summary``, ``change.content``, or an alternative)
-    longer than ``inline_limit`` bytes renders as a reference to its text, which is put in ``external`` under that
-    reference: the record stays complete while the prompt carries only its size.
+    The record's metadata, such as its provenance and the reads that shaped it, stays in the record and out of the
+    prompt; the heading names the Experience so an agent can cite it. A free-text field (``reasoning``,
+    ``reflection``, ``change.summary``, ``change.content``, or an alternative) longer than ``inline_limit`` bytes
+    renders as a reference to its text, which is put in ``external`` under that reference: the field stays whole
+    while the prompt carries only its size.
     """
 
     group_key = view.experience_groups[experience.id]
     annotations = view.groups[group_key].annotations
-    record = experience.to_dict()
+    record = experience.knowledge()
     if inline_limit is not None and external is not None:
         for container, key in _free_text_slots(record):
             text = container[key]

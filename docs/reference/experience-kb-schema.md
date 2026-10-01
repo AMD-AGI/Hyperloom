@@ -63,6 +63,22 @@ Identity and change-identity values are scalars. Nested payloads belong in
 change content, provenance extras, or referenced resources; allowing nested
 identity values would make indexing and deterministic grouping ambiguous.
 
+## Knowledge and metadata
+
+Every top-level field is one of two kinds, fixed for every schema by
+`KNOWLEDGE_FIELDS` and `METADATA_FIELDS`:
+
+| Kind | Fields | In a prompt |
+|---|---|---|
+| Knowledge: what was learned | `identity`, `objective`, `baseline_identity`, `baseline_value`, `preconditions`, `reasoning`, `alternatives`, `change`, `outcome`, `reflection` | yes |
+| Metadata: what keeps the record | `kind`, `id`, `schema_ref`, `schema_version`, `status`, `created_at`, `completed_at`, `run_id`, `seq`, `parent_id`, `supersedes`, `rendered_refs`, `provenance` | no |
+
+Both kinds are stored, exported, and synced whole. A read renders only the
+knowledge fields, under a heading that names the Experience so an agent can
+cite it; `rendered_refs` and the citations and read a producer records in
+`provenance.extra` never reach a prompt. `Experience.knowledge()` returns the
+knowledge fields as the record holds them.
+
 ## Declaration schema
 
 Each producer writes under one versioned declaration; its content-addressed

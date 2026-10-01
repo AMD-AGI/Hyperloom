@@ -452,14 +452,15 @@ set +a
 PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.experience_kb_service ensure
 ```
 
-It prints whether the service was started or already running, never the token.
+It prints whether the service was started, restarted, or already running,
+never the token.
 If it fails, report its message; when another process already serves that port
 with a different token, ask the user to set another port in `HYPERLOOM_KB_URL`
 and rerun this step. Do not continue to a demo until it succeeds.
 
 When the `.env` settings the service uses change (the Anthropic gateway, model,
-or global KB), the next run of this step or of an optimize launch restarts it
-with them. Push and pull never restart it, so run this step before them after
+or global KB), or Hyperloom is upgraded, the next run of this step or of an
+optimize launch restarts it with them. Push and pull never restart it, so run this step before them after
 such a change.
 
 ### Global Experience KB
@@ -475,9 +476,17 @@ PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.exper
 In `baremetal` mode, run `pull` once now so the first run already reads what
 the global KB holds for this workspace's schema. Each command prints one line
 with the global URL and the `created`, `unchanged`, `skipped`, and `rejected`
-counts, and exits 1 when it stopped early or rejected an Experience; report
-that line. A failure here does not block setup: report it and continue. In
-`docker` mode, tell the user the same commands run inside the container.
+counts, plus `held_back` for a push; a pull that labelled the state before it
+also names that label, and restoring it undoes the pull. Each exits 1 when it
+stopped early, was refused, or rejected an Experience; report that line. A
+failure here does not block setup: report it and continue. In `docker` mode,
+tell the user the same commands run inside the container.
+
+The same entry point also runs the `hyperloom-kb` skill's other commands on
+the workspace's service, such as
+`python3 -m hyperloom.inference_optimizer.experience_kb_service labels` or
+`restore <label_id>`, defaulting to this workspace's schema. Setup itself
+runs none of them.
 
 ## Step 6: Report Result
 

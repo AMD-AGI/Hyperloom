@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from hyperloom_kb import (
+    KNOWLEDGE_FIELDS,
+    METADATA_FIELDS,
     Alternative,
     Change,
     ConstraintResult,
@@ -121,6 +123,14 @@ def test_complete_experience_round_trips_as_json() -> None:
     assert restored.to_dict()["created_at"] == "2026-09-04T20:00:00Z"
     assert restored.identity["tenant"] == "extra-dimension-is-preserved"
     declaration().validate(restored)
+
+
+def test_every_record_field_is_either_knowledge_or_metadata() -> None:
+    record = complete_experience().to_dict()
+
+    assert KNOWLEDGE_FIELDS | METADATA_FIELDS == set(record)
+    assert not KNOWLEDGE_FIELDS & METADATA_FIELDS
+    assert complete_experience().knowledge() == {name: record[name] for name in KNOWLEDGE_FIELDS}
 
 
 def test_schema_ref_is_content_addressed_and_required() -> None:

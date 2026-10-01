@@ -14,11 +14,11 @@ import os
 import sqlite3
 import threading
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from functools import partial
+from functools import cache, partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,6 +26,7 @@ from typing import Any, TextIO, cast
 from urllib.parse import parse_qs, urlsplit
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
+from hyperloom_kb.local_state import LABEL_BEFORE_PULL, LABEL_MANUAL, LocalState, UnknownStateItem
 from hyperloom_kb.knowledge_read import (
     AnthropicPlannerBackend,
     KnowledgeReadService,
@@ -74,6 +75,8 @@ READ_POLICY_VERSION = "shared-experience-read@v1"
 DEFAULT_HOME = Path("~/.local/share/hyperloom-kb").expanduser()
 # Held by the one service process that serves a home, for as long as it serves it.
 SERVICE_LOCK = "service.lock"
+# The home's identity: made when the home is first served and kept with its data wherever the home moves.
+IDENTITY_FILE = "identity.json"
 # A transport guard, not a data policy: Experiences of any size are stored.
 _MAX_REQUEST_BYTES = 256 * 1024 * 1024
 _READ_FIELDS = frozenset(
@@ -84,6 +87,35 @@ _WRITE_FIELDS = frozenset({"experience", "declaration"})
 
 class HTTPServiceError(ValueError):
     """Raised when a request or service configuration is invalid."""
+
+
+def _identity(home: Path) -> str:
+    path = home / IDENTITY_FILE
+    try:
+        return str(json.loads(path.read_text(encoding="utf-8"))["kb_id"])
+    except FileNotFoundError:
+        pass
+    home.mkdir(parents=True, exist_ok=True)
+    kb_id = f"kb-{uuid.uuid4().hex}"
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps({"kb_id": kb_id, "created_at": _utc_now()}) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+    return kb_id
+
+
+@cache
+def code_digest() -> str:
+    """A fingerprint of this package's code, so a client can tell a service started from other code, such as one
+    started before an upgrade."""
+
+    root = Path(__file__).parent
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root)
+        if "tests" not in relative.parts:
+            digest.update(f"{relative.as_posix()}\0".encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def _canonical(value: Any) -> str:
@@ -175,6 +207,13 @@ def _query_text(query: Mapping[str, list[str]], name: str) -> str | None:
     return _required_text(values[0], name) if values else None
 
 
+def _query_flag(query: Mapping[str, list[str]], name: str) -> bool:
+    raw = query.get(name, ["false"])[0].strip().lower()
+    if raw not in ("true", "false"):
+        raise HTTPServiceError(f"{name} must be true or false")
+    return raw == "true"
+
+
 def _reject_unknown(body: Mapping[str, JsonValue], allowed: frozenset[str]) -> None:
     unknown = sorted(set(body) - allowed)
     if unknown:
@@ -241,6 +280,15 @@ class ExperienceIndex:
             ).fetchall()
         return frozenset(str(row["experience_id"]) for row in rows)
 
+    def head(self, schema_ref: str | None) -> int:
+        """The last write position of one schema or, with ``schema_ref=None``, of every schema; 0 before any write."""
+
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT MAX(sequence) FROM experiences WHERE (? IS NULL OR schema_ref = ?)", (schema_ref, schema_ref)
+            ).fetchone()
+        return int(row[0] or 0)
+
     def page(
         self,
         schema_ref: str | None,
@@ -297,10 +345,14 @@ class ExperienceHTTPService:
         *,
         global_kb: RemoteClient | None = None,
         config_digest: str = "",
+        name: str = "",
     ) -> None:
         self.config = config
         self.declaration = declaration
+        self.name = name
+        self.kb_id = _identity(config.home)
         self._config_digest = config_digest
+        self._code_digest = code_digest()
         canonical_root = config.home / "canonical"
         self._store = LocalExperienceStore(canonical_root)
         self._experience_service = ExperienceService(
@@ -309,14 +361,18 @@ class ExperienceHTTPService:
         )
         self._experience_service.register_schema(declaration)
         self._index = ExperienceIndex(config.home / "kb.sqlite3")
+        self._state = LocalState(config.home / "state.sqlite3")
+        self._ledger = SyncLedger(config.home / "sync.sqlite3")
         self._planner = planner
         self._write_lock = threading.RLock()
         self._mirror = InMemoryExperienceStore()
         self._declarations: dict[str, ExperienceDeclaration] = {}
         self._views: dict[str, QueryView] = {}
+        self._visible: dict[str, frozenset[str]] = {}
+        self._pushable: dict[str, frozenset[str]] = {}
         for registered in self._experience_service.list_schemas():
             self._load(registered)
-        self._sync = GlobalSync(self, SyncLedger(config.home / "sync.sqlite3"), global_kb)
+        self._sync = GlobalSync(self, self._ledger, global_kb)
 
     def _load(self, declaration: ExperienceDeclaration) -> None:
         schema_ref = declaration.schema_ref
@@ -327,14 +383,35 @@ class ExperienceHTTPService:
             if record.experience.id not in indexed:
                 self._index.register(record.experience.id, schema_ref)
         self._declarations[schema_ref] = declaration
-        self._views[schema_ref] = self._build_view(declaration)
+        self._refresh(declaration)
 
-    def _build_view(self, declaration: ExperienceDeclaration) -> QueryView:
-        return QueryViewBuilder().build(
+    def _stored_ids(self, schema_ref: str) -> frozenset[str]:
+        return frozenset(record.experience.id for record in self._mirror.list_experiences(schema_ref))
+
+    def _refresh(self, declaration: ExperienceDeclaration) -> None:
+        """Rebuild what reads of ``declaration``'s schema see from its stored Experiences and their state."""
+
+        records = self._mirror.list_experiences(declaration.schema_ref)
+        visible = self._state.visible(declaration.schema_ref, {record.experience.id for record in records})
+        self._views[declaration.schema_ref] = QueryViewBuilder().build(
             declaration,
-            self._mirror.list_experiences(declaration.schema_ref),
+            tuple(record for record in records if record.experience.id in visible),
             fuzzy_ready=True,
         )
+        self._visible[declaration.schema_ref] = visible
+        self._pushable[declaration.schema_ref] = visible - self._state.withheld(declaration.schema_ref)
+
+    def is_visible(self, experience: Experience) -> bool:
+        return experience.id in self._visible.get(experience.schema_ref, frozenset())
+
+    def is_pushable(self, experience: Experience) -> bool:
+        return experience.id in self._pushable.get(experience.schema_ref, frozenset())
+
+    def held(self, experience_id: str) -> Experience:
+        stored = self._mirror.get_experience(experience_id)
+        if stored is None:
+            raise UnknownStateItem(f"Experience {experience_id} is not held here")
+        return stored.experience
 
     @property
     def schema_refs(self) -> tuple[str, ...]:
@@ -352,14 +429,8 @@ class ExperienceHTTPService:
                 self._experience_service.register_schema(declaration)
                 self._load(declaration)
 
-    def _stored(self, experience_id: str) -> Experience:
-        stored = self._mirror.get_experience(experience_id)
-        if stored is None:
-            raise RuntimeError(f"Experience {experience_id} is missing from the service corpus")
-        return stored.experience
-
     def _decision(self, experience_id: str) -> str:
-        outcome = self._stored(experience_id).outcome
+        outcome = self.held(experience_id).outcome
         return outcome.decision if outcome is not None else ""
 
     def _outcome(self, value: Any, declaration: ExperienceDeclaration) -> str:
@@ -381,7 +452,7 @@ class ExperienceHTTPService:
             result = self._experience_service.submit_complete(experience)
             if self._mirror.get_experience(experience.id) is None:
                 self._mirror.insert_complete(result.record.experience)
-                self._views[schema.schema_ref] = self._build_view(schema)
+                self._refresh(schema)
             self._index.register(experience.id, experience.schema_ref)
         return {
             "status": result.status.value,
@@ -492,7 +563,7 @@ class ExperienceHTTPService:
         }
         experiences: list[JsonValue] = []
         for reference in result.rendered_refs:
-            item = _summary(self._stored(reference.id))
+            item = _summary(self.held(reference.id))
             group = groups.get(reference.id)
             item["score"] = group.score if group is not None else 0.0
             item["why_matched"] = [
@@ -520,18 +591,26 @@ class ExperienceHTTPService:
         )
         return response
 
+    def _listed(self, experience: Experience, include_excluded: bool) -> bool:
+        """List and export name what was written here, and of that only what reads see unless ``include_excluded``."""
+
+        return not self._ledger.pulled(experience.id) and (include_excluded or self.is_visible(experience))
+
     def list_experiences(
         self,
         *,
         after: int = 0,
         limit: int = 100,
         schema_ref: str | None = None,
+        include_excluded: bool = False,
     ) -> dict[str, JsonValue]:
         after = _bounded_int(after, "after", minimum=0)
         limit = _bounded_int(limit, "limit", minimum=1, maximum=MAX_LIST_LIMIT)
-        page, next_cursor, has_more = self._index.page(schema_ref, after=after, limit=limit)
+        records, next_cursor, has_more = self.records_after(after, limit, schema_ref)
         items: list[JsonValue] = [
-            {"sequence": sequence, **_summary(self._stored(experience_id))} for sequence, experience_id in page
+            {"sequence": sequence, **_summary(experience)}
+            for sequence, experience in records
+            if self._listed(experience, include_excluded)
         ]
         return {"items": items, "next_cursor": next_cursor, "has_more": has_more}
 
@@ -541,34 +620,120 @@ class ExperienceHTTPService:
         """Complete Experiences in write order after the ``after`` sequence, of one schema or of all of them."""
 
         page, next_cursor, has_more = self._index.page(schema_ref, after=after, limit=limit)
-        return tuple((sequence, self._stored(experience_id)) for sequence, experience_id in page), next_cursor, has_more
+        return tuple((sequence, self.held(experience_id)) for sequence, experience_id in page), next_cursor, has_more
 
     def export(
-        self, *, after: int = 0, limit: int = MAX_EXPORT_LIMIT, schema_ref: str | None = None
+        self,
+        *,
+        after: int = 0,
+        limit: int = MAX_EXPORT_LIMIT,
+        schema_ref: str | None = None,
+        include_excluded: bool = False,
     ) -> dict[str, JsonValue]:
         after = _bounded_int(after, "after", minimum=0)
         limit = _bounded_int(limit, "limit", minimum=1, maximum=MAX_EXPORT_LIMIT)
         records, next_cursor, has_more = self.records_after(after, limit, schema_ref)
         items: list[JsonValue] = [
-            {"sequence": sequence, "experience": experience.to_dict()} for sequence, experience in records
+            {"sequence": sequence, "experience": experience.to_dict()}
+            for sequence, experience in records
+            if self._listed(experience, include_excluded)
         ]
-        return {"items": items, "next_cursor": next_cursor, "has_more": has_more}
+        page: dict[str, JsonValue] = {
+            "items": items,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+            "head": self._index.head(schema_ref),
+        }
+        if schema_ref is not None:
+            page["declaration"] = self.declaration_for(schema_ref).to_dict()
+            page["state"] = self._state.hidden_digest(schema_ref)
+        return page
+
+    def _schema_ref(self, schema_ref: str | None) -> str:
+        return self.declaration_for(schema_ref or self.declaration.schema_ref).schema_ref
+
+    def labels(self, schema_ref: str | None = None) -> dict[str, JsonValue]:
+        """``schema_ref``'s labels, newest first, its current label, and whether the state changed since it."""
+
+        schema = self._schema_ref(schema_ref)
+        current, modified = self._state.current(schema, self._stored_ids(schema))
+        return {
+            "schema_ref": schema,
+            "current_label_id": None if current is None else current.label_id,
+            "modified": modified,
+            "labels": [label.to_dict() for label in self._state.labels(schema)],
+        }
+
+    def create_label(self, *, schema_ref: str | None = None, name: str = "") -> dict[str, JsonValue]:
+        schema = self._schema_ref(schema_ref)
+        with self._write_lock:
+            return self._state.label(schema, self._stored_ids(schema), name=name, reason=LABEL_MANUAL).to_dict()
+
+    def delete_label(self, label_id: str) -> dict[str, JsonValue]:
+        with self._write_lock:
+            self._state.delete_label(label_id)
+        return {"deleted": label_id}
+
+    def restore(self, label_id: str) -> dict[str, JsonValue]:
+        """Make ``label_id``'s state current; a current state no label holds is labelled first and named in
+        ``saved``."""
+
+        with self._write_lock:
+            label = self._state.get_label(label_id)
+            saved = self._state.restore(label, self._stored_ids(label.schema_ref))
+            self._refresh(self.declaration_for(label.schema_ref))
+        return {"restored": label.to_dict(), "saved": None if saved is None else saved.to_dict()}
+
+    def exclude(self, experience_id: str, reason: str) -> dict[str, JsonValue]:
+        with self._write_lock:
+            experience = self.held(experience_id)
+            self._state.exclude(experience.schema_ref, experience.id, reason)
+            self._refresh(self.declaration_for(experience.schema_ref))
+        return {"experience_id": experience_id, "status": "excluded"}
+
+    def include(self, experience_id: str) -> dict[str, JsonValue]:
+        with self._write_lock:
+            experience = self.held(experience_id)
+            lifted = self._state.include(experience.schema_ref, experience.id)
+            self._refresh(self.declaration_for(experience.schema_ref))
+        return {"experience_id": experience_id, "status": "included" if lifted else "not_excluded"}
+
+    def exclusions(self, schema_ref: str | None = None) -> dict[str, JsonValue]:
+        schema = self._schema_ref(schema_ref)
+        return {
+            "schema_ref": schema,
+            "exclusions": list(self._state.exclusions(schema)),
+            "history": list(self._state.exclusion_history(schema)),
+        }
 
     def push(self) -> dict[str, JsonValue]:
         return self._sync.push()
 
-    def pull(self) -> dict[str, JsonValue]:
-        return self._sync.pull()
+    def pull(self, schema_ref: str) -> dict[str, JsonValue]:
+        return self._sync.pull(schema_ref)
+
+    def begin_pull(self, schema_ref: str) -> dict[str, JsonValue] | None:
+        with self._write_lock:
+            saved = self._state.save_if_modified(schema_ref, self._stored_ids(schema_ref), LABEL_BEFORE_PULL)
+        return None if saved is None else saved.to_dict()
+
+    def bring_in(self, schema_ref: str, experience_ids: Collection[str]) -> None:
+        with self._write_lock:
+            self._state.bring_in(schema_ref, experience_ids)
+            self._refresh(self.declaration_for(schema_ref))
 
     def health(self) -> dict[str, JsonValue]:
         counts = {schema_ref: len(view.visible_experience_ids) for schema_ref, view in sorted(self._views.items())}
         return {
             "status": "ok",
+            "kb_id": self.kb_id,
+            "name": self.name,
             "schema_ref": self.declaration.schema_ref,
             "experience_count": sum(counts.values()),
             "schemas": dict(counts),
             "pid": os.getpid(),
             "config_digest": self._config_digest,
+            "code_digest": self._code_digest,
             "home": str(self.config.home.resolve()),
         }
 
@@ -624,6 +789,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     after=_query_int(query, "after", 0),
                     limit=_query_int(query, "limit", 100),
                     schema_ref=_query_text(query, "schema_ref"),
+                    include_excluded=_query_flag(query, "include_excluded"),
                 ),
             )
             return
@@ -634,12 +800,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                     after=_query_int(query, "after", 0),
                     limit=_query_int(query, "limit", MAX_EXPORT_LIMIT),
                     schema_ref=_query_text(query, "schema_ref"),
+                    include_excluded=_query_flag(query, "include_excluded"),
                 ),
             )
             return
-        if self.command == "POST" and parsed.path in ("/v1/push", "/v1/pull"):
+        if self._dispatch_state(app, parsed.path, query):
+            return
+        if self.command == "POST" and parsed.path == "/v1/push":
             _reject_unknown(self._body(), frozenset())
-            self._write(HTTPStatus.OK, app.push() if parsed.path == "/v1/push" else app.pull())
+            self._write(HTTPStatus.OK, app.push())
+            return
+        if self.command == "POST" and parsed.path == "/v1/pull":
+            body = self._body()
+            _reject_unknown(body, frozenset({"schema_ref"}))
+            self._write(HTTPStatus.OK, app.pull(_required_text(body.get("schema_ref"), "schema_ref")))
             return
         if self.command == "POST" and parsed.path == "/v1/read":
             body = self._body()
@@ -679,9 +853,54 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         self._write(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
+    def _dispatch_state(self, app: ExperienceHTTPService, path: str, query: Mapping[str, list[str]]) -> bool:
+        """Serve the label and exclusion routes; ``False`` when ``path`` is none of them."""
+
+        labels, exclusions = "/v1/labels", "/v1/exclusions"
+        if self.command == "GET" and path == labels:
+            self._write(HTTPStatus.OK, app.labels(_query_text(query, "schema_ref")))
+        elif self.command == "POST" and path == labels:
+            body = self._body()
+            _reject_unknown(body, frozenset({"schema_ref", "name"}))
+            schema_ref, name = body.get("schema_ref"), body.get("name", "")
+            if not isinstance(name, str):
+                raise HTTPServiceError("name must be a string")
+            self._write(
+                HTTPStatus.OK,
+                app.create_label(
+                    schema_ref=None if schema_ref is None else _required_text(schema_ref, "schema_ref"),
+                    name=name.strip(),
+                ),
+            )
+        elif self.command == "DELETE" and path.startswith(f"{labels}/"):
+            self._write(HTTPStatus.OK, app.delete_label(path.removeprefix(f"{labels}/")))
+        elif self.command == "POST" and path == "/v1/restore":
+            body = self._body()
+            _reject_unknown(body, frozenset({"label_id"}))
+            self._write(HTTPStatus.OK, app.restore(_required_text(body.get("label_id"), "label_id")))
+        elif self.command == "GET" and path == exclusions:
+            self._write(HTTPStatus.OK, app.exclusions(_query_text(query, "schema_ref")))
+        elif self.command == "POST" and path == exclusions:
+            body = self._body()
+            _reject_unknown(body, frozenset({"experience_id", "reason"}))
+            self._write(
+                HTTPStatus.OK,
+                app.exclude(
+                    _required_text(body.get("experience_id"), "experience_id"),
+                    _required_text(body.get("reason"), "reason"),
+                ),
+            )
+        elif self.command == "DELETE" and path.startswith(f"{exclusions}/"):
+            self._write(HTTPStatus.OK, app.include(path.removeprefix(f"{exclusions}/")))
+        else:
+            return False
+        return True
+
     def _handle(self) -> None:
         try:
             self._dispatch()
+        except UnknownStateItem as exc:
+            self._write(HTTPStatus.NOT_FOUND, {"error": "not_found", "detail": str(exc)})
         except ImmutableExperienceConflict as exc:
             self._write(HTTPStatus.CONFLICT, {"error": "conflict", "detail": str(exc)})
         except SyncUnavailable as exc:
@@ -703,6 +922,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._handle()
 
     def do_PUT(self) -> None:
+        self._handle()
+
+    def do_DELETE(self) -> None:
         self._handle()
 
 
@@ -752,6 +974,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--home", type=Path, default=DEFAULT_HOME)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument("--name", default="", help="A display name for this service; its identity stays its kb_id.")
     parser.add_argument(
         "--seed-jsonl",
         type=Path,
@@ -781,6 +1004,7 @@ def main(argv: list[str] | None = None) -> int:
             planner,
             global_kb=None if settings.global_kb is None else RemoteClient(settings.global_kb),
             config_digest=settings.digest(),
+            name=args.name,
         )
         for seed in args.seed_jsonl:
             log.info("seeded %s: %s", seed, _canonical(app.seed(seed)))
@@ -815,6 +1039,7 @@ __all__ = [
     "HTTPServiceError",
     "RequestHandler",
     "ServiceSettings",
+    "code_digest",
     "create_http_server",
     "main",
 ]

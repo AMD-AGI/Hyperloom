@@ -5,17 +5,25 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import socket
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 import hyperloom
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
 from hyperloom.inference_optimizer import cli, experience_collect, experience_kb_service
-from hyperloom_kb import ConfigurationError, GLOBAL_TOKEN_ENV, GLOBAL_URL_ENV, LocalService, LocalServiceError
+from hyperloom_kb import (
+    GLOBAL_TOKEN_ENV,
+    GLOBAL_URL_ENV,
+    ConfigurationError,
+    ExperienceDeclaration,
+    LocalService,
+    LocalServiceError,
+)
 
 _PACKAGE = Path(hyperloom.__file__).parent
 
@@ -137,6 +145,18 @@ def test_ensure_reports_a_service_that_cannot_serve(monkeypatch, capsys) -> None
     assert "workspace-token" not in captured.err + captured.out
 
 
+def test_ensure_says_when_it_restarted_a_stale_service(monkeypatch, capsys) -> None:
+    def restart(*_args: Any, **_kwargs: Any) -> LocalService:
+        return LocalService({"experience_count": 14}, cast(Any, object()), restarted=True)
+
+    monkeypatch.setattr(experience_kb_service, "ensure_local_service", restart)
+    monkeypatch.setenv("HYPERLOOM_KB_URL", "http://127.0.0.1:8787")
+    monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "workspace-token")
+
+    assert experience_kb_service.main(["ensure"]) == 0
+    assert "Experience KB service restarted at http://127.0.0.1:8787: 14 Experiences" in capsys.readouterr().out
+
+
 def test_a_launch_continues_when_the_service_cannot_serve(monkeypatch, caplog) -> None:
     validated: list[bool] = []
 
@@ -184,6 +204,7 @@ def _push_report(**overrides: Any) -> dict[str, Any]:
         "created": 2,
         "unchanged": 0,
         "skipped": 0,
+        "held_back": 1,
         "rejected": [],
         **overrides,
     }
@@ -206,7 +227,7 @@ def test_auto_push_is_off_until_the_workspace_opts_in(monkeypatch, caplog) -> No
     _opt_into_auto_push(monkeypatch)
     with caplog.at_level(logging.INFO):
         experience_kb_service.auto_push()
-    assert "push with https://global.example: 2 created, 0 unchanged, 0 skipped, 0 rejected" in caplog.text
+    assert "push with https://global.example: 2 created, 0 unchanged, 0 skipped, 1 held_back, 0 rejected" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -292,6 +313,44 @@ def test_a_push_never_stops_the_service_a_run_may_be_reading_from(monkeypatch, t
                 service.process.wait(timeout=10)
 
 
+def test_workspace_labels_restores_and_exclusions_act_on_the_schema_its_runs_write(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"HYPERLOOM_KB_URL=http://127.0.0.1:{_free_port()}\n", encoding="utf-8")
+    experience_kb_service.init_env(env_file)
+    for key, value in _env_values(env_file).items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "data"))
+    for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", GLOBAL_URL_ENV, GLOBAL_TOKEN_ENV):
+        monkeypatch.delenv(key, raising=False)
+    service = experience_kb_service.ensure_service()
+    assert service is not None and service.process is not None
+    try:
+        assert experience_kb_service.main(["label", "--name", "before tuning"]) == 0
+        label = json.loads(capsys.readouterr().out)
+        assert experience_kb_service.main(["labels"]) == 0
+        labels = json.loads(capsys.readouterr().out)
+        assert experience_kb_service.main(["restore", label["label_id"]]) == 0
+        restored = json.loads(capsys.readouterr().out)
+        assert experience_kb_service.main(["exclude", "exp-" + "0" * 32, "--reason", "noisy node"]) == 1
+        refused = capsys.readouterr().err
+        assert experience_kb_service.main(["export"]) == 0
+        exported = json.loads(capsys.readouterr().out)
+        assert service.process.poll() is None
+    finally:
+        service.process.terminate()
+        service.process.wait(timeout=10)
+
+    assert label["schema_ref"] == labels["schema_ref"] == experience_collect.mapping_schema_ref()
+    assert (
+        ExperienceDeclaration.from_dict(exported["declaration"]).schema_ref == experience_collect.mapping_schema_ref()
+    )
+    assert [entry["label_id"] for entry in labels["labels"]] == [label["label_id"]]
+    assert (restored["restored"]["label_id"], restored["saved"]) == (label["label_id"], None)
+    assert "Experience KB exclude failed" in refused and "404" in refused
+
+
 def test_skills_describe_the_service_by_the_commands_and_variables_it_reads() -> None:
     setup = (_PACKAGE / "skills/hyperloom-setup/SKILL.md").read_text(encoding="utf-8")
     optimizer = (_PACKAGE / "inference_optimizer/SKILL.md").read_text(encoding="utf-8")
@@ -314,6 +373,11 @@ def test_skills_describe_the_service_by_the_commands_and_variables_it_reads() ->
     for command in ("push", "pull"):
         assert f"hyperloom.inference_optimizer.experience_kb_service {command}" in setup
         assert f"hyperloom.inference_optimizer.experience_kb_service {command}" in optimizer
+    # Labels, restores, and exclusions are the hyperloom-kb skill's commands, run through the workspace entry point.
+    assert "hyperloom.inference_optimizer.experience_kb_service labels" in setup
+    assert "experience_kb_service restore <label_id>" in optimizer
+    for text in (setup, optimizer, global_kb):
+        assert "`hyperloom-kb` skill" in " ".join(text.split())
     assert "python3 -m hyperloom_kb --host 0.0.0.0" in global_kb
     for text in (setup, optimizer, global_kb):
         assert "HYPERLOOM_FLEET_KB" not in text

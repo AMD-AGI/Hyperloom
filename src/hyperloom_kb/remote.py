@@ -50,7 +50,7 @@ _PERMANENT_HTTP_STATUSES = frozenset(
         HTTPStatus.UNPROCESSABLE_ENTITY,
     }
 )
-_SYNC_COUNTS = ("created", "unchanged", "skipped")
+_SYNC_COUNTS = ("created", "unchanged", "skipped", "held_back")
 _DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -130,6 +130,16 @@ class ListPage:
     items: tuple[dict[str, JsonValue], ...]
     next_cursor: int
     has_more: bool
+
+
+@dataclass(frozen=True)
+class ExportPage(ListPage):
+    """An export page, with the last write position of what it pages and, for one schema, that schema and its
+    ``state``, which changes whenever the service's exclusions or restores change what it shows of that schema."""
+
+    head: int = 0
+    declaration: ExperienceDeclaration | None = None
+    state: str = ""
 
 
 def _int(value: JsonValue, name: str) -> int:
@@ -350,14 +360,20 @@ class RemoteClient:
         return tuple(results)
 
     @staticmethod
-    def _page_query(after: int, limit: int, schema_ref: str | None) -> str:
+    def _page_query(after: int, limit: int, schema_ref: str | None, include_excluded: bool) -> str:
         values: dict[str, str | int] = {"after": after, "limit": limit}
         if schema_ref is not None:
             values["schema_ref"] = schema_ref
+        if include_excluded:
+            values["include_excluded"] = "true"
         return urllib.parse.urlencode(values)
 
-    def list_experiences(self, *, after: int = 0, limit: int = 100, schema_ref: str | None = None) -> ListPage:
-        payload = self._request("GET", f"/v1/list?{self._page_query(after, limit, schema_ref)}")
+    def list_experiences(
+        self, *, after: int = 0, limit: int = 100, schema_ref: str | None = None, include_excluded: bool = False
+    ) -> ListPage:
+        """Summaries of the Experiences written to this service, of those its reads see unless ``include_excluded``."""
+
+        payload = self._request("GET", f"/v1/list?{self._page_query(after, limit, schema_ref, include_excluded)}")
         items = payload.get("items")
         if not isinstance(items, list):
             raise RemoteClientError("Experience list response is invalid")
@@ -367,41 +383,99 @@ class RemoteClient:
             has_more=payload.get("has_more") is True,
         )
 
-    def export_page(self, *, after: int = 0, limit: int = 100, schema_ref: str | None = None) -> ListPage:
-        """One page of complete records, ``{"sequence", "experience"}``, in the service's write order."""
+    def export_page(
+        self, *, after: int = 0, limit: int = 100, schema_ref: str | None = None, include_excluded: bool = False
+    ) -> ExportPage:
+        """One page of complete records, ``{"sequence", "experience"}``, in the service's write order; the records
+        are chosen as ``list_experiences`` chooses them."""
 
-        payload = self._request("GET", f"/v1/export?{self._page_query(after, limit, schema_ref)}")
+        payload = self._request("GET", f"/v1/export?{self._page_query(after, limit, schema_ref, include_excluded)}")
         items = payload.get("items")
         if not isinstance(items, list):
             raise RemoteClientError("Experience export response is invalid")
-        return ListPage(
+        declaration, state = None, ""
+        if schema_ref is not None:
+            try:
+                declaration = ExperienceDeclaration.from_dict(payload.get("declaration"))
+            except ValueError as exc:
+                raise RemoteClientError(f"Experience export response has no valid declaration: {exc}") from exc
+            reported = payload.get("state")
+            if not isinstance(reported, str) or not reported:
+                raise RemoteClientError("Experience export response has no state")
+            state = reported
+        return ExportPage(
             items=tuple(item for item in items if isinstance(item, dict)),
             next_cursor=_int(payload.get("next_cursor"), "next_cursor"),
             has_more=payload.get("has_more") is True,
+            head=_int(payload.get("head"), "head"),
+            declaration=declaration,
+            state=state,
         )
+
+    @staticmethod
+    def _schema_query(schema_ref: str | None) -> str:
+        return "" if schema_ref is None else f"?{urllib.parse.urlencode({'schema_ref': schema_ref})}"
+
+    def labels(self, *, schema_ref: str | None = None) -> dict[str, JsonValue]:
+        """A schema's labels, newest first, its ``current_label_id``, and whether its state is ``modified`` since."""
+
+        return self._request("GET", f"/v1/labels{self._schema_query(schema_ref)}")
+
+    def create_label(self, *, schema_ref: str | None = None, name: str = "") -> dict[str, JsonValue]:
+        body: dict[str, JsonValue] = {"name": name}
+        if schema_ref is not None:
+            body["schema_ref"] = schema_ref
+        return self._request("POST", "/v1/labels", body)
+
+    def delete_label(self, label_id: str) -> dict[str, JsonValue]:
+        return self._request("DELETE", f"/v1/labels/{urllib.parse.quote(label_id, safe='')}")
+
+    def restore(self, label_id: str) -> dict[str, JsonValue]:
+        """Make a label's state current; ``saved`` names the label an unlabelled current state was saved under."""
+
+        return self._request("POST", "/v1/restore", {"label_id": label_id})
+
+    def exclude(self, experience_id: str, *, reason: str) -> dict[str, JsonValue]:
+        return self._request("POST", "/v1/exclusions", {"experience_id": experience_id, "reason": reason})
+
+    def include(self, experience_id: str) -> dict[str, JsonValue]:
+        return self._request("DELETE", f"/v1/exclusions/{urllib.parse.quote(experience_id, safe='')}")
+
+    def exclusions(self, *, schema_ref: str | None = None) -> dict[str, JsonValue]:
+        """A schema's current exclusions and the history of every exclude and include."""
+
+        return self._request("GET", f"/v1/exclusions{self._schema_query(schema_ref)}")
 
     def push(self) -> dict[str, JsonValue]:
         """Ask this service to send every Experience written here and not yet pushed to its global KB."""
 
-        return self._sync("/v1/push")
+        return self._sync("/v1/push", {})
 
-    def pull(self) -> dict[str, JsonValue]:
-        """Ask this service to store every global-KB Experience of its declaration it does not hold yet."""
+    def pull(self, schema_ref: str) -> dict[str, JsonValue]:
+        """Ask this service to bring one schema to everything its global KB holds of it.
 
-        return self._sync("/v1/pull")
+        ``saved`` names the label the state before the pull was saved under, when no label held it.
+        """
 
-    def _sync(self, path: str) -> dict[str, JsonValue]:
+        return self._sync("/v1/pull", {"schema_ref": schema_ref})
+
+    def _sync(self, path: str, body: dict[str, JsonValue]) -> dict[str, JsonValue]:
         # Each request handles one bounded batch, so no single request outlives the client timeout.
         totals = dict.fromkeys(_SYNC_COUNTS, 0)
         rejected: list[JsonValue] = []
+        saved: JsonValue = None
         while True:
-            report = self._request("POST", path, {})
+            report = self._request("POST", path, body)
             for key in _SYNC_COUNTS:
                 totals[key] += _int(report.get(key, 0), key)
             batch_rejected = report.get("rejected")
             rejected.extend(batch_rejected if isinstance(batch_rejected, list) else ())
+            saved = saved or report.get("saved")
             if report.get("status") != "completed" or report.get("has_more") is not True:
-                return {**report, **totals, "rejected": rejected}
+                result = {**report, **totals, "rejected": rejected}
+                if "saved" in report:
+                    result["saved"] = saved
+                return result
 
 
 class RemoteExperienceSession:
