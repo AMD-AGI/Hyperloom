@@ -12,7 +12,7 @@ import os
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import yaml
 
@@ -27,6 +27,7 @@ from hyperloom.orchestrator.loop.coordinator_helpers import (
     _resolve_handoff_gpu_ids_space,
 )
 from ._accuracy_gate import parse_eval_results
+from ._gpu_power import ServerLogPhaseDriver, build_gpu_power_recorder, read_measured_gpu_power
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 log = logging.getLogger(__name__)
@@ -80,19 +81,40 @@ def _parse_isl_osl(spec: str) -> tuple[int, int]:
 
 def _geak_replay_server_log(out_dir: Path) -> str | None:
     """Return the newest server log created inside this replay's output only."""
-    candidates = [out_dir / "server.log"]
     try:
-        candidates.extend(out_dir.glob("replica_*/attempt_*/server.log"))
+        existing = _replay_server_logs(out_dir)
+        return max(existing, key=lambda path: Path(path).stat().st_mtime) if existing else None
     except OSError:
-        # Replay-log discovery is best effort; retain the direct log candidate.
-        logging.debug("Unable to enumerate GEAK replica server logs", exc_info=True)
-    existing = [path for path in candidates if path.is_file()]
-    if not existing:
+        # Replay-log discovery is best effort.
+        logging.debug("Unable to enumerate GEAK replay server logs", exc_info=True)
         return None
+
+
+def _replay_server_logs(out_dir: Path) -> list[str]:
+    """Every server log this replay has written so far, oldest first: one per replica boot."""
+    candidates = [out_dir / "server.log", *sorted(out_dir.glob("replica_*/attempt_*/server.log"))]
+    return [str(path) for path in candidates if path.is_file()]
+
+
+def _run_with_power_sampling(
+    run: Callable[[], subprocess.CompletedProcess], out_dir: Path, env: Mapping[str, str]
+) -> subprocess.CompletedProcess:
+    """Run one replay with the measured-phase power recorder a native round gets.
+
+    The replay boots its own servers, so the watchdog's phase marks are not available; the driver reads the same
+    ready / warmup / measured / eval markers from the logs the replay writes. Writes ``gpu_power.json`` into
+    ``out_dir`` whenever sampling is on.
+    """
+    recorder = build_gpu_power_recorder(str(out_dir / "server.log"), dict(env))
+    if recorder is None:
+        return run()
+    driver = ServerLogPhaseDriver(recorder, lambda: _replay_server_logs(out_dir))
+    driver.start()
     try:
-        return str(max(existing, key=lambda path: path.stat().st_mtime))
-    except OSError:
-        return None
+        return run()
+    finally:
+        driver.stop()
+        recorder.close()
 
 
 def _replay_serving_env(handoff: Mapping[str, Any], env_spec: Mapping[str, Any]) -> dict[str, str]:
@@ -285,8 +307,10 @@ async def sweep_via_geak(
             tput = None
             succeeded = False
             err: str | None = None
+            entry["gpu_power_avg_w"] = None
             try:
-                proc = await asyncio.to_thread(_run)
+                proc = await asyncio.to_thread(_run_with_power_sampling, _run, out_dir, env)
+                entry["gpu_power_avg_w"] = read_measured_gpu_power(out_dir)[1]
                 summ = read_json(out_dir / "bench_summary.json", default={}, require_dict=True)
                 # ``throughput_tok_s_median`` is the metric-neutral median of
                 # whatever basis GEAK measured, and the only field populated in
