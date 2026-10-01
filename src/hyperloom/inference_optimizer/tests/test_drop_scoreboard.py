@@ -39,13 +39,13 @@ def test_shared_state_keeps_params_no_promote_streak_as_fact():
     assert "params_no_promote_streak" in s.to_prompt_summary()
 
 
-def test_shared_state_keeps_tick_and_target_gap_pct():
-    """``tick`` (counter) and ``target_gap_pct`` (fact) both stay."""
+def test_shared_state_keeps_tick():
+    """``tick`` (counter) stays; the objective gap is derived on read, not stored."""
     s = SharedState()
     s.increment_tick()
     s.increment_tick()
     assert s.tick == 2
-    assert s.target_gap_pct == 0.0
+    assert not hasattr(s, "target_gap_pct")
 
 
 def test_shared_state_all_top_actions_policy_locked_removed():

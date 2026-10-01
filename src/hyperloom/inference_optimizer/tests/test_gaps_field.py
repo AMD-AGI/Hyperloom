@@ -11,8 +11,11 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.orchestrator.state.gaps import _GAPS_ATTEMPTS_HISTORY, _GAPS_MAX_ENTRIES
 from hyperloom.orchestrator.state.shared_state import SharedState
+
+from .conftest import make_coordinator
 
 
 # 1. Field surface
@@ -190,17 +193,10 @@ class _StubTask:
 
 @pytest.fixture
 def coord(tmp_path: Path):
-    """Coordinator stand-in via ``Coordinator.__new__`` (skips the full constructor)."""
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    c = Coordinator.__new__(Coordinator)
-    c.session_dir = tmp_path
-    c.shared_state = SharedState()
-    c.shared_state.session_id = "test-session"
-    c.shared_state.model_name = "llama-3.1-70B"
-    c.shared_state.gpu_type = "mi300x"
-    c.knowledge_plane = None
-    return c
+    return make_coordinator(
+        tmp_path,
+        shared_state_overrides={"session_id": "test-session", "model_name": "llama-3.1-70B", "gpu_type": "mi300x"},
+    )
 
 
 @pytest.mark.asyncio
@@ -212,10 +208,10 @@ async def test_refresh_gaps_no_op_until_baseline(coord):
 
 @pytest.mark.asyncio
 async def test_refresh_gaps_seeds_throughput_gap_from_baseline(coord):
-    """After baseline + non-zero target_gap_pct, the extractor emits a `throughput_below_target` gap row anchored to the workload id."""
+    """After baseline + a non-zero gap to the objective, the extractor emits a `throughput_below_target` gap row anchored to the workload id."""
     s = coord.shared_state
     s.baseline_tput = 1000.0
-    s.target_gap_pct = 12.0
+    coord._current_objective = TargetGainObjective(target_gain_pct=12.0)
     await coord.gap_refresh._refresh_gaps(reason="baseline_done", workload_id=coord.proposals._workload_canonical_id())
     matches = [g for g in s.gaps if g["canonical_id"].endswith("#throughput_below_target")]
     assert matches, f"missing throughput gap in {s.gaps!r}"
