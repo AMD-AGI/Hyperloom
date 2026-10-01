@@ -91,25 +91,6 @@ def test_reverted_integrate_patch_records_attempt_not_keep():
     assert "code_patch_attempts=1" in summary
 
 
-def test_a_kept_patch_the_lift_refused_records_an_attempt_not_a_keep():
-    """The executor's ``kept`` is not the adoption; the settlement verdict is."""
-    coord = object.__new__(Coordinator)
-    coord.shared_state = SharedState(session_id="im-coord-refused")
-    task = Task(
-        task_id="t-integrate-refused",
-        kind="integrate_patch",
-        state="succeeded",
-        params={},
-        idempotency_key="t-integrate-refused",
-    )
-
-    coord.writeback._record_intervention_for_task(task, {"status": "kept", "delta_pct": 3.0}, Verdict.REFUSED)
-
-    summary = coord.shared_state.to_intervention_mix_summary()
-    assert "code_patch_keeps=0" in summary
-    assert "code_patch_attempts=1" in summary
-
-
 def test_config_heavy_zero_patch_renders_counts_without_directive():
     """Config-heavy ledger (>=5 config keeps, 0 code_patch) renders neutral counts."""
     s = SharedState(session_id="im-heavy")

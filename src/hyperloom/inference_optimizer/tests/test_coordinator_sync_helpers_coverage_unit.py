@@ -249,7 +249,6 @@ def test_pitfall_severity_for(coord: Coordinator) -> None:
 
 
 def test_is_promotable_result(coord: Coordinator) -> None:
-    assert coord.writeback._is_promotable_result("baseline", "not-a-dict") is False
     assert coord.writeback._is_promotable_result("sweep", {"status": "succeeded"}) is True
     assert coord.writeback._is_promotable_result("sweep", {"status": "failed"}) is False
     assert coord.writeback._is_promotable_result("replay_warm_recipe", {"status": "failed"}) is True

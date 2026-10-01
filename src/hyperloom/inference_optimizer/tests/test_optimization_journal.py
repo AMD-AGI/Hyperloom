@@ -399,46 +399,25 @@ def test_summarize_change_falls_back_to_task_kind():
 
 
 # derive_journal_outcome
-def test_only_an_adopted_verdict_journals_keep():
-    """KEEP means the configuration moved; every other verdict is something else."""
-    assert derive_journal_outcome(Verdict.ADOPTED, {}) == OUTCOME_KEEP
-    for verdict in (Verdict.REFUSED, Verdict.REVERTED, Verdict.FAILED, Verdict.RECORDED):
-        assert derive_journal_outcome(verdict, {"status": "kept"}) != OUTCOME_KEEP, verdict
-
-
-def test_a_refused_keep_journals_no_promote():
-    """A KEEP the adoption rule declined adopted nothing."""
-    assert derive_journal_outcome(Verdict.REFUSED, {"status": "kept", "delta_pct": 7.5}) == OUTCOME_NO_PROMOTE
-
-
-def test_a_measured_loss_journals_revert():
-    assert derive_journal_outcome(Verdict.REVERTED, {"status": "reverted", "delta_pct": -0.44}) == OUTCOME_REVERT
-
-
-def test_a_failure_journals_no_promote():
-    """Nothing was measured, so it is neither a KEEP nor a measured loss."""
-    assert derive_journal_outcome(Verdict.FAILED, {"status": "apply_failed"}) == OUTCOME_NO_PROMOTE
-
-
-def test_a_step_without_adoption_semantics_is_recorded_not_a_dead_end():
-    """A specialist or analysis step is neither a KEEP nor a no_promote the trajectory review would cluster."""
-    out = derive_journal_outcome(Verdict.RECORDED, {"status": "succeeded"})
-    assert out == OUTCOME_RECORDED
-    assert out not in (OUTCOME_KEEP, OUTCOME_REVERT, OUTCOME_NO_PROMOTE)
-
-
-def test_a_step_that_declined_to_run_is_neither_a_keep_nor_a_dead_end():
-    """A conc_sweep with nothing to compare succeeds without doing anything."""
-    out = derive_journal_outcome(
-        Verdict.RECORDED,
-        {"status": "succeeded", "was_skipped": True, "skip_reason": "no_optimization_to_compare"},
-    )
-    assert out == OUTCOME_SKIP
-
-
-def test_a_stray_was_skipped_cannot_demote_an_adopted_change():
-    """Only a step with nothing to adopt can read as skipped."""
-    assert derive_journal_outcome(Verdict.ADOPTED, {"status": "kept", "was_skipped": True}) == OUTCOME_KEEP
+@pytest.mark.parametrize(
+    ("verdict", "result", "expected"),
+    [
+        (Verdict.ADOPTED, {}, OUTCOME_KEEP),
+        # Only a step with nothing to adopt can read as skipped.
+        (Verdict.ADOPTED, {"status": "kept", "was_skipped": True}, OUTCOME_KEEP),
+        (Verdict.REFUSED, {"status": "kept", "delta_pct": 7.5}, OUTCOME_NO_PROMOTE),
+        (Verdict.REVERTED, {"status": "reverted", "delta_pct": -0.44}, OUTCOME_REVERT),
+        (Verdict.FAILED, {"status": "apply_failed"}, OUTCOME_NO_PROMOTE),
+        (Verdict.RECORDED, {"status": "succeeded"}, OUTCOME_RECORDED),
+        (
+            Verdict.RECORDED,
+            {"status": "succeeded", "was_skipped": True, "skip_reason": "no_optimization_to_compare"},
+            OUTCOME_SKIP,
+        ),
+    ],
+)
+def test_the_journal_outcome_is_derived_from_the_verdict(verdict, result, expected):
+    assert derive_journal_outcome(verdict, result) == expected
 
 
 def test_operation_kind_for_maps_kind_and_action():

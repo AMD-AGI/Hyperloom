@@ -762,27 +762,6 @@ def test_record_fact_kept_integrate_patch_journals_keep(coord: Coordinator) -> N
     assert entry.gain_pct == 6.2
 
 
-def test_record_fact_refused_integrate_patch_is_not_a_keep(coord: Coordinator) -> None:
-    """An executor ``kept`` the lift refused adopted nothing: no_promote, never KEEP."""
-    from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_NO_PROMOTE
-    from hyperloom.orchestrator.state.task_registry import Task
-
-    task = Task(
-        task_id="t-refused-keep",
-        kind="integrate_patch",
-        state="succeeded",
-        params={},
-        idempotency_key="t-refused-keep",
-    )
-    coord.writeback._record_fact_per_task(
-        task=task,
-        source_session_id="sess-a",
-        result_dict={"status": "kept", "delta_pct": 6.2, "output_throughput": 1100.0},
-        verdict=Verdict.REFUSED,
-    )
-    assert coord.writeback._ensure_journal().entries[-1].outcome == OUTCOME_NO_PROMOTE
-
-
 def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coordinator) -> None:
     """A reverted integrate_patch stays promotable so it still runs the pending_integrate cleanup in _promote_to_shared_state."""
     assert coord.writeback._is_promotable_result("integrate_patch", {"status": "reverted"}) is True

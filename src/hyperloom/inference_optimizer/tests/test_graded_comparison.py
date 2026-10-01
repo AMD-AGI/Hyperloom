@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -489,17 +488,19 @@ def test_a_synthetic_session_is_untouched_by_the_marker_check(monkeypatch):
 
 @pytest.fixture
 def baseline_writer(monkeypatch, tmp_path):
-    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _PromoteOutcome
-    from hyperloom.orchestrator.state.shared_state import SharedState
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.loop.writeback import _PromoteOutcome
+
+    from .conftest import make_coordinator
 
     _agentx(monkeypatch)
-    state = SharedState(framework="vllm", benchmark_mode="agentx")
-    writer = WritebackCollaborator(SimpleNamespace(shared_state=state, session_dir=tmp_path))
-    monkeypatch.setattr(writer, "_refresh_gaps", AsyncMock(), raising=False)
+    coord = make_coordinator(tmp_path, shared_state_overrides={"framework": "vllm", "benchmark_mode": "agentx"})
+    writer = coord.writeback
+    monkeypatch.setattr(coord.gap_refresh, "_refresh_gaps", AsyncMock())
     monkeypatch.setattr(writer, "_drain_queued_baselines", AsyncMock())
     monkeypatch.setattr(writer, "_should_run_prelude_bootstrap", lambda _tput: False)
-    monkeypatch.setattr(state, "record_baseline_roofline_ceiling", Mock())
-    return writer, _PromoteOutcome()
+    monkeypatch.setattr(coord.shared_state, "record_baseline_roofline_ceiling", Mock())
+    return writer, _PromoteOutcome(verdict=Verdict.RECORDED)
 
 
 @pytest.mark.parametrize("baseline_enablement", [True, False], ids=["enablement", "validated-layer"])
