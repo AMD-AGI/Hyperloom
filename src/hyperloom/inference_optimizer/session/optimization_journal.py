@@ -299,9 +299,9 @@ def _variant_args(variant: dict[str, Any]) -> str:
     return str(variant.get("extra_server_args") or "")
 
 
-def derive_journal_outcome(verdict: Verdict, result_dict: dict[str, Any] | None) -> str:
+def derive_journal_outcome(verdict: Verdict, result_dict: dict[str, Any]) -> str:
     """Derive the journal ``outcome`` for a settled per-task result from its verdict."""
-    if verdict is Verdict.RECORDED and (result_dict or {}).get("was_skipped"):
+    if verdict is Verdict.RECORDED and result_dict.get("was_skipped"):
         return OUTCOME_SKIP
     return _JOURNAL_OUTCOME_BY_VERDICT[verdict]
 

@@ -5,11 +5,10 @@
 
 from __future__ import annotations
 import logging as _logging
-import math
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
-from hyperloom.common.perf_metric import graded_axes_of
+from hyperloom.common.perf_metric import VERDICT_KEEP, graded_axes_of
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     GATE_ACCURACY,
@@ -29,18 +28,17 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     SKIP_RECIPE_NOT_REPLAYABLE,
     SKIP_RECIPE_READ_FAILED,
     SKIP_WORKLOAD_CONFIG_INCOMPATIBLE,
-    STATUS_BY_OUTCOME,
 )
 
 from . import machine_state as _phase_state
 from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_OTHER,
-    OUTCOME_KEEP,
+    derive_journal_outcome,
     JournalEntry,
     Verdict,
 )
 from ..actions.executors.baseline import _revert_warm_patch_state, revert_warm_kernel_patches
-from ..state.shared_state import inject_stack_base_params
+from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
 from ..state.task_registry import Task
 from ..loop.time_budget import (
     expected_action_cost_minutes,
@@ -65,14 +63,6 @@ _WARM_REPLAY_EVENT_PHASE = "prelude"
 #: constant because a consumer asking "was the initial analysis refused, or
 #: never considered" selects on it.
 PRELUDE_ARM_DROPPED = "prelude_arm_dropped"
-
-# The settlement verdict of a replay, keyed by the timeline status its settled
-# outcome closes the event with; any other status produced nothing to judge.
-_VERDICT_BY_WARM_REPLAY_EVENT_STATUS: dict[str, Verdict] = {
-    "succeeded": Verdict.ADOPTED,
-    "rejected": Verdict.REVERTED,
-    "degraded": Verdict.REFUSED,
-}
 
 # The donor's identity, carried flattened on the outcome and re-nested for the
 # event. Listed once so the two directions cannot drift apart.
@@ -1457,8 +1447,6 @@ class PreludePhase(CoordinatorCollaborator):
             "warm_kernel_plan": kernel_pending,
             "warm_kernel_apply_results": kernel_applied,
             "warm_kernel_snapshots": kernel_snapshots,
-            "combined_current_contract": bool(current_remote or kernel_pending),
-            "combined_keep_threshold_pct": _phase_state.resolve_keep_threshold(self.shared_state),
             "workload_compatibility": workload_compatibility,
         }
         try:
@@ -1708,11 +1696,11 @@ class PreludePhase(CoordinatorCollaborator):
         outcome: dict[str, Any],
         recorder: Any = None,
     ) -> bool:
-        """Rollback or persist a terminal recovery failure without clearing it.
+        """Roll back a rejected replay, settling it as ``rollback_failed`` when a tree did not come back.
 
-        The rollback is recorded here rather than at each of the six branches
-        that unwind a rejected replay: what a reader needs is whether the trees
-        came back. Returns ``True`` when every tree was restored.
+        The rollback is recorded here rather than at each of the branches that
+        unwind a rejected replay: what a reader needs is whether the trees came
+        back. Returns ``True`` when every tree was restored.
         """
         rollback = self._rollback_combined_warm(result, task)
         if recorder is not None:
@@ -1728,10 +1716,8 @@ class PreludePhase(CoordinatorCollaborator):
             "errors": list(rollback.get("errors") or []),
         }
         outcome["kernel"] = kernel_outcome
-        self.shared_state.warm_replay_outcome = outcome
-        if hasattr(self.shared_state, "set_stop_reason"):
-            self.shared_state.set_stop_reason("warm_replay_rollback_failed")
-        self.shared_state.save(self.session_dir)
+        self.shared_state.set_stop_reason("warm_replay_rollback_failed")
+        self._conclude_warm_replay(outcome, Verdict.FAILED)
         return False
 
     @staticmethod
@@ -1754,14 +1740,14 @@ class PreludePhase(CoordinatorCollaborator):
             return path
         return None
 
-    def _warm_replay_accuracy_ok(
+    def _judge_warm_replay_accuracy(
         self,
         result: dict,
         task: "Task | None",
         outcome: dict,
         recorder: Any = None,
-    ) -> bool:
-        """Whether a replayed config may be promoted on accuracy grounds.
+    ) -> Verdict | None:
+        """Rule on whether a replayed config may be promoted on accuracy grounds.
 
         Every replay is judged, not just the ones touching a knob known to be
         risky: a KB recipe is evidence from another session, so reproducing its
@@ -1770,8 +1756,8 @@ class PreludePhase(CoordinatorCollaborator):
         a score of 0.0 means the model answered nothing, while no score at all
         means no evidence either way.
 
-        Returns ``True`` when promotion may proceed; ``False`` when the caller
-        must stop (the rollback and outcome have already been recorded).
+        Returns ``None`` when promotion may proceed; otherwise the verdict the
+        caller must stop on (the rollback and outcome have already been recorded).
         """
         from ..actions.executors._accuracy_gate import (
             DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
@@ -1832,7 +1818,7 @@ class PreludePhase(CoordinatorCollaborator):
                     reason=eval_error or "no accuracy verdict",
                     threshold=baseline_accuracy if baseline_accuracy > 0 else None,
                 )
-            return True
+            return None
         if baseline_accuracy > 0:
             if accuracy_passed(baseline_accuracy, float(measured)):
                 if recorder is not None:
@@ -1843,7 +1829,7 @@ class PreludePhase(CoordinatorCollaborator):
                         observed=measured,
                         threshold=baseline_accuracy,
                     )
-                return True
+                return None
             reason = (
                 f"accuracy regression on the replayed config (baseline {baseline_accuracy:.4f}, replay {measured:.4f})"
             )
@@ -1856,7 +1842,7 @@ class PreludePhase(CoordinatorCollaborator):
                     observed=measured,
                     threshold=DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
                 )
-            return True
+            return None
         else:
             reason = (
                 "accuracy below absolute floor on the replayed config "
@@ -1872,13 +1858,11 @@ class PreludePhase(CoordinatorCollaborator):
                 threshold=baseline_accuracy if baseline_accuracy > 0 else DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
             )
         if not self._require_combined_warm_rollback(result, task, outcome, recorder):
-            return False
+            return Verdict.FAILED
         outcome["status"] = "accuracy_failed"
         outcome["reason"] = reason
-        state.warm_replay_outcome = outcome
-        state.save(self.session_dir)
         log.info("warm-replay REJECTED on accuracy: %s", reason)
-        return False
+        return self._conclude_warm_replay(outcome, Verdict.REVERTED)
 
     # ---- warm-replay timeline recording ----------------------------------
     # The replay spans two ticks: one enqueues the task, a later one harvests it.
@@ -2085,21 +2069,27 @@ class PreludePhase(CoordinatorCollaborator):
         would leave a settled replay reading as still in flight.
 
         Returns:
-            The settlement verdict, read off the outcome status the settling
-            persisted.
+            The settlement verdict the settling ruled.
         """
         recorder = self._warm_replay_timeline(task)
         try:
-            self._settle_warm_replay(result, task=task, recorder=recorder)
+            verdict = self._settle_warm_replay(result, task=task, recorder=recorder)
         except BaseException as exc:
             if recorder is not None:
                 recorder.finish_crashed(exc)
             raise
-        outcome = self.shared_state.warm_replay_outcome
         if recorder is not None:
-            recorder.finish(outcome)
-        event_status = STATUS_BY_OUTCOME.get(str((outcome or {}).get("status") or ""), "failed")
-        return _VERDICT_BY_WARM_REPLAY_EVENT_STATUS.get(event_status, Verdict.FAILED)
+            recorder.finish(self.shared_state.warm_replay_outcome)
+        return verdict
+
+    def _conclude_warm_replay(self, outcome: dict, verdict: Verdict, *, clear_pending: bool = False) -> Verdict:
+        """Persist the settled outcome, the one way every settlement ends."""
+        state = self.shared_state
+        if clear_pending:
+            state.warm_replay_pending = {}
+        state.warm_replay_outcome = outcome
+        state.save(self.session_dir)
+        return verdict
 
     def _settle_warm_replay(
         self,
@@ -2107,7 +2097,7 @@ class PreludePhase(CoordinatorCollaborator):
         *,
         task: "Task | None",
         recorder: Any,
-    ) -> None:
+    ) -> Verdict:
         """Settle a combined Recipe+Kernel replay onto an outcome.
 
         Measured uplift promotes the warm config onto ``optimization_stack`` and
@@ -2125,27 +2115,23 @@ class PreludePhase(CoordinatorCollaborator):
         expected_gain = float(outcome.get("expected_gain_pct") or 0.0)
         if not isinstance(result, dict):
             if not self._require_combined_warm_rollback({}, task, outcome, recorder):
-                return
+                return Verdict.FAILED
             outcome["status"] = "failed"
             outcome["reason"] = "non_dict_result"
-            state.warm_replay_outcome = outcome
-            state.save(self.session_dir)
-            return
+            return self._conclude_warm_replay(outcome, Verdict.FAILED)
         status = str(result.get("status") or "")
         if status != "succeeded":
             if not self._require_combined_warm_rollback(result, task, outcome, recorder):
-                return
+                return Verdict.FAILED
             outcome["status"] = "failed"
             outcome["error_class"] = str(result.get("error_class") or "")
             outcome["reason"] = str(result.get("error") or result.get("reason") or "")[:240]
-            state.warm_replay_outcome = outcome
-            state.save(self.session_dir)
             log.info(
                 "warm-replay failed (status=%s, error_class=%s)",
                 status,
                 outcome.get("error_class"),
             )
-            return
+            return self._conclude_warm_replay(outcome, Verdict.FAILED)
         tput_raw = result.get("output_throughput")
         try:
             tput = float(tput_raw) if tput_raw is not None else 0.0
@@ -2180,12 +2166,10 @@ class PreludePhase(CoordinatorCollaborator):
                     threshold=baseline_tput,
                 )
             if not self._require_combined_warm_rollback(result, task, outcome, recorder):
-                return
+                return Verdict.FAILED
             outcome["status"] = "failed"
             outcome["reason"] = f"invalid_tput tput={single_round_tput} baseline={baseline_tput}"
-            state.warm_replay_outcome = outcome
-            state.save(self.session_dir)
-            return
+            return self._conclude_warm_replay(outcome, Verdict.FAILED)
         if recorder is not None:
             recorder.record_gate(
                 GATE_TPUT_VALID,
@@ -2226,14 +2210,12 @@ class PreludePhase(CoordinatorCollaborator):
                     reason="image-quality gate failed vs baseline reference",
                 )
             if not self._require_combined_warm_rollback(result, task, outcome, recorder):
-                return
+                return Verdict.FAILED
             outcome["status"] = "quality_failed"
             outcome["reason"] = "image-quality gate failed vs baseline reference"
             outcome["quality_gate"] = qg
-            state.warm_replay_outcome = outcome
-            state.save(self.session_dir)
             log.info("warm-replay REJECTED by quality gate: %s", qg)
-            return
+            return self._conclude_warm_replay(outcome, Verdict.REVERTED)
         # A replayed config lands on ``current_best``, so every later
         # measurement in the session is taken against it. Promoting on
         # throughput alone selects for garbage: breaking the numerics is itself
@@ -2242,8 +2224,8 @@ class PreludePhase(CoordinatorCollaborator):
             # Only recorded when a gate existed to rule, which is how a reader
             # tells "passed quality" from "quality did not apply".
             recorder.record_gate(GATE_QUALITY, passed=True, reason="no quality regression vs baseline reference")
-        if not self._warm_replay_accuracy_ok(result, task, outcome, recorder):
-            return
+        if (accuracy_verdict := self._judge_warm_replay_accuracy(result, task, outcome, recorder)) is not None:
+            return accuracy_verdict
         if recorder is not None:
             # Restated now that the gate has read the scores onto the outcome,
             # so the score sits beside the reference it was judged against.
@@ -2259,7 +2241,6 @@ class PreludePhase(CoordinatorCollaborator):
             )
         result["combined_gain_pct"] = round(measured_gain, 3)
         decision_params = (task.params if task is not None else {}) or {}
-        combined_current_contract = bool(decision_params.get("combined_current_contract"))
         if recorder is not None:
             # Recorded before the keep ruling, so a replay that measured and
             # lost still states what lost.
@@ -2268,28 +2249,15 @@ class PreludePhase(CoordinatorCollaborator):
                 extra_envs=dict(decision_params.get("extra_envs") or {}),
             )
             self._record_warm_patch_apply_items(recorder, result)
-        keep_threshold = 0.0
-        if combined_current_contract:
-            raw_threshold = decision_params.get("combined_keep_threshold_pct")
-            default_threshold = _phase_state.resolve_keep_threshold(self.shared_state)
-            try:
-                keep_threshold = float(raw_threshold) if raw_threshold is not None else default_threshold
-            except (TypeError, ValueError):
-                keep_threshold = default_threshold
-            if not math.isfinite(keep_threshold):
-                keep_threshold = default_threshold
-        # Local legacy replay keeps any positive gain.
-        reproduced = measured_gain >= keep_threshold if combined_current_contract else measured_gain > 0
+        keep_threshold = _phase_state.resolve_keep_threshold(state)
+        graded = resolve_graded_comparison(state, result, keep_threshold_pct=keep_threshold, anchor_tput=baseline_tput)
+        reproduced = graded.verdict == VERDICT_KEEP
         outcome["keep_threshold_pct"] = keep_threshold
         if recorder is not None:
             recorder.record_gate(
                 GATE_KEEP_THRESHOLD,
                 passed=reproduced,
-                reason=(
-                    "cleared the approved kernel replay threshold"
-                    if combined_current_contract
-                    else "legacy local replay keeps any positive gain"
-                ),
+                reason=f"graded on {graded.objective}: {graded.verdict}",
                 observed=measured_gain,
                 threshold=keep_threshold,
             )
@@ -2313,7 +2281,7 @@ class PreludePhase(CoordinatorCollaborator):
                     outcome,
                     recorder,
                 ):
-                    return
+                    return Verdict.FAILED
                 outcome["status"] = "promotion_failed"
                 outcome["reason"] = str(promotion.get("failure") or "validated Recipe checkout promotion failed")
                 outcome["recipe_checkout_promotion"] = promotion
@@ -2323,9 +2291,7 @@ class PreludePhase(CoordinatorCollaborator):
                     "validation": "combined_recipe_kernel",
                 }
                 outcome["kernel"] = kernel_outcome
-                state.warm_replay_outcome = outcome
-                state.save(self.session_dir)
-                return
+                return self._conclude_warm_replay(outcome, Verdict.FAILED)
             promoted_checkout = (
                 str(promotion.get("target_repo") or "").strip() if promotion.get("status") == "promoted" else ""
             )
@@ -2372,9 +2338,7 @@ class PreludePhase(CoordinatorCollaborator):
                     measured_gain,
                     task,
                 )
-                state.warm_replay_outcome = outcome
-                state.save(self.session_dir)
-                return
+                return self._conclude_warm_replay(outcome, Verdict.REFUSED)
             if recorder is not None:
                 recorder.record_gate(
                     GATE_PARAMS_PRESENT,
@@ -2440,18 +2404,13 @@ class PreludePhase(CoordinatorCollaborator):
             ):
                 # Cleared the keep threshold against the baseline yet did not
                 # beat the adopted configuration on its graded objective.
-                if not self._reject_warm_replay_as_drift(
+                return self._reject_warm_replay_as_drift(
                     result,
                     task,
                     outcome,
                     recorder,
                     reason=f"measured {measured_gain:+.2f}% over baseline but current_best refused the lift",
-                ):
-                    return
-                state.warm_replay_pending = {}
-                state.warm_replay_outcome = outcome
-                state.save(self.session_dir)
-                return
+                )
             if promoted_checkout:
                 outcome["active_framework_root"] = promoted_checkout
                 # Resume re-points $INFERENCEX_PATH at this checkout, and stops the run when it has since vanished.
@@ -2469,10 +2428,7 @@ class PreludePhase(CoordinatorCollaborator):
                     "warm-replay promote: stack already carries the entry; "
                     "skipping duplicate push (likely resume mid-promote)",
                 )
-                state.warm_replay_pending = {}
-                state.warm_replay_outcome = outcome
-                state.save(self.session_dir)
-                return
+                return self._conclude_warm_replay(outcome, Verdict.ADOPTED, clear_pending=True)
             if recorder is not None:
                 recorder.record_promotion(
                     promoted_checkout=promoted_checkout,
@@ -2500,7 +2456,7 @@ class PreludePhase(CoordinatorCollaborator):
                         iter=int(state.tick or 0),
                         kind=KIND_OTHER,
                         change=f"warm_replay({outcome.get('warm_recipe_tier', '?')}): {warm_args}",
-                        outcome=OUTCOME_KEEP,
+                        outcome=derive_journal_outcome(Verdict.ADOPTED, result),
                         gain_pct=round(measured_gain, 3),
                         throughput_after=tput,
                         task_id=str(task.task_id if task is not None else ""),
@@ -2509,17 +2465,14 @@ class PreludePhase(CoordinatorCollaborator):
                 )
             except Exception:
                 log.exception("warm-replay journal append failed")
-        elif not self._reject_warm_replay_as_drift(
+            return self._conclude_warm_replay(outcome, Verdict.ADOPTED, clear_pending=True)
+        return self._reject_warm_replay_as_drift(
             result,
             task,
             outcome,
             recorder,
             reason=f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%",
-        ):
-            return
-        state.warm_replay_pending = {}
-        state.warm_replay_outcome = outcome
-        state.save(self.session_dir)
+        )
 
     def _reject_warm_replay_as_drift(
         self,
@@ -2529,14 +2482,13 @@ class PreludePhase(CoordinatorCollaborator):
         recorder: Any,
         *,
         reason: str,
-    ) -> bool:
+    ) -> Verdict:
         """Roll back a measured replay that is not adopted and settle it as ``drift``.
 
-        Returns ``False`` when the rollback failed; the outcome then already
-        carries ``rollback_failed``.
+        A rollback that failed settles as ``rollback_failed`` instead.
         """
         if not self._require_combined_warm_rollback(result, task, outcome, recorder):
-            return False
+            return Verdict.FAILED
         kernel_plan = (task.params or {}).get("warm_kernel_plan") if task is not None else []
         kernel_outcome = {
             "status": "reverted",
@@ -2551,7 +2503,7 @@ class PreludePhase(CoordinatorCollaborator):
         outcome["status"] = "drift"
         outcome["reason"] = reason
         log.info("warm-replay DRIFT: %s", reason)
-        return True
+        return self._conclude_warm_replay(outcome, Verdict.REVERTED, clear_pending=True)
 
     async def _maybe_enqueue_prelude_initial_analysis_after_baseline(
         self,
