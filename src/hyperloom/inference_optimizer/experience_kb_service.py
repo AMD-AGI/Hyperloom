@@ -176,7 +176,8 @@ def auto_push() -> None:
 
 
 def _summary(direction: str, report: dict[str, JsonValue]) -> str:
-    counts = ", ".join(f"{report[key]} {key}" for key in ("created", "unchanged", "skipped"))
+    keys = ("created", "unchanged", "skipped", *(("held_back",) if direction == "push" else ()))
+    counts = ", ".join(f"{report[key]} {key}" for key in keys)
     rejected = report["rejected"] if isinstance(report["rejected"], list) else []
     line = f"Experience KB {direction} with {report['global_url']}: {counts}, {len(rejected)} rejected"
     return line if report["status"] == "completed" else f"{line}; stopped: {report.get('error', '')}"

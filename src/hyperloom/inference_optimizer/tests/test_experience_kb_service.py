@@ -184,6 +184,7 @@ def _push_report(**overrides: Any) -> dict[str, Any]:
         "created": 2,
         "unchanged": 0,
         "skipped": 0,
+        "held_back": 1,
         "rejected": [],
         **overrides,
     }
@@ -206,7 +207,7 @@ def test_auto_push_is_off_until_the_workspace_opts_in(monkeypatch, caplog) -> No
     _opt_into_auto_push(monkeypatch)
     with caplog.at_level(logging.INFO):
         experience_kb_service.auto_push()
-    assert "push with https://global.example: 2 created, 0 unchanged, 0 skipped, 0 rejected" in caplog.text
+    assert "push with https://global.example: 2 created, 0 unchanged, 0 skipped, 1 held_back, 0 rejected" in caplog.text
 
 
 @pytest.mark.parametrize(
