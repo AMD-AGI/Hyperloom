@@ -14,7 +14,7 @@ import os
 import sqlite3
 import threading
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,7 +26,7 @@ from typing import Any, TextIO, cast
 from urllib.parse import parse_qs, urlsplit
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
-from hyperloom_kb.local_state import LABEL_MANUAL, LocalState, UnknownStateItem
+from hyperloom_kb.local_state import LABEL_BEFORE_PULL, LABEL_MANUAL, LocalState, UnknownStateItem
 from hyperloom_kb.knowledge_read import (
     AnthropicPlannerBackend,
     KnowledgeReadService,
@@ -75,6 +75,8 @@ READ_POLICY_VERSION = "shared-experience-read@v1"
 DEFAULT_HOME = Path("~/.local/share/hyperloom-kb").expanduser()
 # Held by the one service process that serves a home, for as long as it serves it.
 SERVICE_LOCK = "service.lock"
+# The home's identity: made when the home is first served and kept with its data wherever the home moves.
+IDENTITY_FILE = "identity.json"
 # A transport guard, not a data policy: Experiences of any size are stored.
 _MAX_REQUEST_BYTES = 256 * 1024 * 1024
 _READ_FIELDS = frozenset(
@@ -85,6 +87,20 @@ _WRITE_FIELDS = frozenset({"experience", "declaration"})
 
 class HTTPServiceError(ValueError):
     """Raised when a request or service configuration is invalid."""
+
+
+def _identity(home: Path) -> str:
+    path = home / IDENTITY_FILE
+    try:
+        return str(json.loads(path.read_text(encoding="utf-8"))["kb_id"])
+    except FileNotFoundError:
+        pass
+    home.mkdir(parents=True, exist_ok=True)
+    kb_id = f"kb-{uuid.uuid4().hex}"
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps({"kb_id": kb_id, "created_at": _utc_now()}) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+    return kb_id
 
 
 def _canonical(value: Any) -> str:
@@ -249,6 +265,15 @@ class ExperienceIndex:
             ).fetchall()
         return frozenset(str(row["experience_id"]) for row in rows)
 
+    def head(self, schema_ref: str | None) -> int:
+        """The last write position of one schema or, with ``schema_ref=None``, of every schema; 0 before any write."""
+
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT MAX(sequence) FROM experiences WHERE (? IS NULL OR schema_ref = ?)", (schema_ref, schema_ref)
+            ).fetchone()
+        return int(row[0] or 0)
+
     def page(
         self,
         schema_ref: str | None,
@@ -305,9 +330,12 @@ class ExperienceHTTPService:
         *,
         global_kb: RemoteClient | None = None,
         config_digest: str = "",
+        name: str = "",
     ) -> None:
         self.config = config
         self.declaration = declaration
+        self.name = name
+        self.kb_id = _identity(config.home)
         self._config_digest = config_digest
         canonical_root = config.home / "canonical"
         self._store = LocalExperienceStore(canonical_root)
@@ -589,7 +617,15 @@ class ExperienceHTTPService:
             for sequence, experience in records
             if self._listed(experience, include_excluded)
         ]
-        return {"items": items, "next_cursor": next_cursor, "has_more": has_more}
+        page: dict[str, JsonValue] = {
+            "items": items,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+            "head": self._index.head(schema_ref),
+        }
+        if schema_ref is not None:
+            page["declaration"] = self.declaration_for(schema_ref).to_dict()
+        return page
 
     def _schema_ref(self, schema_ref: str | None) -> str:
         return self.declaration_for(schema_ref or self.declaration.schema_ref).schema_ref
@@ -651,13 +687,25 @@ class ExperienceHTTPService:
     def push(self) -> dict[str, JsonValue]:
         return self._sync.push()
 
-    def pull(self) -> dict[str, JsonValue]:
-        return self._sync.pull()
+    def pull(self, schema_ref: str) -> dict[str, JsonValue]:
+        return self._sync.pull(schema_ref)
+
+    def begin_pull(self, schema_ref: str) -> dict[str, JsonValue] | None:
+        with self._write_lock:
+            saved = self._state.save_if_modified(schema_ref, self._stored_ids(schema_ref), LABEL_BEFORE_PULL)
+        return None if saved is None else saved.to_dict()
+
+    def bring_in(self, schema_ref: str, experience_ids: Collection[str]) -> None:
+        with self._write_lock:
+            self._state.bring_in(schema_ref, experience_ids)
+            self._refresh(self.declaration_for(schema_ref))
 
     def health(self) -> dict[str, JsonValue]:
         counts = {schema_ref: len(view.visible_experience_ids) for schema_ref, view in sorted(self._views.items())}
         return {
             "status": "ok",
+            "kb_id": self.kb_id,
+            "name": self.name,
             "schema_ref": self.declaration.schema_ref,
             "experience_count": sum(counts.values()),
             "schemas": dict(counts),
@@ -735,9 +783,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if self._dispatch_state(app, parsed.path, query):
             return
-        if self.command == "POST" and parsed.path in ("/v1/push", "/v1/pull"):
+        if self.command == "POST" and parsed.path == "/v1/push":
             _reject_unknown(self._body(), frozenset())
-            self._write(HTTPStatus.OK, app.push() if parsed.path == "/v1/push" else app.pull())
+            self._write(HTTPStatus.OK, app.push())
+            return
+        if self.command == "POST" and parsed.path == "/v1/pull":
+            body = self._body()
+            _reject_unknown(body, frozenset({"schema_ref"}))
+            self._write(HTTPStatus.OK, app.pull(_required_text(body.get("schema_ref"), "schema_ref")))
             return
         if self.command == "POST" and parsed.path == "/v1/read":
             body = self._body()
@@ -898,6 +951,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--home", type=Path, default=DEFAULT_HOME)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument("--name", default="", help="A display name for this service; its identity stays its kb_id.")
     parser.add_argument(
         "--seed-jsonl",
         type=Path,
@@ -927,6 +981,7 @@ def main(argv: list[str] | None = None) -> int:
             planner,
             global_kb=None if settings.global_kb is None else RemoteClient(settings.global_kb),
             config_digest=settings.digest(),
+            name=args.name,
         )
         for seed in args.seed_jsonl:
             log.info("seeded %s: %s", seed, _canonical(app.seed(seed)))

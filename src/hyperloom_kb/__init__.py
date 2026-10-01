@@ -61,6 +61,7 @@ from hyperloom_kb.query_view import (
     repeat_group_key,
 )
 from hyperloom_kb.remote import (
+    ExportPage,
     ListPage,
     RemoteClient,
     RemoteClientError,
@@ -184,6 +185,7 @@ __all__ = [
     "ExperienceService",
     "ExperienceStatus",
     "ExperienceStore",
+    "ExportPage",
     "FieldDeclaration",
     "FieldKind",
     "GLOBAL_TOKEN_ENV",

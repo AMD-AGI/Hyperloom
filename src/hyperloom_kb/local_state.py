@@ -25,7 +25,8 @@ from hyperloom_kb.schema import JsonValue
 
 LABEL_MANUAL = "manual"
 LABEL_BEFORE_RESTORE = "before_restore"
-_AUTOMATIC_NAMES = {LABEL_BEFORE_RESTORE: "before restore"}
+LABEL_BEFORE_PULL = "before_pull"
+_AUTOMATIC_NAMES = {LABEL_BEFORE_RESTORE: "before restore", LABEL_BEFORE_PULL: "before pull"}
 
 
 class UnknownStateItem(LookupError):
@@ -322,8 +323,18 @@ class LocalState:
             )
         return saved
 
+    def bring_in(self, schema_ref: str, experience_ids: Collection[str]) -> None:
+        """Put stored Experiences a restore set outside back into the state; their exclusions stand."""
+
+        with self._connection() as connection:
+            connection.executemany(
+                "DELETE FROM outside WHERE schema_ref = ? AND experience_id = ?",
+                ((schema_ref, experience_id) for experience_id in experience_ids),
+            )
+
 
 __all__ = [
+    "LABEL_BEFORE_PULL",
     "LABEL_BEFORE_RESTORE",
     "LABEL_MANUAL",
     "Label",

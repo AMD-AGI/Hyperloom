@@ -253,8 +253,10 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
     assert read.experiences[0]["why_matched"]
     assert [item["experience_id"] for item in page.items] == [experience.id]
     assert "score" not in page.items[0]
+    assert str(health.pop("kb_id")).startswith("kb-")
     assert health == {
         "status": "ok",
+        "name": "",
         "schema_ref": schema.schema_ref,
         "experience_count": 1,
         "schemas": {schema.schema_ref: 1},
