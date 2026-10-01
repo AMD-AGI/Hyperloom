@@ -330,21 +330,22 @@ def test_a_later_phase_entry_supersedes_the_resume_boundary():
 def test_budget_exit_evidence_reports_the_time_it_judged_on():
     """A cap decided on cumulative time must not be evidenced by one entry's clock."""
     state = _kernel_state()
+    # Kernel work stays pending so the budget guard, not the settled-kernel exit, decides.
+    state.pending_kernel_integrations = {
+        "i1": {"kernel_id": "k1", "status": "pending", "source_file": "a.py", "task_key": "t1"},
+    }
     # Two entries already banked, a third under way: no single entry is over the cap, the total is.
     state.phase_elapsed_totals = {ps.PHASE_KERNEL_AGENT: 2 * ENTRY_SEC}
     state.phase = ps.PHASE_KERNEL_AGENT
     state.phase_started_unix = T0
     state.phase_started_ts = T0_ISO
-    now = T0 + ENTRY_SEC
 
-    _out = ps.compute_next_phase(state, now_unix=now)
-    result = None if _out is None else (_out[1], _out[2])
+    out = ps.compute_next_phase(state, now_unix=T0 + ENTRY_SEC)
 
-    assert result is not None
-    reason, evidence = result
-    assert reason in {"kernel_budget_cap", "kernel_phase_budget_exhausted", "kernel_no_more_leverage"}
-    if reason in {"kernel_budget_cap", "kernel_phase_budget_exhausted"}:
-        assert evidence["entry_elapsed_seconds"] == pytest.approx(ENTRY_SEC)
-        assert evidence["cumulative_elapsed_seconds"] == pytest.approx(3 * ENTRY_SEC)
-        assert evidence["cumulative_elapsed_seconds"] > KERNEL_CAP_SEC
-        assert evidence["entry_elapsed_seconds"] < KERNEL_CAP_SEC
+    assert out is not None
+    target, reason, evidence = out
+    assert (target, reason) == (ps.PHASE_SWEEP, "kernel_budget_cap")
+    assert evidence["entry_elapsed_seconds"] == pytest.approx(ENTRY_SEC)
+    assert evidence["cumulative_elapsed_seconds"] == pytest.approx(3 * ENTRY_SEC)
+    assert evidence["cumulative_elapsed_seconds"] > KERNEL_CAP_SEC
+    assert evidence["entry_elapsed_seconds"] < KERNEL_CAP_SEC
