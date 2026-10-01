@@ -99,6 +99,7 @@ class AB:
     min_free_gb: float = 50.0
     on_interrupt: str = "rerun"
     poll_sec: float = 300.0
+    stop_ray: bool = False
 
 
 @dataclass(frozen=True)
@@ -239,6 +240,7 @@ def _ab(raw: dict) -> AB:
         min_free_gb=float(s.get("min_free_gb", 50.0)),
         on_interrupt=str(s.get("on_interrupt", "rerun")),
         poll_sec=float(s.get("poll_sec", 300.0)),
+        stop_ray=bool(s.get("stop_ray", False)),
     )
     if ab.on_interrupt not in ("rerun", "keep"):
         raise ConfigError("ab.on_interrupt must be 'rerun' or 'keep'")

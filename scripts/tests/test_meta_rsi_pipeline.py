@@ -59,6 +59,9 @@ class TestConfig:
         with pytest.raises(ConfigError, match="snapshot"):
             parse_config(rsi_config_dict)
 
+    def test_stopping_a_ray_cluster_is_opt_in(self, rsi_config_dict):
+        assert parse_config(rsi_config_dict).ab.stop_ray is False
+
 
 class TestState:
     def test_records_survive_a_reload(self, tmp_path):

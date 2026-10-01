@@ -5,8 +5,13 @@
 
 Arms share the host's framework installs (sessions patch vLLM/aiter in place) and Magpie stops
 every vLLM server on the host after a benchmark, so arms never overlap. Before each arm the
-snapshot is restored and compile caches are cleared, so no arm inherits another's work. The
-driver never kills processes it did not start: leftover servers make the step wait, then fail.
+snapshot (when configured) is restored and the configured compile caches are cleared, so no arm
+inherits another's work. An arm is not launched while a Ray cluster is reachable from its
+environment: Hyperloom would reuse it, and its workers keep the environment, and so the code
+tree, of whoever started it. When an arm's optimizer has exited, the driver stops the processes
+whose environment carries that arm's USER_DATA_PATH (its Ray daemons and servers). It stops
+nothing else: other leftover servers make the step wait, then fail, and a Ray cluster the round
+did not start is stopped only under ``ab.stop_ray``.
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 
@@ -47,10 +53,27 @@ def version(name):
         return None
 print(json.dumps({name: version(name) for name in sys.argv[1:]}))
 """
+RAY_PROBE = """
+import subprocess, sys
+from hyperloom.agents.kernel.tools.backends import ray_runtime
+if sys.argv[1:] == ["stop"]:
+    subprocess.run(["ray", "stop", "--force"], timeout=ray_runtime.DEFAULT_RAY_STOP_TIMEOUT_SEC, check=False)
+print("reachable" if ray_runtime.ray_status_ok() else "unreachable")
+"""
+LEFTOVER_POLL_SEC = 1.0
 
 
 def arm_dir(ctx: RoundContext, name: str) -> Path:
     return ctx.config.ab.sessions_dir / name
+
+
+def _live(proc: Path) -> bool:
+    """Whether a /proc entry is a running process rather than a zombie."""
+    return (proc / "stat").read_text().rsplit(")", 1)[-1].split()[0] != "Z"
+
+
+def _cmdline(proc: Path) -> str:
+    return (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="ignore").strip()
 
 
 def busy_processes() -> list[str]:
@@ -58,9 +81,9 @@ def busy_processes() -> list[str]:
     found = []
     for proc in Path("/proc").glob("[0-9]*"):
         try:
-            if (proc / "stat").read_text().rsplit(")", 1)[-1].split()[0] == "Z":
+            if not _live(proc):
                 continue
-            cmdline = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="ignore").strip()
+            cmdline = _cmdline(proc)
         except OSError:
             continue
         if any(marker in cmdline for marker in BUSY_MARKERS):
@@ -72,12 +95,71 @@ def optimizer_alive(pid: int, udp: Path) -> bool:
     """Whether ``pid`` is still this arm's optimizer: not a zombie, and not a pid reused by anything else."""
     proc = Path("/proc") / str(pid)
     try:
-        if (proc / "stat").read_text().rsplit(")", 1)[-1].split()[0] == "Z":
+        if not _live(proc):
             return False
-        cmdline = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="ignore")
+        cmdline = _cmdline(proc)
     except OSError:
         return False
     return OPTIMIZER_MARKER in cmdline and str(udp / "optimizer_runs") in cmdline
+
+
+def arm_processes(udp: Path) -> list[int]:
+    """Live processes whose environment carries this arm's USER_DATA_PATH, i.e. everything the arm started."""
+    entry = f"USER_DATA_PATH={udp}".encode()
+    found = []
+    for proc in Path("/proc").glob("[0-9]*"):
+        try:
+            if _live(proc) and entry in (proc / "environ").read_bytes().split(b"\0"):
+                found.append(int(proc.name))
+        except OSError:
+            continue
+    return found
+
+
+def stop_arm_processes(ctx: RoundContext, udp: Path) -> None:
+    """Stop what an arm left running once its optimizer is gone: TERM, then KILL after the grace period."""
+    from hyperloom.agents.kernel.tools.backends.ray_runtime import DEFAULT_RAY_STOP_TIMEOUT_SEC
+
+    pids = arm_processes(udp)
+    if pids:
+        ctx.log(f"stopping {len(pids)} processes left by the arm in {udp}")
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                continue
+        waited = 0.0
+        while pids and waited < DEFAULT_RAY_STOP_TIMEOUT_SEC:
+            ctx.sleep(LEFTOVER_POLL_SEC)
+            waited += LEFTOVER_POLL_SEC
+            pids = arm_processes(udp)
+        if not pids:
+            return
+    raise StepFailed(f"processes left by the arm in {udp} survived SIGKILL: {pids}")
+
+
+def ray_reachable(ctx: RoundContext, env: dict[str, str], tree: Path, *mode: str) -> bool:
+    """Hyperloom's own reachability test (``ray_status_ok``), run in the arm's environment and tree."""
+    probe = ctx.runner.run(
+        [str(ctx.config.ab.python), "-c", RAY_PROBE, *mode], cwd=tree, env=env, log=ctx.path("logs", "ab.log")
+    )
+    return probe.stdout.strip().splitlines()[-1:] == ["reachable"]
+
+
+def ensure_no_ray(ctx: RoundContext, env: dict[str, str], tree: Path) -> None:
+    """Refuse to launch an arm that would reuse a running Ray cluster, or stop it under ab.stop_ray."""
+    if not ray_reachable(ctx, env, tree):
+        return
+    if not ctx.config.ab.stop_ray:
+        raise StepFailed(
+            "a Ray cluster is reachable from the arm's environment; the arm would reuse it, and its workers "
+            "keep the environment (and code tree) of whoever started it. Stop it, or set ab.stop_ray: true "
+            "on a node this round has to itself"
+        )
+    ctx.log("ab.stop_ray: running `ray stop --force`, which stops every Ray cluster on this node")
+    if ray_reachable(ctx, env, tree, "stop"):
+        raise StepFailed("a Ray cluster is still reachable after `ray stop --force`; stop it before the next arm")
 
 
 def arm_env(ctx: RoundContext, arm: Arm, udp: Path, tree: Path) -> dict[str, str]:
@@ -205,11 +287,19 @@ def swap_in(src: Path, dst: Path) -> None:
         shutil.rmtree(old)
 
 
-def restore_snapshot(snapshot_dir: Path, clear_caches: tuple[Path, ...]) -> None:
+def restore_snapshot(snapshot_dir: Path) -> None:
     for entry in json.loads((snapshot_dir / "manifest.json").read_text()):
         swap_in(snapshot_dir / entry["copy"], Path(entry["source"]))
-    for cache in clear_caches:
-        shutil.rmtree(cache, ignore_errors=True)
+
+
+def clear_caches(caches: tuple[Path, ...]) -> None:
+    for cache in caches:
+        if not cache.exists():
+            continue
+        try:
+            shutil.rmtree(cache)
+        except OSError as exc:
+            raise StepFailed(f"cannot clear {cache} before the arm: {exc}") from exc
 
 
 def preflight(ctx: RoundContext) -> list[str]:
@@ -263,18 +353,23 @@ def run_arm(ctx: RoundContext, arm: Arm, rec: dict, scenario: list[str]) -> None
     ab, udp = ctx.config.ab, arm_dir(ctx, arm.name)
     proc = None
     if rec["status"] == "running" and not optimizer_alive(int(rec["pid"]), udp):
+        stop_arm_processes(ctx, udp)
         rec["status"] = arm_outcome(udp)
         return
     if rec["status"] != "running":
         wait_idle(ctx)
+        tree = ctx.worktree(arm.tree)
+        ensure_no_ray(ctx, arm_env(ctx, arm, udp, tree), tree)
         if ab.snapshot_dir:
-            restore_snapshot(ab.snapshot_dir, ab.clear_caches)
+            restore_snapshot(ab.snapshot_dir)
+        clear_caches(ab.clear_caches)
         proc = launch(ctx, arm, scenario)
         rec.update(status="running", pid=proc.pid, attempt=rec["attempt"] + 1, started=utc_now())
         ctx.state.save()
         ctx.log(f"arm {arm.name}: started (pid {proc.pid})")
     while (proc.poll() is None) if proc else optimizer_alive(int(rec["pid"]), udp):
         ctx.sleep(ab.poll_sec)
+    stop_arm_processes(ctx, udp)
     rec.update(status=arm_outcome(udp), ended=utc_now())
 
 

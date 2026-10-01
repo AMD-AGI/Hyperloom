@@ -1,17 +1,21 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract tests for the A/B step: arm environment and arguments, snapshot, outcome and rerun policy."""
+"""Contract tests for the A/B step: arm environment and arguments, snapshot and caches, the launch
+and resume path, Ray reuse, leftover processes, outcome and rerun policy."""
 
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import sys
+import time
 
 import pytest
 from meta_rsi.rsi.config import Arm, parse_config
-from meta_rsi.rsi.pipeline import RoundContext
+from meta_rsi.rsi.pipeline import RoundContext, StepFailed
 from meta_rsi.rsi.state import RoundState
 from meta_rsi.rsi.steps import ab
 
@@ -27,6 +31,24 @@ def _session(udp, **state) -> None:
     sess = udp / "Qwen" / "20261001T000000Z-abc"
     sess.mkdir(parents=True)
     (sess / "state.json").write_text(json.dumps(state))
+
+
+class RayProbe:
+    """Stands in for the arm interpreter running ab.RAY_PROBE: one answer per call, modes recorded."""
+
+    def __init__(self, *answers: str):
+        self.answers, self.modes = list(answers), []
+
+    def run(self, cmd, **_kwargs):
+        self.modes.append(tuple(cmd[3:]))
+        return subprocess.CompletedProcess(cmd, 0, f"{self.answers.pop(0)}\n", "")
+
+
+class Exited:
+    pid = 4242
+
+    def poll(self) -> int:
+        return 0
 
 
 class TestArmSetup:
@@ -85,20 +107,132 @@ class TestArmSetup:
         assert f"export MAGPIE_PYTHON='{tmp_path / 'python'}'" in text
 
 
-class TestSnapshot:
-    def test_a_restore_puts_back_what_the_snapshot_recorded_and_clears_caches(self, tmp_path):
-        framework, cache = tmp_path / "site" / "vllm", tmp_path / "cache"
+class TestSnapshotAndCaches:
+    def test_a_restore_puts_back_what_the_snapshot_recorded(self, tmp_path):
+        framework = tmp_path / "site" / "vllm"
         framework.mkdir(parents=True)
         (framework / "ops.py").write_text("original\n")
         assert ab.take_snapshot(tmp_path / "snap", (framework,)) is True
         assert ab.take_snapshot(tmp_path / "snap", (framework,)) is False
         (framework / "ops.py").write_text("patched by a session\n")
         (framework / "extra.py").write_text("added\n")
-        cache.mkdir()
-        ab.restore_snapshot(tmp_path / "snap", (cache,))
+        ab.restore_snapshot(tmp_path / "snap")
         assert (framework / "ops.py").read_text() == "original\n"
-        assert not (framework / "extra.py").exists() and not cache.exists()
+        assert not (framework / "extra.py").exists()
         assert not list(framework.parent.glob(".vllm.rsi-*"))
+
+    def test_a_cache_that_cannot_be_removed_stops_the_step(self, tmp_path, monkeypatch):
+        cache = tmp_path / "cache"
+        cache.mkdir()
+
+        def refuse(path):
+            raise PermissionError(13, "Permission denied", str(path))
+
+        monkeypatch.setattr(ab.shutil, "rmtree", refuse)
+        with pytest.raises(StepFailed, match="cannot clear"):
+            ab.clear_caches((cache, tmp_path / "absent"))
+
+
+class TestRunArm:
+    def test_a_fresh_arm_starts_on_cleared_caches_without_a_snapshot_and_its_leftovers_are_stopped(
+        self, rsi_config_dict, tmp_path, monkeypatch
+    ):
+        cache = tmp_path / "triton-cache"
+        (cache / "kernel").mkdir(parents=True)
+        rsi_config_dict["ab"]["clear_caches"] = [str(cache)]
+        ctx = _ctx(rsi_config_dict)
+        ctx.runner = RayProbe("unreachable")
+        calls = []
+
+        def launch(c, arm, _scenario):
+            calls.append(("launch", cache.exists()))
+            _session(ab.arm_dir(c, arm.name), stop_reason="time_exhausted")
+            return Exited()
+
+        monkeypatch.setattr(ab, "wait_idle", lambda _c: calls.append("idle"))
+        monkeypatch.setattr(ab, "launch", launch)
+        monkeypatch.setattr(ab, "stop_arm_processes", lambda _c, udp: calls.append(("stop", udp.name)))
+        rec = {"status": "pending", "attempt": 0}
+        ab.run_arm(ctx, Arm("A", "base"), rec, SCENARIO)
+        assert calls == ["idle", ("launch", False), ("stop", "A")]
+        assert ctx.runner.modes == [()]
+        assert rec["status"] == "finished" and rec["attempt"] == 1 and rec["pid"] == Exited.pid
+
+    def test_a_reachable_ray_cluster_stops_the_launch(self, rsi_config_dict, monkeypatch):
+        ctx = _ctx(rsi_config_dict)
+        ctx.runner = RayProbe("reachable")
+        monkeypatch.setattr(ab, "wait_idle", lambda _c: None)
+        monkeypatch.setattr(ab, "launch", lambda *_a: pytest.fail("launched next to a reachable Ray cluster"))
+        with pytest.raises(StepFailed, match="Ray cluster is reachable"):
+            ab.run_arm(ctx, Arm("A", "base"), {"status": "pending", "attempt": 0}, SCENARIO)
+        assert ctx.runner.modes == [()]
+        assert not ab.arm_dir(ctx, "A").exists()
+
+    @pytest.mark.parametrize(("after_stop", "launched"), [("unreachable", True), ("reachable", False)])
+    def test_stop_ray_stops_the_cluster_and_launches_only_once_it_is_gone(
+        self, rsi_config_dict, monkeypatch, after_stop, launched
+    ):
+        rsi_config_dict["ab"]["stop_ray"] = True
+        ctx = _ctx(rsi_config_dict)
+        ctx.runner = RayProbe("reachable", after_stop)
+        started = []
+        monkeypatch.setattr(ab, "wait_idle", lambda _c: None)
+        monkeypatch.setattr(ab, "launch", lambda *_a: started.append(True) or Exited())
+        monkeypatch.setattr(ab, "stop_arm_processes", lambda _c, _udp: None)
+        rec = {"status": "pending", "attempt": 0}
+        if launched:
+            ab.run_arm(ctx, Arm("A", "base"), rec, SCENARIO)
+        else:
+            with pytest.raises(StepFailed, match="still reachable"):
+                ab.run_arm(ctx, Arm("A", "base"), rec, SCENARIO)
+        assert ctx.runner.modes == [(), ("stop",)]
+        assert started == ([True] if launched else [])
+
+    def test_a_resumed_arm_whose_optimizer_died_is_recorded_not_relaunched(self, rsi_config_dict, monkeypatch):
+        ctx = _ctx(rsi_config_dict)
+        _session(ab.arm_dir(ctx, "B"), stop_reason="time_exhausted")
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        stopped = []
+        monkeypatch.setattr(ab, "launch", lambda *_a: pytest.fail("a dead arm was relaunched"))
+        monkeypatch.setattr(ab, "stop_arm_processes", lambda _c, udp: stopped.append(udp.name))
+        rec = {"status": "running", "attempt": 1, "pid": dead.pid}
+        ab.run_arm(ctx, Arm("B", "candidate"), rec, SCENARIO)
+        assert rec["status"] == "finished" and rec["attempt"] == 1 and stopped == ["B"]
+
+
+class TestHostProcesses:
+    def test_only_processes_carrying_the_arms_user_data_path_are_stopped(self, rsi_config_dict):
+        ctx = _ctx(rsi_config_dict)
+        ctx.sleep = time.sleep
+        udp = ab.arm_dir(ctx, "A")
+        sleeper = [sys.executable, "-c", "import time; time.sleep(120)"]
+        mine = subprocess.Popen(sleeper, env={**os.environ, "USER_DATA_PATH": str(udp)})
+        other = subprocess.Popen(sleeper, env={**os.environ, "USER_DATA_PATH": f"{udp}-other"})
+        try:
+            assert mine.pid in ab.arm_processes(udp) and other.pid not in ab.arm_processes(udp)
+            ab.stop_arm_processes(ctx, udp)
+            assert mine.wait(timeout=10) == -signal.SIGTERM
+            assert other.poll() is None
+        finally:
+            for proc in (mine, other):
+                proc.kill()
+                proc.wait()
+
+    def test_leftover_servers_fail_the_step_after_the_idle_wait(self, rsi_config_dict, monkeypatch):
+        ctx = _ctx(rsi_config_dict)
+        naps = []
+        ctx.sleep = naps.append
+        monkeypatch.setattr(ab, "busy_processes", lambda: ["101: vllm serve /m/Qwen"])
+        with pytest.raises(StepFailed, match="vllm serve /m/Qwen"):
+            ab.wait_idle(ctx)
+        assert sum(naps) == ab.IDLE_WAIT_SEC
+
+    def test_an_idle_host_does_not_wait(self, rsi_config_dict, monkeypatch):
+        ctx = _ctx(rsi_config_dict)
+        ctx.sleep = lambda _s: pytest.fail("waited on an idle host")
+        monkeypatch.setattr(ab, "busy_processes", lambda: [])
+        ab.wait_idle(ctx)
 
 
 class TestArmOutcome:

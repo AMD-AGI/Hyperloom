@@ -58,6 +58,7 @@ ab:
     HYPERLOOM_TRACE_ANALYSIS_ROUTE: bypass
   min_free_gb: 50
   on_interrupt: rerun                     # or keep: compare an interrupted arm as it stands
+  stop_ray: false                         # true: `ray stop --force` a reachable cluster before an arm (node-wide)
 
 compare:
   router_log: ""                          # model router request log, for per-route request counts
