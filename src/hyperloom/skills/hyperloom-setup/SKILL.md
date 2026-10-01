@@ -475,9 +475,17 @@ PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.exper
 In `baremetal` mode, run `pull` once now so the first run already reads what
 the global KB holds for this workspace's schema. Each command prints one line
 with the global URL and the `created`, `unchanged`, `skipped`, and `rejected`
-counts, and exits 1 when it stopped early or rejected an Experience; report
-that line. A failure here does not block setup: report it and continue. In
-`docker` mode, tell the user the same commands run inside the container.
+counts, plus `held_back` for a push; a pull that labelled the state before it
+also names that label, and restoring it undoes the pull. Each exits 1 when it
+stopped early, was refused, or rejected an Experience; report that line. A
+failure here does not block setup: report it and continue. In `docker` mode,
+tell the user the same commands run inside the container.
+
+The same entry point also runs the `hyperloom-kb` skill's other commands on
+the workspace's service, such as
+`python3 -m hyperloom.inference_optimizer.experience_kb_service labels` or
+`restore <label_id>`, defaulting to this workspace's schema. Setup itself
+runs none of them.
 
 ## Step 6: Report Result
 

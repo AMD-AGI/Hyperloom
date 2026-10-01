@@ -141,6 +141,7 @@ quantization-agent = "hyperloom.agents.quantization.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
 # ``python -m kernelforge.cli`` directly; this is for interactive use.
 kernelforge = "kernelforge.cli:main"
+hyperloom-kb = "hyperloom_kb.cli:main"
 hyperloom-kb-serve = "hyperloom_kb.http_service:main"
 hyperloom-kb-collect = "hyperloom_kb.collect.cli:main"
 
@@ -209,6 +210,10 @@ exclude = [
 ".agents/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
 ".claude/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
 ".cursor/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
+# Operates any Experience KB service with the hyperloom-kb CLI: labels, restores, exclusions, sync.
+".agents/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
+".claude/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
+".cursor/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
 # Demo run skills chained from /hyperloom-setup.
 ".agents/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
