@@ -22,7 +22,7 @@ from hyperloom.orchestrator.kernel.conc_sweep import _budget_limited_without_val
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.actions.executors._gpu_pin import (
     _parse_server_arg_value,
-    _resolve_gpu_pin,
+    resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
 )
@@ -281,7 +281,7 @@ async def test_geak_harness_replay_uses_run_gpu_pin_and_recipe_identity(
         osl=16,
         conc=1,
     )
-    pin = _resolve_gpu_pin(recipe_envs=recipe_env, environ={})
+    pin = resolve_gpu_pin(recipe_envs=recipe_env, environ={})
     gpu_ids = _resolve_handoff_gpu_ids(gpu_pin=pin, tp=2)
     gpu_ids_space = _resolve_handoff_gpu_ids_space(gpu_pin=pin)
     assert gpu_ids == ("0,1" if pin_var == "ROCR_VISIBLE_DEVICES" else "4,5")

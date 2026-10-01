@@ -76,13 +76,13 @@ class TestForgeGemmHelperCoverage:
     def test_resolve_backend_requires_exact_kernel_order_forge(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("GEMM_TUNING_BACKEND", raising=False)
-        assert krh._resolve_gemm_tuning_backend({}) == "geak"
+        assert krh.resolve_gemm_tuning_backend({}) == "geak"
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
-        assert krh._resolve_gemm_tuning_backend({}) == "geak"
-        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "forge"}) == "geak"
-        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "unknown"}) == "geak"
+        assert krh.resolve_gemm_tuning_backend({}) == "geak"
+        assert krh.resolve_gemm_tuning_backend({"gemm_tuning_backend": "forge"}) == "geak"
+        assert krh.resolve_gemm_tuning_backend({"gemm_tuning_backend": "unknown"}) == "geak"
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-        assert krh._resolve_gemm_tuning_backend({}) == "forge"
+        assert krh.resolve_gemm_tuning_backend({}) == "forge"
 
     def test_parse_forge_gemm_sentinel(self):
         payload = {"status": "ok", "micro_decision": "candidate"}
