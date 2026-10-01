@@ -178,55 +178,13 @@ class MachinePhase(CoordinatorCollaborator):
         """Whether the optimisation phase is enabled for this run."""
         return bool(self.shared_state.framework_agent_phase_enabled)
 
-    async def _inflight_kernel_task_ids(self) -> tuple[str, ...]:
-        """Return the ids of queued/running tasks doing KERNEL-lane work."""
-        kinds = _phase_state.PHASE_ALLOWED_ACTIONS[_phase_state.PHASE_KERNEL_AGENT]
-        tasks = list(await self.tasks.queued()) + list(await self.tasks.running())
-        return tuple(
-            sorted(str(task.task_id) for task in tasks if str(getattr(task, "kind", "") or "").strip() in kinds)
-        )
-
-    async def _kernel_agent_in_flight(self) -> bool:
-        """Whether the ``kernel_agent`` task is queued or running."""
-        tasks = list(await self.tasks.queued()) + list(await self.tasks.running())
-        return any(task.kind == "kernel_agent" for task in tasks)
-
-    async def _track_kernel_idle_streak(self) -> None:
-        """Advance or reset the KERNEL idle-streak counters for this tick."""
-        state = self.shared_state
-        if str(state.phase or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
-            state.kernel_idle_ticks = 0
-            state.kernel_progress_fingerprint = ""
-            state.kernel_idle_since_unix = 0.0
-            return
-        import time as _time
-
-        now = _time.time()
-        inflight = await self._inflight_kernel_task_ids()
-        fingerprint = _phase_state.compute_kernel_progress_fingerprint(
-            state,
-            inflight_task_ids=inflight,
-        )
-        if fingerprint != str(state.kernel_progress_fingerprint or ""):
-            state.kernel_progress_fingerprint = fingerprint
-            state.kernel_idle_ticks = 0
-            state.kernel_idle_since_unix = now
-            return
-        if inflight or _phase_state.kernel_inline_step_running(state, now_unix=now):
-            state.kernel_idle_since_unix = now
-            return
-        # Only reachable after a tick that opened the streak above, so ``kernel_idle_since_unix`` is already stamped
-        # whenever the counter is non-zero — the pairing the guard's wall-clock floor relies on.
-        state.kernel_idle_ticks = int(state.kernel_idle_ticks or 0) + 1
-
     async def _advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick."""
         state = self.shared_state
-        await self._track_kernel_idle_streak()
+        kernel_facts = await self._coord.phase_kernel.exit_facts()
         optimize_enabled = self._optimize_enabled()
         # Only asked inside the phase: the query renews the open round's lease.
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
-        in_kernel = str(state.phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT
         enablement_in_flight = in_enablement and await self._coord.enablement_lane._enablement_in_flight()
         next_phase = _phase_state.compute_next_phase(
             state,
@@ -234,11 +192,8 @@ class MachinePhase(CoordinatorCollaborator):
             optimize_enabled=optimize_enabled,
             enablement_enabled=self._coord.enablement_lane._enablement_admitted(),
             enablement_in_flight=enablement_in_flight,
-            kernel_work_in_flight=in_kernel and await self._kernel_agent_in_flight(),
+            kernel_work_in_flight=kernel_facts.agent_in_flight,
         )
-        if str(state.phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
-            await self._coord.phase_internal._maybe_enqueue_explore_research_scout()
-            await self._coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
         await self._coord.phase_internal._maybe_enqueue_trajectory_reviewer()
         if next_phase is None:
             return
