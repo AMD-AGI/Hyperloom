@@ -13,7 +13,8 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from an_global import cost, pct, price_family
+from an_global import pct
+from metrics import cost_usd, price_family
 from round_env import recent_since, round_dir
 
 ERAS = ("recent", "earlier")
@@ -41,7 +42,7 @@ def run_cost(r: dict) -> tuple[float, dict]:
         model = max(models, key=models.get) if models else None
         if model in (None, "None"):
             model = sess_model
-        per[comp] = cost(tok, price_family(model))
+        per[comp] = cost_usd(tok, price_family(model))
     return sum(per.values()), per
 
 

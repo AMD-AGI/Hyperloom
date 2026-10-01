@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from meta_rsi import pulse
 from meta_rsi.compare_ab import compare
+from meta_rsi.metrics import cost_usd, price_family
 from meta_rsi.rsi.config import parse_config
 from meta_rsi.rsi.pipeline import RoundContext, StepFailed
 from meta_rsi.rsi.state import RoundState
@@ -106,6 +107,39 @@ class TestCompare:
         b = _arm(tmp_path / "B", 5.0, [_row("specialist", "glm-5-3", 1000, 100)])
         result = compare(a, b)
         assert result["B"]["cost_usd"] == 0.0 and result["B"]["glm_raw_tokens"] == 1100
+
+    def test_arms_that_never_validated_a_gain_fail_the_gain_test(self, tmp_path):
+        a = _arm(tmp_path / "A", None, [_row("orchestration", "claude-opus-5", 100, 10)], stop="baseline_failed")
+        b = _arm(tmp_path / "B", None, [_row("orchestration", "claude-opus-5", 10, 1)], stop="baseline_failed")
+        v = compare(a, b)["verdict"]
+        assert v["savings"] is True and v["gain_ok"] is False and v["pass"] is False
+
+    def test_a_model_outside_the_priced_families_stops_the_comparison(self, tmp_path):
+        a = _arm(tmp_path / "A", 5.0, [_row("orchestration", "claude-opus-5", 10, 1)])
+        b = _arm(tmp_path / "B", 5.0, [_row("specialist", "qwen3-coder", 10, 1)])
+        with pytest.raises(SystemExit, match="'qwen3-coder' names no single family"):
+            compare(a, b)
+
+
+@pytest.mark.parametrize(
+    ("model", "family"),
+    [
+        ("claude-opus-5", "opus"),
+        ("us.anthropic.claude-sonnet-4-5-v1:0", "sonnet"),
+        ("glm-5-3", "glm"),
+        ("gpt-5-codex", "gpt"),
+        ("Qwen3-Coder-480B-GPTQ", None),
+        ("claude", None),
+        (None, None),
+    ],
+)
+def test_a_model_names_its_price_family_as_one_of_its_parts(model, family):
+    assert price_family(model) == family
+
+
+def test_an_unpriced_model_costs_nothing_rather_than_an_opus_guess():
+    usage = {"input_tokens": 1_000_000}
+    assert cost_usd(usage, None) == 0.0 and cost_usd(usage, "opus") == 5.0
 
 
 class TestPulseExits:

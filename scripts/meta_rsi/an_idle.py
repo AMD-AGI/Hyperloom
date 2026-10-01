@@ -23,7 +23,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from an_global import cost, price_family, weighted
+from metrics import cost_usd, price_family, weighted
 from round_env import analysis_dir, bundles_dir
 
 HEARTBEATS = (0, 5, 15, 30)
@@ -113,7 +113,7 @@ def main() -> None:
             for r, dg in zip(rows, digests):
                 t = ts(r["ts"]) if r.get("ts") else 0.0
                 led_row = led.get(r.get("call_id"), {})
-                c = cost(led_row, price_family(led_row.get("model") or r.get("model")))
+                c = cost_usd(led_row, price_family(led_row.get("model") or r.get("model")))
                 w = weighted(led_row)
                 unchanged = prev_digest is not None and dg == prev_digest
                 due = hb > 0 and last_sent_ts is not None and (t - last_sent_ts) >= hb * 60

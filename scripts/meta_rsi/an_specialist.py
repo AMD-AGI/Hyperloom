@@ -22,25 +22,14 @@ import statistics as st
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from metrics import POLL, context_tokens, weighted
 from round_env import analysis_dir, bundles_dir
 
 READ_ONLY_TOOLS = {"Read", "Grep", "Glob", "LS"}
 READ_ONLY_BASH = re.compile(
     r"^\s*(cat|head|tail|grep|rg|ls|find|sed -n|wc|stat|file|tree|awk|git (log|show|diff|status|grep)|python3? -c|pip show|du|readlink|realpath|which|echo)\b"
 )
-POLL_BASH = re.compile(
-    r"\bsleep\s+\d|tail -[fF]\b|\bwatch\b|\bps\s+(-|aux)|rocm-smi|nvidia-smi|curl\s+-s[^|]*(health|v1/models)|heartbeat"
-)
 BIG_RESULT = 20000
-
-
-def w(u: dict) -> float:
-    return (
-        (u.get("input_tokens") or 0)
-        + 1.25 * (u.get("cache_creation_input_tokens") or 0)
-        + 0.1 * (u.get("cache_read_input_tokens") or 0)
-        + 5 * (u.get("output_tokens") or 0)
-    )
 
 
 def parse(path: Path) -> dict | None:
@@ -81,19 +70,14 @@ def parse(path: Path) -> dict | None:
     if not order:
         return None
     stats = Counter()
-    first = turns[order[0]]["usage"]
-    stats["first_ctx"] = (
-        (first.get("input_tokens") or 0)
-        + (first.get("cache_creation_input_tokens") or 0)
-        + (first.get("cache_read_input_tokens") or 0)
-    )
+    stats["first_ctx"] = context_tokens(turns[order[0]]["usage"])
     stats["tools_loaded"] = len(tools_loaded)
     stats["turns"] = len(order)
     files_read = Counter()
     prev_small_ro = False
     for mid in order:
         tr = turns[mid]
-        tw = w(tr["usage"])
+        tw = weighted(tr["usage"])
         stats["w"] += tw
         names = [n for n, _, _ in tr["tools"]]
         for n in names:
@@ -113,7 +97,7 @@ def parse(path: Path) -> dict | None:
             prev_small_ro = True
         else:
             prev_small_ro = False
-        if any(n == "Bash" and POLL_BASH.search(str(inp.get("command") or "")) for n, inp, _ in tr["tools"]):
+        if any(n == "Bash" and POLL.search(str(inp.get("command") or "")) for n, inp, _ in tr["tools"]):
             stats["poll_turns"] += 1
             stats["poll_w"] += tw
         for n, inp, tid in tr["tools"]:

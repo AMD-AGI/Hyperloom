@@ -8,43 +8,8 @@ from __future__ import annotations
 import json
 from collections import Counter, defaultdict
 
+from metrics import TOKEN_FIELDS, context_tokens, cost_usd, price_family
 from round_env import analysis_dir, bundles_dir
-
-# USD per 1M tokens: (input, cache_write, cache_read, output). Assumed list prices, reported as parameters.
-PRICES = {
-    "opus": (5.0, 6.25, 0.50, 25.0),
-    "sonnet": (3.0, 3.75, 0.30, 15.0),
-    "gpt": (1.25, 1.25, 0.125, 10.0),
-    "gemini": (1.25, 1.25, 0.31, 10.0),
-    "glm": (0.0, 0.0, 0.0, 0.0),
-}
-
-
-def price_family(model: str | None, fallback: str = "opus") -> str:
-    m = (model or "").lower()
-    for fam in ("opus", "sonnet", "gpt", "gemini", "glm"):
-        if fam in m:
-            return fam
-    return fallback
-
-
-def cost(row: dict, fam: str) -> float:
-    p = PRICES[fam]
-    return (
-        (row.get("input_tokens") or 0) * p[0]
-        + (row.get("cache_creation_input_tokens") or 0) * p[1]
-        + (row.get("cache_read_input_tokens") or 0) * p[2]
-        + (row.get("output_tokens") or 0) * p[3]
-    ) / 1e6
-
-
-def weighted(row: dict) -> float:
-    return (
-        (row.get("input_tokens") or 0)
-        + 1.25 * (row.get("cache_creation_input_tokens") or 0)
-        + 0.1 * (row.get("cache_read_input_tokens") or 0)
-        + 5 * (row.get("output_tokens") or 0)
-    )
 
 
 def pct(xs, q):
@@ -61,6 +26,7 @@ def main() -> None:
     comp_raw = defaultdict(Counter)
     comp_model = defaultdict(Counter)
     comp_phase = defaultdict(Counter)
+    unpriced = Counter()
     stop_cost, stop_runs = Counter(), Counter()
     per_run_cost, per_hour_cost = [], []
     orch_ctx, orch_out, orch_write, orch_rounds = [], [], [], []
@@ -75,12 +41,14 @@ def main() -> None:
             model = max(models, key=models.get) if models else None
             if model in (None, "None"):
                 model = sess_model
-            fam = price_family(model)
-            c = cost(tok, fam)
+            family = price_family(model)
+            if family is None and tok.get("weighted"):
+                unpriced[model] += tok["weighted"]
+            c = cost_usd(tok, family)
             comp_cost[comp] += c
             comp_w[comp] += tok.get("weighted", 0)
             comp_calls[comp] += r.get("calls", {}).get(comp, 0)
-            for f in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"):
+            for f in TOKEN_FIELDS:
                 comp_raw[comp][f] += tok.get(f, 0)
             comp_model[comp][model] += c
             for ph, w in r.get("phase_weighted", {}).get(comp, {}).items():
@@ -109,11 +77,7 @@ def main() -> None:
                     continue
                 if row.get("component") != "orchestration" or row.get("status") not in (None, "ok"):
                     continue
-                ctx = (
-                    (row.get("input_tokens") or 0)
-                    + (row.get("cache_creation_input_tokens") or 0)
-                    + (row.get("cache_read_input_tokens") or 0)
-                )
+                ctx = context_tokens(row)
                 if not ctx:
                     continue
                 orch_ctx.append(ctx)
@@ -140,6 +104,9 @@ def main() -> None:
     lines.append("\n# cost by component x model")
     for comp in comp_cost:
         lines.append(f"{comp:14s} " + ", ".join(f"{m}=${c:,.0f}" for m, c in comp_model[comp].most_common(6)))
+    if unpriced:
+        lines.append("\n# models with no family in metrics.PRICES (weighted tokens; left out of every cost)")
+        lines.append(", ".join(f"{m}={w / 1e9:.2f}B" for m, w in unpriced.most_common(10)))
     lines.append("\n# weighted share by component x phase (top)")
     for comp in comp_cost:
         tot = sum(comp_phase[comp].values()) or 1

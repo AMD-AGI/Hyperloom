@@ -14,19 +14,8 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from metrics import TOKEN_FIELDS, weighted
 from round_env import analysis_dir, bundles_dir
-
-TOKEN_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
-
-
-def weighted(row: dict) -> float:
-    """Anthropic-relative units: cache write 1.25x, cache read 0.1x, output 5x of plain input."""
-    return (
-        (row.get("input_tokens") or 0)
-        + 1.25 * (row.get("cache_creation_input_tokens") or 0)
-        + 0.1 * (row.get("cache_read_input_tokens") or 0)
-        + 5 * (row.get("output_tokens") or 0)
-    )
 
 
 def run_root(ledger: Path) -> Path:

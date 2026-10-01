@@ -4,15 +4,16 @@
 """Compare two A/B arms and apply the round's comparison rule.
 
 Effect kept: B's furthest phase is not earlier than A's, B's validated gain is at least A's minus
-2 points or at least 90% of A's, and B has no failing stop reason A did not have.
-Savings: B's Opus weighted tokens and its priced cost are both below A's. GLM is self-hosted and
-priced at 0; its tokens are reported separately.
+2 points or at least 90% of A's, and B has no failing stop reason A did not have. An arm that never
+validated a gain fails the gain test.
+Savings: B's Opus weighted tokens and its priced cost are both below A's (prices in
+``metrics.py``). A model that names no priced family is an error, not a guess.
 
 The rule is advisory: with one run per arm it cannot separate a code effect from the optimizer's
 run-to-run variance, so read it together with each arm's exploration record.
 
-    python compare_ab.py --a <arm A user-data dir> --b <arm B user-data dir> --out <dir>
-        [--router-log <model router requests.jsonl>]
+    cd scripts && python -m meta_rsi.compare_ab --a <arm A user-data dir> --b <arm B user-data dir> \\
+        --out <dir> [--router-log <model router requests.jsonl>]
 """
 
 from __future__ import annotations
@@ -25,54 +26,11 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from meta_rsi.metrics import POLL, TOKEN_FIELDS, context_tokens, cost_usd, price_family, weighted
+
 PHASES = ["PRELUDE", "ENABLEMENT", "FRAMEWORK_AGENT", "KERNEL_AGENT", "SWEEP", "CLOSE"]
 FAILING_STOPS = re.compile(r"fail|error|emergency|exhausted_during_prelude|escalated", re.I)
-PRICES = {
-    "opus": (5.0, 6.25, 0.50, 25.0),
-    "sonnet": (3.0, 3.75, 0.30, 15.0),
-    "gpt": (1.25, 1.25, 0.125, 10.0),
-    "glm": (0.0, 0.0, 0.0, 0.0),
-}
-TOKEN_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
-POLL = re.compile(
-    r"\bsleep\s+\d|tail -[fF]\b|\bwatch\b|\bps\s+(-|aux)|rocm-smi|nvidia-smi|curl\s+-s[^|]*(health|v1/models)|heartbeat"
-)
 FINDINGS_HEADER = "=== Specialist findings ==="
-
-
-def fam(model: str | None) -> str:
-    m = (model or "").lower()
-    for f in ("glm", "sonnet", "gpt", "opus"):
-        if f in m:
-            return f
-    return "opus"
-
-
-def w(r: dict) -> float:
-    return (
-        (r.get("input_tokens") or 0)
-        + 1.25 * (r.get("cache_creation_input_tokens") or 0)
-        + 0.1 * (r.get("cache_read_input_tokens") or 0)
-        + 5 * (r.get("output_tokens") or 0)
-    )
-
-
-def usd(r: dict, f: str) -> float:
-    p = PRICES[f]
-    return (
-        (r.get("input_tokens") or 0) * p[0]
-        + (r.get("cache_creation_input_tokens") or 0) * p[1]
-        + (r.get("cache_read_input_tokens") or 0) * p[2]
-        + (r.get("output_tokens") or 0) * p[3]
-    ) / 1e6
-
-
-def context_tokens(u: dict) -> int:
-    return (
-        (u.get("input_tokens") or 0)
-        + (u.get("cache_creation_input_tokens") or 0)
-        + (u.get("cache_read_input_tokens") or 0)
-    )
 
 
 def jsonl(path: Path):
@@ -120,13 +78,15 @@ def ledger_tokens(sess: Path) -> tuple[dict, Counter, list]:
             or (spec_models.get(r.get("task_id") or "") if comp == "specialist" else None)
             or "claude-opus-5"
         )
-        f = fam(model)
+        f = price_family(model)
+        if f is None:
+            raise SystemExit(f"{sess}: model {model!r} names no single family in metrics.PRICES; add it there")
         key = f"{comp}:{f}"
         calls[comp] += 1
         for k in TOKEN_FIELDS:
             tok[key][k] += r.get(k) or 0
-        tok[key]["weighted"] += w(r)
-        tok[key]["usd"] += usd(r, f)
+        tok[key]["weighted"] += weighted(r)
+        tok[key]["usd"] += cost_usd(r, f)
         if comp == "orchestration":
             orch_ctx.append(context_tokens(r))
     return tok, calls, orch_ctx
@@ -223,9 +183,9 @@ def arm_metrics(udp: Path, window: tuple[str, str], router_log: Path | None = No
 
 
 def verdict(a: dict, b: dict) -> dict:
-    ga, gb = a["validated_gain_pct"] or 0.0, b["validated_gain_pct"] or 0.0
+    ga, gb = a["validated_gain_pct"], b["validated_gain_pct"]
     phase_ok = PHASES.index(b["furthest_phase"]) >= PHASES.index(a["furthest_phase"])
-    gain_ok = gb >= ga - 2.0 or (ga > 0 and gb >= 0.9 * ga)
+    gain_ok = ga is not None and gb is not None and (gb >= ga - 2.0 or (ga > 0 and gb >= 0.9 * ga))
     new_failure = bool(FAILING_STOPS.search(str(b["stop_reason"] or ""))) and not FAILING_STOPS.search(
         str(a["stop_reason"] or "")
     )
