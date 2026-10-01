@@ -255,27 +255,11 @@ class _BusMessage:
     msg_id: str = ""
 
 
-class _TrackingProposalDict(dict):
-    """pending_proposals dict that sets ``.decided = True`` on popped proposals and caches them so the bus can set ``.verdict``."""
+class _StubBus:
+    """MessageBus double that captures every appended message."""
 
     def __init__(self) -> None:
-        super().__init__()
-        self._decided: dict[str, Any] = {}
-
-    def pop(self, key: Any, *default: Any) -> Any:
-        val = super().pop(key, *default)
-        if val is not None and key not in self._decided:
-            val.decided = True
-            self._decided[key] = val
-        return val
-
-
-class _StubBus:
-    """MessageBus double — captures every appended message and mirrors verdicts onto pending proposals."""
-
-    def __init__(self, pending_decided: "_TrackingProposalDict | None" = None) -> None:
         self.messages: list[_BusMessage] = []
-        self._pending_decided = pending_decided
 
     async def append_and_seq(self, msg: Any) -> Any:
         bm = _BusMessage(
@@ -287,10 +271,6 @@ class _StubBus:
             msg_id=getattr(msg, "msg_id", ""),
         )
         self.messages.append(bm)
-        if bm.topic == "review_verdict" and self._pending_decided is not None:
-            pending = self._pending_decided._decided.get(bm.in_reply_to)
-            if pending is not None:
-                pending.verdict = bm.payload.get("verdict", "")
         return None
 
 
@@ -304,17 +284,19 @@ class _StubRecipeKB:
         self.verify_calls.append(dict(kwargs))
 
 
+def _posted_verdict(coord: Coordinator) -> str:
+    return next(m.payload["verdict"] for m in reversed(coord.bus.messages) if m.topic == "review_verdict")
+
+
 @pytest.fixture
 def coord(tmp_path: Path):
     """Coordinator-shaped object with just enough plumbing for the review-verdict path."""
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = _BareSharedState()
-    tracking_proposals: _TrackingProposalDict = _TrackingProposalDict()
     c.state = CoordinatorState()
-    c.state.pending_proposals = tracking_proposals  # type: ignore[assignment]
     c.recipe_kb = _StubRecipeKB()
-    c.bus = _StubBus(pending_decided=tracking_proposals)
+    c.bus = _StubBus()
     c.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
     materialise_calls: list[tuple[PendingProposal, set[str] | None]] = []
     c._materialise_calls = materialise_calls  # type: ignore[attr-defined]
@@ -372,8 +354,8 @@ async def test_legacy_single_verdict_still_materialises_whole_proposal(coord):
     assert "verdict_map" not in bus_msgs[0].payload
     assert len(coord._materialise_calls) == 1
     assert coord._materialise_calls[0][1] is None
-    assert pending.decided is True
-    assert pending.verdict == "approve"
+    assert pending.proposal_msg_id not in coord.state.pending_proposals
+    assert _posted_verdict(coord) == "approve"
 
 
 @pytest.mark.asyncio
@@ -393,8 +375,8 @@ async def test_verdict_map_collapses_to_summary_single_verdict(coord):
         },
     )
     await coord.router._handle_review_verdict("critic", intent)
-    assert pending.decided is True
-    assert pending.verdict == "approve"
+    assert pending.proposal_msg_id not in coord.state.pending_proposals
+    assert _posted_verdict(coord) == "approve"
     assert len(coord._materialise_calls) == 1
     assert coord._materialise_calls[0][1] == {"v_a"}
     bus_msgs = [m for m in coord.bus.messages if m.topic == "review_verdict"]
@@ -421,7 +403,7 @@ async def test_verdict_map_mixed_collapse_logs_audit(coord, caplog):
     )
     with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.intent_router"):
         await coord.router._handle_review_verdict("critic", intent)
-    assert pending.verdict == "approve"
+    assert _posted_verdict(coord) == "approve"
     assert len(coord._materialise_calls) == 1
     assert coord._materialise_calls[0][1] == {"v_a"}
     assert any("review_verdict collapse" in r.getMessage() for r in caplog.records)
@@ -443,7 +425,7 @@ async def test_verdict_map_all_rejected_collapses_to_reject(coord):
         },
     )
     await coord.router._handle_review_verdict("critic", intent)
-    assert pending.verdict == "reject"
+    assert _posted_verdict(coord) == "reject"
     assert coord._materialise_calls == []
 
 
@@ -463,7 +445,7 @@ async def test_a_genuine_reject_does_not_sink_advised_siblings(coord):
         },
     )
     await coord.router._handle_review_verdict("critic", intent)
-    assert pending.verdict == "approve"
+    assert _posted_verdict(coord) == "approve"
     assert len(coord._materialise_calls) == 1
     assert coord._materialise_calls[0][1] == {"v_a", "v_c"}
 
@@ -595,7 +577,7 @@ async def test_reject_on_an_advisory_only_rule_is_held_to_advise(coord):
         },
     )
     await coord.router._handle_review_verdict("critic", intent)
-    assert pending.verdict == "advise"
+    assert _posted_verdict(coord) == "advise"
     # advise materialises, so the round keeps the proposal.
     assert len(coord._materialise_calls) == 1
     assert [m for m in coord.bus.messages if m.topic == "review_verdict"][0].payload["verdict"] == "advise"
@@ -653,7 +635,7 @@ async def test_a_rule_named_only_in_prose_still_holds_the_verdict(coord):
         },
     )
     await coord.router._handle_review_verdict("critic", intent)
-    assert pending.verdict == "advise"
+    assert _posted_verdict(coord) == "advise"
     assert len(coord._materialise_calls) == 1
     kinds = [call.args[2].get("kind") for call in coord.writeback._record_observation.await_args_list]
     assert "verdict_downgraded_to_rule_verdict" in kinds
@@ -680,7 +662,7 @@ async def test_prose_that_cites_no_rule_leaves_the_reject_alone(coord):
         },
     )
     await coord.router._handle_review_verdict("critic", intent)
-    assert pending.verdict == "reject"
+    assert _posted_verdict(coord) == "reject"
     assert coord._materialise_calls == []
 
 
@@ -705,7 +687,7 @@ async def test_a_declared_reject_code_outranks_an_advisory_one_in_prose(coord):
         },
     )
     await coord.router._handle_review_verdict("critic", intent)
-    assert pending.verdict == "reject"
+    assert _posted_verdict(coord) == "reject"
     assert coord._materialise_calls == []
 
 
@@ -741,7 +723,7 @@ async def test_a_held_reject_is_not_a_landing_permit(coord):
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert pending.verdict == "advise"
+    assert _posted_verdict(coord) == "advise"
     assert len(coord._materialise_calls) == 1
     assert coord.shared_state.patch_verdicts["t-permit"] == "reject"
     assert coord.shared_state.patch_verdicts["t-permit"] not in INTEGRATE_PATCH_PERMISSIVE_VERDICTS
@@ -769,7 +751,7 @@ async def test_a_held_variant_mirrors_the_verdict_the_critic_wrote(coord):
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert pending.verdict == "advise"
+    assert _posted_verdict(coord) == "advise"
     assert len(coord._materialise_calls) == 1
     assert coord.shared_state.patch_verdicts["t-map"] == "reject"
 
@@ -819,7 +801,7 @@ async def test_a_reject_that_also_names_a_second_risk_is_not_held(coord):
         },
     )
     await coord.router._handle_review_verdict("critic", intent)
-    assert pending.verdict == "reject"
+    assert _posted_verdict(coord) == "reject"
     assert coord._materialise_calls == []
 
 
@@ -844,7 +826,7 @@ async def test_a_reject_still_asking_for_evidence_is_not_held(coord):
         },
     )
     await coord.router._handle_review_verdict("critic", intent)
-    assert pending.verdict == "reject"
+    assert _posted_verdict(coord) == "reject"
     assert coord._materialise_calls == []
 
 
@@ -871,7 +853,7 @@ async def test_a_rule_the_critic_cleared_is_not_the_grounds_for_its_reject(coord
         },
     )
     await coord.router._handle_review_verdict("critic", intent)
-    assert pending.verdict == "reject"
+    assert _posted_verdict(coord) == "reject"
     assert coord._materialise_calls == []
 
 
@@ -1033,7 +1015,7 @@ async def test_a_verdict_whose_findings_cannot_be_counted_still_decides_its_prop
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert (pending.decided, pending.verdict) == (True, "reject")
+    assert (pending.proposal_msg_id in coord.state.pending_proposals, _posted_verdict(coord)) == (False, "reject")
     assert coord._materialise_calls == []
 
 
@@ -1059,7 +1041,7 @@ async def test_a_held_reject_never_lands_the_patch_it_rejected(coord):
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert pending.verdict == "reject"
+    assert _posted_verdict(coord) == "reject"
     assert coord._materialise_calls == []
     assert coord.shared_state.patch_verdicts["t-patch"] == "reject"
 
@@ -1086,7 +1068,7 @@ async def test_a_reject_of_a_proposal_the_rules_do_not_govern_stands(coord, acti
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert pending.verdict == "reject"
+    assert _posted_verdict(coord) == "reject"
     assert coord._materialise_calls == []
 
 
@@ -1111,7 +1093,7 @@ async def test_a_cross_domain_hint_reject_is_held_too(coord):
         },
     )
     await coord.router._handle_review_verdict("critic", intent)
-    assert pending.verdict == "advise"
+    assert _posted_verdict(coord) == "advise"
 
 
 @pytest.mark.asyncio
@@ -1142,7 +1124,7 @@ async def test_a_substantive_reject_still_rejects(coord, payload_extra):
         },
     )
     await coord.router._handle_review_verdict("critic", intent)
-    assert pending.verdict == "reject"
+    assert _posted_verdict(coord) == "reject"
     assert coord._materialise_calls == []
 
 
@@ -1165,7 +1147,7 @@ async def test_one_variant_held_to_advise_does_not_out_rank_its_siblings(coord):
     )
     await coord.router._handle_review_verdict("critic", intent)
     # Without the per-entry hold, reject out-ranks advise and the set is lost.
-    assert pending.verdict == "advise"
+    assert _posted_verdict(coord) == "advise"
     assert len(coord._materialise_calls) == 1
     assert coord._materialise_calls[0][1] == {"v_a", "v_b"}
 
@@ -1189,7 +1171,7 @@ async def test_a_variant_citing_its_rule_in_the_key_the_entry_carries_is_held(co
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert pending.verdict == "advise"
+    assert _posted_verdict(coord) == "advise"
     assert len(coord._materialise_calls) == 1
     assert coord._materialise_calls[0][1] == {"v_b"}
 
@@ -1207,7 +1189,7 @@ async def test_a_grid_rejected_only_on_advisory_rules_survives(coord):
         },
     )
     await coord.router._handle_review_verdict("critic", intent)
-    assert pending.verdict == "advise"
+    assert _posted_verdict(coord) == "advise"
     assert len(coord._materialise_calls) == 1
     assert coord._materialise_calls[0][1] == {"v_a", "v_b"}
 
@@ -1239,7 +1221,7 @@ async def test_a_variant_reject_keeps_the_grounds_the_payload_states_for_it(coor
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert pending.verdict == "reject"
+    assert _posted_verdict(coord) == "reject"
     assert coord._materialise_calls == []
 
 
@@ -1262,7 +1244,7 @@ async def test_a_reject_code_the_payload_declares_outranks_a_variants_advisory_p
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert pending.verdict == "reject"
+    assert _posted_verdict(coord) == "reject"
     assert coord._materialise_calls == []
 
 
@@ -1284,7 +1266,7 @@ async def test_the_one_risk_a_batch_states_is_not_the_rule_its_variants_cite(coo
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+    assert (_posted_verdict(coord), len(coord._materialise_calls)) == ("reject", 0)
 
 
 @pytest.mark.asyncio
@@ -1308,7 +1290,7 @@ async def test_a_variant_resting_only_on_the_cited_rule_still_gives_up_its_rejec
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert pending.verdict == "advise"
+    assert _posted_verdict(coord) == "advise"
     assert len(coord._materialise_calls) == 1
     kinds = [call.args[2].get("kind") for call in coord.writeback._record_observation.await_args_list]
     assert "verdict_downgraded_to_rule_verdict" in kinds
@@ -1333,7 +1315,7 @@ async def test_the_verdicts_own_prose_does_not_supply_a_variants_citation(coord)
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert pending.verdict == "reject"
+    assert _posted_verdict(coord) == "reject"
     assert coord._materialise_calls == []
 
 
@@ -1356,7 +1338,7 @@ async def test_the_batchs_declared_advisory_code_does_not_supply_a_variants_cita
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert pending.verdict == "reject"
+    assert _posted_verdict(coord) == "reject"
     assert coord._materialise_calls == []
 
 
@@ -1420,7 +1402,7 @@ async def test_a_batch_blocker_binds_every_variant_whatever_name_its_prose_carri
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+    assert (_posted_verdict(coord), len(coord._materialise_calls)) == ("reject", 0)
 
 
 @pytest.mark.asyncio
@@ -1450,7 +1432,7 @@ async def test_a_batch_finding_is_not_disowned_by_a_sibling_named_in_a_neighbour
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+    assert (_posted_verdict(coord), len(coord._materialise_calls)) == ("reject", 0)
 
 
 @pytest.mark.asyncio
@@ -1473,7 +1455,7 @@ async def test_grounds_stated_in_a_shape_the_schema_does_not_use_are_not_read_as
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+    assert (_posted_verdict(coord), len(coord._materialise_calls)) == ("reject", 0)
 
 
 @pytest.mark.asyncio
@@ -1496,7 +1478,7 @@ async def test_evidence_the_batch_still_wants_holds_a_variant_resting_on_a_cited
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+    assert (_posted_verdict(coord), len(coord._materialise_calls)) == ("reject", 0)
 
 
 @pytest.mark.asyncio
@@ -1520,7 +1502,7 @@ async def test_a_variant_that_states_a_finding_of_its_own_still_answers_for_the_
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+    assert (_posted_verdict(coord), len(coord._materialise_calls)) == ("reject", 0)
 
 
 @pytest.mark.asyncio
@@ -1540,7 +1522,7 @@ async def test_a_variant_stating_no_grounds_does_not_borrow_the_batchs_advisory_
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+    assert (_posted_verdict(coord), len(coord._materialise_calls)) == ("reject", 0)
 
 
 @pytest.mark.asyncio
@@ -1561,7 +1543,7 @@ async def test_a_batch_code_no_rule_declares_withholds_the_downgrade(coord):
     )
     await coord.router._handle_review_verdict("critic", intent)
 
-    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+    assert (_posted_verdict(coord), len(coord._materialise_calls)) == ("reject", 0)
 
 
 @pytest.mark.parametrize(
