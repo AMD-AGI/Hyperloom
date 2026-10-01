@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Awaitable
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -333,7 +334,7 @@ class ClosePhase(CoordinatorCollaborator):
         except Exception:
             log.debug("CLOSE: geak candidate record failed", exc_info=True)
 
-    async def _run_close_step(self, step_name: str, coro) -> bool:
+    async def _run_close_step(self, step_name: str, coro: Awaitable[None]) -> None:
         """Execute one CLOSE step and record success or failure.
 
         Each step helper records its own success outcome (with any relevant detail
@@ -342,11 +343,9 @@ class ClosePhase(CoordinatorCollaborator):
         """
         try:
             await coro
-            return True
         except Exception as exc:
             log.exception("CLOSE step %r failed", step_name)
             await self._record_close_step(step_name, status="failed", detail=repr(exc)[:240])
-            return False
 
     async def _do_stack_revalidation(self) -> None:
         """Validate the optimization stack before any close-section records."""
