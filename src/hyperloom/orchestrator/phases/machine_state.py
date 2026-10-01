@@ -1281,7 +1281,6 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "runtime_sec": _positive_number(getattr(state, "baseline_runtime_sec", 0.0)),
         "post_ready_runtime_sec": _positive_number(getattr(state, "baseline_post_ready_runtime_sec", 0.0)),
         "warm_runtime_sec": _positive_number(getattr(state, "baseline_warm_runtime_sec", 0.0)),
-        "double_run": True,
     }
 
 
@@ -1725,7 +1724,7 @@ def replay_next_phase(inputs: dict[str, Any]) -> tuple[str, str, dict[str, Any]]
                 baseline.get("post_ready_runtime_sec")
             )
             retry = runtime
-            if runtime is not None and bool(baseline.get("double_run")) and benchmark is not None:
+            if runtime is not None and benchmark is not None:
                 retry += benchmark
             viability = _prelude_viability(baseline)
             use_sec = _number(viability.get("measured_round_sec")) or runtime
