@@ -285,7 +285,7 @@ def agent_dir(session_dir: Path, role: str) -> Path:
     return Path(session_dir) / "agents" / role
 
 
-def agent_prompt_snapshot(session_dir: Path, role: str, *, phase: str = "", macro_cycle: int = 0) -> Path:
+def agent_prompt_snapshot(session_dir: Path, role: str, *, macro_cycle: int, phase: str = "") -> Path:
     """Compute the path to the per-agent system-prompt snapshot.
 
     Only the orchestration role's snapshot carries the macro-cycle prefix (``cN``);

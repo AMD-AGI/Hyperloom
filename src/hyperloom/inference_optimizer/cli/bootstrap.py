@@ -308,8 +308,8 @@ def _snapshot_system_prompts(
     session_dir: Path,
     *,
     prompts: dict[str, str],
+    macro_cycle: int,
     orchestration_phase: str = "",
-    macro_cycle: int = 0,
 ) -> None:
     """Persist each agent's effective system prompt via the shared snapshot writer.
 
