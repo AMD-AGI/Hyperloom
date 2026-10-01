@@ -20,36 +20,25 @@ SOURCE_RESOLUTION_SCHEMA_VERSION = "1.1.0"
 #: ``tracelens_analysis._SOURCE_RESOLUTION_NAME`` for the standalone path.
 SOURCE_RESOLUTION_FILENAME = "kernel_source_resolution.json"
 
-#: How a location was decided, best evidence first. ``llm_review`` outranks the
-#: deterministic tiers only because it runs last and sees their output; it is
-#: not more trusted, which is why the tier it overrode is kept in
-#: ``previous_method``.
-#:
-#: ``active_finder`` runs *before* the curated map: it demangles the device
-#: kernel symbol and looks it up in the currently-installed framework source
-#: tree, so it self-heals across file moves/renames and version drift. The
-#: curated map remains the fallback when the symbol is absent from the live
-#: index. ``symbol_index`` is the same resolution surfaced by the bypass route.
-METHOD_ACTIVE_FINDER = "active_finder"
+#: How a location was decided, as emitted by TraceLens' ``resolve_kernel_source``.
+#: ``symbol_index`` is the native active-finder hit; ``triton_ast`` /
+#: ``trace_kernel_file`` / ``triton_symbol_index`` come from the Triton resolver;
+#: ``gate_non_patchable`` is a non-patchable verdict that may still carry a
+#: dispatcher/cache source; ``unresolved`` is a genuine miss with no source.
 METHOD_SYMBOL_INDEX = "symbol_index"
-METHOD_CURATED = "op_to_source"
-METHOD_TRACE = "trace_python_stack"
-METHOD_GREP = "name_grep"
-METHOD_LLM_FALLBACK = "llm_fallback"
-METHOD_LLM = "llm_review"
-METHOD_REJECTED = "rejected_non_path_sentinel"
+METHOD_TRITON_AST = "triton_ast"
+METHOD_TRACE_KERNEL_FILE = "trace_kernel_file"
+METHOD_TRITON_SYMBOL_INDEX = "triton_symbol_index"
+METHOD_GATE_NON_PATCHABLE = "gate_non_patchable"
 METHOD_UNRESOLVED = "unresolved"
 
 KNOWN_METHODS = frozenset(
     {
-        METHOD_ACTIVE_FINDER,
         METHOD_SYMBOL_INDEX,
-        METHOD_CURATED,
-        METHOD_TRACE,
-        METHOD_GREP,
-        METHOD_LLM_FALLBACK,
-        METHOD_LLM,
-        METHOD_REJECTED,
+        METHOD_TRITON_AST,
+        METHOD_TRACE_KERNEL_FILE,
+        METHOD_TRITON_SYMBOL_INDEX,
+        METHOD_GATE_NON_PATCHABLE,
         METHOD_UNRESOLVED,
     }
 )
@@ -281,9 +270,11 @@ def validate_document(doc: Any) -> list[str]:
         if reason_class and reason_class not in KNOWN_REASON_CLASSES:
             problems.append(f"entries[{i}] has unknown reason_class {reason_class!r}")
         src = str(entry.get("source_file") or "")
-        if src and method in {METHOD_UNRESOLVED, METHOD_REJECTED}:
+        if src and method == METHOD_UNRESOLVED:
             problems.append(f"entries[{i}] has a source_file but method is {method}")
-        if not src and method not in {METHOD_UNRESOLVED, METHOD_REJECTED}:
+        # gate_non_patchable may or may not carry a source (a vendor GEMM resolves
+        # its dispatcher; a bare symbol does not), so it is exempt from both rules.
+        if not src and method not in {METHOD_UNRESOLVED, METHOD_GATE_NON_PATCHABLE}:
             problems.append(f"entries[{i}] has method {method!r} but no source_file")
         confidence = entry.get("confidence")
         if confidence is not None:

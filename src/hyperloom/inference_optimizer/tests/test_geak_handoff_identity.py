@@ -249,7 +249,7 @@ async def test_handoff_rejects_stale_tput_without_matching_measurement(
         osl=1024,
         conc=64,
     )
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "vllm")
 
     def _stop_after_handoff(_name: str) -> Path:
@@ -295,7 +295,7 @@ async def test_handoff_uses_only_matching_current_best_measurement(
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = state
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
     def _stop_after_handoff(_name: str) -> Path:
@@ -336,7 +336,7 @@ async def test_handoff_marks_declared_only_identity_without_faking_observation(
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = state
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
     def _stop_after_handoff(_name: str) -> Path:
@@ -369,7 +369,7 @@ async def test_handoff_does_not_verify_matching_identity_without_evidence(
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = state
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
     def _stop_after_handoff(_name: str) -> Path:
@@ -412,7 +412,7 @@ async def test_handoff_exposes_archived_sglang_observed_identity_map(
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = state
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
     monkeypatch.setattr(
@@ -448,7 +448,7 @@ async def test_handoff_hashes_observed_identity_from_server_args_alone(
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = state
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
     monkeypatch.setattr(

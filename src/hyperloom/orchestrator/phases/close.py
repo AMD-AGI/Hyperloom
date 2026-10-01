@@ -5,25 +5,26 @@
 
 from __future__ import annotations
 import asyncio
+import hashlib
 import time
 import uuid
 from collections.abc import Awaitable
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from hyperloom.common.deadline import Deadline
 import logging as _logging
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+from hyperloom.inference_optimizer.breakdown.workflow_contract import workflow_contract
 
 from . import machine_state as _phase_state
+from .machine import Transition
 from ..bus.message_bus import Message
+from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
 from ..state.task_registry import IllegalTransition, Task, TaskNotFound
 from ..collaborator import CoordinatorCollaborator
-
-if TYPE_CHECKING:
-    from .machine import Transition
 
 log = _logging.getLogger(__name__)
 
@@ -44,6 +45,11 @@ _CLOSE_STEP_WAIT_FLOOR_SEC: float = 60.0
 
 # Ceiling on the same wait.
 _CLOSE_STEP_WAIT_CEILING_SEC: float = 600.0
+
+# Steps the workflow contract lets CLOSE skip or fail without the close-out counting as incomplete.
+_OPTIONAL_CLOSE_STEPS: frozenset[str] = frozenset(
+    row["step"] for row in workflow_contract()["close_sequence"]["steps"] if row["optional"]
+)
 
 # Stops that ask the process to go away now. A full-stack benchmark would outlive the request, so CLOSE publishes
 # nothing for an unvalidated stack instead of measuring it.
@@ -377,12 +383,19 @@ class ClosePhase(CoordinatorCollaborator):
             raise
         terminal_state = await self._run_close_task(report_task, step="1 (report)")
         if terminal_state in {"succeeded", None}:
-            await self._record_close_step("report", status="done", task_id=report_task.task_id)
             from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
 
             _rd = _reports_dir(self.session_dir)
             _json_path = _rd / "final.json" if (_rd / "final.json").exists() else None
             _md_path = _rd / "final.md" if (_rd / "final.md").exists() else None
+            _receipt_path = _json_path or _md_path
+            await self._record_close_step(
+                "report",
+                status="done",
+                task_id=report_task.task_id,
+                artifact_path=str(_receipt_path.relative_to(Path(self.session_dir))) if _receipt_path else "",
+                artifact_digest=hashlib.sha256(_receipt_path.read_bytes()).hexdigest() if _receipt_path else "",
+            )
             _close_out.record_close_artifacts(self.session_dir, final_json_path=_json_path, final_md_path=_md_path)
             self._coord.writeback.emit_lifecycle(
                 step="report",
@@ -403,7 +416,12 @@ class ClosePhase(CoordinatorCollaborator):
         bd_task = await self._enqueue_internal_session_breakdown_task(reason="close_phase_entry")
         terminal_state = await self._run_close_task(bd_task, step="2 (session_breakdown)")
         if terminal_state in {"succeeded", None}:
-            await self._record_close_step("session_breakdown", status="done", task_id=bd_task.task_id)
+            await self._record_close_step(
+                "session_breakdown",
+                status="done",
+                task_id=bd_task.task_id,
+                artifact_path=_close_out.SESSION_BREAKDOWN_PATH,
+            )
         else:
             await self._record_close_step(
                 "session_breakdown",
@@ -444,15 +462,19 @@ class ClosePhase(CoordinatorCollaborator):
             session_id=session_id,
         )
         if pkg_path is not None:
+            # The ZIP digest cannot live inside the SBD that same ZIP bundles without a self-reference, so the
+            # receipt names the path only.
             _close_out.record_close_artifacts(self.session_dir, artifact_package_path=pkg_path)
-            await self._record_close_step("artifact_package", status="done", detail=str(pkg_path))
+            await self._record_close_step(
+                "artifact_package", status="done", detail=str(pkg_path), artifact_path=str(pkg_path)
+            )
         else:
             await self._record_close_step(
                 "artifact_package", status="skipped", detail="no artifacts matched or dest unwritable"
             )
         return pkg_path
 
-    async def on_enter_close(self, tr: "Transition") -> None:
+    async def on_enter_close(self, tr: Transition) -> None:
         """CLOSE sequencer (fixed order): stack revalidation → post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons."""
         from_phase = tr.from_phase
         log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
@@ -523,6 +545,9 @@ class ClosePhase(CoordinatorCollaborator):
             self.session_dir,
             stop_reason=str(self.shared_state.stop_reason or ""),
         )
+        from hyperloom.inference_optimizer.breakdown.recorder import record_stage_reached
+
+        record_stage_reached(self.session_dir, "close")
 
         # Refresh the breakdown's ``close`` key now that the sequence is on
         # disk: step 2 wrote the breakdown, so the copy it produced describes
@@ -770,6 +795,8 @@ class ClosePhase(CoordinatorCollaborator):
         status: str,
         task_id: str = "",
         detail: str = "",
+        artifact_path: str = "",
+        artifact_digest: str = "",
     ) -> None:
         """Record one settled close step (best-effort, per-step persist).
 
@@ -787,6 +814,10 @@ class ClosePhase(CoordinatorCollaborator):
             ts=ts,
             task_id=task_id,
             detail=detail,
+            optional=step in _OPTIONAL_CLOSE_STEPS,
+            artifact_path=artifact_path,
+            artifact_digest=artifact_digest,
+            error=detail if status == "failed" else "",
         )
         entry: dict[str, Any] = {
             "step": step,
@@ -812,6 +843,50 @@ class ClosePhase(CoordinatorCollaborator):
                 status,
             )
 
+    async def _record_terminal_close_transition(self) -> str:
+        """Establish CLOSE ownership without dispatching the sequencer or optimization work.
+
+        The report and breakdown tasks freeze the phase they were dispatched from into their SBD evidence, so the
+        transition has to be on the ledger before they are enqueued.
+
+        Returns:
+            str: the phase CLOSE was entered from.
+        """
+        state = self.shared_state
+        prior = state.phase
+        if prior == _phase_state.PHASE_CLOSE:
+            return prior
+        machine = self._coord.phase_machine
+        enablement_in_flight = (
+            prior == _phase_state.PHASE_ENABLEMENT and await self._coord.enablement_lane.enablement_in_flight()
+        )
+        kernel_facts = await self._coord.phase_kernel.exit_facts()
+        now = time.time()
+        decision = _phase_state.compute_next_phase(
+            state,
+            kernel_enabled=machine.kernel_enabled(),
+            optimize_enabled=machine.optimize_enabled(),
+            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+            enablement_in_flight=enablement_in_flight,
+            kernel_work_in_flight=kernel_facts.agent_in_flight,
+            now_unix=now,
+        )
+        assert decision is not None and decision[0] == _phase_state.PHASE_CLOSE
+        target, reason, evidence = decision
+        if state.pending_escalate_hint == ESCALATE_HINT_SKIP_TO_CLOSE:
+            state.consume_pending_escalate_hint()
+        elif state.pending_escalate_hint:
+            state.discard_pending_escalate_hint()
+        _phase_state.record_phase_transition(state, to_phase=target, reason=reason, evidence=evidence, ts_unix=now)
+        machine.fire_phase_exit(
+            Transition(from_phase=prior, to_phase=target, reason=reason, evidence=evidence, loopback=False)
+        )
+        _phase_state.record_lifecycle_event(
+            state, step=target, status=_phase_state.LIFECYCLE_STATUS_ENTER, phase=target, detail=f"reason={reason}"
+        )
+        state.save(self.session_dir)
+        return prior
+
     async def enter_closing_phase(self, *, grace_sec: float) -> Deadline:
         """Enter report-flush phase after the wall-clock deadline (enqueue deterministic report task).
 
@@ -826,6 +901,7 @@ class ClosePhase(CoordinatorCollaborator):
         closing_deadline = Deadline.after(grace_sec)
         self.shared_state.closing_phase = True
         self.shared_state.closing_started_unix = closing_started
+        await self._record_terminal_close_transition()
         self.shared_state.save(self.session_dir)
 
         log.info(
@@ -889,7 +965,7 @@ class ClosePhase(CoordinatorCollaborator):
         no report at all. Idempotent via ``close_sequence_done``.
 
         Args:
-            reason: What terminated the run, recorded as the entry's from-phase.
+            reason: What terminated the run, used for logging.
 
         Returns:
             bool: ``True`` when this call ran the sequence.
@@ -897,10 +973,15 @@ class ClosePhase(CoordinatorCollaborator):
         if self.shared_state.close_sequence_done:
             return False
         log.info("CLOSE: no close sequence has run (reason=%s); running it now", reason)
-        from .machine import Transition
-
+        prior = await self._record_terminal_close_transition()
         await self.on_enter_close(
-            Transition(from_phase=reason, to_phase="CLOSE", reason=reason, evidence={}, loopback=False)
+            Transition(
+                from_phase=prior,
+                to_phase=_phase_state.PHASE_CLOSE,
+                reason=reason,
+                evidence={},
+                loopback=False,
+            )
         )
         return True
 

@@ -224,7 +224,6 @@ def test_kernel_opt_body_references_v08_decision_signals():
         "last_action_failures",
         "last_kernel_opt",
         "rejected_kernel_ids",
-        "_DEFAULT_KERNEL_OPT_MAX_PARTIAL",
     ):
         assert signal in body, (
             f"_KERNEL_OPT_PIPELINE_BODY missing v0.8 decision signal {signal!r} (KB_gaps/Dead-D §5.1)"

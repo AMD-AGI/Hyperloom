@@ -75,8 +75,10 @@ class _StubTaskRegistry:
 def coord(tmp_path: Path):
     """Build a Coordinator via ``__new__`` with just enough attributes for specialist lifecycle methods."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
     c = Coordinator.__new__(Coordinator)
+    c.phase_framework = FrameworkPhase(c)
     c.session_dir = tmp_path
     c.shared_state = _StubSharedState()
     c.tasks = _StubTaskRegistry()

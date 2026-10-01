@@ -221,7 +221,6 @@ async def test_a_lane_denied_its_own_cache_is_refused_rather_than_shared(tmp_pat
 
 async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path):
     """Pin the single-lane path: an ordinary session carries no overlay at all."""
-    del tmp_path
     captured: dict = {}
     backend = ClaudeBackend.__new__(ClaudeBackend)
     backend.runtime = AgentRuntimeConfig(provider="claude", model="fake-model")
@@ -238,7 +237,9 @@ async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path):
         AgentRunSpec(
             system_prompt="implementer",
             user_prompt="tune it",
-            cwd=str(Path.cwd()),
+            # Its own repository, not the checkout: a write session guards its workspace, and other test workers
+            # write ``__pycache__`` under the checkout while this one runs. The overlay comes from ``env`` alone.
+            cwd=str(_lane_dir(tmp_path, "single-lane")),
             tool_policy=AgentToolPolicy(read=True, write=True, shell=True),
         )
     )

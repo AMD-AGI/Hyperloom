@@ -45,6 +45,15 @@ from ..state.shared_state import (
     is_valid_escalate_hint,
 )
 from ..state.task_registry import IllegalTransition, TaskNotFound
+from hyperloom.inference_optimizer.trace.trajectory_trace import (
+    EVENT_INTENT,
+    EVENT_PROPOSAL,
+    STATUS_CANCELLED,
+    STATUS_COMPLETED,
+    record_event,
+    trajectory_scope,
+    trajectory_span,
+)
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
 from ..collaborator import CoordinatorCollaborator
@@ -297,7 +306,7 @@ class IntentRouter(CoordinatorCollaborator):
 
             gap_layer = str(params.get("gap_layer") or "").strip().lower()
             active_phase = str(self.shared_state.phase or "").strip().upper()
-            # Layer first, phase last: both lanes share one phase, so the live phase no longer says which lever a
+            # Layer first, phase last: both lanes share one phase, so the live phase does not say which lever a
             # specialist moves.
             if gap_layer == "framework":
                 owner = "FRAMEWORK_AGENT"
@@ -353,13 +362,23 @@ class IntentRouter(CoordinatorCollaborator):
         return owner
 
     async def handle_intent(self, source: str, intent: Intent) -> None:
-        """Validate an emitted intent through PolicyGate, then route it."""
+        """Validate an emitted intent through PolicyGate, then route it under its trajectory event."""
+        attributes = {"name": intent.type.value, "source": source}
+        action_name = (intent.payload or {}).get("action_name")
+        if isinstance(action_name, str) and action_name:
+            attributes["action_name"] = action_name
         try:
             self.policy.validate_intent(source, intent)
         except PolicyDenied as denied:
+            record_event(EVENT_INTENT, attributes={**attributes, "admitted": False, "denied": str(denied)[:200]})
             await self._coord.writeback.record_policy_denied(source, intent, denied)
             return
+        intent_span_id = record_event(EVENT_INTENT, attributes={**attributes, "admitted": True})
+        with trajectory_scope(parent_span_id=intent_span_id):
+            await self._route_intent(source, intent)
 
+    async def _route_intent(self, source: str, intent: Intent) -> None:
+        """Run the handler for an admitted intent; a handler failure is recorded, never raised."""
         try:
             it = intent.type
             handlers: dict[IntentType, Any] = {
@@ -666,6 +685,37 @@ class IntentRouter(CoordinatorCollaborator):
             reauthored=verdict == "needs_review",
             patch_verdict_key=sid_candidate if patch_verdict else "",
         )
+        with trajectory_span(
+            EVENT_PROPOSAL,
+            span_id=pending.proposal_msg_id,
+            attributes={"name": pending.action_name, "verdict": verdict},
+        ) as proposal_span:
+            await self._apply_verdict_outcome(
+                pending,
+                verdict=verdict,
+                reasoning=reasoning,
+                advisory=advisory,
+                approved_variant_names=approved_variant_names,
+                pa_params=pa_params,
+                sid_candidate=sid_candidate,
+            )
+            proposal_span.finish(
+                STATUS_COMPLETED if verdict in ("approve", "advise") else STATUS_CANCELLED,
+                task_id=pending.task_id,
+            )
+
+    async def _apply_verdict_outcome(
+        self,
+        pending: Any,
+        *,
+        verdict: str,
+        reasoning: str,
+        advisory: dict[str, Any] | None,
+        approved_variant_names: set[str] | None,
+        pa_params: Mapping[str, Any],
+        sid_candidate: str,
+    ) -> None:
+        """Materialise, deny, or send back a proposal according to its collapsed verdict."""
         # Both `approve` and `advise` mean "dispatch may proceed"; treat them
         # identically for materialization.
         if verdict in ("approve", "advise"):

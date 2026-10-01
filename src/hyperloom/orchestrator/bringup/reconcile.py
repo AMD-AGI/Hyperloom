@@ -22,6 +22,7 @@ from ..state.round_store import (
     RoundStore,
 )
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskRegistry
+from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PROPOSAL, STATUS_CANCELLED, record_event
 
 log = logging.getLogger(__name__)
 
@@ -120,7 +121,7 @@ class Reconciler:
             holder went terminal with no successor.
         review_ttl_sec (float): How long a proposal may sit undecided.
         last_report (ReconcileReport): What the most recent pass did; read by
-            the maintenance tick, which no longer sweeps leases itself.
+            the maintenance tick, which leaves lease sweeping to this pass.
     """
 
     def __init__(
@@ -242,9 +243,27 @@ class Reconciler:
             applied = cur.rowcount == 1
         if applied:
             log.warning("RECONCILE: review timeout denied proposal %s after %.0fs", msg_id, age)
+            self._record_timeout_terminal(msg_id, age=age)
             if self._proposals is not None:
                 self._proposals().pop(msg_id, None)
         return applied
+
+    def _record_timeout_terminal(self, msg_id: str, *, age: float) -> None:
+        """Close the proposal's trajectory span: a timeout deny never passes through the verdict handler."""
+        pending = self._proposals().get(msg_id) if self._proposals is not None else None
+        action_name = str(getattr(pending, "action_name", "") or "") or None
+        record_event(
+            EVENT_PROPOSAL,
+            status=STATUS_CANCELLED,
+            span_id=msg_id,
+            attributes={
+                "name": action_name,
+                "action_name": action_name,
+                "verdict": TIMEOUT_VERDICT,
+                "reason": "review_timeout",
+                "waited_sec": round(age, 1),
+            },
+        )
 
     async def _resolve_open_rounds(self, now_unix: float, report: ReconcileReport) -> None:
         """Advance completed owners without timing out active ownership."""

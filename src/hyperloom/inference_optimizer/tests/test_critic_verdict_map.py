@@ -19,6 +19,7 @@ from hyperloom.orchestrator.loop.coordinator import (
     CoordinatorState,
 )
 from hyperloom.orchestrator.loop.proposals import PendingProposal
+from hyperloom.orchestrator.phases.framework import FrameworkPhase
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
@@ -293,6 +294,7 @@ def _posted_verdict(coord: Coordinator) -> str:
 def coord(tmp_path: Path):
     """Coordinator-shaped object with just enough plumbing for the review-verdict path."""
     c = Coordinator.__new__(Coordinator)
+    c.phase_framework = FrameworkPhase(c)
     c.session_dir = tmp_path
     c.shared_state = _BareSharedState()
     c.state = CoordinatorState()
@@ -1679,6 +1681,7 @@ def test_collapse_verdict_map_with_no_proceedable_variant_stays_reject():
 async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     """Pin the ``approved_variant_names`` filter contract independently."""
     coord = Coordinator.__new__(Coordinator)
+    coord.phase_framework = FrameworkPhase(coord)
     coord.session_dir = tmp_path
     coord.shared_state = _BareSharedState()
     coord.state = CoordinatorState()
@@ -1733,6 +1736,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
 async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path):
     """A filter that matches nothing must not enqueue an empty explore grid."""
     coord = Coordinator.__new__(Coordinator)
+    coord.phase_framework = FrameworkPhase(coord)
     coord.session_dir = tmp_path
     coord.state = CoordinatorState()
     coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
@@ -1766,6 +1770,7 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
 async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     """``approved_variant_names=None`` leaves the grid untouched."""
     coord = Coordinator.__new__(Coordinator)
+    coord.phase_framework = FrameworkPhase(coord)
     coord.session_dir = tmp_path
     coord.state = CoordinatorState()
     coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())

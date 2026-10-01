@@ -15,6 +15,16 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.state.task_states import TERMINAL_STATES, TRANSITIONS
+from hyperloom.inference_optimizer.trace.trajectory_trace import (
+    EVENT_TASK,
+    STATUS_CANCELLED,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_QUEUED,
+    STATUS_STARTED,
+    record_event,
+    scalar_attributes,
+)
 
 
 TASK_STATES = (
@@ -28,6 +38,14 @@ TASK_STATES = (
 # Re-exported: the state machine moved to ``task_states`` so ``bus`` can read it
 # without importing this module back. Existing callers keep their import site.
 _TRANSITIONS = TRANSITIONS
+
+_TRAJECTORY_STATUS: dict[str, str] = {
+    "queued": STATUS_QUEUED,
+    "running": STATUS_STARTED,
+    "succeeded": STATUS_COMPLETED,
+    "failed": STATUS_FAILED,
+    "cancelled": STATUS_CANCELLED,
+}
 
 # Progress notes a task's ``history`` retains, oldest dropped first.
 _MAX_PROGRESS_NOTES = 120
@@ -160,6 +178,26 @@ class TerminalTaskReuse(RuntimeError):
     """An idempotency key already names a task in a terminal state."""
 
 
+def _record_task_state(
+    task_id: str,
+    kind: str,
+    state: str,
+    *,
+    evidence: dict[str, Any] | None = None,
+    **attributes: Any,
+) -> None:
+    """Put one task state change on the trajectory; ``queued`` is parented to the scope that created the task."""
+    context: dict[str, Any] = {} if state == "queued" else {"parent_span_id": None}
+    record_event(
+        EVENT_TASK,
+        status=_TRAJECTORY_STATUS[state],
+        span_id=task_id,
+        task_id=task_id,
+        attributes={**scalar_attributes(evidence), **attributes, "name": kind, "kind": kind},
+        **context,
+    )
+
+
 def _insert_queued_task(
     cur: Any,
     *,
@@ -223,6 +261,14 @@ def _insert_queued_task(
             task.created_at,
             task.updated_at,
         ),
+    )
+    # A rolled-back insert leaves an open row that never closes, and open rows never project.
+    _record_task_state(
+        task.task_id,
+        task.kind,
+        "queued",
+        requires_lanes=task.requires_lanes,
+        **({"dispatch_class": dispatch_class} if dispatch_class else {}),
     )
     return task
 
@@ -434,6 +480,7 @@ class TaskRegistry:
                 "UPDATE tasks SET state=?, history=?, updated_at=? WHERE task_id=?",
                 (new_state, json.dumps(history), now, task_id),
             )
+        _record_task_state(task_id, row["kind"], new_state, evidence=evidence)
         return await self.get(task_id)
 
     async def record_progress(
@@ -467,16 +514,13 @@ class TaskRegistry:
             history.append({"ts": now_iso(), "evidence": evidence or {}})
             cur.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
 
-    async def integrate_reconcile_child_exists(self, base_key: str, *, states: tuple[str, ...]) -> bool:
-        """Return whether an integrate-patch reconcile child exists in these states."""
-        if not states:
-            return False
-        prefix = f"{base_key}-reconcile%"
+    async def exists_with_key_prefix(self, kind: str, key_prefix: str, *, states: tuple[str, ...]) -> bool:
+        """Return whether a task of ``kind`` in one of ``states`` has this key prefix."""
         placeholders = ",".join("?" for _ in states)
         row = await self.db.fetchone(
-            "SELECT 1 FROM tasks WHERE kind='integrate_patch' "
-            f"AND idempotency_key LIKE ? AND state IN ({placeholders}) LIMIT 1",  # nosec B608 - generated placeholders only.
-            (prefix, *states),
+            "SELECT 1 FROM tasks WHERE kind=? AND substr(idempotency_key, 1, ?)=? "
+            f"AND state IN ({placeholders}) LIMIT 1",  # nosec B608 - generated placeholders only.
+            (kind, len(key_prefix), key_prefix, *states),
         )
         return row is not None
 
@@ -498,42 +542,13 @@ class TaskRegistry:
         rows = await self.db.fetchall("SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC")
         return [Task.from_row(r) for r in rows]
 
-    def running_context_sync(self) -> list[tuple[Task, list[str], str, list[int]]]:
-        """Read running tasks with the lanes, soonest lease expiry and GPUs each holds.
-
-        The three statements are separate reads, not one transactional snapshot.
-        """
+    def running_context_sync(self) -> list[Task]:
+        """Read running tasks least-recently-updated-first off the sync path."""
         rows = self.db.fetchall_sync(
             "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC",
             (),
         )
-        if not rows:
-            return []
-        lanes_by_task: dict[str, list[str]] = {}
-        # Soonest lane expiry: the first one to lapse is when reclaim starts.
-        expiry_by_task: dict[str, str] = {}
-        for row in self.db.fetchall_sync("SELECT lane, task_id, expires_at FROM leases", ()):
-            tid = str(row["task_id"])
-            lanes_by_task.setdefault(tid, []).append(str(row["lane"]))
-            expires = str(row["expires_at"])
-            prev = expiry_by_task.get(tid)
-            if prev is None or expires < prev:
-                expiry_by_task[tid] = expires
-        gpus_by_task: dict[str, list[int]] = {}
-        for row in self.db.fetchall_sync("SELECT gpu_id, task_id FROM gpu_leases", ()):
-            gpus_by_task.setdefault(str(row["task_id"]), []).append(int(row["gpu_id"]))
-        projected: list[tuple[Task, list[str], str, list[int]]] = []
-        for row in rows:
-            task = Task.from_row(row)
-            projected.append(
-                (
-                    task,
-                    lanes_by_task.get(task.task_id, []),
-                    expiry_by_task.get(task.task_id, ""),
-                    gpus_by_task.get(task.task_id, []),
-                )
-            )
-        return projected
+        return [Task.from_row(row) for row in rows]
 
     async def extend_lease(self, task_id: str, extra_sec: int) -> int:
         """Grow a running task's ``lease_ttl_sec`` by ``extra_sec``."""
@@ -565,9 +580,10 @@ class TaskRegistry:
     ) -> list[str]:
         """Fail running tasks whose lease-holder process is provably dead."""
         reclaimed: list[str] = []
+        reclaimed_rows: list[tuple[str, str, int]] = []
         async with self.db.transaction() as cur:
             cur.execute(
-                "SELECT t.task_id, t.history, l.pid, l.owner_scope "
+                "SELECT t.task_id, t.kind, t.history, l.pid, l.owner_scope "
                 "FROM tasks t JOIN leases l ON l.task_id = t.task_id "
                 "WHERE t.state='running' AND l.pid > 0"
             )
@@ -594,6 +610,9 @@ class TaskRegistry:
                     (json.dumps(history), ts_now, task_id),
                 )
                 reclaimed.append(task_id)
+                reclaimed_rows.append((task_id, rows[0]["kind"], pid))
+        for task_id, kind, pid in reclaimed_rows:
+            _record_task_state(task_id, kind, "failed", reason=reason, dead_pid=pid)
         return reclaimed
 
     async def cancel_family(
@@ -608,15 +627,16 @@ class TaskRegistry:
             return []
         spared = {str(t or "").strip() for t in exclude_task_ids if str(t or "").strip()}
         cancelled: list[str] = []
+        kinds: dict[str, str] = {}
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(family_kinds))
             cur.execute(
-                f"SELECT task_id, history FROM tasks WHERE state='queued' AND kind IN ({placeholders})",  # nosec B608 - generated placeholders only.
+                f"SELECT task_id, kind, history FROM tasks WHERE state='queued' AND kind IN ({placeholders})",  # nosec B608 - generated placeholders only.
                 family_kinds,
             )
-            rows = [(r["task_id"], r["history"]) for r in cur.fetchall()]
+            rows = [(r["task_id"], r["kind"], r["history"]) for r in cur.fetchall()]
             now = now_iso()
-            for task_id, history_json in rows:
+            for task_id, kind, history_json in rows:
                 if str(task_id or "").strip() in spared:
                     continue
                 history = json.loads(history_json)
@@ -633,6 +653,9 @@ class TaskRegistry:
                     (json.dumps(history), now, task_id),
                 )
                 cancelled.append(task_id)
+                kinds[task_id] = kind
+        for task_id in cancelled:
+            _record_task_state(task_id, kinds[task_id], "cancelled", reason=reason)
         return cancelled
 
     async def cancel_queued(
@@ -644,6 +667,7 @@ class TaskRegistry:
         """Bulk-cancel queued tasks whose kind is not in ``allowed_kinds``."""
         allowed = {str(kind or "").strip() for kind in allowed_kinds if str(kind or "").strip()}
         cancelled: list[str] = []
+        kinds: dict[str, str] = {}
         async with self.db.transaction() as cur:
             cur.execute("SELECT task_id, kind, history FROM tasks WHERE state='queued'")
             rows = [(r["task_id"], r["kind"], r["history"]) for r in cur.fetchall()]
@@ -665,6 +689,9 @@ class TaskRegistry:
                     (json.dumps(history), now, task_id),
                 )
                 cancelled.append(task_id)
+                kinds[task_id] = kind
+        for task_id in cancelled:
+            _record_task_state(task_id, kinds[task_id], "cancelled", reason=reason)
         return cancelled
 
 

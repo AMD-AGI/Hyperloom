@@ -17,6 +17,7 @@ from typing import Any
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
@@ -106,6 +107,45 @@ def agentx_state_is_stale(state: Any) -> str:
                 "a different workload and cannot anchor or be compared against"
             )
     return ""
+
+
+def latency_budget_scope_error(framework: str | None, requested_ms: float | None) -> str:
+    """Return why ``--max-latency-ms`` does not apply to *framework*, or ``\"\"``.
+
+    Scriptable workloads grade on output throughput alone and are the only frameworks compute partitioning places
+    work for, so they are the only place a throughput-only gate can buy throughput with per-request latency. AgentX
+    serving sessions already REVERT that trade on interactivity, and the fixed ISL/OSL serving mode takes no new
+    capability, so the budget is refused there rather than silently doing nothing.
+    """
+    from .. import framework_registry
+
+    if requested_ms is None or framework_registry.is_scriptable(framework):
+        return ""
+    name = str(framework or "").strip() or framework_registry.DEFAULT_FRAMEWORK
+    return (
+        f"--max-latency-ms applies only to scriptable frameworks (xdit, custom); {name!r} is a serving framework. "
+        "On AgentX the interactivity objective already refuses a throughput gain bought with per-request latency"
+    )
+
+
+def latency_budget_resume_conflict(state: Any, requested_ms: float | None) -> str:
+    """Return why ``--max-latency-ms`` cannot apply to a resumed session, or ``\"\"``.
+
+    The recorded KEEPs were graded under the archived budget, so a different
+    value would leave them judged against a constraint the new one does not
+    state. Omitting the flag keeps the archived budget.
+    """
+    if requested_ms is None:
+        return ""
+    archived = float(getattr(state, "latency_budget_ms", 0.0) or 0.0)
+    if float(requested_ms) == archived:
+        return ""
+    recorded = f"{archived:g} ms" if archived > 0 else "no budget"
+    return (
+        f"--max-latency-ms {float(requested_ms):g} differs from the {recorded} this session was "
+        "graded under; its KEEPs would be judged against a constraint they were never measured "
+        "for. Resume without the flag to keep the recorded budget, or start a fresh session"
+    )
 
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
@@ -232,6 +272,9 @@ def _seed_shared_state(
         # config.json structural summary, persisted for downstream collectors.
         model_info=summarize_model_config(str(args.model)),
         framework=os.environ.get("FRAMEWORK", "sglang"),
+        # The only copy of the budget. Validated at the CLI, so anything that reaches here is usable, and archived
+        # with the session so a resume restores it without a second source to reconcile.
+        latency_budget_ms=float(getattr(args, "max_latency_ms", None) or 0.0),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI/env.
         tp=_int_arg("tp", DEFAULT_TP),
@@ -291,7 +334,9 @@ def _seed_shared_state(
         # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each
         # rung is a 3600s window and the session grades at a fixed CONC.
         # Pass --enable-conc-sweep explicitly to override.
-        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", not _agentx_enabled())),
+        conc_sweep_enabled=(
+            not is_agentx_mode(benchmark_mode) if args.enable_conc_sweep is None else args.enable_conc_sweep
+        ),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
         grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
@@ -338,7 +383,7 @@ def _print_session_skeleton(session_dir: Path) -> None:
 def _print_final_summary(
     state: SharedState,
     stop_reason: str,
-    session_dir: Path | None = None,
+    session_dir: Path,
 ) -> None:
     """Print the end-of-run summary block to stdout."""
     print()
@@ -351,7 +396,7 @@ def _print_final_summary(
     print(
         f"  baseline             : {framework_registry.format_primary_metric(getattr(state, 'framework', ''), state.baseline_tput)}"
     )
-    if session_dir is not None and stop_reason == "baseline_failed":
+    if stop_reason == "baseline_failed":
         failure_summary = _read_failure_summary(session_dir)
         if failure_summary and failure_summary.get("root_cause"):
             print(
@@ -373,7 +418,6 @@ def _print_final_summary(
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")
-    _print_kernel_opt_summary_line(state)
     print("===============================================")
 
 
@@ -469,34 +513,6 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 
 
-def _print_kernel_opt_summary_line(state: SharedState) -> None:
-    """One-line forensic readout of kernel_opt attempts at session end (matches the on-disk report; best-effort)."""
-    try:
-        from hyperloom.orchestrator.kernel.attempt_summary import (
-            build_kernel_optimization_summary,
-        )
-
-        session_dir = _resolve_session_dir_for_summary(state)
-        if session_dir is None:
-            return
-        summary = build_kernel_optimization_summary(state, session_dir)
-        totals = summary.get("totals") or {}
-        attempted = int(totals.get("attempted") or 0)
-        if attempted == 0:
-            return
-        integrated = int(totals.get("integrated") or 0)
-        rejected = int(totals.get("rejected") or 0)
-        print(f"  kernel_opt           : {attempted} attempted ({integrated} integrated, {rejected} rejected)")
-        takeaways = summary.get("top_takeaways") or []
-        if len(takeaways) >= 2:
-            print(f"  kernel_opt_top_cause : {takeaways[1]}")
-        report_path = Path(session_dir) / "reports" / "kernel_optimization_summary.json"
-        if report_path.is_file():
-            print(f"  kernel_opt_report    : {report_path}")
-    except Exception:  # noqa: BLE001 — stdout print must never fail the run
-        pass
-
-
 def _parse_conc_sweep_concs(args: argparse.Namespace, benchmark_mode: str) -> list[int]:
     """Parse ``--conc-sweep-concs`` into a list[int]; non-integers warned+dropped."""
     from hyperloom.orchestrator.kernel.conc_sweep import default_concs_for_mode
@@ -557,13 +573,3 @@ def _resolve_reference_recipe(
 
     print(f"Reference script: {source} ({len(recipe.server_args.split())} arg tokens, {len(recipe.envs)} env(s))")
     return (recipe.server_args, dict(recipe.envs), recipe.model or "", dict(controls))
-
-
-def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
-    """Best-effort session_dir lookup ($HYPERLOOM_SESSION_DIR) for the stdout kernel_opt line; ``None`` if unresolved."""
-    env_sd = os.environ.get("HYPERLOOM_SESSION_DIR", "").strip()
-    if env_sd:
-        p = Path(env_sd).expanduser()
-        if p.is_dir():
-            return p
-    return None

@@ -101,7 +101,7 @@ def _phase(tmp_path: Path) -> KernelPhase:
         framework="sglang",
         baseline_tput=100.0,
     )
-    return KernelPhase(coord)
+    return coord
 
 
 def _integrate_log(tmp_path: Path, text: str) -> Path:

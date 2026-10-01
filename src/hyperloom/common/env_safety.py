@@ -71,7 +71,7 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
-        # Legacy: not consumed anymore, still scrubbed if present.
+        # Legacy: nothing reads it, but it is scrubbed if present.
         "SAFE_API_KEY",
     }
 )
@@ -214,7 +214,6 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "GEAK_RUN_MODE",
         "GEAK_SCORE_TARGET",
         "GEAK_SKIP_PROFILE",
-        "HYPERLOOM_FORGE_REWRITE_BY_FLYDSL",
         "HYPERLOOM_KERNEL_AGENT_ROOT",
         "HYPERLOOM_ROOT",
         "HYPERLOOM_RUNTIME_DIR",

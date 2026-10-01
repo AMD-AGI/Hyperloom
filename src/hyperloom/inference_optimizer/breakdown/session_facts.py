@@ -4,8 +4,8 @@
 """Session facts shared by the recorder and the collector fallback.
 
 Architecture and recovery are written at author time and re-projected at
-export when the fragment is missing. The two paths used to copy the field
-lists; this module is the one list they both read.
+export when the fragment is missing. This module is the one field list both
+paths read.
 """
 
 from __future__ import annotations

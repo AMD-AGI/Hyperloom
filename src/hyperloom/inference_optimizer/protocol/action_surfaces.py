@@ -162,7 +162,8 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             side_effects=("launches_server", "writes_results"),
             description=(
                 "Post-sweep concurrency comparison: benchmark baseline vs current_best across a CONC ladder. "
-                "On by default; opt out via --no-enable-conc-sweep; bounded by --conc-sweep-total-budget-sec "
+                "On by default, off under AgentX; force with --enable-conc-sweep / --no-enable-conc-sweep; "
+                "bounded by --conc-sweep-total-budget-sec "
                 "(default 2.5h)."
             ),
         ),

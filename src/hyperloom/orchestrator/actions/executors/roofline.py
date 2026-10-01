@@ -69,6 +69,7 @@ _NON_RETRYABLE_PROFILE_ERRORS = frozenset(
     {
         "agentx_multi_node_profile_unsupported",
         "primary_rank_trace_missing",
+        "recipe_lever_unavailable",
     }
 )
 _NON_RETRYABLE_CAPTURE_REASONS = frozenset(
@@ -803,9 +804,7 @@ class RooflineExecutor:
                     profile_result.get("error_class") in _NON_RETRYABLE_PROFILE_ERRORS
                     or capture_reason in _NON_RETRYABLE_CAPTURE_REASONS
                 ):
-                    # Recorded before returning: this branch used to leave the attempt out of ``runs`` entirely,
-                    # so the one class of failure nobody can retry their way out of was also the one the event
-                    # could not describe.
+                    # Recorded before returning, so ``runs`` also describes the failure no retry can get past.
                     await _note_profile_run(
                         status="failed",
                         result=profile_result,
