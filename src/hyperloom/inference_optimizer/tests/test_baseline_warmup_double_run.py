@@ -154,17 +154,13 @@ def _cold_then_hot_fake_run(
 def _executor(
     base: Path,
     tmp_path: Path,
-    *,
-    baseline_double_run: bool = True,
 ) -> BaselineExecutor:
-    ex = BaselineExecutor(
+    return BaselineExecutor(
         magpie_python=sys.executable,
         default_config_path=base,
         session_dir=tmp_path,
         shared_state=SimpleNamespace(),
     )
-    ex._baseline_double_run_default = baseline_double_run
-    return ex
 
 
 @pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
@@ -177,7 +173,7 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch,
     captured: list = []
     launches: list = []
     fake_run, state = _cold_then_hot_fake_run(captured, launches=launches)
-    executor = _executor(base, tmp_path, baseline_double_run=True)
+    executor = _executor(base, tmp_path)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -250,7 +246,7 @@ def test_each_double_run_round_reports_before_it_blocks(tmp_path):
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     notes: list[dict] = []
-    executor = _executor(base, tmp_path, baseline_double_run=True)
+    executor = _executor(base, tmp_path)
     ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
 
     result, at_launch = _run_capturing_rounds(executor, ctx, notes)
@@ -269,8 +265,10 @@ def test_the_single_round_path_reports_too(tmp_path):
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     notes: list[dict] = []
-    executor = _executor(base, tmp_path, baseline_double_run=False)
-    ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx(
+        {"baseline_double_run": False, "output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"}
+    )
 
     result, at_launch = _run_capturing_rounds(executor, ctx, notes)
 
@@ -289,8 +287,10 @@ def test_a_round_is_handed_the_liveness_callback_its_heartbeat_needs(tmp_path):
         seen.append(kwargs.get("on_output"))
         return inner(cmd, *args, **kwargs)
 
-    executor = _executor(base, tmp_path, baseline_double_run=False)
-    ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx(
+        {"baseline_double_run": False, "output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"}
+    )
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=fake_run,
@@ -303,7 +303,9 @@ def test_a_round_is_handed_the_liveness_callback_its_heartbeat_needs(tmp_path):
 
 def _cadence_ctx(tmp_path) -> SimpleNamespace:
     """A single-round baseline context for the cadence tests."""
-    return _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
+    return _make_ctx(
+        {"baseline_double_run": False, "output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"}
+    )
 
 
 def test_a_round_keeps_reporting_while_its_benchmark_blocks(tmp_path, progress_cadence):
@@ -311,7 +313,7 @@ def test_a_round_keeps_reporting_while_its_benchmark_blocks(tmp_path, progress_c
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     inner, _state = _cold_then_hot_fake_run()
-    executor = _executor(base, tmp_path, baseline_double_run=False)
+    executor = _executor(base, tmp_path)
 
     with (
         progress_scope(progress_cadence.sink()),
@@ -335,7 +337,7 @@ def test_the_multi_node_warmup_pass_keeps_reporting_too(tmp_path, monkeypatch, p
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     inner, state = _cold_then_hot_fake_run()
-    executor = _executor(base, tmp_path, baseline_double_run=False)
+    executor = _executor(base, tmp_path)
 
     with (
         progress_scope(progress_cadence.sink()),
@@ -359,7 +361,7 @@ def test_a_failing_warmup_round_still_reported_that_it_started(tmp_path):
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     notes: list[dict] = []
-    executor = _executor(base, tmp_path, baseline_double_run=True)
+    executor = _executor(base, tmp_path)
     ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
 
     with (
@@ -881,7 +883,7 @@ def test_deferred_accuracy_skips_eval_when_hot_throughput_regresses(
     output_dir = tmp_path / "ws"
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path, baseline_double_run=True)
+    executor = _executor(base, tmp_path)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -939,7 +941,7 @@ def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
             )
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    executor = _executor(base, tmp_path, baseline_double_run=True)
+    executor = _executor(base, tmp_path)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -1275,7 +1277,7 @@ def test_deferred_accuracy_is_cancelled_by_no_eval(tmp_path, with_policy):
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
 
-    executor = _executor(base, tmp_path, baseline_double_run=True)
+    executor = _executor(base, tmp_path)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -1334,9 +1336,10 @@ def test_deferred_accuracy_single_round_keeps_eval_enabled(tmp_path, with_policy
         )
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    executor = _executor(base, tmp_path, baseline_double_run=False)
+    executor = _executor(base, tmp_path)
     ctx = _make_ctx(
         {
+            "baseline_double_run": False,
             "output_dir": str(output_dir),
             "timeout_sec": 10,
             "gpu_type": "mi300x",
@@ -1616,7 +1619,7 @@ def test_baseline_warmup_round_failure_short_circuits(tmp_path, monkeypatch):
         state["calls"] += 1
         return subprocess.CompletedProcess(cmd, 1, "", "boom: server crashed")
 
-    executor = _executor(base, tmp_path, baseline_double_run=True)
+    executor = _executor(base, tmp_path)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -1692,9 +1695,10 @@ def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
         )
         return subprocess.CompletedProcess(cmd, 1, "", "magpie wrapper noise")
 
-    executor = _executor(base, tmp_path, baseline_double_run=False)
+    executor = _executor(base, tmp_path)
     ctx = _make_ctx(
         {
+            "baseline_double_run": False,
             "output_dir": str(output_dir),
             "timeout_sec": 10,
             "gpu_type": "mi300x",
@@ -1735,9 +1739,10 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
         # Classification must be driven by the server.log marker, not returncode.
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    executor = _executor(base, tmp_path, baseline_double_run=False)
+    executor = _executor(base, tmp_path)
     ctx = _make_ctx(
         {
+            "baseline_double_run": False,
             "output_dir": str(output_dir),
             "timeout_sec": 10,
             "gpu_type": "mi300x",
@@ -1775,9 +1780,10 @@ def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
         (slot / "benchmark_vllm_20260602_010101").mkdir(parents=True)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    executor = _executor(base, tmp_path, baseline_double_run=False)
+    executor = _executor(base, tmp_path)
     ctx = _make_ctx(
         {
+            "baseline_double_run": False,
             "output_dir": str(output_dir),
             "timeout_sec": 10,
             "gpu_type": "mi300x",
@@ -1824,8 +1830,10 @@ def test_baseline_nonzero_rc_with_valid_measurement_fails(tmp_path):
         )
         return subprocess.CompletedProcess(cmd, 1, "stdout tail", "server exited 1")
 
-    executor = _executor(base, tmp_path, baseline_double_run=False)
-    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx(
+        {"baseline_double_run": False, "output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"}
+    )
 
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
@@ -1867,8 +1875,10 @@ def test_baseline_rejects_stale_workspace_on_crash(tmp_path, monkeypatch):
     def fake_run(cmd, *args, **kwargs):
         return subprocess.CompletedProcess(cmd, 1, "", "HIP out of memory")
 
-    executor = _executor(base, tmp_path, baseline_double_run=False)
-    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx(
+        {"baseline_double_run": False, "output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"}
+    )
 
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
@@ -1909,8 +1919,10 @@ def test_baseline_rejects_stale_workspace_on_silent_exit(tmp_path, monkeypatch):
     def fake_run(cmd, *args, **kwargs):
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    executor = _executor(base, tmp_path, baseline_double_run=False)
-    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx(
+        {"baseline_double_run": False, "output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"}
+    )
 
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
@@ -1951,8 +1963,10 @@ def test_baseline_rejects_stale_workspace_when_the_run_produced_none(tmp_path, m
     def fake_run(cmd, *args, **kwargs):
         return subprocess.CompletedProcess(cmd, 1, "", "boom")
 
-    executor = _executor(base, tmp_path, baseline_double_run=False)
-    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx(
+        {"baseline_double_run": False, "output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"}
+    )
 
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
@@ -1989,8 +2003,10 @@ def test_baseline_picks_fresh_workspace_sorting_before_a_stale_one(tmp_path, mon
         _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]), tput=4000.0)
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    executor = _executor(base, tmp_path, baseline_double_run=False)
-    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx(
+        {"baseline_double_run": False, "output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"}
+    )
 
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
@@ -2027,8 +2043,10 @@ def test_baseline_fresh_workspace_succeeds_despite_stale_peer(tmp_path, monkeypa
         _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]), tput=4000.0)
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    executor = _executor(base, tmp_path, baseline_double_run=False)
-    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx(
+        {"baseline_double_run": False, "output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"}
+    )
 
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
@@ -2054,9 +2072,10 @@ def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
         _fake_workspace(slot, tput=_HOT_TPUT)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    executor = _executor(base, tmp_path, baseline_double_run=False)
+    executor = _executor(base, tmp_path)
     ctx = _make_ctx(
         {
+            "baseline_double_run": False,
             "output_dir": str(output_dir),
             "timeout_sec": 10,
             "gpu_type": "mi300x",
@@ -2083,7 +2102,7 @@ def test_atom_engages_double_run_like_vllm_sglang(tmp_path, monkeypatch):
 
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path, baseline_double_run=True)
+    executor = _executor(base, tmp_path)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -2125,7 +2144,7 @@ def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path, monkeypatch):
         _fake_workspace(slot, tput=tput)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    executor = _executor(base, tmp_path, baseline_double_run=True)
+    executor = _executor(base, tmp_path)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -2195,7 +2214,7 @@ def test_pre_start_cleanup_called_once_regardless_of_double_run(tmp_path, baseli
 
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path, baseline_double_run=baseline_double_run)
+    executor = _executor(base, tmp_path)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
