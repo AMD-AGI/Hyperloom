@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PRELUDE-bootstrap analysis-task enqueue tests (kind/idempotency/benchmark-script wiring of ``_enqueue_internal_analysis_task``)."""
+"""PRELUDE-bootstrap analysis-task enqueue tests (kind/idempotency/benchmark-script wiring of ``enqueue_internal_analysis_task``)."""
 
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def test_prelude_initial_roofline_task_contract(coord: Coordinator):
     }
 
     task = asyncio.run(
-        coord.phase_prelude._enqueue_internal_analysis_task(reason="prelude_initial"),
+        coord.phase_prelude.enqueue_internal_analysis_task(reason="prelude_initial"),
     )
 
     assert task.kind == "roofline"
@@ -139,7 +139,7 @@ def test_prelude_initial_roofline_uses_baseline_server_args(
     )
 
     task = asyncio.run(
-        coord.phase_prelude._enqueue_internal_analysis_task(reason="prelude_initial"),
+        coord.phase_prelude.enqueue_internal_analysis_task(reason="prelude_initial"),
     )
 
     assert task.params["base_extra_args"] == "--attention-backend AITER"
@@ -150,8 +150,8 @@ def test_prelude_initial_roofline_uses_baseline_server_args(
 @pytest.mark.asyncio
 async def test_prelude_initial_roofline_is_idempotent(coord: Coordinator):
     """A second call with the same reason returns the same task (no double-enqueue on resume)."""
-    first = await coord.phase_prelude._enqueue_internal_analysis_task(reason="prelude_initial")
-    second = await coord.phase_prelude._enqueue_internal_analysis_task(reason="prelude_initial")
+    first = await coord.phase_prelude.enqueue_internal_analysis_task(reason="prelude_initial")
+    second = await coord.phase_prelude.enqueue_internal_analysis_task(reason="prelude_initial")
     assert first.task_id == second.task_id
     assert len(coord.tasks._tasks) == 1
 
@@ -159,10 +159,10 @@ async def test_prelude_initial_roofline_is_idempotent(coord: Coordinator):
 @pytest.mark.asyncio
 async def test_distinct_reasons_produce_distinct_tasks(coord: Coordinator):
     """A watermark-driven roofline is a separate task; the idempotency key is reason-scoped."""
-    prelude = await coord.phase_prelude._enqueue_internal_analysis_task(
+    prelude = await coord.phase_prelude.enqueue_internal_analysis_task(
         reason="prelude_initial",
     )
-    watermark = await coord.phase_prelude._enqueue_internal_analysis_task(
+    watermark = await coord.phase_prelude.enqueue_internal_analysis_task(
         reason="explore_keep_watermark",
     )
     assert prelude.task_id != watermark.task_id
@@ -173,12 +173,12 @@ async def test_distinct_reasons_produce_distinct_tasks(coord: Coordinator):
 @pytest.mark.asyncio
 async def test_failed_roofline_does_not_dedup_away_the_retry(coord: Coordinator):
     """The whole blackout, stated directly."""
-    first = await coord.phase_prelude._enqueue_internal_analysis_task(
+    first = await coord.phase_prelude.enqueue_internal_analysis_task(
         reason="integrate_keep_watermark",
     )
 
     coord.shared_state.roofline_failure_streak = 1
-    retry = await coord.phase_prelude._enqueue_internal_analysis_task(
+    retry = await coord.phase_prelude.enqueue_internal_analysis_task(
         reason="integrate_keep_watermark",
     )
 
@@ -192,7 +192,7 @@ async def test_each_further_failure_earns_its_own_attempt(coord: Coordinator):
     seen = set()
     for streak in (0, 1, 2):
         coord.shared_state.roofline_failure_streak = streak
-        task = await coord.phase_prelude._enqueue_internal_analysis_task(
+        task = await coord.phase_prelude.enqueue_internal_analysis_task(
             reason="integrate_keep_watermark",
         )
         seen.add(task.task_id)
@@ -204,8 +204,8 @@ async def test_each_further_failure_earns_its_own_attempt(coord: Coordinator):
 async def test_a_roofline_that_worked_is_never_re_run(coord: Coordinator):
     """The streak resets to zero on a successful snapshot, so success collapses back onto the original key and stays idempotent across resumes."""
     coord.shared_state.roofline_failure_streak = 0
-    first = await coord.phase_prelude._enqueue_internal_analysis_task(reason="prelude_initial")
-    second = await coord.phase_prelude._enqueue_internal_analysis_task(reason="prelude_initial")
+    first = await coord.phase_prelude.enqueue_internal_analysis_task(reason="prelude_initial")
+    second = await coord.phase_prelude.enqueue_internal_analysis_task(reason="prelude_initial")
 
     assert first.task_id == second.task_id
     assert first.idempotency_key == "internal-analysis-prelude_initial"
@@ -216,7 +216,7 @@ async def test_profile_kind_keeps_the_plain_key(coord: Coordinator):
     """Only roofline retries; the profile kind has no failure streak to spend."""
     coord.shared_state.enable_roofline = False
     coord.shared_state.roofline_failure_streak = 2
-    task = await coord.phase_prelude._enqueue_internal_analysis_task(reason="prelude_initial")
+    task = await coord.phase_prelude.enqueue_internal_analysis_task(reason="prelude_initial")
 
     assert task.kind == "profile"
     assert task.idempotency_key == "internal-analysis-prelude_initial"
@@ -246,7 +246,7 @@ async def test_watermark_gate_reopens_exactly_when_the_roofline_it_names_finishe
     state.cumulative_gain_validated = 50.0
     state.last_roofline_tput = 0.0
 
-    named = await coord.phase_prelude._enqueue_internal_analysis_task(
+    named = await coord.phase_prelude.enqueue_internal_analysis_task(
         reason="integrate_keep_watermark",
     )
     coord.tasks._tasks[named.task_id].state = named_state
@@ -287,7 +287,7 @@ async def test_a_condemned_stack_enqueues_no_analysis_at_all(coord: Coordinator)
     coord.shared_state.gpu_trace_unsupported_reason = "no GPU kernels on this stack"
 
     for reason in ("prelude_initial", "cycle_start", "kernel_entry_g1_abc", "close_post_opt"):
-        assert await coord.phase_prelude._enqueue_internal_analysis_task(reason=reason) is None
+        assert await coord.phase_prelude.enqueue_internal_analysis_task(reason=reason) is None
 
     assert coord.tasks._tasks == {}
 
@@ -320,7 +320,7 @@ def test_watermark_roofline_inherits_current_best_args(coord: Coordinator):
     }
 
     task = asyncio.run(
-        coord.phase_prelude._enqueue_internal_analysis_task(reason="explore_keep_watermark"),
+        coord.phase_prelude.enqueue_internal_analysis_task(reason="explore_keep_watermark"),
     )
 
     assert task.params["reason"] == "explore_keep_watermark"
@@ -335,7 +335,7 @@ def test_watermark_roofline_inherits_current_best_args(coord: Coordinator):
 async def test_enable_roofline_false_picks_profile_kind(coord: Coordinator):
     """When ``enable_roofline`` is False, the task switches kind to ``profile`` keeping the reason-scoped key."""
     coord.shared_state.enable_roofline = False
-    task = await coord.phase_prelude._enqueue_internal_analysis_task(reason="prelude_initial")
+    task = await coord.phase_prelude.enqueue_internal_analysis_task(reason="prelude_initial")
     assert task.kind == "profile"
     assert task.idempotency_key == "internal-analysis-prelude_initial"
 

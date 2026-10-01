@@ -387,7 +387,7 @@ async def test_a_phase_advance_that_raises_is_recorded_at_the_session_tick(sessi
     async def _raise() -> None:
         raise RuntimeError("advance broke")
 
-    monkeypatch.setattr(c.phase_machine, "_advance_phase_if_needed", _raise)
+    monkeypatch.setattr(c.phase_machine, "advance_phase_if_needed", _raise)
     try:
         # A resumed session carries its tick forward; the record uses that clock, not a per-run count.
         c.shared_state.tick = 41
@@ -943,7 +943,7 @@ async def test_orchestration_prompt_has_no_execution_checklist(session_dir):
         c.shared_state.last_profile_trace = ""
         c.shared_state.save(session_dir)
 
-        prompt = await c.conversation._compose_prompt("orchestration")
+        prompt = await c.conversation.compose_prompt("orchestration")
 
         assert "Execution checklist" not in prompt
     finally:
@@ -1746,7 +1746,7 @@ async def test_a_revalidation_the_budget_cannot_fit_is_not_enqueued(session_dir,
         st.max_minutes = 60
         st.elapsed_minutes = lambda **_kw: 60.0  # type: ignore[method-assign]
 
-        assert await c.enablement_revalidation._maybe_enqueue_enablement_baseline_revalidation() == ""
+        assert await c.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation() == ""
 
         # The window survives the stop: same generation, still pending, and no row for the key a resume with budget
         # left will need.
@@ -1769,7 +1769,7 @@ async def test_a_revalidation_key_spent_on_a_cancelled_row_opens_the_next_one(se
         st.enablement.revalidation_generation = 3
         spent = await _cancelled_revalidation_row(c, gen=3)
 
-        tid = await c.enablement_revalidation._maybe_enqueue_enablement_baseline_revalidation()
+        tid = await c.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
 
         assert tid and tid != spent.task_id, "the window resolved to the cancelled row"
         assert st.enablement.revalidation_generation == 4
@@ -2438,7 +2438,7 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
     async def _boom():
         raise RuntimeError("tick exploded mid-run")
 
-    c.phase_machine._advance_phase_if_needed = _boom  # type: ignore[assignment]
+    c.phase_machine.advance_phase_if_needed = _boom  # type: ignore[assignment]
 
     try:
         reason = await c.run(max_ticks=5)

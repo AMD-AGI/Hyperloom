@@ -105,9 +105,9 @@ async def test_the_next_cycle_opens_on_the_directive_and_enters_as_one_sequence(
         order.append("soft_restart")
 
     st.open_macro_cycle = _open_cycle  # type: ignore[method-assign]
-    coord.phase_macro_cycle._run_cycle_soft_restart = _soft_restart  # type: ignore[method-assign]
+    coord.phase_macro_cycle.run_cycle_soft_restart = _soft_restart  # type: ignore[method-assign]
 
-    await coord.phase_machine._advance_phase_if_needed()
+    await coord.phase_machine.advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_FRAMEWORK_AGENT
     assert st.macro_cycle == 1

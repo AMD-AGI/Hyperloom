@@ -427,7 +427,7 @@ async def test_coordinator_applies_loopback(cyclic_coordinator):
     st.last_conc_sweep = {"status": "succeeded"}
     st.last_conc_sweep = {"status": "succeeded"}
 
-    await c.phase_machine._advance_phase_if_needed()
+    await c.phase_machine.advance_phase_if_needed()
 
     # Reloop targets the highest-leverage layer (FRAMEWORK enabled by default).
     assert st.phase == ps.PHASE_FRAMEWORK_AGENT
@@ -469,7 +469,7 @@ async def test_skip_to_close_is_consumed_when_sweep_already_settled(
         return None
 
     monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _entered)
-    await c.phase_machine._advance_phase_if_needed()
+    await c.phase_machine.advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_CLOSE
     assert st.pending_escalate_hint == ""
@@ -489,7 +489,7 @@ async def test_coordinator_converged_close_sets_stop_reason(cyclic_coordinator):
     st.no_gain_cycle_streak = 2  # effective 3 ≥ threshold
     st.last_conc_sweep = {"status": "succeeded"}
 
-    await c.phase_machine._advance_phase_if_needed()
+    await c.phase_machine.advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_CLOSE
     assert st.stop_reason == "global_converged"

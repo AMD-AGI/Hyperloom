@@ -160,7 +160,7 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
         )
         state.enablement.revalidation_task_id = task.task_id
     else:
-        task_id = await coordinator.enablement_revalidation._maybe_enqueue_enablement_baseline_revalidation()
+        task_id = await coordinator.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
         assert task_id
         task = await coordinator.tasks.get(task_id)
 

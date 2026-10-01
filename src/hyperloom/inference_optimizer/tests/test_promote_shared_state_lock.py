@@ -758,8 +758,8 @@ async def test_a_step_without_adoption_semantics_is_never_journalled_keep(sessio
 @pytest.mark.asyncio
 async def test_forge_loop_integrate_keep_lands_a_journal_entry(session_dir):
     """Reproduces a real session: a forge-loop kernel_rewrite_controller KEEP lands on
-    optimization_stack via _record_integrate_keep, which never went through the generic
-    _fact_write_hook -> _record_fact_per_task path every dispatched Task uses to append its own
+    optimization_stack via record_integrate_keep, which never went through the generic
+    fact_write_hook -> _record_fact_per_task path every dispatched Task uses to append its own
     optimization_journal.json row. The journal's header (final_throughput/total_gain_pct) ends up
     naming a KEEP its own entries list never records."""
     from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_KEEP
@@ -1429,7 +1429,7 @@ async def test_resume_settles_state_before_draining_kb_outbox(
 
 @pytest.mark.asyncio
 @pytest.mark.asyncio
-# GAP 7: replay_warm_recipe routes through _promote_warm_replay (self-saves) and never sets outcome.changed, so the
+# GAP 7: replay_warm_recipe routes through promote_warm_replay (self-saves) and never sets outcome.changed, so the
 # unified tail neither audits nor re-saves.
 @pytest.mark.asyncio
 async def test_promote_replay_warm_recipe_routes_and_skips_tail(session_dir, monkeypatch):
@@ -1441,16 +1441,16 @@ async def test_promote_replay_warm_recipe_routes_and_skips_tail(session_dir, mon
     def _spy_warm(result, *, task=None):
         warm_calls.append({"result": result, "task": task})
 
-    # _promote_warm_replay lives on the phase_prelude collaborator; also stub the deferred PRELUDE analysis enqueue so the
+    # promote_warm_replay lives on the phase_prelude collaborator; also stub the deferred PRELUDE analysis enqueue so the
     # test stays hermetic.
-    monkeypatch.setattr(coord.phase_prelude, "_promote_warm_replay", _spy_warm)
+    monkeypatch.setattr(coord.phase_prelude, "promote_warm_replay", _spy_warm)
 
     async def _noop_prelude(*a, **k):
         return None
 
     monkeypatch.setattr(
         coord.phase_prelude,
-        "_maybe_enqueue_prelude_initial_analysis_after_baseline",
+        "maybe_enqueue_prelude_initial_analysis_after_baseline",
         _noop_prelude,
     )
 

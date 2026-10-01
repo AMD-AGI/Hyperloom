@@ -102,7 +102,7 @@ def test_framework_gpu_params_request_whole_machine(tmp_path, monkeypatch):
     """The shared helper (used by BOTH the perf-framework and enablement param builders) requests the whole machine when GPUs are visible + single-node."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
     assert coord.framework_gpu_pool.capacity == 4
-    gpu_params = coord.gpu_lanes._framework_gpu_params()
+    gpu_params = coord.gpu_lanes.framework_gpu_params()
     assert gpu_params.get("needs_gpu") is True
     assert gpu_params.get("gpu_count") == 4
 
@@ -114,7 +114,7 @@ def test_enablement_params_carry_whole_machine_gpu(tmp_path, monkeypatch):
     coord.shared_state.model_name = "some/model"
     # A missing-model-arch log classifies to an actionable signature.
     log = "Model architecture 'FooBarForCausalLM' is not supported by this build"
-    params = coord.enablement_params._build_enablement_specialist_params(log)
+    params = coord.enablement_params.build_enablement_specialist_params(log)
     assert params is not None
     assert params.get("enablement") is True
     assert params.get("needs_gpu") is True
@@ -125,14 +125,14 @@ def test_framework_gpu_params_empty_without_gpus(tmp_path, monkeypatch):
     """No visible cards → no needs_gpu (never deadlock the dispatcher)."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0, visible_devices="")
     assert coord.framework_gpu_pool.capacity == 0
-    assert coord.gpu_lanes._framework_gpu_params() == {}
+    assert coord.gpu_lanes.framework_gpu_params() == {}
 
 
 def test_framework_gpu_params_empty_on_multi_node(tmp_path, monkeypatch):
     """Multi-node → no whole-machine GPU request (integrate_patch is single-node)."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    assert coord.gpu_lanes._framework_gpu_params() == {}
+    assert coord.gpu_lanes.framework_gpu_params() == {}
 
 
 # ── 2. dispatch leases the whole machine even when capacity=0 ────────────────

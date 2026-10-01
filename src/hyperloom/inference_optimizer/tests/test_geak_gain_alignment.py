@@ -1283,7 +1283,7 @@ def test_promote_with_dead_overlay_leaves_no_kernel_names_in_stack_entry(tmp_pat
     coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=measured, overlay_loaded=False)
 
     entry = next(e for e in coord.shared_state.optimization_stack if e.get("action") == "geak_e2e")
-    # ``_lift_to_current_best`` drops empty values, so "no proof" reads as no lane at all rather than an empty one --
+    # ``lift_to_current_best`` drops empty values, so "no proof" reads as no lane at all rather than an empty one --
     # either way there is no name to credit.
     assert not entry.get("accepted_kernels")
     assert not entry.get("accepted_heads")

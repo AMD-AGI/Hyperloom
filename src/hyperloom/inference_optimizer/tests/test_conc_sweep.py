@@ -1281,7 +1281,7 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
     coord.writeback.record_integrate_keep = AsyncMock()
     coord.session_dir = Path("/tmp/sess")
 
-    asyncio.run(KernelStackPhase._drain_pending_keep_integrates(coord))
+    asyncio.run(KernelStackPhase.drain_pending_keep_integrates(coord))
 
     assert fake_integrate.await_count == 2, fake_integrate.await_args_list
     assert coord.shared_state.save.call_count >= 2

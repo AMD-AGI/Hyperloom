@@ -165,14 +165,14 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         rounds=rounds,
         session_dir=str(session),
         run_deadline=None,
-        _warm_specialist_params=_noop,
+        warm_specialist_params=_noop,
         record_observation=_noop,
         action_registry=ACTION_CATALOGUE,
         state=types.SimpleNamespace(pending_proposals={}),
         _read_enablement_source_context=lambda _sig: "",
         _derive_checkpoint_weight_facts=lambda _log: "",
-        _framework_gpu_params=lambda: {},
-        _framework_authoring_lanes_ttl=lambda _params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
+        framework_gpu_params=lambda: {},
+        framework_authoring_lanes_ttl=lambda _params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
         time_budget_denial_for_action=lambda _action: None,
         # Attributes exposed by CoordinatorCollaborator properties; set directly
         # on the shim since property descriptors don't apply to SimpleNamespace.
@@ -180,23 +180,23 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         recipe_kb=None,
     )
     for owner, name in (
-        (EnablementParams, "_build_enablement_specialist_params"),
+        (EnablementParams, "build_enablement_specialist_params"),
         (EnablementParams, "_discover_enablement_candidate_refs"),
         (EnablementLane, "_maybe_record_enablement_human_review"),
-        (EnablementLane, "_maybe_rearm_enablement"),
+        (EnablementLane, "maybe_rearm_enablement"),
         (EnablementLane, "_maybe_enqueue_enablement_specialist"),
-        (EnablementLane, "_enablement_admitted"),
+        (EnablementLane, "enablement_admitted"),
         (EnablementLane, "_check_argv_terminal"),
         (EnablementLane, "_check_environment_terminal"),
         (EnablementLane, "_environment_verdict"),
-        (EnablementLane, "_enablement_in_flight"),
+        (EnablementLane, "enablement_in_flight"),
         (EnablementLane, "_round_has_live_work"),
         (EnablementLane, "_open_authoring_round"),
         (EnablementLane, "_renew_enablement_round"),
-        (EnablementLane, "_settle_enablement_round"),
+        (EnablementLane, "settle_enablement_round"),
         (EnablementLane, "close_lane_event"),
-        (EnablementBuild, "_maybe_enqueue_specialist_requested_build"),
-        (EnablementBuild, "_maybe_escalate_to_targeted_build"),
+        (EnablementBuild, "maybe_enqueue_specialist_requested_build"),
+        (EnablementBuild, "maybe_escalate_to_targeted_build"),
     ):
         setattr(shim, name, types.MethodType(getattr(owner, name), shim))
     # Collaborator access goes through self._coord, so route it back to the shim.
@@ -475,7 +475,7 @@ async def test_the_enablement_attempt_cap_stops_a_round_that_keeps_asking(
     assert not lane.shared_state.stop_reason
     # That round has to end before the next one can ask for the machine, and a
     # revert is how a round that repaired nothing ends.
-    await lane._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
+    await lane.maybe_rearm_enablement({"enablement": True, "status": "reverted"})
     assert await rounds.held() is None
 
     # Now at the cap: the lane must stop.
@@ -510,7 +510,7 @@ async def test_an_advancing_round_does_not_exhaust_the_cap(
     assert not lane.shared_state.stop_reason
 
     # An advancing result settles the open round as ADVANCED, resetting the streak.
-    await lane._maybe_rearm_enablement(
+    await lane.maybe_rearm_enablement(
         {"enablement": True, "status": "advanced", "patches_applied": ["vllm/platforms/rocm.py"]}
     )
     assert await rounds.held() is None
@@ -544,7 +544,7 @@ async def test_a_round_settles_when_the_caller_has_no_reason_to_give(
     held = await rounds.held()
     assert held is not None
 
-    await lane._settle_enablement_round(FAILED, reason="")
+    await lane.settle_enablement_round(FAILED, reason="")
 
     assert await rounds.held() is None
     row = await rounds.get(held.round_id)

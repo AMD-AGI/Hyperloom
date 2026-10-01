@@ -50,7 +50,7 @@ async def test_warm_specialist_params_populates_warm_start_lessons(tmp_path: Pat
     ]
     coord = _make_coord(tmp_path, state=SharedState(warm_start_lessons=lessons))
     params: dict[str, Any] = {}
-    await coord.specialist_dispatch._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert params["warm_start_lessons"] == lessons
 
 
@@ -61,7 +61,7 @@ async def test_warm_specialist_params_omits_warm_start_lessons_when_empty(
     """No lessons → no key in params (avoids leaking a misleading empty list)."""
     coord = _make_coord(tmp_path, state=SharedState(warm_start_lessons=[]))
     params: dict[str, Any] = {}
-    await coord.specialist_dispatch._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert "warm_start_lessons" not in params
 
 

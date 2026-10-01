@@ -214,7 +214,7 @@ def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_pa
     specialist_task = stub.tasks._queued[-1]
     assert task_id == specialist_task.task_id
     assert specialist_task.params["reauthor_attempt"] == 1
-    round_entry = stub.specialist_dispatch._build_specialist_round_entry(
+    round_entry = stub.specialist_dispatch.build_specialist_round_entry(
         task=specialist_task,
         done_payload={"proposal_set": []},
         source=f"specialist:{task_id}",

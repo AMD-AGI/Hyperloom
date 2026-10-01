@@ -1406,7 +1406,7 @@ class TestATickCannotOutliveTheSessionBound:
         coord: Coordinator,
         monkeypatch,
     ):
-        monkeypatch.setattr(coord.phase_machine, "_advance_phase_if_needed", _idle)
+        monkeypatch.setattr(coord.phase_machine, "advance_phase_if_needed", _idle)
         monkeypatch.setattr(coord, "_reactor_pass", _hang_forever)
         monkeypatch.setattr(coord.dispatcher, "pump_dispatcher_once", _idle)
         started = time.monotonic()
@@ -1426,7 +1426,7 @@ class TestATickCannotOutliveTheSessionBound:
         coord: Coordinator,
         monkeypatch,
     ):
-        monkeypatch.setattr(coord.phase_machine, "_advance_phase_if_needed", _hang_forever)
+        monkeypatch.setattr(coord.phase_machine, "advance_phase_if_needed", _hang_forever)
         monkeypatch.setattr(coord, "_reactor_pass", _idle)
         monkeypatch.setattr(coord.dispatcher, "pump_dispatcher_once", _idle)
         started = time.monotonic()

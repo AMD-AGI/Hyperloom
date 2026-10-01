@@ -382,13 +382,13 @@ async def test_run_closing_phase_skips_reactor(session_dir):
     c.shared_state.baseline_tput = 50.0
     c.shared_state.save(session_dir)
     calls_at_closing: list[int] = []
-    real_enter = c.phase_close._enter_closing_phase
+    real_enter = c.phase_close.enter_closing_phase
 
     async def _enter_and_record(*, grace_sec: float) -> float:
         calls_at_closing.append(spy.calls)
         return await real_enter(grace_sec=grace_sec)
 
-    c.phase_close._enter_closing_phase = _enter_and_record  # type: ignore[method-assign]
+    c.phase_close.enter_closing_phase = _enter_and_record  # type: ignore[method-assign]
     try:
         await c.run(
             max_minutes=0.0001,

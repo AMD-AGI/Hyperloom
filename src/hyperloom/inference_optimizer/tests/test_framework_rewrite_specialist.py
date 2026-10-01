@@ -309,15 +309,15 @@ class _Tasks:
 
 
 class _GpuLanesStub:
-    def _framework_gpu_params(self) -> dict:
+    def framework_gpu_params(self) -> dict:
         return {}
 
-    def _framework_authoring_lanes_ttl(self, _params, *, base_ttl_sec: int) -> tuple[list[str], int]:
+    def framework_authoring_lanes_ttl(self, _params, *, base_ttl_sec: int) -> tuple[list[str], int]:
         return [], base_ttl_sec
 
 
 class _SpecialistDispatchStub:
-    async def _warm_specialist_params(self, _params) -> None:
+    async def warm_specialist_params(self, _params) -> None:
         return None
 
 

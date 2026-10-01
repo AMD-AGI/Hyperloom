@@ -663,7 +663,7 @@ def test_a_session_recorded_at_an_unknown_phase_refuses_to_resume(coordinator_wi
     c.shared_state.phase = "EXPLORE"
 
     with pytest.raises(RuntimeError) as excinfo:
-        c.phase_machine._ensure_phase_initialised(None)
+        c.phase_machine.ensure_phase_initialised(None)
 
     assert "EXPLORE" in str(excinfo.value)
     assert c.shared_state.phase == "EXPLORE"
@@ -710,7 +710,7 @@ def _enter_framework_for(c, elapsed_sec: float) -> None:
 
 
 async def _phase_block(c) -> str:
-    prompt = await c.conversation._compose_prompt("orchestration")
+    prompt = await c.conversation.compose_prompt("orchestration")
     return prompt.split("=== Phase ===", 1)[1]
 
 
@@ -730,13 +730,13 @@ async def test_no_kernel_framework_share_is_the_same_for_machine_dispatch_and_pr
         block = await _phase_block(c)
         assert f"pct={share:.2f}" in block
         assert "remaining_sec=0 " not in block
-        await c.phase_machine._advance_phase_if_needed()
+        await c.phase_machine.advance_phase_if_needed()
         assert c.shared_state.phase == phase_state.PHASE_FRAMEWORK_AGENT
 
         _enter_framework_for(c, _NO_KERNEL_CYCLE_SEC * share + 60.0)
         assert c.dispatcher._dispatch_paused_for_phase_budget() is True
         assert "remaining_sec=0" in await _phase_block(c)
-        await c.phase_machine._advance_phase_if_needed()
+        await c.phase_machine.advance_phase_if_needed()
         framework_exit = c.shared_state.phase_history[-1]
         assert framework_exit["from_phase"] == phase_state.PHASE_FRAMEWORK_AGENT
         assert framework_exit["evidence"]["passed_through_reason"] == "optimize_phase_budget_exhausted"
@@ -770,7 +770,7 @@ async def test_extend_explore_budget_moves_the_share_every_reader_uses(no_kernel
         block = await _phase_block(c)
         assert f"pct={bumped:.2f}" in block
         assert "remaining_sec=0 " not in block
-        await c.phase_machine._advance_phase_if_needed()
+        await c.phase_machine.advance_phase_if_needed()
         assert c.shared_state.phase == phase_state.PHASE_FRAMEWORK_AGENT
     finally:
         await c.stop()

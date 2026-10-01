@@ -383,7 +383,7 @@ async def test_the_reseeded_override_is_what_the_orchestration_turn_loads(tmp_pa
 
     assert handler._reseed_orch_prompt_for_phase("EXPLORE") is True
 
-    assert await coord.conversation._load_system_prompt("orchestration") == "PROMPT[phase=EXPLORE]"
+    assert await coord.conversation.load_system_prompt("orchestration") == "PROMPT[phase=EXPLORE]"
 
 
 def test_cycle_strategy_rows_do_not_nest_the_prior_cycles(tmp_path):
@@ -392,7 +392,7 @@ def test_cycle_strategy_rows_do_not_nest_the_prior_cycles(tmp_path):
     state = coord.shared_state
     for cycle in range(1, 5):
         state.macro_cycle = cycle
-        coord.phase_macro_cycle._record_cycle_strategy_for_current_cycle()
+        coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
         handler._reseed_orch_prompt_for_phase("EXPLORE")
 
     assert [row["cycle"] for row in state.cycle_strategy_log] == [1, 2, 3, 4]

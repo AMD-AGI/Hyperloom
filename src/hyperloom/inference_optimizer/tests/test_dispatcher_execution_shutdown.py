@@ -59,6 +59,7 @@ def _dispatcher(tmp_path):
         reconciler=SimpleNamespace(last_report=ReconcileReport()),
         _BUDGET_GATED_DISPATCH_PHASES=frozenset(),
         writeback=writeback_ns,
+        specialist_dispatch=SimpleNamespace(maybe_auto_retry_specialist=AsyncMock(return_value=True)),
     )
     dispatcher = DispatcherCollaborator(coord)
     dispatcher.poll_sec = 0.01
@@ -581,7 +582,6 @@ def test_confirmed_cleanup_unregisters_even_when_completion_raises(tmp_path, out
 
 def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path):
     dispatcher = _dispatcher(tmp_path)
-    dispatcher._maybe_auto_retry_specialist = AsyncMock(return_value=True)
     dispatcher._coord.writeback.record_specialist_result = AsyncMock()
     dispatcher._coord.writeback.handle_unpromotable_result = AsyncMock()
     dispatcher._coord.phase_framework = SimpleNamespace(on_specialist_settled=Mock())
@@ -596,7 +596,7 @@ def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path
         assert (await dispatcher.tasks.get(task.task_id)).state == "cancelled"
         events = await dispatcher.bus.tail(topic="delegated_result")
         assert len(events) == 1 and events[0].payload["state"] == "cancelled"
-        assert dispatcher._maybe_auto_retry_specialist.await_count == 0
+        assert dispatcher._coord.specialist_dispatch.maybe_auto_retry_specialist.await_count == 0
         assert dispatcher._coord.writeback.record_specialist_result.await_count == 1
         assert dispatcher._coord.phase_framework.on_specialist_settled.call_count == 1
         assert dispatcher._coord.writeback.promote_to_shared_state.await_count == 0

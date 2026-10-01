@@ -128,7 +128,7 @@ def test_freeform_patch_prompt_carries_mandate_and_patch_protocol():
     assert "worktree" in system.lower()
 
 
-# _maybe_auto_retry_specialist — lane assignment mirrors first dispatch
+# maybe_auto_retry_specialist — lane assignment mirrors first dispatch
 
 
 def _make_explore_phase_stub(tmp_path, registry_lanes, registry_ttl, gpu_ttl, captured_tasks):
@@ -162,7 +162,7 @@ def _make_explore_phase_stub(tmp_path, registry_lanes, registry_ttl, gpu_ttl, ca
 
 
 def _make_stale_task(params):
-    """Minimal Task-like object for _maybe_auto_retry_specialist."""
+    """Minimal Task-like object for maybe_auto_retry_specialist."""
     t = MagicMock()
     t.task_id = "orig-task-1"
     t.idempotency_key = "spec-key-1"
@@ -192,13 +192,13 @@ async def test_auto_retry_needs_gpu_acquires_gpu_research_lane(tmp_path):
     task = _make_stale_task({"needs_gpu": True, "scope": "freeform", "task_description": "probe"})
     result = _make_stale_result()
 
-    retried = await phase._maybe_auto_retry_specialist(task, result)
+    retried = await phase.maybe_auto_retry_specialist(task, result)
 
     assert retried is True, "infra failure + needs_gpu task must be retried"
     assert captured, "create_or_return_existing must have been called"
     lanes = captured[0]["requires_lanes"]
     assert "gpu_research_lane" in lanes, f"retry must hold gpu_research_lane; got {lanes}"
-    assert captured[0]["lease_ttl_sec"] == 7200, "retry TTL must be re-sourced via _gpu_lease_ttl_sec"
+    assert captured[0]["lease_ttl_sec"] == 7200, "retry TTL must be re-sourced via gpu_lease_ttl_sec"
 
 
 @pytest.mark.asyncio
@@ -224,7 +224,7 @@ async def test_auto_retry_bench_specialist_acquires_both_lanes(tmp_path):
     )
     result = _make_stale_result()
 
-    retried = await phase._maybe_auto_retry_specialist(task, result)
+    retried = await phase.maybe_auto_retry_specialist(task, result)
 
     assert retried is True
     lanes = captured[0]["requires_lanes"]
@@ -247,7 +247,7 @@ async def test_auto_retry_non_gpu_specialist_no_gpu_research_lane(tmp_path):
     task = _make_stale_task({"needs_gpu": False, "scope": "freeform", "task_description": "read logs"})
     result = _make_stale_result()
 
-    retried = await phase._maybe_auto_retry_specialist(task, result)
+    retried = await phase.maybe_auto_retry_specialist(task, result)
 
     assert retried is True
     lanes = captured[0]["requires_lanes"]

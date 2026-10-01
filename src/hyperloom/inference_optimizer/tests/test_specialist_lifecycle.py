@@ -119,7 +119,7 @@ def _done_payload(
     }
 
 
-# 1. _record_specialist_result — direct bookkeeping unit tests
+# 1. record_specialist_result — direct bookkeeping unit tests
 @pytest.mark.asyncio
 async def test_record_specialist_result_non_empty_proposal_set(coord):
     """Non-empty proposal_set: ledger +1 row, save called."""
@@ -148,7 +148,7 @@ async def test_record_specialist_result_non_empty_proposal_set(coord):
 async def test_record_specialist_result_enqueues_build_request(coord):
     task = _StubTask(task_id="build-spec", params={"enablement": True})
     coord.tasks.register(task)
-    coord.enablement_build._maybe_enqueue_specialist_requested_build = AsyncMock()
+    coord.enablement_build.maybe_enqueue_specialist_requested_build = AsyncMock()
     payload = _done_payload(no_proposals=True)
     payload["needs_targeted_build"] = {
         "component": "aiter",
@@ -162,7 +162,7 @@ async def test_record_specialist_result_enqueues_build_request(coord):
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}build-spec",
     )
 
-    coord.enablement_build._maybe_enqueue_specialist_requested_build.assert_awaited_once_with(
+    coord.enablement_build.maybe_enqueue_specialist_requested_build.assert_awaited_once_with(
         task_id="build-spec",
         payload=payload,
     )
@@ -233,7 +233,7 @@ def test_task_id_from_specialist_source_returns_empty_for_bad():
     )
 
 
-# 4. _build_specialist_round_entry — output shape
+# 4. build_specialist_round_entry — output shape
 @pytest.mark.asyncio
 async def test_build_specialist_round_entry_carries_full_payload(coord):
     """The entry carries the full field set the timeline round product expects."""
@@ -252,7 +252,7 @@ async def test_build_specialist_round_entry_carries_full_payload(coord):
         ],
         confidence=0.62,
     )
-    entry = coord_obj.specialist_dispatch._build_specialist_round_entry(
+    entry = coord_obj.specialist_dispatch.build_specialist_round_entry(
         task=task,
         done_payload=payload,
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t-build",
@@ -288,7 +288,7 @@ async def test_build_specialist_round_entry_round_id_falls_back_to_task_id(coord
 
     coord_obj = Coordinator.__new__(Coordinator)
     task = _StubTask(task_id="task-no-round", params={})
-    entry = coord_obj.specialist_dispatch._build_specialist_round_entry(
+    entry = coord_obj.specialist_dispatch.build_specialist_round_entry(
         task=task,
         done_payload=_done_payload(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-no-round",
@@ -423,7 +423,7 @@ def force_coord(tmp_path: Path, monkeypatch):
     (source_root / ".git").mkdir(parents=True)
     c.shared_state.framework_repo_path = str(source_root)
     c.tasks = SimpleNamespace(find_by_idempotency_key=AsyncMock(return_value=None))
-    monkeypatch.setattr(SpecialistDispatchCollaborator, "_warm_specialist_params", AsyncMock())
+    monkeypatch.setattr(SpecialistDispatchCollaborator, "warm_specialist_params", AsyncMock())
     c.router.handle_intent = AsyncMock()  # type: ignore[assignment]
     return c
 
@@ -442,7 +442,7 @@ async def test_force_stalled_domain_dispatches_when_gap_pending(force_coord):
         }
     )
 
-    await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
 
     force_coord.router.handle_intent.assert_awaited_once()
     src, intent = force_coord.router.handle_intent.call_args.args
@@ -474,7 +474,7 @@ async def test_force_stalled_idempotency_key_is_cycle_scoped(force_coord):
         }
     )
 
-    await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
 
     _, intent = force_coord.router.handle_intent.call_args.args
     assert intent.payload["idempotency_key"].endswith("-c2")
@@ -495,7 +495,7 @@ async def test_force_stalled_domain_does_not_resubmit_existing_round(force_coord
     )
     force_coord.tasks.find_by_idempotency_key.return_value = SimpleNamespace(state=task_state)
 
-    await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
 
     force_coord.router.handle_intent.assert_not_awaited()
     force_coord.tasks.find_by_idempotency_key.assert_awaited_once_with("forced-stalled-framework-round0")
@@ -515,8 +515,8 @@ async def test_force_stalled_source_patch_without_git_root_is_pruned_once(force_
         }
     )
 
-    await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
-    await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
 
     force_coord.router.handle_intent.assert_not_awaited()
     assert state.pruned_families == ["source_patch"]
@@ -541,7 +541,7 @@ async def test_force_stalled_research_specialist_ignores_source_patch_prune(forc
     state.stalled_domains = lambda **_kwargs: ["pr_intelligence"]
     state.best_gap_for_anchor = lambda _anchor: "gap.framework.discovery.s1"
 
-    await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
 
     force_coord.router.handle_intent.assert_awaited_once()
     _, intent = force_coord.router.handle_intent.call_args.args
@@ -554,7 +554,7 @@ async def test_force_stalled_domain_noop_without_pending_gap(force_coord):
     for _ in range(10):
         state.bump_domain_round_counters()
     # No gap in the ledger -> nothing to force even though counters are high.
-    await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
     force_coord.router.handle_intent.assert_not_awaited()
 
 
@@ -571,5 +571,5 @@ async def test_force_stalled_domain_noop_outside_explore(force_coord):
             "severity": "high",
         }
     )
-    await force_coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
     force_coord.router.handle_intent.assert_not_awaited()

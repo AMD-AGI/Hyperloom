@@ -888,7 +888,7 @@ async def test_promote_roofline_flips_changed_and_saves(session_dir):
     )
     post = json.loads((session_dir / "state.json").read_text())
     assert post.get("last_profile_trace") == "/sessions/abc/.../NEW_trace.gz", (
-        "N10 _promote_to_shared_state 'roofline' branch must trigger "
+        "N10 promote_to_shared_state 'roofline' branch must trigger "
         "the tail-save; otherwise the post-promote state.json would "
         "still show the pre-mutate trace path"
     )

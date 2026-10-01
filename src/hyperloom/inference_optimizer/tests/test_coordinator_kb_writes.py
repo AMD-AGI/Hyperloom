@@ -238,7 +238,7 @@ def test_sdk_fallback_t0_anchors_into_self_recipe_kb(tmp_path: Path) -> None:
     # Clear the markers and re-anchor the canonical Recipe identity.
     coord.shared_state.warm_start_ts = ""
     coord.shared_state.recipe_kb_session_id = ""
-    coord.phase_machine._ensure_recipe_kb_t0_anchored()
+    coord.phase_machine.ensure_recipe_kb_t0_anchored()
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     assert row is not None, "SDK-fallback T0 did not anchor into self.recipe_kb"
 
