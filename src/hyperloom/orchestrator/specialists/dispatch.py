@@ -44,7 +44,7 @@ FORCE_STALLED_KEEP_ROUNDS: int = 12
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     """Specialist dispatch: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
 
-    async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
+    async def warm_specialist_params(self, params: dict[str, Any]) -> None:
         """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); missing fields stay empty.
 
         Args:
@@ -161,7 +161,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 params["source_hint_directories"] = list(_dirs)
 
         if "target_gap_notes" not in params:
-            _gap_notes = self._coord.conversation._target_gap_advisory_block()
+            _gap_notes = self._coord.conversation.target_gap_advisory_block()
             if _gap_notes:
                 params["target_gap_notes"] = _gap_notes
 
@@ -255,7 +255,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "hot_kernels_top15": hot_kernels,
             }
 
-    async def _maybe_auto_retry_specialist(
+    async def maybe_auto_retry_specialist(
         self,
         task: "Task",
         result: "SubAgentResult",
@@ -432,7 +432,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             detail,
         )
 
-    async def _fan_out_specialist_wave(
+    async def fan_out_specialist_wave(
         self,
         source: str,
         intent: Intent,
@@ -491,7 +491,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         for sub_intent in pending:
             await self._coord.router.handle_delegate(source, sub_intent)
 
-    async def _maybe_force_stalled_domain_specialist(self) -> None:
+    async def maybe_force_stalled_domain_specialist(self) -> None:
         """Force-dispatch a domain specialist for a domain untouched for too many
         config-arm rounds that still has an open gap in the gaps[] ledger.
 
@@ -548,7 +548,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 existing = await lookup(idempotency_key)
                 if existing is not None:
                     continue
-            await self._warm_specialist_params(params)
+            await self.warm_specialist_params(params)
             if is_source_patch:
                 preflight_error = specialist_patch_preflight_error(
                     params,
@@ -602,7 +602,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             return None
         return None
 
-    def _build_specialist_round_entry(
+    def build_specialist_round_entry(
         self,
         *,
         task: "Task",

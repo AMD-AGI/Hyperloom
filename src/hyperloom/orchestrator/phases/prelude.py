@@ -175,7 +175,7 @@ def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]
 class PreludePhase(CoordinatorCollaborator):
     """PRELUDE phase handler: session boot, target analysis, and phase seeding."""
 
-    def _internal_analysis_kind(self) -> str:
+    def internal_analysis_kind(self) -> str:
         """Pick the kind for the next Coordinator-internal analysis task: roofline when enable_roofline else profile."""
         return (
             "roofline"
@@ -187,7 +187,7 @@ class PreludePhase(CoordinatorCollaborator):
 
     def _measured_analysis_cost_sec(self) -> float:
         """Expected cost of the initial roofline/profile arm, in seconds."""
-        meta = self.action_registry.get(self._internal_analysis_kind())
+        meta = self.action_registry.get(self.internal_analysis_kind())
         return (
             expected_action_cost_minutes(
                 meta,
@@ -214,7 +214,7 @@ class PreludePhase(CoordinatorCollaborator):
         except Exception:
             log.exception("PRELUDE: failed to persist the dropped-arm record for %r", arm)
 
-    def _warm_recipe_proven_items(self) -> list[dict[str, str]]:
+    def warm_recipe_proven_items(self) -> list[dict[str, str]]:
         """Summarise warm-start ``what_worked`` items the scout can skip ({name, source}); fail-soft."""
         state = self.shared_state
         warm = state.warm_start_recipe or {}
@@ -238,7 +238,7 @@ class PreludePhase(CoordinatorCollaborator):
             out.append({"name": name, "source": str(row.get("source") or "").strip()})
         return out
 
-    def _inject_warm_recipe_history_into_ledger(self) -> int:
+    def inject_warm_recipe_history_into_ledger(self) -> int:
         """Pre-fill ``explore_search.rejected`` with the warm recipe's ``what_failed`` rows (fingerprinted so the dedup gate denies re-tests). Idempotent via warm_history_injected; returns rows added."""
         state = self.shared_state
         if state.warm_history_injected:
@@ -1028,7 +1028,7 @@ class PreludePhase(CoordinatorCollaborator):
             "provenance": provenance,
         }
 
-    async def _maybe_enqueue_warm_replay(
+    async def maybe_enqueue_warm_replay(
         self,
         *,
         baseline_tput: float,
@@ -1581,7 +1581,7 @@ class PreludePhase(CoordinatorCollaborator):
             "target_repos": promoted,
         }
 
-    def _rollback_combined_warm(
+    def rollback_combined_warm(
         self,
         result: dict[str, Any],
         task: "Task | None",
@@ -1694,7 +1694,7 @@ class PreludePhase(CoordinatorCollaborator):
         unwind a rejected replay: what a reader needs is whether the trees came
         back. Returns ``True`` when every tree was restored.
         """
-        rollback = self._rollback_combined_warm(result, task)
+        rollback = self.rollback_combined_warm(result, task)
         if recorder is not None:
             recorder.record_rollback(ok=rollback.get("ok"), errors=rollback.get("errors"))
         if rollback.get("ok"):
@@ -2047,7 +2047,7 @@ class PreludePhase(CoordinatorCollaborator):
             recorder.record_rollback(ok=rollback.get("ok"), errors=rollback.get("errors"))
         recorder.finish_skipped(code=code, outcome=outcome, details=details)
 
-    def _promote_warm_replay(
+    def promote_warm_replay(
         self,
         result: dict,
         *,
@@ -2497,7 +2497,7 @@ class PreludePhase(CoordinatorCollaborator):
         log.info("warm-replay DRIFT: %s", reason)
         return self._conclude_warm_replay(outcome, Verdict.REVERTED, clear_pending=True)
 
-    async def _maybe_enqueue_prelude_initial_analysis_after_baseline(
+    async def maybe_enqueue_prelude_initial_analysis_after_baseline(
         self,
         *,
         baseline_tput: float | None = None,
@@ -2507,7 +2507,7 @@ class PreludePhase(CoordinatorCollaborator):
         if _phase_state.warm_replay_in_flight(state):
             log.info(
                 "PRELUDE: deferring initial %s until warm-replay completes",
-                self._internal_analysis_kind(),
+                self.internal_analysis_kind(),
             )
             return
         if baseline_tput is None:
@@ -2528,7 +2528,7 @@ class PreludePhase(CoordinatorCollaborator):
                 "PRELUDE: skipping the initial %s — %.0fs of preparation budget "
                 "left (bound=%s) against an expected %.0fs. The optimization "
                 "phases keep the time instead.",
-                self._internal_analysis_kind(),
+                self.internal_analysis_kind(),
                 evidence.get("affordable_sec", 0.0),
                 evidence.get("bound", ""),
                 evidence.get("expected_cost_sec", 0.0),
@@ -2536,7 +2536,7 @@ class PreludePhase(CoordinatorCollaborator):
             self._record_prelude_arm_dropped("initial_analysis", evidence)
             return
         try:
-            rl_task = await self._enqueue_internal_analysis_task(
+            rl_task = await self.enqueue_internal_analysis_task(
                 reason="prelude_initial",
             )
             if rl_task is None:
@@ -2564,14 +2564,14 @@ class PreludePhase(CoordinatorCollaborator):
             streak = 0
         return f"-a{streak}" if streak > 0 else ""
 
-    async def _enqueue_internal_analysis_task(self, *, reason: str, inline_event: str = "") -> "Task | None":
+    async def enqueue_internal_analysis_task(self, *, reason: str, inline_event: str = "") -> "Task | None":
         """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key
         internal-analysis-<reason>. Returns None when the stack cannot produce a GPU trace for it to analyze.
         """
-        params = self._internal_analysis_params(reason=reason, inline_event=inline_event)
+        params = self.internal_analysis_params(reason=reason, inline_event=inline_event)
         if params is None:
             return None
-        kind = self._internal_analysis_kind()
+        kind = self.internal_analysis_kind()
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(kind)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=kind,
@@ -2592,7 +2592,7 @@ class PreludePhase(CoordinatorCollaborator):
             )
         return task
 
-    def _internal_analysis_params(self, *, reason: str, inline_event: str = "") -> dict[str, Any] | None:
+    def internal_analysis_params(self, *, reason: str, inline_event: str = "") -> dict[str, Any] | None:
         """Params for a Coordinator-internal analysis run, or None when the stack cannot produce a GPU trace."""
         from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 

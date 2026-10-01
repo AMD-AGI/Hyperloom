@@ -297,7 +297,7 @@ class Coordinator:
         )
         self.sub.policy = self.policy
         # Attach read-only context-pull MCP tools to Orchestration backend.
-        self.conversation._attach_orchestration_context_tools()
+        self.conversation.attach_orchestration_context_tools()
         # Resume detection must run before any boot-time state.json write.
         self.writeback.detect_resume_state()
         # Reap serving processes orphaned by a prior monitor-process crash (e.g. a raylet death that took the
@@ -350,9 +350,9 @@ class Coordinator:
         self._current_objective: Objective | None = None
 
         # Initialise phase machine (fresh session enters PRELUDE). Idempotent.
-        self.phase_machine._ensure_phase_initialised(phase_budget_pct)
+        self.phase_machine.ensure_phase_initialised(phase_budget_pct)
         # Recipe KB T0 defensive fallback for direct SDK/test callers; best-effort.
-        self.phase_machine._ensure_recipe_kb_t0_anchored()
+        self.phase_machine.ensure_recipe_kb_t0_anchored()
 
     @property
     def recipe_kb(self) -> RecipeKB | None:
@@ -693,12 +693,12 @@ class Coordinator:
         try:
             # A phase-entry hook may have finished early (for example a GEAK no_gain run exits KERNEL immediately).
             await self._await_within_session_bound(
-                self.phase_machine._advance_phase_if_needed,
+                self.phase_machine.advance_phase_if_needed,
                 stage="advance_phase_pre_reactor",
             )
             if self.shared_state.pending_escalate_hint.strip():
                 await self._await_within_session_bound(
-                    self.phase_machine._advance_phase_if_needed,
+                    self.phase_machine.advance_phase_if_needed,
                     stage="advance_phase_hint",
                 )
         except Exception as exc:
@@ -718,17 +718,17 @@ class Coordinator:
             await self.dispatcher.pump_dispatcher_once()
         if not in_closing:
             phase = (self.shared_state.phase or "").strip().upper()
-            if not self.phase_machine._pump_table:
-                self.phase_machine._build_dispatch_tables()
-            pump = self.phase_machine._pump_table.get(phase)
+            if not self.phase_machine.pump_table:
+                self.phase_machine.build_dispatch_tables()
+            pump = self.phase_machine.pump_table.get(phase)
             if pump is not None:
                 await pump()
             # Phase-independent enablement pump: repair a non-runnable combo.
-            await self.enablement_lane._pump_enablement_safely()
+            await self.enablement_lane.pump_enablement_safely()
         # phase machine advance; runs even in_closing so CLOSE is recorded.
         try:
             await self._await_within_session_bound(
-                self.phase_machine._advance_phase_if_needed,
+                self.phase_machine.advance_phase_if_needed,
                 stage="advance_phase",
             )
         except Exception as exc:
@@ -928,13 +928,13 @@ class Coordinator:
                     if grace_sec <= 0:
                         stop_reason = "time_exhausted"
                         break
-                    closing_deadline = await self.phase_close._enter_closing_phase(
+                    closing_deadline = await self.phase_close.enter_closing_phase(
                         grace_sec=grace_sec,
                     )
                     self._closing_deadline = closing_deadline
                     continue
                 if in_closing:
-                    report_terminal = await self.phase_close._closing_report_terminal()
+                    report_terminal = await self.phase_close.closing_report_terminal()
                     grace_blown = closing_deadline is not None and closing_deadline.expired()
                     if report_terminal or grace_blown:
                         if grace_blown and not report_terminal:
@@ -1031,8 +1031,8 @@ class Coordinator:
         intents.
         """
         backend = self.backends[agent_name]
-        sys_prompt = await self.conversation._load_system_prompt(agent_name)
-        prompt = await self.conversation._compose_prompt(agent_name)
+        sys_prompt = await self.conversation.load_system_prompt(agent_name)
+        prompt = await self.conversation.compose_prompt(agent_name)
         if request:
             prompt = f"{prompt}\n\n{request}"
         tools = self.policy.allowed_tools_for_agent(agent_name)
@@ -1075,7 +1075,7 @@ class Coordinator:
                 "observation",
                 {"kind": "no_intent_emitted", "agent": agent_name, "error": str(exc)[:500]},
             )
-            await self.conversation._advance_rendered_cursor(agent_name)
+            await self.conversation.advance_rendered_cursor(agent_name)
             return
         except Exception as exc:
             # Catch-all so one agent's bad turn never stops the loop.
@@ -1101,7 +1101,7 @@ class Coordinator:
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
-        self.conversation._record_reactor_conversation(agent_name, result)
+        self.conversation.record_reactor_conversation(agent_name, result)
         for intent in result.intents:
             await self.router.handle_intent(agent_name, intent)
         if not result.intents and not request:
@@ -1110,7 +1110,7 @@ class Coordinator:
                 "observation",
                 {"kind": "no_intent_emitted", "agent": agent_name, "error": "the turn emitted no intents"},
             )
-        await self.conversation._advance_rendered_cursor(agent_name)
+        await self.conversation.advance_rendered_cursor(agent_name)
         if agent_name == "orchestration":
             state = self.shared_state
             state.last_discarded_escalate_hint = ""

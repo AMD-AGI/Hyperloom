@@ -2905,7 +2905,7 @@ class IntegratePatchExecutor:
             # them in the next round's mandate.  The field lives on done_payload
             # (written by runner.py) and must be forwarded here because
             # _no_patches is the concrete dict framework.py reads via
-            # _maybe_rearm_enablement.
+            # maybe_rearm_enablement.
             ungrounded = (done_payload or {}).get("patches_ungrounded")
             if isinstance(ungrounded, list) and ungrounded:
                 _no_patches["patches_ungrounded"] = ungrounded

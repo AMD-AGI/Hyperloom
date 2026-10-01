@@ -70,7 +70,7 @@ _MIN_LEASE_SEC = 300.0
 class EnablementLane(CoordinatorCollaborator):
     """Owns one enablement round: admit, track in-flight, re-arm on outcome."""
 
-    def _enablement_admitted(self) -> bool:
+    def enablement_admitted(self) -> bool:
         """Whether this run and host admit the enablement lane at all."""
         from ..actions.executors._accuracy_gate import eval_enablement_allowed, launch_enablement_allowed
         from ..actions.executors._multi_node_env import is_multi_node
@@ -85,7 +85,7 @@ class EnablementLane(CoordinatorCollaborator):
     async def _maybe_enqueue_enablement_specialist(self) -> str:
         """Dispatch an enablement_specialist when a baseline cannot launch or its accuracy eval fails."""
         state = self.shared_state
-        if not self._enablement_admitted():
+        if not self.enablement_admitted():
             return ""
         if state.enablement.succeeded:
             return ""
@@ -94,7 +94,7 @@ class EnablementLane(CoordinatorCollaborator):
         if await self.rounds.held() is not None:
             # Renews the open round's lease as a side effect; the reconciler,
             # which runs ahead of this pump, ends a round nobody is working on.
-            await self._enablement_in_flight()
+            await self.enablement_in_flight()
             return ""
         # Each terminal below writes stop_reason, which routes the phase to CLOSE on the
         # next tick; returning keeps a new round from opening in the meantime.
@@ -124,7 +124,7 @@ class EnablementLane(CoordinatorCollaborator):
         # Reaches the network and stats a checkout on a network mount, so it
         # runs off the tick; discovery degrades to repos-only at the deadline.
         params = await offload(
-            lambda: self._coord.enablement_params._build_enablement_specialist_params(launch_log, attempt=stalled),
+            lambda: self._coord.enablement_params.build_enablement_specialist_params(launch_log, attempt=stalled),
             deadline=Deadline.after(ENABLEMENT_PARAMS_BUDGET_SEC).tightened_to(deadline),
             label="enablement specialist params",
         )
@@ -138,13 +138,13 @@ class EnablementLane(CoordinatorCollaborator):
         # no-ops when a matching build is already queued or running, and neither
         # may block the authoring dispatch below, which is this method's point.
         try:
-            await self._coord.enablement_build._maybe_enqueue_specialist_requested_build()
-            await self._coord.enablement_build._maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
+            await self._coord.enablement_build.maybe_enqueue_specialist_requested_build()
+            await self._coord.enablement_build.maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
         except Exception:
             log.exception("enablement: build escalation failed")
-        await self._coord.specialist_dispatch._warm_specialist_params(params)
+        await self._coord.specialist_dispatch.warm_specialist_params(params)
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
-        lanes, ttl = self._coord.gpu_lanes._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_tid = await self._open_authoring_round(
             params=params,
             lanes=lanes,
@@ -307,7 +307,7 @@ class EnablementLane(CoordinatorCollaborator):
             return ""
         return holder
 
-    async def _enablement_in_flight(self) -> bool:
+    async def enablement_in_flight(self) -> bool:
         """True while an open round still has work running under it.
 
         Returns:
@@ -367,7 +367,7 @@ class EnablementLane(CoordinatorCollaborator):
             request_id=f"renew:{round_row.round_id}:{round_row.fence}:{now:.0f}",
         )
 
-    async def _handoff_enablement_round(self, task: "Task") -> None:
+    async def handoff_enablement_round(self, task: "Task") -> None:
         """Move the open round onto the integrate that consumes its deliverable.
 
         Handoff is the only fence increment, so every task id that takes over an
@@ -404,7 +404,7 @@ class EnablementLane(CoordinatorCollaborator):
                 moved.reason,
             )
 
-    async def _settle_enablement_round(self, outcome: str, *, reason: str = "") -> None:
+    async def settle_enablement_round(self, outcome: str, *, reason: str = "") -> None:
         """End the open round, if one is still open.
 
         Args:
@@ -509,7 +509,7 @@ class EnablementLane(CoordinatorCollaborator):
             signature.kind,
         )
 
-    async def _maybe_rearm_enablement(self, res: dict[str, Any] | None) -> None:
+    async def maybe_rearm_enablement(self, res: dict[str, Any] | None) -> None:
         """Re-arm, advance, or terminate the enablement retry loop.
 
         Called on every ``integrate_patch`` completion. An enablement patch has
@@ -600,7 +600,7 @@ class EnablementLane(CoordinatorCollaborator):
         # A rearm always ends the round; only a KEEP booted and was graded, and
         # an advance is the ledger's record that the cap must not charge it.
         is_advanced = status == "advanced" or bool(res.get("advanced"))
-        await self._settle_enablement_round(
+        await self.settle_enablement_round(
             BOOTED if status == "kept" else ADVANCED if is_advanced else FAILED,
             reason=status,
         )
@@ -626,15 +626,15 @@ class EnablementLane(CoordinatorCollaborator):
             f" stop_reason={stop_set}" if stop_set else "",
         )
 
-    async def _pump_enablement_safely(self) -> None:
+    async def pump_enablement_safely(self) -> None:
         """ENABLEMENT phase pump — called every tick while in ENABLEMENT."""
         if (self.shared_state.phase or "").strip().upper() != PHASE_ENABLEMENT:
             return
         # Independently, because a raise in one pump must not skip the rest: the
         # one that dispatches the next authoring round is the last of them.
         for pump in (
-            self._coord.enablement_build._maybe_route_build_outcomes,
-            self._coord.enablement_revalidation._maybe_enqueue_enablement_baseline_revalidation,
+            self._coord.enablement_build.maybe_route_build_outcomes,
+            self._coord.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation,
             self._maybe_enqueue_enablement_specialist,
         ):
             try:

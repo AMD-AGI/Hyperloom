@@ -62,7 +62,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             counts[domain] = counts.get(domain, 0) + 1
         return counts
 
-    def _plan_cycle_focus(self) -> dict[str, Any]:
+    def plan_cycle_focus(self) -> dict[str, Any]:
         """Pick an advisory specialist-domain focus for the current macro-cycle."""
         from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
 
@@ -136,10 +136,10 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             "gain_delta": None,
         }
 
-    def _record_cycle_strategy_for_current_cycle(self) -> None:
+    def record_cycle_strategy_for_current_cycle(self) -> None:
         """Append/update the advisory cycle-strategy row for the current cycle."""
         state = self.shared_state
-        planned = self._plan_cycle_focus()
+        planned = self.plan_cycle_focus()
         log_rows = [r for r in (state.cycle_strategy_log or []) if isinstance(r, dict)]
         cycle = int(planned.get("cycle", 0) or 0)
         replaced = False
@@ -154,7 +154,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             log_rows.append(planned)
         state.cycle_strategy_log = log_rows[-50:]
 
-    async def _run_cycle_soft_restart(
+    async def run_cycle_soft_restart(
         self,
         *,
         prior_cycle: int,
@@ -196,7 +196,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         )
         return summary
 
-    async def _on_cycle_start_reprofile(self, *, from_phase: str) -> None:
+    async def on_cycle_start_reprofile(self, *, from_phase: str) -> None:
         """Force a fresh analysis at the start of a reopened macro-cycle.
 
         Reached on every cycle start now. It used to be attached to the config-arm
@@ -209,7 +209,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             from_phase: The phase being left; only a SWEEP origin starts a cycle.
         """
         if (from_phase or "").upper() == _phase_state.PHASE_SWEEP and int(self.shared_state.macro_cycle or 0) > 0:
-            task = await self._coord.phase_prelude._enqueue_internal_analysis_task(
+            task = await self._coord.phase_prelude.enqueue_internal_analysis_task(
                 reason="cycle_start",
             )
             if task is None:

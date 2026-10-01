@@ -189,7 +189,7 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
 class ConversationCollaborator(CoordinatorCollaborator):
     """Manages conversation rounds: context tools, prompt injection, and round history."""
 
-    def _attach_orchestration_context_tools(self) -> None:
+    def attach_orchestration_context_tools(self) -> None:
         """Bind a read-only ContextProvider to the orchestration backend (no-op without setter)."""
         backend = self.backends.get("orchestration")
         setter = getattr(backend, "set_context_provider", None)
@@ -343,7 +343,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
                 return f"(analysis.md unreadable at {path}: {exc!r})"
         return "(no analysis.md snapshot yet)"
 
-    def _record_reactor_conversation(
+    def record_reactor_conversation(
         self,
         agent_name: str,
         result: BackendTurnResult,
@@ -369,7 +369,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         )
         append_conversation(session_dir=self.session_dir, record=record)
 
-    async def _compose_prompt(self, agent_name: str) -> str:
+    async def compose_prompt(self, agent_name: str) -> str:
         """Compose the prompt for *agent_name*: session context + inbox tail (with canonical msg_id per inbox row)."""
         sections: list[str] = []
 
@@ -433,7 +433,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             research_block = self._specialist_findings_block()
             if research_block:
                 sections.append(research_block)
-            gap_block = self._target_gap_advisory_block()
+            gap_block = self.target_gap_advisory_block()
             if gap_block:
                 sections.append("=== External target gap (advisory) ===")
                 sections.append(gap_block)
@@ -454,7 +454,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
                 sections.append("=== Intervention mix (telemetry) ===")
                 sections.append(mix_block)
 
-            plateau_block = self._plateau_advisory_block()
+            plateau_block = self.plateau_advisory_block()
             if plateau_block:
                 sections.append("=== Plateau advisory ===")
                 sections.append(plateau_block)
@@ -515,7 +515,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
         return "\n".join(sections)
 
-    async def _advance_rendered_cursor(self, agent_name: str) -> None:
+    async def advance_rendered_cursor(self, agent_name: str) -> None:
         """Advance an agent's read cursor to the last message its prompt rendered."""
         entry = self._coord._rendered_cursor.get(agent_name)
         if entry is None:
@@ -547,7 +547,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         merged.sort(key=lambda m: int(getattr(m, "seq", 0) or 0))
         return merged
 
-    async def _load_system_prompt(self, agent_name: str) -> str:
+    async def load_system_prompt(self, agent_name: str) -> str:
         """Load the system prompt for an agent, honoring overrides."""
         override = self._coord.orch_prompt.get(agent_name)
         if override is not None:
@@ -561,7 +561,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             return f"(no system prompt for {agent_name})"
 
     # Advisory prompt blocks (folded in from the former AdvisoryCollaborator).
-    def _plateau_advisory_block(self) -> str:
+    def plateau_advisory_block(self) -> str:
         """Render the plateau-judgment advisory block for the current phase."""
         state = self.shared_state
         phase = (state.phase or "").strip().upper()
@@ -608,7 +608,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         )
         return "\n".join(lines)
 
-    def _dominant_roofline_direction(self) -> tuple[str, float]:
+    def dominant_roofline_direction(self) -> tuple[str, float]:
         """Return ``(direction, pct)`` for the most-saturated roofline direction in the latest snapshot; ``("", 0.0)`` when no snapshot is available."""
         from hyperloom.inference_optimizer.roofline_snapshot import dominant_direction
 
@@ -634,7 +634,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             return ""
         prev = str(state.last_cycle_bottleneck or "")
         cur_top = state.current_top_bottleneck()
-        direction, pct = self._dominant_roofline_direction()
+        direction, pct = self.dominant_roofline_direction()
         lines: list[str] = []
         if has_switch:
             lines.append(
@@ -715,7 +715,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
                 lines.append(f"  {name}: prior gain {g:+.2f}% < {keep:.2f}%")
         return "\n".join(lines)
 
-    def _target_gap_advisory_block(self) -> str:
+    def target_gap_advisory_block(self) -> str:
         """Build the advisory \"External target gap\" prompt block (current-best vs competitor target; never gates)."""
         state = self.shared_state
         if not bool(state.target_advisory_enabled):

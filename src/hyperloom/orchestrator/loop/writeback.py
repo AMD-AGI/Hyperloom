@@ -1285,7 +1285,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             if measurement_status is not None and str(measurement_status) != "succeeded":
                 return False
             return is_valid_measurement(result)
-        # replay_warm_recipe always routes through _promote_warm_replay (owns its own failure bookkeeping).
+        # replay_warm_recipe always routes through promote_warm_replay (owns its own failure bookkeeping).
         if task_kind == "replay_warm_recipe":
             return True
         return result.get("status") != "failed"
@@ -1448,7 +1448,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         state.enablement.revalidation_generation = int(state.enablement.revalidation_generation or 0) + 1
         state.enablement.revalidation_task_id = ""
-        await self._coord.enablement_lane._settle_enablement_round(ABANDONED, reason="revalidation_stopped_by_the_run")
+        await self._coord.enablement_lane.settle_enablement_round(ABANDONED, reason="revalidation_stopped_by_the_run")
 
     async def _record_revalidation_not_promoted(
         self,
@@ -1481,9 +1481,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         else:
             state.enablement.revalidation_task_id = ""
             state.enablement.validation_pending = False
-            await self._coord.enablement_lane._settle_enablement_round(
-                FAILED, reason=err_class or "revalidation_failed"
-            )
+            await self._coord.enablement_lane.settle_enablement_round(FAILED, reason=err_class or "revalidation_failed")
         # A window the run stopped measured nothing, so recording it as a failed
         # revalidation would charge the lane for a clock.
         enablement_event.record_revalidation_outcome(
@@ -3023,7 +3021,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             proposals = []
         is_empty = len(proposals) == 0
 
-        round_entry = self._coord.specialist_dispatch._build_specialist_round_entry(
+        round_entry = self._coord.specialist_dispatch.build_specialist_round_entry(
             task=task,
             done_payload=done_payload,
             source=source,
@@ -3086,8 +3084,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # Multi-node only: auto-materialise the proposal_set into a
         # benchmarked explore task. No-op single-node (LLM drives explore
         # directly there) and no-op when the proposal_set is empty / has
-        # no applicable variants. See :meth:`_maybe_materialize_mn_explore`.
-        await self._coord.phase_framework._maybe_materialize_mn_explore(
+        # no applicable variants. See :meth:`maybe_materialize_mn_explore`.
+        await self._coord.phase_framework.maybe_materialize_mn_explore(
             task=task,
             domain=domain,
             proposals=proposals,
@@ -3120,23 +3118,23 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "proposals_total": len(proposals),
                 },
             )
-        await self._coord.gap_refresh._refresh_gaps(
+        await self._coord.gap_refresh.refresh_gaps(
             reason="specialist_done", workload_id=self._coord.proposals.workload_canonical_id()
         )
         if bool((task.params or {}).get("enablement")) and isinstance(done_payload.get("needs_targeted_build"), dict):
-            await self._coord.enablement_build._maybe_enqueue_specialist_requested_build(
+            await self._coord.enablement_build.maybe_enqueue_specialist_requested_build(
                 task_id=str(task.task_id or ""),
                 payload=done_payload,
             )
         # Push specialist-authored patches to the Critic so integrate_patch can pass.
-        await self._coord.phase_framework._maybe_autosubmit_specialist_patches(
+        await self._coord.phase_framework.maybe_autosubmit_specialist_patches(
             task=task,
             done_payload=done_payload,
         )
         # Relaxed FRAMEWORK rule: a config-lever deliverable (no source patch,
         # but a proposal_set of serving flags / env vars) is routed through the
         # same integrate_patch gate via its config_changes channel.
-        await self._coord.phase_framework._maybe_autosubmit_framework_config(
+        await self._coord.phase_framework.maybe_autosubmit_framework_config(
             task=task,
             done_payload=done_payload,
         )
@@ -3207,7 +3205,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         pr_ids.extend(refs)
         self.shared_state.register_seen_pr_ids(pr_ids)
         # Seed high-priority hints as gaps[] so the config arm tries them early.
-        self._coord.gap_refresh._seed_gaps_from_research_hints()
+        self._coord.gap_refresh.seed_gaps_from_research_hints()
         log.info(
             "specialist findings harvested: hints_added=%d seen_pr_ids=%d",
             added,
@@ -3715,7 +3713,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         self.shared_state.enablement.revalidation_task_id = ""
                         self.shared_state.enablement.origin = ""
                         self.shared_state.enablement.pending = False
-                        await self._coord.enablement_lane._settle_enablement_round(
+                        await self._coord.enablement_lane.settle_enablement_round(
                             BOOTED, reason="revalidation_promoted"
                         )
                         # This promote is the lane's terminal: the KEEP that
@@ -3742,7 +3740,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         )
                         self.shared_state.enablement.validation_pending = False
                         self.shared_state.enablement.revalidation_task_id = ""
-                        await self._coord.enablement_lane._settle_enablement_round(
+                        await self._coord.enablement_lane.settle_enablement_round(
                             FAILED, reason="revalidation_below_floor"
                         )
                         enablement_event.record_revalidation_outcome(
@@ -3902,7 +3900,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if result.get("eval_probe"):
             audit_extras["eval_probe"] = result["eval_probe"]
         # seed the gaps[] ledger from baseline.
-        await self._coord.gap_refresh._refresh_gaps(
+        await self._coord.gap_refresh.refresh_gaps(
             reason="baseline_done", workload_id=self._coord.proposals.workload_canonical_id()
         )
         if self.shared_state.baseline_tput > 0:
@@ -3920,20 +3918,20 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # re-baseline must not re-fire replay / scout / recon.
         if prior_anchor <= 0.0 and self._should_run_prelude_bootstrap(tput):
             # History injection (fires regardless of --no-warm-replay).
-            self._coord.phase_prelude._inject_warm_recipe_history_into_ledger()
+            self._coord.phase_prelude.inject_warm_recipe_history_into_ledger()
             # Warm-recipe replay, anchored on the hot baseline_tput contract.
-            await self._coord.phase_prelude._maybe_enqueue_warm_replay(
+            await self._coord.phase_prelude.maybe_enqueue_warm_replay(
                 baseline_tput=float(self.shared_state.baseline_tput or tput),
             )
             # Auto-analysis (roofline / profile); may defer.
-            await self._coord.phase_prelude._maybe_enqueue_prelude_initial_analysis_after_baseline(
+            await self._coord.phase_prelude.maybe_enqueue_prelude_initial_analysis_after_baseline(
                 baseline_tput=float(tput),
             )
             # Research scout (parallel, read-only, CPU-only).
-            await self._coord.phase_internal._maybe_enqueue_prelude_research_scout()
+            await self._coord.phase_internal.maybe_enqueue_prelude_research_scout()
             # Static-recon (parallel, read-only, CPU-only): seed bridge
             # candidates as gaps[] before the optimisation phase starts.
-            await self._coord.phase_internal._maybe_enqueue_prelude_static_recon()
+            await self._coord.phase_internal.maybe_enqueue_prelude_static_recon()
         outcome.changed = changed
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
@@ -3997,9 +3995,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
         outcome: _PromoteOutcome,
     ) -> None:
         """Separate promote path so replay doesn't overwrite baseline_tput/current_best."""
-        outcome.verdict = self._coord.phase_prelude._promote_warm_replay(result, task=task)
+        outcome.verdict = self._coord.phase_prelude.promote_warm_replay(result, task=task)
         # PRELUDE initial roofline was deferred while replay ran.
-        await self._coord.phase_prelude._maybe_enqueue_prelude_initial_analysis_after_baseline()
+        await self._coord.phase_prelude.maybe_enqueue_prelude_initial_analysis_after_baseline()
 
     async def _promote_profile(
         self,
@@ -5655,7 +5653,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if not (state.pending_stack_validation_result or state.pending_stack_validation_apply_results):
             return
         try:
-            recovered = await self._coord.phase_kernel_stack._recover_interrupted_stack_validation()
+            recovered = await self._coord.phase_kernel_stack.recover_interrupted_stack_validation()
         except ValueError as exc:
             # The checkpoint cannot be bound to the ledger rows it was written
             # from, so which patches are on the tree is unknown. Halting says
@@ -5846,7 +5844,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         pending = state.warm_replay_pending or {}
         if not isinstance(pending, dict) or not pending:
             return
-        rollback = self._coord.phase_prelude._rollback_combined_warm({}, None)
+        rollback = self._coord.phase_prelude.rollback_combined_warm({}, None)
         errors = list(rollback.get("errors") or [])
         if errors:
             report["warnings"].append(
@@ -5904,7 +5902,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             **dict(state.warm_replay_outcome or {}),
             "status": "failed",
             "reason": "interrupted_combined_validation_rolled_back",
-            # This terminal branch never runs ``_promote_warm_replay``, which is
+            # This terminal branch never runs ``promote_warm_replay``, which is
             # what normally stamps ``settled_at``; stamp it here so the SBD
             # warm_replay event reports the real span instead of collapsing its
             # end_time back onto ``enqueued_at`` (a zero-duration replay).
@@ -6556,7 +6554,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         if (state.phase or "").strip().upper() != PHASE_KERNEL_AGENT:
             return
-        if not (self._coord.phase_machine._kernel_enabled() and self._coord.phase_kernel.geak_enabled()):
+        if not (self._coord.phase_machine.kernel_enabled() and self._coord.phase_kernel.geak_enabled()):
             return
         history = state.phase_history or []
         row = history[-1] if history else {}

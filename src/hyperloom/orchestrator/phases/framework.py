@@ -585,7 +585,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             },
         }
 
-    def _close_framework_timeline(self, tr: "Transition") -> None:
+    def close_framework_timeline(self, tr: "Transition") -> None:
         """Close the FRAMEWORK timeline event when the phase is left."""
         exit_reason = tr.reason
         evidence: dict | None = tr.evidence if tr.evidence else None
@@ -663,14 +663,14 @@ class FrameworkPhase(CoordinatorCollaborator):
             thresholds={"no_keep_streak_threshold": evidence.get("source_threshold")},
         )
 
-    async def _on_enter_framework(self, tr: "Transition") -> None:
+    async def on_enter_framework(self, tr: "Transition") -> None:
         """FRAMEWORK entry hook: trigger the per-batch pump once on entry; later batches are driven from the main tick."""
         log.info(
             "OPTIMIZE entry (from=%s): pumping initial batch",
             tr.from_phase or "<unknown>",
         )
         # A reopened macro-cycle re-measures before either arm spends anything.
-        await self._coord.phase_macro_cycle._on_cycle_start_reprofile(from_phase=tr.from_phase)
+        await self._coord.phase_macro_cycle.on_cycle_start_reprofile(from_phase=tr.from_phase)
         # Opened after the reprofile so the policy reads the settled anchor,
         # and before the pump so the entry's first dispatch is inside the event.
         self._open_framework_timeline()
@@ -917,14 +917,14 @@ class FrameworkPhase(CoordinatorCollaborator):
             "source": "coordinator_internal",
             "notes": notes,
             # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
-            **self._coord.gpu_lanes._framework_gpu_params(),
+            **self._coord.gpu_lanes.framework_gpu_params(),
         }
-        await self._coord.specialist_dispatch._warm_specialist_params(params)
+        await self._coord.specialist_dispatch.warm_specialist_params(params)
         idem = f"framework_agent_authoring:{batch_id}:{cand_id}"
         if reauthor_attempt > 0:
             idem = f"{idem}:reauthor:{int(reauthor_attempt)}"
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
-        lanes, ttl = self._coord.gpu_lanes._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _spec_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
@@ -970,7 +970,7 @@ class FrameworkPhase(CoordinatorCollaborator):
 
         Routes to the lane-specific handler:
 
-        * ``enablement`` lane → :meth:`_maybe_rearm_enablement`, which settles
+        * ``enablement`` lane → :meth:`maybe_rearm_enablement`, which settles
           the round and charges its observation.
         * ``perf_framework`` / ``perf_explore`` lanes with ``apply_failed``
           status → increment per-candidate apply-fail retry counter; below cap
@@ -990,7 +990,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         status = str(res.get("status") or "")
 
         if lane == "enablement" or res.get("enablement"):
-            await self._coord.enablement_lane._maybe_rearm_enablement(res)
+            await self._coord.enablement_lane.maybe_rearm_enablement(res)
             return
 
         if status != "apply_failed":
@@ -1195,12 +1195,12 @@ class FrameworkPhase(CoordinatorCollaborator):
             "source": "coordinator_internal",
             "notes": notes,
             "apply_retry_attempt": attempt,
-            **self._coord.gpu_lanes._framework_gpu_params(),
+            **self._coord.gpu_lanes.framework_gpu_params(),
         }
-        await self._coord.specialist_dispatch._warm_specialist_params(params)
+        await self._coord.specialist_dispatch.warm_specialist_params(params)
         # Gap id and attempt both repeat across cycles.
         idem = f"perf_explore_authoring:{gap_cid}:retry:{attempt}{self._coord.dispatcher.cycle_idem_suffix()}"
-        lanes, ttl = self._coord.gpu_lanes._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _ = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
@@ -1426,10 +1426,10 @@ class FrameworkPhase(CoordinatorCollaborator):
             "framework_audit": {},
             "framework_local_explore": True,
             "source": "coordinator_internal",
-            **self._coord.gpu_lanes._framework_gpu_params(),
+            **self._coord.gpu_lanes.framework_gpu_params(),
         }
-        await self._coord.specialist_dispatch._warm_specialist_params(params)
-        lanes, ttl = self._coord.gpu_lanes._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        await self._coord.specialist_dispatch.warm_specialist_params(params)
+        lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         create_kwargs: dict[str, Any] = {
             "kind": "specialist",
             "params": params,
@@ -2070,8 +2070,8 @@ class FrameworkPhase(CoordinatorCollaborator):
         """
         try:
             await self._pump_framework_agent_phase()
-            await self._coord.phase_internal._maybe_enqueue_explore_research_scout()
-            await self._coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
+            await self._coord.phase_internal.maybe_enqueue_explore_research_scout()
+            await self._coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
             self._record_advisory_plateau()
         except Exception as exc:
             log.exception("FRAMEWORK pump failed")
@@ -2302,7 +2302,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             return
         inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
         # A downstream integrate_patch (owned by the authored-outcome bridge that writes the terminal row) is created
-        # by ``_maybe_autosubmit_specialist_patches`` when the deliverable is routable: ``patches_written`` (post
+        # by ``maybe_autosubmit_specialist_patches`` when the deliverable is routable: ``patches_written`` (post
         # safety-vetting) non-empty, OR a config-lever deliverable, OR a non-diff tuned artifact.
         patches = inner.get("patches_written") or []
         if isinstance(patches, list) and patches:
@@ -2400,8 +2400,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             "reason": reason,
             "source": "coordinator_internal",
         }
-        await self._coord.specialist_dispatch._warm_specialist_params(params)
-        lanes, ttl = self._coord.gpu_lanes._framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
+        await self._coord.specialist_dispatch.warm_specialist_params(params)
+        lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
@@ -2529,7 +2529,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             out.append(cand)
         return out
 
-    async def _maybe_materialize_mn_explore(
+    async def maybe_materialize_mn_explore(
         self,
         *,
         task: "Task",
@@ -2611,7 +2611,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             was_existing,
         )
 
-    async def _maybe_autosubmit_specialist_patches(
+    async def maybe_autosubmit_specialist_patches(
         self,
         *,
         task: "Task",
@@ -2790,7 +2790,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 sid,
             )
 
-    async def _maybe_autosubmit_framework_config(
+    async def maybe_autosubmit_framework_config(
         self,
         *,
         task: "Task",
@@ -2798,7 +2798,7 @@ class FrameworkPhase(CoordinatorCollaborator):
     ) -> None:
         """Route a FRAMEWORK config-lever deliverable through integrate_patch.
 
-        Companion to :meth:`_maybe_autosubmit_specialist_patches`: fires when a
+        Companion to :meth:`maybe_autosubmit_specialist_patches`: fires when a
         FRAMEWORK authoring or ENABLEMENT specialist returns NO source patch but a config-lever
         ``proposal_set`` (extra_args / extra_envs). The levers go into
         integrate_patch's ``config_changes`` channel (apply + bench + accuracy
@@ -2871,10 +2871,10 @@ class FrameworkPhase(CoordinatorCollaborator):
             integrate_params["framework_agent_candidate_id"] = fa_cand
         if fa_batch:
             integrate_params["framework_batch_id"] = fa_batch
-        # Enablement passthrough (mirrors _maybe_autosubmit_specialist_patches): a
+        # Enablement passthrough (mirrors maybe_autosubmit_specialist_patches): a
         # config-lever-only enablement deliverable MUST still flow the enablement
         # marker + setup_commands into integrate_patch, or the result never
-        # carries ``enablement=True``, ``_maybe_rearm_enablement`` no-ops, and
+        # carries ``enablement=True``, ``maybe_rearm_enablement`` no-ops, and
         # the round is never settled or charged.
         if bool(spec_params.get("enablement")):
             integrate_params["enablement"] = True

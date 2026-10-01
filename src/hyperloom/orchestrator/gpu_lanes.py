@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 class GpuLanes(CoordinatorCollaborator):
     """Resolves GPU params and lane leases for Coordinator-internal dispatches."""
 
-    def _framework_gpu_params(self) -> dict[str, Any]:
+    def framework_gpu_params(self) -> dict[str, Any]:
         """Return the ``{needs_gpu, gpu_count}`` params for framework authoring."""
         try:
             from .actions.executors._multi_node_env import is_multi_node
@@ -34,7 +34,7 @@ class GpuLanes(CoordinatorCollaborator):
             return {}
         return {"needs_gpu": True, "gpu_count": cap}
 
-    def _framework_authoring_lanes_ttl(self, params: dict[str, Any], *, base_ttl_sec: int) -> tuple[list[str], int]:
+    def framework_authoring_lanes_ttl(self, params: dict[str, Any], *, base_ttl_sec: int) -> tuple[list[str], int]:
         """Resolve lanes + lease TTL for an internally-dispatched framework specialist."""
         lanes = ["research_lane"]
         ttl = int(base_ttl_sec or 0)

@@ -1043,7 +1043,7 @@ def build_orchestration_prompt(
         cycle_directive: optional LLM-authored focus text for this cycle
             (from ``orchestration_memory.next_cycle_directive``); empty string
             with no ``cycle_strategy`` renders the standing breadth→depth default.
-        cycle_strategy: optional dict from ``_plan_cycle_focus`` with deterministic
+        cycle_strategy: optional dict from ``plan_cycle_focus`` with deterministic
             focus, rationale, saturated directions, and prior-cycle history; rendered
             in the CYCLE DIRECTIVE section after the LLM directive (if any).
         phase: current pipeline phase; omits the modules whose behaviour it
