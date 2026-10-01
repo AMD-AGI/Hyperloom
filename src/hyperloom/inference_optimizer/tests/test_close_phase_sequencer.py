@@ -36,6 +36,8 @@ from hyperloom.orchestrator.phases.close import (
 )
 from hyperloom.orchestrator.state.shared_state import effective_closing_grace_sec
 
+from .conftest import make_coordinator
+
 
 class _BareState:
     """SharedState stand-in for CLOSE sequencer tests.
@@ -1372,3 +1374,30 @@ async def test_recipe_kb_t4_hook_degraded_is_complete_noop() -> None:
     )
 
     await Coordinator._recipe_kb_t4_hook(coordinator)
+
+
+@pytest.mark.asyncio
+async def test_report_failure_emits_lifecycle_error_and_records_failed_step(tmp_path: Path):
+    coord = make_coordinator(tmp_path)
+    close = coord.phase_close
+    lifecycle: list[dict[str, Any]] = []
+    steps: list[tuple[str, str, str]] = []
+
+    def _emit(**kwargs: Any) -> None:
+        lifecycle.append(kwargs)
+
+    async def _record(step: str, *, status: str, task_id: str = "", detail: str = "") -> None:
+        steps.append((step, status, detail))
+
+    async def _enqueue_fails(*, reason: str) -> None:
+        raise RuntimeError("db down")
+
+    coord.writeback._emit_lifecycle = _emit  # type: ignore[method-assign]
+    close._record_close_step = _record  # type: ignore[method-assign]
+    close._enqueue_internal_report_task = _enqueue_fails  # type: ignore[method-assign]
+
+    await close._run_close_step("report", close._do_report())
+
+    assert [(row["step"], row["status"]) for row in lifecycle] == [("report", "START"), ("report", "ERROR")]
+    assert "db down" in lifecycle[-1]["detail"]
+    assert ("report", "failed") in [(step, status) for step, status, _ in steps]
