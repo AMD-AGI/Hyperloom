@@ -202,7 +202,7 @@ def _extract_steady_state_retry_mode(
 
 
 def _extract_trace_path(profile_result: dict[str, Any]) -> str:
-    """Pick the trace path like Coordinator's ``_promote_to_shared_state``: prefer ``main_trace_path``, else
+    """Pick the trace path like Coordinator's ``promote_to_shared_state``: prefer ``main_trace_path``, else
     ``trace_files[0]`` for legacy results.
     """
     if not isinstance(profile_result, dict):

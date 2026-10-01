@@ -2372,7 +2372,7 @@ class PreludePhase(CoordinatorCollaborator):
                 params["recipe_extra_server_args"] if "recipe_extra_server_args" in params else warm_args
             ).strip()
             recipe_envs = dict(params["recipe_extra_envs"] if "recipe_extra_envs" in params else warm_envs)
-            if not already_pushed and not self._coord.writeback._lift_to_current_best(
+            if not already_pushed and not self._coord.writeback.lift_to_current_best(
                 "replay_warm_recipe",
                 float(single_round_tput),
                 {
@@ -2441,7 +2441,7 @@ class PreludePhase(CoordinatorCollaborator):
             )
             # Journal warm-replay as a synthetic KEEP; no KB lesson.
             try:
-                journal = self._coord.writeback._ensure_journal()
+                journal = self._coord.writeback.ensure_journal()
                 journal.append_entry(
                     JournalEntry(
                         phase=(state.phase or "PRELUDE").upper() or "PRELUDE",

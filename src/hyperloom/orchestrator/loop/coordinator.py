@@ -299,7 +299,7 @@ class Coordinator:
         # Attach read-only context-pull MCP tools to Orchestration backend.
         self.conversation._attach_orchestration_context_tools()
         # Resume detection must run before any boot-time state.json write.
-        self.writeback._detect_resume_state()
+        self.writeback.detect_resume_state()
         # Reap serving processes orphaned by a prior monitor-process crash (e.g. a raylet death that took the
         # optimizer down mid-benchmark), scoped strictly to this session's own pidfiles.
         self._reap_orphaned_servers_best_effort(phase="boot")
@@ -679,7 +679,7 @@ class Coordinator:
 
     async def tick(self, n: int = 1) -> None:
         """Run ``n`` ticks of the run() loop body without its deadline or teardown."""
-        await self.writeback._replay_resume_if_needed()
+        await self.writeback.replay_resume_if_needed()
         for _ in range(n):
             await self._tick_once()
 
@@ -891,7 +891,7 @@ class Coordinator:
             )
             log.info("Coordinator.run: stop-signal drain armed=%s", self._signals.armed)
 
-        await self.writeback._replay_resume_if_needed()
+        await self.writeback.replay_resume_if_needed()
         grace_sec, deadline, max_minutes_value = self._bind_session_deadline(
             max_minutes=max_minutes,
             closing_grace_sec=closing_grace_sec,
@@ -1061,7 +1061,7 @@ class Coordinator:
                     exc,
                     latency_ms=int((time.perf_counter() - _t0) * 1000),
                 )
-            await self.writeback._record_observation(
+            await self.writeback.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "backend_error", "agent": agent_name, "error": repr(exc)},
@@ -1070,7 +1070,7 @@ class Coordinator:
             return
         except NoIntentEmitted as exc:
             # No parseable intents; surface as observation so the next tick self-corrects.
-            await self.writeback._record_observation(
+            await self.writeback.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "no_intent_emitted", "agent": agent_name, "error": str(exc)[:500]},
@@ -1080,7 +1080,7 @@ class Coordinator:
         except Exception as exc:
             # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
-            await self.writeback._record_observation(
+            await self.writeback.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "reactor_exception", "agent": agent_name, "error": format_exc_brief(exc, limit=500)},
@@ -1105,7 +1105,7 @@ class Coordinator:
         for intent in result.intents:
             await self.router.handle_intent(agent_name, intent)
         if not result.intents and not request:
-            await self.writeback._record_observation(
+            await self.writeback.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "no_intent_emitted", "agent": agent_name, "error": "the turn emitted no intents"},
@@ -1206,7 +1206,7 @@ class Coordinator:
         threshold = self._backend_error_streak_threshold
         if new_value >= threshold and self._backend_error_alarm_armed.get(agent_name, True):
             self._backend_error_alarm_armed[agent_name] = False
-            await self.writeback._record_observation(
+            await self.writeback.record_observation(
                 "coordinator",
                 "observation",
                 {

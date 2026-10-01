@@ -580,7 +580,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 original_grid=original_grid,
                 approved_variant_names=approved_variant_names,
             ):
-                await self._coord.writeback._record_observation(
+                await self._coord.writeback.record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -631,7 +631,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             if not was_existing:
                 break
             if task.state not in TERMINAL_STATES:
-                await self._coord.writeback._record_observation(
+                await self._coord.writeback.record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -646,7 +646,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 )
                 return
         else:
-            await self._coord.writeback._record_observation(
+            await self._coord.writeback.record_observation(
                 "coordinator",
                 "observation",
                 {

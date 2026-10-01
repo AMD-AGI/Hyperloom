@@ -1073,7 +1073,7 @@ class ExploreExecutor:
                         gain = None
                         reason = (r.error or "")[-1200:] or "no_measurement"
                     elif graded.degrade_reason:
-                        # Same fail-closed rule as ``_lift_to_current_best``: an
+                        # Same fail-closed rule as ``lift_to_current_best``: an
                         # AgentX session that could not grade on interactivity
                         # does not KEEP on output throughput instead.
                         gain = None
