@@ -225,6 +225,24 @@ def test_a_service_serving_an_older_declaration_is_restarted_with_the_packaged_o
         _stop(current)
 
 
+def test_a_data_home_another_service_serves_is_never_served_twice(tmp_path: Path) -> None:
+    home = tmp_path / "shared-home"
+    env = _env_without_planner_gateway(tmp_path)
+    first_port = _free_port()
+    first = ensure_local_service(_config(first_port, tmp_path), home, env=env)
+    try:
+        other = RemoteConfig(f"http://127.0.0.1:{_free_port()}", "other-workspace", timeout_seconds=5)
+        with pytest.raises(
+            LocalServiceError, match=rf"another Experience service \(pid \d+, port {first_port}\) already"
+        ):
+            ensure_local_service(other, home, env=env)
+
+        assert first.process is not None and first.process.poll() is None
+        assert RemoteClient(_config(first_port, tmp_path)).health()["status"] == "ok"
+    finally:
+        _stop(first)
+
+
 def test_a_service_that_cannot_start_is_reported_with_its_log(tmp_path: Path) -> None:
     home = tmp_path / "home"
     (home / "kb.sqlite3").mkdir(parents=True)

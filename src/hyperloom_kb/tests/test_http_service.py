@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
+import io
 import json
 import os
 import re
@@ -12,6 +14,7 @@ import urllib.error
 import urllib.request
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from email.message import Message
 from pathlib import Path
 from typing import Any
 
@@ -570,6 +573,27 @@ def test_unavailable_service_fails_open_and_flushes_spool_idempotently(tmp_path:
     assert [item.status for item in flushed] == ["created"]
     assert replay.status == "unchanged"
     assert not tuple(spool.glob("spool-*.json"))
+
+
+@pytest.mark.parametrize(
+    "cut", [http.client.IncompleteRead(b"{", 100), ConnectionResetError("reset"), TimeoutError("slow")]
+)
+def test_an_error_response_cut_off_mid_body_is_still_a_client_error(tmp_path: Path, cut: Exception) -> None:
+    class CutBody(io.BytesIO):
+        def read(self, *_args: object) -> bytes:
+            raise cut
+
+    def proxy_error(request: urllib.request.Request, **_options: Any) -> Any:
+        raise urllib.error.HTTPError(request.full_url, 502, "Bad Gateway", Message(), CutBody())
+
+    schema = _declaration()
+    client = RemoteClient(RemoteConfig("http://kb.invalid", TOKEN, spool_root=tmp_path / "spool"), opener=proxy_error)
+
+    assert client.read(DECISION, _read_context()).status == "unavailable"
+    assert client.publish(_experience(schema)).status == "spooled"
+    with pytest.raises(RemoteClientError, match="HTTP 502") as failed:
+        client.write(_experience(schema, seq=1, knob="other"))
+    assert failed.value.retryable
 
 
 def test_a_client_that_lost_its_service_spools_without_waiting_until_a_flush_delivers(tmp_path: Path) -> None:

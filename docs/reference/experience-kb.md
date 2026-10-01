@@ -72,6 +72,11 @@ It looks at what answers on `HYPERLOOM_KB_URL`:
   at, or anything else on the port, such as another user's service: it refuses
   without stopping it, and the user picks another port in `HYPERLOOM_KB_URL`.
 
+A data home has one service. A service holds `service.lock` in its home while
+it serves, and one started on a home another service holds exits, naming that
+service's pid and port; `ensure` reports that line. Two workspaces therefore
+need their own `USER_DATA_PATH`, or the second gets no service of its own.
+
 Only an optimize launch and `ensure` restart a service. `push` and `pull`,
 including the automatic push at the end of a run, use the service as it runs
 and warn when its settings differ from theirs, so a push from a shell never
@@ -103,6 +108,7 @@ collection spools without waiting on the service. Requests to a loopback service
 | `sync.sqlite3` | Push and pull progress per global KB. Losing it makes the next push and pull resend everything, which the idempotent writes absorb. |
 | `spool/` | Writes the service has not accepted yet. |
 | `service.log` | The service's log. |
+| `service.lock` | Held by the one service serving this home; names its pid and port. |
 
 ## Schemas
 

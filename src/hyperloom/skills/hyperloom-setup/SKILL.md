@@ -113,6 +113,8 @@ value.
      absolute path. Each optimizer run still creates its own UTC-stamped
      subdirectory under it.
    - If an existing `USER_DATA_PATH` is visible in the current shell or terminal context, offer that exact value as one option.
+     Say that another workspace using the same value shares its Experience KB data home, which only one workspace's
+     service can serve.
    - Always offer a custom path option.
    - Do not auto-select; write `USER_DATA_PATH` only after the user explicitly chooses (they may accept the default).
 

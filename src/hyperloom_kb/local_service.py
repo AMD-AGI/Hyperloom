@@ -87,6 +87,14 @@ def _spawn(host: str, port: int, home: Path, token: str, env: Mapping[str, str])
         raise LocalServiceError(f"cannot start the Experience service from {home}: {exc}") from exc
 
 
+def _last_line(log_path: Path) -> str:
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+    except OSError:
+        return ""
+    return lines[-1][:300] if lines else ""
+
+
 def _wait_until_listening(
     process: subprocess.Popen[bytes],
     host: str,
@@ -98,7 +106,9 @@ def _wait_until_listening(
     while not _listening(host, port):
         # A concurrent start may have won the port, which makes this process exit while the service serves.
         if process.poll() is not None and not _listening(host, port):
-            raise LocalServiceError(f"Experience service exited with status {process.returncode}; see {log_path}")
+            raise LocalServiceError(
+                f"Experience service exited with status {process.returncode}: {_last_line(log_path)}; see {log_path}"
+            )
         if time.monotonic() >= deadline:
             raise LocalServiceError(
                 f"Experience service is not listening on {host}:{port} after {timeout_seconds:g}s; see {log_path}"

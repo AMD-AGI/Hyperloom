@@ -178,7 +178,11 @@ class RemoteClient:
                 payload = json.loads(response.read())
         except urllib.error.HTTPError as exc:
             with exc:
-                detail = exc.read().decode("utf-8", errors="replace")[:500]
+                try:
+                    detail = exc.read().decode("utf-8", errors="replace")[:500]
+                except (OSError, http.client.HTTPException) as cut:
+                    # The status is known even when the body is cut off; it still decides whether to retry.
+                    detail = f"<body unreadable: {type(cut).__name__}>"
             raise RemoteClientError(
                 f"Experience service returned HTTP {exc.code}: {detail}",
                 retryable=exc.code not in _PERMANENT_HTTP_STATUSES,
