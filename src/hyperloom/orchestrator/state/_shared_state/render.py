@@ -137,11 +137,6 @@ class _RenderMixin:
             if unvalidated
             else ""
         )
-        resume_revalidation_tag = (
-            " ⚠ stack has unvalidated keeps — recheck before trusting validated gain"
-            if self.optimization_stack_has_unvalidated_keeps()
-            else ""
-        )
         geak_pending_status = (
             str(self.geak_pending.get("status") or "") if isinstance(getattr(self, "geak_pending", None), dict) else ""
         )
@@ -172,7 +167,7 @@ class _RenderMixin:
             f"gain      : validated={self.cumulative_gain_validated:.2f}%{validated_age}",
             f"stack     : {len(self.optimization_stack)} entries "
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
-            f"{unvalidated_tag}{resume_revalidation_tag}{geak_pending_tag}",
+            f"{unvalidated_tag}{geak_pending_tag}",
         ]
         # Surface reusable hot kernels still owing a kernel_opt attempt.
         untried_hot = self.untried_hot_reusable_kernels()
