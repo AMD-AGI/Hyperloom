@@ -206,7 +206,7 @@ class TestSessionBudget:
         state.begin_leg(now_unix=1_000.0)
         state.charge_elapsed(now_unix=4_600.0)  # whole budget spent
         assert state.remaining_minutes(now=_at(4_600.0)) == 0.0
-        assert state.extend_budget_minutes(30.0, reason="operator") == 90.0
+        assert state.extend_budget_minutes(30.0) == 90.0
         assert state.elapsed_minutes(now=_at(4_600.0)) == pytest.approx(60.0)
         assert state.remaining_minutes(now=_at(4_600.0)) == pytest.approx(30.0)
 

@@ -1865,7 +1865,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _begin_resume_leg(state)
         extend_hours = float(args.extend_hours)
         if extend_hours > 0.0:
-            state.extend_budget_minutes(extend_hours * 60.0, reason="--extend-hours")
+            state.extend_budget_minutes(extend_hours * 60.0)
         state.save(session_dir)
         _record_resumed_model_gate(
             args,

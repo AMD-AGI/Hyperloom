@@ -533,7 +533,7 @@ def test_resume_notes_on_a_spent_budget_point_at_the_operator_extend() -> None:
 
 def test_resume_notes_record_an_extension_that_was_granted() -> None:
     state = _spent_state(elapsed_h=3.0, remaining_h=0.0)
-    state.extend_budget_minutes(60.0, reason="--extend-hours")
+    state.extend_budget_minutes(60.0)
     text = "\n".join(cb._resume_budget_lines(state, extend_hours=1.0))
     assert "--extend-hours added 1.00h to the session budget" in text
     assert "WARNING" not in text
