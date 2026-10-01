@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging as _logging
 from dataclasses import dataclass
 from typing import Any
-from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
@@ -18,6 +17,12 @@ from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
 from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
+
+# SWEEP budget exits end the run for lack of time; every other CLOSE transition reason is itself a stop reason.
+_BUDGET_EXIT_STOP_REASONS = {
+    "sweep_budget_exhausted": "time_exhausted",
+    "sweep_budget_cap": "time_exhausted",
+}
 
 
 @dataclass(frozen=True)
@@ -254,10 +259,8 @@ class MachinePhase(CoordinatorCollaborator):
                 reason,
             )
         # Terminal transition (target=CLOSE): set stop_reason once from the transition reason.
-        # Non-vocab reasons are mapped to time_exhausted so the sequencer always finds it populated.
         if target == _phase_state.PHASE_CLOSE and not state.stop_reason:
-            canonical = reason if reason and is_valid_stop_reason(reason) else "time_exhausted"
-            state.set_stop_reason(canonical)
+            state.set_stop_reason(_BUDGET_EXIT_STOP_REASONS.get(reason, reason), strict=True)
         # A cyclic config-arm plateau winds the cycle down with ``switch_bottleneck``: record the plateaued bottleneck
         # so the next cycle steers specialists off it.
         if isinstance(evidence, dict) and evidence.get("switch_bottleneck"):
