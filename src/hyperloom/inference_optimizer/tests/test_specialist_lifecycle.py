@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
 )
@@ -81,7 +82,7 @@ def coord(tmp_path: Path):
     c.tasks = _StubTaskRegistry()
     c._proposal_scorer = None
     c.knowledge_plane = None
-    c.recipe_kb = None
+    c.knowledge_plane = KnowledgePlane(recipe_kb=None)
     c.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
     return c
 

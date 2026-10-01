@@ -16,6 +16,7 @@ import pytest
 import hyperloom.inference_optimizer.model_config_utils as mcu_mod
 import hyperloom.orchestrator.kernel.request_handlers as krh_mod
 import hyperloom.orchestrator.phases.kernel as kernel_phase_mod
+from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -52,7 +53,7 @@ def _coord(tmp_path: Path, **state_kwargs) -> Coordinator:
     coord.shared_state = SharedState(**state_kwargs)
     coord._journal = None
     coord.knowledge_plane = None
-    coord.recipe_kb = None
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=None)
     coord._proposal_scorer = None
     return coord
 

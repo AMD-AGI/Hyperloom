@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.roles import (
     Backend,
     MockBackend,
@@ -1435,7 +1436,7 @@ def test_context_analysis_reader_unreadable_path(
 # -- _recipe_kb_t4_hook + stop -------------------------------------------------
 @pytest.mark.asyncio
 async def test_recipe_kb_t4_hook_noop_without_kb(coord: Coordinator) -> None:
-    coord.recipe_kb = None
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=None)
     await coord._recipe_kb_t4_hook()
 
 
@@ -1637,7 +1638,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
 async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
 
-    coord.recipe_kb = object()  # non-None -> KB amend path
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=object())  # non-None -> KB amend path
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     amends: list[dict] = []
@@ -1657,7 +1658,7 @@ async def test_record_fact_per_task_writes_no_lesson_for_an_unadopted_gain(coord
     """A lesson is for a change the session adopted; a measured gain the lift refused teaches nothing."""
     from hyperloom.orchestrator.state.task_registry import Task
 
-    coord.recipe_kb = object()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=object())
     amends: list[dict] = []
     monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
     task = Task(task_id="fact-refused", kind="integrate_patch", state="succeeded", params={}, idempotency_key="fx")
@@ -1674,7 +1675,7 @@ async def test_record_fact_per_task_writes_no_lesson_for_an_unadopted_gain(coord
 async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
 
-    coord.recipe_kb = object()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=object())
     amends: list[dict] = []
     monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
     monkeypatch.setattr(coord.writeback, "_pitfall_severity_for", lambda rd: "high")
@@ -1935,7 +1936,7 @@ class _FakeRecipeKB:
 
 @pytest.mark.asyncio
 async def test_recipe_kb_finalize_skips_without_model(coord: Coordinator) -> None:
-    coord.recipe_kb = _FakeRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_FakeRecipeKB())
     coord.shared_state.model_name = ""  # missing model -> skip update_recipe
     coord.shared_state.gpu_type = "mi300x"
     coord.writeback.finalize_recipe_and_journal()
@@ -1943,7 +1944,7 @@ async def test_recipe_kb_finalize_skips_without_model(coord: Coordinator) -> Non
 
 @pytest.mark.asyncio
 async def test_recipe_kb_finalize_amends_recipe(coord: Coordinator, monkeypatch) -> None:
-    coord.recipe_kb = _FakeRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_FakeRecipeKB())
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     coord.shared_state.cumulative_gain_validated = 12.0
@@ -2446,7 +2447,7 @@ class _FakeRecipeKBRich:
 
 @pytest.mark.asyncio
 async def test_recipe_kb_finalize_merges_existing_row(coord: Coordinator, monkeypatch) -> None:
-    coord.recipe_kb = _FakeRecipeKBRich()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_FakeRecipeKBRich())
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     coord.shared_state.cumulative_gain_validated = 15.0

@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.loop.coordinator import (
     Coordinator,
@@ -295,7 +296,7 @@ def coord(tmp_path: Path):
     c.session_dir = tmp_path
     c.shared_state = _BareSharedState()
     c.state = CoordinatorState()
-    c.recipe_kb = _StubRecipeKB()
+    c.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     c.bus = _StubBus()
     c.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
     materialise_calls: list[tuple[PendingProposal, set[str] | None]] = []
@@ -1681,7 +1682,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     coord.session_dir = tmp_path
     coord.shared_state = _BareSharedState()
     coord.state = CoordinatorState()
-    coord.recipe_kb = _StubRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     coord.bus = _StubBus()
     coord.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
 
@@ -1734,7 +1735,7 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.state = CoordinatorState()
-    coord.recipe_kb = _StubRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     coord.bus = _StubBus()
     coord.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
     create_calls: list[dict[str, Any]] = []
@@ -1767,7 +1768,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.state = CoordinatorState()
-    coord.recipe_kb = _StubRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     coord.bus = _StubBus()
     coord.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
     create_calls: list[dict[str, Any]] = []
@@ -1831,7 +1832,7 @@ def _delegate_coord(tmp_path: Path):
 
     c.shared_state = _State()
     c.state = CoordinatorState()
-    c.recipe_kb = _StubRecipeKB()
+    c.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     c.bus = _StubBus()
     c.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
     c.writeback._record_policy_denied = AsyncMock()  # type: ignore[method-assign]
