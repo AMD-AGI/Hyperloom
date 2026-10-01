@@ -51,14 +51,11 @@ from ..state.shared_state import resolve_graded_comparison
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound
 from ..bus.message_bus import Message
 from ..kernel.geak_config import (
-    _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
-    _MAX_ROOFLINE_FAILURE_RETRIES,
     _geak_accepted_kernel_specs,
     _geak_has_accepted_kernel,
-    _geak_spec_name,
+    geak_spec_name,
     geak_is_cand_tag,
     geak_spec_is_env,
-    ROOFLINE_WATERMARK_RATIO,
     _accepted_config_as_variant,
     _accepted_config_controls,
 )
@@ -77,6 +74,15 @@ if TYPE_CHECKING:
     from .machine import Transition
 
 log = _logging.getLogger(__name__)
+
+# |measurement_divergence_pct| above this (GEAK vs orchestrator, same config) is logged as a measurement-mismatch
+# warning at geak promote.
+_GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = 3.0
+
+ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
+
+# Consecutive roofline failures tolerated before the watermark stops re-arming.
+MAX_ROOFLINE_FAILURE_RETRIES: int = 3
 
 # Last-resort location of the aiter checkout inside the standard serving container.
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
@@ -1891,7 +1897,7 @@ class KernelPhase(CoordinatorCollaborator):
                 delta = None if stated is None or stated == "" else float(stated)
             except (TypeError, ValueError):
                 delta = None
-            name = _geak_spec_name(raw)
+            name = geak_spec_name(raw)
             if not name:
                 continue
             row = {**raw, "lane": lane, "alias_collapsed": False}
@@ -1912,12 +1918,12 @@ class KernelPhase(CoordinatorCollaborator):
             kept["alias_collapsed"] = True
             # The collapsed twin's name is the one a reader may hold, so it is
             # carried on the survivor rather than dropped with the row.
-            aliases = {*(kept.get("aliases") or []), _geak_spec_name(kept), name}
-            if geak_is_cand_tag(_geak_spec_name(kept)) and not geak_is_cand_tag(name):
+            aliases = {*(kept.get("aliases") or []), geak_spec_name(kept), name}
+            if geak_is_cand_tag(geak_spec_name(kept)) and not geak_is_cand_tag(name):
                 row["alias_collapsed"] = True
                 out[position] = row
                 kept = row
-            kept["aliases"] = sorted({a for a in aliases if a and a != _geak_spec_name(kept)})
+            kept["aliases"] = sorted({a for a in aliases if a and a != geak_spec_name(kept)})
         return out
 
     @staticmethod
@@ -4104,7 +4110,7 @@ class KernelPhase(CoordinatorCollaborator):
                 failure_streak = 0
             if failure_streak <= 0:
                 return False
-            if failure_streak > _MAX_ROOFLINE_FAILURE_RETRIES:
+            if failure_streak > MAX_ROOFLINE_FAILURE_RETRIES:
                 return False
             try:
                 last_rl = float(state.baseline_tput or 0.0)

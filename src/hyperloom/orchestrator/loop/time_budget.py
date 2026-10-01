@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..state.shared_state import SharedState
 
 # Actions that must stay startable no matter how little budget is left: they are how a session ends cleanly, so a time
 # gate that refused them would strand the run with nothing to show.
@@ -26,12 +29,9 @@ _GPU_BENCH_LANES: frozenset[str] = frozenset(
 )
 
 
-def measured_baseline_runtime_sec(shared_state: Any | None) -> float:
+def measured_baseline_runtime_sec(shared_state: SharedState) -> float:
     """Read this session's own measured baseline round, in seconds."""
-    try:
-        return max(0.0, float(getattr(shared_state, "baseline_runtime_sec", 0.0) or 0.0))
-    except (TypeError, ValueError):
-        return 0.0
+    return max(0.0, shared_state.baseline_runtime_sec)
 
 
 def _action_benches_on_gpu(meta: Any | None) -> bool:

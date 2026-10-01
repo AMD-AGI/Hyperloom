@@ -21,19 +21,6 @@ from hyperloom.common.env_safety import (
 
 log = logging.getLogger(__name__)
 
-# Minimum over-baseline gain a same-harness revalidation must show to count as "engaged"; detects a collapse back to
-# ~baseline.
-_MIN_KERNEL_ENGAGED_GAIN_PCT: float = 2.0
-
-# |measurement_divergence_pct| above this (GEAK vs orchestrator, same config) is logged as a measurement-mismatch
-# warning at geak promote.
-_GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = 3.0
-
-ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
-
-# Consecutive roofline failures tolerated before the watermark stops re-arming.
-_MAX_ROOFLINE_FAILURE_RETRIES: int = 3
-
 
 def _split_env_and_flags(env_str: str) -> tuple[dict[str, str], str]:
     """Split a bench-style config string into (env dict, flags string)."""
@@ -212,18 +199,13 @@ def geak_is_cand_tag(name: Any) -> bool:
     return bool(text) and bool(_GEAK_CAND_TAG_RE.match(text))
 
 
-def _geak_spec_name(spec: Any) -> str:
+def geak_spec_name(spec: Any) -> str:
     """Return the display name of one GEAK acceptance entry."""
     if isinstance(spec, str):
         return spec.strip()
     if not isinstance(spec, dict):
         return ""
     return str(spec.get("short_name") or spec.get("kernel_id") or spec.get("cand_tag") or "").strip()
-
-
-def geak_spec_name(spec: Any) -> str:
-    """Public alias of :func:`_geak_spec_name` for out-of-module readers."""
-    return _geak_spec_name(spec)
 
 
 def geak_spec_kind(spec: Any) -> str | None:
@@ -269,7 +251,7 @@ def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
             index[twin] = len(out)
             out.append(k)
             continue
-        existing_name = _geak_spec_name(out[pos])
+        existing_name = geak_spec_name(out[pos])
         if _GEAK_CAND_TAG_RE.match(existing_name) and not _GEAK_CAND_TAG_RE.match(name):
             out[pos] = k
             continue

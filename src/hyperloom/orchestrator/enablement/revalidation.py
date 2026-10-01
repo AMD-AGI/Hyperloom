@@ -15,7 +15,6 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..collaborator import CoordinatorCollaborator
-from ..loop.proposal_utils import baseline_benchmark_script
 from ..state.task_registry import TerminalTaskReuse, create_in_cursor, task_dispatch_origin
 from .params import _enablement_carrier_params
 
@@ -56,7 +55,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
             "disable_run_eval": False,
             **_enablement_carrier_params(state),
         }
-        benchmark_script = baseline_benchmark_script(state)
+        benchmark_script = state.accepted_baseline_script()
         if benchmark_script:
             params["benchmark_script"] = benchmark_script
         accepted_cfg = str(state.enablement.accepted_config_path or "").strip()

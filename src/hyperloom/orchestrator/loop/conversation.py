@@ -16,7 +16,7 @@ from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
-from hyperloom.common.timeutil import _parse_iso_unix
+from hyperloom.common.timeutil import parse_iso_unix_or_zero
 from .verdicts import serialize_verdict_advisory
 from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -280,7 +280,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         lines = ["=== Tasks in flight ==="]
         for task, lanes, expires_at, gpus in tasks:
             params = task.params or {}
-            started = _parse_iso_unix(task.updated_at)
+            started = parse_iso_unix_or_zero(task.updated_at)
             running_sec = max(0.0, now_unix - started) if started > 0 else 0.0
             parts = [
                 f"  - task_id={task.task_id}",
@@ -297,7 +297,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if task.lease_ttl_sec:
                 parts.append(f"lease_ttl_sec={task.lease_ttl_sec}")
             if expires_at:
-                exp_unix = _parse_iso_unix(expires_at)
+                exp_unix = parse_iso_unix_or_zero(expires_at)
                 if exp_unix > 0:
                     parts.append(f"lease_expires_in_sec={int(exp_unix - now_unix)}")
             if lanes:
