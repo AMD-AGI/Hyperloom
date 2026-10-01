@@ -796,7 +796,21 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     if agentx_enabled() and "submission_valid" in result:
         verdict = result.get("submission_valid")
         if verdict is False:
-            return False
+            # A declared deviation from the canonical workload. Refusing it is
+            # what stops a short smoke from being read as a leaderboard number,
+            # and that stays the default. But the same refusal also blocks the
+            # search the smoke exists for: every candidate is stamped
+            # non-canonical, so no variant can be graded against a baseline
+            # measured the same way, and a session spends its budget producing
+            # verdicts it then discards. Measured on Kimi-K3 agentic: the only
+            # gradeable workload was the canonical 613-trajectory set at ~33h
+            # per round. The opt-in buys A/B grading on a deviating workload and
+            # nothing else -- ``submission_valid`` stays False in the result,
+            # the reasons travel with it, and the KEEP gate still demands a
+            # canonical run of its own.
+            from hyperloom.common.env import env_bool
+
+            return bool(env_bool("HYPERLOOM_ALLOW_NONCANONICAL_MEASUREMENT"))
         if verdict is None:
             # The verdict is unknown: no --scenario was requested or the aiperf build predates the field. map_aiperf
             # writes the key unconditionally, so None arrives as a present key.
