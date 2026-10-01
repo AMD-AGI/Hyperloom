@@ -224,7 +224,7 @@ fusion that already succeeded this session.
 | `HYPERLOOM_SKIP_FUSION`        | Unset (lane enabled)          | Truthy (`1` / `true` / `yes` / `on`) disables the fusion lane outright, before any other gate is evaluated.                                                                                        |
 | `FORGE_FUSION_TIMEOUT`         | `7200` (2h)                   | Wrapper timeout in seconds for one forge-fusion run. A payload `timeout` / `timeout_sec` takes precedence over the env; an unparseable value falls back to the default.                            |
 | `FORGE_FUSION_MAX_TURNS`       | `100`                         | Agent turn cap handed to forge-fusion for one run. A payload `max_turns` takes precedence.                                                                                                         |
-| `HYPERLOOM_FUSION_KEEP_PCT`    | `1.0`                         | Fraction of nominated fusion patches to enqueue for SWEEP-entry integration. `1.0` enqueues all patches; lower values drop low-ranked patches before they enter the stack. A malformed value raises `EnvValueError`. |
+| `HYPERLOOM_FUSION_KEEP_PCT`    | `1.0`                         | Minimum throughput gain, in percent, that a queued fusion patch must reach to be KEPT when it is integrated. Every nominated patch is queued; the value is recorded on each queued record. A malformed value raises `EnvValueError`. |
 
 ---
 
@@ -710,7 +710,7 @@ from these benchmark limits and retain their existing contracts.
 | Variable | Default | Description |
 |---|---|---|
 | `HYPERLOOM_REAP_BACKEND` | `process_group` | Which unit ends a bring-up round's processes: `process_group`, `cgroup` or `container`. Only `cgroup` and `container` produce a reap that is *proof* the tree is gone — the kernel (or the container runtime) owns the membership list, so nothing can leave it by forking or re-parenting. `process_group` reaches only what it could enumerate from procfs before it signalled. A unit that cannot run on this host falls back to `process_group`, which weakens the claim rather than faking it. |
-| `INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC` | `1800` | Total wall-clock limit for each reactor stage, including backend startup, streamed output, retries, backoff, and cleanup. This is independent of backend `*_CALL_TIMEOUT_SEC` settings: for streamed Claude turns those settings bound idle time between SDK messages, and activity resets that idle timer. Reaching this total limit cancels the stage and records a crash; a shorter remaining session bound still ends the stage without recording a crash. |
+| `INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC` | `1800` | Total wall-clock limit for each reactor stage, including backend startup, streamed output, retries, backoff, and cleanup. This is independent of backend `*_CALL_TIMEOUT_SEC` settings: for streamed Claude turns those settings bound idle time between SDK messages, and activity resets that idle timer. Reaching this total limit cancels the stage and records a crash; a shorter remaining session bound still ends the stage without recording a crash. A malformed value raises `EnvValueError`; a non-positive or non-finite value falls back to the default. |
 
 ---
 
