@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Replay orchestration ticks: how many calls saw nothing new since the previous call.
 
 A call is "unchanged" when its prompt, normalized by the rules below, equals the prompt of
@@ -11,18 +14,18 @@ least every H minutes is replayed; saved cost uses the ledger row with the same 
 A skipped call whose recorded reply reports new work counts as a miss.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
-import os
 import re
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
 from an_global import cost, price_family, weighted
+from round_env import analysis_dir, bundles_dir
 
-BUNDLES = Path(os.environ.get("PULSE_BUNDLES", "/root/pulse15d/02_bundles"))
-OUT = Path(os.environ.get("PULSE_ROUND_DIR", "/wekafs/csl/Hyperloom-Sessions/meta_rsi/pulse15d")) / "analysis"
 HEARTBEATS = (0, 5, 15, 30)
 
 DROP_LINE = re.compile(r"^\s*(budget\s*:|reloop\s*:|time\s*:|elapsed=|current_action=)")
@@ -34,7 +37,7 @@ SUBS = [
     (re.compile(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?"), "TS"),
 ]
 ACTION = re.compile(
-    r"\b(dispatch(ed)?|emitted|launched|started (a|the|two|three)|requested|queued|kicked off|submitted|integrat(ed|ing))\b",
+    r"\b(dispatch(ed)?|emitted|launched|started (a|the|two|three)|requested|queued|kicked off|submitted|integrated|integrating)\b",
     re.I,
 )
 IDLE = re.compile(
@@ -78,16 +81,17 @@ def ledger_rows(run_dir: Path) -> dict:
 
 
 def main() -> None:
+    out, bundles = analysis_dir(), bundles_dir()
     joined = {}
-    for line in open(OUT / "runs_joined.jsonl"):
+    for line in open(out / "runs_joined.jsonl"):
         j = json.loads(line)
         joined[(j["name"], j["run_dir"])] = j
     totals = defaultdict(Counter)
     per_run = []
-    for conv in sorted(BUNDLES.glob("*/*/**/reports/trace/conversations.jsonl")):
+    for conv in sorted(bundles.glob("*/*/**/reports/trace/conversations.jsonl")):
         run_dir = conv.parent.parent.parent
-        archive = conv.relative_to(BUNDLES).parts[1]
-        rel = str(run_dir.relative_to(BUNDLES / conv.relative_to(BUNDLES).parts[0] / archive))
+        archive = conv.relative_to(bundles).parts[1]
+        rel = str(run_dir.relative_to(bundles / conv.relative_to(bundles).parts[0] / archive))
         meta = joined.get((archive, rel), {})
         led = ledger_rows(run_dir)
         rows = []
@@ -101,7 +105,7 @@ def main() -> None:
         if len(rows) < 3:
             continue
         rows.sort(key=lambda r: r.get("ts") or "")
-        digests = [hashlib.sha1(normalize(r["prompt"]).encode()).hexdigest() for r in rows]
+        digests = [hashlib.sha1(normalize(r["prompt"]).encode(), usedforsecurity=False).hexdigest() for r in rows]
         stats = Counter()
         for hb in HEARTBEATS:
             last_sent_ts = None
@@ -131,7 +135,7 @@ def main() -> None:
         per_run.append({"name": archive, "run_dir": rel, "era": era, **stats})
         for k, v in stats.items():
             totals[era][k] += v
-    with open(OUT / "idle_replay.jsonl", "w") as fh:
+    with open(out / "idle_replay.jsonl", "w") as fh:
         for r in per_run:
             fh.write(json.dumps(r) + "\n")
     lines = []
@@ -153,7 +157,7 @@ def main() -> None:
             f"  {r['name'][:55]:55s} calls={r['calls']:5d} skip15={r.get('skip_15', 0):5d} ${r.get('skip_cost_15', 0):7.1f} of ${r['cost']:7.1f} misses={r.get('miss_15', 0)}"
         )
     text = "\n".join(lines)
-    (OUT / "idle_replay_summary.txt").write_text(text + "\n")
+    (out / "idle_replay_summary.txt").write_text(text + "\n")
     print(text)
 
 

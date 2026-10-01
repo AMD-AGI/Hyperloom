@@ -1,20 +1,27 @@
-"""Join run ledgers with the Pulse index and split the token picture by code era."""
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Join run ledgers with the Pulse index and split the token picture into recent and earlier runs.
+
+A run is recent when its session started on or after ``PULSE_RECENT_SINCE``; earlier runs ran
+code that has changed since, so findings use the recent ones.
+"""
+
+from __future__ import annotations
 
 import json
-import os
 from collections import Counter, defaultdict
 from pathlib import Path
 
 from an_global import cost, pct, price_family
+from round_env import recent_since, round_dir
 
-ROOT = Path(os.environ.get("PULSE_ROUND_DIR", "/wekafs/csl/Hyperloom-Sessions/meta_rsi/pulse15d"))
-OUT = ROOT / "analysis"
-RECENT = os.environ.get("PULSE_RECENT_SINCE", "2026-09-15")
+ERAS = ("recent", "earlier")
 
 
-def load_index() -> dict:
+def load_index(root: Path) -> dict:
     idx = {}
-    for line in open(ROOT / "00_enum_global/index_rows.jsonl"):
+    for line in open(root / "00_enum_global/index_rows.jsonl"):
         r = json.loads(line)
         name = r.get("session_id")
         if not name:
@@ -39,8 +46,10 @@ def run_cost(r: dict) -> tuple[float, dict]:
 
 
 def main() -> None:
-    idx = load_index()
-    runs = [json.loads(l) for l in open(OUT / "runs_ledger.jsonl")]
+    root, since = round_dir(), recent_since()
+    out = root / "analysis"
+    idx = load_index(root)
+    runs = [json.loads(l) for l in open(out / "runs_ledger.jsonl")]
     joined = []
     for r in runs:
         ix = idx.get(r["name"], {})
@@ -50,7 +59,7 @@ def main() -> None:
             {
                 **r,
                 "started": started,
-                "era": "recent" if started >= RECENT else ("aug" if started >= "2026-08-01" else "jul"),
+                "era": "recent" if started >= since else "earlier",
                 "ix_stop": ix.get("stop_reason"),
                 "ix_duration_h": (ix.get("duration_seconds") or 0) / 3600,
                 "ix_gain": ix.get("gain"),
@@ -62,12 +71,12 @@ def main() -> None:
                 "cost_by_comp": per,
             }
         )
-    with open(OUT / "runs_joined.jsonl", "w") as fh:
+    with open(out / "runs_joined.jsonl", "w") as fh:
         for j in joined:
             fh.write(json.dumps(j) + "\n")
 
     lines = []
-    for era in ("recent", "aug", "jul"):
+    for era in ERAS:
         rs = [j for j in joined if j["era"] == era]
         if not rs:
             continue
@@ -102,15 +111,15 @@ def main() -> None:
                 models[m] += 1
         lines.append("  orchestration models (row counts): " + ", ".join(f"{m}={n}" for m, n in models.most_common(6)))
 
-    # scenario candidates: recent + aug runs grouped by model/framework/gpu
+    # scenario candidates: recent runs grouped by model/framework/gpu
     cand = defaultdict(list)
     for j in joined:
-        if j["era"] == "jul":
+        if j["era"] != "recent":
             continue
         key = (j.get("ix_model") or j.get("model_name"), j.get("framework"), j.get("gpu"))
         cand[key].append(j)
     lines.append(
-        "\n## scenario groups since Aug (model, framework, gpu): runs, cost p50, llm calls p50, duration p50 h, stops"
+        "\n## recent scenario groups (model, framework, gpu): runs, cost p50, llm calls p50, duration p50 h, stops"
     )
     for key, rs in sorted(cand.items(), key=lambda kv: -len(kv[1])):
         calls = [sum(j.get("calls", {}).values()) for j in rs]
@@ -119,7 +128,7 @@ def main() -> None:
             f"dur_p50={pct([j['ix_duration_h'] for j in rs], 0.5):4.1f}h stops={dict(Counter(str(j['ix_stop']) for j in rs).most_common(4))}"
         )
     text = "\n".join(lines)
-    (OUT / "era_summary.txt").write_text(text + "\n")
+    (out / "era_summary.txt").write_text(text + "\n")
     print(text)
 
 

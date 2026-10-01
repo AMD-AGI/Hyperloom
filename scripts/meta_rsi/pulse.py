@@ -1,14 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Read-only client for the Hyperloom Pulse API, standard library only.
 
-This machine has no route to the Pulse host, so every call goes through a
-local SOCKS5 tunnel (remote DNS, no auth). Only GET is ever issued; the API
-has no write surface and this client does not invent one.
+Calls go straight to ``PULSE_API_BASE`` (default: the hosted Pulse API), or through a SOCKS5
+proxy (remote DNS, no auth) when ``PULSE_SOCKS`` is ``host:port``. Only GET is ever issued; the
+API has no write surface and this client does not invent one.
 
-Archives are addressed by ``source_session_id`` (``<model>_<TS>_<hash>``).
-The claw UUID that the 2026-08 fetch used as the archive key now answers
-``404 no_archive`` for archives that are present under their name.
+Archives are addressed by ``source_session_id`` (``<model>_<TS>_<hash>``); the claw UUID is not
+an archive key and answers ``404 no_archive``.
 
-Failure taxonomy, carried over from the 2026-08 fetch:
+Failure taxonomy:
 
 * a transport failure, 408, 429 or 5xx is *deferred*: retried with backoff,
   and if it still fails it is logged as deferred, never as a verdict;
@@ -173,7 +175,7 @@ class Pulse:
         parsed = urllib.parse.urlsplit(base)
         self.host = parsed.hostname
         self.prefix = parsed.path.rstrip("/")
-        socks = os.environ.get("PULSE_SOCKS", "127.0.0.1:1080") if socks is None else socks
+        socks = os.environ.get("PULSE_SOCKS", "") if socks is None else socks
         if socks:
             host, _, port = socks.rpartition(":")
             self.socks = (host, int(port))
@@ -611,7 +613,7 @@ def cmd_census_retry(args) -> int:
 
 
 def bundle_dir(root: Path, name: str) -> Path:
-    shard = hashlib.sha1(name.encode()).hexdigest()[:2]
+    shard = hashlib.sha1(name.encode(), usedforsecurity=False).hexdigest()[:2]
     return root / shard / name
 
 

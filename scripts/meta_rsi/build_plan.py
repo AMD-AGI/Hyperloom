@@ -1,13 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Turn the census into fetch plans: token-relevant files only, never shell/env files."""
+
+from __future__ import annotations
 
 import gzip
 import json
-import os
 import re
 import sys
-from pathlib import Path
 
-ROOT = Path(os.environ.get("PULSE_ROUND_DIR", str(Path(__file__).resolve().parent.parent)))
+from round_env import round_dir
+
 SKIP = re.compile(r"\.(sh|env)$|(^|/)local\.yaml$|(^|/)\.env|credential|secret", re.I)
 TIER1 = [
     re.compile(p)
@@ -42,9 +46,10 @@ TIER3 = [re.compile(p) for p in (r"(^|/)critic-workdir/\d+/(request|review|emit)
 
 
 def main() -> None:
-    recent = {n.strip() for n in open(ROOT / "targets_recent.txt") if n.strip()}
+    root = round_dir()
+    recent = {n.strip() for n in open(root / "targets_recent.txt") if n.strip()}
     plans = {"tier1": [], "tier2": [], "tier3": []}
-    with gzip.open(ROOT / "01_census/ls.jsonl.gz", "rt") as fh:
+    with gzip.open(root / "01_census/ls.jsonl.gz", "rt") as fh:
         for line in fh:
             row = json.loads(line)
             if row["status"] != "ready":
@@ -60,7 +65,7 @@ def main() -> None:
                 elif row["name"] in recent and any(p.search(path) for p in TIER3):
                     plans["tier3"].append(item)
     for tier, items in plans.items():
-        with open(ROOT / f"plan_{tier}.jsonl", "w") as out:
+        with open(root / f"plan_{tier}.jsonl", "w") as out:
             for item in items:
                 out.write(json.dumps(item) + "\n")
         print(

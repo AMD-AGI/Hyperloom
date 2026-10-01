@@ -1,12 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Global token picture across all fetched runs: shares by component, model, phase, outcome."""
 
-import json
-import os
-from collections import Counter, defaultdict
-from pathlib import Path
+from __future__ import annotations
 
-OUT = Path(os.environ.get("PULSE_ROUND_DIR", "/wekafs/csl/Hyperloom-Sessions/meta_rsi/pulse15d")) / "analysis"
-BUNDLES = Path(os.environ.get("PULSE_BUNDLES", "/root/pulse15d/02_bundles"))
+import json
+from collections import Counter, defaultdict
+
+from round_env import analysis_dir, bundles_dir
 
 # USD per 1M tokens: (input, cache_write, cache_read, output). Assumed list prices, reported as parameters.
 PRICES = {
@@ -53,7 +55,8 @@ def pct(xs, q):
 
 
 def main() -> None:
-    runs = [json.loads(l) for l in open(OUT / "runs_ledger.jsonl")]
+    out, bundles = analysis_dir(), bundles_dir()
+    runs = [json.loads(l) for l in open(out / "runs_ledger.jsonl")]
     comp_w, comp_cost, comp_calls = Counter(), Counter(), Counter()
     comp_raw = defaultdict(Counter)
     comp_model = defaultdict(Counter)
@@ -96,7 +99,7 @@ def main() -> None:
 
     # orchestration per-call shape, straight from the ledgers
     for r in runs:
-        ledger = BUNDLES.glob(f"*/{r['name']}/{r['run_dir']}/reports/trace/llm_calls.jsonl")
+        ledger = bundles.glob(f"*/{r['name']}/{r['run_dir']}/reports/trace/llm_calls.jsonl")
         for path in ledger:
             first_ctx = None
             for line in path.open(errors="ignore"):
@@ -154,15 +157,18 @@ def main() -> None:
     lines.append(
         "\n# orchestration per call: context p50/p90, output p50/p90, cache write p50/p90, context/first-call-prefix p50/p90"
     )
-    lines.append(
-        f"ctx {pct(orch_ctx, 0.5):,} / {pct(orch_ctx, 0.9):,}; out {pct(orch_out, 0.5):,} / {pct(orch_out, 0.9):,}; "
-        f"write {pct(orch_write, 0.5):,} / {pct(orch_write, 0.9):,}; rounds~ {pct(orch_rounds, 0.5):.1f} / {pct(orch_rounds, 0.9):.1f}  (n={len(orch_ctx):,})"
-    )
+    if orch_ctx:
+        lines.append(
+            f"ctx {pct(orch_ctx, 0.5):,} / {pct(orch_ctx, 0.9):,}; out {pct(orch_out, 0.5):,} / {pct(orch_out, 0.9):,}; "
+            f"write {pct(orch_write, 0.5):,} / {pct(orch_write, 0.9):,}; rounds~ {pct(orch_rounds, 0.5):.1f} / {pct(orch_rounds, 0.9):.1f}  (n={len(orch_ctx):,})"
+        )
+    else:
+        lines.append("n/a: no orchestration rows in the bundles")
     lines.append("\n# top 12 runs by cost")
     for c, name, model, stage, stop, el in sorted(run_rows, reverse=True)[:12]:
         lines.append(f"${c:8,.0f} {name[:60]:60s} stage={stage} stop={stop} min={el}")
     text = "\n".join(lines)
-    (OUT / "global_summary.txt").write_text(text + "\n")
+    (out / "global_summary.txt").write_text(text + "\n")
     print(text)
 
 

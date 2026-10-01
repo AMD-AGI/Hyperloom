@@ -1,14 +1,19 @@
-"""Pick the A/B validation scenario by a fixed score over historical runs.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
-Hard filters: the runs are other users' (PULSE_EXCLUDE_ROOTS, default the operator's own
-/wekafs/csl) and started on or after PULSE_RECENT_SINCE; the model has at least
-PULSE_MIN_MODEL_B billion parameters (default 30) and is on local disk; the precision runs on
-MI325X (no MXFP4); the run used the synthetic benchmark (the agentx client and corpus are not
-installed here); and the scenario has at least two such runs that lasted an hour or more.
+"""Pick the A/B validation scenario by a fixed score over this cluster's recent runs.
+
+Reads ``analysis/local_runs.jsonl`` (written by an_local.py). Hard filters: the run started on or
+after PULSE_RECENT_SINCE; it is not under any of PULSE_EXCLUDE_ROOTS (colon-separated, e.g. the
+operator's own sessions); its model has at least PULSE_MIN_MODEL_B billion parameters (default 30)
+and is present under PULSE_MODELS_DIR; the model is not MXFP4 (which needs MI355X); and the
+scenario (model, framework, TP) has at least two such runs that lasted an hour or more.
 Score (0..1): 0.35 LLM activity per hour (normalized to the best candidate), 0.30 phase
 coverage, 0.25 reliability (share of runs that reached CLOSE without a baseline failure),
 0.10 duration fit (median duration / 6 h, capped at 1).
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -18,19 +23,19 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-ANALYSIS = Path(os.environ.get("PULSE_ROUND_DIR", "/wekafs/csl/Hyperloom-Sessions/meta_rsi/pulse15d")) / "analysis"
-MODELS = Path(os.environ.get("PULSE_MODELS_DIR", "/wekafs/models"))
+from round_env import analysis_dir, env_value, recent_since
+
 PHASES = ("PRELUDE", "ENABLEMENT", "FRAMEWORK_AGENT", "KERNEL_AGENT", "SWEEP")
 MAX_HOURS = 6.0
 
 
-def local_model_dir(name: str) -> str:
+def local_model_dir(name: str, models: Path) -> str:
     if not name:
         return ""
     base = name.split("/")[-1]
-    for cand in os.listdir(MODELS):
+    for cand in os.listdir(models):
         if cand == base or cand.endswith("-" + base) or cand.split("-", 1)[-1] == base:
-            return str(MODELS / cand)
+            return str(models / cand)
     return ""
 
 
@@ -64,34 +69,35 @@ def run_model(run: dict) -> str:
     return parts[-1] if parts else ""
 
 
-def load_candidates() -> dict:
-    since = os.environ.get("PULSE_RECENT_SINCE", "2026-09-15")
-    exclude = [p for p in os.environ.get("PULSE_EXCLUDE_ROOTS", "/wekafs/csl").split(":") if p]
+def load_candidates(analysis: Path) -> dict:
+    since = recent_since()
+    exclude = [p for p in os.environ.get("PULSE_EXCLUDE_ROOTS", "").split(":") if p]
     min_b = float(os.environ.get("PULSE_MIN_MODEL_B", "30"))
     groups = defaultdict(list)
-    for line in open(ANALYSIS / "weka_sep_runs.jsonl"):
+    for line in open(analysis / "local_runs.jsonl"):
         r = json.loads(line)
-        if since and str(r.get("created") or r.get("first_ts") or "")[:10] < since:
+        if str(r.get("created") or r.get("first_ts") or "")[:10] < since:
             continue
         if any(r["path"].startswith(root) for root in exclude):
             continue
         model = run_model(r)
         if model_billions(model) < min_b:
             continue
-        r["source"] = "weka-mi325x"
+        r["source"] = "local"
         r["hours"] = (r.get("elapsed_min") or 0) / 60
         groups[(model, r.get("framework"), r.get("tp"))].append(r)
     return groups
 
 
 def main() -> None:
-    groups = load_candidates()
+    analysis, models = analysis_dir(), Path(env_value("PULSE_MODELS_DIR"))
+    groups = load_candidates(analysis)
     rows = []
     for (model, fw, tp), runs in groups.items():
         runs = [r for r in runs if r.get("framework") and r["hours"] >= 1.0]
         if len(runs) < 2 or not fw:
             continue
-        mdir = local_model_dir(model)
+        mdir = local_model_dir(model, models)
         if not mdir or "mxfp4" in model.lower():
             continue
         activity = st.median(
@@ -124,14 +130,14 @@ def main() -> None:
             0.35 * r["activity_per_h"] / best_act + 0.30 * r["coverage"] + 0.25 * r["reliability"] + 0.10 * r["fit"], 3
         )
     rows.sort(key=lambda r: -r["score"])
-    (ANALYSIS / "scenario_scores.json").write_text(json.dumps(rows, indent=1))
+    (analysis / "scenario_scores.json").write_text(json.dumps(rows, indent=1))
     for r in rows:
         print(
             f"{r['score']:.3f} {r['model']:40s} {r['framework']:7s} tp={r['tp']} runs={r['runs']} act/h={r['activity_per_h']:6.1f} "
             f"cov={r['coverage']:.2f} rel={r['reliability']:.2f} fit={r['fit']:.2f} $/h={r['cost_per_h']:.2f}"
         )
     if not rows:
-        print("no candidate passed the filters; fall back to the arm A scenario", file=sys.stderr)
+        print("no candidate passed the filters", file=sys.stderr)
 
 
 if __name__ == "__main__":

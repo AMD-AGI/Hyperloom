@@ -1,17 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Per-run token accounting from the fetched Pulse bundles (ledger + session_breakdown).
 
 One archive can hold several run directories (resumes, retries); each run directory
 with its own ledger becomes one record.
 """
 
+from __future__ import annotations
+
 import json
-import os
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-BUNDLES = Path(os.environ.get("PULSE_BUNDLES", "/root/pulse15d/02_bundles"))
-OUT = Path(os.environ.get("PULSE_ROUND_DIR", "/wekafs/csl/Hyperloom-Sessions/meta_rsi/pulse15d")) / "analysis"
+from round_env import analysis_dir, bundles_dir
+
 TOKEN_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 
 
@@ -117,9 +121,10 @@ def summarize(rows: list[dict]) -> dict:
 
 
 def main() -> None:
-    OUT.mkdir(parents=True, exist_ok=True)
+    out = analysis_dir()
+    out.mkdir(parents=True, exist_ok=True)
     records = []
-    for shard in sorted(p for p in BUNDLES.iterdir() if p.is_dir()):
+    for shard in sorted(p for p in bundles_dir().iterdir() if p.is_dir()):
         for archive in sorted(p for p in shard.iterdir() if p.is_dir()):
             for ledger in sorted(archive.rglob("llm_calls.jsonl")):
                 root = run_root(ledger)
@@ -134,7 +139,7 @@ def main() -> None:
                         **summarize(rows),
                     }
                 )
-    with open(OUT / "runs_ledger.jsonl", "w") as fh:
+    with open(out / "runs_ledger.jsonl", "w") as fh:
         for rec in records:
             fh.write(json.dumps(rec) + "\n")
     print(

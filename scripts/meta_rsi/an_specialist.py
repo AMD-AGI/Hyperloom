@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Specialist turn patterns from Claude CLI stream-json process logs.
 
 Per run: tools loaded at init, turns (unique assistant message ids), first-turn context,
@@ -5,7 +8,12 @@ tool-call mix, read-only single-call turns that follow another such turn (could 
 batched), polling turns (sleep/tail/ps/health checks), oversized tool results, files read
 more than once, and the weighted tokens attributable to each pattern (the turn's own
 weighted usage).
+
+Process logs come from the fetched bundles; ``PULSE_LOCAL_SPECIALIST_GLOB`` optionally adds
+local ones (an absolute glob), reported under the ``local`` label.
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -14,8 +22,8 @@ import statistics as st
 from collections import Counter, defaultdict
 from pathlib import Path
 
-BUNDLES = Path(os.environ.get("PULSE_BUNDLES", "/root/pulse15d/02_bundles"))
-OUT = Path(os.environ.get("PULSE_ROUND_DIR", "/wekafs/csl/Hyperloom-Sessions/meta_rsi/pulse15d")) / "analysis"
+from round_env import analysis_dir, bundles_dir
+
 READ_ONLY_TOOLS = {"Read", "Grep", "Glob", "LS"}
 READ_ONLY_BASH = re.compile(
     r"^\s*(cat|head|tail|grep|rg|ls|find|sed -n|wc|stat|file|tree|awk|git (log|show|diff|status|grep)|python3? -c|pip show|du|readlink|realpath|which|echo)\b"
@@ -122,20 +130,19 @@ def parse(path: Path) -> dict | None:
 
 
 def main() -> None:
+    out, bundles = analysis_dir(), bundles_dir()
     joined = {}
-    for line in open(OUT / "runs_joined.jsonl"):
+    for line in open(out / "runs_joined.jsonl"):
         j = json.loads(line)
         joined[j["name"]] = j["era"]
     sources = []
-    for p in BUNDLES.glob("*/*/**/runs/specialist/*/process.log"):
-        sources.append((joined.get(p.relative_to(BUNDLES).parts[1], "?"), p))
-    local_glob = os.environ.get(
-        "PULSE_LOCAL_SPECIALIST_GLOB",
-        "/wekafs/csl/Hyperloom-Sessions/vllm/Qwen-Qwen3-8B/*/runs/specialist/*/process.log",
-    )
-    anchor = Path(local_glob.split("*", 1)[0])
-    for p in anchor.glob(local_glob[len(str(anchor)) :].lstrip("/")):
-        sources.append(("local", p))
+    for p in bundles.glob("*/*/**/runs/specialist/*/process.log"):
+        sources.append((joined.get(p.relative_to(bundles).parts[1], "?"), p))
+    local_glob = os.environ.get("PULSE_LOCAL_SPECIALIST_GLOB", "").strip()
+    if local_glob:
+        anchor = Path(local_glob.split("*", 1)[0])
+        for p in anchor.glob(local_glob[len(str(anchor)) :].lstrip("/")):
+            sources.append(("local", p))
     agg = defaultdict(Counter)
     dist = defaultdict(lambda: defaultdict(list))
     for era, p in sources:
@@ -173,7 +180,7 @@ def main() -> None:
         top_tools = sorted(((k[5:], v) for k, v in a.items() if k.startswith("tool_")), key=lambda kv: -kv[1])[:10]
         lines.append("  tool calls: " + ", ".join(f"{k}={v:,}" for k, v in top_tools))
     text = "\n".join(lines)
-    (OUT / "specialist_summary.txt").write_text(text + "\n")
+    (out / "specialist_summary.txt").write_text(text + "\n")
     print(text)
 
 
