@@ -84,6 +84,18 @@ class TestCompare:
         assert compare(a, low)["verdict"]["gain_ok"] is False
         assert compare(a, failing)["verdict"]["new_failure"] is True
 
+    def test_router_requests_after_the_later_arms_last_call_are_not_its_own(self, tmp_path):
+        a = _arm(tmp_path / "A", 5.0, [_row("orchestration", "claude-opus-5", 10, 1)])
+        b_row = {**_row("specialist", "glm-5-3", 10, 1), "ts": "2026-10-01T02:00:00Z"}
+        b = _arm(tmp_path / "B", 5.0, [b_row])
+        (b / "Qwen" / "20261001T000000Z-abc").rename(b / "Qwen" / "20261001T010000Z-abc")
+        log = tmp_path / "router.jsonl"
+        stamps = ("2026-10-01T00:30:00Z", "2026-10-01T01:30:00Z", "2026-10-01T02:00:30Z", "2026-10-01T05:00:00Z")
+        log.write_text("".join(json.dumps({"ts": ts, "route": "infera", "status": 200}) + "\n" for ts in stamps))
+        result = compare(a, b, log)
+        assert result["A"]["router"]["infera_requests"] == 1
+        assert result["B"]["router"]["infera_requests"] == 2
+
     def test_self_hosted_glm_tokens_are_counted_but_not_priced(self, tmp_path):
         a = _arm(tmp_path / "A", 5.0, [_row("specialist", "claude-opus-5", 1000, 100)])
         b = _arm(tmp_path / "B", 5.0, [_row("specialist", "glm-5-3", 1000, 100)])

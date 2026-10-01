@@ -22,6 +22,7 @@ import json
 import re
 import statistics as st
 from collections import Counter, defaultdict
+from datetime import datetime, timedelta
 from pathlib import Path
 
 PHASES = ["PRELUDE", "ENABLEMENT", "FRAMEWORK_AGENT", "KERNEL_AGENT", "SWEEP", "CLOSE"]
@@ -244,12 +245,24 @@ def verdict(a: dict, b: dict) -> dict:
     }
 
 
+def last_activity(udp: Path) -> str:
+    """A minute past the arm's last ledger row (compact form), or open-ended when it has none."""
+    stamps = [r["ts"] for r in jsonl(session_dir(udp) / "reports/trace/llm_calls.jsonl") if r.get("ts")]
+    if not stamps:
+        return ""
+    last = datetime.fromisoformat(max(stamps).replace("Z", "+00:00")) + timedelta(minutes=1)
+    return last.strftime("%Y%m%dT%H%M%S")
+
+
 def compare(arm_a: Path, arm_b: Path, router_log: Path | None = None) -> dict:
-    """Both arms' metrics and the rule's verdict; each arm's router window ends where the other starts."""
+    """Both arms' metrics and the rule's verdict. An arm's router window ends where the other arm
+    starts, or, for the later arm, just after its own last ledger row."""
     a_start = compact_ts(session_dir(arm_a).name)
     b_start = compact_ts(session_dir(arm_b).name)
-    a = arm_metrics(arm_a, (a_start, b_start if b_start > a_start else ""), router_log)
-    b = arm_metrics(arm_b, (b_start, a_start if a_start > b_start else ""), router_log)
+    a_end = b_start if b_start > a_start else last_activity(arm_a)
+    b_end = a_start if a_start > b_start else last_activity(arm_b)
+    a = arm_metrics(arm_a, (a_start, a_end), router_log)
+    b = arm_metrics(arm_b, (b_start, b_end), router_log)
     return {"A": a, "B": b, "verdict": verdict(a, b)}
 
 
