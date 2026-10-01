@@ -492,7 +492,7 @@ def test_killed_overtime_enters_failures_and_mints_gap():
     assert laf["error_class"] == "killed_overtime"
 
     # 3. _extract_gaps_from_attempts mints a gap with the expected canonical_id.
-    gaps = c.gap_refresh._extract_gaps_from_attempts()
+    gaps = c.gap_refresh._extract_gaps_from_attempts(c.proposals._workload_canonical_id())
     cids = [g["canonical_id"] for g in gaps]
     assert any("killed_overtime" in cid for cid in cids), f"Expected a killed_overtime gap, got: {cids}"
 
