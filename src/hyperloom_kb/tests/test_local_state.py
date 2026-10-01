@@ -209,6 +209,28 @@ def test_a_push_sends_only_what_reads_see_and_the_rest_once_they_see_it(tmp_path
     assert shared_second == {_id(0), _id(1)}
 
 
+def test_an_experience_excluded_before_its_push_waits_for_an_include_whatever_a_restore_shows(tmp_path: Path) -> None:
+    with _serving(_service(tmp_path / "global")) as global_client:
+        with _serving(_service(tmp_path / "local", global_client.config.base_url)) as client:
+            client.write(_experience(0))
+            before = client.create_label(name="before the exclusion")
+            client.exclude(_id(0), reason="not ready to share")
+            client.push()
+            client.restore(str(before["label_id"]))
+            shown = _listed(client)
+            after_restore = client.push()
+            shared_after_restore = _listed(global_client)
+            released = client.include(_id(0))
+            after_include = client.push()
+            shared = _listed(global_client)
+
+    # The restore shows it to reads again, but only an include releases it for a push.
+    assert shown == {_id(0)}
+    assert (after_restore["created"], shared_after_restore) == (0, set())
+    assert released["status"] == "included"
+    assert (after_include["created"], shared) == (1, {_id(0)})
+
+
 def test_a_home_with_no_recorded_state_keeps_every_stored_experience_visible(tmp_path: Path) -> None:
     home = tmp_path / "local"
     with _serving(_service(home)) as client:

@@ -45,7 +45,7 @@ def global_config_from_env(env: Mapping[str, str]) -> RemoteConfig | None:
 class SyncLedger:
     """What this service knows of each global KB it syncs with: the KB's identity, push and pull cursors, the
     Experiences pulled here, which are never pushed back, the ones a push held back because reads here did not see
-    them, and every Experience known to be on that global KB."""
+    them, every Experience known to be on that global KB, and the state of each schema there as a pull last saw it."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -75,6 +75,12 @@ class SyncLedger:
                 CREATE TABLE IF NOT EXISTS pulls_in_progress (
                     global_url TEXT NOT NULL,
                     schema_ref TEXT NOT NULL,
+                    PRIMARY KEY (global_url, schema_ref)
+                );
+                CREATE TABLE IF NOT EXISTS pulled_states (
+                    global_url TEXT NOT NULL,
+                    schema_ref TEXT NOT NULL,
+                    state TEXT NOT NULL,
                     PRIMARY KEY (global_url, schema_ref)
                 );
                 """
@@ -160,6 +166,22 @@ class SyncLedger:
             ).fetchall()
         return frozenset(str(row[0]) for row in rows)
 
+    def pulled_state(self, global_url: str, schema_ref: str) -> str:
+        """The state of ``schema_ref`` on the global KB as the last pull batch saw it; empty before the first."""
+
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT state FROM pulled_states WHERE global_url = ? AND schema_ref = ?", (global_url, schema_ref)
+            ).fetchone()
+        return str(row[0]) if row else ""
+
+    def note_pulled_state(self, global_url: str, schema_ref: str, state: str) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO pulled_states(global_url, schema_ref, state) VALUES (?, ?, ?)",
+                (global_url, schema_ref, state),
+            )
+
     def pull_in_progress(self, global_url: str, schema_ref: str) -> bool:
         with self._connection() as connection:
             row = connection.execute(
@@ -228,8 +250,8 @@ class SyncedService(Protocol):
     def held(self, experience_id: str) -> Experience:
         """The stored Experience ``experience_id``."""
 
-    def is_visible(self, experience: Experience) -> bool:
-        """Whether reads on this service see ``experience``."""
+    def is_pushable(self, experience: Experience) -> bool:
+        """Whether a push may send ``experience``: reads here see it and no exclusion still withholds it."""
 
     def begin_pull(self, schema_ref: str) -> dict[str, JsonValue] | None:
         """Label the current state of ``schema_ref`` when no label holds it; the label made, if any."""
@@ -298,7 +320,7 @@ class GlobalSync:
             rejected: list[JsonValue] = []
             for experience_id in self._ledger.held_back(url):
                 experience = self._service.held(experience_id)
-                if not self._service.is_visible(experience):
+                if not self._service.is_pushable(experience):
                     continue
                 error = self._send(target, experience, counts, rejected)
                 if error:
@@ -309,7 +331,7 @@ class GlobalSync:
             for sequence, experience in records:
                 if self._ledger.pulled(experience.id):
                     counts["skipped"] += 1
-                elif not self._service.is_visible(experience):
+                elif not self._service.is_pushable(experience):
                     self._ledger.hold_back(url, experience.id)
                     counts["held_back"] += 1
                 else:
@@ -341,6 +363,10 @@ class GlobalSync:
             position = self._ledger.cursor(url, direction)
             try:
                 page = target.export_page(after=position, limit=SYNC_BATCH, schema_ref=schema_ref)
+                if position and page.state != self._ledger.pulled_state(url, schema_ref):
+                    # The global KB's exclusions or restores changed, so Experiences the cursor passed while they
+                    # were hidden may show now; the ones already here come back unchanged.
+                    page = target.export_page(after=0, limit=SYNC_BATCH, schema_ref=schema_ref)
             except RemoteClientError as exc:
                 return _report("incomplete", url, error=str(exc))
             if page.head < position:
@@ -377,6 +403,7 @@ class GlobalSync:
             self._ledger.note_on_global(url, schema_ref, fetched)
             self._service.bring_in(schema_ref, fetched)
             self._ledger.advance(url, direction, page.next_cursor)
+            self._ledger.note_pulled_state(url, schema_ref, page.state)
             self._ledger.mark_pull_in_progress(url, schema_ref, page.has_more)
             return {
                 **_report("completed", url, counts, rejected, has_more=page.has_more),

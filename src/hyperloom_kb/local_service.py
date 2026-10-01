@@ -18,7 +18,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
-from hyperloom_kb.http_service import ServiceSettings
+from hyperloom_kb.http_service import ServiceSettings, code_digest
 from hyperloom_kb.remote import RemoteClient, RemoteClientError, RemoteConfig, is_loopback
 from hyperloom_kb.schema import JsonValue
 
@@ -131,6 +131,8 @@ def _stale(health: Mapping[str, JsonValue], env: Mapping[str, str]) -> str:
         return f"it serves {health.get('schema_ref')!r} but this client writes {expected}"
     if health.get("config_digest") != ServiceSettings.from_env(env).digest():
         return "it was started with other settings"
+    if health.get("code_digest") != code_digest():
+        return "it runs other Experience KB code than this client"
     return ""
 
 
