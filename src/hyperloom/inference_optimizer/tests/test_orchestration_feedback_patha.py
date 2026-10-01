@@ -531,12 +531,10 @@ def test_short_session_reloop_boundary(monkeypatch, benchmark_timeout, expected_
         monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", benchmark_timeout)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
     remaining_sec = expected_floor + remaining_offset
-    _inputs = ps.workflow_predicate_inputs(st, now_unix=start_unix + 7200 - remaining_sec)
-    _inputs["sweep_result"]["reloop"]["min_remaining_sec"] = ps._cycle_reloop_min_remaining_sec(st, 7200)
-    reloop, ev = ps._reloop_decision(_inputs)
+    target, _reason, ev = ps.compute_next_phase(st, now_unix=start_unix + 7200 - remaining_sec)
 
     assert ev["min_remaining_sec_effective"] == expected_floor
-    assert reloop is (remaining_offset >= 0), ev
+    assert (target == ps.PHASE_FRAMEWORK_AGENT) is (remaining_offset >= 0), ev
     if remaining_offset < 0:
         assert ev["reloop_blocked"] == "insufficient_remaining"
         assert ev["session_remaining_seconds"] == remaining_sec

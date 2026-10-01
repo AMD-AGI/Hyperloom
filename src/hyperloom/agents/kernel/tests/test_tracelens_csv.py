@@ -76,7 +76,7 @@ def test_dry_run_writes_the_source_resolution_artifact(
                 "duration_us": 1.0,
                 "source_file": str(source),
                 "source_type": "python",
-                "source_resolution_method": "name_grep",
+                "source_resolution_method": "symbol_index",
             }
         ],
     )
@@ -371,7 +371,7 @@ def test_125_finalize_outputs_source_path_field():
             "shapes": [[16, 1024]],
         }
     ]
-    out = tla._finalize_candidates(candidates, total_dur=100.0)
+    out = tla._finalize_candidates(candidates)
     assert out[0]["source_path"] == "/path/to/rmsnorm.cu"
     assert out[0]["kernel_category"] == "LayerNorm"
 
@@ -396,7 +396,6 @@ def test_finalize_uses_csv_op_category_for_aten_mm(tmp_path):
     ]
     out = tla._finalize_candidates(
         candidates,
-        total_dur=100.0,
         perf_report_csv_dir=csv_dir,
     )
     assert out[0]["tracelens_category"] == "GEMM"
@@ -515,7 +514,6 @@ def test_finalize_grafts_fused_moe_shapes_onto_empty_candidate(tmp_path):
     ]
     out = tla._finalize_candidates(
         candidates,
-        total_dur=302429.0,
         perf_report_csv_dir=csv_dir,
     )
     assert out[0]["shapes"], "fused-MoE candidate must carry non-empty shapes"
@@ -555,7 +553,6 @@ def test_finalize_grafts_csv_shapes_for_other_bucket_attention_candidate(tmp_pat
 
     out = tla._finalize_candidates(
         candidates,
-        total_dur=170086.617,
         perf_report_csv_dir=csv_dir,
     )
 
@@ -588,7 +585,6 @@ def test_finalize_does_not_touch_non_moe_or_already_shaped(tmp_path):
     ]
     out = tla._finalize_candidates(
         candidates,
-        total_dur=300.0,
         perf_report_csv_dir=csv_dir,
     )
     assert out[0]["shapes"] == []
@@ -610,7 +606,6 @@ def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
     ]
     out = tla._finalize_candidates(
         candidates,
-        total_dur=100.0,
         perf_report_csv_dir=tmp_path / "does_not_exist",
     )
     assert out[0].get("tracelens_category", "") == ""
@@ -1193,6 +1188,251 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert res.runner == "claude_agent_sdk"
 
 
+@pytest.mark.parametrize(
+    ("tool_idle_env", "expected_ceiling_ms"),
+    [(None, "3600000"), ("900", "900000"), ("0", "0")],
+)
+def test_run_tracelens_skill_aligns_cli_background_wait_with_tool_idle_bound(
+    tmp_path, monkeypatch, tool_idle_env, expected_ceiling_ms
+):
+    """The Claude CLI must not kill background sub-agents before the runner's own in-flight bound does."""
+    import asyncio
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class _TextBlock:
+        text: str
+
+    @dataclass
+    class _Message:
+        content: list[Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.delenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", raising=False)
+    if tool_idle_env is None:
+        monkeypatch.delenv("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", raising=False)
+    else:
+        monkeypatch.setenv("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", tool_idle_env)
+    output_dir = tmp_path / "out"
+    captured: dict[str, Any] = {}
+
+    async def _fake_query(*, prompt, options):
+        captured["options"] = options.kwargs
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield _Message(content=[_TextBlock("done")])
+
+    asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=None,
+            budget_minutes=1,
+            model="claude-sonnet-4-5-20250929",
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        )
+    )
+
+    assert captured["options"]["env"]["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] == expected_ceiling_ms
+
+
+def test_run_tracelens_skill_books_its_requests_on_the_trajectory(tmp_path):
+    import asyncio
+    from dataclasses import dataclass
+    from typing import Any
+
+    from hyperloom.inference_optimizer.trace import trajectory_trace as tt
+
+    @dataclass
+    class StreamEvent:
+        event: dict[str, Any]
+        parent_tool_use_id: str | None = None
+
+    @dataclass
+    class ToolUseBlock:
+        id: str
+        name: str
+        input: dict[str, Any]
+
+    @dataclass
+    class ToolResultBlock:
+        tool_use_id: str
+        content: str
+        is_error: bool = False
+
+    @dataclass
+    class AssistantMessage:
+        content: list[Any]
+        message_id: str
+        model: str = "claude-tl"
+        parent_tool_use_id: str | None = None
+
+    @dataclass
+    class UserMessage:
+        content: list[Any]
+
+    @dataclass
+    class ResultMessage:
+        usage: dict[str, Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+    session_dir = tmp_path / "session"
+    captured: dict[str, Any] = {}
+    usage = {"input_tokens": 12, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 0, "output_tokens": 7}
+
+    async def _fake_query(*, prompt, options):
+        captured["options"] = options.kwargs
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        start = {"id": "msg_1", "model": "claude-tl", "usage": {"input_tokens": 12, "cache_read_input_tokens": 300}}
+        yield StreamEvent({"type": "message_start", "message": start})
+        yield StreamEvent({"type": "content_block_delta"})
+        yield StreamEvent(
+            {"type": "message_delta", "usage": {"output_tokens": 7}, "delta": {"stop_reason": "tool_use"}}
+        )
+        yield StreamEvent({"type": "message_stop"})
+        yield AssistantMessage(content=[ToolUseBlock("tu1", "Bash", {"command": "ls"})], message_id="msg_1")
+        yield UserMessage(content=[ToolResultBlock("tu1", "ok")])
+        yield ResultMessage(usage=usage)
+
+    with tt.trajectory_scope(session_dir=session_dir, component="tracelens", task_id="t-tl", parent_span_id="t-tl"):
+        asyncio.run(
+            tlr.run_tracelens_skill(
+                skill_path=tmp_path / "skill.md",
+                trace_path=tmp_path / "trace.json.gz",
+                output_dir=output_dir,
+                tracelens_root=tmp_path,
+                tracelens_internal_root=tmp_path / "TraceLens-internal",
+                platform="MI355X",
+                framework="sglang",
+                analysis_mode="default",
+                capture_folder=None,
+                budget_minutes=1,
+                model="claude-tl",
+                sdk_query_factory=_fake_query,
+                sdk_options_cls=_FakeOptions,
+            )
+        )
+
+    assert captured["options"]["include_partial_messages"] is True
+    rows = tt.load_events(session_dir)
+    calls = [row for row in rows if row["event_type"] == tt.EVENT_LLM_CALL]
+    assert [row["status"] for row in calls] == [tt.STATUS_STARTED, tt.STATUS_COMPLETED]
+    call = calls[-1]
+    assert (call["component"], call["agent"], call["task_id"], call["parent_span_id"]) == (
+        "tracelens",
+        "tracelens",
+        "t-tl",
+        "t-tl",
+    )
+    assert call["call_id"]
+    assert {key: call["attributes"][key] for key in usage} == usage
+    assert call["attributes"]["model"] == "claude-tl"
+
+    (request,) = [row for row in rows if row["event_type"] == tt.EVENT_LLM_REQUEST]
+    assert request["parent_span_id"] == call["span_id"]
+    assert request["call_id"] == call["call_id"]
+    assert request["component"] == "tracelens"
+    assert request["attributes"]["output_tokens"] == 7
+    assert request["attributes"]["cache_read_input_tokens"] == 300
+
+    (tool,) = [row for row in rows if row["event_type"] == tt.EVENT_TOOL]
+    assert tool["attributes"]["name"] == "Bash"
+    assert tool["parent_span_id"] == request["span_id"]
+
+
+def test_trajectory_scope_restores_the_launchers_join_keys(tmp_path):
+    import argparse
+    import contextlib
+
+    from hyperloom.inference_optimizer.trace import trajectory_trace as tt
+
+    unset = argparse.Namespace(
+        trajectory_session_dir="",
+        trajectory_phase="",
+        trajectory_tick=None,
+        trajectory_task_id="",
+        trajectory_parent_span_id="",
+    )
+    assert isinstance(tla._trajectory_scope(unset), contextlib.nullcontext)
+
+    launched = argparse.Namespace(
+        trajectory_session_dir=str(tmp_path),
+        trajectory_phase="roofline",
+        trajectory_tick=4,
+        trajectory_task_id="t-roof",
+        trajectory_parent_span_id="span-roof",
+    )
+    with tla._trajectory_scope(launched):
+        ctx = tt.current_context()
+    assert (ctx.session_dir, ctx.component, ctx.agent, ctx.phase, ctx.tick, ctx.task_id, ctx.parent_span_id) == (
+        tmp_path,
+        "tracelens",
+        "tracelens",
+        "roofline",
+        4,
+        "t-roof",
+        "span-roof",
+    )
+
+
+def test_run_tracelens_skill_records_nothing_outside_a_session(tmp_path):
+    import asyncio
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class ResultMessage:
+        usage: dict[str, Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+
+    async def _fake_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield ResultMessage(usage={"input_tokens": 1, "output_tokens": 1})
+
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI355X",
+            framework="sglang",
+            analysis_mode="default",
+            capture_folder=None,
+            budget_minutes=1,
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        )
+    )
+
+    assert res.report_path.exists()
+    assert "tracelens_agent_sdk_error" not in res.artifact_paths
+    assert not list(tmp_path.rglob("trajectory"))
+
+
 def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
     """TraceLens SDK runner must not inherit stale global Claude settings."""
     import asyncio
@@ -1677,7 +1917,7 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
         )
 
 
-# splitter CLI must match the real TraceLens.TraceUtils.split_trace.main interface (positional trace_path, -o,
+# splitter CLI must match the real split_trace.main interface (positional trace_path, -o,
 # --find-steady-state); the old --input/--platform form failed.
 def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
     trace_dir = tmp_path / "torch_trace"
@@ -2475,165 +2715,6 @@ def test_194_3_splitter_ignores_non_numeric_R(tmp_path):
     assert "--R" not in splitter_cmd, splitter_cmd
 
 
-# parse_analysis_md — TraceLens final-report contract
-_FIXTURE_LLAMA70B_ANALYSIS_MD = (
-    Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "tracelens_v03_llama70b_analysis.md"
-)
-
-
-def test_parse_analysis_md_llama70b_fixture_yields_21_compute_candidates():
-    """Round-trip the official Llama-3 70B golden analysis.md fixture into 21 compute candidates."""
-    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
-    assert len(cands) == 21, (
-        f"expected 21 candidates (18 GEMM + 2 SDPA_fwd + 1 SDPA_bwd) from the fixture; got {len(cands)}"
-    )
-
-    by_cat = {}
-    for c in cands:
-        by_cat.setdefault(c["tracelens_category"], []).append(c)
-    assert len(by_cat["gemm"]) == 18
-    assert len(by_cat["sdpa_fwd"]) == 2
-    assert len(by_cat["sdpa_bwd"]) == 1
-
-    p1_first = cands[0]
-    assert p1_first["name"] == "aten::mm"
-    assert p1_first["tracelens_category"] == "gemm"
-    assert p1_first["tracelens_pitem_rank"] == 1
-    assert p1_first["library"] == "Tensile"
-    assert p1_first["bound_type"] == "compute-bound"
-    # Time (ms) -> duration_us; first row of P1 = 7607.463 ms.
-    assert abs(p1_first["duration_us"] - 7607463.0) < 1.0
-    assert p1_first["call_count"] == 320
-    assert abs(p1_first["percent_of_total"] - 13.42) < 0.001
-    assert abs(p1_first["efficiency_percent"] - 68.74) < 0.001
-    assert p1_first["efficiency_peak_value"] == 708.0
-    assert "TFLOPS" in p1_first["efficiency_peak_unit"]
-    assert p1_first["impact_score"] == 15.12  # mid value from p_item marker
-    # Args is "<br>"-joined upstream; parser must normalise to a list of whitespace-trimmed shape strings without
-    # losing entries.
-    assert p1_first["shapes"] == [
-        "(24576,8192) bf16",
-        "(8192,28672) bf16",
-        "(24576,28672) bf16",
-    ]
-    # Kernel Path is "—" for every row in this fixture; parser must keep the field as empty string (not the dash) so
-    # downstream "no source path" checks remain truthy.
-    assert p1_first["source_file"] == ""
-
-    # Last candidate is the lone SDPA_bwd row (P3 in the report).
-    p3_only = cands[-1]
-    assert p3_only["name"] == "flash_attn::_flash_attn_backward"
-    assert p3_only["tracelens_category"] == "sdpa_bwd"
-    assert p3_only["tracelens_pitem_rank"] == 3
-    assert p3_only["library"] == "CK"
-    assert p3_only["call_count"] == 160
-
-
-def test_parse_analysis_md_returns_empty_when_no_detailed_analysis(tmp_path):
-    """Empty Detailed Analysis -> 0 candidates, so caller can fall back."""
-    md = tmp_path / "analysis.md"
-    md.write_text(
-        "# Stub\n\n## Compute Kernel Optimizations\n\n"
-        "✅ No actionable per-category compute-kernel bottlenecks were promoted.\n\n"
-        "## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
-        "_No compute-kernel reasoning candidates were promoted._\n",
-        encoding="utf-8",
-    )
-    assert tlr.parse_analysis_md(md, top_k=10) == []
-
-
-def test_parse_analysis_md_missing_file_returns_empty(tmp_path):
-    """Non-existent report -> 0 candidates (callers fall back, never raise)."""
-    assert tlr.parse_analysis_md(tmp_path / "nope.md", top_k=10) == []
-
-
-def test_parse_analysis_md_top_k_caps_total_rows(tmp_path):
-    """top_k caps the per-row total across all P-items, not per category."""
-    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=5)
-    assert len(cands) == 5
-    # First 5 rows of the fixture are all P1 GEMMs.
-    assert all(c["tracelens_pitem_rank"] == 1 for c in cands)
-
-
-# Filter for GEAK based on budget (Higher P-item, Lower Efficiency)
-def _write_two_pitem_analysis_md(md: Path) -> None:
-    md.write_text(
-        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
-        "<!-- impact-begin kind=p_item category=sdpa_fwd mid=1.5 low=0.5 high=3.0 -->\n"
-        "\n"
-        "## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
-        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
-        "#### 🔴 P1: GEMM cluster (Tensile)\n\n"
-        "**Identification:** stub identification\n"
-        "**Data:**\n"
-        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
-        "FLOPS/Byte | Efficiency | Bound |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| high_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "80% of 708 TFLOPS | compute-bound |\n"
-        "| low_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "5% of 708 TFLOPS | compute-bound |\n"
-        "| unknown_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        " | compute-bound |\n"
-        "| mid_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "40% of 708 TFLOPS | compute-bound |\n"
-        "**Reasoning for Slowdown:** stub reasoning\n"
-        "**Resolution:** stub resolution\n"
-        "**Impact estimate:**\n"
-        "Low end: 1.0 ms savings (0.1% E2E)\n"
-        "High end: 2.0 ms savings (0.2% E2E)\n"
-        "\n"
-        "<!-- reasoning-candidate tier=compute rank=2 -->\n"
-        "#### 🟡 P2: SDPA (CK)\n\n"
-        "**Identification:** stub identification\n"
-        "**Data:**\n"
-        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
-        "FLOPS/Byte | Efficiency | Bound |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| p2_sdpa | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "10% of 708 TFLOPS | compute-bound |\n"
-        "**Reasoning for Slowdown:** stub reasoning\n"
-        "**Resolution:** stub resolution\n"
-        "**Impact estimate:**\n"
-        "Low end: 1.0 ms savings (0.1% E2E)\n"
-        "High end: 2.0 ms savings (0.2% E2E)\n",
-        encoding="utf-8",
-    )
-
-
-def test_parse_analysis_md_sorts_within_pitem_by_lower_efficiency(tmp_path):
-    """Within a P-item, lower-efficiency rows sort first (survive top_k); P1 before P2 across items."""
-    md = tmp_path / "analysis.md"
-    _write_two_pitem_analysis_md(md)
-
-    cands = tlr.parse_analysis_md(md, top_k=10)
-    names = [c["name"] for c in cands]
-    assert names == [
-        # P1 rows sorted ascending by efficiency:
-        "low_eff_gemm",
-        "mid_eff_gemm",
-        "high_eff_gemm",
-        # Unknown / 0.0 efficiency lands last within the P-item:
-        "unknown_eff_gemm",
-        # P2 still after every P1 row regardless of efficiency:
-        "p2_sdpa",
-    ]
-
-
-def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
-    """Budget cap: top_k keeps the lowest-efficiency rows within a P-item."""
-    md = tmp_path / "analysis.md"
-    _write_two_pitem_analysis_md(md)
-
-    cands = tlr.parse_analysis_md(md, top_k=2)
-    names = [c["name"] for c in cands]
-    assert names == ["low_eff_gemm", "mid_eff_gemm"], (
-        "top_k=2 must keep the two lowest-efficiency P1 rows; the "
-        "high-efficiency / unknown rows must be dropped before any P2 row"
-    )
-
-
-# normalize_upstream_category — TraceLens orchestrator_prepare.py enum
 @pytest.mark.parametrize(
     "raw,expected",
     [
@@ -2697,299 +2778,6 @@ def test_derive_kernel_category_falls_back_to_name_heuristic():
     assert tla.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
 
 
-# _extract_pitem_prose extracts Reasoning / Resolution / Impact.
-_SYNTHETIC_PITEM_BODY = """\
-#### 🔴 P1: RMSNorm fused with quantization (Triton)
-
-**Identification:** Four `aiter::rmsnorm_quant` operations were flagged as memory-bound with efficiencies of 0.88%-4.31% against peak HBM bandwidth of 5.3 TB/s. (source: `rmsnorm_metrics.json` → `operations[].efficiency.efficiency_percent`)
-
-**Data:**
-
-| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| rmsnorm_quant | (8,4096) bf16 | aiter/ops/rmsnorm.py(76): rmsnorm | 123.4 | 4.2 | 64 | 0.5 | 30% of 5.3 TB/s | memory-bound |
-
-**Reasoning for Slowdown:**
-
-Memory-bound elementwise kernel; HBM bandwidth saturated by the bf16 load + fp8 quant store pair.
-
-**Resolution:**
-
-Fuse RMSNorm with the immediately-following GEMM to amortize global loads, or rewrite as a single-pass Triton kernel with `tl.store(..., mask=)`.
-
-**Impact estimate:**
-
-Low end (baseline shapes): 12.5 ms savings (3.2% E2E). High end (peak decode batch): 40.0 ms savings (10.4% E2E).
-"""
-
-
-def test_extract_pitem_prose_pulls_all_sections():
-    prose = tlr._extract_pitem_prose(_SYNTHETIC_PITEM_BODY)
-    assert "Four `aiter::rmsnorm_quant`" in prose["identification"]
-    assert "rmsnorm_metrics.json" in prose["identification"]
-    assert "Memory-bound elementwise kernel" in prose["reasoning_for_slowdown"]
-    assert "HBM bandwidth saturated" in prose["reasoning_for_slowdown"]
-    assert "Fuse RMSNorm" in prose["resolution"]
-    assert "amortize global loads" in prose["resolution"]
-    assert prose["impact_low_ms"] == 12.5
-    assert prose["impact_low_e2e_pct"] == 3.2
-    assert prose["impact_high_ms"] == 40.0
-    assert prose["impact_high_e2e_pct"] == 10.4
-
-
-def test_extract_pitem_prose_identification_stops_at_data_marker():
-    """Identification ends at ``**Data:**`` — must not leak the 9-column table into the field."""
-    body = (
-        "**Identification:** Three ops flagged at 0.5% efficiency. "
-        "(source: gemm_metrics.json)\n\n"
-        "**Data:**\n\n| Op | Args | ... |\n\n"
-        "**Reasoning for Slowdown:**\nMemory-bound.\n"
-    )
-    prose = tlr._extract_pitem_prose(body)
-    assert prose["identification"].startswith("Three ops flagged")
-    assert "gemm_metrics.json" in prose["identification"]
-    assert "| Op |" not in prose["identification"], (
-        "Identification leaked into the Data table — end-marker order is wrong"
-    )
-    assert "Memory-bound" not in prose["identification"]
-
-
-def test_extract_pitem_prose_returns_empty_strings_when_markers_absent():
-    """Bodies without the four labels still return the full dict shape (key presence guaranteed)."""
-    prose = tlr._extract_pitem_prose("**Data:**\n| ... | ... |\n")
-    assert prose["identification"] == ""
-    assert prose["reasoning_for_slowdown"] == ""
-    assert prose["resolution"] == ""
-    assert prose["impact_low_ms"] == 0.0
-    assert prose["impact_low_e2e_pct"] == 0.0
-    assert prose["impact_high_ms"] == 0.0
-    assert prose["impact_high_e2e_pct"] == 0.0
-
-
-def test_extract_pitem_prose_reasoning_stops_at_resolution_marker():
-    """Reasoning must not leak into Resolution when both are present."""
-    body = (
-        "**Reasoning for Slowdown:**\nFirst paragraph.\n\n"
-        "**Resolution:**\nSecond paragraph.\n\n"
-        "**Impact estimate:**\nLow end: 1.0 ms savings (0.5% E2E).\n"
-        "High end: 2.0 ms savings (1.0% E2E).\n"
-    )
-    prose = tlr._extract_pitem_prose(body)
-    assert prose["reasoning_for_slowdown"] == "First paragraph."
-    assert prose["resolution"] == "Second paragraph."
-    assert prose["impact_low_ms"] == 1.0
-    assert prose["impact_high_ms"] == 2.0
-
-
-def test_extract_between_returns_empty_when_start_marker_missing():
-    """Defensive guard: missing start marker → empty, never raises."""
-    assert tlr._extract_between("body", "**Missing:**", ("**End:**",)) == ""
-
-
-def test_parse_analysis_md_attaches_prose_from_fixture():
-    """Every parsed LLama70B fixture candidate carries non-empty prose fields from its parent P-item block."""
-    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
-    assert cands, "fixture must produce at least one candidate"
-    # All 21 fixture candidates share P-item prose with their group.
-    for c in cands:
-        assert "identification" in c
-        assert "reasoning_for_slowdown" in c
-        assert "resolution" in c
-        assert "impact_low_ms" in c
-        assert "impact_high_ms" in c
-        # The fixture's P-items all have non-empty prose; require it.
-        assert c["reasoning_for_slowdown"], (
-            f"empty reasoning_for_slowdown on candidate {c.get('name')!r} (rank P{c.get('tracelens_pitem_rank')})"
-        )
-        assert c["resolution"], f"empty resolution on candidate {c.get('name')!r}"
-
-    # P1 prose mentions "Tile / wave-occupancy tuning" per the fixture.
-    p1_rows = [c for c in cands if c["tracelens_pitem_rank"] == 1]
-    assert any("wave-occupancy" in c["resolution"] for c in p1_rows), (
-        "P1 resolution should mention wave-occupancy tuning (from fixture)"
-    )
-
-
-# parse_analysis_md — spec allows trailing category-specific extra columns after the 9 canonical ones (attention
-# appends 3, generic-op appends Sub-Category); the parser must accept them, not skip.
-_FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD = (
-    Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "tracelens_v03_qwen3_moe_attention_analysis.md"
-)
-
-
-def test_parse_analysis_md_tolerates_attention_12_column_table_per_spec():
-    """A 12-column attention ``**Data:**`` table (9 canonical + 3 spec-allowed extras) must parse using the first 9 cells."""
-    cands = tlr.parse_analysis_md(_FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD, top_k=10)
-    assert len(cands) == 1, f"expected 1 attention candidate from the 12-column fixture; got {len(cands)}"
-    c = cands[0]
-    assert c["name"] == "vllm::unified_attention_with_output"
-    assert c["tracelens_category"] == "inferenceattention"
-    assert c["tracelens_pitem_rank"] == 1
-    assert c["bound_type"] == "memory-bound"
-    # Time (ms) -> duration_us; row is 45.862 ms.
-    assert abs(c["duration_us"] - 45862.0) < 1.0
-    assert c["call_count"] == 48
-    assert abs(c["percent_of_total"] - 2.61) < 0.001
-    assert abs(c["efficiency_percent"] - 3.69) < 0.001
-    assert c["efficiency_peak_value"] == 8.0
-    assert "TB/s" in c["efficiency_peak_unit"]
-    # impact_score is the mid value carried by the p_item marker.
-    assert c["impact_score"] == 2.2
-    # Kernel Path is a real launcher string (not "—"), so source_file must round-trip the relative path (resolution
-    # happens downstream).
-    assert "qwen3_moe.py" in c["source_file"]
-    # The three trailing extra cells are spec-allowed extras, preserved under tracelens_extra_columns.
-    extras = c.get("tracelens_extra_columns")
-    assert extras is not None, "tracelens_extra_columns missing for 12-col row"
-    assert extras.get("dominant kernel") == "`_fwd_kernel` (93.61%)"
-    assert extras.get("workload") == "unknown"
-    assert extras.get("attention pattern") == "GQA (8:1)"
-    # Canonical fields must NOT leak into extras.
-    for canonical_key in (
-        "operation",
-        "args",
-        "kernel path",
-        "time (ms)",
-        "%e2e",
-        "count",
-        "flops/byte",
-        "efficiency",
-        "bound",
-    ):
-        assert canonical_key not in extras
-
-
-def test_unified_attention_fixture_emits_semantic_workload_selectors():
-    candidates = tlr.parse_analysis_md(
-        _FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD,
-        top_k=10,
-    )
-    candidate = candidates[0]
-    candidate["kernel_id"] = "k001"
-    group = {
-        "primary_kernel_id": "k001",
-        "rows": [candidate],
-    }
-
-    cases = task_group_contract.build_task_group_shape_cases(group)
-    assert len(cases) == 1
-    selector = cases[0]["selector"]
-    assert selector == {
-        "CASE_ID": "case_001",
-        "QTOKENS": 1087,
-        "QHEADS": 32,
-        "KVHEADS": 4,
-        "HEADSIZE": 128,
-    }
-    assert {key: value for key, value in selector.items() if key != "CASE_ID"} == {
-        "QTOKENS": 1087,
-        "QHEADS": 32,
-        "KVHEADS": 4,
-        "HEADSIZE": 128,
-    }
-    canonical_workload = "_".join(f"{key}{selector[key]}" for key in sorted(selector) if key != "CASE_ID")
-    assert canonical_workload == ("HEADSIZE128_KVHEADS4_QHEADS32_QTOKENS1087")
-
-    grouped_candidate = dict(candidate)
-    grouped_candidate["task_group"] = {
-        **group,
-        "shape_cases": cases,
-    }
-    shapes = task_group_contract.forge_shapes_from_candidate(grouped_candidate)
-    assert shapes["primary"] == selector
-    assert shapes["minimal"] == selector
-    assert shapes["validation"] == [selector]
-
-
-def test_parse_analysis_md_tolerates_subcategory_10_column_table_per_spec(tmp_path):
-    """A 10-column table with a trailing ``Sub-Category`` must parse using the first 9 cells."""
-    md = tmp_path / "analysis.md"
-    md.write_text(
-        "<!-- impact-begin kind=p_item category=other mid=4.0 low=2.0 high=8.0 -->\n"
-        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
-        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
-        "#### 🔴 P1: Generic op cluster (Triton)\n\n"
-        "**Identification:** stub identification\n"
-        "**Data:**\n"
-        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
-        "FLOPS/Byte | Efficiency | Bound | Sub-Category |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| custom_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "40% of 708 TFLOPS | compute-bound | scatter_gather |\n"
-        "**Reasoning for Slowdown:** stub reasoning\n"
-        "**Resolution:** stub resolution\n",
-        encoding="utf-8",
-    )
-    cands = tlr.parse_analysis_md(md, top_k=10)
-    assert len(cands) == 1
-    c = cands[0]
-    assert c["name"] == "custom_op"
-    assert c["tracelens_category"] == "other"
-    assert c["bound_type"] == "compute-bound"
-    assert c["call_count"] == 10
-    # ``Sub-Category`` is preserved in extras, never the candidate top-level.
-    extras = c.get("tracelens_extra_columns")
-    assert extras is not None
-    assert extras.get("sub-category") == "scatter_gather"
-    assert "sub-category" not in c
-
-
-def test_parse_analysis_md_canonical_9_column_table_has_no_extras_key():
-    """Canonical 9-column candidates must NOT carry a ``tracelens_extra_columns`` key."""
-    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
-    assert cands, "Llama70B fixture must produce candidates"
-    for c in cands:
-        assert "tracelens_extra_columns" not in c, (
-            f"canonical 9-col candidate {c.get('name')!r} unexpectedly "
-            f"carries tracelens_extra_columns={c.get('tracelens_extra_columns')!r}"
-        )
-
-
-def test_parse_analysis_md_rejects_fewer_than_canonical_columns(tmp_path):
-    """A table missing a canonical column (here ``Bound``, 8 cols) must be skipped, not mis-mapped."""
-    md = tmp_path / "analysis.md"
-    md.write_text(
-        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
-        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
-        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
-        "#### 🔴 P1: Missing column (Tensile)\n\n"
-        "**Identification:** stub identification\n"
-        "**Data:**\n"
-        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
-        "FLOPS/Byte | Efficiency |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| stub_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "40% of 708 TFLOPS |\n"
-        "**Reasoning for Slowdown:** stub reasoning\n"
-        "**Resolution:** stub resolution\n",
-        encoding="utf-8",
-    )
-    assert tlr.parse_analysis_md(md, top_k=10) == []
-
-
-def test_parse_analysis_md_rejects_reordered_canonical_columns(tmp_path):
-    """Reordered canonical columns (Bound/Efficiency swapped) must be skipped, not mis-mapped."""
-    md = tmp_path / "analysis.md"
-    md.write_text(
-        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
-        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
-        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
-        "#### 🔴 P1: Reordered columns (Tensile)\n\n"
-        "**Identification:** stub identification\n"
-        "**Data:**\n"
-        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
-        "FLOPS/Byte | Bound | Efficiency |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| stub_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "compute-bound | 40% of 708 TFLOPS |\n"
-        "**Reasoning for Slowdown:** stub reasoning\n"
-        "**Resolution:** stub resolution\n",
-        encoding="utf-8",
-    )
-    assert tlr.parse_analysis_md(md, top_k=10) == []
-
-
-# classify_patchability gate + skip_reason audit field.
 def test_classify_patchability_accepts_stable_triton_source():
     """A stable Triton source is reusable; skip_reason is empty."""
     cand = {
@@ -3479,7 +3267,7 @@ def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
             "duration_us": 100.0,
             "call_count": 64,
             "gpu_pct": 5.0,
-            "tracelens_launcher_path": f"{src}(2): rms_norm",
+            "kernel_launcher_path": f"{src}(2): rms_norm",
         },
         {
             "kernel_id": "k002",
@@ -3487,7 +3275,7 @@ def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
             "duration_us": 50.0,
             "call_count": 32,
             "gpu_pct": 2.5,
-            "tracelens_launcher_path": f"{src}(2): rms_norm",
+            "kernel_launcher_path": f"{src}(2): rms_norm",
         },
         {
             "kernel_id": "k003",
@@ -3495,7 +3283,7 @@ def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
             "duration_us": 30.0,
             "call_count": 16,
             "gpu_pct": 1.5,
-            "tracelens_launcher_path": f"{src}(5): other_fn",
+            "kernel_launcher_path": f"{src}(5): other_fn",
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -3526,12 +3314,12 @@ def test_python_task_group_key_is_stable_across_definition_line_changes(tmp_path
         "kernel_id": "k001",
         "name": "fused_operator",
         "duration_us": 100.0,
-        "tracelens_launcher_path": f"{src}(1): forward",
+        "kernel_launcher_path": f"{src}(1): forward",
     }
     first_key = tlr.aggregate_by_source_function([candidate])[0]["task_group_key"]
 
     src.write_text("\n\n\ndef forward(x):\n    return x\n", encoding="utf-8")
-    candidate["tracelens_launcher_path"] = f"{src}(4): forward"
+    candidate["kernel_launcher_path"] = f"{src}(4): forward"
     second_key = tlr.aggregate_by_source_function([candidate])[0]["task_group_key"]
 
     assert first_key == second_key
@@ -3563,7 +3351,7 @@ def test_trace_routes_generate_compatible_operator_identities(tmp_path):
                 "duration_us": 100.0,
                 "call_count": 1,
                 "gpu_pct": 10.0,
-                "tracelens_launcher_path": f"{src}(1): forward",
+                "kernel_launcher_path": f"{src}(1): forward",
             }
         ]
     )[0]
@@ -3599,7 +3387,7 @@ def test_native_trace_routes_generate_compatible_operator_identities(tmp_path):
                 "duration_us": 100.0,
                 "call_count": 1,
                 "gpu_pct": 10.0,
-                "tracelens_launcher_path": f"{src}(1): fused_operator",
+                "kernel_launcher_path": f"{src}(1): fused_operator",
             }
         ]
     )[0]
@@ -3621,7 +3409,7 @@ def test_native_trace_routes_generate_compatible_operator_identities(tmp_path):
 
 def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path):
     """Q1 invariant: distinct operations sharing one Python wrapper stay in separate task_groups (operation is part of the key)."""
-    src = tmp_path / "gpt_oss.py"
+    src = tmp_path / "vendor_module.py"
     src.write_text(
         "def x():\n    pass\n\n\ndef forward(x):\n    return x\n",
         encoding="utf-8",
@@ -3633,14 +3421,14 @@ def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path)
             "name": "vllm::rocm_unquantized_gemm",
             "duration_us": 12704.0,
             "call_count": 360,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         {
             "kernel_id": "k002",
             "name": "vllm::rocm_aiter_triton_add_rmsnorm_pad",
             "duration_us": 9870.0,
             "call_count": 360,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         # Same op as k001 at a different shape MUST still merge with k001.
         {
@@ -3648,7 +3436,7 @@ def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path)
             "name": "vllm::rocm_unquantized_gemm",
             "duration_us": 1260.0,
             "call_count": 36,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -3680,13 +3468,13 @@ def test_aggregate_keeps_same_operation_in_different_functions_separate(
             "kernel_id": "k001",
             "name": "shared_operation",
             "duration_us": 100.0,
-            "tracelens_launcher_path": f"{src}(1): first",
+            "kernel_launcher_path": f"{src}(1): first",
         },
         {
             "kernel_id": "k002",
             "name": "shared_operation",
             "duration_us": 90.0,
-            "tracelens_launcher_path": f"{src}(4): second",
+            "kernel_launcher_path": f"{src}(4): second",
         },
     ]
 
@@ -3710,28 +3498,24 @@ def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_
             "name": "aiter::rms_norm",
             "duration_us": 200.0,
             "call_count": 100,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
             "tracelens_pitem_rank": 2,
             "tracelens_pitem_title": "Memory-Bound at decode shapes",
             "identification": "Decode-shape Identification.",
             "reasoning_for_slowdown": "Decode-shape Reasoning.",
             "resolution": "Decode-shape Resolution.",
-            "impact_low_ms": 5.0,
-            "impact_high_ms": 10.0,
         },
         {
             "kernel_id": "k002",
             "name": "aiter::rms_norm",
             "duration_us": 80.0,
             "call_count": 40,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
             "tracelens_pitem_rank": 5,
             "tracelens_pitem_title": "Compute-Bound at prefill shapes",
             "identification": "Prefill-shape Identification.",
             "reasoning_for_slowdown": "Prefill-shape Reasoning.",
             "resolution": "Prefill-shape Resolution.",
-            "impact_low_ms": 1.0,
-            "impact_high_ms": 3.0,
         },
         # Same P2 again — must dedupe (only one entry retained).
         {
@@ -3739,14 +3523,12 @@ def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_
             "name": "aiter::rms_norm",
             "duration_us": 50.0,
             "call_count": 25,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
             "tracelens_pitem_rank": 2,
             "tracelens_pitem_title": "Memory-Bound at decode shapes",
             "identification": "Decode-shape Identification.",
             "reasoning_for_slowdown": "Decode-shape Reasoning.",
             "resolution": "Decode-shape Resolution.",
-            "impact_low_ms": 5.0,
-            "impact_high_ms": 10.0,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -3783,7 +3565,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
             "duration_us": 12704.0,
             "call_count": 360,
             "bound_type": "memory-bound",
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         {
             "kernel_id": "k002",
@@ -3792,7 +3574,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
             "duration_us": 10992.0,
             "call_count": 360,
             "bound_type": "memory-bound",
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         {
             "kernel_id": "k003",
@@ -3801,7 +3583,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
             "duration_us": 9291.0,
             "call_count": 360,
             "bound_type": "memory-bound",
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         {
             "kernel_id": "k004",
@@ -3810,7 +3592,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
             "duration_us": 1260.0,
             "call_count": 36,
             "bound_type": "memory-bound",
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -3845,7 +3627,7 @@ def test_aggregate_drops_empty_prose_entries(tmp_path):
             "kernel_id": "k001",
             "name": "aiter::rms_norm",
             "duration_us": 100.0,
-            "tracelens_launcher_path": f"{src}(1): rms_norm",
+            "kernel_launcher_path": f"{src}(1): rms_norm",
             # No P-item rank, no prose — raw-trace fallback shape.
         },
     ]
@@ -3857,16 +3639,16 @@ def test_aggregate_drops_empty_prose_entries(tmp_path):
 def test_aggregate_by_source_function_skips_unparseable_launcher_paths():
     """Candidates with empty / em-dash Kernel Path (LLama70B fixture shape) produce zero groups — caller falls back to per-kernel."""
     cands = [
-        {"kernel_id": "k001", "name": "x", "tracelens_launcher_path": ""},
-        {"kernel_id": "k002", "name": "y", "tracelens_launcher_path": "—"},
-        # No tracelens_launcher_path field AND no source_file: skipped.
+        {"kernel_id": "k001", "name": "x", "kernel_launcher_path": ""},
+        {"kernel_id": "k002", "name": "y", "kernel_launcher_path": "—"},
+        # No kernel_launcher_path field AND no source_file: skipped.
         {"kernel_id": "k003", "name": "z"},
     ]
     assert tlr.aggregate_by_source_function(cands) == []
 
 
 def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
-    """Candidates from raw-trace / csv fallback paths lack ``tracelens_launcher_path`` but may carry a Python-shaped path in ``source_file``; we still parse those when possible."""
+    """Candidates from raw-trace / csv fallback paths lack ``kernel_launcher_path`` but may carry a Python-shaped path in ``source_file``; we still parse those when possible."""
     cands = [
         {
             "kernel_id": "k001",
@@ -3879,6 +3661,36 @@ def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
     groups = tlr.aggregate_by_source_function(cands)
     assert len(groups) == 1
     assert groups[0]["function_name"] == "rms_norm"
+
+
+def test_aggregate_keys_resolved_row_on_source_file_and_reports_resolved_line(tmp_path):
+    """A resolved row carries TraceLens' verdict in ``source_file`` / ``source_line``: the
+    group keys on the native ``source_file`` and reports the resolved ``source_line`` as
+    ``definition_line`` — the ``.py`` ``kernel_launcher_path`` neither re-keys the native
+    kernel onto its launcher nor drives the def line to the launcher's own line."""
+    native = tmp_path / "custom_all_reduce.cuh"
+    native.write_text("// native kernel\n", encoding="utf-8")
+    launcher = tmp_path / "aiter" / "rmsnorm.py"
+    cands = [
+        {
+            "kernel_id": "k001",
+            "name": "aiter::cross_device_reduce_2stage",
+            "duration_us": 100.0,
+            "call_count": 8,
+            "kernel_launcher_path": f"{launcher}(1): rms_norm",
+            "source_file": str(native),
+            "source_line": 42,
+            "source_function": "cross_device_reduce_2stage",
+        },
+    ]
+    groups = tlr.aggregate_by_source_function(cands)
+    assert len(groups) == 1
+    g = groups[0]
+    assert g["source_path"].endswith("custom_all_reduce.cuh")
+    assert g["definition_line"] == 42
+    # The resolved __global__ symbol labels the group, not the .cuh file stem.
+    assert g["function_name"] == "cross_device_reduce_2stage"
+    assert g["ast_resolved"] is False
 
 
 # task-group over-splitting: native (.cu/.hip/.cpp) kernels have no Python AST def-line (TraceLens reports the
@@ -3956,15 +3768,6 @@ def test_is_native_source_detects_device_extensions():
         assert not tlr._is_native_source(p), p
 
 
-def test_grep_for_keyword_treats_dash_prefixed_keyword_as_literal(tmp_path):
-    """Profiler-derived names can begin with ``-``; grep must not treat them as command-line options."""
-    src = tmp_path / "kernel.py"
-    src.write_text("def uses_dash_prefixed_name():\n    return '--danger'\n", encoding="utf-8")
-
-    tla._GREP_CACHE.clear()
-    assert tla._grep_for_keyword("--danger", tmp_path) == [src]
-
-
 def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
     """A native .cu kernel invoked from two call sites reports two different ``#L`` lines (no Python AST def-line exists)."""
     src = tmp_path / "rmsnorm.cu"
@@ -3979,7 +3782,7 @@ def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
             "duration_us": 100.0,
             "call_count": 64,
             "gpu_pct": 5.0,
-            "tracelens_launcher_path": f"{src}(120): rmsnorm_kernel",
+            "kernel_launcher_path": f"{src}(120): rmsnorm_kernel",
         },
         {
             "kernel_id": "k002",
@@ -3987,7 +3790,7 @@ def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
             "duration_us": 50.0,
             "call_count": 32,
             "gpu_pct": 2.5,
-            "tracelens_launcher_path": f"{src}(456): rmsnorm_kernel",
+            "kernel_launcher_path": f"{src}(456): rmsnorm_kernel",
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -4014,21 +3817,21 @@ def test_aggregate_merges_native_template_instances_by_source(tmp_path):
             "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb0ELb0EEEvPKT_",
             "duration_us": 300.0,
             "call_count": 30,
-            "tracelens_launcher_path": bare,
+            "kernel_launcher_path": bare,
         },
         {  # rmsnorm (mode 1), shape B -> different BlockSize template arg
             "kernel_id": "k006",
             "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi512ELi16ELb0ELb0EEEvPKT_",
             "duration_us": 200.0,
             "call_count": 20,
-            "tracelens_launcher_path": bare,
+            "kernel_launcher_path": bare,
         },
         {  # add_rmsnorm (mode 2) -> ADD_RESIDUAL=true template arg
             "kernel_id": "k007",
             "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0EEEvPKT_",
             "duration_us": 100.0,
             "call_count": 10,
-            "tracelens_launcher_path": bare,
+            "kernel_launcher_path": bare,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -4054,13 +3857,13 @@ def test_aggregate_splits_distinct_native_operators_in_one_source(tmp_path):
             "kernel_id": "k001",
             "name": "quantize_kernel",
             "duration_us": 100.0,
-            "tracelens_launcher_path": str(src),
+            "kernel_launcher_path": str(src),
         },
         {
             "kernel_id": "k002",
             "name": "dequantize_kernel",
             "duration_us": 80.0,
-            "tracelens_launcher_path": str(src),
+            "kernel_launcher_path": str(src),
         },
     ]
 
@@ -4084,14 +3887,14 @@ def test_aggregate_normalizes_template_dtype_on_python_track(tmp_path):
             "name": "fused_moe_kernel<bf16>",
             "duration_us": 70.0,
             "call_count": 7,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         {
             "kernel_id": "k002",
             "name": "fused_moe_kernel<fp16>",
             "duration_us": 30.0,
             "call_count": 3,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -4107,14 +3910,14 @@ def test_aggregate_canonicalizes_native_source_path():
             "name": "rmsnorm_kernel",
             "duration_us": 40.0,
             "call_count": 4,
-            "tracelens_launcher_path": "csrc/sub/../rmsnorm.cu(12): rmsnorm_kernel",
+            "kernel_launcher_path": "csrc/sub/../rmsnorm.cu(12): rmsnorm_kernel",
         },
         {
             "kernel_id": "k002",
             "name": "rmsnorm_kernel",
             "duration_us": 10.0,
             "call_count": 1,
-            "tracelens_launcher_path": "csrc/rmsnorm.cu(99): rmsnorm_kernel",
+            "kernel_launcher_path": "csrc/rmsnorm.cu(99): rmsnorm_kernel",
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -4131,7 +3934,7 @@ def test_build_task_groups_filters_non_reusable():
             "name": "rms_norm",
             "duration_us": 50.0,
             "call_count": 4,
-            "tracelens_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
+            "kernel_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
             "reusable_native_kernel": True,
         },
         {
@@ -4139,7 +3942,7 @@ def test_build_task_groups_filters_non_reusable():
             "name": "rocblas_sgemm",
             "duration_us": 80.0,
             "call_count": 2,
-            "tracelens_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
+            "kernel_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
             "reusable_native_kernel": False,  # filtered out
         },
     ]
@@ -4421,57 +4224,6 @@ def test_resolve_launcher_via_atom_fallback_root(tmp_path, monkeypatch):
 
 
 # The wrapper that merely *launches* the kernel — must never be the source.
-
-
-def test_extract_total_time_us_from_gpu_timeline(tmp_path):
-    csv_dir = tmp_path / "perf_report_csvs"
-    csv_dir.mkdir()
-    (csv_dir / "gpu_timeline.csv").write_text(
-        "type,time ms,percent\ncompute_time,100.5,80.0\ntotal_time,125.0,100.0\nidle_time,24.5,20.0\n",
-        encoding="utf-8",
-    )
-    result = tla._extract_total_time_us_from_gpu_timeline(tmp_path)
-    assert result == 125000.0
-
-
-def test_extract_total_time_us_returns_none_when_missing(tmp_path):
-    assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
-
-
-# gpu_timeline cell reads + low-compute gate evaluation
-
-
-def _write_gpu_timeline(tmp_path, body: str):
-    csv_dir = tmp_path / "perf_report_csvs"
-    csv_dir.mkdir(exist_ok=True)
-    (csv_dir / "gpu_timeline.csv").write_text(body, encoding="utf-8")
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        # Duration column renamed beyond the known aliases: the row is found, the number is not.
-        "type,duration,percent\ntotal_time,18186.6,100.0\n",
-        # Row truncated: DictReader yields None for the missing cell, and float(None) raises TypeError rather than
-        # ValueError.
-        "type,time ms,percent\ntotal_time\n",
-        # Present but blank.
-        "type,time ms,percent\ntotal_time,,100.0\n",
-        # Present but not a number.
-        "type,time ms,percent\ntotal_time,n/a,100.0\n",
-    ],
-)
-def test_unreadable_total_time_cell_is_none_not_zero(tmp_path, body):
-    """An unreadable window total must fail open, never read as ``0 ms``."""
-    _write_gpu_timeline(tmp_path, body)
-    assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
-
-
-@pytest.mark.parametrize("column", ["time ms", "time (ms)", "time_ms", "ms"])
-def test_known_duration_column_spellings_are_read(tmp_path, column):
-    """Known alias spellings are read rather than discarded as unknown."""
-    _write_gpu_timeline(tmp_path, f"type,{column},percent\ntotal_time,18186.6,100.0\n")
-    assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) == 18186600.0
 
 
 def test_low_compute_gate_fires_on_spin_wait_window(monkeypatch, tmp_path):

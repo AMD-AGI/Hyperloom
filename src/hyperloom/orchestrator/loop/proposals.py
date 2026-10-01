@@ -13,6 +13,7 @@ from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
+from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PROPOSAL, STATUS_QUEUED, record_event
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..state.shared_state import inject_stack_base_params
@@ -39,6 +40,8 @@ class PendingProposal:
     action_name: str
     predicted_gain_pct: float
     payload: dict[str, Any]
+    #: The task this proposal materialized into, once the Critic approved it.
+    task_id: str | None = None
 
 
 async def record_proposal(
@@ -72,6 +75,17 @@ async def record_proposal(
         payload=payload,
     )
     coord.state.pending_proposals[msg.msg_id] = pending
+    record_event(
+        EVENT_PROPOSAL,
+        status=STATUS_QUEUED,
+        span_id=msg.msg_id,
+        attributes={
+            "name": action_name,
+            "action_name": action_name,
+            "from_agent": from_agent,
+            "predicted_gain_pct": pending.predicted_gain_pct,
+        },
+    )
     _record_phase_proposal(coord, pending)
     _record_config_proposal(coord, pending)
     return pending
@@ -616,6 +630,10 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         # Content-addressed so a batch of proposals that would launch identical work collapses to one task; a
         # terminated twin still gets a fresh key so a legitimate retry after failure is never locked out.
         raw_key = self._approved_idempotency_key(pending.action_name, params)
+        # Preserve the authoritative config-proposal join on the materialized task. Keep this out of the
+        # content-addressed idempotency key above so two proposals for identical grids still collapse to one task.
+        if pending.action_name == "explore" and pending.proposal_msg_id:
+            params["proposal_msg_id"] = str(pending.proposal_msg_id)
         task = None
         was_existing = False
         for attempt in range(_MAX_IDEMPOTENCY_ATTEMPTS):
@@ -679,6 +697,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         )
         # Trace attribution: record proposal_msg_id -> task_id for the decision-trace collector.
         self._record_proposal_task_map(pending.proposal_msg_id, task.task_id)
+        pending.task_id = task.task_id
         _record_proposal_materialized(pending.proposal_msg_id, task.task_id)
         _record_config_routed(self, pending, task_id=task.task_id)
 

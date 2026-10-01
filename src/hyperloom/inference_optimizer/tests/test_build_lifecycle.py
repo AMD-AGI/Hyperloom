@@ -55,20 +55,20 @@ def _fake_action(**kw):
     return TargetedBuildAction(**base)
 
 
-async def _enqueue_and_run(build_lifecycle, executor, *, action, session_dir) -> tuple:
+async def _enqueue_and_run(build_coord, executor, *, action, session_dir) -> tuple:
     """Run one build through SubAgentRunner; return (task_row, runner_result)."""
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 
-    tid = await build_lifecycle.enqueue_targeted_build(action)
-    task_obj = await build_lifecycle.tasks.get(tid)
+    tid = await build_coord.enqueue_targeted_build(action)
+    task_obj = await build_coord.tasks.get(tid)
     runner = SubAgentRunner(
-        locks=build_lifecycle.locks,
-        tasks=build_lifecycle.tasks,
+        locks=build_coord.locks,
+        tasks=build_coord.tasks,
         executor_registry={"targeted_build": executor},
         session_dir=Path(session_dir),
-        shared_state=build_lifecycle.shared_state,
+        shared_state=build_coord.shared_state,
     )
-    lease = await build_lifecycle.locks.try_acquire_many(
+    lease = await build_coord.locks.try_acquire_many(
         ["build_lane"],
         holder_id=tid,
         task_id=tid,
@@ -77,32 +77,32 @@ async def _enqueue_and_run(build_lifecycle, executor, *, action, session_dir) ->
     )
     assert lease is not None
     result = await runner.run_task(task_obj, prebound_lease=lease)
-    return await build_lifecycle.tasks.get(tid), result
+    return await build_coord.tasks.get(tid), result
 
 
 # Enqueue
 
 
 @pytest.mark.asyncio
-async def test_idempotent_enqueue_no_double_row(build_coord, build_lifecycle):
+async def test_idempotent_enqueue_no_double_row(build_coord):
     a = _action([sys.executable, "-c", "print('x')"], ref="v1", gpu_arch="gfx950")
-    t1 = await build_lifecycle.enqueue_targeted_build(a)
-    t2 = await build_lifecycle.enqueue_targeted_build(a)
+    t1 = await build_coord.enqueue_targeted_build(a)
+    t2 = await build_coord.enqueue_targeted_build(a)
     assert t1 == t2
-    all_builds = [t for t in await build_lifecycle.tasks.queued() if t.kind == "targeted_build"]
+    all_builds = [t for t in await build_coord.tasks.queued() if t.kind == "targeted_build"]
     assert len(all_builds) == 1
 
 
 @pytest.mark.asyncio
-async def test_build_lane_serializes_two_builds(build_coord, build_lifecycle):
+async def test_build_lane_serializes_two_builds(build_coord):
     """Capacity-1 build_lane: second build stays queued while first runs."""
-    a1 = await build_lifecycle.enqueue_targeted_build(
+    a1 = await build_coord.enqueue_targeted_build(
         _action([sys.executable, "-c", "import time; time.sleep(60)"], ref="v1")
     )
-    a2 = await build_lifecycle.enqueue_targeted_build(_action([sys.executable, "-c", "print('two')"], ref="v2"))
+    a2 = await build_coord.enqueue_targeted_build(_action([sys.executable, "-c", "print('two')"], ref="v2"))
     assert a1 != a2
-    t1 = await build_lifecycle.tasks.get(a1)
-    lease = await build_lifecycle.locks.try_acquire_many(
+    t1 = await build_coord.tasks.get(a1)
+    lease = await build_coord.locks.try_acquire_many(
         ["build_lane"],
         holder_id=a1,
         task_id=a1,
@@ -110,20 +110,20 @@ async def test_build_lane_serializes_two_builds(build_coord, build_lifecycle):
         ttl_sec=t1.lease_ttl_sec or 60,
     )
     assert lease is not None
-    await build_lifecycle.tasks.transition(a1, "running")
-    running = [t.task_id for t in await build_lifecycle.tasks.by_state("running") if t.kind == "targeted_build"]
-    queued = [t.task_id for t in await build_lifecycle.tasks.queued() if t.kind == "targeted_build"]
+    await build_coord.tasks.transition(a1, "running")
+    running = [t.task_id for t in await build_coord.tasks.by_state("running") if t.kind == "targeted_build"]
+    queued = [t.task_id for t in await build_coord.tasks.queued() if t.kind == "targeted_build"]
     assert len(running) == 1
     assert len(queued) == 1
-    await build_lifecycle.locks.release(lease)
+    await build_coord.locks.release(lease)
 
 
 @pytest.mark.asyncio
-async def test_build_lane_does_not_conflict_with_serving(build_coord, build_lifecycle):
+async def test_build_lane_does_not_conflict_with_serving(build_coord):
     """build_lane must not mutex the serving/benchmark lanes."""
-    tid = await build_lifecycle.enqueue_targeted_build(_action([sys.executable, "-c", "import time; time.sleep(2)"]))
-    t = await build_lifecycle.tasks.get(tid)
-    build_lease = await build_lifecycle.locks.try_acquire_many(
+    tid = await build_coord.enqueue_targeted_build(_action([sys.executable, "-c", "import time; time.sleep(2)"]))
+    t = await build_coord.tasks.get(tid)
+    build_lease = await build_coord.locks.try_acquire_many(
         ["build_lane"],
         holder_id=tid,
         task_id=tid,
@@ -150,9 +150,9 @@ def executor(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_build_succeeds(build_coord, build_lifecycle, executor, tmp_path):
+async def test_build_succeeds(build_coord, executor, tmp_path):
     task, _ = await _enqueue_and_run(
-        build_lifecycle,
+        build_coord,
         executor,
         action=_action([sys.executable, "-c", "print('ok')"]),
         session_dir=tmp_path,
@@ -165,9 +165,9 @@ async def test_build_succeeds(build_coord, build_lifecycle, executor, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_nonzero_exit_records_compile_error(build_coord, build_lifecycle, executor, tmp_path):
+async def test_nonzero_exit_records_compile_error(build_coord, executor, tmp_path):
     task, _ = await _enqueue_and_run(
-        build_lifecycle,
+        build_coord,
         executor,
         action=_action([sys.executable, "-c", "import sys; sys.exit(2)"]),
         session_dir=tmp_path,
@@ -177,12 +177,12 @@ async def test_nonzero_exit_records_compile_error(build_coord, build_lifecycle, 
 
 
 @pytest.mark.asyncio
-async def test_timeout_kills_and_records_timeout(build_coord, build_lifecycle, tmp_path):
+async def test_timeout_kills_and_records_timeout(build_coord, tmp_path):
     from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
 
     action = _action([sys.executable, "-c", "import time; time.sleep(600)"], build_budget_sec=1)
     task, _ = await _enqueue_and_run(
-        build_lifecycle,
+        build_coord,
         TargetedBuildExecutor(),
         action=action,
         session_dir=tmp_path,
@@ -194,7 +194,7 @@ async def test_timeout_kills_and_records_timeout(build_coord, build_lifecycle, t
 
 
 @pytest.mark.asyncio
-async def test_cancel_kills_the_compile_before_releasing_the_lane(build_coord, build_lifecycle, executor, tmp_path):
+async def test_cancel_kills_the_compile_before_releasing_the_lane(build_coord, executor, tmp_path):
     """A cancelled build must not leave the compile running."""
     import asyncio
 
@@ -212,7 +212,7 @@ async def test_cancel_kills_the_compile_before_releasing_the_lane(build_coord, b
     try:
         run = asyncio.create_task(
             _enqueue_and_run(
-                build_lifecycle,
+                build_coord,
                 executor,
                 action=_action([sys.executable, "-c", "import time; time.sleep(600)"]),
                 session_dir=tmp_path,
@@ -236,7 +236,7 @@ async def test_cancel_kills_the_compile_before_releasing_the_lane(build_coord, b
 
 
 @pytest.mark.asyncio
-async def test_a_failed_sentinel_write_still_kills_the_compile(build_coord, build_lifecycle, executor, tmp_path):
+async def test_a_failed_sentinel_write_still_kills_the_compile(build_coord, executor, tmp_path):
     """The spawn is inside the teardown's scope, so a raise cannot orphan it."""
     from hyperloom.orchestrator.actions.executors import targeted_build_executor as tbe_mod
 
@@ -261,7 +261,7 @@ async def test_a_failed_sentinel_write_still_kills_the_compile(build_coord, buil
     type(build_coord.shared_state).save = _fail_first_save
     try:
         task, _ = await _enqueue_and_run(
-            build_lifecycle,
+            build_coord,
             executor,
             action=_action([sys.executable, "-c", "import time; time.sleep(600)"]),
             session_dir=tmp_path,
@@ -439,7 +439,7 @@ def test_driver_command_explicit_build_command_passthrough(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_real_component_writes_plan_json_before_spawn(build_coord, build_lifecycle, tmp_path):
+async def test_real_component_writes_plan_json_before_spawn(build_coord, tmp_path):
     """plan.json must exist before spawn_build is called."""
     from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
     from hyperloom.orchestrator.actions.executors import targeted_build_executor as tbe_mod
@@ -447,9 +447,9 @@ async def test_real_component_writes_plan_json_before_spawn(build_coord, build_l
 
     action = _real_action()
     executor = TargetedBuildExecutor()
-    tid = await build_lifecycle.enqueue_targeted_build(action)
-    task_obj = await build_lifecycle.tasks.get(tid)
-    await build_lifecycle.tasks.transition(tid, "running")
+    tid = await build_coord.enqueue_targeted_build(action)
+    task_obj = await build_coord.tasks.get(tid)
+    await build_coord.tasks.transition(tid, "running")
 
     spawned_commands: list[list[str]] = []
 
@@ -480,16 +480,16 @@ async def test_real_component_writes_plan_json_before_spawn(build_coord, build_l
 
 
 @pytest.mark.asyncio
-async def test_explicit_build_command_passed_verbatim(build_coord, build_lifecycle, tmp_path):
+async def test_explicit_build_command_passed_verbatim(build_coord, tmp_path):
     from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
     from hyperloom.orchestrator.actions.executors import targeted_build_executor as tbe_mod
     from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 
     action = _fake_action()
     executor = TargetedBuildExecutor()
-    tid = await build_lifecycle.enqueue_targeted_build(action)
-    task_obj = await build_lifecycle.tasks.get(tid)
-    await build_lifecycle.tasks.transition(tid, "running")
+    tid = await build_coord.enqueue_targeted_build(action)
+    task_obj = await build_coord.tasks.get(tid)
+    await build_coord.tasks.transition(tid, "running")
 
     spawned_commands: list[list[str]] = []
 
@@ -560,14 +560,14 @@ def test_targeted_build_params_pass_policy_gate(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_spawn_failure_marks_row_failed(build_coord, build_lifecycle, tmp_path):
+async def test_spawn_failure_marks_row_failed(build_coord, tmp_path):
     """spawn failure via sub_agent_runner writes failed terminal state and releases lane."""
     from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 
     action = _action(["/nonexistent_compiler_xyz_P1_12"])
-    tid = await build_lifecycle.enqueue_targeted_build(action)
-    task_obj = await build_lifecycle.tasks.get(tid)
+    tid = await build_coord.enqueue_targeted_build(action)
+    task_obj = await build_coord.tasks.get(tid)
     executor = TargetedBuildExecutor()
     runner = SubAgentRunner(
         locks=build_coord.locks,
@@ -576,7 +576,7 @@ async def test_spawn_failure_marks_row_failed(build_coord, build_lifecycle, tmp_
         session_dir=tmp_path,
         shared_state=build_coord.shared_state,
     )
-    lease = await build_lifecycle.locks.try_acquire_many(
+    lease = await build_coord.locks.try_acquire_many(
         ["build_lane"],
         holder_id=tid,
         task_id=tid,

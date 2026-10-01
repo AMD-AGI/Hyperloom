@@ -51,7 +51,7 @@ def _sweep_state(
 
 
 # compute_next_phase SWEEP back-edge
-def test_sweep_reloops_to_explore_when_budget_and_leverage():
+def test_sweep_reloops_to_framework_agent_when_budget_and_leverage():
     st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
     nxt = ps.compute_next_phase(st)
     assert nxt is not None
@@ -275,12 +275,10 @@ def test_long_and_unbounded_runs_are_long():
     assert ps.is_long_run(st_unbounded) is True
 
 
-def test_should_reloop_respects_max_cycles():
-    st = _sweep_state(macro_cycle=5)
-    # Override max_cycles: set macro_cycle to DEFAULT-1 to test the cap
-    st.macro_cycle = ps.DEFAULT_MAX_MACRO_CYCLES - 1
-    reloop, ev = ps._reloop_decision(ps.workflow_predicate_inputs(st))
-    assert reloop is False
+def test_sweep_closes_at_the_macro_cycle_cap():
+    st = _sweep_state(macro_cycle=ps.DEFAULT_MAX_MACRO_CYCLES - 1)
+    target, reason, ev = ps.compute_next_phase(st)
+    assert (target, reason) == (ps.PHASE_CLOSE, "global_converged")
     assert ev["reloop_blocked"] == "max_cycles"
 
 

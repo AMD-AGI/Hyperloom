@@ -700,7 +700,7 @@ class ExploreExecutor:
             # Honour an operator-pinned SGLANG_USE_AITER=0: drop variants that would re-enable the (hang-prone) aiter
             # MoE runner.
             runnable, _aiter_dropped = apply_aiter_moe_pin_filter(runnable)
-            # xDiT do-not-set list, plus flags the model class or the installed server does not support.
+            # xDiT do-not-set list, plus flags the model class does not support.
             runnable, _compat_dropped = apply_compatibility_filter(
                 runnable,
                 framework=framework,
@@ -1046,6 +1046,8 @@ class ExploreExecutor:
                         GRADED_INTVTY_P50: r.intvty_p50,
                         GRADED_DURATION: r.duration_seconds,
                         GRADED_ERROR_RATE: r.request_error_rate,
+                        # Graded against the session latency budget when one is set.
+                        "e2el_mean_ms": r.e2el_mean_ms,
                     }
                     stamp_output_per_gpu(variant_meas, getattr(ss, "tp", None))
                     graded = resolve_graded_comparison(
@@ -1087,7 +1089,13 @@ class ExploreExecutor:
                     elif graded.verdict == VERDICT_REVERT:
                         gain = None
                         outcome = "REVERT"
-                        if _graded_on_intvty:
+                        if graded.veto_reason:
+                            # The variant is refused a round earlier than the
+                            # promotion gate would, so it is never folded onto the
+                            # stack and never becomes the anchor the rest of the
+                            # batch is graded against.
+                            reason = graded.veto_reason
+                        elif _graded_on_intvty:
                             reason = f"median_or_guard_failed ({axes})"
                         else:
                             reason = "gain_below_threshold"
@@ -1099,9 +1107,15 @@ class ExploreExecutor:
                         # all, which is why no row is appended then.
                         decision_gates.append(
                             {
-                                "gate": "graded_axes"
-                                if (_graded_on_intvty or graded.degrade_reason)
-                                else "keep_threshold",
+                                "gate": (
+                                    "latency_budget"
+                                    if graded.veto_reason
+                                    else (
+                                        "graded_axes"
+                                        if (_graded_on_intvty or graded.degrade_reason)
+                                        else "keep_threshold"
+                                    )
+                                ),
                                 "passed": (False if graded.degrade_reason else graded.verdict != VERDICT_REVERT),
                                 # The anchor is the reference; the floor the
                                 # candidate has to clear belongs to the gate, as
@@ -1289,6 +1303,8 @@ class ExploreExecutor:
                             "total_throughput": r.total_token_throughput,
                             "e2e_norm_intvty_p90": r.intvty_p90,
                             "tpot_p90_ms": r.tpot_p90_ms,
+                            # Promotion re-checks the latency budget against this row, not the round's measurement.
+                            "e2el_mean_ms": r.e2el_mean_ms,
                             "single_workspace": r.workspace,
                             "launch_evidence": dict(r.launch_evidence or {}),
                             "launch_evidence_path": r.launch_evidence_path,
@@ -1524,9 +1540,9 @@ class ExploreExecutor:
             t.get("outcome") in ("KEEP", "REVERT", TS_KILLED_OVERTIME) for t in tested_update.values()
         )
         status = "succeeded" if produced_measurement or winners else "failed"
-        # A round that measured nothing because the run stopped it is not the same as one whose variants failed, and
-        # it used to be reported as a bare ``failed`` with no error_class at all -- nothing downstream could tell the
-        # two apart, so the KB could learn that these variants are bad.
+        # A round that measured nothing because the run stopped it is not the same as one whose variants failed. As a
+        # bare ``failed`` with no error_class nothing downstream could tell the two apart, and the KB would learn that
+        # these variants are bad.
         budget_error: dict[str, Any] = {}
         if status == "failed" and run_stop is not None:
             budget_error = {

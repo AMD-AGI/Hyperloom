@@ -32,19 +32,23 @@ from .kb import (
 from .backends import (
     _build_backends,
     _build_proposal_scorer,
+    critic_review_target,
+    orchestration_runs_on_codex,
 )
 from .model_gate import (
-    _autodetect_gpu_type,
-    _gpu_runner_type,
     _load_model_max_position_embeddings,
     _finish_model_gate,
     _preflight_context_window,
     _preflight_model_config_compat,
     _preflight_unsupported_model_arch,
     _record_resumed_model_gate,
-    _resolve_gpu_type,
     _resolve_max_model_len,
     _start_model_gate,
+)
+from ..gpu_types import (
+    _autodetect_gpu_type,
+    _gpu_runner_type,
+    _resolve_gpu_type,
 )
 from ..model_config_utils import (
     summarize_model_config,
@@ -58,6 +62,8 @@ from .bootstrap import (
     _seed_shared_state,
     _snapshot_system_prompts,
     agentx_state_is_stale,
+    latency_budget_resume_conflict,
+    latency_budget_scope_error,
     parse_operator_extra_env,
     resolve_model_display_name,
 )
@@ -740,7 +746,7 @@ def _resolve_models_for_run(
     if claude_follows_codex:
         # codex_model is about to become the orchestration model, so it needs the ladder whatever the critic backend
         # is.
-        _smoke_test_codex_model(args, resolved_urls, required=True)
+        _smoke_test_codex_model(args, resolved_urls)
         args.claude_model = args.codex_model
 
     # Hard-gate the Claude model (mutates args.claude_model on fallback; sys.exit(2) on failure).
@@ -748,24 +754,80 @@ def _resolve_models_for_run(
 
     if codex_follows_claude:
         args.codex_model = args.claude_model
-    elif not claude_follows_codex:
-        # Codex smoke probes the OpenAI side independently (split entrypoints).
-        _smoke_test_codex_model(args, resolved_urls)
+
+    _probe_critic_review_model(args, codex_follows_claude=codex_follows_claude)
+
+
+_CRITIC_PROBE_TIMEOUT_SEC = 60.0
+
+
+def _probe_critic_review_model(args: argparse.Namespace, *, codex_follows_claude: bool) -> None:
+    """Send the critic's model one real request before the session starts; exit rc=2 when it cannot answer.
+
+    A catalog listing only proves a gateway names a model, not that its upstream serves it, and the critic has no
+    fallback model: a review path that fails every call must stop the launch rather than run a session without a
+    critic.
+    """
+    if _resolve_critic_choice(args) != "agent":
+        return
+    try:
+        protocol, model = critic_review_target(
+            args.critic_protocol,
+            orchestration_on_codex=orchestration_runs_on_codex(codex_follows_claude=codex_follows_claude),
+            claude_model=args.claude_model,
+            codex_model=args.codex_model,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    messages = [{"role": "user", "content": "Reply with OK."}]
+    last_error: BaseException | None = None
+    for delay in (0.0, *_CATALOG_RETRY_DELAYS_SEC):
+        if delay:
+            time.sleep(delay)
+        try:
+            if protocol == "anthropic":
+                llm_config.anthropic_completion(
+                    model=model,
+                    messages=messages,
+                    max_tokens=16,
+                    timeout_s=_CRITIC_PROBE_TIMEOUT_SEC,
+                    component="critic",
+                    operation="preflight",
+                )
+            else:
+                llm_config.chat_completion(
+                    llm_config.get_openai_client(timeout=_CRITIC_PROBE_TIMEOUT_SEC),
+                    component="critic",
+                    operation="preflight",
+                    model=model,
+                    messages=messages,
+                    max_completion_tokens=16,
+                )
+        except Exception as exc:  # noqa: BLE001 — any failure means the review path is unusable
+            last_error = exc
+            continue
+        print(f"Preflight: critic model {model!r} answered over the {protocol} protocol")
+        return
+    print(
+        f"ERROR: critic model {model!r} did not answer over the {protocol} protocol: {last_error!r}\n"
+        f"  The critic reviews with the orchestration model unless --critic-protocol selects the other side "
+        f"(then CLAUDE_MODEL for anthropic, CODEX_MODEL for openai); there is no fallback model.\n"
+        f"  Fix that model or its credential, or pass --critic-mock to run without a critic. Refusing to start.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 def _smoke_test_codex_model(
     args: argparse.Namespace,
     resolved_urls: tuple[str, str] | None,
-    *,
-    required: bool = False,
 ) -> None:
-    """WARN-only catalog check for ``--codex-model``; flags typos and steps down the ladder before Coordinator starts."""
-    if not required:
-        if _codex_model_should_follow_claude():
-            return
-        if args.critic_backend != "agent":
-            return
+    """WARN-only catalog check for ``--codex-model`` on an OpenAI-only launch, where it becomes the orchestration model.
 
+    Steps down the ladder before Coordinator starts.
+    """
     openai_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
     if not openai_url:
         openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
@@ -804,8 +866,7 @@ def _smoke_test_codex_model(
         f"({sorted(m for m in catalog_ids if m.startswith('gpt-'))}); "
         f"CodexBackend will fail at first turn. Pass --codex-model with a "
         f"value in the catalog (known-good ids, newest first: "
-        f"{list(_CODEX_FALLBACK_MODELS)}) or use --critic-mock to "
-        f"avoid the Codex path entirely."
+        f"{list(_CODEX_FALLBACK_MODELS)})."
     )
 
 
@@ -1329,6 +1390,10 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
     """
     if stop_reason == SUPERVISOR_RESTART_REASON:
         return
+    if not state.close_sequence_done:
+        from ..breakdown.recorder.close_out import record_close_safety_net
+
+        record_close_safety_net(session_dir)
     try:
         from ..breakdown import write_minimal_final_json
 
@@ -1435,6 +1500,11 @@ def _persist_preflight_failure_artifacts(
                 record_write_warning(session_dir, component="preflight_failure.manifest", exc=write_exc)
 
         _persist_install_event(args, session_dir)
+        from ..breakdown.recorder.close_out import record_close_safety_net
+        from ..breakdown.recorder import record_stage_reached
+
+        record_close_safety_net(session_dir)
+        record_stage_reached(session_dir, "install")
         try:
             from ..breakdown import write_breakdown_json
 
@@ -1585,6 +1655,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Before either session branch: these are read by the fresh-launch seeding AND by the resume path, so this is the
     # one place that covers both.
     _preflight_agentx_backend(args)
+    if not args.resume_from:
+        _scope_error = latency_budget_scope_error(
+            getattr(args, "framework", None) or os.environ.get("FRAMEWORK", ""), getattr(args, "max_latency_ms", None)
+        )
+        if _scope_error:
+            print(f"ERROR: {_scope_error}.", file=sys.stderr)
+            raise SystemExit(2)
     _apply_agentx_budget_profile(args)
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
@@ -1663,6 +1740,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
+        _latency_conflict = latency_budget_scope_error(
+            state.framework, getattr(args, "max_latency_ms", None)
+        ) or latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
+        if _latency_conflict:
+            session_lock.release()
+            print(f"ERROR: cannot resume this session -- {_latency_conflict}.", file=sys.stderr)
+            sys.exit(2)
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
@@ -1704,6 +1788,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
             if runner_gpu_type != state.gpu_type:
                 print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
+        _emit_launch_info(
+            pid=os.getpid(),
+            session_dir=session_dir,
+            session_id=str(manifest.get("session_id") or ""),
+            run_log=os.environ.get("INFERENCE_OPTIMIZER_RUN_LOG", ""),
+            gpu_type=state.gpu_type or "",
+            framework=state.framework or "",
+            model=str(state.model_path or ""),
+            launch_info_file=getattr(args, "launch_info_file", None),
+        )
         # Resolve workload knobs with the resumed state as the fallback source (explicit --isl/--conc/... on this
         # resume still win), then project the resolved values into env so resume sees the same workload contract (not
         # YAML defaults).

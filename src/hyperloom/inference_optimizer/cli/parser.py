@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from math import isfinite
 from pathlib import Path
 from typing import NoReturn
 
@@ -103,6 +104,22 @@ def _positive_int_arg(value: str) -> int:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
     if parsed <= 0:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return parsed
+
+
+def _positive_ms_arg(value: str) -> float:
+    """argparse type for a millisecond ceiling.
+
+    The gate this feeds fails closed, so its switch must not fail open: an
+    unusable value has to stop the launch rather than resolve to "no budget" and
+    leave the operator believing an SLA is enforced.
+    """
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}") from exc
+    if not isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}")
     return parsed
 
 
@@ -559,6 +576,20 @@ def _build_parser() -> argparse.ArgumentParser:
             "independently of --target-gain / --target-tput / --target-baseline-dir."
         ),
     )
+    # Outside the group as well, and for a stronger reason than --target-roofline: this is a constraint rather than
+    # an objective. It does not say when to stop, it says which winners are admissible, so it composes with whichever
+    # target is in use instead of competing with one.
+    opt.add_argument(
+        "--max-latency-ms",
+        type=_positive_ms_arg,
+        default=None,
+        help=(
+            "Scriptable frameworks (xdit, custom) only. Refuse any KEEP whose mean "
+            "end-to-end latency exceeds N ms. Off by default. A candidate that "
+            "reported no end-to-end latency is refused too, since an unmeasured "
+            "constraint is not a satisfied one."
+        ),
+    )
     opt.add_argument(
         "--resume-from",
         type=str,
@@ -742,8 +773,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Protocol for the Critic's review inference. 'openai' uses the "
         "OpenAI SDK; 'anthropic' uses the Messages API, or the Claude CLI when a "
         "CLAUDE_CODE_OAUTH_TOKEN subscription is the only credential. "
-        "'auto' (default) derives it from the configured credentials; an "
-        "explicit value fails at startup when that side has no credential. "
+        "'auto' (default) reviews with the orchestration model over the protocol "
+        "orchestration runs on; an explicit value reviews with that side's model "
+        "(CLAUDE_MODEL or CODEX_MODEL) and fails at startup when that side has no "
+        "credential. Preflight sends the review model one request and refuses to "
+        "start when it does not answer; there is no fallback model. "
         "Ignored (with a warning) under --critic-mock, which runs no review "
         "inference.",
     )
@@ -999,17 +1033,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "directions. Advisory only — never gates Objective or scoring. "
         "Default on; pass ``--no-target-advisory`` to disable.",
     )
-    # Post-optimization concurrency sweep (on by default): a baseline-vs-optimized Magpie grid across CONC values (see
-    # orchestrator/conc_sweep.py).
+    # Post-optimization concurrency sweep: a baseline-vs-optimized Magpie grid across CONC values (see
+    # orchestrator/conc_sweep.py). Defaults to None so bootstrap can pick by benchmark mode.
     opt.add_argument(
         "--enable-conc-sweep",
         dest="enable_conc_sweep",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="Run a post-optimization concurrency sweep (baseline vs "
         "current_best across CONC) and write "
         "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
-        "On by default; disable with --no-enable-conc-sweep.",
+        "On by default, off under AgentX (each rung is a 3600s window); "
+        "force either way with --enable-conc-sweep / --no-enable-conc-sweep.",
     )
     opt.add_argument(
         "--conc-sweep-concs",

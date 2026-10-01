@@ -274,15 +274,7 @@ def _cumulative_gain_validated(state: Any) -> float:
         return 0.0
 
 
-def target_was_reached(state: Any) -> bool:
-    """Whether the run objective has been met."""
-    return bool(str(state.target_reached_at or "").strip())
-
-
-def _cycle_reloop_min_remaining_sec(
-    state: Any,
-    min_remaining_sec: float | None = None,
-) -> float:
+def _cycle_reloop_min_remaining_sec(state: Any) -> float:
     """Session-scaled floor on the seconds that must remain to justify a new cycle.
 
     The session-scaled share keeps a short run from being blocked by a threshold
@@ -295,14 +287,13 @@ def _cycle_reloop_min_remaining_sec(
 
     Args:
         state (Any): Frozen SharedState view exposing ``max_minutes``.
-        min_remaining_sec (float | None): Absolute floor before session scaling; defaults to env-resolved value.
 
     Returns:
         float: The effective floor in seconds.
     """
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
-    effective = float(min_remaining_sec) if min_remaining_sec is not None else _default_cycle_reloop_min_remaining_sec()
+    effective = _default_cycle_reloop_min_remaining_sec()
     max_minutes = _max_minutes(state)
     if max_minutes > 0:
         budget_sec = max_minutes * 60.0
@@ -1211,8 +1202,10 @@ def _budget_predicate_inputs(
     now_unix: float,
 ) -> dict[str, Any]:
     """Normalize the clocks compared by phase budget predicates."""
+    remaining_sec = phase_budget_remaining_seconds(state, now_unix=now_unix)
     return {
-        "remaining_sec": phase_budget_remaining_seconds(state, now_unix=now_unix),
+        "remaining_sec": remaining_sec,
+        "current_balance": remaining_sec,
         "cap_sec": phase_cap_seconds(state),
         "entry_elapsed_sec": phase_elapsed_seconds(state, now_unix=now_unix),
         "cumulative_elapsed_sec": phase_cumulative_seconds(state, now_unix=now_unix),
@@ -1986,8 +1979,23 @@ def record_phase_transition(
     from hyperloom.common.llm_attribution import set_current_phase
 
     set_current_phase(str(row["to_phase"] or ""))
+    from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PHASE, record_event
+
+    record_event(
+        EVENT_PHASE,
+        phase=str(row["to_phase"] or "") or None,
+        attributes={
+            "name": row["to_phase"],
+            "from_phase": from_phase or None,
+            "to_phase": row["to_phase"],
+            "reason": reason,
+            "macro_cycle": int(state.macro_cycle or 0),
+        },
+    )
     try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached
+        from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import PHASE_STAGES
+        from hyperloom.inference_optimizer.session.session_binding import bound_session
 
         # The phase itself, as a timeline event: close the span being left on
         # the exit that ended it, and open the one being entered. Recorded here
@@ -2014,6 +2022,9 @@ def record_phase_transition(
             entered_at=str(row.get("ts") or ""),
             entered_unix=now_unix,
         )
+        stage = PHASE_STAGES.get(str(row.get("to_phase") or ""))
+        if stage:
+            record_stage_reached(bound_session(), stage)
     except Exception:  # noqa: BLE001 -- telemetry must never block phase changes
         pass
     return row
@@ -2132,7 +2143,6 @@ __all__ = [
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_long_run",
     "resolve_keep_threshold",
-    "target_was_reached",
     "allowed_actions_for",
     "apply_escalate_budget_bump",
     "bank_phase_segment",

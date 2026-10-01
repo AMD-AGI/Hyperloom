@@ -514,23 +514,6 @@ async def test_running_tasks_reader_skips_heartbeat_for_non_specialist(
 
 
 @pytest.mark.asyncio
-async def test_running_tasks_reader_survives_db_failure(coordinator_with_mocks):
-    """A read failure degrades to a message, never an exception."""
-    c = coordinator_with_mocks
-    try:
-
-        def _boom(*_a, **_k):
-            raise RuntimeError("db gone")
-
-        c.bus.db.fetchall_sync = _boom
-        out = c.conversation._context_running_tasks_reader()
-        assert "running tasks unavailable" in out
-        assert "db gone" in out
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_running_tasks_reader_reports_in_flight_task(coordinator_with_mocks):
     """A running task is visible with its elapsed time and idempotency key."""
     c = coordinator_with_mocks

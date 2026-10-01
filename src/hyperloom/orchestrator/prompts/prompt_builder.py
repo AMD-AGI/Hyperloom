@@ -698,8 +698,7 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
                 "* **RULE F1** (PRELUDE) — same baseline fingerprint twice failed →"
                 " change at least one of the eight fingerprint fields.",
                 "* **RULE F2** (PRELUDE) — `error_class='no_report'` + no"
-                " `rescued_from_leaked_path:*` → redirect RESULT_DIR or set"
-                " INFERENCE_OPTIMIZER_RESCUE_PATHS.",
+                " `rescued_from_leaked_path:*` → redirect RESULT_DIR.",
             ]
         )
     lines.extend(
@@ -745,7 +744,11 @@ def _idea_generation_lines() -> list[str]:
         "Variant identity is content-based (args+envs+remove_args+",
         "unset_envs+args_mode); only exact same-grid duplicates are collapsed.",
         "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
-        "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
+        "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`). On an agentic",
+        "recipe a flag replaces the recipe's own value and `remove_args` deletes",
+        "a recipe flag. Its draft (method, model, length) and simulated acceptance",
+        "are pinned; other `--speculative-config` keys such as `attention_backend`",
+        "merge into the recipe's own config.",
         "",
         "Draw first from `=== Untested proposals (current cycle) ===`; the",
         "five moves above are for topping the grid up to its target of 4",
@@ -764,8 +767,7 @@ The request kinds you may emit here are `trace_analyze`, `integrate`, and
 (phase allowed-set + gaps + KB priors), with no system-side priority ranking.
 Read the optimization lane's outcome before you act: a `state.gaps[]`
 `layer='kernel_agent'` gap names the target, `last_kernel_opt` carries the
-verdict (KEEP→integrate next; PARTIAL→the lane retries at most
-`_DEFAULT_KERNEL_OPT_MAX_PARTIAL` times then rejects; REVERT→rejected),
+verdict (KEEP→integrate next; REVERT→rejected),
 `rejected_kernel_ids` lists the ids already written off, and
 `last_action_failures` explains a request of your own that failed.
 KERNEL_AGENT → SWEEP advance is driven by the phase budget, idle-no-progress,
@@ -953,20 +955,35 @@ def _section_cycle_directive(
 
 
 _WHEN_TAG_RE = re.compile(r"^<!--\s*when:\s*(?P<when>.+?)\s*-->$")
+# Reference docs surfaced only on AgentX runs. Gated here (keyed on the session's
+# benchmark_mode, i.e. HYPERLOOM_AGENTX) rather than by an orchestration.md rule,
+# so a synthetic run never lists a doc it should not act on.
+_AGENTX_ONLY_REFERENCES: frozenset[str] = frozenset({"speculative_decoding"})
 
 
-def _section_reference_index(*, references_dir: Path, phase: str = "") -> list[str]:
+def _section_reference_index(
+    *,
+    references_dir: Path,
+    phase: str = "",
+    benchmark_mode: str = "",
+) -> list[str]:
     """Build ``## 8.`` from the reference docs that apply to *phase*.
 
     Args:
         references_dir: Directory containing the reference markdown files.
         phase: Normalised current pipeline phase; ``""`` includes all entries.
+        benchmark_mode: The session's benchmark mode (i.e. HYPERLOOM_AGENTX);
+            docs in :data:`_AGENTX_ONLY_REFERENCES` are listed only when it names
+            the AgentX workload. ``""`` (unscoped) still lists every doc.
 
     Returns:
         Markdown lines, or ``[]`` when the directory is absent or empty.
     """
     if not references_dir.is_dir():
         return []
+    # Only filter AgentX-only docs when a concrete mode is set; unscoped renders all.
+    mode_set = bool(str(benchmark_mode or "").strip())
+    agentx = is_agentx_mode(benchmark_mode)
     entries: list[tuple[str, str]] = []
     for path in sorted(references_dir.glob("*.md")):
         when_text = ""
@@ -985,6 +1002,8 @@ def _section_reference_index(*, references_dir: Path, phase: str = "") -> list[s
                 continue
             break
         if file_phases and not _renders_in(phase, file_phases):
+            continue
+        if path.stem in _AGENTX_ONLY_REFERENCES and mode_set and not agentx:
             continue
         entries.append((path.stem, when_text or "see document"))
     if not entries:
@@ -1125,7 +1144,11 @@ def build_orchestration_prompt(
     # The reference index is an index of documents ``read_reference`` pulls;
     # without that tool it is a list the model cannot act on.
     if transport != TRANSPORT_STRUCTURED_OUTPUT:
-        ref_index = _section_reference_index(references_dir=references_dir, phase=phase_norm)
+        ref_index = _section_reference_index(
+            references_dir=references_dir,
+            phase=phase_norm,
+            benchmark_mode=benchmark_mode,
+        )
         if ref_index:
             sections.append(ref_index)
     sections.append(_section_rules(rules_md, phase=phase_norm, transport=transport))

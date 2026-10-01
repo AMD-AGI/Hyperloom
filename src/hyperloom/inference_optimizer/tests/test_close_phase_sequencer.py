@@ -18,8 +18,10 @@ import pytest
 
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.breakdown.collectors.v6_close import collect_v6_close
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
+from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts, phase_event_parts
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import (
@@ -34,7 +36,9 @@ from hyperloom.orchestrator.phases.close import (
     _CLOSE_STEP_WAIT_CEILING_SEC,
     _CLOSE_STEP_WAIT_FLOOR_SEC,
 )
+from hyperloom.orchestrator.actions.executors.session_breakdown import session_breakdown_executor
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import task_dispatch_record
 
 from .conftest import make_coordinator
 
@@ -1020,6 +1024,158 @@ class TestEveryTerminalReachesAWrittenReport:
 
         assert reason == "max_ticks"
         assert coord.shared_state.close_sequence_done is True
+        assert coord.shared_state.phase == "CLOSE"
+        assert coord.shared_state.phase_history[-1]["reason"] == "max_ticks"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "phase,hint,sweep_status,transition_reason",
+        [
+            ("PRELUDE", "", "", "signal"),
+            ("PRELUDE", "skip_to_close", "", "global_converged"),
+            ("SWEEP", "skip_to_close", "completed", "signal"),
+            ("FRAMEWORK_AGENT", "", "", "signal"),
+            ("KERNEL_AGENT", "", "", "signal"),
+        ],
+    )
+    async def test_terminal_close_records_the_phase_before_dispatch(
+        self, tmp_path, phase, hint, sweep_status, transition_reason
+    ):
+        coord = self._coordinator(tmp_path / "session")
+        coord.sub.register_executor("session_breakdown", session_breakdown_executor)
+        state = coord.shared_state
+        state.max_minutes = 60
+        if state.phase != phase:
+            machine_state.record_phase_transition(state, to_phase=phase, reason="phase_entered")
+        if phase == "FRAMEWORK_AGENT":
+            coord.phase_framework._open_framework_timeline()
+        elif phase == "KERNEL_AGENT":
+            coord.phase_kernel._open_kernel_timeline(
+                route="forge", route_reason="kernel_optimizer=forge", from_phase="PRELUDE"
+            )
+        state.pending_escalate_hint = hint
+        state.last_conc_sweep = {"status": sweep_status}
+        state.set_stop_reason("signal")
+        try:
+            assert await coord.phase_close.ensure_close_sequence(reason="signal") is True
+            assert state.stop_reason == "signal"
+            transition = state.phase_history[-1]
+            assert (transition["from_phase"], transition["to_phase"], transition["reason"]) == (
+                phase,
+                "CLOSE",
+                transition_reason,
+            )
+            replay = machine_state.replay_next_phase(transition["evidence"]["predicate_inputs"])
+            assert replay[:2] == ("CLOSE", transition_reason)
+            assert transition["ts_unix"] == transition["evidence"]["predicate_inputs"]["now_unix"]
+            assert state.pending_escalate_hint == ""
+            assert assemble_parts(coord.session_dir)["outcome"]["stage_reached_recorded"] == "close"
+            prior, _ = phase_event.assemble_phase_ext(phase_event_parts(), event=phase_event.phase_event_id(phase, 0))
+            assert prior["open"] is False
+            assert prior["duration_sec"] is not None
+            if phase in {"FRAMEWORK_AGENT", "KERNEL_AGENT"}:
+                event_type = "framework_agent" if phase == "FRAMEWORK_AGENT" else "kernel"
+                internal = next(
+                    event for event in read_timeline_events(coord.session_dir) if event["type"] == event_type
+                )
+                assert internal["end_time"]
+                if phase == "FRAMEWORK_AGENT":
+                    assert internal["ext"]["exit"]["reason"] == transition_reason
+                else:
+                    assert internal["ext"]["outcome"]["exit_reason"] == transition_reason
+            close, _ = phase_event.assemble_phase_ext(phase_event_parts(), event="close:0:phase")
+            actions = {row["task_id"]: row for row in close["actions"]["rows"]}
+            receipts = transition["evidence"]["close_steps"]
+            for step in ("report", "session_breakdown"):
+                receipt = next(row for row in receipts if row["step"] == step)
+                task = await coord.tasks.get(receipt["task_id"])
+                assert task_dispatch_record(task)["phase"] == "CLOSE"
+                assert actions[task.task_id]["action"] == step
+            history_count = len(state.phase_history)
+            assert await coord.phase_close.ensure_close_sequence(reason="signal") is False
+            assert len(state.phase_history) == history_count
+        finally:
+            await coord.stop()
+
+    @pytest.mark.asyncio
+    async def test_deadline_close_observes_enablement_work_without_renewing_its_lease(self, tmp_path):
+        coord = self._coordinator(tmp_path / "session")
+        state = coord.shared_state
+        machine_state.record_phase_transition(state, to_phase="ENABLEMENT", reason="phase_entered")
+        try:
+            holder = await coord.enablement_lane._open_authoring_round(params={}, lanes=[], lease_ttl_sec=300)
+            assert holder
+            before = await coord.rounds.held()
+            assert before is not None
+            assert await coord.enablement_lane._round_has_live_work(holder)
+
+            await coord.phase_close.enter_closing_phase(grace_sec=30)
+
+            assert state.phase == "CLOSE"
+            assert state.phase_history[-1]["evidence"]["predicate_inputs"]["enablement_in_flight"] is True
+            after = await coord.rounds.held()
+            assert after is not None
+            assert (after.renewed_unix, after.expires_unix) == (before.renewed_unix, before.expires_unix)
+        finally:
+            await coord.stop()
+
+    @pytest.mark.asyncio
+    async def test_deadline_report_is_created_in_close_and_reused(self, tmp_path, monkeypatch):
+        coord = self._coordinator(tmp_path / "session")
+        state = coord.shared_state
+        state.max_minutes = 60
+        roofline_contexts = []
+        original_roofline = coord.phase_close._maybe_run_close_post_opt_roofline
+
+        async def _roofline():
+            roofline_contexts.append(state.closing_phase)
+            return await original_roofline()
+
+        monkeypatch.setattr(coord.phase_close, "_session_integrated_kernel_patch", lambda: True)
+        monkeypatch.setattr(coord.phase_close, "_maybe_run_close_post_opt_roofline", _roofline)
+        try:
+            deadline = await coord.phase_close.enter_closing_phase(grace_sec=30)
+            assert deadline.remaining() > 0
+            assert state.phase == "CLOSE"
+            assert state.close_sequence_done is False
+            transition = state.phase_history[-1]
+            assert transition["reason"] == "time_exhausted"
+            assert machine_state.replay_next_phase(transition["evidence"]["predicate_inputs"])[:2] == (
+                "CLOSE",
+                "time_exhausted",
+            )
+            report = await coord.tasks.get(state.closing_report_task_id)
+            assert task_dispatch_record(report)["phase"] == "CLOSE"
+            history_count = len(state.phase_history)
+            coord._closing_deadline = deadline
+            await coord.await_within_session_bound(coord.phase_machine.advance_phase_if_needed, stage="advance_phase")
+            assert state.close_sequence_done is True
+            assert roofline_contexts == [True]
+            receipts = state.phase_history[-1]["evidence"]["close_steps"]
+            assert next(row for row in receipts if row["step"] == "report")["task_id"] == report.task_id
+            assert len(state.phase_history) == history_count
+        finally:
+            await coord.stop()
+
+    @pytest.mark.asyncio
+    async def test_deadline_sequence_still_obeys_the_grace_bound(self, tmp_path, monkeypatch):
+        coord = self._coordinator(tmp_path / "session")
+        cancelled = asyncio.Event()
+
+        async def _slow_close(_transition):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(coord.phase_close, "on_enter_close", _slow_close)
+        try:
+            coord._closing_deadline = await coord.phase_close.enter_closing_phase(grace_sec=0.1)
+            await coord.await_within_session_bound(coord.phase_machine.advance_phase_if_needed, stage="advance_phase")
+            assert cancelled.is_set()
+            assert coord.shared_state.close_sequence_done is False
+        finally:
+            await coord.stop()
 
     @pytest.mark.asyncio
     async def test_a_spent_session_closes_even_though_every_step_is_skipped(self, tmp_path: Path):

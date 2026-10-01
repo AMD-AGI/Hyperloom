@@ -1996,10 +1996,9 @@ class PreludePhase(CoordinatorCollaborator):
         """Settle the one-shot guard for a replay that will not run.
 
         Every refusal owes the same four things: flip the guard, state the
-        outcome, close the timeline event, and persist. The persist is the one
-        that used to be left out of some branches, and it is what makes the
-        guard mean anything -- a refusal that never reached disk would let the
-        next boot replay against the decision just taken.
+        outcome, close the timeline event, and persist. The persist is what
+        makes the guard mean anything -- a refusal that never reached disk would
+        let the next boot replay against the decision just taken.
 
         Call this after any rollback or stop-reason the branch also sets, so
         that one save carries the whole refusal.
@@ -2245,6 +2244,10 @@ class PreludePhase(CoordinatorCollaborator):
         graded = resolve_graded_comparison(state, result, keep_threshold_pct=keep_threshold, anchor_tput=baseline_tput)
         reproduced = graded.verdict == VERDICT_KEEP
         outcome["keep_threshold_pct"] = keep_threshold
+        if graded.veto_reason:
+            # The grading applies the session's latency ceiling, so the drift branch below rolls the replay back
+            # rather than leaving a config the budget refused promoted on disk.
+            outcome["latency_veto"] = graded.veto_reason
         if recorder is not None:
             recorder.record_gate(
                 GATE_KEEP_THRESHOLD,
@@ -2378,6 +2381,8 @@ class PreludePhase(CoordinatorCollaborator):
                 {
                     "name": "warm_replay",
                     **graded_axes_of(result),
+                    # The latency budget grades on this and fails closed without it.
+                    "e2el_mean_ms": result.get("e2el_mean_ms"),
                     "candidate_extra_server_args": warm_args,
                     "candidate_extra_envs": warm_envs,
                     "recipe_delta": {
@@ -2463,7 +2468,7 @@ class PreludePhase(CoordinatorCollaborator):
             task,
             outcome,
             recorder,
-            reason=f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%",
+            reason=graded.veto_reason or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%",
         )
 
     def _reject_warm_replay_as_drift(

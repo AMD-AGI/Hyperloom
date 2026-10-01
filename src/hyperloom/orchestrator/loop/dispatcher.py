@@ -18,6 +18,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     KERNEL_AGENT_OWNED_ACTIONS,
 )
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
 from ..actions.cancel_channel import CancelScope, use_cancel_scope
 from ..actions.executors._ray_serving import (
     CANCEL_ROUND_GRACE_SEC,
@@ -472,13 +473,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         get_verdict = self.shared_state.get_specialist_patch_verdict
 
         created: list[str] = []
-        try:
-            cancelled = await self.tasks.by_state("cancelled")
-        except Exception:
-            log.exception("dispatcher: reconcile could not list cancelled tasks")
-            return []
-
-        for task in cancelled:
+        for task in await self.tasks.by_state("cancelled"):
             if task.kind != "integrate_patch":
                 continue
             evidence = _dispatch_policy_denied_evidence(task)
@@ -498,18 +493,15 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             except PolicyDenied:
                 continue
             base_key = str(task.idempotency_key or f"integrate-{task.task_id}").strip()
-            if await self.tasks.integrate_reconcile_child_exists(
-                base_key,
-                states=("succeeded",),
-            ):
-                continue
-            if await self.tasks.integrate_reconcile_child_exists(
-                base_key,
-                states=("queued", "running"),
+            child_key_prefix = f"{base_key}-reconcile"
+            if await self.tasks.exists_with_key_prefix(
+                task.kind,
+                child_key_prefix,
+                states=("succeeded", "queued", "running"),
             ):
                 continue
             for attempt in range(1, 6):
-                new_key = f"{base_key}-reconcile{attempt}"
+                new_key = f"{child_key_prefix}{attempt}"
                 new_task, was_existing = await self.tasks.create_or_return_existing(
                     kind=task.kind,
                     params=params,
@@ -526,8 +518,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                         new_task.task_id,
                         new_key,
                     )
-                    break
-                if new_task.state in ("queued", "running", "succeeded"):
                     break
         return created
 
@@ -771,10 +761,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             # no registered executor. Kernel-owned kinds are legitimately
             # unregistered under --no-kernel, so they are excluded to avoid a
             # false positive. Dispatch is unchanged.
-            _execs = self._coord.sub.executor_registry
+            _execs = self.sub.executor_registry
             if (
-                isinstance(_execs, dict)
-                and _execs
+                _execs
                 and task.kind not in _execs
                 and task.kind != "specialist"
                 and task.kind not in KERNEL_AGENT_OWNED_ACTIONS
@@ -938,7 +927,11 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 self._inflight_actions.pop(task.task_id, None)
                 self._executions.discard(asyncio.current_task())
 
-        with use_cancel_scope(cancel_scope), current_action_scope(task.kind):
+        with (
+            use_cancel_scope(cancel_scope),
+            current_action_scope(task.kind),
+            trajectory_scope(task_id=task.task_id, parent_span_id=task.task_id),
+        ):
             execution = asyncio.create_task(execute_and_complete())
         self._executions.add(execution)
         execution.add_done_callback(self._report_unjoined_failure(task))

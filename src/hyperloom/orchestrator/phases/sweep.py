@@ -64,8 +64,9 @@ class SweepPhase(CoordinatorCollaborator):
         """Auto-enqueue the ``conc_sweep`` task on SWEEP entry."""
         from_phase = tr.from_phase
         state = self.shared_state
-        # An unwind a previous leg left owed still has the stack's patches on the
-        # tree, so settle it before the drain below applies anything on top.
+        # A stack attempt an earlier entry or leg left behind may still have its
+        # members on the tree, so settle it before the drain below applies
+        # anything on top; the recovery halts the session if it cannot.
         await self._coord.phase_kernel_stack.recover_interrupted_stack_validation()
         # Drain pending KEEP integrates so sweep measures full current_best.
         if state.has_keep_pending_integrate:

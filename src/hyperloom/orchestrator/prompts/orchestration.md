@@ -347,6 +347,15 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   `explore` round to refresh the validated gain. The legacy
   `validate_stack` / `backends` / `params` action names are not in any
   phase's proposable set (use `explore`).
+* **A latency budget changes what a KEEP means.** When
+  `=== Latency budget (constraint) ===` is present (scriptable workloads
+  only), a throughput gain no longer predicts a KEEP: any winner over the
+  ceiling is refused, as is one that reported no end-to-end latency. The
+  refusals are in the ledgers you already read — `reason=latency_budget_exceeded`
+  or `latency_unmeasured` in the explore history, `promotion_refused` in the
+  journal. Many of them before concluding the search is exhausted means the
+  SLA is the binding limit, and the answer is a lever that buys throughput
+  without spending per-request latency, not more of the same.
 * **Config vs source patch.** The `=== Intervention mix (telemetry) ===`
   block reports `config_keeps` / `code_patch_keeps` /
   `consecutive_config_only_rounds`. Config tuning tends to plateau; when
@@ -355,8 +364,8 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   (scheduler / kv_cache / chunked-prefill), promoted via
   `integrate_patch`, is one route worth weighing against another config
   round. A `code_patch` KEEP resets the consecutive counter.
-* **You CANNOT** delegate kernel_agent-owned actions; mutate core state fields
-  (`current_best` / `stop_reason` / `baseline_tput` / ...); read or write KB
+* **You CANNOT** delegate kernel_agent-owned actions; write a state field
+  the `update_state` rule does not list as agent-writable; read or write KB
   directly (Critic owns it). You **CAN** emit `escalate_strategy_change`
   with a phase-advance / budget hint (`skip_to_kernel`
   / `skip_to_close` / `extend_explore_budget` / `extend_kernel_budget`) —

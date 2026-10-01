@@ -87,8 +87,8 @@ def _optional_int(value: Any) -> int | None:
 def _measured_float(value: Any) -> float | None:
     """Coerce a measurement to float, or ``None`` when nothing was measured.
 
-    A non-positive throughput is the sentinel an unanchored run used to carry,
-    so it reads as absent rather than as a reading a consumer can divide by.
+    A non-positive throughput is the sentinel of an unanchored run, so it reads
+    as absent rather than as a reading a consumer can divide by.
     """
     try:
         measured = float(value)

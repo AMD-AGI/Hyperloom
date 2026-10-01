@@ -343,9 +343,6 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     monkeypatch.setattr(explore, "effective_fingerprint", observe_fingerprint)
     monkeypatch.setattr(explore, "maybe_serving_lease", lambda **_kwargs: None)
     monkeypatch.setattr(explore, "teardown_lifecycle_server", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._grid_variant_filter._probe_server_help_text", lambda _framework: ""
-    )
     result = await ExploreExecutor(session_dir=coordinator.session_dir)(
         SimpleNamespace(task=task, extra={"shared_state": state})
     )

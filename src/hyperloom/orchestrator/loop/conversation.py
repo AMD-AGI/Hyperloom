@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any
+from ..bus.gpu_pool import gpus_by_task_sync
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
 from ..roles.base import BackendTurnResult
@@ -229,10 +230,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     def _context_inbox_reader(self, since_seq: int = 0) -> str:
         """Synchronous projection of the orchestration inbox tail (sync SQLite path)."""
-        try:
-            msgs = self.bus.inbox_context_sync("orchestration", after_seq=int(since_seq or 0))
-        except Exception as exc:  # noqa: BLE001
-            return f"(inbox unavailable: {exc!r})"
+        msgs = self.bus.inbox_context_sync("orchestration", after_seq=int(since_seq or 0))
         if not msgs:
             return "(no inbox events)"
 
@@ -241,14 +239,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     def _context_recent_outcomes_reader(self, top_k: int = 8) -> str:
         """Synchronous projection of recent action outcomes."""
-        try:
-            k = max(1, min(int(top_k or 8), 50))
-        except (TypeError, ValueError):
-            k = 8
-        try:
-            newest_first = self.bus.recent_outcomes_context_sync(limit=k)
-        except Exception as exc:  # noqa: BLE001
-            return f"(recent outcomes unavailable: {exc!r})"
+        k = max(1, min(top_k or 8, 50))
+        newest_first = self.bus.recent_outcomes_context_sync(limit=k)
         if not newest_first:
             return "(no recent outcomes)"
         # Flip newest-first query to newest-last for chronological reading.
@@ -268,17 +260,18 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return "\n".join([header] + rendered)
 
     def _context_running_tasks_reader(self) -> str:
-        """Synchronous projection of in-flight tasks with their held resources."""
-        try:
-            tasks = self.tasks.running_context_sync()
-        except Exception as exc:  # noqa: BLE001
-            return f"(running tasks unavailable: {exc!r})"
+        """Project in-flight tasks and their held resources from three reads, not one snapshot."""
+        tasks = self.tasks.running_context_sync()
         if not tasks:
             return "(no tasks in flight)"
 
+        lanes_by_task = self.locks.lanes_by_task_sync()
+        gpus_by_task = gpus_by_task_sync(self.db)
         now_unix = time.time()
         lines = ["=== Tasks in flight ==="]
-        for task, lanes, expires_at, gpus in tasks:
+        for task in tasks:
+            lanes, expires_at = lanes_by_task.get(task.task_id, ([], ""))
+            gpus = gpus_by_task.get(task.task_id, [])
             params = task.params or {}
             started = parse_iso_unix_or_zero(task.updated_at)
             running_sec = max(0.0, now_unix - started) if started > 0 else 0.0
@@ -408,6 +401,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
         sections.append("=== Shared session state ===")
         sections.append(self.shared_state.to_prompt_summary())
         sections.append(f"target_gap_pct={self._coord.target_gap_pct():.2f}")
+        # Not wrapped, unlike the advisory blocks below: a latency budget changes
+        # what a KEEP means, so losing it silently would have the model route as
+        # if the session were unconstrained. Pure string assembly, no I/O.
+        latency_block = self.shared_state.to_latency_budget_summary()
+        if latency_block:
+            sections.append("=== Latency budget (constraint) ===")
+            sections.append(latency_block)
         sections.append("=== Resource pools ===")
         sections.append(resource_pools_summary(self.shared_state))
         if agent_name == "orchestration":
@@ -491,8 +491,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if discarded_escalate_block:
                 sections.append("=== Discarded escalation hint (advisory) ===")
                 sections.append(discarded_escalate_block)
-
-        # NOTE: there is deliberately no "=== Specialist health ===" block.
 
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)

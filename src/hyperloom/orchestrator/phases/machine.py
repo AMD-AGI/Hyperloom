@@ -72,7 +72,7 @@ class MachinePhase(CoordinatorCollaborator):
         if budget_pct or not state.phase_budget_pct:
             state.phase_budget_pct = _phase_state.redistribute_budget_pct(
                 _phase_state.normalize_budget_pct(budget_pct),
-                optimize_enabled=self._optimize_enabled(),
+                optimize_enabled=self.optimize_enabled(),
                 kernel_enabled=self.kernel_enabled(),
             )
         current = (state.phase or "").strip().upper()
@@ -98,7 +98,7 @@ class MachinePhase(CoordinatorCollaborator):
                         state,
                         current_phase="",
                         kernel_enabled=self.kernel_enabled(),
-                        optimize_enabled=self._optimize_enabled(),
+                        optimize_enabled=self.optimize_enabled(),
                         enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
                     ),
                 },
@@ -126,7 +126,7 @@ class MachinePhase(CoordinatorCollaborator):
                     state,
                     current_phase=_phase_state.PHASE_CLOSE,
                     kernel_enabled=self.kernel_enabled(),
-                    optimize_enabled=self._optimize_enabled(),
+                    optimize_enabled=self.optimize_enabled(),
                     enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
                 ),
             },
@@ -179,15 +179,20 @@ class MachinePhase(CoordinatorCollaborator):
         """Whether kernel optimization is enabled for this run."""
         return bool(self.shared_state.kernel_enabled)
 
-    def _optimize_enabled(self) -> bool:
+    def optimize_enabled(self) -> bool:
         """Whether the optimisation phase is enabled for this run."""
         return bool(self.shared_state.framework_agent_phase_enabled)
 
     async def advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick."""
         state = self.shared_state
+        # The deadline path records CLOSE before it dispatches the report, so the machine has no transition left to
+        # make; the sequencer it stopped short of still has to run.
+        if state.closing_phase and state.phase == _phase_state.PHASE_CLOSE and not state.close_sequence_done:
+            await self._coord.phase_close.ensure_close_sequence(reason="time_exhausted")
+            return
         kernel_facts = await self._coord.phase_kernel.exit_facts()
-        optimize_enabled = self._optimize_enabled()
+        optimize_enabled = self.optimize_enabled()
         # Only asked inside the phase: the query renews the open round's lease.
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
         enablement_in_flight = in_enablement and await self._coord.enablement_lane.enablement_in_flight()
@@ -369,16 +374,22 @@ class MachinePhase(CoordinatorCollaborator):
             loopback=bool(isinstance(evidence, dict) and evidence.get("loopback")),
         )
 
-        if not self._on_exit:
-            self.build_dispatch_tables()
-
-        exit_hook = self._on_exit.get((from_phase or "").upper())
-        if exit_hook:
-            exit_hook(tr)
+        self.fire_phase_exit(tr)
 
         entry_hook = self._on_enter.get(tr.to_phase)
         if entry_hook:
             await entry_hook(tr)
+
+    def fire_phase_exit(self, tr: Transition) -> None:
+        """Settle the internal timeline owned by the phase being left.
+
+        Reached on its own by the terminal CLOSE path, which records the transition without an entry dispatch.
+        """
+        if not self._on_exit:
+            self.build_dispatch_tables()
+        exit_hook = self._on_exit.get(tr.from_phase.upper())
+        if exit_hook:
+            exit_hook(tr)
 
     def _cycle_directive(self) -> str:
         """The directive Orchestration wrote at the previous cycle's handoff, or empty."""

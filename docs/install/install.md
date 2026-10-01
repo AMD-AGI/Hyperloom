@@ -2,13 +2,13 @@
 myst:
     html_meta:
         "description": "Run Hyperloom inside a Docker container or on bare-metal on an AMD GPU machine. Covers installing Hyperloom, configuring credentials, and running a demo."
-        "keywords": "Hyperloom, Docker, container, bare metal, install, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Claude, Dev Containers, Install, ROCm"
+        "keywords": "Hyperloom, Docker, container, bare metal, install, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Claude, Codex, Dev Containers, Install, ROCm"
 ---
 # Install Hyperloom on Docker or bare metal
 
 These instructions allow you to set up and run Hyperloom inside a Docker container
 or on bare-metal on an AMD GPU machine. The recommended path is to prepare a
-dedicated workspace, open that directory in Claude Code and
+dedicated workspace, open that directory in Claude Code or Codex and
 install the wheel into the current directory with `pip install --target .`. The
 source-clone path is kept at the end for developers and manual debugging.
 
@@ -16,8 +16,8 @@ source-clone path is kept at the end for developers and manual debugging.
 
 This is the recommended path to install and get started with Hyperloom. The
 current directory is both the install target and the agent workspace. Prepare a
-dedicated clean directory first, then open that directory in Claude Code before
-running the install command.
+dedicated clean directory first, then open that directory in Claude Code or
+Codex before running the install command.
 
 > **Recommended run mode: Docker** Running the demos inside the provided
 > [ROCm container](https://rocm.docs.amd.com/projects/hyperloom/en/latest/compatibility.html#container-images)
@@ -34,7 +34,8 @@ Before installing Hyperloom, ensure the following requirements are met.
 - Python 3.10+ and `pip` on the machine where you open the workspace and run
   `pip install --target .`. This covers the Hyperloom wheel only; serving-framework
   Python constraints depend on your setup scenario below.
-- Access to the Anthropic LLM provider.
+- Access to the Anthropic LLM provider (Claude) or the OpenAI LLM provider
+  (Codex).
 - A dedicated workspace directory opened in the user's agent.
 
 ### Install Hyperloom
@@ -42,7 +43,7 @@ Before installing Hyperloom, ensure the following requirements are met.
 From the agent terminal in that workspace, install the published release wheel:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.1.2 --target .
+pip install hyperloom-inference-optimizer==1.1.3 --target .
 ```
 
 It is normal for the current directory to contain many Python package directories
@@ -132,7 +133,7 @@ The backend runs `install_baremetal.sh` in five phases:
 
 1. **Base preflight**: Checks ROCm, GPU arch, ROCm torch, torch/triton alignment,
    and serving framework imports.
-2. **Framework install**: Optionally installs the SGLang or vLLM framework layer.
+2. **Framework install**: Optionally installs the SGLang, vLLM or ATOM framework layer.
 3. **ROCm hotfix**: Applies the profiler hotfix when the ROCm stack is eligible,
    covering both `/opt/rocm/lib` and PyTorch's bundled `torch/lib/`.
 4. **Credentials**: Resolves LLM gateway credentials into `.env`.
@@ -211,7 +212,11 @@ LLM defaults:
 | Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-5` |
 
 Setup creates or updates `.env` in the current workspace and writes the resolved
-values there.
+values there. Setup asks for the Anthropic side only; to run on Codex, add
+`OPENAI_BASE_URL`, `OPENAI_API_KEY` and, optionally, `CODEX_MODEL` to `.env`
+yourself. With only the OpenAI side configured, orchestration, TraceLens and
+Forge run on Codex, while GEAK needs the Anthropic side. See
+[Authentication](../reference/authentication.md) for every provider layout.
 
 Common keys:
 
@@ -238,7 +243,7 @@ Specialist subprocesses inherit a minimal environment including LLM provider
 credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, AWS Bedrock vars, etc.)
 by default so the agent CLI can authenticate. Unrelated secrets such as GitHub
 and KB tokens are never forwarded. To suppress credential forwarding when the
-`claude` CLI is authenticated through its own config, set
+agent CLI (`claude` or `codex`) is authenticated through its own config, set
 `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0`.
 
 `.env` in the current workspace is the single source of truth; no extra script
@@ -312,8 +317,9 @@ must never be printed.
 - The current workspace contains many package folders after `pip install
   --target .` - this is the expected behavior.
 - If `/hyperloom-setup` is not visible, confirm the setup skill exists under
-  the current workspace. It is installed to `.claude/skills/hyperloom-setup/`;
-  restart the agent if needed.
+  the current workspace. It is installed to `.claude/skills/hyperloom-setup/`
+  (Claude Code) and `.agents/skills/hyperloom-setup/` (Codex); restart the
+  agent if needed.
 - `ImportError: libamdhip64.so.7` or `libhipblas.so.3` means the installed
   framework torch wheel expects different ROCm user-space libraries; align
   `ROCM_PATH` and `LD_LIBRARY_PATH`.
@@ -396,7 +402,7 @@ set of accepted shapes, including split entrypoints and self-hosted gateways.
 Make sure the host already provides the required base environment:
 
 - ROCm runtime and a ROCm-built torch.
-- A serving framework (SGLang or vLLM) importable in the active Python.
+- A serving framework (SGLang, vLLM or ATOM) importable in the active Python.
 - `git` for the dependency checkouts the optimization skill performs.
 
 With that in place, open the repository root in the agent and paste a launch

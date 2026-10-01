@@ -2530,10 +2530,12 @@ async def test_a_met_target_waits_for_the_ladder_it_routed_to(session_dir):
 
     c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_stays_queued  # type: ignore[method-assign]
     try:
-        await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
+        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
+        assert reason == "max_ticks"
         assert c.shared_state.target_reached_at
         assert c.shared_state.last_conc_sweep == {}
-        assert (c.shared_state.phase or "").upper() == "SWEEP"
+        terminal = c.shared_state.phase_history[-1]
+        assert (terminal["from_phase"], terminal["to_phase"], terminal["reason"]) == ("SWEEP", "CLOSE", "max_ticks")
     finally:
         await c.stop()
 

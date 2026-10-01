@@ -70,6 +70,7 @@ def _coord(state: SharedState) -> Coordinator:
     c = Coordinator.__new__(Coordinator)
     c.shared_state = state
     c.bus = _FakeBus()
+    c._attempt_marks = {}
     return c
 
 

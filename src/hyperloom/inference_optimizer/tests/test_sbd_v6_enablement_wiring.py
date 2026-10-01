@@ -406,7 +406,10 @@ async def test_the_stall_cap_closes_the_lane_on_a_real_coordinator(_bound_sessio
     events = _events(_bound_session)
     assert len(events) == 1
     assert events[0]["status"] == "failed"
-    assert events[0]["ext"]["result"]["reason"] == "enablement_attempts_exhausted"
+    result = events[0]["ext"]["result"]
+    assert result["outcome"] == enablement_event.OUTCOME_STALLED
+    assert result["reason"] == "enablement_attempts_exhausted"
+    assert result["stall_streak"] == ENABLEMENT_MAX_ATTEMPTS
 
 
 @pytest.mark.asyncio
