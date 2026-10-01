@@ -104,7 +104,7 @@ def test_asyncio_run_shutdown_waits_for_execution_and_completion(tmp_path, monke
         task = await dispatcher.tasks.create(
             kind="shutdown_test", params={}, idempotency_key="shutdown", requires_lanes=["research_lane"]
         )
-        pump = asyncio.create_task(dispatcher._pump_dispatcher_once())
+        pump = asyncio.create_task(dispatcher.pump_dispatcher_once())
         assert await asyncio.to_thread(entered.wait, 5)
         pump.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -144,7 +144,7 @@ def test_cancelled_pump_late_success_is_reaped_once(tmp_path, monkeypatch):
 
         dispatcher.sub.register_executor("shutdown_test", execute)
         await dispatcher.tasks.create(kind="shutdown_test", params={}, idempotency_key="late-success")
-        pump = asyncio.create_task(dispatcher._pump_dispatcher_once())
+        pump = asyncio.create_task(dispatcher.pump_dispatcher_once())
         await asyncio.wait_for(entered.wait(), 5)
         pump.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -152,7 +152,7 @@ def test_cancelled_pump_late_success_is_reaped_once(tmp_path, monkeypatch):
         executions = tuple(dispatcher._executions)
         finish.set()
         await asyncio.gather(*executions)
-        await dispatcher._pump_dispatcher_once()
+        await dispatcher.pump_dispatcher_once()
         events = await dispatcher.db.fetchall("SELECT payload FROM events WHERE topic='delegated_result'")
         assert len(events) == 1
         assert dispatcher._coord.writeback.promote_to_shared_state.await_count == 1
@@ -210,8 +210,8 @@ def test_normal_pump_completion_is_not_reaped_twice(tmp_path, monkeypatch):
     async def run():
         dispatcher.sub.register_executor("shutdown_test", AsyncMock(return_value={"status": "ok"}))
         await dispatcher.tasks.create(kind="shutdown_test", params={}, idempotency_key="normal-completion")
-        await dispatcher._pump_dispatcher_once()
-        await dispatcher._pump_dispatcher_once()
+        await dispatcher.pump_dispatcher_once()
+        await dispatcher.pump_dispatcher_once()
         events = await dispatcher.db.fetchall("SELECT payload FROM events WHERE topic='delegated_result'")
         assert len(events) == 1
         assert dispatcher._coord.writeback.promote_to_shared_state.await_count == 1
@@ -591,7 +591,7 @@ def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path
         task = await dispatcher.tasks.create(
             kind="specialist", params={}, idempotency_key="cancelled", requires_lanes=["research_lane"]
         )
-        result = await dispatcher.run_task_registered(task, on_complete=partial(dispatcher._reap_dispatched_task, task))
+        result = await dispatcher.run_task_registered(task, on_complete=partial(dispatcher.reap_dispatched_task, task))
         assert result.state == "cancelled"
         assert (await dispatcher.tasks.get(task.task_id)).state == "cancelled"
         events = await dispatcher.bus.tail(topic="delegated_result")

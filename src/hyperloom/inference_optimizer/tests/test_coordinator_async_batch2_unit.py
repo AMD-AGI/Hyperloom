@@ -1421,7 +1421,7 @@ async def test_stop_cancels_and_closes(coord: Coordinator) -> None:
     assert coord._stop.is_set()
 
 
-# -- _pump_dispatcher_once --------------------------------------------------
+# -- pump_dispatcher_once --------------------------------------------------
 def _sub_result(task_id: str, *, state: str = "succeeded", result=None, error=None):
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
@@ -1430,7 +1430,7 @@ def _sub_result(task_id: str, *, state: str = "succeeded", result=None, error=No
 
 @pytest.mark.asyncio
 async def test_pump_dispatcher_noop_when_empty(coord: Coordinator) -> None:
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
 
 @pytest.mark.asyncio
@@ -1457,7 +1457,7 @@ async def test_pump_dispatcher_explore_promotes(coord: Coordinator, monkeypatch)
         )
 
     monkeypatch.setattr(coord.sub, "run_task", fake_run)
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
     tail = await coord.bus.tail(topic="delegated_result", n=10)
     assert any(m.payload.get("task_id") == task.task_id for m in tail)
 
@@ -1481,7 +1481,7 @@ async def test_pump_dispatcher_specialist_bookkeeping(coord: Coordinator, monkey
         )
 
     monkeypatch.setattr(coord.sub, "run_task", fake_run)
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
     tail = await coord.bus.tail(topic="delegated_result", n=10)
     assert any(m.payload.get("kind") == "specialist" for m in tail)
 
@@ -1498,7 +1498,7 @@ async def test_pump_dispatcher_absorbs_spawn_exception(coord: Coordinator, monke
         raise RuntimeError("spawn boom")
 
     monkeypatch.setattr(coord.sub, "run_task", fake_run)
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
 
 # -- specialist visibility contract -----------------------------------------
@@ -2121,7 +2121,7 @@ async def test_direct_integrate_proposal_inherits_specialist_owner(
     )
     monkeypatch.setattr(
         coord.dispatcher,
-        "_admission_denial_for_action",
+        "admission_denial_for_action",
         lambda _action: None,
     )
     await coord.router._handle_propose_action(

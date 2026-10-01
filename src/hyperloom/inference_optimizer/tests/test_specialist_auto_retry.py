@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -19,6 +19,8 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
 )
+
+from .conftest import make_coordinator
 
 
 # classify_specialist_failure — the taxonomy
@@ -129,11 +131,8 @@ def test_freeform_patch_prompt_carries_mandate_and_patch_protocol():
 # _maybe_auto_retry_specialist — lane assignment mirrors first dispatch
 
 
-def _make_explore_phase_stub(registry_lanes, registry_ttl, gpu_ttl, captured_tasks):
-    """Return a minimal SpecialistDispatchCollaborator-like stub with a fake TaskRegistry."""
-    from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
-
-    # Fake Task returned by create_or_return_existing.
+def _make_explore_phase_stub(tmp_path, registry_lanes, registry_ttl, gpu_ttl, captured_tasks):
+    """The specialist dispatch collaborator of a real Coordinator whose task creation is recorded."""
     fake_task = MagicMock()
     fake_task.task_id = "retry-task-1"
 
@@ -153,21 +152,13 @@ def _make_explore_phase_stub(registry_lanes, registry_ttl, gpu_ttl, captured_tas
                 "lease_ttl_sec": lease_ttl_sec,
             }
         )
-        return fake_task, False  # (task, was_existing=False)
+        return fake_task, False
 
-    fake_tasks = MagicMock()
-    fake_tasks.create_or_return_existing = _fake_create
-
-    coord_stub = MagicMock()
-    coord_stub.tasks = fake_tasks
-    coord_stub._registry_lanes_ttl = MagicMock(return_value=(list(registry_lanes), registry_ttl))
-    coord_stub._gpu_lease_ttl_sec = MagicMock(return_value=gpu_ttl)
-    coord_stub._record_observation = AsyncMock()
-
-    # Build SpecialistDispatchCollaborator with __init__ bypassed.
-    phase = SpecialistDispatchCollaborator.__new__(SpecialistDispatchCollaborator)
-    phase._coord = coord_stub
-    return phase
+    coord = make_coordinator(tmp_path)
+    coord.tasks.create_or_return_existing = _fake_create
+    coord.dispatcher.registry_lanes_ttl = lambda kind: (list(registry_lanes), registry_ttl)
+    coord.dispatcher.gpu_lease_ttl_sec = lambda *_a, **_k: gpu_ttl
+    return coord.specialist_dispatch
 
 
 def _make_stale_task(params):
@@ -187,10 +178,11 @@ def _make_stale_result(runner_status="stale", error="subprocess_timeout"):
 
 
 @pytest.mark.asyncio
-async def test_auto_retry_needs_gpu_acquires_gpu_research_lane():
+async def test_auto_retry_needs_gpu_acquires_gpu_research_lane(tmp_path):
     """A specialist with needs_gpu=true must include gpu_research_lane in retry lanes."""
     captured = []
     phase = _make_explore_phase_stub(
+        tmp_path,
         registry_lanes=["research_lane"],
         registry_ttl=600,
         gpu_ttl=7200,
@@ -210,10 +202,11 @@ async def test_auto_retry_needs_gpu_acquires_gpu_research_lane():
 
 
 @pytest.mark.asyncio
-async def test_auto_retry_bench_specialist_acquires_both_lanes():
+async def test_auto_retry_bench_specialist_acquires_both_lanes(tmp_path):
     """A bench-capable specialist (mode=patch & bench=true, needs_gpu defaulted) must hold both benchmark_lane and gpu_research_lane on retry."""
     captured = []
     phase = _make_explore_phase_stub(
+        tmp_path,
         registry_lanes=["research_lane"],
         registry_ttl=600,
         gpu_ttl=7200,
@@ -240,10 +233,11 @@ async def test_auto_retry_bench_specialist_acquires_both_lanes():
 
 
 @pytest.mark.asyncio
-async def test_auto_retry_non_gpu_specialist_no_gpu_research_lane():
+async def test_auto_retry_non_gpu_specialist_no_gpu_research_lane(tmp_path):
     """A non-GPU specialist (needs_gpu=false) must NOT acquire gpu_research_lane."""
     captured = []
     phase = _make_explore_phase_stub(
+        tmp_path,
         registry_lanes=["research_lane"],
         registry_ttl=600,
         gpu_ttl=7200,

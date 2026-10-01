@@ -181,14 +181,14 @@ def _lane(session_dir: Path, **overrides: Any):
         _derive_checkpoint_weight_facts=lambda _log: "",
         _framework_gpu_params=lambda: {},
         _framework_authoring_lanes_ttl=lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
-        _time_budget_denial_for_action=lambda _action: None,
+        time_budget_denial_for_action=lambda _action: None,
         action_registry=ACTION_CATALOGUE,
         knowledge_plane=None,
         # The host preflight would stat a checkpoint named by the ambient ``MODEL_PATH``, which belongs
         # to whichever test ran before this one, so the host answers that it cannot tell.
         _environment_verdict=lambda: None,
     )
-    for name in ("_registry_lanes_ttl",):
+    for name in ("registry_lanes_ttl",):
         setattr(fake, name, types.MethodType(getattr(DispatcherCollaborator, name), fake))
     for name in ("_build_enablement_specialist_params", "_discover_enablement_candidate_refs"):
         setattr(fake, name, types.MethodType(getattr(EnablementParams, name), fake))
@@ -247,8 +247,8 @@ def _lane(session_dir: Path, **overrides: Any):
             record_observation=lambda *a, **k: fake.record_observation(*a, **k),
         ),
         dispatcher=types.SimpleNamespace(
-            _time_budget_denial_for_action=lambda a: fake._time_budget_denial_for_action(a),
-            _registry_lanes_ttl=lambda kind: fake._registry_lanes_ttl(kind),
+            time_budget_denial_for_action=lambda a: fake.time_budget_denial_for_action(a),
+            registry_lanes_ttl=lambda kind: fake.registry_lanes_ttl(kind),
         ),
     )
     return fake

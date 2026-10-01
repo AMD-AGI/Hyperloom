@@ -195,7 +195,7 @@ async def test_the_pump_returns_while_the_kernel_agent_task_runs(coord):
     c.sub.register_executor("kernel_agent", _blocking_executor(release, started))
     task = await _create_kernel_agent(c)
 
-    await asyncio.wait_for(c.dispatcher._pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(started.wait(), timeout=2.0)
 
     assert (await c.tasks.get(task.task_id)).state == "running"
@@ -234,7 +234,7 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
     c.shared_state.macro_cycle = 4
     c.shared_state.tick = 99
 
-    await c.dispatcher._pump_dispatcher_once()
+    await c.dispatcher.pump_dispatcher_once()
     await _settle(c, task.task_id)
 
     fixture = build(c.session_dir)
@@ -351,7 +351,7 @@ async def test_a_spent_phase_budget_stops_the_kernel_agent_and_leaves_kernel(coo
     started = asyncio.Event()
     c.sub.register_executor("kernel_agent", _listening_executor(started))
     task = await _create_kernel_agent(c)
-    await asyncio.wait_for(c.dispatcher._pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(started.wait(), timeout=2.0)
     _spend_the_phase_budget(st)
 
@@ -378,10 +378,10 @@ async def test_a_running_kernel_agent_keeps_roofline_queued_until_it_returns(coo
 
     c.sub.register_executor("roofline", _roofline)
     agent = await _create_kernel_agent(c)
-    await asyncio.wait_for(c.dispatcher._pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(started.wait(), timeout=2.0)
 
-    lanes, ttl = c.dispatcher._registry_lanes_ttl("roofline")
+    lanes, ttl = c.dispatcher.registry_lanes_ttl("roofline")
     roofline, _ = await c.tasks.create_or_return_existing(
         kind="roofline",
         params={"source": "coordinator_internal", "reason": "test"},
@@ -389,14 +389,14 @@ async def test_a_running_kernel_agent_keeps_roofline_queued_until_it_returns(coo
         requires_lanes=lanes,
         lease_ttl_sec=ttl,
     )
-    await asyncio.wait_for(c.dispatcher._pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
 
     assert rooflines == []
     assert (await c.tasks.get(roofline.task_id)).state == "queued"
 
     release.set()
     await _settle(c, agent.task_id)
-    await asyncio.wait_for(c.dispatcher._pump_dispatcher_once(), timeout=5.0)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=5.0)
 
     assert rooflines == [roofline.task_id]
     assert (await c.tasks.get(roofline.task_id)).state == "succeeded"
@@ -410,7 +410,7 @@ async def test_a_spent_session_cancels_the_running_kernel_agent(coord):
     started = asyncio.Event()
     c.sub.register_executor("kernel_agent", _listening_executor(started))
     task = await _create_kernel_agent(c)
-    await asyncio.wait_for(c.dispatcher._pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(started.wait(), timeout=2.0)
 
     st.max_minutes = 60
@@ -430,11 +430,11 @@ def test_the_time_budget_gate_admits_kernel_agent_while_one_baseline_round_fits(
     st.max_minutes = 120
     # 120-minute session: 120 s closing reserve, so 100 min spent leaves 18 usable minutes.
     st.elapsed_minutes = lambda **_kw: 100.0  # type: ignore[method-assign]
-    assert c.dispatcher._time_budget_denial_for_action("kernel_agent") is None
+    assert c.dispatcher.time_budget_denial_for_action("kernel_agent") is None
 
     # 112 min spent leaves 6 usable minutes: not even the 10-minute baseline round fits.
     st.elapsed_minutes = lambda **_kw: 112.0  # type: ignore[method-assign]
-    denied = c.dispatcher._time_budget_denial_for_action("kernel_agent")
+    denied = c.dispatcher.time_budget_denial_for_action("kernel_agent")
     assert denied is not None and denied.rule == "time_budget"
 
 

@@ -718,7 +718,7 @@ async def test_a_lift_refused_integrate_patch_is_not_journalled_keep(session_dir
         result={"status": "kept", "output_throughput": 150.0, "delta_pct": 50.0},
     )
 
-    await coord.dispatcher._reap_dispatched_task(task, result)
+    await coord.dispatcher.reap_dispatched_task(task, result)
 
     assert len(s.optimization_stack) == 1
     assert s.current_best["tput"] == 200.0
