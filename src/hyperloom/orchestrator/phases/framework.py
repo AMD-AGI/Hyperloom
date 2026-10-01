@@ -581,7 +581,6 @@ class FrameworkPhase(CoordinatorCollaborator):
                     _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK,
                 ),
                 "discovery_retry_limit": DISCOVER_FAILURE_RETRY_LIMIT,
-                "authoring_enabled": True,
             },
         }
 
@@ -1337,10 +1336,7 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     def _framework_local_explore_arm_enabled(self) -> bool:
         """True when the candidate-free local-exploration arm may run."""
-        state = self.shared_state
-        return bool(getattr(state, "framework_agent_authoring_enabled", False)) and bool(
-            getattr(state, "framework_local_explore_enabled", True)
-        )
+        return self.shared_state.framework_local_explore_enabled
 
     def _compose_framework_local_explore_gap(self) -> tuple[str, list[str]]:
         """Compose the ``(gap, keywords)`` steering the local-exploration arm."""
@@ -1778,15 +1774,11 @@ class FrameworkPhase(CoordinatorCollaborator):
         cand_id = str(payload.get("framework_agent_candidate_id") or self._framework_candidate_key(candidate))
         batch_id = str(payload.get("batch_id") or candidate.get("batch_id") or "")
         _record_review_outcome(self, cand_id, materialized=True)
-        authoring_enabled = bool(getattr(self.shared_state, "framework_agent_authoring_enabled", False))
         want_raw = audit_step == "direct_framework"
         want_author = audit_step == "author_via_specialist"
         if audit_step not in ("direct_framework", "author_via_specialist"):
             want_raw = True
             want_author = True
-        if want_author and not authoring_enabled:
-            want_raw = True
-            want_author = False
         log.info(
             "FRAMEWORK: critic-approved candidate=%s batch=%s audit_step=%s raw=%s author=%s",
             cand_id,
@@ -1799,7 +1791,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             # _enqueue_framework_agent_task owns its own enqueue_failed terminal row on failure, so a raw-track
             # candidate always ends up processed.
             await self._enqueue_framework_agent_task(candidate)
-        if want_author and authoring_enabled:
+        if want_author:
             try:
                 await self._enqueue_framework_agent_authoring_specialist(
                     candidate,

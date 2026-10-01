@@ -94,7 +94,6 @@ async def test_materialize_direct_route_enqueues_raw_only(coord: Coordinator, mo
     monkeypatch.setattr(
         coord.phase_framework, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
     )
-    coord.shared_state.framework_agent_authoring_enabled = True
     await coord.phase_framework.materialize_candidate(
         _pending({"candidate": dict(_CANDIDATE), "audit_step": "direct_framework", "batch_id": "b"})
     )
@@ -110,30 +109,11 @@ async def test_materialize_author_route_enqueues_specialist_only(coord: Coordina
     monkeypatch.setattr(
         coord.phase_framework, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
     )
-    coord.shared_state.framework_agent_authoring_enabled = True
     await coord.phase_framework.materialize_candidate(
         _pending({"candidate": dict(_CANDIDATE), "audit_step": "author_via_specialist", "batch_id": "b"})
     )
     assert raw == []
     assert len(author) == 1
-
-
-@pytest.mark.asyncio
-async def test_materialize_author_route_falls_back_to_raw_when_authoring_disabled(
-    coord: Coordinator, monkeypatch
-) -> None:
-    raw: list = []
-    author: list = []
-    monkeypatch.setattr(coord.phase_framework, "_enqueue_framework_agent_task", lambda c: _append(raw, c))
-    monkeypatch.setattr(
-        coord.phase_framework, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
-    )
-    coord.shared_state.framework_agent_authoring_enabled = False
-    await coord.phase_framework.materialize_candidate(
-        _pending({"candidate": dict(_CANDIDATE), "audit_step": "author_via_specialist", "batch_id": "b"})
-    )
-    assert len(raw) == 1
-    assert author == []
 
 
 @pytest.mark.asyncio
@@ -144,7 +124,6 @@ async def test_materialize_unknown_route_runs_both_tracks(coord: Coordinator, mo
     monkeypatch.setattr(
         coord.phase_framework, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
     )
-    coord.shared_state.framework_agent_authoring_enabled = True
     await coord.phase_framework.materialize_candidate(
         _pending({"candidate": dict(_CANDIDATE), "audit_step": "", "batch_id": "b"})
     )

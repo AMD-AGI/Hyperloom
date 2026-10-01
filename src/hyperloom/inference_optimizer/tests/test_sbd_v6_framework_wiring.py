@@ -69,7 +69,6 @@ def test_open_records_the_resolved_policy(session_dir: Path, legacy_timeout_over
     state = coord.shared_state
     state.phase = "FRAMEWORK_AGENT"
     state.macro_cycle = 0
-    state.framework_agent_authoring_enabled = True
     state.explore_overtime_kill_ratio = 1.5
     state.explore_variant_timeout_sec_override = legacy_timeout_override
     state.plateau_overrides = {"explore_lookback": 7, "explore_keep_gain_pct": 1.25}
@@ -86,7 +85,6 @@ def test_open_records_the_resolved_policy(session_dir: Path, legacy_timeout_over
     assert policy["config"]["keep_gain_threshold_pct"] == 1.25
     # Not overridden, so the library default the phase will actually apply.
     assert policy["config"]["empty_streak_threshold"] is not None
-    assert policy["source"]["authoring_enabled"] is True
     assert policy["source"]["no_keep_streak_threshold"] is not None
     assert policy["source"]["discovery_retry_limit"] == 3
 
