@@ -296,10 +296,13 @@ every member.
 
 `status` is `completed`, `unavailable` (no planner gateway), or `failed`
 (planning or retrieval failed; `warnings` holds the reason); the HTTP status is
-200 either way. `prompt_block` holds each rendered Experience's complete record
-and Repeat Group annotations, never condensed, under an
-`Experience <id>` heading. A producer that acts on a read records the returned
-`rendered_refs` in the resulting Experience.
+200 either way. `prompt_block` holds each rendered Experience's knowledge
+fields and Repeat Group annotations, never condensed, under an
+`Experience <id>` heading; its metadata, such as `provenance` and
+`rendered_refs`, stays in the record and out of the prompt (see
+[Experience record](experience-kb-schema.md#knowledge-and-metadata)). A
+producer that acts on a read records the returned `rendered_refs` in the
+resulting Experience.
 
 With `content_inline_limit`, a longer free-text field appears in the record as
 `<external content sha256:<hex>, <n> bytes>`, and `contents` carries its text:

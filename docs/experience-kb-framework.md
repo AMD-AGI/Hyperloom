@@ -67,7 +67,9 @@ not yet reach an attempt from a multi-node auto-materialized grid or from an
 upstream PR candidate. The
 Experience carries its citations in `provenance.extra.experience_citations`;
 how often a cited Experience worked out is not stored on any record but
-derived by the KB that holds both.
+derived by the KB that holds both. Citations, `kb_read_id`, and
+`rendered_refs` are record metadata: they are stored and synced with the
+Experience but never rendered into a prompt.
 
 ## Publication
 
