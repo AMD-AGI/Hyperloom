@@ -2075,7 +2075,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             self._record_advisory_plateau()
         except Exception as exc:
             log.exception("FRAMEWORK pump failed")
-            self._coord._record_coordinator_exception(stage="framework_pump", exc=exc)
+            self._coord.record_exception(stage="framework_pump", exc=exc)
 
     def _record_framework_agent_authored_outcome(
         self,

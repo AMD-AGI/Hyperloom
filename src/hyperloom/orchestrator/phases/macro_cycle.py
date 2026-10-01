@@ -8,6 +8,8 @@ from __future__ import annotations
 import logging as _logging
 from typing import Any
 
+from hyperloom.common.env import env_bool
+
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
 from ..loop.maintenance import run_lease_and_db_reclaim
@@ -19,6 +21,11 @@ __all__ = ["MacroCycleCollaborator"]
 
 class MacroCycleCollaborator(CoordinatorCollaborator):
     """Macro-cycle planning, focus scoring, soft-restart, reprofile, and orchestration-memory helpers."""
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        # Medium-intensity soft restart at each macro-cycle boundary.
+        self._soft_restart_enabled = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART")
 
     def _negative_ledger_domain_counts(self, *, recent_cycles: int = 3) -> dict[str, int]:
         """Summarise recent negative explore-ledger pressure by specialist domain."""
@@ -168,7 +175,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             A summary dict of the restart steps performed, or ``None`` when the
             soft restart is disabled.
         """
-        if not self._coord._cycle_soft_restart:
+        if not self._soft_restart_enabled:
             return None
         summary: dict[str, Any] = {
             "prior_cycle": int(prior_cycle),

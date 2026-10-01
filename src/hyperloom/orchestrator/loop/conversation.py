@@ -385,9 +385,11 @@ class ConversationCollaborator(CoordinatorCollaborator):
         if agent_name == "orchestration":
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
-            if self._coord._run_deadline is not None and self._coord._run_started_monotonic is not None:
-                remaining_min = max(0.0, self._coord._run_deadline.remaining() / 60.0)
-                elapsed_min = (time.monotonic() - self._coord._run_started_monotonic) / 60.0
+            deadline = self._coord.run_deadline
+            started = self._coord.run_started_monotonic
+            if deadline is not None and started is not None:
+                remaining_min = max(0.0, deadline.remaining() / 60.0)
+                elapsed_min = (time.monotonic() - started) / 60.0
                 budget_min = self.shared_state.max_minutes or 0
                 sections.append("=== Time budget ===")
                 sections.append(

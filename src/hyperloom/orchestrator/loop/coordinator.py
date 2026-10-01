@@ -12,10 +12,11 @@ import time
 import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, AbstractSet, Any, Awaitable, Callable
 
-from hyperloom.common.env import env_bool, env_float, env_int
+from hyperloom.common.env import env_float, env_int
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
@@ -28,7 +29,6 @@ DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop, in seconds.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 from ..phases import machine_state as _phase_state
-from hyperloom.inference_optimizer.session.optimization_journal import Journal
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.session.session_binding import bind_session
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
@@ -223,12 +223,11 @@ class Coordinator:
         self.role_registry = role_registry or default_role_registry()
         # Orchestration prompt overrides, rebuild closure, and snapshot writes.
         self.orch_prompt = OrchestrationPrompt(overrides={})
-        # Per-session optimization journal; lazy-instantiated on first use.
-        self._journal: Journal | None = None
         # KnowledgePlane facade; pre-warms PR feed + advisory context.
         self.knowledge_plane: Any = knowledge_plane
-        # ProposalScorer facade (advisory only).
-        self._proposal_scorer: Any = proposal_scorer
+        from .writeback import WritebackCollaborator
+
+        self._collaborator("_writeback", partial(WritebackCollaborator, proposal_scorer=proposal_scorer))
         self._model_class_override: str = (model_class or "").strip()
 
         # Validate every reactor has a backend wired.
@@ -276,9 +275,6 @@ class Coordinator:
             self.db,
             gpu_ids=resolve_whole_machine_devices(),
         )
-        # Dispatcher re-scan poll cadence: re-scan the queue while awaiting in-flight tasks so a queued GPU task
-        # starts the moment its lane frees.
-        self._dispatcher_poll_sec = 10.0
         # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
         try:
             from ..bus.storage.schema import set_lane_capacity as _set_lane_capacity
@@ -304,7 +300,7 @@ class Coordinator:
         # Attach read-only context-pull MCP tools to Orchestration backend.
         self.conversation._attach_orchestration_context_tools()
         # Resume detection must run before any boot-time state.json write.
-        self._resumed_from = self.writeback._detect_resume_state()
+        self.writeback._detect_resume_state()
         # Reap serving processes orphaned by a prior monitor-process crash (e.g. a raylet death that took the
         # optimizer down mid-benchmark), scoped strictly to this session's own pidfiles.
         self._reap_orphaned_servers_best_effort(phase="boot")
@@ -328,9 +324,6 @@ class Coordinator:
         if float(getattr(self.shared_state, "cycle_minutes", 0) or 0) <= 0:
             _cycle_hours = env_float("INFERENCE_OPTIMIZER_CYCLE_HOURS", default=DEFAULT_CYCLE_HOURS)
             self.shared_state.cycle_minutes = max(1.0, _cycle_hours * 60.0)
-
-        # Medium-intensity soft restart at each macro-cycle boundary.
-        self._cycle_soft_restart: bool = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART")
 
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
@@ -367,6 +360,16 @@ class Coordinator:
         """RecipeKB owned by the knowledge plane."""
         plane = self.knowledge_plane
         return plane.recipe_kb if plane is not None else None
+
+    @property
+    def run_deadline(self) -> Deadline | None:
+        """Wall-clock deadline of the current run leg; None outside a run."""
+        return self._run_deadline
+
+    @property
+    def run_started_monotonic(self) -> float | None:
+        """Monotonic start of the current run leg; None outside a run."""
+        return self._run_started_monotonic
 
     def target_gap_pct(self) -> float:
         """Percent improvement still needed to reach the run objective; 0.0 outside a run."""
@@ -553,14 +556,6 @@ class Coordinator:
 
         return self._collaborator("_build_lifecycle", BuildLifecycleCollaborator)
 
-    def _kb_hardware_slug(self) -> str:
-        """Topology-aware hardware dimension for the recipe ``canonical_id``."""
-        from hyperloom.orchestrator.actions.executors._multi_node_env import resolve_kb_topology
-        from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
-
-        ss = self.shared_state
-        return kb_hardware_slug(ss.gpu_type or "unknown_gpu", **resolve_kb_topology())
-
     def _reap_orphaned_servers_best_effort(self, *, phase: str) -> None:
         """Reap leftover single-node serving processes via this session's pidfiles.
 
@@ -709,18 +704,18 @@ class Coordinator:
                 )
         except Exception as exc:
             log.exception("phase advance before reactors failed")
-            self._record_coordinator_exception(stage="advance_phase_pre_reactor", exc=exc)
+            self.record_exception(stage="advance_phase_pre_reactor", exc=exc)
         in_closing = bool(self.shared_state.closing_phase)
         # One reactor + dispatcher pass; during closing skip LLM passes.
         if not in_closing:
             for name in self._tick_roles:
-                if self._stop_requested():
+                if self.stop_requested():
                     break
                 await self._await_within_session_bound(
                     lambda n=name: self._reactor_pass(n),
                     stage=f"reactor:{name}",
                 )
-        if not self._stop_requested():
+        if not self.stop_requested():
             await self.dispatcher._pump_dispatcher_once()
         if not in_closing:
             phase = (self.shared_state.phase or "").strip().upper()
@@ -739,7 +734,7 @@ class Coordinator:
             )
         except Exception as exc:
             log.exception("phase advance failed")
-            self._record_coordinator_exception(stage="advance_phase", exc=exc)
+            self.record_exception(stage="advance_phase", exc=exc)
         # Periodic reaper + DB retention; time-gated.
         now = time.monotonic()
         if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
@@ -747,7 +742,7 @@ class Coordinator:
             self._last_maintenance_ts = now
         return in_closing
 
-    def _record_coordinator_exception(
+    def record_exception(
         self,
         *,
         stage: str,
@@ -808,7 +803,7 @@ class Coordinator:
             return None
         return self.reactor_turn_timeout_sec
 
-    def _stop_requested(self) -> bool:
+    def stop_requested(self) -> bool:
         """Whether an operator has asked this run to stop.
 
         Reads both the asyncio event and the drain's threading event, so the
@@ -870,7 +865,7 @@ class Coordinator:
                 timeout,
             )
             if stage_timeout is not None and timeout == stage_timeout:
-                self._record_coordinator_exception(stage=stage, exc=exc, agent=stage.removeprefix("reactor:"))
+                self.record_exception(stage=stage, exc=exc, agent=stage.removeprefix("reactor:"))
 
     # Long-run interface
     async def run(
@@ -918,10 +913,10 @@ class Coordinator:
                 except Exception as exc:
                     last_tick_exc = exc
                     log.exception("Coordinator.run: tick %d body raised", self.shared_state.tick)
-                    self._record_coordinator_exception(stage="tick_body", exc=exc)
+                    self.record_exception(stage="tick_body", exc=exc)
 
                 # check stop conditions
-                if self._stop_requested():
+                if self.stop_requested():
                     stop_reason = self._signal_stop_reason()
                     break
                 if self.shared_state.stop_reason and not in_closing:
@@ -1091,7 +1086,7 @@ class Coordinator:
                 "observation",
                 {"kind": "reactor_exception", "agent": agent_name, "error": format_exc_brief(exc, limit=500)},
             )
-            self._record_coordinator_exception(
+            self.record_exception(
                 stage="reactor_pass",
                 agent=agent_name,
                 exc=exc,
