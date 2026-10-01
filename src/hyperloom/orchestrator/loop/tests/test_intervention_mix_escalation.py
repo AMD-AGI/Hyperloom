@@ -77,7 +77,7 @@ def test_reverted_integrate_patch_records_attempt_not_keep():
         idempotency_key="t-integrate-revert",
     )
 
-    coord.writeback._record_intervention_for_task(
+    coord.writeback.record_intervention_for_task(
         task,
         {
             "status": "reverted",

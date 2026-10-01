@@ -96,7 +96,7 @@ def test_failed_framework_task_stamps_no_result_failed(tmp_path: Path):
         },
     )
     result = {"status": "failed", "reason": "server never came up"}
-    asyncio.run(coord.writeback._handle_unpromotable_result(task, result))
+    asyncio.run(coord.writeback.handle_unpromotable_result(task, result))
     rows = coord.shared_state.framework_agent_phase_progress
     assert len(rows) == 1
     assert rows[0]["candidate_id"] == "https://example.com/pr/7"

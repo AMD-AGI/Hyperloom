@@ -103,7 +103,7 @@ def test_current_best_snapshot_preserves_removal_controls(tmp_path: Path, snapsh
     state.current_best.update(controls)
     writer = _writeback(tmp_path, state)
 
-    config = writer._current_best_launch_config() if snapshot == "launch_config" else writer.build_env_spec()["config"]
+    config = writer.current_best_launch_config() if snapshot == "launch_config" else writer.build_env_spec()["config"]
 
     assert {key: config.get(key) for key in controls} == controls
 

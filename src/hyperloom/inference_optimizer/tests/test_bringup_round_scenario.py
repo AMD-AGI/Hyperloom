@@ -166,7 +166,7 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         session_dir=str(session),
         run_deadline=None,
         _warm_specialist_params=_noop,
-        _record_observation=_noop,
+        record_observation=_noop,
         action_registry=ACTION_CATALOGUE,
         state=types.SimpleNamespace(pending_proposals={}),
         _read_enablement_source_context=lambda _sig: "",
@@ -396,7 +396,7 @@ async def _settle_failures(coordinator, session, slot, scenario_len: int) -> lis
     for index in range(scenario_len):
         result = await _bringup_attempt(session, slot, task_id=f"baseline-{index}")
         played.append(result)
-        await coordinator.writeback._handle_unpromotable_result(_baseline_task(f"baseline-{index}"), result)
+        await coordinator.writeback.handle_unpromotable_result(_baseline_task(f"baseline-{index}"), result)
         if coordinator.shared_state.stop_reason:
             break
     return played

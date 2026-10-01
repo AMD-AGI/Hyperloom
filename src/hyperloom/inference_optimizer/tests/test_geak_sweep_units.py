@@ -321,7 +321,7 @@ async def test_geak_harness_replay_uses_run_gpu_pin_and_recipe_identity(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(_geak_sweep.subprocess, "run", _fake_run)
-    outcome = await coord.writeback._validate_geak_via_geak_harness(reason="unit")
+    outcome = await coord.writeback.validate_geak_via_geak_harness(reason="unit")
 
     assert captured["GPU"] == gpu_ids
     if gpu_ids_space == "logical":

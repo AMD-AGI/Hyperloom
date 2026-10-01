@@ -2082,9 +2082,9 @@ async def test_coordinator_promotes_valid_baseline_even_with_failed_status(sessi
         "workspace": "/tmp/baseline",
         "materialized_config": "/tmp/baseline/config.yaml",
     }
-    assert c.writeback._is_promotable_result("baseline", payload)
+    assert c.writeback.is_promotable_result("baseline", payload)
 
-    await c.writeback._promote_to_shared_state("baseline", payload)
+    await c.writeback.promote_to_shared_state("baseline", payload)
 
     assert c.shared_state.baseline_tput == pytest.approx(1855.76)
     assert c.shared_state.current_best["tput"] == pytest.approx(1855.76)
