@@ -2,17 +2,20 @@ name: Forge E2E (single-GPU forge-loop smoke)
 
 # Run the same Triton-softmax ``kernelforge forge-loop`` smoke that guarded the
 # standalone KernelForge repository, now against the exact Hyperloom PR commit
-# containing the vendored package. The GPU job is path-gated to loop-affecting
-# code; standalone Fusion/GEMM changes use their focused checks instead. The
-# cheap resolve job still handles labels, comments, renames, and manual dispatch
-# consistently.
+# containing the vendored package. A PR runs it only while it carries the
+# `run-forge-e2e` label: adding the label starts a run, and every new commit pushed
+# while it stays starts another. Without the label nothing is dispatched; only
+# collaborators can label a PR, so the label is also the approval to spend the
+# shared GPU. Re-run without a new commit by removing the label and adding it
+# again. The GPU job is also path-gated to loop-affecting code; standalone
+# Fusion/GEMM changes use their focused checks instead. The cheap resolve job
+# handles the label, renames, and manual dispatch consistently.
 
 on:
   pull_request:
     branches: [main, v1.0-dev]
-    types: [opened, synchronize, reopened, labeled, unlabeled]
-  issue_comment:
-    types: [created]
+    # labeled = `run-forge-e2e` was just added; the other three run only while it is on.
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       head_ref:
@@ -30,19 +33,14 @@ permissions:
 
 jobs:
   resolve:
+    # The whole label decision for a PR: an unlabeled PR, or a label other than
+    # `run-forge-e2e` being added, never allocates a runner.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request != null &&
-       contains(github.event.comment.body, '/retest') &&
-       (github.event.comment.author_association == 'OWNER' ||
-        github.event.comment.author_association == 'MEMBER' ||
-        github.event.comment.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'pull_request' &&
-       (github.event.action != 'labeled' ||
-        github.event.label.name == 'retest' ||
-        github.event.label.name == 'skip-e2e-test') &&
-       (github.event.action != 'unlabeled' || github.event.label.name == 'skip-e2e-test'))
+       ((github.event.action == 'labeled' && github.event.label.name == 'run-forge-e2e') ||
+        (github.event.action != 'labeled' &&
+         contains(github.event.pull_request.labels.*.name, 'run-forge-e2e'))))
     # API/file filtering does not need the scarce private-network polling runner.
     runs-on: ubuntu-latest
     outputs:
@@ -51,7 +49,6 @@ jobs:
       head_ref: ${{ steps.decide.outputs.head_ref }}
       head_sha: ${{ steps.decide.outputs.head_sha }}
       head_repo: ${{ steps.decide.outputs.head_repo }}
-      opted_out: ${{ steps.decide.outputs.opted_out }}
       path_skipped: ${{ steps.decide.outputs.path_skipped }}
     steps:
       - name: Checkout Forge path gate
@@ -64,23 +61,17 @@ jobs:
           API_URL: ${{ github.api_url }}
           REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
-          ACTION: ${{ github.event.action }}
-          LABEL: ${{ github.event.label.name }}
-          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           PR_NUMBER_EVT: ${{ github.event.pull_request.number }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          COMMENT_BODY: ${{ github.event.comment.body }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          IS_PR_COMMENT: ${{ github.event.issue.pull_request != null }}
           DISPATCH_HEAD_REF: ${{ inputs.head_ref }}
           DISPATCH_HEAD_SHA: ${{ inputs.head_sha }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           run=false; pr_number=""; head_ref=""; head_sha=""; head_repo=""
-          opted_out=false; path_skipped=false
+          path_skipped=false
           emit() {
             {
               echo "run=$run"
@@ -88,7 +79,6 @@ jobs:
               echo "head_ref=$head_ref"
               echo "head_sha=$head_sha"
               echo "head_repo=$head_repo"
-              echo "opted_out=$opted_out"
               echo "path_skipped=$path_skipped"
             } >> "$GITHUB_OUTPUT"
           }
@@ -108,40 +98,9 @@ jobs:
               fi
               ;;
             pull_request)
+              # The job's `if` already required `run-forge-e2e`.
               pr_number="$PR_NUMBER_EVT"; head_ref="$PR_HEAD_REF"
               head_sha="$PR_HEAD_SHA"; head_repo="$PR_HEAD_REPO"
-              if printf '%s' "$PR_LABELS_JSON" | jq -e 'index("skip-e2e-test")' >/dev/null 2>&1; then
-                echo "skip-e2e-test present; skipping"
-                opted_out=true; emit; exit 0
-              fi
-              if [ "$ACTION" = "labeled" ] && [ "$LABEL" != "retest" ]; then
-                echo "labeled '$LABEL' (not retest); skipping"; emit; exit 0
-              fi
-              if [ "$ACTION" = "unlabeled" ] && [ "$LABEL" != "skip-e2e-test" ]; then
-                echo "unlabeled '$LABEL' (not skip-e2e-test); skipping"; emit; exit 0
-              fi
-              run=true
-              ;;
-            issue_comment)
-              if [ "$IS_PR_COMMENT" != "true" ]; then
-                echo "not a PR comment; skipping"; emit; exit 0
-              fi
-              body="$(printf '%s' "$COMMENT_BODY" | tr -d '\r')"
-              if ! printf '%s' "$body" | grep -qiE '(^|[[:space:]])/retest(-failed)?([[:space:]]|$)'; then
-                echo "no /retest command; skipping"; emit; exit 0
-              fi
-              pr_number="$ISSUE_NUMBER"
-              pr_json="$(curl -fsS \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                "$API_URL/repos/$REPO/pulls/$pr_number")"
-              head_ref="$(printf '%s' "$pr_json" | jq -r '.head.ref // ""')"
-              head_sha="$(printf '%s' "$pr_json" | jq -r '.head.sha // ""')"
-              head_repo="$(printf '%s' "$pr_json" | jq -r '.head.repo.full_name // ""')"
-              if printf '%s' "$pr_json" | jq -e '[.labels[].name] | index("skip-e2e-test")' >/dev/null 2>&1; then
-                echo "skip-e2e-test present; skipping /retest"
-                opted_out=true; emit; exit 0
-              fi
               run=true
               ;;
           esac
@@ -151,9 +110,10 @@ jobs:
             exit 1
           fi
 
-          # pull_request.paths cannot cover issue_comment/retest. Query the Pull
-          # Files API for every PR-backed trigger and include previous_filename
-          # so a rename or deletion out of src/kernelforge still runs the smoke.
+          # Not pull_request.paths: a path-filtered workflow does not run at all, so
+          # the path skip could not close out its status. Query the Pull Files API
+          # and include previous_filename so a rename or deletion out of
+          # src/kernelforge still runs the smoke.
           if [ "$run" = true ] && [ "$EVENT" != "workflow_dispatch" ]; then
             forge_changed=false
             page=1
@@ -186,11 +146,10 @@ jobs:
 
   skipped-status:
     needs: resolve
-    if: >-
-      needs.resolve.outputs.head_sha != '' &&
-      (needs.resolve.outputs.opted_out == 'true' || needs.resolve.outputs.path_skipped == 'true')
-    # Concurrency starts only after resolve has authenticated and parsed the
-    # event. A no-op comment therefore cannot cancel an in-flight GPU job.
+    if: needs.resolve.outputs.head_sha != '' && needs.resolve.outputs.path_skipped == 'true'
+    # Concurrency starts only after resolve has decided. An event that starts
+    # nothing, such as an unrelated label being added, therefore cannot cancel an
+    # in-flight GPU job.
     concurrency:
       group: forge-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_sha || needs.resolve.outputs.head_ref || github.ref }}
       cancel-in-progress: true
@@ -202,13 +161,8 @@ jobs:
           API_URL: ${{ github.api_url }}
           REPO: ${{ github.repository }}
           SHA: ${{ needs.resolve.outputs.head_sha }}
-          OPTED_OUT: ${{ needs.resolve.outputs.opted_out }}
         run: |
-          if [ "$OPTED_OUT" = true ]; then
-            description="skipped via skip-e2e-test label"
-          else
-            description="skipped: no Forge loop-related files changed"
-          fi
+          description="skipped: no Forge loop-related files changed"
           # Fork pull_request jobs get a read-only GITHUB_TOKEN even with
           # permissions.statuses: write, so this POST 403s and used to fail
           # the required skipped-status check. Swallow only that 403;
@@ -247,15 +201,6 @@ jobs:
     runs-on: ${{ vars.FORGE_E2E_RUNNER_LABEL || 'Hyperloom-e2e-ci' }}
     timeout-minutes: ${{ fromJSON(vars.FORGE_E2E_JOB_TIMEOUT_MIN || '240') }}
     steps:
-      - name: Consume retest label
-        if: github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'retest'
-        run: |
-          curl -sS -X DELETE \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ needs.resolve.outputs.pr_number }}/labels/retest" \
-            -o /dev/null -w 'remove-label HTTP=%{http_code}\n' || true
-
       - uses: actions/checkout@v7
 
       - name: Ensure jq

@@ -249,7 +249,7 @@ case "$result" in
     post_status "success" "PASS — uid=${UID_}; job=${jobref:--}; sha=${HEAD_SHA:0:12}"
     report_upsert "✅ Succeeded" ;;
   cancelled)
-    # Not a red build: a newer commit or a retest ended this one, and reporting it as a
+    # Not a red build: a newer commit or a re-run ended this one, and reporting it as a
     # failure sends somebody looking for a bug that is not there.
     summary "🚫 **CANCELLED** — session_id=\`${UID_}\`"
     post_status "error" "cancelled; uid=${UID_}; sha=${HEAD_SHA:0:12}"
