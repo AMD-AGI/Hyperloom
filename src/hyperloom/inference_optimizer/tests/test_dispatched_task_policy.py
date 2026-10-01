@@ -163,7 +163,7 @@ async def test_dispatch_denied_baseline_is_not_charged_to_baseline_failures(sess
     for i in range(3):
         task = await coord.tasks.create(kind="baseline", params={}, idempotency_key=f"denied-baseline-{i}")
         result = await coord.sub.run_task(task)
-        await coord.dispatcher._reap_dispatched_task(task, result)
+        await coord.dispatcher.reap_dispatched_task(task, result)
         assert result.state == "cancelled"
         assert result.error_class == "policy_enablement_round_in_flight"
         assert (await coord.tasks.get(task.task_id)).state == "cancelled"

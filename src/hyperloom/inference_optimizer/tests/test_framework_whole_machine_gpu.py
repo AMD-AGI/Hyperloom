@@ -162,7 +162,7 @@ async def test_framework_family_leases_whole_machine_when_capacity_zero(tmp_path
         lease_ttl_sec=3600,
     )
 
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
     assert probe.entries, "framework GPU task never dispatched"
     tid = probe.entries[0]
@@ -191,7 +191,7 @@ async def test_framework_family_defaults_gpu_count_to_whole_machine(tmp_path, mo
         lease_ttl_sec=3600,
     )
 
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
     assert probe.entries
     assert probe.gpu_ids_by_task[probe.entries[0]] == [0, 1, 2, 3]
@@ -258,7 +258,7 @@ async def test_explore_gpu_specialist_still_gated_by_capacity(tmp_path, monkeypa
         lease_ttl_sec=3600,
     )
 
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
     # Carved pool is empty (capacity=0) → no lease → task stays queued, unrun.
     assert not probe.entries
@@ -287,7 +287,7 @@ async def test_explore_gpu_specialist_uses_carved_pool(tmp_path, monkeypatch):
         lease_ttl_sec=3600,
     )
 
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
     assert probe.entries
     assert probe.gpu_ids_by_task[probe.entries[0]] == [0]
@@ -321,7 +321,7 @@ async def test_bench_specialist_leases_whole_machine_when_serving_owns_node(tmp_
         lease_ttl_sec=3600,
     )
 
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
     assert probe.entries, "bench specialist never dispatched"
     tid = probe.entries[0]
@@ -359,7 +359,7 @@ async def test_non_bench_gpu_probe_still_uses_carved_pool(tmp_path, monkeypatch)
         lease_ttl_sec=3600,
     )
 
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
     assert probe.entries
     # First card of the carved (serving-disjoint) pool, not card 0.
@@ -395,7 +395,7 @@ async def test_serving_priority_defers_gpu_specialist_and_releases_lane(tmp_path
         lease_ttl_sec=3600,
     )
 
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
     # Executor must NOT have run — the task should still be queued.
     assert not probe.entries, "executor must not run while serving slot is busy"
@@ -444,7 +444,7 @@ async def test_serving_priority_defers_on_second_probe_racing_admit(tmp_path, mo
         lease_ttl_sec=3600,
     )
 
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
     # The per-task probe must have been called at least once.
     assert busy_calls, "serving_slot_busy must be called at admit time"
@@ -485,7 +485,7 @@ async def test_serving_priority_admits_gpu_specialist_when_slot_free(tmp_path, m
         lease_ttl_sec=3600,
     )
 
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
     assert probe.entries, "executor must run when serving slot is free"
     assert not await coord.tasks.queued()

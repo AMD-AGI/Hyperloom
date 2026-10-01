@@ -2395,7 +2395,7 @@ async def test_report_success_does_not_stop_run(session_dir):
             params={"session_dir": str(session_dir)},
             idempotency_key="k-report-1",
         )
-        await c.dispatcher._pump_dispatcher_once()
+        await c.dispatcher.pump_dispatcher_once()
         after = await c.tasks.get(task.task_id)
         assert after.state == "succeeded"
         assert not (c.shared_state.stop_reason or "").strip()
@@ -2417,7 +2417,7 @@ async def test_report_success_does_not_overwrite_prior_stop_reason(session_dir):
             params={"session_dir": str(session_dir)},
             idempotency_key="k-report-pre-set",
         )
-        await c.dispatcher._pump_dispatcher_once()
+        await c.dispatcher.pump_dispatcher_once()
         after = await c.tasks.get(task.task_id)
         assert after.state == "succeeded"
         assert c.shared_state.stop_reason == "target_reached"

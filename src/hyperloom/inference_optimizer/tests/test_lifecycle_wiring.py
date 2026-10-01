@@ -366,7 +366,7 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
         # the emit.
         monkeypatch.setattr(
             c.dispatcher,
-            "_sequence_denial_for_request",
+            "sequence_denial_for_request",
             lambda target, kind: None,
         )
         monkeypatch.setattr(

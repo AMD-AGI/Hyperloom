@@ -249,7 +249,7 @@ class TestTimeBudgetGate:
 
     def test_an_action_too_big_for_the_budget_is_denied(self, coord: Coordinator):
         _set_budget(coord, minutes=20)
-        denied = coord.dispatcher._time_budget_denial_for_action(_EXPENSIVE_ACTION)
+        denied = coord.dispatcher.time_budget_denial_for_action(_EXPENSIVE_ACTION)
         assert isinstance(denied, PolicyDenied)
         assert denied.rule == "time_budget"
         assert f"{_EXPENSIVE_COST_MIN:.0f} min" in str(denied)
@@ -257,15 +257,15 @@ class TestTimeBudgetGate:
 
     def test_an_action_that_fits_is_admitted(self, coord: Coordinator):
         _set_budget(coord, minutes=20)
-        assert coord.dispatcher._time_budget_denial_for_action(_CHEAP_ACTION) is None
+        assert coord.dispatcher.time_budget_denial_for_action(_CHEAP_ACTION) is None
 
     def test_an_unbounded_budget_admits_the_most_expensive_action(self, coord: Coordinator):
         coord.shared_state.max_minutes = 0
-        assert coord.dispatcher._time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
+        assert coord.dispatcher.time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
 
     def test_an_action_with_no_registry_entry_is_admitted(self, coord: Coordinator):
         _set_budget(coord, minutes=1)
-        assert coord.dispatcher._time_budget_denial_for_action("frobnicate") is None
+        assert coord.dispatcher.time_budget_denial_for_action("frobnicate") is None
 
     def test_only_the_closing_actions_are_exempt_from_the_budget(self):
         """Recover restarts the server; it is not how a session ends."""
@@ -276,29 +276,29 @@ class TestTimeBudgetGate:
         _set_budget(coord, minutes=60, elapsed_min=60.0)
         assert coord.shared_state.session_budget_usable_sec() == 0.0
         for action in TIME_BUDGET_EXEMPT_ACTIONS:
-            assert coord.dispatcher._time_budget_denial_for_action(action) is None, action
+            assert coord.dispatcher.time_budget_denial_for_action(action) is None, action
 
     def test_nonclosing_actions_are_refused_on_an_empty_budget(self, coord: Coordinator):
         """A spent session may admit closing actions, not another round of work."""
         _set_budget(coord, minutes=60, elapsed_min=60.0)
         assert coord.shared_state.session_budget_usable_sec() == 0.0
         for action in (_CHEAP_ACTION, _EXPENSIVE_ACTION):
-            denied = coord.dispatcher._time_budget_denial_for_action(action)
+            denied = coord.dispatcher.time_budget_denial_for_action(action)
             assert isinstance(denied, PolicyDenied), action
             assert denied.rule == "time_budget"
 
     def test_a_stopping_session_leaves_the_gate_to_the_stop_path(self, coord: Coordinator):
         _set_budget(coord, minutes=1)
         coord.shared_state.stop_reason = "time_exhausted"
-        assert coord.dispatcher._time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
+        assert coord.dispatcher.time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
 
     def test_this_session_s_own_baseline_changes_the_answer(self, coord: Coordinator):
         """Half an hour left admits a baseline the catalogue prices at five minutes -- until this session has measured one and knows better."""
         _set_budget(coord, minutes=30)
-        assert coord.dispatcher._time_budget_denial_for_action(_BASELINE_ACTION) is None
+        assert coord.dispatcher.time_budget_denial_for_action(_BASELINE_ACTION) is None
 
         coord.shared_state.baseline_runtime_sec = _MEASURED_BASELINE_SEC
-        denied = coord.dispatcher._time_budget_denial_for_action(_BASELINE_ACTION)
+        denied = coord.dispatcher.time_budget_denial_for_action(_BASELINE_ACTION)
 
         assert isinstance(denied, PolicyDenied)
         assert denied.rule == "time_budget"
@@ -306,28 +306,28 @@ class TestTimeBudgetGate:
 
     def test_the_budget_shrinks_the_gate_as_the_session_runs(self, coord: Coordinator):
         _set_budget(coord, minutes=120, elapsed_min=0.0)
-        assert coord.dispatcher._time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
+        assert coord.dispatcher.time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
         _set_budget(coord, minutes=120, elapsed_min=105.0)
-        assert coord.dispatcher._time_budget_denial_for_action(_EXPENSIVE_ACTION) is not None
+        assert coord.dispatcher.time_budget_denial_for_action(_EXPENSIVE_ACTION) is not None
 
 
 class TestAdmissionGateOrder:
-    """``_admission_denial_for_action`` chains the gates; the first one wins."""
+    """``admission_denial_for_action`` chains the gates; the first one wins."""
 
     def test_the_baseline_prerequisite_is_reported_before_the_budget(self, coord: Coordinator):
         coord.shared_state.baseline_tput = 0.0
         _set_budget(coord, minutes=1)
-        denied = coord.dispatcher._admission_denial_for_action("explore")
+        denied = coord.dispatcher.admission_denial_for_action("explore")
         assert denied is not None and denied.rule == "execution_order"
 
     def test_the_budget_gate_runs_once_the_sequence_gate_passes(self, coord: Coordinator):
         _set_budget(coord, minutes=20)
-        denied = coord.dispatcher._admission_denial_for_action(_EXPENSIVE_ACTION)
+        denied = coord.dispatcher.admission_denial_for_action(_EXPENSIVE_ACTION)
         assert denied is not None and denied.rule == "time_budget"
 
     def test_an_action_clearing_both_gates_is_admitted(self, coord: Coordinator):
         _set_budget(coord, minutes=600)
-        assert coord.dispatcher._admission_denial_for_action(_EXPENSIVE_ACTION) is None
+        assert coord.dispatcher.admission_denial_for_action(_EXPENSIVE_ACTION) is None
 
 
 def _delegate(action_name: str, key: str) -> Intent:
@@ -455,7 +455,7 @@ class TestPreDispatchBackstop:
         )
         _set_budget(coord, minutes=600, elapsed_min=600.0)
 
-        await coord.dispatcher._pump_dispatcher_once()
+        await coord.dispatcher.pump_dispatcher_once()
 
         row = await coord.tasks.get(task.task_id)
         assert row.state == "cancelled"
@@ -603,7 +603,7 @@ async def _queue_action(
     """Queue an action with its real lanes; ``make_executor`` shapes what it does."""
     started = asyncio.Event()
     coord.sub.register_executor(kind, make_executor(started))
-    lanes, ttl_sec = coord.dispatcher._registry_lanes_ttl(kind)
+    lanes, ttl_sec = coord.dispatcher.registry_lanes_ttl(kind)
     task, _ = await coord.tasks.create_or_return_existing(
         kind=kind,
         params={},
@@ -637,7 +637,7 @@ async def _start_action_under_pump(
 ) -> tuple[Task, asyncio.Task, asyncio.Task]:
     """Let a running pump dispatch the action, the way a tick does."""
     task, started = await _queue_action(coord, kind=kind, key=key)
-    pump = asyncio.create_task(coord.dispatcher._pump_dispatcher_once())
+    pump = asyncio.create_task(coord.dispatcher.pump_dispatcher_once())
     await asyncio.wait_for(started.wait(), timeout=5.0)
     return task, coord.dispatcher._inflight_actions[task.task_id][1], pump
 
@@ -1101,7 +1101,7 @@ async def test_retired_queued_recover_emits_cancelled_result_without_failure(coo
     await coord.locks.acquire_many(
         ["server_lifecycle"], holder_id="occupied", task_id="occupied", action="baseline", ttl_sec=60
     )
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
     assert (await coord.tasks.get(task.task_id)).state == "cancelled"
     event = await coord.db.fetchone("SELECT payload FROM events WHERE topic='delegated_result'")
     assert event is not None
@@ -1120,7 +1120,7 @@ async def test_cancelled_result_bookkeeping_does_not_release_gpu_capacity(coord)
     gpu = await coord.gpu_specialist_pool.try_acquire(count=1, holder_id=task.task_id, task_id=task.task_id)
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
-    await coord.dispatcher._reap_dispatched_task(task, SubAgentResult(task.task_id, "cancelled", {}))
+    await coord.dispatcher.reap_dispatched_task(task, SubAgentResult(task.task_id, "cancelled", {}))
     assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is not None
 
 
@@ -1269,7 +1269,7 @@ class TestThePumpStopsWorkItCannotWaitFor:
         task = await coord.tasks.create(
             kind=_CHEAP_ACTION, params={}, idempotency_key="p-orphan", requires_lanes=[_CHEAP_ACTION_LANE]
         )
-        pump = asyncio.create_task(coord.dispatcher._pump_dispatcher_once())
+        pump = asyncio.create_task(coord.dispatcher.pump_dispatcher_once())
         try:
             assert await asyncio.to_thread(entered.wait, 2)
             handle = coord.dispatcher._inflight_actions[task.task_id]
@@ -1296,7 +1296,7 @@ class TestThePumpStopsWorkItCannotWaitFor:
         assert not await coord.locks.lane_holders()
         assert coord.dispatcher._inflight_actions == {}
         assert not coord.dispatcher._executions
-        await coord.dispatcher._pump_dispatcher_once()
+        await coord.dispatcher.pump_dispatcher_once()
         events = await coord.db.fetchall("SELECT payload FROM events WHERE topic='delegated_result'")
         assert len(events) == 1
         promoted.assert_awaited_once()
@@ -1318,7 +1318,7 @@ class TestThePumpOnlyCancelsWhatItSpawned:
         _set_budget(coord, minutes=600)
         unjoined = await _start_unjoined_action(coord, key="unjoined-idle")
         try:
-            await asyncio.wait_for(coord.dispatcher._pump_dispatcher_once(), timeout=10.0)
+            await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=10.0)
 
             assert unjoined.task_id in coord.dispatcher._inflight_actions
         finally:
@@ -1346,7 +1346,7 @@ class TestThePumpOnlyCancelsWhatItSpawned:
         handle = coord.dispatcher._inflight_actions[unjoined.task_id]
         coord._stop.set()
 
-        await asyncio.wait_for(coord.dispatcher._pump_dispatcher_once(), timeout=10.0)
+        await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=10.0)
 
         assert handle.scope.cancelled
         assert handle.atask.cancelled()
@@ -1408,7 +1408,7 @@ class TestATickCannotOutliveTheSessionBound:
     ):
         monkeypatch.setattr(coord.phase_machine, "_advance_phase_if_needed", _idle)
         monkeypatch.setattr(coord, "_reactor_pass", _hang_forever)
-        monkeypatch.setattr(coord.dispatcher, "_pump_dispatcher_once", _idle)
+        monkeypatch.setattr(coord.dispatcher, "pump_dispatcher_once", _idle)
         started = time.monotonic()
         try:
             reason = await asyncio.wait_for(
@@ -1428,7 +1428,7 @@ class TestATickCannotOutliveTheSessionBound:
     ):
         monkeypatch.setattr(coord.phase_machine, "_advance_phase_if_needed", _hang_forever)
         monkeypatch.setattr(coord, "_reactor_pass", _idle)
-        monkeypatch.setattr(coord.dispatcher, "_pump_dispatcher_once", _idle)
+        monkeypatch.setattr(coord.dispatcher, "pump_dispatcher_once", _idle)
         started = time.monotonic()
         try:
             reason = await asyncio.wait_for(

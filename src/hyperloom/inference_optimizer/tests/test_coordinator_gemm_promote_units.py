@@ -1087,7 +1087,7 @@ class TestBf16DenseFallbackIsInternalToForge:
         coord.bus.append_and_seq = _append_and_seq
         coord.phase_machine._kernel_enabled = lambda: True
         coord.phase_kernel._geak_enabled = lambda: False
-        coord.dispatcher._gemm_tuning_required_before_kernel_opt = lambda: True
+        coord.phase_kernel._gemm_tuning_required_before_kernel_opt = lambda: True
         coord.phase_machine._record_phase_entry_evidence = lambda **_kwargs: None
 
         async def _noop(*_args, **_kwargs):

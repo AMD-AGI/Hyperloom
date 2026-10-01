@@ -293,7 +293,7 @@ async def _build_minimal_coord(tmp_path: Path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_pump_reclaims_expired_running_task(tmp_path: Path, monkeypatch):
-    """_pump_dispatcher_once flips an orphaned expired-running task to failed."""
+    """pump_dispatcher_once flips an orphaned expired-running task to failed."""
     coord = await _build_minimal_coord(tmp_path, monkeypatch)
 
     # Orphaned task: TTL expired via backdated updated_at.
@@ -328,7 +328,7 @@ async def test_pump_reclaims_expired_running_task(tmp_path: Path, monkeypatch):
     )
     await coord.tasks.transition(no_ttl.task_id, "running")
 
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
     assert (await coord.tasks.get(orphan.task_id)).state == "running", "age alone cannot establish worker death"
     assert (await coord.tasks.get(live.task_id)).state == "running", "in-window running task must not be reclaimed"
@@ -353,8 +353,8 @@ async def test_pump_reclaim_idempotent(tmp_path: Path, monkeypatch):
         (stale_ts, orphan.task_id),
     )
 
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
     assert (await coord.tasks.get(orphan.task_id)).state == "running"
 
-    await coord.dispatcher._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
     assert (await coord.tasks.get(orphan.task_id)).state == "running"

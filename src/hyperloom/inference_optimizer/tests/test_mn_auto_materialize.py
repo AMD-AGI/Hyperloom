@@ -34,7 +34,7 @@ def _fake_self(**state_overrides):
     for k, v in state_overrides.items():
         setattr(state, k, v)
     dispatcher = SimpleNamespace(
-        _registry_lanes_ttl=lambda kind: ([], 1800),
+        registry_lanes_ttl=lambda kind: ([], 1800),
     )
     coord = SimpleNamespace(dispatcher=dispatcher)
     return SimpleNamespace(

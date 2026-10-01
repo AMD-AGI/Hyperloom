@@ -1484,7 +1484,7 @@ async def test_dispatch_failure_rolls_back_preapplied_warm_kernel(tmp_path):
         },
     )
 
-    await dispatcher._reap_dispatched_task(
+    await dispatcher.reap_dispatched_task(
         task,
         SubAgentResult(
             task_id=task.task_id,

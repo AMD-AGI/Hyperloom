@@ -29,7 +29,6 @@ from hyperloom.orchestrator.enablement.params import EnablementParams
 def coord(build_coord):
     """``build_coord`` augmented with the routing-method surface the framework phase delegates to (launch-probe enqueue, rearm capture, build lifecycle)."""
     from hyperloom.orchestrator.enablement.revalidation import EnablementRevalidation
-    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 
     build_coord._rearm_calls = []
     # Bind EnablementBuild methods directly onto build_coord so that test code calling
@@ -37,10 +36,6 @@ def coord(build_coord):
     # _open_row_past_spent_generations lives on enablement_revalidation; bind the real method there.
     build_coord.enablement_revalidation._open_row_past_spent_generations = _types.MethodType(
         EnablementRevalidation._open_row_past_spent_generations, build_coord.enablement_revalidation
-    )
-    # _time_budget_denial_for_action lives on dispatcher; bind the real wall-clock gate directly on build_coord.
-    build_coord._time_budget_denial_for_action = _types.MethodType(
-        DispatcherCollaborator._time_budget_denial_for_action, build_coord
     )
     # The real wall-clock gate, on the real catalogue: with no budget set it admits everything, so a test that wants a
     # denial sets one.
@@ -60,8 +55,7 @@ def coord(build_coord):
         ["research_lane"],
         base_ttl_sec,
     )
-    # _time_budget_denial_for_action lives on dispatcher; set it on the fake coord directly so it is found.
-    build_coord._registry_lanes_ttl = lambda kind: (
+    build_coord.dispatcher.registry_lanes_ttl = lambda kind: (
         ["server_lifecycle", "workspace_mutation", "benchmark_lane"],
         3600,
     )

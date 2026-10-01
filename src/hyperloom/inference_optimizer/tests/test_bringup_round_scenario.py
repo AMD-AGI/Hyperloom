@@ -173,7 +173,7 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         _derive_checkpoint_weight_facts=lambda _log: "",
         _framework_gpu_params=lambda: {},
         _framework_authoring_lanes_ttl=lambda _params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
-        _time_budget_denial_for_action=lambda _action: None,
+        time_budget_denial_for_action=lambda _action: None,
         # Attributes exposed by CoordinatorCollaborator properties; set directly
         # on the shim since property descriptors don't apply to SimpleNamespace.
         knowledge_plane=None,

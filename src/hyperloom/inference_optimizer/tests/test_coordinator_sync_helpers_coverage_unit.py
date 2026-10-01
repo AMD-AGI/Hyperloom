@@ -66,7 +66,7 @@ def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> N
     )
 
     assert budget == max(60 * 60, resolve_benchmark_timeouts()[1] + 10 * 60)
-    assert coord.dispatcher._gpu_lease_ttl_sec(params=params) == pytest.approx(
+    assert coord.dispatcher.gpu_lease_ttl_sec(params=params) == pytest.approx(
         int(budget * (1.0 + GPU_LEASE_TTL_GRACE)), abs=2
     )
 
@@ -111,7 +111,7 @@ def test_gpu_lease_ttl_grace_over_wall_budget(coord: Coordinator) -> None:
     ttl = int(budget * (1.0 + GPU_LEASE_TTL_GRACE))
     assert ttl == int(3600 * 1.1)
     assert ttl >= budget
-    assert coord.dispatcher._gpu_lease_ttl_sec() == pytest.approx(ttl, abs=2)
+    assert coord.dispatcher.gpu_lease_ttl_sec() == pytest.approx(ttl, abs=2)
 
 
 def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> None:
@@ -556,8 +556,8 @@ def test_phase_denial_for_action(coord: Coordinator) -> None:
 def test_the_coordinator_revalidation_baseline_is_not_phase_denied(coord: Coordinator) -> None:
     """The revalidation pump prices its own action and never runs the phase gate."""
     coord.shared_state.phase = "ENABLEMENT"
-    assert coord.dispatcher._time_budget_denial_for_action("baseline") is None
-    assert coord.dispatcher._admission_denial_for_action("baseline") is not None
+    assert coord.dispatcher.time_budget_denial_for_action("baseline") is None
+    assert coord.dispatcher.admission_denial_for_action("baseline") is not None
 
 
 # -- sequence denial gates -------------------------------------------------
@@ -582,18 +582,18 @@ def test_sequence_denial_for_request(coord: Coordinator) -> None:
     ss.stop_reason = ""
     ss.baseline_tput = 0.0
     # non-kernel target -> not gated
-    assert coord.dispatcher._sequence_denial_for_request("orchestration", "anything") is None
+    assert coord.dispatcher.sequence_denial_for_request("orchestration", "anything") is None
     # trace_analyze always allowed
-    assert coord.dispatcher._sequence_denial_for_request("kernel_agent", "trace_analyze") is None
+    assert coord.dispatcher.sequence_denial_for_request("kernel_agent", "trace_analyze") is None
     # unknown handler kind -> not gated
-    assert coord.dispatcher._sequence_denial_for_request("kernel_agent", "no_such_kind") is None
+    assert coord.dispatcher.sequence_denial_for_request("kernel_agent", "no_such_kind") is None
 
 
 def test_skip_gemm_tuning_env(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", raising=False)
-    assert coord.dispatcher._skip_gemm_tuning() is False
+    assert coord.phase_kernel._skip_gemm_tuning() is False
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "yes")
-    assert coord.dispatcher._skip_gemm_tuning() is True
+    assert coord.phase_kernel._skip_gemm_tuning() is True
 
 
 def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch) -> None:
@@ -605,17 +605,17 @@ def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch)
     # forge backend: any precision on a supported framework is eligible.
     ss.framework = "sglang"
     ss.precision = "fp16"
-    assert coord.dispatcher._gemm_tuning_required_before_kernel_opt() is True
+    assert coord.phase_kernel._gemm_tuning_required_before_kernel_opt() is True
     ss.precision = "bf16"
-    assert coord.dispatcher._gemm_tuning_required_before_kernel_opt() is True
+    assert coord.phase_kernel._gemm_tuning_required_before_kernel_opt() is True
     # Unsupported framework -> not eligible.
     ss.framework = "trt-llm"
-    assert coord.dispatcher._gemm_tuning_required_before_kernel_opt() is False
+    assert coord.phase_kernel._gemm_tuning_required_before_kernel_opt() is False
     # Supported framework + terminal status -> not required.
     ss.framework = "sglang"
     ss.precision = "fp8"
     ss.last_gemm_tuning = {"status": "succeeded"}
-    assert coord.dispatcher._gemm_tuning_required_before_kernel_opt() is False
+    assert coord.phase_kernel._gemm_tuning_required_before_kernel_opt() is False
 
 
 # -- canonical id helpers --------------------------------------------------

@@ -171,14 +171,6 @@ def test_format_inbox_fallback():
     assert "topic=other" in _format_inbox_event(m) and "payload=" in _format_inbox_event(m)
 
 
-def test_skip_gemm_tuning_env(monkeypatch):
-    """Env gate used before FP8 GEMM pre-kernel_opt scheduling."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "true")
-    assert DispatcherCollaborator._skip_gemm_tuning() is True
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "")
-    assert DispatcherCollaborator._skip_gemm_tuning() is False
-
-
 def test_gap_layer_for_action_mapping():
     assert GapRefreshCollaborator._gap_layer_for_action("kernel_opt") == (
         "kernel_agent",

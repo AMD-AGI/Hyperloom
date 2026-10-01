@@ -367,7 +367,7 @@ async def test_kernel_agent_reprofiles_on_change(coord: Coordinator, monkeypatch
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
     coord.sub = _StubSub(coord.shared_state, landed_tput=120.0)
     monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
-    monkeypatch.setattr(coord.dispatcher, "_gemm_tuning_required_before_kernel_opt", lambda: False)
+    monkeypatch.setattr(coord.phase_kernel, "_gemm_tuning_required_before_kernel_opt", lambda: False)
     coord.shared_state.cumulative_gain_validated = 20.0  # cur = 100 * 1.20 = 120
 
     await coord.phase_kernel._run_kernel_agent(_kernel_agent_ctx())
@@ -385,7 +385,7 @@ async def test_kernel_agent_skips_gemm_but_still_runs_fusion(coord: Coordinator,
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
     monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
     monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: True)
-    assert coord.dispatcher._gemm_tuning_required_before_kernel_opt() is False
+    assert coord.phase_kernel._gemm_tuning_required_before_kernel_opt() is False
 
     fusion_calls = 0
 

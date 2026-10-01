@@ -333,7 +333,7 @@ class _DispatchStub:
         self.tasks = _Tasks()
         self.shared_state = SharedState(framework=framework, last_framework_rewrite_evidence=evidence)
         # Build a minimal _coord stub so collaborator cross-calls resolve.
-        dispatcher_stub = SimpleNamespace(_cycle_idem_suffix=lambda: "")
+        dispatcher_stub = SimpleNamespace(cycle_idem_suffix=lambda: "")
         self._coord = SimpleNamespace(
             shared_state=self.shared_state,
             session_dir=tmp_path,
@@ -353,10 +353,6 @@ class _DispatchStub:
             setattr(self, name, getattr(FrameworkPhase, name).__get__(self))
         # A staticmethod on the real class; binding it would pass ``self`` as the candidate row.
         self._framework_candidate_key = FrameworkPhase._framework_candidate_key
-
-    def _cycle_idem_suffix(self) -> str:
-        """Macro-cycle 0, as the Coordinator would report it."""
-        return ""
 
     def _render_framework_memory_for_prompt(self, _memory) -> str:
         """Suppress the working-memory block; not under test here."""
