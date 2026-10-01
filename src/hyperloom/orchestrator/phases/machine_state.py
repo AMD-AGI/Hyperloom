@@ -243,7 +243,7 @@ def resolve_keep_threshold(state: Any) -> float:
     """Current-cycle KEEP threshold for every path that injects ``keep_threshold_pct``."""
     from ..actions.executors._multi_node_env import is_multi_node
 
-    cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    cycle = state.macro_cycle
     return decaying_keep_threshold_pct(cycle, multi_node=is_multi_node())
 
 
@@ -572,8 +572,8 @@ def _phase_budget_total_seconds(
     now_unix: float | None = None,
 ) -> float | None:
     """Effective TOTAL budget (seconds) allotted to the current phase."""
-    budget = normalize_budget_pct(getattr(state, "phase_budget_pct", None))
-    phase = (getattr(state, "phase", "") or "").strip().upper()
+    budget = state.phase_budget_pct
+    phase = (state.phase or "").strip().upper()
     if phase not in budget:
         return None
     pct = float(budget[phase])
@@ -629,8 +629,8 @@ def effective_max_minutes(state: Any) -> float:
 
 def phase_cap_seconds(state: Any) -> float | None:
     """Absolute wall-clock ceiling (seconds) for the current phase."""
-    budget = normalize_budget_pct(getattr(state, "phase_budget_pct", None))
-    phase = (getattr(state, "phase", "") or "").upper()
+    budget = state.phase_budget_pct
+    phase = (state.phase or "").upper()
     if phase not in budget:
         return None
     pct = float(budget[phase])
@@ -709,7 +709,7 @@ def phase_status_summary(
     allowed_line = f"allowed   : {', '.join(actions_in_phase) if actions_in_phase else '(none)'}"
     lines = [
         f"phase     : {phase}",
-        f"cycle     : {int(getattr(state, 'macro_cycle', 0) or 0)}",
+        f"cycle     : {state.macro_cycle}",
         f"entered   : {state.phase_started_ts or '(unset)'}",
         budget_line,
         allowed_line,
@@ -738,14 +738,6 @@ def phase_status_summary(
 
 
 # plateau pure functions
-def _current_macro_cycle(state: Any) -> int:
-    """Return the current macro-cycle index."""
-    try:
-        return int(getattr(state, "macro_cycle", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
 def _row_cycle(row: dict[str, Any]) -> int:
     """Return a row cycle, treating legacy unstamped rows as cycle zero."""
     try:
@@ -761,7 +753,7 @@ def _rows_for_current_cycle(rows: Any, state: Any) -> list[dict[str, Any]]:
     dict_rows = [row for row in rows if isinstance(row, dict)]
     if not any("cycle" in row for row in dict_rows):
         return dict_rows
-    cycle = _current_macro_cycle(state)
+    cycle = state.macro_cycle
     return [row for row in dict_rows if _row_cycle(row) == cycle]
 
 
@@ -1269,7 +1261,7 @@ def _base_workflow_predicate_inputs(
         "plateau": None,
         "hint": hint,
         "sweep_result": None,
-        "macro_cycle": int(getattr(state, "macro_cycle", 0) or 0),
+        "macro_cycle": state.macro_cycle,
         "run_flags": {
             "kernel_enabled": bool(kernel_enabled),
             "framework_agent_enabled": bool(optimize_enabled),
@@ -1971,7 +1963,7 @@ def record_phase_transition(
     # Read before the loopback's bump can be observed here: it increments
     # ``macro_cycle`` on the way out of a phase, so the cycle in scope at the
     # transition is not always the one the outgoing phase ran in.
-    prev_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    prev_cycle = state.macro_cycle
     # Bank the finished segment for EVERY phase so the budget guards can charge
     # a phase for the whole run instead of the current entry.
     bank_phase_segment(state, until_unix=now_unix)
@@ -1982,7 +1974,7 @@ def record_phase_transition(
         evidence=evidence,
         ts=now_ts,
         ts_unix=now_unix,
-        cycle=int(getattr(state, "macro_cycle", 0) or 0),
+        cycle=state.macro_cycle,
     )
     history = list(state.phase_history or [])
     history.append(row)
@@ -2017,7 +2009,7 @@ def record_phase_transition(
             )
         phase_event.record_entry(
             phase=str(row.get("to_phase") or ""),
-            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            macro_cycle=state.macro_cycle,
             sequence=len(history),
             from_phase=from_phase,
             reason=str(row.get("reason") or ""),
@@ -2052,7 +2044,7 @@ def append_phase_history_event(
         evidence=evidence,
         ts=now_ts,
         ts_unix=now_unix,
-        cycle=int(getattr(state, "macro_cycle", 0) or 0),
+        cycle=state.macro_cycle,
     )
     history = list(state.phase_history or [])
     history.append(row)
@@ -2064,7 +2056,7 @@ def append_phase_history_event(
 
         phase_event.record_marker(
             phase=phase,
-            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            macro_cycle=state.macro_cycle,
             sequence=len(history),
             reason=str(row.get("reason") or ""),
             evidence=dict(row.get("evidence") or {}),

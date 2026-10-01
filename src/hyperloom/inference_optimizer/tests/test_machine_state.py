@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
-from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_VOCAB, is_valid_escalate_hint
+from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_VOCAB, SharedState, is_valid_escalate_hint
 
 
 def test_is_valid_escalate_hint() -> None:
@@ -85,19 +85,21 @@ def test_phase_elapsed_seconds() -> None:
 
 def test_phase_budget_remaining_seconds() -> None:
     # unlimited -> None
-    assert ps.phase_budget_remaining_seconds(SimpleNamespace(max_minutes=0)) is None
+    assert ps.phase_budget_remaining_seconds(SharedState(max_minutes=0)) is None
     # phase not in the budget map -> None
-    state = SimpleNamespace(
+    state = SharedState(
         max_minutes=60,
         phase="UNKNOWN_PHASE",
+        start_ts="",
         phase_started_unix=0.0,
         phase_budget_pct={ps.PHASE_FRAMEWORK_AGENT: 0.5},
     )
     assert ps.phase_budget_remaining_seconds(state) is None
     # 60min * 0.5 = 1800s budget, minus elapsed.
-    state2 = SimpleNamespace(
+    state2 = SharedState(
         max_minutes=60,
         phase=ps.PHASE_FRAMEWORK_AGENT,
+        start_ts="",
         phase_started_unix=1000.0,
         phase_budget_pct={ps.PHASE_FRAMEWORK_AGENT: 0.5},
     )

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 
 import pytest
 
@@ -54,7 +53,7 @@ def test_is_valid_escalate_hint_accepts_vocab():
 
 
 def test_config_lever_dry_empty_attempts_returns_false():
-    state = SimpleNamespace(attempts=[], macro_cycle=0)
+    state = SharedState(attempts=[], macro_cycle=0)
     triggered, ev = _config_lever_dry(state, {})
     assert triggered is False
     assert ev["empty_streak"] == 0
@@ -62,7 +61,7 @@ def test_config_lever_dry_empty_attempts_returns_false():
 
 
 def test_config_lever_dry_low_gain_and_streak_triggers():
-    state = SimpleNamespace(
+    state = SharedState(
         macro_cycle=0,
         attempts=(
             [{"lever_kind": LEVER_CONFIG, "outcome": "KEEP", "adopted": True, "gain_pct": 0.1, "cycle": 0}]
@@ -80,7 +79,7 @@ def test_config_lever_dry_low_gain_and_streak_triggers():
 
 def test_config_lever_dry_high_gain_blocks_trigger():
     """Even with empty streak, large recent KEEP gain blocks plateau."""
-    state = SimpleNamespace(
+    state = SharedState(
         macro_cycle=0,
         attempts=[
             {"lever_kind": LEVER_CONFIG, "outcome": "KEEP", "adopted": True, "gain_pct": 3.0, "cycle": 0},
@@ -96,7 +95,7 @@ def test_config_lever_dry_high_gain_blocks_trigger():
 
 def test_config_lever_dry_short_empty_streak_blocks_trigger():
     """Low gain alone (without empty streak) does not trigger plateau."""
-    state = SimpleNamespace(
+    state = SharedState(
         macro_cycle=0,
         attempts=[
             {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0},
@@ -129,7 +128,7 @@ def _grid_round(round_id: str, *, variants: int, keep_at: int | None = None, gai
 
 def test_config_lever_dry_counts_a_grid_round_once():
     """A single grid is one attempt, however many variants it benched."""
-    state = SimpleNamespace(macro_cycle=0, attempts=_grid_round("r1", variants=8))
+    state = SharedState(macro_cycle=0, attempts=_grid_round("r1", variants=8))
     triggered, ev = _config_lever_dry(state, {})
     assert triggered is False
     assert ev["empty_streak"] == 1
@@ -139,7 +138,7 @@ def test_config_lever_dry_triggers_after_streak_floor_rounds():
     rows: list[dict] = []
     for i in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK):
         rows += _grid_round(f"r{i}", variants=4)
-    state = SimpleNamespace(macro_cycle=0, attempts=rows)
+    state = SharedState(macro_cycle=0, attempts=rows)
     triggered, ev = _config_lever_dry(state, {})
     assert triggered is True
     assert ev["empty_streak"] == DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK
@@ -151,14 +150,14 @@ def test_config_lever_dry_round_that_kept_is_not_dry():
     for i in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK):
         rows += _grid_round(f"r{i}", variants=4)
     rows += _grid_round("r-last", variants=8, keep_at=0)
-    state = SimpleNamespace(macro_cycle=0, attempts=rows)
+    state = SharedState(macro_cycle=0, attempts=rows)
     triggered, ev = _config_lever_dry(state, {})
     assert triggered is False
     assert ev["empty_streak"] == 0
 
 
 def test_config_lever_dry_ignores_prior_macro_cycle_rows():
-    state = SimpleNamespace(
+    state = SharedState(
         macro_cycle=1,
         attempts=[
             {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0}
@@ -171,7 +170,7 @@ def test_config_lever_dry_ignores_prior_macro_cycle_rows():
 
 
 def test_config_lever_dry_supports_threshold_overrides():
-    state = SimpleNamespace(
+    state = SharedState(
         macro_cycle=0,
         attempts=[
             {"lever_kind": LEVER_CONFIG, "outcome": "KEEP", "adopted": True, "gain_pct": 1.5, "cycle": 0},
@@ -218,7 +217,7 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
 
 def test_optimize_exits_on_plateau():
     """Both arms dry advances to the next lever."""
-    state = SimpleNamespace(
+    state = SharedState(
         phase="FRAMEWORK_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
@@ -242,7 +241,7 @@ def test_optimize_exits_on_plateau():
 
 def test_skip_to_kernel_hint_short_circuits_optimize():
     """A ``skip_to_kernel`` hint exits even when the arms' own signals disagree."""
-    state = SimpleNamespace(
+    state = SharedState(
         phase="FRAMEWORK_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
@@ -263,7 +262,7 @@ def test_skip_to_kernel_hint_short_circuits_optimize():
 
 def test_kernel_does_not_exit_on_plateau():
     """Plateau alone (all attempts reverted, one still PARTIAL) does not exit KERNEL."""
-    state = SimpleNamespace(
+    state = SharedState(
         phase="KERNEL_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
@@ -288,14 +287,13 @@ def test_kernel_does_not_exit_on_plateau():
 
 def test_gemm_completion_with_no_pending_work_exits_kernel():
     """GEMM done with no further kernel_opt work pending → KERNEL exits to SWEEP."""
-    state = SimpleNamespace(
+    state = SharedState(
         phase="KERNEL_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
         kernel_integrate_attempts={},
         kernel_opt_task_attempts={},
-        auto_kernel_opt_enabled=False,
         rejected_kernel_ids=[],
         last_gemm_tuning={
             "status": "complete",
@@ -315,7 +313,7 @@ def test_gemm_completion_with_no_pending_work_exits_kernel():
 
 
 def test_compute_next_phase_skip_to_close_routes_to_close():
-    state = SimpleNamespace(
+    state = SharedState(
         phase="FRAMEWORK_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
@@ -323,7 +321,6 @@ def test_compute_next_phase_skip_to_close_routes_to_close():
         explore_search={},
         specialist_rounds=[],
         params_no_promote_streak=0,
-        backends_search={},
         optimization_stack=[],
         pending_escalate_hint=ESCALATE_HINT_SKIP_TO_CLOSE,
         stop_reason="",
@@ -338,8 +335,8 @@ def test_compute_next_phase_skip_to_close_routes_to_close():
     assert evidence.get("hint") == ESCALATE_HINT_SKIP_TO_CLOSE
 
 
-def _skip_to_sweep_state(phase: str) -> SimpleNamespace:
-    return SimpleNamespace(
+def _skip_to_sweep_state(phase: str) -> SharedState:
+    return SharedState(
         phase=phase,
         phase_started_unix=0.0,
         max_minutes=0,
@@ -348,7 +345,6 @@ def _skip_to_sweep_state(phase: str) -> SimpleNamespace:
         attempts=[],
         specialist_rounds=[],
         params_no_promote_streak=0,
-        backends_search={},
         rejected_kernel_ids=[],
         optimization_stack=[],
         pending_escalate_hint=ESCALATE_HINT_SKIP_TO_SWEEP,
@@ -388,7 +384,9 @@ def test_kernel_with_no_pending_work_routes_to_sweep():
 
 def test_kernel_holds_while_work_pending_keep():
     state = _skip_to_sweep_state("KERNEL_AGENT")
-    state.has_keep_pending_integrate = True
+    state.pending_kernel_integrations = {
+        "i0": {"kernel_id": "k0", "status": "pending", "task_key": "k0", "artifact_path": "/tmp/k0.patch"}
+    }
 
     assert kernel_work_pending(state) is True
     assert compute_next_phase(state, kernel_enabled=True) is None
@@ -596,7 +594,7 @@ def test_stop_reason_vocab_has_v08_additions():
 
 def test_compute_next_phase_advances_on_plateau():
     """When both arms report dry, compute_next_phase routes to KERNEL_AGENT."""
-    state = SimpleNamespace(
+    state = SharedState(
         phase="FRAMEWORK_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
@@ -609,7 +607,6 @@ def test_compute_next_phase_advances_on_plateau():
         ],
         specialist_rounds=[],
         params_no_promote_streak=0,
-        backends_search={},
         optimization_stack=[],
         pending_escalate_hint="",
         stop_reason="",
@@ -625,7 +622,7 @@ def test_compute_next_phase_advances_on_plateau():
 
 def test_compute_next_phase_honors_explore_plateau_overrides():
     """CLI plateau overrides control the actual phase transition."""
-    state = SimpleNamespace(
+    state = SharedState(
         phase="FRAMEWORK_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
@@ -639,7 +636,6 @@ def test_compute_next_phase_honors_explore_plateau_overrides():
         ],
         specialist_rounds=[],
         params_no_promote_streak=0,
-        backends_search={},
         optimization_stack=[],
         pending_escalate_hint="",
         stop_reason="",

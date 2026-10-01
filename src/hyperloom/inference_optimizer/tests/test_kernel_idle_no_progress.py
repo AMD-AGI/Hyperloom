@@ -5,15 +5,14 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from hyperloom.orchestrator.phases import machine_state as ms
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 def _state(idle_ticks, *, idle_seconds=ms.KERNEL_IDLE_MIN_SECONDS):
     # ``now_unix`` is pinned at 10_000.0 by the callers below, so backdating the streak start by ``idle_seconds``
     # gives an exact idle window.
-    return SimpleNamespace(
+    return SharedState(
         kernel_idle_ticks=idle_ticks,
         kernel_idle_since_unix=10_000.0 - idle_seconds,
         rejected_kernel_ids=[],
