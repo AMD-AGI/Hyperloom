@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from hyperloom.common.env import EnvValueError
 from hyperloom.orchestrator.phases import machine_state as ms
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -97,9 +100,6 @@ def test_idle_max_ticks_env_override(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "0")
     assert ms._kernel_idle_max_ticks() == 3
     # Malformed raises.
-    import pytest
-    from hyperloom.common.env import EnvValueError
-
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "xx")
     with pytest.raises(EnvValueError):
         ms._kernel_idle_max_ticks()
@@ -117,9 +117,6 @@ def test_idle_min_seconds_env_override(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", "0")
     assert ms._kernel_idle_min_seconds() == 600.0
     # Malformed raises.
-    import pytest
-    from hyperloom.common.env import EnvValueError
-
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", "xx")
     with pytest.raises(EnvValueError):
         ms._kernel_idle_min_seconds()
