@@ -445,11 +445,14 @@ def test_phase_seam_survives_an_unwritable_session_dir(tmp_path):
 def test_prompt_snapshot_path_is_phase_suffixed(tmp_path):
     from hyperloom.inference_optimizer.session.session_paths import agent_prompt_snapshot
 
-    assert agent_prompt_snapshot(tmp_path, "orchestration").name == "system_prompt.c0.snapshot.md"
-    scoped = agent_prompt_snapshot(tmp_path, "orchestration", phase="explore")
+    assert agent_prompt_snapshot(tmp_path, "orchestration", macro_cycle=0).name == "system_prompt.c0.snapshot.md"
+    scoped = agent_prompt_snapshot(tmp_path, "orchestration", macro_cycle=0, phase="explore")
     assert scoped.name == "system_prompt.c0.EXPLORE.snapshot.md"
     # A blank phase must not produce a stray dot in the stem.
-    assert agent_prompt_snapshot(tmp_path, "orchestration", phase="  ").name == "system_prompt.c0.snapshot.md"
+    assert (
+        agent_prompt_snapshot(tmp_path, "orchestration", macro_cycle=0, phase="  ").name
+        == "system_prompt.c0.snapshot.md"
+    )
 
 
 def test_boot_snapshot_records_the_phase_it_was_scoped_to(tmp_path):
@@ -460,6 +463,7 @@ def test_boot_snapshot_records_the_phase_it_was_scoped_to(tmp_path):
         tmp_path,
         prompts={"orchestration": "BOOT PROMPT", "critic": "CRITIC"},
         orchestration_phase="PRELUDE",
+        macro_cycle=0,
     )
 
     agents = tmp_path / "agents"
@@ -474,7 +478,7 @@ def test_boot_snapshot_records_the_phase_it_was_scoped_to(tmp_path):
 def test_boot_snapshot_without_a_phase_keeps_the_legacy_layout(tmp_path):
     from hyperloom.inference_optimizer.cli.bootstrap import _snapshot_system_prompts
 
-    _snapshot_system_prompts(tmp_path, prompts={"orchestration": "BOOT"})
+    _snapshot_system_prompts(tmp_path, prompts={"orchestration": "BOOT"}, macro_cycle=0)
 
     orch = tmp_path / "agents" / "orchestration"
     assert (orch / "system_prompt.c0.snapshot.md").read_text(encoding="utf-8") == "BOOT"
