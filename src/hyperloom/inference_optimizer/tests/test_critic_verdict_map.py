@@ -465,6 +465,24 @@ async def test_verdict_for_unknown_proposal_logs_observation(coord):
 
 
 @pytest.mark.asyncio
+async def test_an_approve_after_the_timeout_deny_creates_nothing(coord):
+    """The timeout deny is final: it removes the pending proposal, so a late approve has no target."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-timed-out", variants=["v_a"])
+    coord.state.pending_proposals.pop(pending.proposal_msg_id)
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={"target_proposal_msg_id": pending.proposal_msg_id, "verdict": "approve"},
+    )
+
+    await coord.router._handle_review_verdict("critic", intent)
+
+    (call,) = coord.writeback._record_observation.await_args_list
+    assert call.args[2]["kind"] == "verdict_for_unknown_proposal"
+    assert coord._materialise_calls == []
+    assert [m for m in coord.bus.messages if m.topic == "review_verdict"] == []
+
+
+@pytest.mark.asyncio
 async def test_single_verdict_rebroadcast_carries_full_advisory_fieldset(coord):
     """The rebroadcast payload and the compact inbox line both flow through the one serializer, carrying the full advisory field set."""
     from hyperloom.orchestrator.loop.conversation import _format_inbox_event

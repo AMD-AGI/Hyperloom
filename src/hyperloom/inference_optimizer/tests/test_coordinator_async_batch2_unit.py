@@ -1807,6 +1807,29 @@ async def test_record_specialist_result_with_proposals(coord: Coordinator) -> No
 
 
 @pytest.mark.asyncio
+async def test_record_specialist_result_seeds_gaps_from_static_recon(coord: Coordinator) -> None:
+    task = _ptask("rec-spec-recon", "specialist")
+    await coord.writeback._record_specialist_result(
+        task=task,
+        done_payload={
+            "domain": "static_recon_specialist",
+            "proposal_set": [],
+            "recon": {
+                "bridge_candidates": [
+                    {
+                        "id": "fused-moe",
+                        "predicate_file": "vllm/model_executor/fused_moe.py",
+                        "why_disabled_here": "gated on a non-gfx950 arch",
+                    }
+                ]
+            },
+        },
+        source="specialist:rec-spec-recon",
+    )
+    assert "gap.static_recon.fused-moe" in {gap.get("canonical_id") for gap in coord.shared_state.gaps}
+
+
+@pytest.mark.asyncio
 async def test_record_specialist_result_logs_ungrounded_patches(coord: Coordinator) -> None:
     """A patch nobody could ground has to reach the durable failure log.
 

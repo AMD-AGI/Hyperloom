@@ -123,6 +123,7 @@ async def test_emit_lifecycle_debounces_nonterminal_but_flushes_terminal(
             # First START flushes.
             c.writeback._emit_lifecycle(step="trace_analyze", status="START")
             saves_after_first = mock_save.call_count
+            assert saves_after_first == 1
             # Subsequent STARTs inside the window are debounced.
             c.writeback._emit_lifecycle(step="trace_analyze", status="START")
             c.writeback._emit_lifecycle(step="kernel_optimization", status="START")
