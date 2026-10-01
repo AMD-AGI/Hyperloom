@@ -436,10 +436,10 @@ def test_an_auto_pushed_run_reaches_another_workspace_that_pulls(
 
         _workspace(monkeypatch, tmp_path / "second")
         try:
-            assert experience_kb_service.main(["pull"]) == 0
             config = RemoteConfig.from_env()
             assert config is not None
-            pulled = {str(item["experience_id"]) for item in RemoteClient(config).list_experiences().items}
+            pulled = experience_kb_service.sync_with_global("pull")
+            readable = RemoteClient(config).health()["experience_count"]
         finally:
             _stop_workspace_service()
     finally:
@@ -448,7 +448,9 @@ def test_an_auto_pushed_run_reaches_another_workspace_that_pulls(
         thread.join(timeout=5)
 
     assert written and shared == written
-    assert pulled == written
+    # The second workspace reads what the first pushed; it lists only what it wrote itself.
+    assert pulled["created"] == len(written)
+    assert readable == len(written)
 
 
 def test_recorded_framework_attempts_satisfy_the_packaged_mapping(session_dir: Path) -> None:

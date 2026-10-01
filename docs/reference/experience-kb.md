@@ -106,6 +106,7 @@ collection spools without waiting on the service. Requests to a loopback service
 | `canonical/` | The immutable schemas and Experiences; the source of truth. |
 | `kb.sqlite3` | Write order for listing and export; rebuilt from `canonical/` when lost. |
 | `sync.sqlite3` | Push and pull progress per global KB. Losing it makes the next push and pull resend everything, which the idempotent writes absorb. |
+| `state.sqlite3` | Labels, exclusions and their history, and what a restore set outside the current state. Without it every stored Experience is in the state and none is excluded. |
 | `spool/` | Writes the service has not accepted yet. |
 | `service.log` | The service's log. |
 | `service.lock` | Held by the one service serving this home; names its pid and port. |
@@ -122,11 +123,38 @@ A read searches exactly one schema: the run's own, which is the declaration its
 packaged mapping produces. Listing and export cover every schema unless a
 `schema_ref` narrows them.
 
+## Labels, restore, and exclusions
+
+Each schema on a service has one current state: the stored Experiences in it,
+written here or pulled, minus the ones excluded. Reads see exactly that state.
+Writing an Experience adds it to the state; nothing is ever deleted.
+
+- **Exclude** an Experience, with a reason, to hide it from reads; **include**
+  lifts the exclusion. Either kind of Experience can be excluded, and every
+  exclude and include is kept in the schema's exclusion history.
+- **Label** the current state to keep it. A label is identified by its
+  `label_id`; its name is only for people and need not be unique.
+- **Restore** a label to make its state current again: the Experiences it held,
+  with the exclusions it held. Experiences written after the label leave the
+  state, and later writes add to the restored one. When the current state is
+  not what its label saved, the restore first labels it (reason
+  `before_restore`), so nothing restored over is lost: restore that label to
+  get it back.
+
+A state equals its label again once its changes are undone, such as an
+exclusion lifted. With no label yet, any non-empty state counts as unlabelled.
+
+Push sends only Experiences written here that reads see; one written here but
+excluded, or outside the state, is held back and sent by the first push after
+reads see it. A push cannot take back what it already sent. List and export
+name only Experiences written here, and of those only what reads see unless
+`include_excluded` asks for the rest.
+
 ## Global sync
 
 **Push** sends each Experience written to the local service that was not pushed
 to this global KB yet, with its declaration. It never sends an Experience that
-was pulled from a global KB, and it stops at the first failure the global KB may
+was pulled from a global KB, holds back one reads do not see, and it stops at the first failure the global KB may
 recover from, keeping its place so the next push resumes there. An Experience
 the global KB rejects for good (400, 409, 413, 414, 415 or 422, including a 413
 from a proxy in front of it) is reported under `rejected` and skipped. A
@@ -174,6 +202,13 @@ network, put a TLS-terminating proxy in front of it and hand out its
 | `GET /v1/export` | page through complete Experiences in write order | `export_page()` |
 | `POST /v1/push` | push one batch to this service's global KB | `push()` |
 | `POST /v1/pull` | pull one batch from this service's global KB | `pull()` |
+| `GET /v1/labels` | a schema's labels, current label, and whether its state changed since | `labels()` |
+| `POST /v1/labels` | label a schema's current state | `create_label()` |
+| `DELETE /v1/labels/{label_id}` | delete a label | `delete_label()` |
+| `POST /v1/restore` | make a label's state current | `restore()` |
+| `GET /v1/exclusions` | a schema's exclusions and their history | `exclusions()` |
+| `POST /v1/exclusions` | exclude an Experience from reads | `exclude()` |
+| `DELETE /v1/exclusions/{experience_id}` | lift an exclusion | `include()` |
 | `GET /health` | liveness, schemas, corpus size, process, settings digest | `health()` |
 
 Every request, including `/health`, sends `Authorization: Bearer <token>`.
@@ -184,7 +219,7 @@ request body may be up to 256 MiB; Experiences themselves have no size limit.
 |---|---|---|---|
 | 400 | `invalid_request` | malformed body, unknown field, invalid Experience, unregistered schema, out-of-range parameter | no |
 | 401 | `unauthorized` | missing or wrong token | after fixing the token |
-| 404 | `not_found` | unknown path | no |
+| 404 | `not_found` | unknown path, label, or Experience | no |
 | 409 | `conflict` | the id already exists with different content | no |
 | 409 | `sync_unavailable` | push or pull on a service started without a global KB | after configuring one |
 | 500 | `internal_error` | storage or service failure | yes |
@@ -265,7 +300,10 @@ Each item in `experiences`, and in `/v1/list`, is a summary:
 ### `GET /v1/list` and `GET /v1/export`
 
 Query: `after` (the previous page's `next_cursor`, default 0), `limit` (list
-1–500, export 1–100), and optional `schema_ref`. Repeat while `has_more` is true.
+1–500, export 1–100), optional `schema_ref`, and `include_excluded`
+(`true` or `false`, default `false`). Repeat while `has_more` is true. Both name
+only Experiences written to this service; `include_excluded=true` adds the ones
+reads do not see, so a page may hold fewer items than `limit`.
 
 ```json
 {"items": [{"sequence": 1, "experience_id": "exp-...", "...": "..."}], "next_cursor": 1, "has_more": false}
@@ -279,12 +317,33 @@ Query: `after` (the previous page's `next_cursor`, default 0), `limit` (list
 Body: `{}`. The service contacts the global KB it was started with.
 
 ```json
-{"status": "completed", "global_url": "https://global-kb.example", "created": 2, "unchanged": 0, "skipped": 1, "rejected": [], "has_more": false}
+{"status": "completed", "global_url": "https://global-kb.example", "created": 2, "unchanged": 0, "skipped": 1, "held_back": 0, "rejected": [], "has_more": false}
 ```
 
-`skipped` counts pulled Experiences a push does not send back. `status` is
+`skipped` counts pulled Experiences a push does not send back; `held_back`
+counts Experiences written here that this push left for when reads see them. `status` is
 `incomplete`, with an `error`, when the global KB stopped answering; the batch
 up to that point is kept.
+
+### Labels and exclusions
+
+`schema_ref` is optional on every one of these and defaults to the service's
+`--declaration`; a restore, an exclude, and an include act on the schema of the
+label or Experience they name.
+
+| Request | Body | Response |
+|---|---|---|
+| `GET /v1/labels?schema_ref=` | | `{"schema_ref", "current_label_id", "modified", "labels": [<label>, ...]}`, newest first |
+| `POST /v1/labels` | `{"schema_ref"?, "name"?}` | `<label>` |
+| `DELETE /v1/labels/{label_id}` | | `{"deleted": "<label_id>"}` |
+| `POST /v1/restore` | `{"label_id"}` | `{"restored": <label>, "saved": <label> or null}` |
+| `GET /v1/exclusions?schema_ref=` | | `{"schema_ref", "exclusions": [{"experience_id", "reason", "excluded_at"}], "history": [{"experience_id", "action", "reason", "at"}]}` |
+| `POST /v1/exclusions` | `{"experience_id", "reason"}` | `{"experience_id", "status": "excluded"}` |
+| `DELETE /v1/exclusions/{experience_id}` | | `{"experience_id", "status": "included" or "not_excluded"}` |
+
+A label is `{"label_id", "schema_ref", "name", "reason", "created_at",
+"member_count", "excluded_count"}`; `reason` is `manual`, or `before_restore` for
+a label a restore made, whose `name` says so with its time.
 
 ### `GET /health`
 

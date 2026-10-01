@@ -39,7 +39,8 @@ def global_config_from_env(env: Mapping[str, str]) -> RemoteConfig | None:
 
 
 class SyncLedger:
-    """Per-global-KB push and pull cursors, and the Experiences pulled here, which are never pushed back."""
+    """Per-global-KB push and pull cursors, the Experiences pulled here, which are never pushed back, and the ones
+    a push held back because reads here did not see them."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -56,6 +57,15 @@ class SyncLedger:
                 """
             )
             connection.execute("CREATE TABLE IF NOT EXISTS pulled (experience_id TEXT PRIMARY KEY)")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS held_back (
+                    global_url TEXT NOT NULL,
+                    experience_id TEXT NOT NULL,
+                    PRIMARY KEY (global_url, experience_id)
+                )
+                """
+            )
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -93,6 +103,25 @@ class SyncLedger:
             row = connection.execute("SELECT 1 FROM pulled WHERE experience_id = ?", (experience_id,)).fetchone()
         return row is not None
 
+    def hold_back(self, global_url: str, experience_id: str) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO held_back(global_url, experience_id) VALUES (?, ?)", (global_url, experience_id)
+            )
+
+    def release(self, global_url: str, experience_id: str) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                "DELETE FROM held_back WHERE global_url = ? AND experience_id = ?", (global_url, experience_id)
+            )
+
+    def held_back(self, global_url: str) -> tuple[str, ...]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT experience_id FROM held_back WHERE global_url = ? ORDER BY experience_id", (global_url,)
+            ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
 
 def _report(
     status: str,
@@ -110,6 +139,7 @@ def _report(
         "created": counts["created"],
         "unchanged": counts["unchanged"],
         "skipped": counts["skipped"],
+        "held_back": counts["held_back"],
         "rejected": rejected or [],
         "has_more": has_more,
     }
@@ -139,6 +169,12 @@ class SyncedService(Protocol):
     def records_after(self, after: int, limit: int) -> tuple[tuple[tuple[int, Experience], ...], int, bool]:
         """Up to ``limit`` records written after sequence ``after``, the next cursor, and whether more remain."""
 
+    def held(self, experience_id: str) -> Experience:
+        """The stored Experience ``experience_id``."""
+
+    def is_visible(self, experience: Experience) -> bool:
+        """Whether reads on this service see ``experience``."""
+
 
 class GlobalSync:
     """One service's sync with its global KB; one push or pull batch runs at a time."""
@@ -157,29 +193,52 @@ class GlobalSync:
         self._target.health()
         return self._target
 
+    def _send(
+        self, target: RemoteClient, experience: Experience, counts: Counter[str], rejected: list[JsonValue]
+    ) -> str:
+        """Write one Experience to the global KB; returns the error that should stop this push, if any."""
+
+        declaration = self._service.declaration_for(experience.schema_ref)
+        try:
+            counts[target.write(experience, declaration=declaration).status] += 1
+        except RemoteClientError as exc:
+            if exc.retryable:
+                return str(exc)
+            rejected.append({"experience_id": experience.id, "detail": str(exc)})
+        return ""
+
     def push(self) -> dict[str, JsonValue]:
+        """Send the Experiences written here that reads here see; one they do not see waits until they do."""
+
         with self._lock:
             url = self._target.config.base_url if self._target is not None else ""
             try:
                 target = self._connected()
             except RemoteClientError as exc:
                 return _report("incomplete", url, error=str(exc))
-            position = self._ledger.cursor(url, _PUSH)
-            records, _, has_more = self._service.records_after(position, SYNC_BATCH)
             counts: Counter[str] = Counter()
             rejected: list[JsonValue] = []
+            for experience_id in self._ledger.held_back(url):
+                experience = self._service.held(experience_id)
+                if not self._service.is_visible(experience):
+                    continue
+                error = self._send(target, experience, counts, rejected)
+                if error:
+                    return _report("incomplete", url, counts, rejected, error=error)
+                self._ledger.release(url, experience_id)
+            position = self._ledger.cursor(url, _PUSH)
+            records, _, has_more = self._service.records_after(position, SYNC_BATCH)
             for sequence, experience in records:
                 if self._ledger.pulled(experience.id):
                     counts["skipped"] += 1
+                elif not self._service.is_visible(experience):
+                    self._ledger.hold_back(url, experience.id)
+                    counts["held_back"] += 1
                 else:
-                    declaration = self._service.declaration_for(experience.schema_ref)
-                    try:
-                        counts[target.write(experience, declaration=declaration).status] += 1
-                    except RemoteClientError as exc:
-                        if exc.retryable:
-                            self._ledger.advance(url, _PUSH, position)
-                            return _report("incomplete", url, counts, rejected, error=str(exc))
-                        rejected.append({"experience_id": experience.id, "detail": str(exc)})
+                    error = self._send(target, experience, counts, rejected)
+                    if error:
+                        self._ledger.advance(url, _PUSH, position)
+                        return _report("incomplete", url, counts, rejected, error=error)
                 position = sequence
             self._ledger.advance(url, _PUSH, position)
             return _report("completed", url, counts, rejected, has_more=has_more)
