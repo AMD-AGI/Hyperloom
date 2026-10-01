@@ -161,7 +161,7 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
         )
         state.enablement.revalidation_task_id = task.task_id
     else:
-        task_id = await coordinator._maybe_enqueue_enablement_baseline_revalidation()
+        task_id = await coordinator.enablement_revalidation._maybe_enqueue_enablement_baseline_revalidation()
         assert task_id
         task = await coordinator.tasks.get(task_id)
 
@@ -182,7 +182,7 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
     assert result["output_throughput"] == baseline_receipt["report"]["throughput"]["output_throughput"] == expected_tput
     assert result["accuracy"] == 0.95
 
-    await coordinator._promote_to_shared_state("baseline", result, task=task)
+    await coordinator.writeback._promote_to_shared_state("baseline", result, task=task)
     state.save(coordinator.session_dir)
     coordinator.shared_state = state = SharedState.load_or_init(coordinator.session_dir)
     assert state.baseline_tput == expected_tput
@@ -193,7 +193,7 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
     assert not state.enablement.validation_pending
 
     state.current_best["extra_server_args"] = "--mem-fraction-static 0.9"
-    enqueued = await coordinator._enqueue_internal_stack_rebench(reason="revalidated_anchor")
+    enqueued = await coordinator.writeback._enqueue_internal_stack_rebench(reason="revalidated_anchor")
     rebench = await coordinator.tasks.get(enqueued["task_id"])
     child_receipts = []
 

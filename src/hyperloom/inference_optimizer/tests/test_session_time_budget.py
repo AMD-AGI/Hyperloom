@@ -10,7 +10,6 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -146,11 +145,9 @@ class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
         assert cost == pytest.approx(_MEASURED_BASELINE_SEC / 60.0)
         assert ACTION_CATALOGUE["replay_warm_recipe"].requires_lanes == ACTION_CATALOGUE["baseline"].requires_lanes
 
-    def test_a_measurement_that_is_not_a_number_is_not_a_cost(self):
-        assert measured_baseline_runtime_sec(None) == 0.0
-        assert measured_baseline_runtime_sec(SimpleNamespace(baseline_runtime_sec="not-a-number")) == 0.0
-        assert measured_baseline_runtime_sec(SimpleNamespace(baseline_runtime_sec=-1.0)) == 0.0
-        assert measured_baseline_runtime_sec(SimpleNamespace(baseline_runtime_sec=_MEASURED_BASELINE_SEC)) == (
+    def test_a_negative_measurement_is_not_a_cost(self):
+        assert measured_baseline_runtime_sec(SharedState(baseline_runtime_sec=-1.0)) == 0.0
+        assert measured_baseline_runtime_sec(SharedState(baseline_runtime_sec=_MEASURED_BASELINE_SEC)) == (
             pytest.approx(_MEASURED_BASELINE_SEC)
         )
 

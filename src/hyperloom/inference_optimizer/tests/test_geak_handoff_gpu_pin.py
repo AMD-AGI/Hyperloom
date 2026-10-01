@@ -21,10 +21,10 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.common.visible_devices import parse_device_list
 from hyperloom.orchestrator.actions.executors._gpu_pin import (
     _coerce_tp,
     _is_autofilled_rocr,
-    _parse_device_list,
     _resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
@@ -54,21 +54,21 @@ def _clear_masks(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# _parse_device_list
+# parse_device_list
 # --------------------------------------------------------------------------- #
 
 
-def test_parse_device_list_forms() -> None:
-    assert _parse_device_list("4,5,6,7") == [4, 5, 6, 7]
-    assert _parse_device_list(" 6 ") == [6]
-    assert _parse_device_list("0;1") == [0, 1]
-    assert _parse_device_list("3,3,2") == [3, 2]
+def testparse_device_list_forms() -> None:
+    assert parse_device_list("4,5,6,7") == [4, 5, 6, 7]
+    assert parse_device_list(" 6 ") == [6]
+    assert parse_device_list("0;1") == [0, 1]
+    assert parse_device_list("3,3,2") == [3, 2]
 
 
-def test_parse_device_list_tolerates_junk_and_empty() -> None:
-    assert _parse_device_list("") == []
-    assert _parse_device_list(None) == []
-    assert _parse_device_list("a,,-1,2") == [2]
+def testparse_device_list_tolerates_junk_and_empty() -> None:
+    assert parse_device_list("") == []
+    assert parse_device_list(None) == []
+    assert parse_device_list("a,,-1,2") == [2]
 
 
 # --------------------------------------------------------------------------- #
