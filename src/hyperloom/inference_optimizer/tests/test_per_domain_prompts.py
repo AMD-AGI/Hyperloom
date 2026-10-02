@@ -19,6 +19,11 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     build_specialist_prompts,
 )
 
+# Every enablement round is dispatched on a classified verdict.
+_DISPATCHED = classify_failure(
+    "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
+).to_dict()
+
 
 def _build(domain_key: str) -> str:
     domain = get_domain(domain_key)
@@ -31,6 +36,7 @@ def _build(domain_key: str) -> str:
         gap_symptom="example symptom",
         gap_layer=domain.layer,
         workspace_path=f"/tmp/test/{domain_key}",
+        enablement_failure_signature=_DISPATCHED,
     )
     system, user = build_specialist_prompts(inp)
     return system + "\n" + user
@@ -202,6 +208,7 @@ def _build_split(domain_key: str) -> tuple[str, str]:
         warm_start_pitfalls=[{"attrs": {"description": "prior revert pitfall"}}],
         kb_subgraph={"nodes": ["x"]},
         workspace_path=f"/tmp/test/{domain_key}",
+        enablement_failure_signature=_DISPATCHED,
     )
     return build_specialist_prompts(inp)
 
@@ -253,6 +260,7 @@ def test_enablement_mandate_carries_the_dispatch_evidence():
         framework="vllm",
         enablement_source_context=weights,
         enablement_candidate_refs=("ROCm/vllm#123", "vllm-project/vllm#456"),
+        enablement_failure_signature=_DISPATCHED,
     )
     _system, user = build_specialist_prompts(inp)
     assert "SOURCE CONTEXT" in user
@@ -1211,6 +1219,7 @@ def test_enablement_ladder_rendered_exactly_once():
         framework="vllm",
         # notes is empty (no stacked patches, no build failure)
         notes="",
+        enablement_failure_signature=classify_failure("vllm cannot launch ModelFoo: unknown").to_dict(),
     )
     _, user = build_specialist_prompts(inp)
     count = user.count("ENABLEMENT METHODOLOGY")

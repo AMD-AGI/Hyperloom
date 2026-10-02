@@ -84,23 +84,12 @@ class FailureSignature:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any] | None) -> "FailureSignature":
-        """Rehydrate from :meth:`to_dict`; missing keys default to ``UNKNOWN``."""
-        raw = raw or {}
-        secondary = raw.get("secondary_kinds")
-        try:
-            confidence = float(raw.get("confidence") or 0.0)
-        except (TypeError, ValueError):
-            confidence = 0.0
-        return cls(
-            kind=str(raw.get("kind") or UNKNOWN),
-            offending_file=str(raw.get("offending_file") or ""),
-            offending_symbol=str(raw.get("offending_symbol") or ""),
-            raw_excerpt=str(raw.get("raw_excerpt") or ""),
-            confidence=confidence,
-            bridge_layer=str(raw.get("bridge_layer") or ""),
-            secondary_kinds=tuple(str(k) for k in secondary) if isinstance(secondary, (list, tuple)) else (),
-        )
+    def from_dict(cls, raw: Mapping[str, Any]) -> "FailureSignature":
+        """Rehydrate :meth:`to_dict`'s output after it crossed the task table as JSON.
+
+        JSON hands ``secondary_kinds`` back as a list.
+        """
+        return cls(**{**raw, "secondary_kinds": tuple(raw["secondary_kinds"])})
 
 
 # --- CapabilityGap projection -----------------------------------------------
