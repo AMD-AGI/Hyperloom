@@ -435,17 +435,20 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         """
         await self._reclaim_stale_dispatch_state()
         while True:
-            if await self._drain_completions():
-                return
+            booked = await self._drain_completions()
             shutting_down = await self._cancel_inflight_that_outlived_the_session()
             if not shutting_down and not self.admission_frozen and not self._dispatch_paused_for_phase_budget():
                 await self._spawn_fitting_queued()
+            if booked:
+                return
             waitable = [
                 entry.atask
                 for entry in self._inflight_actions.values()
                 if entry.booked_by_pump and not entry.atask.done()
             ]
             if not waitable:
+                if self._completion_queue:
+                    continue
                 return
             await asyncio.wait(waitable, timeout=self._dispatcher_poll_sec, return_when=asyncio.FIRST_COMPLETED)
 

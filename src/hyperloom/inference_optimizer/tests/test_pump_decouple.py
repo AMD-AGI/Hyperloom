@@ -84,6 +84,19 @@ async def test_pump_returns_after_first_completion_while_slow_work_keeps_running
     assert _in_flight_kinds(coord) == []
 
 
+async def test_a_pump_that_books_a_completion_still_spawns_the_task_it_unblocked(coord):
+    first, second = _Instant(), _Instant()
+    coord.sub.register_executor("first_action", first)
+    coord.sub.register_executor("second_action", second)
+    await _enqueue(coord, "first_action", "first", ["benchmark_lane"])
+    await _enqueue(coord, "second_action", "second", ["benchmark_lane"])
+
+    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await asyncio.sleep(0.1)
+
+    assert first.calls and second.calls
+
+
 async def test_a_running_task_is_not_dispatched_again_by_a_later_pump(coord):
     fast, slow = _Instant(), _Gated()
     coord.sub.register_executor("fast_action", fast)
