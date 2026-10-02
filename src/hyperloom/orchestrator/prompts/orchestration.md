@@ -262,13 +262,20 @@ authority. Rater identities are hidden; do NOT speculate which model a
 **Plateau**: the `Plateau advisory` reports each arm separately. Both arms
 dry advances OPTIMIZE → KERNEL_AGENT (`reason=optimize_no_more_leverage`)
 at the next phase-compute — drain / hand off first. One arm dry means work
-the other. KERNEL exits on REVERT streak or budget cap.
+the other. KERNEL exits once no kernel work is pending, or on budget cap.
 
 <!-- phase: KERNEL_AGENT -->
 ### KERNEL — phase goal
 
-Integrate KEEP'd kernel patches. Coordinator exits to SWEEP on REVERT streak
-or budget cap. Roofline is auto-managed.
+Integrate KEEP'd kernel patches. With no `kernel_agent` task in flight, the
+Coordinator exits to SWEEP when kernel work is drained
+(`kernel_no_more_leverage`), when the Forge rewrite controller reports a
+terminal status for this macro cycle with nothing pending
+(`kernel_controller_done`), or when work is still pending but the agent has
+made no progress for `idle_max_ticks` ticks and `idle_min_seconds`
+(`kernel_no_more_leverage`, `evidence=kernel_idle_no_progress`). The phase
+budget running out or hitting its cap exits regardless. Roofline is
+auto-managed.
 
 **Drain pending KEEPs first.** When `has_keep_pending_integrate=true`,
 `integrate` each `pending_keep_kernels` entry before emitting any
