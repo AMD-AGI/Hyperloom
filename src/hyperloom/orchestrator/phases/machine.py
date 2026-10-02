@@ -20,7 +20,7 @@ log = _logging.getLogger(__name__)
 
 
 class MachinePhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     def _ensure_phase_initialised(self) -> None:
         """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent)."""
@@ -196,6 +196,12 @@ class MachinePhase(CoordinatorCollaborator):
     async def _advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick."""
         state = self.shared_state
+        if state.closing_phase and state.phase == _phase_state.PHASE_CLOSE and not state.close_sequence_done:
+            # The closing transition supersedes any barrier this machine was holding, and the closing report is
+            # dispatched by the pump.
+            self.admission_frozen = False
+            await self.ensure_close_sequence(reason="time_exhausted")
+            return
         await self._track_kernel_idle_streak()
         optimize_enabled = self._optimize_enabled()
         # Only asked inside the phase: the query renews the open round's lease.
@@ -215,20 +221,21 @@ class MachinePhase(CoordinatorCollaborator):
             await self._maybe_enqueue_explore_research_scout()
             await self._maybe_force_stalled_domain_specialist()
         await self._maybe_enqueue_trajectory_reviewer()
-        if next_phase is None:
+        # Admission stays frozen for as long as a transition is pending.
+        self.admission_frozen = next_phase is not None and next_phase[0] != (state.phase or "").upper()
+        if not self.admission_frozen:
             return
         target, reason, evidence = next_phase
-        if target == (state.phase or "").upper():
-            return  # already there
         prior = state.phase
         barrier_reason = f"phase_transition:{str(prior or '').strip().upper()}->{target}"
         # The next phase starts on quiet GPUs: every running action is stopped, and the transition waits until the
-        # registry confirms none is left running. Queued work the next phase does not admit is dropped here too.
+        # registry confirms none is left running and every finished one is booked in this phase. Queued work the next
+        # phase does not admit is dropped here too.
         cancelled = await self.tasks.cancel_queued(
             allowed_kinds=_phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset()),
             reason=barrier_reason,
         )
-        stopped = await self.dispatcher.cancel_inflight_actions(reason=barrier_reason)
+        stopped = await self.cancel_inflight_actions(reason=barrier_reason)
         if cancelled or stopped:
             log.info(
                 "Coordinator.phase: %s cancelled %d queued and stopped %d running task(s)",
@@ -249,9 +256,12 @@ class MachinePhase(CoordinatorCollaborator):
                 },
             )
         running = await self.tasks.running()
-        if running:
-            log.info("phase_machine: holding %s until %d running task(s) stop", barrier_reason, len(running))
+        if running or self.has_unbooked_completions():
+            log.info(
+                "phase_machine: holding %s until %d running task(s) stop and are booked", barrier_reason, len(running)
+            )
             return
+        self.admission_frozen = False
         # Consume escalate hint after a hint-driven transition.
         if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
             state.consume_pending_escalate_hint()
@@ -388,9 +398,21 @@ class MachinePhase(CoordinatorCollaborator):
                 a history that kept growing after the decision.
         """
         self._reseed_orch_prompt_for_phase(to_phase)
+        self._on_phase_left(from_phase=from_phase, reason=reason, evidence=evidence)
 
-        # The machine has entry hooks only, so the phase being left closes its own timeline event here rather than in
-        # a hook of its own.
+        target = (to_phase or "").upper()
+        if target == _phase_state.PHASE_FRAMEWORK_AGENT:
+            await self.phase_framework.on_enter(from_phase=from_phase)
+        elif target == _phase_state.PHASE_KERNEL_AGENT:
+            await self._on_enter_kernel(from_phase=from_phase)
+        elif target == _phase_state.PHASE_SWEEP:
+            await self._on_enter_sweep(from_phase=from_phase)
+        elif target == _phase_state.PHASE_CLOSE:
+            await self._on_enter_close(from_phase=from_phase)
+
+    def _on_phase_left(self, *, from_phase: str, reason: str, evidence: dict[str, Any] | None) -> None:
+        """Settle the internal timeline owned by the phase being left."""
+
         if (from_phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT:
             try:
                 self._close_kernel_timeline(exit_reason=str(reason or ""))
@@ -401,22 +423,12 @@ class MachinePhase(CoordinatorCollaborator):
         # that reading is what the phase acted on.
         if (from_phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             try:
-                self._close_framework_timeline(
+                self.phase_framework.close_timeline(
                     exit_reason=str(reason or ""),
                     evidence=evidence if isinstance(evidence, dict) else None,
                 )
             except Exception:
                 log.debug("Coordinator: framework timeline close failed", exc_info=True)
-
-        target = (to_phase or "").upper()
-        if target == _phase_state.PHASE_FRAMEWORK_AGENT:
-            await self._on_enter_framework(from_phase=from_phase)
-        elif target == _phase_state.PHASE_KERNEL_AGENT:
-            await self._on_enter_kernel(from_phase=from_phase)
-        elif target == _phase_state.PHASE_SWEEP:
-            await self._on_enter_sweep(from_phase=from_phase)
-        elif target == _phase_state.PHASE_CLOSE:
-            await self._on_enter_close(from_phase=from_phase)
 
     def _reseed_orch_prompt_for_phase(self, to_phase: str) -> bool:
         """Re-scope the orchestration system prompt to the phase being entered."""

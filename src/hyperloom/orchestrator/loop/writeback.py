@@ -10,6 +10,7 @@ import json
 import os
 import shlex
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -88,6 +89,7 @@ from ..policy.gate import (
 from ..state.round_store import ABANDONED, BOOTED, FAILED
 from ..state.task_registry import Task
 from ..actions.executors.benchmark_result import is_valid_measurement
+from ..actions.executors.integrate_patch import KEEP_STATUSES
 from ..actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
     BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
@@ -103,6 +105,7 @@ from ..knowledge.agent_kb import PatchKB
 from .proposals import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
 import logging as _logging
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -205,9 +208,6 @@ def _graded_source(measurement: Mapping[str, Any], output_tput: float) -> dict[s
     return {**measurement, "output_throughput": float(output_tput)}
 
 
-_INTEGRATE_KEEP_STATUSES: frozenset[str] = frozenset({"kept", "advanced", "kept_inert"})
-
-
 def _integrate_marker_verdict(status: str, phase: str) -> str:
     """Classify one integrate window from its verdict and its durable phase.
 
@@ -222,9 +222,9 @@ def _integrate_marker_verdict(status: str, phase: str) -> str:
         still waiting for its benchmark, and ``"incomplete"`` when the two
         disagree and no obligation can be discharged from them.
     """
-    if phase == "accepted" and status in _INTEGRATE_KEEP_STATUSES:
+    if phase == "accepted" and status in KEEP_STATUSES:
         return "retained"
-    if phase == "restored" and status not in _INTEGRATE_KEEP_STATUSES and status != "applied_no_bench":
+    if phase == "restored" and status not in KEEP_STATUSES and status != "applied_no_bench":
         return "settled"
     if status == "applied_no_bench" and phase in {"applied", "applied_with_restored_stash"}:
         return "inflight"
@@ -257,32 +257,18 @@ def _confirmed_task_outcome(task: Task) -> dict[str, Any] | None:
     return None
 
 
-def _integrate_stack_fields(result: Mapping[str, Any], state: SharedState) -> dict[str, Any]:
-    """Validate kernel membership before promotion and copy its independent evidence."""
+def _integrate_stack_fields(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the members a KEEP promotes.
+
+    Only the kernel-stack lane produces multi-member results, and it binds them to their ledger rows before
+    promoting, so the members are read off the result rather than bound again here.
+    """
     from ..phases.kernel_stack import resolve_stack_members
 
     raw_members = result.get("stack_kernel_ids")
-    inferred_stack = (
-        (isinstance(raw_members, list) and len(raw_members) > 1)
-        or "stack_validation_started_at" in result
-        or "stack_member_identities" in result
-    )
-    membership = {"stack_validation": inferred_stack, **result}
-    members = resolve_stack_members(
-        membership,
-        entries=state.kernel_integrate_attempts if membership["stack_validation"] is True else None,
-    )
-    fields: dict[str, Any] = {
-        "stack_kernel_ids": list(members),
-        "stack_validation": membership["stack_validation"],
-    }
-    if membership["stack_validation"] is True:
-        fields["stack_validation_started_at"] = membership["stack_validation_started_at"]
-        fields["stack_member_identities"] = [
-            {key: entry[key] for key in ("kernel_id", "patch_path", "target_file")}
-            for entry in membership["stack_member_identities"]
-        ]
-    return fields
+    membership = {"stack_validation": isinstance(raw_members, list) and len(raw_members) > 1, **result}
+    members = resolve_stack_members(membership)
+    return {"stack_kernel_ids": list(members), "stack_validation": membership["stack_validation"]}
 
 
 def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
@@ -295,10 +281,10 @@ def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -
     return patch_lever_kind(result) or patch_lever_kind(task_params)
 
 
-#: The one owner label a patch KEEP stages under. Explore- and framework-agent
-#: lifts used to route to two separate columns; the three-column layout has a
-#: single ``patch`` column, so both collapse to this marker. Attribution keeps
-#: its own explore/framework split on the lever kind -- that is unaffected.
+#: The one owner label a patch KEEP stages under. The three-column layout has a
+#: single ``patch`` column, so explore- and framework-agent lifts both stage
+#: under this marker. Attribution keeps its own explore/framework split on the
+#: lever kind.
 _PATCH_KEEP_OWNER = "PATCH"
 
 #: Levers whose overlays feed the one patch column. ``kernel`` publishes through
@@ -573,14 +559,11 @@ def _record_config_attempts(
     recorder.settle_proposal(proposal_ref, disposition=DISPOSITION_ATTEMPTED)
 
 
-class WritebackCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+class WritebackCollaborator(CoordinatorCollaborator):
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
+    _journal: Journal | None
+    _lifecycle_last_save: float
 
     def _emit_lifecycle(
         self,
@@ -618,7 +601,7 @@ class WritebackCollaborator:
             now = time.monotonic()
             if terminal or (now - self._lifecycle_last_save >= self._lifecycle_save_min_interval_s):
                 self.shared_state.save(self.session_dir)
-                self._coord._lifecycle_last_save = now
+                self._lifecycle_last_save = now
         except Exception:
             log.debug(
                 "Coordinator: lifecycle emit failed (step=%s status=%s)",
@@ -1074,7 +1057,7 @@ class WritebackCollaborator:
                 new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
-        stack_fields = _integrate_stack_fields(result, self.shared_state)
+        stack_fields = _integrate_stack_fields(result)
         # A fusion sibling drained through the shared integrate lane must still
         # land on the stack as ``action="fusion"``: the idempotency short-circuit
         # (``_active_forge_fusion_env_flags``) and the remote-recipe fusion export
@@ -1761,10 +1744,10 @@ class WritebackCollaborator:
             The per-session :class:`Journal` instance (created on first call,
             with the baseline backfilled on subsequent calls).
         """
-        existing = getattr(self, "_journal", None)
-        if existing is None:
+        journal: Journal | None = getattr(self, "_journal", None)
+        if journal is None:
             ss = self.shared_state
-            self._coord._journal = Journal.load_or_create(
+            journal = self._journal = Journal.load_or_create(
                 self.session_dir,
                 session_id=str(getattr(ss, "recipe_kb_session_id", "") or "")
                 or str(getattr(ss, "session_id", "") or "")
@@ -1776,8 +1759,8 @@ class WritebackCollaborator:
             )
         else:
             # Backfill baseline once the baseline executor finishes.
-            existing.update_baseline(float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0))
-        return self._journal
+            journal.update_baseline(float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0))
+        return journal
 
     def _pitfall_severity_for(
         self,
@@ -1865,7 +1848,7 @@ class WritebackCollaborator:
         """
         models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
         hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
-        workload_tags = self._coord._collect_workload_tags()
+        workload_tags = self._collect_workload_tags()
         extra = workload_tags if workload_tags else None
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -1882,11 +1865,11 @@ class WritebackCollaborator:
             provenance_base["source_variant_name"] = variant_name
 
         if is_keep and gain_pct is not None and gain_pct > 0:
-            statement = self._coord._build_statement(
+            statement = self._build_statement(
                 change=change,
                 kind="lesson",
             )
-            impact = self._coord._build_measured_impact(
+            impact = self._build_measured_impact(
                 gain_pct=gain_pct,
                 throughput_after=throughput_after,
                 stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
@@ -1910,7 +1893,7 @@ class WritebackCollaborator:
 
         severity = self._pitfall_severity_for(pitfall_severity_dict)
         if severity is not None:
-            description = self._coord._build_statement(
+            description = self._build_statement(
                 change=change,
                 severity=severity,
                 kind="pitfall",
@@ -2444,11 +2427,11 @@ class WritebackCollaborator:
                 )
         for rev in reverted_rows:
             what_failed.append(rev)
-        kernel_optimizations = self._coord._build_kernel_optimizations_from_state()
+        kernel_optimizations = self._build_kernel_optimizations_from_state()
         cumulative_validated = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
         validated_stack_len = int(getattr(ss, "cumulative_gain_validated_stack_len", 0) or 0)
         # Workload-shape tags for shape-filtered warm-start queries (shared via _collect_workload_tags).
-        workload_tags = self._coord._collect_workload_tags()
+        workload_tags = self._collect_workload_tags()
         # framework_version left unset here (manifest-derived); the T0 backfill writes it.
         return {
             "best_config": best_config,
@@ -2813,7 +2796,7 @@ class WritebackCollaborator:
                 "result_type": _close_out.RESULT_INVALID_SCOPE,
             }
         try:
-            attrs = self._coord._build_recipe_attrs_from_state()
+            attrs = self._build_recipe_attrs_from_state()
             # Hoist workload tags flat into top-level recipe attrs (shallow-merged) for warm-start filters.
             workload_tags = attrs.get("workload") or {}
 
@@ -3015,10 +2998,8 @@ class WritebackCollaborator:
         self._record_specialist_round_product(task=task, round_entry=round_entry)
 
         # Per-anchor coverage ledger: every specialist completion is
-        # one "round" — tick all anchors, then zero the one that just ran so a
-        # long-idle domain's counter climbs until the hard-trigger forces it.
+        # one "round" — tick all anchors.
         self.shared_state.bump_domain_round_counters()
-        self.shared_state.note_specialist_dispatched(domain)
 
         self.shared_state.update_last_specialist(
             {
@@ -3044,30 +3025,20 @@ class WritebackCollaborator:
                 task.task_id,
             )
 
-        # Multi-node only: auto-materialise the proposal_set into a
-        # benchmarked explore task. No-op single-node (LLM drives explore
-        # directly there) and no-op when the proposal_set is empty / has
-        # no applicable variants. See :meth:`_maybe_materialize_mn_explore`.
-        await self._maybe_materialize_mn_explore(
-            task=task,
-            domain=domain,
-            proposals=proposals,
-        )
-
         # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain.
         if done_payload.get("new_findings"):
-            await self._coord._harvest_specialist_findings(done_payload)
+            await self._harvest_specialist_findings(done_payload)
 
         # Consume static-recon bridge candidates into gaps[] so the
         # freeform specialist picks them up with a precise mandate.
         if domain == "static_recon_specialist":
-            self._coord._consume_static_recon(done_payload)
+            self._consume_static_recon(done_payload)
 
         # Aggregate research evidence from any research domain that
         # self-reports a ``research`` block, so FRAMEWORK / explore lanes
         # reuse the session-wide seen-set. Idempotent for research_scout
         # (already harvested above).
-        self._coord._aggregate_research_evidence(done_payload)
+        self._aggregate_research_evidence(done_payload)
 
         # Refresh the gaps ledger after a specialist round closes; record the verdict as a gap attempt.
         gap_cid = str(done_payload.get("gap_canonical_id") or "").strip()
@@ -3088,14 +3059,14 @@ class WritebackCollaborator:
                 payload=done_payload,
             )
         # Push specialist-authored patches to the Critic so integrate_patch can pass.
-        await self._maybe_autosubmit_specialist_patches(
+        await self.phase_framework.maybe_autosubmit_specialist_patches(
             task=task,
             done_payload=done_payload,
         )
         # Relaxed FRAMEWORK rule: a config-lever deliverable (no source patch,
         # but a proposal_set of serving flags / env vars) is routed through the
         # same integrate_patch gate via its config_changes channel.
-        await self._maybe_autosubmit_framework_config(
+        await self.phase_framework.maybe_autosubmit_config(
             task=task,
             done_payload=done_payload,
         )
@@ -3235,6 +3206,11 @@ class WritebackCollaborator:
                     graded.degrade_reason,
                 )
                 return False
+            if graded.veto_reason:
+                log.warning(
+                    "current_best held: %s winner refused by the latency budget (%s)", task_kind, graded.veto_reason
+                )
+                return False
             if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
                 log.info(
                     "current_best held: %s winner %s intvty %.1f->%.1f tput %.1f->%.1f",
@@ -3335,6 +3311,7 @@ class WritebackCollaborator:
                         variant_name,
                     )
                 stack_entry: dict[str, Any] = {
+                    "stack_entry_id": uuid.uuid4().hex,
                     "action": task_kind,
                     "variant_name": variant_name,
                     "candidate_extra_server_args": candidate_args,
@@ -3849,6 +3826,29 @@ class WritebackCollaborator:
             # Reads the current_best just assigned, so it has to follow it.
             self._stamp_current_best_measurement(result)
             changed = True
+            # The reference the run is measured against is itself over the SLA, so
+            # nothing that follows can clear it. Stopping here costs one baseline;
+            # continuing spends the whole --max-hours refusing every candidate to
+            # learn something already knowable.
+            from hyperloom.common.perf_metric import latency_veto_reason
+
+            baseline_veto = latency_veto_reason(
+                result.get("e2el_mean_ms"),
+                float(self.shared_state.latency_budget_ms),
+            )
+            if baseline_veto:
+                log.error(
+                    "baseline does not satisfy --max-latency-ms (%s): budget %.1f ms, baseline %s. "
+                    "No candidate can clear a ceiling the reference already breaks; stopping.",
+                    baseline_veto,
+                    float(self.shared_state.latency_budget_ms),
+                    (
+                        f"{float(result['e2el_mean_ms']):.1f} ms"
+                        if isinstance(result.get("e2el_mean_ms"), (int, float))
+                        else "reported no end-to-end latency"
+                    ),
+                )
+                self.shared_state.set_stop_reason("baseline_over_latency_budget")
         if anchor_accepted:
             audit_decision = "promoted"
         elif isinstance(tput, (int, float)) and tput > 0:
@@ -4094,7 +4094,7 @@ class WritebackCollaborator:
             got_hash: The fingerprint the run reported.
             got_overlay_digest: The overlay digest observed after the run.
         """
-        recorder = self.phase_kernel._kernel_timeline()
+        recorder = self._kernel_timeline()
         if recorder is None:
             return
         params = task.params or {}
@@ -4134,7 +4134,7 @@ class WritebackCollaborator:
         afterwards. The recorder declines silently when the kernel event has
         already closed, and the close-out's ``geak_candidate`` carries it then.
         """
-        recorder = self.phase_kernel._kernel_timeline()
+        recorder = self._kernel_timeline()
         if recorder is None:
             return
         recorder.record_geak_rebench_conclusion(
@@ -4520,7 +4520,7 @@ class WritebackCollaborator:
                     ps_stamped["revalidation_status"] = "no_material"
                     self.shared_state.geak_result = ps_stamped
                     self._record_geak_rebench_conclusion(final_status="no_material")
-                    self.phase_kernel._reject_geak_kernel_journey(
+                    self._reject_geak_kernel_journey(
                         ps_stamped,
                         measured_tput=float(measured),
                         current_best_tput=(float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0),
@@ -4579,10 +4579,7 @@ class WritebackCollaborator:
                     )
                     fallback_result: dict[str, Any]
                     try:
-                        # Routed via ``_coord`` so a test / caller that overrides
-                        # ``coordinator._validate_geak_via_geak_harness`` still wins
-                        # (bare-name delegation resolves it back onto this class).
-                        fallback_result = await self._coord._validate_geak_via_geak_harness(reason="2b_inconclusive")
+                        fallback_result = await self._validate_geak_via_geak_harness(reason="2b_inconclusive")
                     except Exception as exc:
                         log.exception("geak 2a GEAK-harness fallback failed")
                         fallback_result = {
@@ -4977,9 +4974,7 @@ class WritebackCollaborator:
     # (``_replay_keep_from_result``), the resume-reconcile path
     # (``_resume_consistency_pass`` + its recover helpers), and the
     # current_best lift path (``_current_best_launch_config`` /
-    # ``build_env_spec``). Methods keep bare ``self.<name>`` access; tests
-    # monkeypatch them via ``coord.writeback.<name>`` (or bare-name
-    # ``_DELEGATED`` on the coordinator).
+    # ``build_env_spec``).
     # ------------------------------------------------------------------
     def _detect_resume_state(self) -> dict[str, Any]:
         """Synchronously inspect persistence to determine if this is a resume (non-blocking).
@@ -4988,12 +4983,11 @@ class WritebackCollaborator:
             A dict with ``is_resume``, ``event_count``, ``state_json_present``
             and ``rebuilt`` (the last set later by :meth:`replay_for_resume`).
         """
-        ev_count = self.bus.db.fetchone_sync("SELECT COUNT(*) AS c FROM events")
-        events_present = (int(ev_count["c"]) if ev_count else 0) > 0
+        event_count = self.bus.count_sync()
         state_path = SharedState.state_path(self.session_dir)
         return {
-            "is_resume": events_present or state_path.exists(),
-            "event_count": int(ev_count["c"]) if ev_count else 0,
+            "is_resume": event_count > 0 or state_path.exists(),
+            "event_count": event_count,
             "state_json_present": state_path.exists(),
             "rebuilt": False,  # set by replay_for_resume()
         }
@@ -5456,10 +5450,18 @@ class WritebackCollaborator:
                 )
                 if hasattr(state, "set_stop_reason"):
                     state.set_stop_reason("active_inferencex_checkout_missing")
-        # (0) Interrupted stack unwind: its members are still applied to the
-        # framework tree. SWEEP entry is where this used to be retried, so
-        # everything a resumed leg benchmarked before reaching SWEEP measured
-        # the patched tree -- the failure the halt exists to prevent.
+        # Loading the state file is the one boundary the persisted
+        # ``optimization_stack`` crosses, so bind its rows to their members here:
+        # a row that cannot name what it integrated makes every later read of the
+        # stack a guess, and every reader below inherits that guess.
+        try:
+            self._stack_resolved_kernel_ids()
+        except ValueError as exc:
+            self._halt_stack_recovery(exc)
+        # (0) Interrupted stack attempt: its members may still be applied to the
+        # framework tree, and everything this pass or the leg benchmarks before
+        # SWEEP entry would measure them. SWEEP entry settles through the same
+        # recovery.
         await self._resume_recover_interrupted_stack(report)
         # (1) Half-applied integrate window: replay the
         # missing stack append or roll back the partial patch BEFORE anything
@@ -5602,6 +5604,9 @@ class WritebackCollaborator:
                 "extra_envs": dict(result.get("extra_envs_applied") or {}),
                 "tput": float(tput),
                 **graded_axes_of(result.get("bench_result") or result),
+                # ``graded_axes_of`` carries the throughput axes only; the latency
+                # budget grades on this one and fails closed without it.
+                "e2el_mean_ms": (result.get("bench_result") or result).get("e2el_mean_ms"),
                 "workspace": result.get("workspace"),
                 "provenance": provenance or "integrate_patch",
                 "scope": "source_patch",
@@ -5673,31 +5678,13 @@ class WritebackCollaborator:
             return False
 
     async def _resume_recover_interrupted_stack(self, report: dict[str, Any]) -> None:
-        """Retry an unwind a halted leg left owed, before anything here can benchmark.
+        """Settle a stack attempt a crash or halt left behind, before anything here can benchmark.
 
-        The recovery halts the session again if the tree still cannot be
-        settled, which is the point: the alternative is measuring a tree whose
-        contents no resume can account for.
+        The recovery halts the session if the tree cannot be settled, which is
+        the point: the alternative is measuring a tree whose contents no resume
+        can account for.
         """
-        state = self.shared_state
-        if not (
-            getattr(state, "pending_stack_validation_result", None)
-            or getattr(state, "pending_stack_validation_apply_results", None)
-        ):
-            return
-        try:
-            recovered = await self._recover_interrupted_stack_validation()
-        except ValueError as exc:
-            # The checkpoint cannot be bound to the ledger rows it was written
-            # from, so which patches are on the tree is unknown. Halting says
-            # that and keeps the evidence; raising would leave the resume above
-            # ``Coordinator.run``'s own guard, ending the process with the
-            # patches applied and no stop reason naming why.
-            self.shared_state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
-            self.shared_state.save(self.session_dir)
-            report["warnings"].append({"kind": "interrupted_stack_validation_unbindable", "error": repr(exc)})
-            return
-        if recovered:
+        if await self._recover_interrupted_stack_validation():
             report["fixes"].append({"kind": "interrupted_stack_validation_recovered"})
 
     def _clear_pending_integrate(self, pending: dict[str, Any], *, gc_runtime: bool) -> None:
@@ -5877,7 +5864,7 @@ class WritebackCollaborator:
         pending = getattr(state, "warm_replay_pending", {}) or {}
         if not isinstance(pending, dict) or not pending:
             return
-        rollback = self.phase_prelude._rollback_combined_warm({}, None)
+        rollback = self._rollback_combined_warm({}, None)
         errors = list(rollback.get("errors") or [])
         if errors:
             report["warnings"].append(

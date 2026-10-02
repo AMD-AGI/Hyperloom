@@ -75,7 +75,7 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "OPENAI_CUSTOM_HEADERS",
     "GEAK_BASE_URL",
     "LLM_API_BASE",
-    # Legacy: not consumed anymore, still stripped if present.
+    # Legacy: nothing reads these, but they are stripped if present.
     "LLM_GATEWAY_KEY",
     "SAFE_API_KEY",
     # A retired DeepSeek config normalizes to BOTH protocol sides, so it is stripped in either single-provider mode:
@@ -514,14 +514,10 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]
 # (cp314 postdates it) must be allowed to keep the newer release the
 # kernel-agent installer resolved for them.
 _RAY_MIN_VERSION = "2.44.1"
-# Only 2.44.1's CLI fails to import with click >= 8.3.0, so the ceiling applies
-# to that release alone; forcing it onto newer Ray downgrades a working click.
+# Only 2.44.1's CLI requires the default Click ceiling. Explicit Ray/Click
+# overrides retain the installer's requested ceiling on other releases too.
 _RAY_CLICK_PINNED_VERSION = "2.44.1"
 _RAY_CLI_CLICK_MAX_VERSION = "8.3.0"
-_RAY_INSTALL_SPEC = f"ray[default]=={_RAY_MIN_VERSION}"
-_RAY_FALLBACK_INSTALL_SPEC = f"ray[default]>={_RAY_MIN_VERSION}"
-_CLICK_INSTALL_SPEC = f"click<{_RAY_CLI_CLICK_MAX_VERSION}"
-_RAY_INSTALL_SPECS = (_RAY_INSTALL_SPEC, _CLICK_INSTALL_SPEC)
 
 
 _RAY_SMOKE_TEMPLATE = r"""
@@ -532,7 +528,8 @@ import sys
 RAY_MIN_VERSION = "__RAY_MIN_VERSION__"
 RAY_CLICK_PINNED_VERSION = "__RAY_CLICK_PINNED_VERSION__"
 RAY_CLI_CLICK_MAX_VERSION = "__RAY_CLI_CLICK_MAX_VERSION__"
-RAY_CLI_CLICK_MAX_VERSION_TUPLE = __RAY_CLI_CLICK_MAX_VERSION_TUPLE__
+ray_version = sys.argv[1] if len(sys.argv) > 1 else ""
+click_override = sys.argv[2] if len(sys.argv) > 2 else ""
 
 def _version_tuple(version: str) -> tuple[int, int, int]:
     parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
@@ -545,20 +542,25 @@ except Exception as exc:
     print(f"ray import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
     raise SystemExit(1)
 
-if _version_tuple(ray.__version__) < _version_tuple(RAY_MIN_VERSION):
+if ray_version:
+    if ray.__version__ != ray_version:
+        print(f"ray version mismatch: {ray.__version__} != {ray_version}", file=sys.stderr)
+        raise SystemExit(1)
+elif _version_tuple(ray.__version__) < _version_tuple(RAY_MIN_VERSION):
     print(f"ray too old: {ray.__version__} < {RAY_MIN_VERSION}", file=sys.stderr)
     raise SystemExit(1)
 
-if ray.__version__ == RAY_CLICK_PINNED_VERSION:
+if ray_version or click_override or ray.__version__ == RAY_CLICK_PINNED_VERSION:
+    click_max_version = click_override or RAY_CLI_CLICK_MAX_VERSION
     try:
         click_version = md.version("click")
     except md.PackageNotFoundError:
         print("click is not installed", file=sys.stderr)
         raise SystemExit(1)
 
-    if _version_tuple(click_version) >= RAY_CLI_CLICK_MAX_VERSION_TUPLE:
+    if _version_tuple(click_version) >= _version_tuple(click_max_version):
         print(
-            f"click version incompatible with Ray CLI: {click_version} >= {RAY_CLI_CLICK_MAX_VERSION}",
+            f"click version incompatible with Ray CLI: {click_version} >= {click_max_version}",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -573,17 +575,10 @@ print(ray.__version__)
 """
 
 
-def _version_tuple(version: str) -> tuple[int, int, int]:
-    parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
-    parts.extend([0] * (3 - len(parts)))
-    return tuple(parts[:3])
-
-
 _RAY_SMOKE = (
     _RAY_SMOKE_TEMPLATE.replace("__RAY_MIN_VERSION__", _RAY_MIN_VERSION)
     .replace("__RAY_CLICK_PINNED_VERSION__", _RAY_CLICK_PINNED_VERSION)
     .replace("__RAY_CLI_CLICK_MAX_VERSION__", _RAY_CLI_CLICK_MAX_VERSION)
-    .replace("__RAY_CLI_CLICK_MAX_VERSION_TUPLE__", repr(_version_tuple(_RAY_CLI_CLICK_MAX_VERSION)))
 )
 
 
@@ -600,9 +595,9 @@ def _ray_probe_env() -> dict[str, str]:
     return env
 
 
-def _ray_smoke(python_exe: str) -> subprocess.CompletedProcess:
+def _ray_smoke(python_exe: str, ray_version: str = "", click_max_version: str = "") -> subprocess.CompletedProcess:
     return subprocess.run(
-        [python_exe, "-c", _RAY_SMOKE],
+        [python_exe, "-c", _RAY_SMOKE, ray_version, click_max_version],
         capture_output=True,
         text=True,
         env=_ray_probe_env(),
@@ -611,7 +606,11 @@ def _ray_smoke(python_exe: str) -> subprocess.CompletedProcess:
 
 def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     """Probe-then-install Ray using the interpreter that will import it."""
-    check = _ray_smoke(python_exe)
+    ray_version = os.environ.get("RAY_VERSION") or ""
+    click_override = os.environ.get("RAY_CLI_CLICK_MAX_VERSION") or ""
+    ray_spec = f"ray[default]=={ray_version or _RAY_MIN_VERSION}"
+    click_spec = f"click<{click_override or _RAY_CLI_CLICK_MAX_VERSION}"
+    check = _ray_smoke(python_exe, ray_version, click_override)
     if check.returncode == 0:
         print("Preflight: ray OK")
         return {
@@ -619,26 +618,22 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
             "skip_reason": None,
             "target": "ray",
             "interpreter": python_exe,
-            "spec": _RAY_INSTALL_SPEC,
-            "version_after": (check.stdout or "").strip() or _RAY_MIN_VERSION,
+            "spec": ray_spec,
+            "version_after": (check.stdout or "").strip() or ray_version or _RAY_MIN_VERSION,
             "message": None,
         }
     reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]
-    print(f"Preflight: ray/click invalid ({reason}), installing {_RAY_INSTALL_SPEC} + {_CLICK_INSTALL_SPEC} ...")
-    specs: tuple[str, ...] = _RAY_INSTALL_SPECS
+    print(f"Preflight: ray/click invalid ({reason}), installing {ray_spec} + {click_spec} ...")
+    specs: tuple[str, ...] = (ray_spec, click_spec)
     install = subprocess.run(
         [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
         capture_output=True,
         text=True,
     )
-    if install.returncode != 0:
-        # The pinned release has no distribution for this interpreter; take one
-        # that resolves and drop the click ceiling, which only guards 2.44.1.
-        specs = (_RAY_FALLBACK_INSTALL_SPEC,)
-        print(
-            f"Preflight: {_RAY_INSTALL_SPEC} does not resolve for {python_exe}; "
-            f"retrying with {_RAY_FALLBACK_INSTALL_SPEC}"
-        )
+    if install.returncode != 0 and not ray_version:
+        # Preserve an explicit Click ceiling; the default only guards 2.44.1.
+        specs = (f"ray[default]>={_RAY_MIN_VERSION}",) + ((click_spec,) if click_override else ())
+        print(f"Preflight: {ray_spec} does not resolve for {python_exe}; retrying with {' '.join(specs)}")
         install = subprocess.run(
             [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
             capture_output=True,
@@ -647,11 +642,11 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     if install.returncode != 0:
         detail = (install.stderr or install.stdout or "no pip output").strip()
         raise RuntimeError(f"Ray install failed for {' '.join(specs)}: {detail}")
-    check = _ray_smoke(python_exe)
+    check = _ray_smoke(python_exe, ray_version, click_override)
     if check.returncode != 0:
         reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip()
         raise RuntimeError(f"Ray install completed but smoke test still failed: {reason}")
-    version_after = (check.stdout or "").strip() or _RAY_MIN_VERSION
+    version_after = (check.stdout or "").strip() or ray_version or _RAY_MIN_VERSION
     print(f"Preflight: ray installed OK ({version_after})")
     return {
         "status": "applied",
@@ -762,7 +757,7 @@ SKIP_FRAMEWORK_CHECK_ENV = "HYPERLOOM_SKIP_FRAMEWORK_CHECK"
 
 #: Frameworks ``install_baremetal.sh --install-framework`` accepts; it exits 2 on
 #: anything else. A test asserts this stays equal to the installer's own list.
-_SETUP_INSTALLABLE_FRAMEWORKS = frozenset({"sglang", "vllm"})
+_SETUP_INSTALLABLE_FRAMEWORKS = frozenset({"sglang", "vllm", "atom"})
 
 
 def _setup_install_command(framework: str) -> str:
@@ -1025,12 +1020,17 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
     interpreters = _framework_probe_interpreters(framework, benchmark_python)
     found, probe = _resolve_framework_build(framework, interpreters)
     if framework == "atom" and (not found or probe.verdict is not True):
+        remedy = (
+            "Select the existing ATOM Python and put its bin directory first on PATH, or install ATOM into it:\n"
+            f"    {_setup_install_command(framework)}"
+            if not found
+            else "Select an ATOM Python whose torch is a ROCm build and put its bin directory first on PATH."
+        )
         print(
             f"Preflight: ERROR — atom runtime check failed in python3 ({found or ', '.join(interpreters) or 'not on PATH'}). "
             "ATOM must import with a ROCm torch build (torch.version.hip) in the selected Python environment."
             f"{_probe_detail_block(probe.detail)}\n"
-            "Select the existing ATOM Python and put its bin directory first on PATH; "
-            "setup does not install ATOM.",
+            f"{remedy}",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -1682,7 +1682,7 @@ def _print_recipe_kb_queue_status() -> dict[str, Any]:
 _INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
 # MUST stay in lockstep with INFERENCEX_REF in assets/install.sh.
 _INFERENCEX_REF_DEFAULT = "408c015be4b22d14c69518643609669405507077"
-_MAGPIE_REF_DEFAULT = "658562345ad1a7e5a617e3631f3acfcec0eade4a"
+_MAGPIE_REF_DEFAULT = "c5c80698fef1b89cc6882264b80d5b306d4e9328"
 _MAGPIE_GENERIC_HEALTH_CODE = "import Magpie\n"
 _MAGPIE_NATIVE_AGENTX_HEALTH_CODE = (
     _MAGPIE_SOURCE_IDENTITY_CODE
@@ -2571,7 +2571,7 @@ def _preflight(
                     "writable checkout instead."
                 )
             elif (Path(candidate) / "benchmarks" / "benchmark_lib.sh").is_file():
-                # Complete but at the wrong revision: the case that used to be accepted silently.
+                # Complete but at the wrong revision: refused, never accepted silently.
                 print(
                     f"Preflight: ignoring InferenceX at {candidate}: it is at "
                     f"{_inferencex_head_sha(candidate)[:12] or 'an unreadable ref'}, "
@@ -2675,8 +2675,8 @@ def _preflight(
     )
 
     # --- Magpie/InferenceX eval-concurrency compatibility ------------------- Preflight installs Magpie and clones
-    # InferenceX itself (above), entirely outside install.sh -- and install.sh is the ONLY place that used to apply
-    # the Magpie script patches.
+    # InferenceX itself (above), entirely outside install.sh, so the Magpie script patches install.sh applies are
+    # applied here as well.
     try:
         if _magpie_backend_active and not _native_agentx_preflight_active:
             # Trust patch first, mirroring install.sh: the eval-concurrency strip removes the very `run_eval ...

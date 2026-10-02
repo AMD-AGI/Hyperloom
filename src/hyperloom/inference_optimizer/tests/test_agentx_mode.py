@@ -111,7 +111,9 @@ assert not any(name.startswith('hyperloom.inference_optimizer.agentx') for name 
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("epoch,native,optimize", [(1, False, False), (2, True, False), (3, True, True), (4, True, True)])
+@pytest.mark.parametrize(
+    "epoch,native,optimize", [(1, False, False), (2, True, False), (3, True, True), (4, True, True)]
+)
 def test_saved_epoch_controls_subprocess_routing(tmp_path, epoch, native, optimize):
     state = {"benchmark_mode": "agentx", "agentx_epoch": epoch}
     (tmp_path / "state.json").write_text(json.dumps(state), encoding="utf-8")
@@ -151,3 +153,24 @@ def test_persisted_epoch_keeps_backend_and_optimization_contract(epoch, warm_rep
     assert restored.agentx_backend == backend
     assert restored.agentx_epoch == epoch
     assert restored.warm_replay_enabled is warm_replay
+
+
+@pytest.mark.parametrize("client, native", [("", True), ("aiperf", True), ("mlperf", False)])
+def test_fresh_client_selection_keeps_managed_default_and_explicit_mlperf(client, native):
+    env = {"HYPERLOOM_AGENTX": "1", "HYPERLOOM_AGENTIC_BACKEND": client}
+    assert native_agentx_session(env=env) is native
+    assert managed_native_agentx_session(env=env) is native
+
+
+@pytest.mark.parametrize("backend", ["legacy", "aiperf", "mlperf"])
+def test_persisted_epoch_one_client_survives_load_and_subprocess_routing(tmp_path, backend):
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState.from_dict({"benchmark_mode": "agentx", "agentx_epoch": 1, "agentx_backend": backend})
+    state.save(tmp_path)
+    restored = SharedState.load_or_init(tmp_path)
+    assert restored.agentx_epoch == 1
+    assert restored.agentx_backend == backend
+    env = {"HYPERLOOM_AGENTX": "1", "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR": str(tmp_path)}
+    assert not native_agentx_session(env=env)
+    assert not managed_native_agentx_session(env=env)

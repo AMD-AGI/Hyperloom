@@ -6,7 +6,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Independent (TraceLens-free) trace analysis backend for the bypass route."""
+"""Trace analysis backend for the bypass route.
+
+The analysis itself (trace reading, roofline, classification) is TraceLens-free.
+Source path mapping is the one exception: it delegates to TraceLens' independent
+``kernel_source`` path-identifier (path identification only, not TraceLens'
+analysis layer), so the route needs an importable TraceLens checkout.
+"""
 
 from __future__ import annotations
 
@@ -352,7 +358,9 @@ def _maybe_build_shape_manifest(
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Build the CLI parser mirroring the flags the handler forwards."""
-    p = argparse.ArgumentParser(description="Hyperloom bypass trace analysis (TraceLens-free)")
+    p = argparse.ArgumentParser(
+        description="Hyperloom bypass trace analysis (TraceLens-free analysis; source path mapping uses TraceLens' kernel_source)"
+    )
     p.add_argument("--trace-input", required=True)
     p.add_argument("--session-id", default="")
     p.add_argument("--top-k", type=int, default=10)
@@ -494,7 +502,10 @@ def main(argv: list[str] | None = None) -> int:
         trace_input=str(args.trace_input),
     )
     for _skipped_step, _skip_reason in (
-        ("install_tracelens", "the TraceLens-free reader needs no TraceLens checkout"),
+        (
+            "install_tracelens",
+            "the orchestrator provisions the TraceLens checkout upstream; the bypass reader/analysis installs nothing but needs TraceLens importable for source path mapping",
+        ),
         ("split_trace", "the reader windows the trace in memory and writes no split chunks"),
         ("select_chunk", "no split chunks exist to select from"),
     ):

@@ -13,9 +13,9 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-# Frozen protocol options in InferenceX's version-1 launch contract. Result
-# verification is pure: it must not import or execute a checkout named by a
-# benchmark artifact. Cross-repository tests exercise the producer separately.
+# Frozen protocol options for persisted InferenceX version-1 launch contracts.
+# Managed sessions instead use their audited Magpie installation to validate
+# argv semantics, including profiler flags and future protected options.
 _PROTOCOL_ARGS = frozenset(
     {
         "--model",
@@ -131,12 +131,14 @@ def native_workload_fingerprint(benchmark: Mapping[str, Any], static_fingerprint
     return canonical_sha256({"static_execution_fingerprint": static_fingerprint, "benchmark": payload})
 
 
-def _validate_profile_receipt(
+def _validate_managed_receipt(
     benchmark: Mapping[str, Any], evidence: Mapping[str, Any], workspace: Path | None
 ) -> list[str]:
-    """Let the audited Magpie installation verify its diagnostic instrumentation."""
-    if workspace is None:
+    """Delegate managed argv and diagnostic instrumentation to audited Magpie."""
+    profile = ((benchmark.get("profiler") or {}).get("torch_profiler") or {}).get("enabled") is True
+    if profile and workspace is None:
         return ["server_launch_profile_workspace_missing"]
+    failure = "server_launch_profile_verification_failed" if profile else "server_launch_managed_verification_failed"
     from hyperloom.common.env_safety import scrub_benchmark_process_env
     from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_benchmark_interpreter
 
@@ -148,15 +150,22 @@ def _validate_profile_receipt(
 import sys
 import Magpie
 from Magpie.modes.benchmark import BenchmarkConfig
-from Magpie.modes.benchmark.agentx_launch import read_launch_evidence
+from Magpie.modes.benchmark.agentx_launch import apply_launch_args, read_launch_evidence, _validate_golden_launch
 package = Path(Magpie.__file__).resolve().parent
 commit, _ = _resolve_magpie_source_identity(package)
 _validate_magpie_execution_tree(package, commit)
 payload = json.load(sys.stdin)
-config = BenchmarkConfig.from_dict(payload["benchmark"])
-actual = read_launch_evidence(config, Path(payload["workspace"]))
-if actual != payload["evidence"]:
-    raise ValueError("profile receipt does not match the report")
+benchmark, evidence = payload["benchmark"], payload["evidence"]
+if payload["profile"]:
+    config = BenchmarkConfig.from_dict(benchmark)
+    actual = read_launch_evidence(config, Path(payload["workspace"]))
+    if actual != evidence:
+        raise ValueError("profile receipt does not match the report")
+else:
+    expected = apply_launch_args(evidence["base_argv"], benchmark["agentx"]["launch_overrides"], benchmark["framework"])
+    if evidence["effective_argv"] != expected:
+        raise ValueError("managed effective argv does not match the candidate")
+    _validate_golden_launch(benchmark["agentx"]["resolved"]["server-launch-spec"], expected)
 """
     )
     import os
@@ -164,7 +173,14 @@ if actual != payload["evidence"]:
     try:
         checked = subprocess.run(
             [resolve_benchmark_interpreter(), "-c", code],
-            input=json.dumps({"benchmark": dict(benchmark), "evidence": dict(evidence), "workspace": str(workspace)}),
+            input=json.dumps(
+                {
+                    "benchmark": dict(benchmark),
+                    "evidence": dict(evidence),
+                    "workspace": str(workspace),
+                    "profile": profile,
+                }
+            ),
             capture_output=True,
             text=True,
             timeout=120,
@@ -172,8 +188,8 @@ if actual != payload["evidence"]:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return ["server_launch_profile_verification_failed"]
-    return [] if checked.returncode == 0 else ["server_launch_profile_verification_failed"]
+        return [failure]
+    return [] if checked.returncode == 0 else [failure]
 
 
 def validate_server_launch(benchmark: Mapping[str, Any], evidence: Any, *, workspace: Path | None = None) -> list[str]:
@@ -193,13 +209,15 @@ def validate_server_launch(benchmark: Mapping[str, Any], evidence: Any, *, works
     if evidence.get("evidence_sha256") != canonical_sha256(unsigned):
         errors.append("server_launch_evidence_hash_mismatch")
     overrides = benchmark["agentx"]["launch_overrides"]
+    resolved = benchmark["agentx"].get("resolved", {})
+    spec = resolved.get("server-launch-spec") if isinstance(resolved, Mapping) else None
     if evidence.get("overrides_sha256") != canonical_sha256(overrides):
         errors.append("server_launch_candidate_mismatch")
     for key in ("base_argv", "effective_argv"):
         args = evidence.get(key)
         if not isinstance(args, list) or not args or any(not isinstance(arg, str) or "\0" in arg for arg in args):
             errors.append(f"server_launch_{key}_invalid")
-    if not any(code.endswith("_argv_invalid") for code in errors):
+    if not isinstance(spec, Mapping) and not any(code.endswith("_argv_invalid") for code in errors):
         try:
             expected_argv = _expected_launch_argv(evidence["base_argv"], overrides)
         except ValueError:
@@ -239,8 +257,6 @@ def validate_server_launch(benchmark: Mapping[str, Any], evidence: Any, *, works
         errors.append("server_launch_source_mismatch")
     if evidence.get("absent_source_files", []) != overrides.get("absent_source_files", []):
         errors.append("server_launch_absent_source_mismatch")
-    resolved = benchmark["agentx"].get("resolved", {})
-    spec = resolved.get("server-launch-spec") if isinstance(resolved, Mapping) else None
     if isinstance(spec, Mapping):
         if evidence.get("owner") != "magpie":
             errors.append("server_launch_owner_mismatch")
@@ -248,9 +264,9 @@ def validate_server_launch(benchmark: Mapping[str, Any], evidence: Any, *, works
             errors.append("server_launch_recipe_sources_mismatch")
         profiler = benchmark.get("profiler") or {}
         torch = profiler.get("torch_profiler") or {}
-        if torch.get("enabled") is True:
-            errors.extend(_validate_profile_receipt(benchmark, evidence, workspace))
-        else:
+        if not any(code.endswith("_argv_invalid") for code in errors):
+            errors.extend(_validate_managed_receipt(benchmark, evidence, workspace))
+        if torch.get("enabled") is not True:
             if evidence.get("server_spec_sha256") != canonical_sha256(spec):
                 errors.append("server_launch_spec_mismatch")
             if evidence.get("base_argv") != spec.get("argv"):

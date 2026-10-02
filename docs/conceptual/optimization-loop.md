@@ -209,6 +209,39 @@ authoring specialist's prompt. The rungs, in increasing complexity:
    environment variable (see
    [Targeted builds (Rung 5)](../reference/environment-variables.md#targeted-builds-rung-5)).
 
+### Latency budget (constraint on KEEP)
+
+`--max-latency-ms` sets a ceiling on mean end-to-end latency, for **scriptable
+workloads only** (`xdit`, `custom`); the CLI refuses it for a serving framework.
+A scriptable workload grades on output throughput alone, and it is the only
+kind compute partitioning places work for, so it is where a throughput-only
+gate can buy throughput with per-request latency. An AgentX serving session
+already refuses that trade on interactivity.
+
+It is a constraint rather than an objective: it does not decide when the run
+stops, only which winners are admissible, so it composes with whichever
+`--target-*` is in use. It rides the same verdict the gain gates decide — a
+candidate that would otherwise KEEP and breaks the ceiling is a REVERT, with a
+`veto_reason` (`latency_budget_exceeded` or `latency_unmeasured`). A candidate
+that did not gain carries no veto, so the ledger names the gate that refused
+it. Every KEEP decision a scriptable session reaches reads that verdict —
+explore, a framework source patch, and a kernel integration — so a lane
+reverts its own over-budget change rather than leaving it on disk.
+
+The constraint exists because a throughput-only comparison does not merely
+tolerate a latency-for-throughput trade, it selects for the worst one on
+offer: facing a lever that raises aggregate throughput *by* making each stream
+slower, the largest regression is where the most throughput is.
+
+It fails closed. A candidate that reported no end-to-end latency is refused,
+since a constraint nobody measured is not one anybody satisfied — which is why
+every lane copies `e2el_mean_ms` onto the dict it promotes. It fails closed at
+the boundary too: if the baseline itself exceeds the ceiling, or reported no
+end-to-end latency, the run stops with `baseline_over_latency_budget` rather
+than spending its whole budget refusing every candidate to learn what was
+knowable at launch. Off by default, leaving KEEP behaviour unchanged when
+unset.
+
 ### Runnable gate (earned KEEP)
 
 A verified build does not KEEP on artifact verification alone. After a
@@ -322,16 +355,17 @@ be attempted or explicitly rejected before report can close the run.
 
 ## SWEEP
 
-Outside native AgentX, SWEEP measures the optimized stack against the baseline
-across a concurrency ladder, one arm each, and produces the throughput-vs-
-interactivity curve. Synthetic serving workloads default to powers of two down
-from 256; `--conc-sweep-concs` can override that ladder.
+SWEEP measures the optimized stack against the baseline across a concurrency
+ladder and produces a throughput-vs-interactivity curve. Synthetic workloads
+default to powers of two down from 256; legacy AgentX and the MLPerf backend
+use `1,4,8,10,14,20,28`. Override the ladder with `--conc-sweep-concs`.
+All AgentX sessions default the sweep off. Legacy AgentX and MLPerf may opt in
+with `--enable-conc-sweep`.
 
-Native AgentX measures one resolved recipe concurrency supplied by `--conc`.
-Its concurrency sweep defaults off because the pinned launcher exposes no
-optimizer-argv hook and therefore no distinct optimized arm to compare.
-Explicit `--enable-conc-sweep` is rejected during preflight rather than
-silently running an invalid ladder; `--conc-sweep-concs` does not enable it.
+Native AgentX measures the fixed recipe concurrency supplied by `--conc`.
+Changing it would change the accepted workload identity, so explicit
+`--enable-conc-sweep` is rejected during preflight; `--conc-sweep-concs` does
+not enable it.
 
 Results update `last_conc_sweep` and feed the final report and breakdown.
 When enabled, the phase exits on `sweep_done` (or `sweep_failed`); a disabled

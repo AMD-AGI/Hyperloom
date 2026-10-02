@@ -571,13 +571,13 @@ async def inline_coordinator(session_dir, monkeypatch):
 async def test_action_handler_rejects_baseline_with_default_whitelist(inline_coordinator):
     coord = inline_coordinator
     assert "baseline" not in coord._inline_action_whitelist()
-    p = mct.ContextProvider(shared_state=coord.shared_state, action_runner=coord.dispatcher._run_action_now_wait)
+    p = mct.ContextProvider(shared_state=coord.shared_state, action_runner=coord._run_action_now_wait)
     out = await mct._make_handler(p, "run_action_now")({"action_name": "baseline"})
     assert "not inline-eligible" in out["content"][0]["text"]
     assert await coord.tasks.queued() == []
     assert await coord.tasks.running() == []
-    assert not coord.dispatcher._executions
-    assert not coord.dispatcher._inflight_actions
+    assert not coord._executions
+    assert not coord._inflight_actions
 
 
 @pytest.mark.parametrize("abandon", ["timeout", "cancel"])
@@ -605,12 +605,12 @@ async def test_action_handler_keeps_real_dispatcher_execution_exactly_once(inlin
 
     async def run(name, params):
         bridge_threads.append(threading.get_ident())
-        return await coord.dispatcher._run_action_now_wait(name, params)
+        return await coord._run_action_now_wait(name, params)
 
     coord.sub.register_executor("target_analysis", execute)
     assert "target_analysis" in coord._inline_action_whitelist()
     monkeypatch.setattr(coord.policy, "validate_intent", lambda *_args: None)
-    monkeypatch.setattr(coord.dispatcher, "_admission_denial_for_action", lambda _action: None)
+    monkeypatch.setattr(coord, "_admission_denial_for_action", lambda _action: None)
     if abandon == "timeout":
         monkeypatch.setenv("INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S", "0.05")
     p = mct.ContextProvider(shared_state=coord.shared_state, action_runner=run)
@@ -622,7 +622,7 @@ async def test_action_handler_keeps_real_dispatcher_execution_exactly_once(inlin
     try:
         await asyncio.wait_for(started.wait(), 2.0)
         task_id = calls[0][0]
-        execution_handle = coord.dispatcher._inflight_actions[task_id].atask
+        execution_handle = coord._inflight_actions[task_id].atask
         if abandon == "timeout":
             out = await asyncio.wait_for(call, 1.0)
             assert "still running after" in out["content"][0]["text"]
@@ -634,7 +634,7 @@ async def test_action_handler_keeps_real_dispatcher_execution_exactly_once(inlin
         assert not cancelled
         assert (await coord.tasks.get(task_id)).state == "running"
         assert not execution_handle.done()
-        assert coord.dispatcher._executions
+        assert coord._executions
         repeated = await handler(arguments)
         assert "already 'running'" in repeated["content"][0]["text"]
         release.set()
@@ -650,8 +650,8 @@ async def test_action_handler_keeps_real_dispatcher_execution_exactly_once(inlin
         assert len(outcomes) == 1
         assert outcomes[0].payload["task_id"] == task_id
         assert outcomes[0].payload["inline"] is True
-        assert not coord.dispatcher._executions
-        assert not coord.dispatcher._inflight_actions
+        assert not coord._executions
+        assert not coord._inflight_actions
         assert not await coord.locks.lane_holders()
     finally:
         release.set()

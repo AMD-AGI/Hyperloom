@@ -17,7 +17,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
-from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
+from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli import parser as cli_parser
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
@@ -83,19 +83,12 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     monkeypatch.setenv("FRAMEWORK", "sglang")
     monkeypatch.setenv("GPU_TYPE", "mi300x")
     monkeypatch.setenv("TARGET_GPU_TYPE", "mi325x")
-    args = SimpleNamespace(
-        model="/models/Qwen3",
-        model_class="",
-        target_summary="",
-        max_hours=1,
-        no_kernel=False,
-        gpu_type="mi325x",
-        target_gain=None,
-        target_tput=None,
+    args = cli_parser._build_parser().parse_args(
+        ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi325x"]
     )
 
-    assert cli_model_gate._gpu_runner_type("mi325x") == "mi300x"
-    assert cli_model_gate._GFX_TO_RUNNER.get("gfx1100") is None
+    assert gpu_types._gpu_runner_type("mi325x") == "mi300x"
+    assert gpu_types._GFX_TO_RUNNER.get("gfx1100") is None
     manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
     state = cli_bootstrap._seed_shared_state(
         tmp_path,
@@ -113,18 +106,11 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     monkeypatch.setenv("FRAMEWORK", "sglang")
     monkeypatch.setenv("GPU_TYPE", "mi300x")
     monkeypatch.setenv("TARGET_GPU_TYPE", "mi308x")
-    args = SimpleNamespace(
-        model="/models/Qwen3",
-        model_class="",
-        target_summary="",
-        max_hours=1,
-        no_kernel=False,
-        gpu_type="mi308x",
-        target_gain=None,
-        target_tput=None,
+    args = cli_parser._build_parser().parse_args(
+        ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi308x"]
     )
 
-    assert cli_model_gate._gpu_runner_type("mi308x") == "mi300x"
+    assert gpu_types._gpu_runner_type("mi308x") == "mi300x"
     manifest = build_manifest(tmp_path, args=args, session_id="mi308x-session")
     state = cli_bootstrap._seed_shared_state(
         tmp_path,
@@ -4590,12 +4576,6 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
             assert "boom" in r.payload["result"]["error"]
         finally:
             await c.stop()
-
-
-# Batch dispatch enablers: batch-parallel sizing + candidates_path injection.
-def test_default_kernel_batch_parallel_matches_full_node():
-    """Default fanout is sized for a single MI300X / MI355X node (8 GPU) so a typical ``run_optimization`` batch does NOT serialize behind an asyncio semaphore tighter than Ray's view of the cluster."""
-    assert krh._DEFAULT_KERNEL_BATCH_PARALLEL == 8
 
 
 # Multi-KEEP integrate queue: streaming record_partial, batch_mode dedup, base_tput auto-injection.

@@ -669,11 +669,11 @@ async def test_kb_writeback_skips_when_no_pr_keys(tmp_path):
     )
 
 
-def test_find_frameworkoposal():
-    assert IntegratePatchExecutor._find_frameworkoposal(None) is None
-    assert IntegratePatchExecutor._find_frameworkoposal({"proposal_set": "x"}) is None
-    assert IntegratePatchExecutor._find_frameworkoposal({"proposal_set": [{"provenance": "kernel:x"}]}) is None
-    found = IntegratePatchExecutor._find_frameworkoposal(
+def test_find_framework_proposal():
+    assert IntegratePatchExecutor._find_framework_proposal(None) is None
+    assert IntegratePatchExecutor._find_framework_proposal({"proposal_set": "x"}) is None
+    assert IntegratePatchExecutor._find_framework_proposal({"proposal_set": [{"provenance": "kernel:x"}]}) is None
+    found = IntegratePatchExecutor._find_framework_proposal(
         {"proposal_set": [{"provenance": "specialist:serving:framework:y", "id": 1}]}
     )
     assert found["id"] == 1
@@ -754,7 +754,7 @@ async def test_bench_patch_with_accuracy(tmp_path, monkeypatch):
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
-    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None: {"accuracy": 0.9})
+    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.9})
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     bench, gate = await ex._bench_patch(
         params={"config_path": str(cfg), "accuracy_baseline": 0.8},
@@ -776,7 +776,7 @@ async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
-    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None: {"accuracy": 0.50})
+    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.50})
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     _, gate = await ex._bench_patch(
         params={"config_path": str(cfg), "accuracy_baseline": 0.95},
@@ -798,7 +798,7 @@ async def test_bench_patch_missing_baseline_skips_with_warning(tmp_path, monkeyp
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
-    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None: {"accuracy": 0.9})
+    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.9})
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     with caplog.at_level("WARNING"):
         _, gate = await ex._bench_patch(

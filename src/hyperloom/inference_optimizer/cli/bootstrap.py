@@ -16,9 +16,11 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_unix
+from hyperloom.common.agentx_workload import agentic_backend
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.timeutil import now_iso
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
 )
@@ -112,8 +114,8 @@ def agentx_state_is_stale(state: Any) -> str:
 
         had_epoch = int(getattr(state, "agentx_epoch", 0) or 0)
         backend = str(getattr(state, "agentx_backend", "") or "").strip().lower()
-        expected_backend = "native" if native_agentx_session(state) else "legacy"
-        if backend and backend != expected_backend:
+        expected_backends = {"native"} if native_agentx_session(state) else {"legacy", "aiperf", "mlperf"}
+        if backend and backend not in expected_backends:
             return f"session AgentX backend {backend!r} conflicts with its measurement epoch {had_epoch}"
         if had_epoch == LEGACY_AGENTX_MEASUREMENT_EPOCH:
             from hyperloom.common.agentx_mode import config_enables_native_agentx
@@ -126,11 +128,65 @@ def agentx_state_is_stale(state: Any) -> str:
                 f"session carries unsupported AgentX epoch {had_epoch}; the recorded results describe "
                 "a different workload and cannot anchor or be compared against"
             )
+        from hyperloom.common.agentx_workload import agentic_backend
+
+        # A bare resume keeps the recorded client, including the public MLPerf backend.
+        had_backend = ("native" if had_epoch >= 2 else "aiperf") if backend in {"", "legacy"} else backend
+        explicit_backend = str(os.environ.get("HYPERLOOM_AGENTIC_BACKEND", "") or "").strip()
+        want_backend = agentic_backend() if explicit_backend else had_backend
+        if had_backend == "native" and want_backend == "aiperf":
+            want_backend = "native"
+        if had_backend != want_backend:
+            return (
+                f"session was measured with agentic backend {had_backend!r} but this "
+                f"run is {want_backend!r}; the recorded results describe a different "
+                "workload and cannot anchor or be compared against"
+            )
     return ""
+
+
+def latency_budget_scope_error(framework: str | None, requested_ms: float | None) -> str:
+    """Return why ``--max-latency-ms`` does not apply to *framework*, or ``\"\"``.
+
+    Scriptable workloads grade on output throughput alone and are the only frameworks compute partitioning places
+    work for, so they are the only place a throughput-only gate can buy throughput with per-request latency. AgentX
+    serving sessions already REVERT that trade on interactivity, and the fixed ISL/OSL serving mode takes no new
+    capability, so the budget is refused there rather than silently doing nothing.
+    """
+    from .. import framework_registry
+
+    if requested_ms is None or framework_registry.is_scriptable(framework):
+        return ""
+    name = str(framework or "").strip() or framework_registry.DEFAULT_FRAMEWORK
+    return (
+        f"--max-latency-ms applies only to scriptable frameworks (xdit, custom); {name!r} is a serving framework. "
+        "On AgentX the interactivity objective already refuses a throughput gain bought with per-request latency"
+    )
+
+
+def latency_budget_resume_conflict(state: Any, requested_ms: float | None) -> str:
+    """Return why ``--max-latency-ms`` cannot apply to a resumed session, or ``\"\"``.
+
+    The recorded KEEPs were graded under the archived budget, so a different
+    value would leave them judged against a constraint the new one does not
+    state. Omitting the flag keeps the archived budget.
+    """
+    if requested_ms is None:
+        return ""
+    archived = float(getattr(state, "latency_budget_ms", 0.0) or 0.0)
+    if float(requested_ms) == archived:
+        return ""
+    recorded = f"{archived:g} ms" if archived > 0 else "no budget"
+    return (
+        f"--max-latency-ms {float(requested_ms):g} differs from the {recorded} this session was "
+        "graded under; its KEEPs would be judged against a constraint they were never measured "
+        "for. Resume without the flag to keep the recorded budget, or start a fresh session"
+    )
 
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
     """Return the canonical corpus shape, until a measurement replaces it."""
+    from hyperloom.common.agentx_workload import MLPERF_CORPUS, is_mlperf_backend, mlperf_trajectories
     from hyperloom.inference_optimizer.agentx.mapping import (
         CANONICAL_CORPUS_DURATION_S,
         CANONICAL_CORPUS_ENTRIES,
@@ -139,6 +195,14 @@ def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
         CANONICAL_OSL,
         CANONICAL_PREFIX_CACHE_HIT,
     )
+
+    if is_mlperf_backend():
+        # The MLPerf corpus has no published shape; the first measurement supplies it.
+        return {
+            "corpus_loader": MLPERF_CORPUS,
+            "corpus_entries": mlperf_trajectories(),
+            "source": "canonical_mlperf",
+        }
 
     return {
         "corpus_loader": CANONICAL_CORPUS_LOADER,
@@ -293,6 +357,9 @@ def _seed_shared_state(
         # config.json structural summary, persisted for downstream collectors.
         model_info=summarize_model_config(str(args.model)),
         framework=os.environ.get("FRAMEWORK", "sglang"),
+        # The only copy of the budget. Validated at the CLI, so anything that reaches here is usable, and archived
+        # with the session so a resume restores it without a second source to reconcile.
+        latency_budget_ms=float(getattr(args, "max_latency_ms", None) or 0.0),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI/env.
         tp=_int_arg("tp", DEFAULT_TP),
@@ -351,10 +418,10 @@ def _seed_shared_state(
         conc_sweep_enabled=(
             bool(getattr(args, "enable_conc_sweep", None))
             if getattr(args, "enable_conc_sweep", None) is not None
-            else True
+            else not is_agentx_mode(benchmark_mode)
         ),
         benchmark_mode=benchmark_mode,
-        agentx_backend="native" if native_agentx else "legacy" if benchmark_mode == "agentx" else "",
+        agentx_backend=("native" if native_agentx else agentic_backend() if benchmark_mode == "agentx" else ""),
         agentx_epoch=(
             AGENTX_MEASUREMENT_EPOCH
             if native_agentx
@@ -404,7 +471,7 @@ def _print_session_skeleton(session_dir: Path) -> None:
 def _print_final_summary(
     state: SharedState,
     stop_reason: str,
-    session_dir: Path | None = None,
+    session_dir: Path,
 ) -> None:
     """Print the end-of-run summary block to stdout."""
     print()
@@ -437,7 +504,6 @@ def _print_final_summary(
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")
-    _print_kernel_opt_summary_line(state)
     print("===============================================")
 
 
@@ -533,34 +599,6 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 
 
-def _print_kernel_opt_summary_line(state: SharedState) -> None:
-    """One-line forensic readout of kernel_opt attempts at session end (matches the on-disk report; best-effort)."""
-    try:
-        from hyperloom.orchestrator.kernel.attempt_summary import (
-            build_kernel_optimization_summary,
-        )
-
-        session_dir = _resolve_session_dir_for_summary(state)
-        if session_dir is None:
-            return
-        summary = build_kernel_optimization_summary(state, session_dir)
-        totals = summary.get("totals") or {}
-        attempted = int(totals.get("attempted") or 0)
-        if attempted == 0:
-            return
-        integrated = int(totals.get("integrated") or 0)
-        rejected = int(totals.get("rejected") or 0)
-        print(f"  kernel_opt           : {attempted} attempted ({integrated} integrated, {rejected} rejected)")
-        takeaways = summary.get("top_takeaways") or []
-        if len(takeaways) >= 2:
-            print(f"  kernel_opt_top_cause : {takeaways[1]}")
-        report_path = Path(session_dir) / "reports" / "kernel_optimization_summary.json"
-        if report_path.is_file():
-            print(f"  kernel_opt_report    : {report_path}")
-    except Exception:  # noqa: BLE001 — stdout print must never fail the run
-        pass
-
-
 def _default_target_summary(args: argparse.Namespace) -> str:
     """Compose a human-readable objective summary from the CLI target flags."""
     roofline = getattr(args, "target_roofline", None)
@@ -644,13 +682,3 @@ def _resolve_reference_recipe(
 
     print(f"Reference script: {source} ({len(recipe.server_args.split())} arg tokens, {len(recipe.envs)} env(s))")
     return (recipe.server_args, dict(recipe.envs), recipe.model or "", source, dict(controls))
-
-
-def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
-    """Best-effort session_dir lookup ($HYPERLOOM_SESSION_DIR) for the stdout kernel_opt line; ``None`` if unresolved."""
-    env_sd = os.environ.get("HYPERLOOM_SESSION_DIR", "").strip()
-    if env_sd:
-        p = Path(env_sd).expanduser()
-        if p.is_dir():
-            return p
-    return None

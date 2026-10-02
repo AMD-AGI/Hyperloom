@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.phases.framework import FrameworkPhase
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     _DOMAIN_FOCUS_TEMPLATES,
@@ -181,28 +182,23 @@ class _State:
         self.last_framework_rewrite_evidence_status = status
 
 
-class _Phase:
-    """Bind the two FrameworkPhase helpers under test to a stub state."""
+def _phase(framework: str, evidence: str = "", status: str = "") -> FrameworkPhase:
+    """A FrameworkPhase whose Coordinator carries only the state the domain router reads."""
+    from types import SimpleNamespace
 
-    def __init__(self, framework: str, evidence: str = "", status: str = "") -> None:
-        from hyperloom.orchestrator.phases.framework import FrameworkPhase
-
-        self.shared_state = _State(framework, evidence, status)
-        self._authoring_specialist_domain = FrameworkPhase._authoring_specialist_domain.__get__(self)
-        self._render_rewrite_evidence_for_prompt = FrameworkPhase._render_rewrite_evidence_for_prompt.__get__(self)
-        self._rewrite_evidence_absence_note = FrameworkPhase._rewrite_evidence_absence_note.__get__(self)
+    return FrameworkPhase(SimpleNamespace(shared_state=_State(framework, evidence, status)))
 
 
 def test_a_measured_negative_reads_as_a_measured_negative():
     """The probe ran and found nothing: the specialist may trust the silence."""
-    note = _Phase("custom", status="no_candidates")._rewrite_evidence_absence_note()
+    note = _phase("custom", status="no_candidates")._rewrite_evidence_absence_note()
     assert "found no rewrite candidates" in note
     assert "measured negative" in note
 
 
 def test_a_broken_probe_does_not_read_as_a_clean_loop():
     """The failure must be named, or an absent instrument looks like a result."""
-    note = _Phase("custom", status="aggregation_failed: boom")._rewrite_evidence_absence_note()
+    note = _phase("custom", status="aggregation_failed: boom")._rewrite_evidence_absence_note()
     assert "aggregation_failed: boom" in note
     assert "broken instrument" in note
     assert "NOT a measured negative" in note
@@ -210,7 +206,7 @@ def test_a_broken_probe_does_not_read_as_a_clean_loop():
 
 def test_no_profile_yet_is_neither_of_those():
     """Before any profile lands the honest answer is 'not yet', not a verdict."""
-    note = _Phase("custom")._rewrite_evidence_absence_note()
+    note = _phase("custom")._rewrite_evidence_absence_note()
     assert "has been collected yet" in note
     assert "measured negative" not in note
 
@@ -219,7 +215,7 @@ def test_evidence_that_exists_but_will_not_render_says_so(tmp_path):
     """A document on disk that this prompt cannot show is not an absence either."""
     recorded = tmp_path / "evidence.json"
     recorded.write_text("{}", encoding="utf-8")
-    note = _Phase("custom", evidence=str(recorded), status="ok")._rewrite_evidence_absence_note()
+    note = _phase("custom", evidence=str(recorded), status="ok")._rewrite_evidence_absence_note()
     assert "could not be rendered" in note
     assert "has been collected yet" not in note
 
@@ -227,19 +223,19 @@ def test_evidence_that_exists_but_will_not_render_says_so(tmp_path):
 @pytest.mark.parametrize("framework", ["custom", "xdit"])
 def test_scriptable_frameworks_route_to_the_rewrite_domain(framework):
     """A server-less iterative pipeline gets the rewrite domain."""
-    assert _Phase(framework)._authoring_specialist_domain() == DOMAIN_KEY
+    assert _phase(framework)._authoring_specialist_domain() == DOMAIN_KEY
 
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
 def test_serving_frameworks_keep_the_serving_domain(framework):
     """Routing is additive: the serving path is untouched."""
-    assert _Phase(framework)._authoring_specialist_domain() == "serving_specialist"
+    assert _phase(framework)._authoring_specialist_domain() == "serving_specialist"
 
 
 @pytest.mark.parametrize("framework", ["", "  ", "something-unregistered"])
 def test_unknown_framework_falls_back_to_serving(framework):
     """An unresolvable framework keeps the historical default rather than guessing."""
-    assert _Phase(framework)._authoring_specialist_domain() == "serving_specialist"
+    assert _phase(framework)._authoring_specialist_domain() == "serving_specialist"
 
 
 def test_evidence_block_renders_from_the_recorded_path(tmp_path):
@@ -273,7 +269,7 @@ def test_evidence_block_renders_from_the_recorded_path(tmp_path):
     path = tmp_path / ev.EVIDENCE_FILENAME
     path.write_text(json.dumps(document), encoding="utf-8")
 
-    text = _Phase("custom", str(path))._render_rewrite_evidence_for_prompt()
+    text = _phase("custom", str(path))._render_rewrite_evidence_for_prompt()
     assert "HOST-SIDE REWRITE EVIDENCE" in text
     assert ev.CATEGORY_HOST_ROUND_TRIP in text
     assert "comm.py:60:exchange" in text
@@ -281,14 +277,14 @@ def test_evidence_block_renders_from_the_recorded_path(tmp_path):
 
 def test_evidence_block_is_empty_without_a_recorded_path():
     """The arm can run before any profile has landed; that is not an error."""
-    assert _Phase("custom")._render_rewrite_evidence_for_prompt() == ""
+    assert _phase("custom")._render_rewrite_evidence_for_prompt() == ""
 
 
 def test_evidence_block_tolerates_an_unreadable_path(tmp_path):
     """A stale or corrupt path degrades to no block rather than wedging the pump."""
     broken = tmp_path / "broken.json"
     broken.write_text("{not json", encoding="utf-8")
-    assert _Phase("custom", str(broken))._render_rewrite_evidence_for_prompt() == ""
+    assert _phase("custom", str(broken))._render_rewrite_evidence_for_prompt() == ""
 
 
 # dispatch payload
@@ -309,41 +305,18 @@ class _Tasks:
 
 
 class _DispatchStub:
-    """Drive ``_enqueue_framework_agent_local_explore_specialist`` in isolation."""
+    """The Coordinator side of a local-explore dispatch, with lanes and warm-start stubbed out."""
 
     def __init__(self, tmp_path: Path, framework: str, evidence: str = "") -> None:
-        from hyperloom.orchestrator.phases.framework import FrameworkPhase
         from hyperloom.orchestrator.state.shared_state import SharedState
 
         self.session_dir = tmp_path
         self.tasks = _Tasks()
         self.shared_state = SharedState(framework=framework, last_framework_rewrite_evidence=evidence)
-        for name in (
-            "_authoring_specialist_domain",
-            "_render_rewrite_evidence_for_prompt",
-            "_rewrite_evidence_absence_note",
-            "_enqueue_framework_agent_local_explore_specialist",
-            "_map_authoring_specialist",
-        ):
-            setattr(self, name, getattr(FrameworkPhase, name).__get__(self))
-        # A staticmethod on the real class; binding it would pass ``self`` as the candidate row.
-        self._framework_candidate_key = FrameworkPhase._framework_candidate_key
 
     def _cycle_idem_suffix(self) -> str:
         """Macro-cycle 0, as the Coordinator would report it."""
         return ""
-
-    def _render_framework_memory_for_prompt(self, _memory) -> str:
-        """Suppress the working-memory block; not under test here."""
-        return ""
-
-    def _build_framework_working_memory(self) -> dict:
-        """Suppress the working-memory block; not under test here."""
-        return {}
-
-    def _framework_gpu_params(self) -> dict:
-        """Provide no GPU params; not under test here."""
-        return {}
 
     def _framework_authoring_lanes_ttl(self, _params, *, base_ttl_sec: int) -> tuple[list[str], int]:
         """Provide fixed lanes/TTL; lane accounting is not under test here."""
@@ -366,7 +339,7 @@ def _dispatch(tmp_path: Path, framework: str, evidence: str = "") -> dict[str, A
         "gap_description": "improve throughput",
         "gap_canonical_id": "local_explore",
     }
-    asyncio.run(stub._enqueue_framework_agent_local_explore_specialist(candidate))
+    asyncio.run(FrameworkPhase(stub)._enqueue_framework_agent_local_explore_specialist(candidate))
     assert stub.tasks.created, "no specialist was dispatched"
     return stub.tasks.created[0]["params"]
 

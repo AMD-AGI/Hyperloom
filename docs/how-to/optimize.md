@@ -1,20 +1,20 @@
 ---
 myst:
     html_meta:
-        "description": "Step-by-step guide to running a Hyperloom optimization. Covers launching from Claude Code, monitoring, resuming, and reading output artifacts."
-        "keywords": "Hyperloom, optimization, how-to, LLM inference, AMD GPU, ROCm, Claude Code, GEAK, TraceLens, session, throughput"
+        "description": "Step-by-step guide to running a Hyperloom optimization. Covers launching from Claude Code or Codex, monitoring, resuming, and reading output artifacts."
+        "keywords": "Hyperloom, optimization, how-to, LLM inference, AMD GPU, ROCm, Claude Code, Codex, GEAK, TraceLens, session, throughput"
 ---
 # Run a Hyperloom optimization
 
 This topic assumes you have already completed installation. If you haven't, follow the [Hyperloom installation instructions](../install/install.md) then return here to launch your first run.
 
-## Launch from Claude Code
+## Launch from Claude Code or Codex
 
-Open the Hyperloom workspace in Claude Code, then paste the following prompt into
-the Claude Code Chat, filling in your workload details:
+Open the Hyperloom workspace in Claude Code or Codex, then paste the following
+prompt into the agent chat, filling in your workload details:
 
 ```{note}
-The prompt includes `install.sh`. This is intentional: Claude Code runs in its own
+The prompt includes `install.sh`. This is intentional: the agent runs in its own
 shell process, which does not inherit the environment you sourced during
 installation. The agent must re-source the env files and re-run `install.sh` in
 its own context before launching the optimizer. Because `install.sh` is
@@ -55,7 +55,7 @@ Requirements:
 | Field | Meaning | How to choose |
 |-------|---------|---------------|
 | `TP` | Tensor-parallel size — number of GPUs the model is sharded across | Must match the number of GPUs in your server node (for example, `8` for a single 8-GPU MI300X node) |
-| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency. Synthetic workloads can measure a SWEEP ladder around it. Native AgentX measures this one recipe point: its concurrency sweep defaults off, and `--enable-conc-sweep` is rejected. |
+| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency. Synthetic SWEEP defaults to `256,128,64,32,16,8,4,2`; legacy AgentX and MLPerf can opt into `1,4,8,10,14,20,28` with `--enable-conc-sweep`. Override either ladder with `--conc-sweep-concs`. Native AgentX measures this fixed recipe point and rejects explicit sweep enablement. |
 | `ISL` | Input sequence length — tokens in each request's prompt | Match your production workload; `1024` is a common starting point |
 | `OSL` | Output sequence length — tokens generated per response | Match your production workload; `1024` is a common starting point |
 
@@ -80,7 +80,7 @@ set `HYPERLOOM_AGENTX=1` and pass the usual model, framework, GPU, precision, an
 concurrency arguments; Magpie resolves the native recipe and launcher. This
 integration is pinned to Magpie
 [v0.3.0](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) plus native launch overrides, custom-model replay, and the generic
-eval source-path fix at commit `658562345ad1a7e5a617e3631f3acfcec0eade4a` and InferenceX commit
+eval source-path fix at commit `c5c80698fef1b89cc6882264b80d5b306d4e9328` and InferenceX commit
 `408c015be4b22d14c69518643609669405507077`.
 
 New AgentX sessions record native backend epoch 4 and retain Hyperloom's
@@ -279,7 +279,7 @@ for the independent benchmark and session limits.
 
 ## Resume an interrupted session
 
-Paste this prompt into the Claude Code chat to resume an existing session:
+Paste this prompt into the agent chat to resume an existing session:
 
 ```text
 @hyperloom/inference_optimizer/SKILL.md

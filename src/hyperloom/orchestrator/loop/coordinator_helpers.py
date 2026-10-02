@@ -31,6 +31,7 @@ from hyperloom.common.visible_devices import (
     mask_tokens,
     parse_device_list,
 )
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 from ..specialists.patch_safety import (
     ADVISE_VERDICT,
@@ -329,12 +330,8 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
         if v not in (None, "", 0):
             out[dst] = v
     envs = bm.get("envs") if isinstance(bm.get("envs"), dict) else {}
-    extra_args_str = ""
-    for env_key in ("EXTRA_SGLANG_ARGS", "EXTRA_VLLM_ARGS"):
-        v = envs.get(env_key)
-        if isinstance(v, str) and v.strip():
-            extra_args_str = v.strip()
-            break
+    v = envs.get(server_args_env_name(bm.get("framework")))
+    extra_args_str = v.strip() if isinstance(v, str) else ""
     tokens = extra_args_str.split() if extra_args_str else []
     for i, tok in enumerate(tokens):
         if tok in ("--max-running-requests",) and i + 1 < len(tokens):

@@ -16,7 +16,6 @@ from typing import Any
 import yaml
 
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
-from hyperloom.inference_optimizer.agentx.identity import canonical_sha256
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args, remove_server_args
 
 from ._native_source import verify_native_source_imports
@@ -27,9 +26,32 @@ def managed_profile_benchmark(benchmark: Mapping[str, Any]) -> bool:
     agentx = benchmark.get("agentx") or {}
     return bool(
         isinstance(agentx, Mapping)
-        and (agentx.get("resolved") or {}).get("server-launch-spec")
+        and (
+            (agentx.get("resolved") or {}).get("server-launch-spec")
+            or (benchmark.get("workload_spec") or {}).get("profile_parent")
+        )
         and ((benchmark.get("profiler") or {}).get("torch_profiler") or {}).get("enabled") is True
     )
+
+
+def materialize_managed_profile(
+    config: dict[str, Any],
+    output_dir: Path,
+    *,
+    out_name: str,
+    snapshot: Mapping[str, Any] | None,
+    **candidate: Any,
+) -> Path:
+    """Derive a diagnostic without reapplying ambient workload or recipe defaults."""
+    from ._native_candidate import install_native_launch_snapshot, update_native_candidate_file
+
+    if snapshot is not None:
+        install_native_launch_snapshot(config["benchmark"], snapshot)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / out_name
+    path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    update_native_candidate_file(path, **candidate)
+    return path
 
 
 def prepare_managed_profile(params: dict[str, Any], state: Any, output_dir: Path) -> None:
@@ -62,13 +84,22 @@ def prepare_managed_profile(params: dict[str, Any], state: Any, output_dir: Path
     settings.update((params.get("profiler") or {}).get("torch_profiler") or {})
     settings.update(params.get("torch_profiler") or {})
     for key in (
-        "num_steps", "num_profiles", "start_seconds", "interval_seconds",
-        "capture_timeout_seconds", "flush_timeout_seconds", "detailed_annotations",
+        "num_steps",
+        "num_profiles",
+        "start_seconds",
+        "interval_seconds",
+        "capture_timeout_seconds",
+        "flush_timeout_seconds",
+        "detailed_annotations",
     ):
         if key in params:
             settings[key] = params[key]
     settings["enabled"] = True
-    benchmark["profiler"] = {"torch_profiler": settings, "system_profiler": {"enabled": False}, "tracelens": {"enabled": False}}
+    benchmark["profiler"] = {
+        "torch_profiler": settings,
+        "system_profiler": {"enabled": False},
+        "tracelens": {"enabled": False},
+    }
     apply_native_candidate(
         benchmark,
         extra_server_args=str(params.get("extra_server_args") or ""),
@@ -90,6 +121,8 @@ def prepare_managed_profile(params: dict[str, Any], state: Any, output_dir: Path
 
 def project_native_profile(params: dict[str, Any], state: Any) -> None:
     """Use observed server flags/runtime while retaining diagnostic client ownership."""
+    from hyperloom.inference_optimizer.agentx.identity import canonical_sha256
+
     measurement = getattr(state, "current_best_measurement", None) or {}
     path = str(measurement.get("materialized_config") or getattr(state, "baseline_config_path", "") or "")
     if not path:

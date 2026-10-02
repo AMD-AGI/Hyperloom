@@ -7,7 +7,8 @@ from __future__ import annotations
 import logging as _logging
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
+from hashlib import sha1
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.coerce import to_float
@@ -35,7 +36,6 @@ from hyperloom.orchestrator.lever import (
     LEVER_UPSTREAM_PR,
     patch_owner_phase,
 )
-from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -222,12 +222,9 @@ def _forward_integrate_source(
             dst[key] = value
 
 
-# These helpers are module-level because the phase's methods get borrowed onto
-# lightweight test stand-ins, where a ``self._record_*`` call would break every
-# stand-in that does not implement it.
 def _recorder(coord: Any):
     """Return the framework recorder for this phase entry, or ``None``."""
-    return getattr(coord, "_framework_timeline_recorder", None)
+    return coord._framework_timeline_recorder
 
 
 def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any) -> None:
@@ -483,8 +480,16 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
         recorder.settle_proposal(ref, disposition=DISPOSITION_DROPPED, reason=verdict)
 
 
-class FrameworkPhase(CoordinatorCollaborator):
-    """The FRAMEWORK_AGENT phase: upstream candidates, authored patches, deliverable routing, and the enablement hand-off."""
+class FrameworkPhase:
+    """The FRAMEWORK_AGENT phase: upstream candidates, authored patches, deliverable routing, and the enablement hand-off.
+
+    Unlike the Coordinator's mixins this is a separate object, reached through ``coord.phase_framework`` and its public
+    hooks. It reaches Coordinator state and methods through ``self._coord``.
+    """
+
+    def __init__(self, coordinator) -> None:
+        self._coord = coordinator
+        self._framework_timeline_recorder: Any = None
 
     # Max tried-candidate rows fed into the ranker/discovery working memory.
     _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
@@ -493,8 +498,8 @@ class FrameworkPhase(CoordinatorCollaborator):
     # Backstop: max Critic-review submissions for a single candidate before the pump force-stamps
     # ``repeated_review_abort`` and stops re-selecting it.
     _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
-    # Multi-node only: cap on specialist proposal_set entries auto-materialised into a single explore grid per round.
-    _MN_AUTO_EXPLORE_GRID_CAP: int = 6
+    # Cap on specialist proposal rows benched per automatic explore grid.
+    _AUTO_EXPLORE_GRID_CAP: int = 4
 
     def on_specialist_settled(self, task: "Task", done_payload: dict[str, Any], *, run_error: str) -> None:
         """Stamp an empty authoring round's terminal row and harvest a discovery round's candidates."""
@@ -541,7 +546,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         """
         from hyperloom.inference_optimizer.breakdown.recorder.framework_event import make_framework_recorder
 
-        state = self.shared_state
+        state = self._coord.shared_state
         recorder = make_framework_recorder(macro_cycle=int(getattr(state, "macro_cycle", 0) or 0))
         self._framework_timeline_recorder = recorder
         if recorder is None:
@@ -555,7 +560,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         resolves it today, so reporting a default would fabricate a threshold
         the phase never applied.
         """
-        state = self.shared_state
+        state = self._coord.shared_state
         overrides = getattr(state, "plateau_overrides", None) or {}
         if not isinstance(overrides, dict):
             overrides = {}
@@ -585,7 +590,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             },
         }
 
-    def _close_framework_timeline(self, *, exit_reason: str = "", evidence: dict | None = None) -> None:
+    def close_timeline(self, *, exit_reason: str = "", evidence: dict | None = None) -> None:
         """Close the FRAMEWORK timeline event when the phase is left.
 
         The phase machine has entry hooks only, so the seam in
@@ -650,109 +655,101 @@ class FrameworkPhase(CoordinatorCollaborator):
             thresholds={"no_keep_streak_threshold": evidence.get("source_threshold")},
         )
 
-    async def _on_enter_framework(self, *, from_phase: str) -> None:
+    async def on_enter(self, *, from_phase: str) -> None:
         """FRAMEWORK entry hook: trigger the per-batch pump once on entry; later batches are driven from the main tick."""
         log.info(
             "OPTIMIZE entry (from=%s): pumping initial batch",
             from_phase or "<unknown>",
         )
         # A reopened macro-cycle re-measures before either arm spends anything.
-        await self._on_cycle_start_reprofile(from_phase=from_phase)
+        await self._coord._on_cycle_start_reprofile(from_phase=from_phase)
         # Opened after the reprofile so the policy reads the settled anchor,
         # and before the pump so the entry's first dispatch is inside the event.
         self._open_framework_timeline()
         await self._pump_framework_agent_phase()
 
+    def _authoring_inflight_candidate_ids(self, queued: list[Any], running: list[Any]) -> set[str]:
+        """Candidate ids with a live specialist / integrate_patch task or an undecided review proposal."""
+        in_flight = {
+            str(t.params.get("framework_agent_candidate_id") or "")
+            for t in (*queued, *running)
+            if t.kind in ("specialist", "integrate_patch") and t.params
+        }
+        for p in self._coord.state.pending_proposals.values():
+            if p.decided or p.action_name != "integrate_patch":
+                continue
+            payload = p.payload or {}
+            in_flight.add(
+                str(
+                    payload.get("framework_agent_candidate_id")
+                    or (payload.get("params") or {}).get("framework_agent_candidate_id")
+                    or ""
+                )
+            )
+        in_flight.discard("")
+        return in_flight
+
     async def _pump_framework_agent_phase(self) -> None:
-        """Drive the FRAMEWORK_AGENT phase: enqueue the next candidate. Idempotent; a discover failure flips framework_agent_phase_done so the phase advances rather than wedging."""
-        state = self.shared_state
+        """Drive the FRAMEWORK_AGENT phase: submit candidates for review in parallel.
+
+        Up to ``research_lane_capacity`` candidates are in flight at once; landing
+        still serialises on ``workspace_mutation``. The discovery → local-explore →
+        phase-done fallback runs only once no candidate is left and none is in
+        flight. Idempotent; a discover failure flips ``framework_agent_phase_done``
+        so the phase advances rather than wedging.
+        """
+        state = self._coord.shared_state
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
         if bool(getattr(state, "framework_agent_phase_done", False)):
             return
-        # Skip if a framework task is already queued or running.
-        queued = await self.tasks.queued()
-        running = await self.tasks.running()
-        for t in (*queued, *running):
-            # A candidate landing as ``integrate_patch`` with a candidate id.
-            if getattr(t, "kind", "") == "integrate_patch" and (getattr(t, "params", None) or {}).get(
-                "framework_agent_candidate_id"
-            ):
-                return
-        # Serialize one candidate at a time: skip while a candidate proposal awaits its (durable) Critic verdict,
-        # resolved on a later tick.
-        if any(
-            getattr(p, "action_name", "") == "integrate_patch"
-            and not getattr(p, "decided", False)
-            and (getattr(p, "payload", None) or {}).get("framework_agent_candidate_id")
-            for p in self.state.pending_proposals.values()
-        ):
-            return
-        # An authoring specialist (or its downstream integrate_patch) for the current candidate may still be running;
-        # wait only on a live TASK (queued/running), NOT on a pending Critic proposal.
-        if getattr(state, "framework_agent_authoring_enabled", False):
-            _q = await self.tasks.queued()
-            _r = await self.tasks.running()
-            if any(
-                getattr(t, "kind", "") in ("specialist", "integrate_patch")
-                and bool((getattr(t, "params", None) or {}).get("framework_agent_authoring"))
-                for t in (*_q, *_r)
-            ):
-                return
-            # Proposal-window guard: the task check above misses the interval between a specialist completing and its
-            # integrate_patch becoming a live TASK (the deliverable exists only as a pending Critic proposal).
-            if await self._framework_agent_authoring_inflight():
-                return
-        # Take the next un-dispatched candidate.
-        next_candidate = self._select_next_framework_agent_candidate()
-        if next_candidate is None:
-            # Hold the phase open while authored patches are still benched or reviewed; only when a batch was
-            # discovered (an LLM-proposed integrate_patch must not keep FRAMEWORK open).
-            discovered_batch = bool(getattr(state, "framework_agent_batches", None) or [])
-            if (
-                discovered_batch
-                and getattr(state, "framework_agent_authoring_enabled", False)
-                and await self._framework_agent_authoring_inflight()
-            ):
-                return
-            # Minimum supply: with the pool empty and no discovery in flight, ask for one.
-            if await self._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty"):
-                state.save(self.session_dir)
-                return
-            if self._framework_local_explore_arm_enabled():
-                gap, keywords = self._compose_framework_local_explore_gap()
-                title = (
-                    f"local source exploration ({gap})"
-                    if gap
-                    else "local source exploration (author a throughput patch from live source + profile)"
-                )
-                dispatched = await self._enqueue_framework_agent_local_explore_specialist(
-                    {
-                        "title": title,
-                        "repo": "(local source)",
-                        "framework": str(getattr(state, "framework", "") or "").strip().lower(),
-                        "gap_description": gap,
-                        "gap_keywords": keywords,
-                    },
-                    reason="no_new_candidates",
-                )
-                if dispatched:
-                    state.save(self.session_dir)
-                    return
-            self._record_framework_agent_phase_done(
-                reason="no_candidates_and_discovery_exhausted",
-                failure_count=int(getattr(state, "framework_agent_discover_failures", 0) or 0),
-            )
-            state.framework_agent_phase_done = True
-            state.save(self.session_dir)
-            return
-        # Submit the candidate as a proposal; the async Critic verdict drives the apply/author enqueue or the
-        # critic_denied row on a later tick.
-        await self._submit_framework_agent_candidate_for_review(
-            next_candidate,
-            audit=dict(next_candidate.get("audit") or {}),
-            audit_step=str(next_candidate.get("route") or "author_via_specialist"),
+        in_flight_ids = self._authoring_inflight_candidate_ids(
+            await self._coord.tasks.queued(), await self._coord.tasks.running()
         )
+        submitted = False
+        while len(in_flight_ids) < max(1, state.research_lane_capacity):
+            candidate = self._select_next_framework_agent_candidate(exclude_ids=in_flight_ids)
+            if candidate is None:
+                break
+            await self._submit_framework_agent_candidate_for_review(
+                candidate,
+                audit=dict(candidate.get("audit") or {}),
+                audit_step=str(candidate.get("route") or "author_via_specialist"),
+            )
+            in_flight_ids.add(self._framework_candidate_key(candidate))
+            submitted = True
+        if submitted or in_flight_ids or await self._framework_agent_authoring_inflight():
+            return
+        # Minimum supply: with the pool empty and no discovery in flight, ask for one.
+        if await self._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty"):
+            state.save(self._coord.session_dir)
+            return
+        if self._framework_local_explore_arm_enabled():
+            gap, keywords = self._compose_framework_local_explore_gap()
+            title = (
+                f"local source exploration ({gap})"
+                if gap
+                else "local source exploration (author a throughput patch from live source + profile)"
+            )
+            dispatched = await self._enqueue_framework_agent_local_explore_specialist(
+                {
+                    "title": title,
+                    "repo": "(local source)",
+                    "framework": str(getattr(state, "framework", "") or "").strip().lower(),
+                    "gap_description": gap,
+                    "gap_keywords": keywords,
+                },
+                reason="no_new_candidates",
+            )
+            if dispatched:
+                state.save(self._coord.session_dir)
+                return
+        self._record_framework_agent_phase_done(
+            reason="no_candidates_and_discovery_exhausted",
+            failure_count=int(getattr(state, "framework_agent_discover_failures", 0) or 0),
+        )
+        state.framework_agent_phase_done = True
+        state.save(self._coord.session_dir)
 
     async def _framework_agent_authoring_inflight(self) -> bool:
         """True while a FRAMEWORK-authored patch for an unprocessed candidate is still in flight."""
@@ -766,8 +763,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             """
             return not cand_id or cand_id not in processed_ids
 
-        queued = await self.tasks.queued()
-        running = await self.tasks.running()
+        queued = await self._coord.tasks.queued()
+        running = await self._coord.tasks.running()
         for t in (*queued, *running):
             if getattr(t, "kind", "") not in ("specialist", "integrate_patch"):
                 continue
@@ -778,7 +775,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 return True
         # An authored patch awaiting Critic review (or a candidate awaiting its pre-screen verdict) keeps the phase
         # open, but only while the proposal targets a still-unprocessed candidate.
-        for p in self.state.pending_proposals.values():
+        for p in self._coord.state.pending_proposals.values():
             if getattr(p, "decided", False):
                 continue
             if getattr(p, "action_name", "") != "integrate_patch":
@@ -848,14 +845,14 @@ class FrameworkPhase(CoordinatorCollaborator):
     def _map_authoring_specialist(self, spec_task: Any, *, cand_id: str, label: str) -> str:
         """Record specialist task -> candidate so the authored-outcome bridge can resolve the candidate id from the
         downstream integrate_patch; returns the specialist task id."""
-        state = self.shared_state
+        state = self._coord.shared_state
         spec_tid = str(getattr(spec_task, "task_id", "") or "")
         try:
             if spec_tid and cand_id:
                 if not isinstance(getattr(state, "framework_agent_specialist_candidate_map", None), dict):
                     state.framework_agent_specialist_candidate_map = {}
                 state.framework_agent_specialist_candidate_map[spec_tid] = cand_id
-                state.save(self.session_dir)
+                state.save(self._coord.session_dir)
         except Exception:
             log.debug("FRAMEWORK %s: specialist->candidate map write failed", label, exc_info=True)
         return spec_tid
@@ -869,7 +866,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         critic_feedback: dict[str, Any] | None = None,
     ) -> str:
         """Dispatch a write-capable specialist seeded with ``candidate`` (flows through autosubmit → Critic → integrate_patch → bench → KEEP/REVERT)."""
-        state = self.shared_state
+        state = self._coord.shared_state
         cand_id = self._framework_candidate_key(candidate)
         batch_id = str(candidate.get("batch_id") or "")
         gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework.{cand_id}"
@@ -911,16 +908,14 @@ class FrameworkPhase(CoordinatorCollaborator):
             "framework_audit": (audit if isinstance(audit, dict) else {}),
             "source": "coordinator_internal",
             "notes": notes,
-            # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
-            **self._framework_gpu_params(),
         }
-        await self._warm_specialist_params(params)
+        await self._coord._warm_specialist_params(params)
         idem = f"framework_agent_authoring:{batch_id}:{cand_id}"
         if reauthor_attempt > 0:
             idem = f"{idem}:reauthor:{int(reauthor_attempt)}"
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
-        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
-        spec_task, _spec_existing = await self.tasks.create_or_return_existing(
+        lanes, ttl = self._coord._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        spec_task, _spec_existing = await self._coord.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
             idempotency_key=idem,
@@ -985,7 +980,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         status = str(res.get("status") or "")
 
         if lane == "enablement" or res.get("enablement"):
-            await self._maybe_rearm_enablement(res)
+            await self._coord._maybe_rearm_enablement(res)
             return
 
         if status != "apply_failed":
@@ -1008,7 +1003,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             (candidate.get("batch_id") if isinstance(candidate, dict) else None) or res.get("batch_id") or ""
         )
 
-        state = self.shared_state
+        state = self._coord.shared_state
 
         existing = state.apply_fail_reauthor_attempts
         apply_fail_attempts: dict[str, int] = existing if isinstance(existing, dict) else {}
@@ -1036,7 +1031,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 provenance="apply_fail_retry",
             )
             try:
-                state.save(self.session_dir)
+                state.save(self._coord.session_dir)
             except Exception:
                 log.debug("authored_lane: save after cap stamp failed", exc_info=True)
             return
@@ -1060,7 +1055,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         pending.append(retry_ctx)
         state.apply_fail_retry_pending = pending
         try:
-            state.save(self.session_dir)
+            state.save(self._coord.session_dir)
         except Exception:
             log.debug("authored_lane: save after retry-pending failed", exc_info=True)
 
@@ -1085,7 +1080,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         if batch_id and not candidate.get("batch_id"):
             candidate["batch_id"] = batch_id
         retry_feedback = retry_feedback or []
-        state = self.shared_state
+        state = self._coord.shared_state
 
         feedback_lines: list[str] = []
         if vetting_drops:
@@ -1125,7 +1120,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             audit: dict[str, Any] = {}
             if specialist_task_id:
                 try:
-                    spec_task = await self.tasks.get(specialist_task_id)
+                    spec_task = await self._coord.tasks.get(specialist_task_id)
                 except TaskNotFound:
                     spec_task = None
                 spec_params = dict(getattr(spec_task, "params", None) or {})
@@ -1158,7 +1153,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         framework_name = str(getattr(state, "framework", "") or "").strip().lower()
         if specialist_task_id:
             try:
-                spec_task = await self.tasks.get(specialist_task_id)
+                spec_task = await self._coord.tasks.get(specialist_task_id)
             except TaskNotFound:
                 spec_task = None
             spec_params = dict(getattr(spec_task, "params", None) or {})
@@ -1190,13 +1185,12 @@ class FrameworkPhase(CoordinatorCollaborator):
             "source": "coordinator_internal",
             "notes": notes,
             "apply_retry_attempt": attempt,
-            **self._framework_gpu_params(),
         }
-        await self._warm_specialist_params(params)
+        await self._coord._warm_specialist_params(params)
         # Gap id and attempt both repeat across cycles.
-        idem = f"perf_explore_authoring:{gap_cid}:retry:{attempt}{self._cycle_idem_suffix()}"
-        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
-        spec_task, _ = await self.tasks.create_or_return_existing(
+        idem = f"perf_explore_authoring:{gap_cid}:retry:{attempt}{self._coord._cycle_idem_suffix()}"
+        lanes, ttl = self._coord._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        spec_task, _ = await self._coord.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
             idempotency_key=idem,
@@ -1216,7 +1210,7 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     async def _drain_apply_fail_retry_pending(self) -> None:
         """Dispatch authoring specialists for any queued apply-failure retries."""
-        state = self.shared_state
+        state = self._coord.shared_state
         pending: list[dict[str, Any]] = state.apply_fail_retry_pending or []
         if not isinstance(pending, list) or not pending:
             return
@@ -1243,7 +1237,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 vetting_drops=vetting_drops or None,
             )
         try:
-            state.save(self.session_dir)
+            state.save(self._coord.session_dir)
         except Exception:
             log.debug("drain_apply_fail: save failed", exc_info=True)
 
@@ -1258,13 +1252,13 @@ class FrameworkPhase(CoordinatorCollaborator):
         """Set of candidate keys that already carry a terminal progress row."""
         return {
             self._framework_candidate_key(p)
-            for p in (getattr(self.shared_state, "framework_agent_phase_progress", None) or [])
+            for p in (getattr(self._coord.shared_state, "framework_agent_phase_progress", None) or [])
             if isinstance(p, dict) and self._framework_candidate_key(p)
         }
 
     def _unprocessed_framework_agent_candidates(self) -> list[dict[str, Any]]:
         """Return all not-yet-processed candidates in the latest batch (order preserved)."""
-        state = self.shared_state
+        state = self._coord.shared_state
         batches = getattr(state, "framework_agent_batches", None) or []
         if not batches:
             return []
@@ -1284,20 +1278,22 @@ class FrameworkPhase(CoordinatorCollaborator):
                 out.append(cand)
         return out
 
-    def _select_next_framework_agent_candidate(self) -> dict[str, Any] | None:
-        """Return the next unprocessed candidate in the batch, in the order given."""
-        unprocessed = self._unprocessed_framework_agent_candidates()
-        return unprocessed[0] if unprocessed else None
+    def _select_next_framework_agent_candidate(self, exclude_ids: Collection[str] = ()) -> dict[str, Any] | None:
+        """Return the next unprocessed candidate whose id is not in ``exclude_ids``, in batch order."""
+        for cand in self._unprocessed_framework_agent_candidates():
+            if self._framework_candidate_key(cand) not in exclude_ids:
+                return cand
+        return None
 
     def _authoring_specialist_domain(self) -> str:
         """Pick the authoring domain that matches the session's framework kind."""
         from ..specialists.domains import authoring_domain_for_framework
 
-        return authoring_domain_for_framework(getattr(self.shared_state, "framework", ""))
+        return authoring_domain_for_framework(getattr(self._coord.shared_state, "framework", ""))
 
     def _render_rewrite_evidence_for_prompt(self) -> str:
         """Render the measured host-side rewrite evidence as prompt lines."""
-        path = str(getattr(self.shared_state, "last_framework_rewrite_evidence", "") or "").strip()
+        path = str(getattr(self._coord.shared_state, "last_framework_rewrite_evidence", "") or "").strip()
         if not path:
             return ""
         try:
@@ -1318,7 +1314,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "rollout loop and ask, for each call inside it, whether the result "
             "can change across iterations."
         )
-        status = str(getattr(self.shared_state, "last_framework_rewrite_evidence_status", "") or "").strip()
+        status = str(getattr(self._coord.shared_state, "last_framework_rewrite_evidence_status", "") or "").strip()
         if status == "no_candidates":
             return (
                 "The host-side probe ran and found no rewrite candidates. Treat "
@@ -1332,7 +1328,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 f"not deliver any: {status}. This is a broken instrument, NOT a "
                 "measured negative -- do not conclude the loop is clean. " + read_the_source
             )
-        if str(getattr(self.shared_state, "last_framework_rewrite_evidence", "") or "").strip():
+        if str(getattr(self._coord.shared_state, "last_framework_rewrite_evidence", "") or "").strip():
             # Reached only when a document is on record but rendering it produced nothing, so the evidence exists and
             # this prompt cannot show it.
             return (
@@ -1343,14 +1339,14 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     def _framework_local_explore_arm_enabled(self) -> bool:
         """True when the candidate-free local-exploration arm may run."""
-        state = self.shared_state
+        state = self._coord.shared_state
         return bool(getattr(state, "framework_agent_authoring_enabled", False)) and bool(
             getattr(state, "framework_local_explore_enabled", True)
         )
 
     def _compose_framework_local_explore_gap(self) -> tuple[str, list[str]]:
         """Compose the ``(gap, keywords)`` steering the local-exploration arm."""
-        state = self.shared_state
+        state = self._coord.shared_state
         try:
             from ..actions.executors._framework_gap_composer import compose_gap
 
@@ -1373,7 +1369,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         reason: str = "",
     ) -> str:
         """Dispatch a candidate-free authoring specialist (no upstream PR lead)."""
-        state = self.shared_state
+        state = self._coord.shared_state
         # A local-exploration round has no upstream lead to key on, so its id counts the rounds already settled.
         progress = getattr(state, "framework_agent_phase_progress", None) or []
         settled = sum(
@@ -1425,10 +1421,9 @@ class FrameworkPhase(CoordinatorCollaborator):
             "framework_audit": {},
             "framework_local_explore": True,
             "source": "coordinator_internal",
-            **self._framework_gpu_params(),
         }
-        await self._warm_specialist_params(params)
-        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        await self._coord._warm_specialist_params(params)
+        lanes, ttl = self._coord._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         create_kwargs: dict[str, Any] = {
             "kind": "specialist",
             "params": params,
@@ -1439,12 +1434,12 @@ class FrameworkPhase(CoordinatorCollaborator):
         # The registry de-duplicates by key and hands back whatever row it finds, so a candidate whose specialist
         # failed keeps resolving to that failure: the phase re-selects the candidate every tick, logs a dispatch, and
         # nothing runs.
-        base_idem = f"framework_agent_local_explore:{cand_id}{self._cycle_idem_suffix()}"
+        base_idem = f"framework_agent_local_explore:{cand_id}{self._coord._cycle_idem_suffix()}"
         spec_task = None
         _spec_existing = False
         for attempt in range(_LOCAL_EXPLORE_MAX_ATTEMPTS):
             idem = base_idem if attempt == 0 else f"{base_idem}:r{attempt}"
-            spec_task, _spec_existing = await self.tasks.create_or_return_existing(
+            spec_task, _spec_existing = await self._coord.tasks.create_or_return_existing(
                 idempotency_key=idem,
                 **create_kwargs,
                 dispatch_class="coordinator",
@@ -1480,7 +1475,7 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     def _framework_known_candidate_ids(self) -> set[str]:
         """All candidate ids already discovered into any prior batch (dedup for new batches)."""
-        state = self.shared_state
+        state = self._coord.shared_state
         ids: set[str] = set()
         batches = getattr(state, "framework_agent_batches", None) or []
         if not isinstance(batches, list):
@@ -1505,7 +1500,7 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     def _build_framework_working_memory(self) -> dict[str, Any]:
         """Summarise the most recent tried candidates from the progress ledger (deterministic, zero-LLM)."""
-        state = self.shared_state
+        state = self._coord.shared_state
         progress = getattr(state, "framework_agent_phase_progress", None) or []
         rows = [p for p in progress if isinstance(p, dict) and self._framework_candidate_key(p)]
         tried: list[dict[str, Any]] = []
@@ -1532,7 +1527,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         failure_count: int,
     ) -> None:
         """Append a framework_agent_phase_done row to phase_history describing why the pump gave up."""
-        state = self.shared_state
+        state = self._coord.shared_state
         try:
             from ..framework.artifacts import summarize_candidate_outcomes
 
@@ -1587,7 +1582,7 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     async def _enqueue_framework_agent_task(self, candidate: dict[str, Any]) -> None:
         """Enqueue an ``integrate_patch`` task that lands ``candidate``'s diff."""
-        state = self.shared_state
+        state = self._coord.shared_state
         cand_id = self._framework_candidate_key(candidate)
         params = {
             "candidate": candidate,
@@ -1613,12 +1608,12 @@ class FrameworkPhase(CoordinatorCollaborator):
             "disable_run_eval": bool(getattr(state, "eval_disabled", False)),
         }
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
-        lanes, ttl = self._registry_lanes_ttl("integrate_patch")
+        lanes, ttl = self._coord._registry_lanes_ttl("integrate_patch")
         try:
             # A framework candidate rebuilds and benchmarks, so it cannot share the GPU.
             if not lanes:
                 raise RuntimeError("integrate_patch resolved to no lanes; the task would run without GPU exclusivity.")
-            await self.tasks.create_or_return_existing(
+            await self._coord.tasks.create_or_return_existing(
                 kind="integrate_patch",
                 params=params,
                 idempotency_key=idem,
@@ -1650,7 +1645,7 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     def _collect_framework_agent_candidate_priors(self) -> dict[str, Any]:
         """Return compact session-local priors for the Critic gate."""
-        raw_progress = getattr(self.shared_state, "framework_agent_phase_progress", None) or []
+        raw_progress = getattr(self._coord.shared_state, "framework_agent_phase_progress", None) or []
         terminal = {
             "kept",
             "kept_inert",
@@ -1686,7 +1681,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         cand_id = self._framework_candidate_key(candidate)
         batch_id = str(candidate.get("batch_id") or "")
         # Dedup: a candidate is already awaiting its pre-screen verdict.
-        for p in self.state.pending_proposals.values():
+        for p in self._coord.state.pending_proposals.values():
             if getattr(p, "action_name", "") != "integrate_patch":
                 continue
             if not (getattr(p, "payload", None) or {}).get("framework_agent_candidate_id"):
@@ -1698,10 +1693,10 @@ class FrameworkPhase(CoordinatorCollaborator):
                 return
         # Repeated-review backstop: count how many times this candidate has been sent for review.
         if cand_id:
-            counts = getattr(self.shared_state, "framework_agent_review_counts", None)
+            counts = getattr(self._coord.shared_state, "framework_agent_review_counts", None)
             if not isinstance(counts, dict):
                 counts = {}
-                self.shared_state.framework_agent_review_counts = counts
+                self._coord.shared_state.framework_agent_review_counts = counts
             count = int(counts.get(cand_id, 0) or 0) + 1
             counts[cand_id] = count
             if count > self._MAX_REPEATED_REVIEW_SUBMISSIONS:
@@ -1739,8 +1734,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             "proposal",
             {**propose_payload, "needs_review": True},
         )
-        await self.bus.append_and_seq(msg)
-        self.state.pending_proposals[msg.msg_id] = PendingProposal(
+        await self._coord.bus.append_and_seq(msg)
+        self._coord.state.pending_proposals[msg.msg_id] = PendingProposal(
             proposal_msg_id=msg.msg_id,
             from_agent="coordinator",
             action_name="integrate_patch",
@@ -1763,7 +1758,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             batch_id,
             audit_step or "<unknown>",
         )
-        await self._record_observation(
+        await self._coord._record_observation(
             "coordinator",
             "observation",
             {
@@ -1775,7 +1770,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             },
         )
         try:
-            self.shared_state.save(self.session_dir)
+            self._coord.shared_state.save(self._coord.session_dir)
         except Exception:
             log.exception(
                 "save after framework_agent candidate submit failed for candidate=%s",
@@ -1794,7 +1789,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         cand_id = str(payload.get("framework_agent_candidate_id") or self._framework_candidate_key(candidate))
         batch_id = str(payload.get("batch_id") or candidate.get("batch_id") or "")
         _record_review_outcome(self, cand_id, materialized=True)
-        authoring_enabled = bool(getattr(self.shared_state, "framework_agent_authoring_enabled", False))
+        authoring_enabled = bool(getattr(self._coord.shared_state, "framework_agent_authoring_enabled", False))
         want_raw = audit_step == "direct_framework"
         want_author = audit_step == "author_via_specialist"
         if audit_step not in ("direct_framework", "author_via_specialist"):
@@ -1855,7 +1850,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         cand_id = str(candidate_id or "")
         if not cand_id:
             return False
-        state = self.shared_state
+        state = self._coord.shared_state
         progress = getattr(state, "framework_agent_phase_progress", None)
         if not isinstance(progress, list):
             progress = []
@@ -1889,7 +1884,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             reason=str(status or ""),
         )
         try:
-            state.save(self.session_dir)
+            state.save(self._coord.session_dir)
         except Exception:
             log.exception(
                 "FRAMEWORK: save after progress stamp failed candidate=%s status=%s",
@@ -1969,7 +1964,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             spec_params: dict[str, Any] = {}
             if sid:
                 try:
-                    spec_task = await self.tasks.get(sid)
+                    spec_task = await self._coord.tasks.get(sid)
                 except TaskNotFound:
                     spec_task = None
                 spec_params = dict(getattr(spec_task, "params", None) or {})
@@ -2003,20 +1998,20 @@ class FrameworkPhase(CoordinatorCollaborator):
             )
             return
         # Skip if the candidate is already materializing as a live integrate_patch task.
-        live_tasks = [*await self.tasks.queued(), *await self.tasks.running()]
+        live_tasks = [*await self._coord.tasks.queued(), *await self._coord.tasks.running()]
         for t in live_tasks:
             if getattr(t, "kind", "") != "integrate_patch":
                 continue
             tp = getattr(t, "params", None) or {}
             if str(tp.get("framework_agent_candidate_id") or "") == cand_id:
                 return
-        attempts = getattr(self.shared_state, "specialist_reauthor_attempts", None)
+        attempts = getattr(self._coord.shared_state, "specialist_reauthor_attempts", None)
         if not isinstance(attempts, dict):
             attempts = {}
-            self.shared_state.specialist_reauthor_attempts = attempts
+            self._coord.shared_state.specialist_reauthor_attempts = attempts
         prior = int(attempts.get(cand_id, 0) or 0)
         if prior >= _AUTHORED_LANE_MAX_ATTEMPTS:
-            await self._record_observation(
+            await self._coord._record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -2051,13 +2046,13 @@ class FrameworkPhase(CoordinatorCollaborator):
             critic_feedback=critic_feedback,
         )
         try:
-            self.shared_state.save(self.session_dir)
+            self._coord.shared_state.save(self._coord.session_dir)
         except Exception:
             log.exception(
                 "save after re-author dispatch failed candidate=%s",
                 cand_id,
             )
-        await self._record_observation(
+        await self._coord._record_observation(
             "coordinator",
             "observation",
             {
@@ -2082,9 +2077,10 @@ class FrameworkPhase(CoordinatorCollaborator):
         """
         try:
             await self._pump_framework_agent_phase()
+            await self._maybe_bench_untested_proposals()
         except Exception as exc:
             log.exception("FRAMEWORK pump (%s) failed", caller)
-            self._record_coordinator_exception(stage=f"framework_pump:{caller}", exc=exc)
+            self._coord._record_coordinator_exception(stage=f"framework_pump:{caller}", exc=exc)
 
     def _record_framework_agent_authored_outcome(
         self,
@@ -2109,7 +2105,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             return
         # Resolve the FRAMEWORK candidate id (a PR URL) that this authored patch belongs to.
         spec_tid = str(params.get("specialist_task_id") or "")
-        cand_map = getattr(self.shared_state, "framework_agent_specialist_candidate_map", None)
+        cand_map = getattr(self._coord.shared_state, "framework_agent_specialist_candidate_map", None)
         mapped_cand = ""
         if isinstance(cand_map, dict) and spec_tid:
             mapped_cand = str(cand_map.get(spec_tid) or "")
@@ -2118,16 +2114,16 @@ class FrameworkPhase(CoordinatorCollaborator):
         )
         batch_id = str(params.get("framework_batch_id") or "")
         if not batch_id:
-            batches = getattr(self.shared_state, "framework_agent_batches", None) or []
+            batches = getattr(self._coord.shared_state, "framework_agent_batches", None) or []
             if isinstance(batches, list) and batches and isinstance(batches[-1], dict):
                 batch_id = str(batches[-1].get("batch_id") or "")
         delta_pct = res.get("delta_pct")
         new_tput = res.get("output_throughput")
         gain = float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0
-        progress = getattr(self.shared_state, "framework_agent_phase_progress", None)
+        progress = getattr(self._coord.shared_state, "framework_agent_phase_progress", None)
         if not isinstance(progress, list):
             progress = []
-            self.shared_state.framework_agent_phase_progress = progress
+            self._coord.shared_state.framework_agent_phase_progress = progress
         matching = [row for row in progress if isinstance(row, dict) and self._framework_candidate_key(row) == cand_id]
         # A KEEP is the last word on a candidate; any other row is an outcome a later attempt may better, and is
         # replaced below.
@@ -2159,7 +2155,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         if not recorded:
             return
         record_patch_attempt(
-            self.shared_state,
+            self._coord.shared_state,
             task_id=str(getattr(task, "task_id", "") or ""),
             specialist_task_id=spec_tid,
             outcome=status,
@@ -2199,7 +2195,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         cand_id = str(params.get("framework_agent_candidate_id") or "")
         if not specialist_task_id or not cand_id:
             return False
-        messages = await self.bus.tail(n=10000, topic="delegated_result")
+        messages = await self._coord.bus.tail(n=10000, topic="delegated_result")
         for message in messages:
             payload = getattr(message, "payload", None) or {}
             if (
@@ -2229,7 +2225,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             if not task_id:
                 continue
             try:
-                integrate_task = await self.tasks.get(task_id)
+                integrate_task = await self._coord.tasks.get(task_id)
             except TaskNotFound:
                 continue
             integrate_params = getattr(integrate_task, "params", None) or {}
@@ -2297,7 +2293,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             return
         inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
         # A downstream integrate_patch (owned by the authored-outcome bridge that writes the terminal row) is created
-        # by ``_maybe_autosubmit_specialist_patches`` when the deliverable is routable: ``patches_written`` (post
+        # by ``maybe_autosubmit_specialist_patches`` when the deliverable is routable: ``patches_written`` (post
         # safety-vetting) non-empty, OR a config-lever deliverable, OR a non-diff tuned artifact.
         patches = inner.get("patches_written") or []
         if isinstance(patches, list) and patches:
@@ -2316,8 +2312,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             from pathlib import Path as _Path
 
             _sid_arts = str(getattr(task, "task_id", "") or "")
-            if self.session_dir is not None and _sid_arts:
-                _spec_root = _runs_dir(_Path(self.session_dir), "specialist", _sid_arts)
+            if self._coord.session_dir is not None and _sid_arts:
+                _spec_root = _runs_dir(_Path(self._coord.session_dir), "specialist", _sid_arts)
                 if _resolvable_artifacts_from_done(inner, [_spec_root / "worktree", _spec_root]):
                     return
         except Exception:
@@ -2360,8 +2356,8 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     async def _candidate_discovery_inflight(self) -> bool:
         """True while a candidate-discovery specialist is queued or running."""
-        queued = await self.tasks.queued()
-        running = await self.tasks.running()
+        queued = await self._coord.tasks.queued()
+        running = await self._coord.tasks.running()
         return any(
             getattr(t, "kind", "") == "specialist"
             and bool((getattr(t, "params", None) or {}).get("candidate_discovery"))
@@ -2370,7 +2366,7 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     async def _maybe_enqueue_candidate_discovery(self, *, reason: str) -> bool:
         """Dispatch the candidate-discovery specialist when the pool is empty."""
-        state = self.shared_state
+        state = self._coord.shared_state
         limit = int(DISCOVER_FAILURE_RETRY_LIMIT)
         empties = int(getattr(state, "framework_agent_empty_discoveries", 0) or 0)
         failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0)
@@ -2395,14 +2391,14 @@ class FrameworkPhase(CoordinatorCollaborator):
             "reason": reason,
             "source": "coordinator_internal",
         }
-        await self._warm_specialist_params(params)
-        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
-        task = await self.tasks.create_or_return_existing(
+        await self._coord._warm_specialist_params(params)
+        lanes, ttl = self._coord._framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
+        task = await self._coord.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
             # The round count is part of the key: the registry returns the row a key already names, so a fixed key
             # would re-fetch the finished first attempt and neither streak could advance.
-            idempotency_key=f"candidate-discovery:{reason}{self._cycle_idem_suffix()}:r{empties + failures}",
+            idempotency_key=f"candidate-discovery:{reason}{self._coord._cycle_idem_suffix()}:r{empties + failures}",
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
             side_effects=["writes_results"],
@@ -2432,7 +2428,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         params = getattr(task, "params", None) or {}
         if not bool(params.get("candidate_discovery")):
             return
-        state = self.shared_state
+        state = self._coord.shared_state
         if run_error:
             failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0) + 1
             state.framework_agent_discover_failures = failures
@@ -2449,7 +2445,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 failures,
                 run_error[:200],
             )
-            state.save(self.session_dir)
+            state.save(self._coord.session_dir)
             return
         proposals = done_payload.get("proposal_set") if isinstance(done_payload, dict) else None
         candidates = self._candidates_from_discovery_proposals(proposals or [])
@@ -2478,7 +2474,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 cand["batch_id"] = batch_id
             batches.append({"batch_id": batch_id, "candidates": candidates})
             log.info("FRAMEWORK: harvested %d candidate(s) into batch=%s", len(candidates), batch_id)
-        state.save(self.session_dir)
+        state.save(self._coord.session_dir)
 
     def _candidates_from_discovery_proposals(self, proposals: Any) -> list[dict[str, Any]]:
         """Map discovery ``proposal_set`` entries to candidate rows."""
@@ -2524,60 +2520,42 @@ class FrameworkPhase(CoordinatorCollaborator):
             out.append(cand)
         return out
 
-    async def _maybe_materialize_mn_explore(
-        self,
-        *,
-        task: "Task",
-        domain: str,
-        proposals: list[Any],
-    ) -> None:
-        """Multi-node bridge: turn a specialist ``proposal_set`` into a
-        benchmarked ``explore`` task automatically.
+    async def _maybe_bench_untested_proposals(self) -> None:
+        """Enqueue an explore grid from the highest-severity untested specialist proposals.
 
-        Single-node is a no-op (``is_multi_node()`` False): there the
-        Orchestration LLM drives ``explore`` directly. In multi-node the GPU
-        cluster lives on remote SSH pods, so the only materialisation channel is
-        a structured ``explore`` action; this helper enqueues the explore grid
-        itself. ``proposal_set`` entries reuse the explore variant schema
-        (``name`` / ``extra_args`` / ``extra_envs``) and pass straight through;
-        ``canonical_fingerprint`` dedup + the per-variant KEEP/REVERT gain gate
-        are the safety net.
-
-        Args:
-            task: The completed specialist task whose id seeds the explore
-                idempotency key.
-            domain: The specialist domain, stamped onto variant provenance.
-            proposals: The specialist ``proposal_set`` entries materialised into
-                the explore grid (capped at ``_MN_AUTO_EXPLORE_GRID_CAP``).
+        Runs in FRAMEWORK_AGENT while no explore is queued or running. The
+        idempotency key names the fingerprint set, so a grid that failed without
+        recording any variant is not re-enqueued until the queue head changes.
         """
-        from ..actions.executors._multi_node_env import is_multi_node
-        from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
+        from ..actions.executors._proposal_identity import controls_of
 
-        if not is_multi_node() or not proposals:
+        state = self._coord.shared_state
+        if (
+            state.phase or ""
+        ).strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT or state.framework_agent_phase_done:
             return
-        grid: list[dict[str, Any]] = []
-        for i, p in enumerate(proposals[: self._MN_AUTO_EXPLORE_GRID_CAP]):
-            if not isinstance(p, dict):
-                continue
-            fields = normalize_proposal(p)
-            if not is_executable(fields):
-                continue
-            grid.append(
-                {
-                    "name": fields["name"] or f"{domain or 'specialist'}-{task.task_id[:8]}-{i}",
-                    "extra_args": fields["extra_args"],
-                    "extra_envs": fields["extra_envs"],
-                    **controls_of(fields),
-                    "provenance": f"specialist:{domain}" if domain else "specialist",
-                    "note": fields["reason"][:200],
-                }
-            )
-        if not grid:
+        if self._coord.admission_frozen or self._coord._dispatch_paused_for_phase_budget():
             return
-        state = self.shared_state
+        if any(t.kind == "explore" for t in (*await self._coord.tasks.queued(), *await self._coord.tasks.running())):
+            return
+        rows = state.untested_proposal_rows()[: self._AUTO_EXPLORE_GRID_CAP]
+        if not rows:
+            return
+        grid = [
+            {
+                "name": row["name"],
+                "extra_args": row["extra_args"],
+                "extra_envs": dict(row["extra_envs"]),
+                **controls_of(row),
+                "provenance": f"specialist:{row['domain']}",
+                "note": row["reason"][:200],
+            }
+            for row in rows
+        ]
+        fp_hash = sha1(",".join(sorted(row["fingerprint"] for row in rows)).encode(), usedforsecurity=False)
         params: dict[str, Any] = {
-            "source": "coordinator_internal_mn",
-            "reason": f"mn_auto_materialize:{domain or 'specialist'}",
+            "source": "coordinator_internal",
+            "reason": "auto_bench_untested_proposals",
             "grid": grid,
         }
         if state.baseline_config_path:
@@ -2588,25 +2566,19 @@ class FrameworkPhase(CoordinatorCollaborator):
             bs = str(last_bl.get("benchmark_script") or "").strip()
             if bs:
                 params["benchmark_script"] = bs
-        lanes, ttl = self._registry_lanes_ttl("explore")
-        etask, was_existing = await self.tasks.create_or_return_existing(
+        lanes, ttl = self._coord._registry_lanes_ttl("explore")
+        etask, was_existing = await self._coord.tasks.create_or_return_existing(
             kind="explore",
             params=params,
-            idempotency_key=f"mn-auto-explore-{task.task_id}",
+            idempotency_key=f"auto-explore-c{int(state.macro_cycle or 0)}-{fp_hash.hexdigest()[:12]}",
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )
-        log.info(
-            "mn_auto_materialize: enqueued explore task_id=%s (variants=%d, from specialist=%s domain=%s, existing=%s)",
-            etask.task_id,
-            len(grid),
-            task.task_id,
-            domain,
-            was_existing,
-        )
+        if not was_existing:
+            log.info("auto_bench: enqueued explore task_id=%s (variants=%d)", etask.task_id, len(grid))
 
-    async def _maybe_autosubmit_specialist_patches(
+    async def maybe_autosubmit_specialist_patches(
         self,
         *,
         task: "Task",
@@ -2630,8 +2602,8 @@ class FrameworkPhase(CoordinatorCollaborator):
         from hyperloom.inference_optimizer.session.session_paths import runs_dir as _runs_dir
 
         resolve_bases: list[Path] = []
-        if self.session_dir is not None:
-            spec_root = _runs_dir(Path(self.session_dir), "specialist", sid)
+        if self._coord.session_dir is not None:
+            spec_root = _runs_dir(Path(self._coord.session_dir), "specialist", sid)
             resolve_bases = [spec_root / "worktree", spec_root]
         existing_patches: list[str] = []
         for p in patches:
@@ -2646,7 +2618,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         routable_artifacts = _resolvable_artifacts_from_done(done_payload, resolve_bases)
         if not existing_patches and not routable_artifacts:
             if patches:
-                await self._record_observation(
+                await self._coord._record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -2657,10 +2629,10 @@ class FrameworkPhase(CoordinatorCollaborator):
                 )
             return
         # Already ruled on by the Critic (e.g. after resume) — nothing to do.
-        if self.shared_state.get_specialist_patch_verdict(sid):
+        if self._coord.shared_state.get_specialist_patch_verdict(sid):
             return
         # A synthetic review for this specialist is already in flight.
-        for p in self.state.pending_proposals.values():
+        for p in self._coord.state.pending_proposals.values():
             if getattr(p, "action_name", "") != "integrate_patch":
                 continue
             pl = getattr(p, "payload", {}) or {}
@@ -2699,7 +2671,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             # the architecture requires does not stop being required because the next
             # specialist is working on a different blocker, and one that omits it sends
             # the round back to the wall an earlier round already cleared.
-            established = dict(getattr(self.shared_state.enablement, "accepted_config", None) or {})
+            established = dict(getattr(self._coord.shared_state.enablement, "accepted_config", None) or {})
             round_envs = {**{str(k): str(v) for k, v in (established.get("extra_envs") or {}).items()}, **round_envs}
             # This round last, so it overrides an inherited value for the same flag.
             round_args = _dedupe_extra_server_args(
@@ -2759,15 +2731,15 @@ class FrameworkPhase(CoordinatorCollaborator):
             "proposal",
             {**propose_payload, "needs_review": True},
         )
-        await self.bus.append_and_seq(msg)
-        self.state.pending_proposals[msg.msg_id] = PendingProposal(
+        await self._coord.bus.append_and_seq(msg)
+        self._coord.state.pending_proposals[msg.msg_id] = PendingProposal(
             proposal_msg_id=msg.msg_id,
             from_agent="coordinator",
             action_name="integrate_patch",
             predicted_gain_pct=0.0,
             payload=dict(propose_payload),
         )
-        await self._record_observation(
+        await self._coord._record_observation(
             "coordinator",
             "observation",
             {
@@ -2785,14 +2757,14 @@ class FrameworkPhase(CoordinatorCollaborator):
             },
         )
         try:
-            self.shared_state.save(self.session_dir)
+            self._coord.shared_state.save(self._coord.session_dir)
         except Exception:
             log.exception(
                 "save after specialist patch autosubmit failed for task=%s",
                 sid,
             )
 
-    async def _maybe_autosubmit_framework_config(
+    async def maybe_autosubmit_config(
         self,
         *,
         task: "Task",
@@ -2800,7 +2772,7 @@ class FrameworkPhase(CoordinatorCollaborator):
     ) -> None:
         """Route a FRAMEWORK config-lever deliverable through integrate_patch.
 
-        Companion to :meth:`_maybe_autosubmit_specialist_patches`: fires when a
+        Companion to :meth:`maybe_autosubmit_specialist_patches`: fires when a
         FRAMEWORK authoring or ENABLEMENT specialist returns NO source patch but a config-lever
         ``proposal_set`` (extra_args / extra_envs). The levers go into
         integrate_patch's ``config_changes`` channel (apply + bench + accuracy
@@ -2841,10 +2813,10 @@ class FrameworkPhase(CoordinatorCollaborator):
         if config_levers and self._config_lever_known_bad(config_levers):
             return
         # Already ruled on (e.g. after resume) — nothing to do.
-        if self.shared_state.get_specialist_patch_verdict(sid):
+        if self._coord.shared_state.get_specialist_patch_verdict(sid):
             return
         # A synthetic review for this specialist is already in flight.
-        for p in self.state.pending_proposals.values():
+        for p in self._coord.state.pending_proposals.values():
             if getattr(p, "action_name", "") != "integrate_patch":
                 continue
             pl = getattr(p, "payload", {}) or {}
@@ -2873,7 +2845,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             integrate_params["framework_agent_candidate_id"] = fa_cand
         if fa_batch:
             integrate_params["framework_batch_id"] = fa_batch
-        # Enablement passthrough (mirrors _maybe_autosubmit_specialist_patches): a
+        # Enablement passthrough (mirrors maybe_autosubmit_specialist_patches): a
         # config-lever-only enablement deliverable MUST still flow the enablement
         # marker + setup_commands into integrate_patch, or the result never
         # carries ``enablement=True``, ``_maybe_rearm_enablement`` no-ops, and
@@ -2911,15 +2883,15 @@ class FrameworkPhase(CoordinatorCollaborator):
             "proposal",
             {**propose_payload, "needs_review": True},
         )
-        await self.bus.append_and_seq(msg)
-        self.state.pending_proposals[msg.msg_id] = PendingProposal(
+        await self._coord.bus.append_and_seq(msg)
+        self._coord.state.pending_proposals[msg.msg_id] = PendingProposal(
             proposal_msg_id=msg.msg_id,
             from_agent="coordinator",
             action_name="integrate_patch",
             predicted_gain_pct=0.0,
             payload=dict(propose_payload),
         )
-        await self._record_observation(
+        await self._coord._record_observation(
             "coordinator",
             "observation",
             {
@@ -2938,7 +2910,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             sorted(integrate_params["extra_envs"]),
         )
         try:
-            self.shared_state.save(self.session_dir)
+            self._coord.shared_state.save(self._coord.session_dir)
         except Exception:
             log.exception(
                 "FRAMEWORK: save after config autosubmit failed for task=%s",

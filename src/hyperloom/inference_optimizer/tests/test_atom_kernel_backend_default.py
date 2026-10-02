@@ -22,7 +22,7 @@ import os
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import _apply_atom_auto_tighten
+from hyperloom.inference_optimizer import cli
 
 
 def _args(**overrides: object) -> argparse.Namespace:
@@ -51,7 +51,7 @@ def test_an_unset_backend_is_left_for_the_shared_default(monkeypatch):
     """Writing anything here would make atom resolve differently from every other framework."""
     monkeypatch.delenv(_KEY, raising=False)
 
-    _apply_atom_auto_tighten(_args())
+    cli._apply_atom_auto_tighten(_args())
 
     assert _KEY not in os.environ
 
@@ -61,7 +61,7 @@ def test_a_named_backend_survives_verbatim(monkeypatch, value):
     """Every spelling reaches the shared resolver unedited, including the blank ones."""
     monkeypatch.setenv(_KEY, value)
 
-    _apply_atom_auto_tighten(_args())
+    cli._apply_atom_auto_tighten(_args())
 
     assert os.environ[_KEY] == value
 
@@ -72,7 +72,7 @@ def test_the_shared_default_puts_atom_on_geak(monkeypatch):
 
     monkeypatch.delenv(_KEY, raising=False)
 
-    _apply_atom_auto_tighten(_args())
+    cli._apply_atom_auto_tighten(_args())
 
     assert _raw_kernel_backend_order() == ["geak"]
 
@@ -82,7 +82,7 @@ def test_multi_node_still_fails_fast(monkeypatch):
     monkeypatch.delenv(_KEY, raising=False)
 
     with pytest.raises(SystemExit) as exc:
-        _apply_atom_auto_tighten(_args(nodes=2))
+        cli._apply_atom_auto_tighten(_args(nodes=2))
 
     assert exc.value.code == 2
     assert _KEY not in os.environ
@@ -154,7 +154,6 @@ async def test_cli_rejects_multinode_atom_on_fresh_and_resume(tmp_path, monkeypa
     import json
     from types import SimpleNamespace
 
-    import hyperloom.inference_optimizer.cli as cli
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     monkeypatch.setattr(os, "environ", dict(os.environ))

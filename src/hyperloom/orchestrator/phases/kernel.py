@@ -200,7 +200,7 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
 
 
 class KernelPhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     @staticmethod
     def _serving_config_signature(serving_config: Any) -> str:
@@ -940,9 +940,9 @@ class KernelPhase(CoordinatorCollaborator):
     @staticmethod
     def _resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
         """Resolve the server launcher named by a legacy AgentX client recipe."""
-        from hyperloom.inference_optimizer.agentx.deploy import AGENTX_CLIENT_SCRIPT
+        from hyperloom.common.agentx_workload import is_agentx_client_script
 
-        if Path(str(bench.get("benchmark_script") or "").strip()).name != AGENTX_CLIENT_SCRIPT:
+        if not is_agentx_client_script(str(bench.get("benchmark_script") or "").strip()):
             return ""
         return resolve_launch_server_script(bench)
 

@@ -1,13 +1,13 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.1.2, a patch release that validates ROCm 10, makes ENABLEMENT its own phase, retires robustness supervision in favour of explicit resume and recovery, and supports ATOM end to end; plus the 1.1.1 and 1.1.0 releases."
+    "description": "Hyperloom release notes: headline capabilities for version 1.1.3, a patch release on top of 1.1.2; plus the 1.1.2 release, which validates ROCm 10, makes ENABLEMENT its own phase, retires robustness supervision in favour of explicit resume and recovery, and supports ATOM end to end, and the 1.1.1 and 1.1.0 releases."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, KernelForge, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is 1.1.2 (`pyproject.toml`). For the
+The current packaged version is 1.1.3 (`pyproject.toml`). For the
 per-change history since the initial snapshot, and for a detailed breakdown of
 all previous Hyperloom pre-release versions, see
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
@@ -19,6 +19,12 @@ release has shipped yet.
 Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
+
+## Hyperloom 1.1.3 release
+
+The [1.1.3 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.3)
+is a patch release on top of 1.1.2. The per-change history is on the
+[Releases](https://github.com/AMD-AGI/Hyperloom/releases) page.
 
 ### Added
 
@@ -33,7 +39,7 @@ it.
   retain their measurement-only contract. No historical baseline or KEEP is
   migrated. Unsupported or ambiguous recipes fail before measurement. The
   pinned pair is Magpie v0.3.0 plus native launch overrides, custom-model replay, and the eval source-path fix at commit
-  `658562345ad1a7e5a617e3631f3acfcec0eade4a` and InferenceX commit
+  `c5c80698fef1b89cc6882264b80d5b306d4e9328` and InferenceX commit
   `408c015be4b22d14c69518643609669405507077`. Both dependencies are pinned by
   immutable commit for reproducible AgentX measurements. The upstream hotfix
   keeps generic GSM8K evaluation and its probe files reachable after benchmark

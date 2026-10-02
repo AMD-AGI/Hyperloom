@@ -171,10 +171,8 @@ AGENTX_REQUIRED_RUNTIME_PIN_NAMES = (
     "HYPERLOOM_IMAGE",
 )
 
-# InferenceX's matrix does not currently declare the launcher that belongs to
-# each recipe.  Do not guess from filenames: runner-specific fallback rules are
-# not uniform.  This audited manifest is intentionally tied to one exact
-# checkout and launcher blob.  A ref bump must update it deliberately.
+# Persisted epoch-2 sessions use these exact shell launcher bytes. New sessions
+# resolve Magpie's server-launch-spec and never consult this historical mapping.
 _NATIVE_LAUNCHER_MANIFEST: dict[tuple[str, str], tuple[str, str]] = {
     (
         "3d5581562f643f9bdeb8410cd924e2c70906c966",
@@ -262,7 +260,7 @@ _NATIVE_LAUNCHER_TRANSITIVE_INPUTS: dict[tuple[str, str], tuple[str, ...]] = {
     ): ("benchmarks/single_node/agentic/apply_k3_container_patches.sh",),
 }
 
-# Reviewed revisions that publish the upstream recipe/launcher contract.
+# Persisted epoch-3 sessions retain the launch contract of their accepted pin.
 _NATIVE_LAUNCH_CONTRACT_REFS: frozenset[str] = frozenset({"421312f8984c2152f4b8eafefc93ea2fa598e80f"})
 _NATIVE_LAUNCH_CONTRACT_INPUTS = (
     "configs/agentx-launchers.json",
@@ -296,6 +294,10 @@ _AUDITED_MAGPIE_EXECUTION_TREES = {
     "a3339dc2776ee0c977fb3313fe89f56da7a91555": {
         "file_count": 79,
         "tree_sha256": "113f880b18ccd3ec26e6a432fcdf06a0c365520d51c3ed3c46069d33d7f07e93",
+    },
+    "c5c80698fef1b89cc6882264b80d5b306d4e9328": {
+        "file_count": 87,
+        "tree_sha256": "1f475d413e7af20204da8b8abcd06a6a69916d3960f175c72d627663ce33d94f",
     },
     "658562345ad1a7e5a617e3631f3acfcec0eade4a": {
         "file_count": 86,
@@ -801,12 +803,7 @@ def validate_native_recipe_launcher(
     recipe: str,
     benchmark_script: str,
 ) -> dict[str, str]:
-    """Prove that a pinned recipe is paired with its audited launcher.
-
-    New revisions publish a versioned launcher manifest. Saved older native
-    sessions use the exact-ref compatibility manifest because their fleet
-    runners have non-uniform filename fallback rules.
-    """
+    """Verify the managed client or an existing session's pinned shell launcher."""
     root = validate_native_checkout_path(inferencex_path)
     head = _checkout_head(root, label="InferenceX")
     recipe_name = str(recipe or "").strip()
@@ -867,12 +864,19 @@ def native_execution_identity(
 ) -> dict[str, Any]:
     """Bind a native run to clean executable inputs from one git checkout."""
     root = validate_native_checkout_path(inferencex_path)
-    from .managed import execution_identity, server_spec
+    from .managed import execution_identity, identity_benchmark, server_spec
 
     if server_spec(resolved_benchmark) is not None:
+        identity_config = identity_benchmark(
+            resolved_benchmark,
+            str(
+                (os.environ if launch_env is None else launch_env).get("HYPERLOOM_AGENTX_EXPECTED_WORKLOAD_FINGERPRINT")
+                or ""
+            ),
+        )
         return execution_identity(
             root=root,
-            benchmark=resolved_benchmark,
+            benchmark=identity_config,
             config_file=config_file,
             expected_ref=expected_ref,
             magpie=magpie_execution or {},
@@ -1130,6 +1134,8 @@ def preview_native_recipe(
         inferencex_path=root,
     )
     resolved_benchmark = resolved_payload["benchmark"]
+    if isinstance(benchmark.get("workload_spec"), dict):
+        resolved_benchmark["workload_spec"] = dict(benchmark["workload_spec"])
     run_mode = str(resolved_benchmark.get("run_mode") or "local").lower()
     if run_mode != "local":
         raise ValueError(

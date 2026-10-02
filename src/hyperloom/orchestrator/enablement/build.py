@@ -432,12 +432,10 @@ class EnablementBuild(CoordinatorCollaborator):
     def _note_build_routed(self, build_task_id: str, **fields: Any) -> None:
         """Record that a build's outcome has been routed, and to what.
 
-        ``routed`` is stamped on both paths. The append path always carried it;
-        the merge path took only the caller's fields, so routing a build with
-        nothing to say about it left a row that named the build and no longer
-        said it had been routed. That was legible only because the reader
-        matched on the id alone -- which is what made an attempt row's id, had
-        it ever carried one, answer for a build nobody had routed.
+        ``routed`` is stamped on both the append and the merge path, so a build
+        routed with no fields of its own still says it was routed. A reader
+        matching on the id alone could not tell that row from an attempt row
+        that happens to carry the same id.
         """
         manifest = list(self.shared_state.enablement.build_manifest or [])
         for idx, entry in enumerate(manifest):
@@ -475,8 +473,7 @@ class EnablementBuild(CoordinatorCollaborator):
         applying any patch.  The probe completes as an ordinary integrate_patch
         task whose enablement:True result is routed by the dispatcher through
         _maybe_rearm_authored_lane → _maybe_rearm_enablement, producing a
-        genuine KEEP/advanced/reverted outcome.  The whole-machine GPU pool is
-        acquired via _framework_gpu_params.
+        genuine KEEP/advanced/reverted outcome.
 
         The probe is what declares KEEP for a build, so it must not be opened
         into a session that cannot run it: the queue scan drops a queued row the
@@ -515,7 +512,6 @@ class EnablementBuild(CoordinatorCollaborator):
             # watched this failure persisted.
             "enablement_before_observation_path": state.enablement.launch_observation_path,
             "source": "coordinator_internal",
-            **self._framework_gpu_params(),
             **_enablement_carrier_params(state),
         }
         # Prefer the eval-origin probe config so the re-run keeps the original workload/eval contract; fall back to

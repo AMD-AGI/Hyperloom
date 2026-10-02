@@ -8,7 +8,13 @@ from __future__ import annotations
 import os
 from typing import Any, Mapping
 
-from ._workload_envs import apply_agentx_switch, apply_scriptable_runtime_defaults
+from hyperloom.common.agentx_workload import is_agentx_client_script
+
+from ._workload_envs import (
+    apply_agentx_switch,
+    apply_scriptable_runtime_defaults,
+    pin_mlperf_round_concurrency,
+)
 
 
 def apply_runtime_benchmark_overrides(
@@ -23,26 +29,11 @@ def apply_runtime_benchmark_overrides(
 ) -> dict[str, Any]:
     """Apply runtime env/CLI overrides to a Magpie benchmark YAML."""
     if agentx_mode is None:
-        serialized_agentx = bench.get("agentx")
-        native_enabled = False
-        if isinstance(serialized_agentx, bool):
-            native_enabled = serialized_agentx
-        elif isinstance(serialized_agentx, str):
-            native_enabled = serialized_agentx.strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "enable",
-                "enabled",
-            }
-        elif isinstance(serialized_agentx, dict):
-            raw_enabled = serialized_agentx.get("enabled", True)
-            native_enabled = (
-                raw_enabled.strip().lower() in {"1", "true", "yes", "enable", "enabled"}
-                if isinstance(raw_enabled, str)
-                else bool(raw_enabled)
-            )
-        if str(bench.get("benchmark_script") or "") == "aiperf_client.sh" or native_enabled:
+        from hyperloom.common.agentx_mode import native_agentx_enabled
+
+        if is_agentx_client_script(str(bench.get("benchmark_script") or "")) or native_agentx_enabled(
+            bench.get("agentx")
+        ):
             agentx_mode = True
 
     if model_path:
@@ -95,6 +86,8 @@ def apply_runtime_benchmark_overrides(
             if yaml_tp not in (None, 0, "", "0"):
                 continue
         envs[env_key] = int(val)
+
+    pin_mlperf_round_concurrency(envs)
 
     explicit_rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
     if explicit_rocr:

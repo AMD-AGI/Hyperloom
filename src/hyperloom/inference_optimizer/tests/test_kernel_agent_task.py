@@ -21,6 +21,7 @@ from hyperloom.orchestrator.actions.cancel_channel import cancel_scope_listener
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, SharedState
 from hyperloom.orchestrator.state.task_registry import Task
+from ._dispatch_helpers import pump_until_settled
 
 _KERNEL_AGENT_LANES = ("server_lifecycle", "workspace_mutation", "benchmark_lane")
 
@@ -48,9 +49,9 @@ def coord(tmp_path, monkeypatch):
     async def _noop(*_args, **_kwargs):
         return None
 
-    c.phase_internal._maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
-    c.specialist_dispatch._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
-    c.phase_internal._maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
+    c._maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
+    c._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
+    c._maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
     c.shared_state.kernel_enabled = True
     yield c
 
@@ -96,11 +97,11 @@ def _skip_phase_entry_effects(c, monkeypatch) -> None:
     async def _noop(**_kwargs):
         return None
 
-    monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _noop)
+    monkeypatch.setattr(c, "_on_phase_entered", _noop)
 
 
 async def _settle(c, task_id: str) -> None:
-    entry = c.dispatcher._inflight_actions.get(task_id)
+    entry = c._inflight_actions.get(task_id)
     if entry is not None:
         await asyncio.wait_for(entry.atask, timeout=5.0)
 
@@ -179,7 +180,7 @@ async def test_the_pump_returns_while_the_kernel_agent_task_runs(coord):
     c.sub.register_executor("kernel_agent", _blocking_executor(release, started))
     task = await _create_kernel_agent(c)
 
-    await asyncio.wait_for(c.dispatcher._pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(c._pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(started.wait(), timeout=2.0)
 
     assert (await c.tasks.get(task.task_id)).state == "running"
@@ -209,7 +210,7 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
     c.shared_state.macro_cycle = 4
     c.shared_state.tick = 99
 
-    await c.dispatcher._pump_dispatcher_once()
+    await c._pump_dispatcher_once()
     await _settle(c, task.task_id)
 
     fixture = build(c.session_dir)
@@ -336,7 +337,7 @@ async def test_a_spent_phase_budget_stops_the_kernel_agent_and_leaves_kernel(coo
     started = asyncio.Event()
     c.sub.register_executor("kernel_agent", _listening_executor(started))
     task = await _create_kernel_agent(c)
-    await asyncio.wait_for(c.dispatcher._pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(c._pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(started.wait(), timeout=2.0)
     _spend_the_phase_budget(st)
 
@@ -363,7 +364,7 @@ async def test_a_running_kernel_agent_keeps_roofline_queued_until_it_returns(coo
 
     c.sub.register_executor("roofline", _roofline)
     agent = await _create_kernel_agent(c)
-    await asyncio.wait_for(c.dispatcher._pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(c._pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(started.wait(), timeout=2.0)
 
     lanes, ttl = c._registry_lanes_ttl("roofline")
@@ -374,14 +375,14 @@ async def test_a_running_kernel_agent_keeps_roofline_queued_until_it_returns(coo
         requires_lanes=lanes,
         lease_ttl_sec=ttl,
     )
-    await asyncio.wait_for(c.dispatcher._pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(c._pump_dispatcher_once(), timeout=2.0)
 
     assert rooflines == []
     assert (await c.tasks.get(roofline.task_id)).state == "queued"
 
     release.set()
     await _settle(c, agent.task_id)
-    await asyncio.wait_for(c.dispatcher._pump_dispatcher_once(), timeout=5.0)
+    await pump_until_settled(c)
 
     assert rooflines == [roofline.task_id]
     assert (await c.tasks.get(roofline.task_id)).state == "succeeded"
@@ -395,13 +396,13 @@ async def test_a_spent_session_cancels_the_running_kernel_agent(coord):
     started = asyncio.Event()
     c.sub.register_executor("kernel_agent", _listening_executor(started))
     task = await _create_kernel_agent(c)
-    await asyncio.wait_for(c.dispatcher._pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(c._pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(started.wait(), timeout=2.0)
 
     st.max_minutes = 60
     st.elapsed_minutes = lambda **_kw: 60.0  # type: ignore[method-assign]
     assert st.session_budget_usable_sec() == 0.0
-    await asyncio.wait_for(c.dispatcher._cancel_inflight_that_outlived_the_session(), timeout=30.0)
+    await asyncio.wait_for(c._cancel_inflight_that_outlived_the_session(), timeout=30.0)
     await _settle(c, task.task_id)
 
     assert (await c.tasks.get(task.task_id)).state == "cancelled"

@@ -75,9 +75,6 @@ _AITER_LINE = (
 class TestForgeGemmHelperCoverage:
     def test_resolve_backend_requires_exact_kernel_order_forge(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        monkeypatch.delenv("GEMM_TUNING_BACKEND", raising=False)
-        assert krh._resolve_gemm_tuning_backend({}) == "geak"
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         assert krh._resolve_gemm_tuning_backend({}) == "geak"
         assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "forge"}) == "geak"
         assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "unknown"}) == "geak"
@@ -3697,10 +3694,8 @@ class TestRunGemmTuningHandler:
         assert result["status"] == "ok"
 
     def test_handler_passes_non_fp8_geak_to_next_hyperloom_prereq(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
-        # The backend is chosen by KERNEL_OPT_BACKEND_ORDER, not by GEMM_TUNING_BACKEND, so
-        # leaving it to the ambient environment sends this down the forge branch instead --
-        # which reports model_path_missing, a prerequisite this test is not about.
+        # An ambient KERNEL_OPT_BACKEND_ORDER=forge sends this down the forge branch instead -- which
+        # reports model_path_missing, a prerequisite this test is not about.
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
         state = SharedState(precision="bf16", framework="sglang")
@@ -3712,7 +3707,7 @@ class TestRunGemmTuningHandler:
         assert result["error_class"] == "kernel_agent_root_missing"
 
     def test_builds_task_file_input_not_task_argv(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         root = tmp_path / "kernel-agent"
         tool = root / "tools" / "gemm_tuning.py"
         tool.parent.mkdir(parents=True)
@@ -3773,7 +3768,7 @@ class TestRunGemmTuningHandler:
         assert "--input-json" in captured["cmd"]  # type: ignore[operator]
 
     def test_generates_isolated_benchmark_script_when_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         root = tmp_path / "kernel-agent"
         tool = root / "tools" / "gemm_tuning.py"
         tool.parent.mkdir(parents=True)
@@ -3827,7 +3822,7 @@ class TestRunGemmTuningHandler:
         assert result["status"] == "ok"
 
     def test_geak_without_config_does_not_fall_back_to_forge(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("GEAK_CONFIG", raising=False)
         root = tmp_path / "kernel-agent"
         root.mkdir()
@@ -3859,7 +3854,6 @@ class TestRunGemmTuningHandler:
 
     def test_forge_uses_runtime_fp8_blockscale_for_aiter_backend(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         model_dir = tmp_path / "qwen"
         model_dir.mkdir()
         state = SharedState(
@@ -3913,7 +3907,6 @@ class TestRunGemmTuningHandler:
         from hyperloom.inference_optimizer.session.session_paths import gemm_tuning_steps_path
 
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         model_dir = tmp_path / "qwen"
         model_dir.mkdir()
         state = SharedState(
@@ -3964,7 +3957,6 @@ class TestRunGemmTuningHandler:
 
     def test_forge_uses_per_token_only_for_explicit_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         model_dir = tmp_path / "qwen"
         model_dir.mkdir()
         state = SharedState(
@@ -4012,7 +4004,6 @@ class TestRunGemmTuningHandler:
     def test_forge_fallback_to_session_precision_when_no_quantization(self, tmp_path, monkeypatch):
         """When current_best has no --quantization, fall back to state.precision."""
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         model_dir = tmp_path / "moe"
         model_dir.mkdir()
         state = SharedState(
@@ -4445,6 +4436,27 @@ class TestTracelensRootResolution:
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
 
+    def test_trace_analyze_handler_bypass_selfheals_default_root_then_fails_if_unrecovered(self, tmp_path, monkeypatch):
+        # Bypass transitively imports TraceLens for source mapping, so it is provisioned like the agent route:
+        # a missing default root self-heals, then fails clearly instead of crashing the subprocess at import time.
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
+        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "no-tracelens-here"))
+        called = {"n": 0}
+
+        def _fake_heal(root, *, log=None):
+            called["n"] += 1
+
+        monkeypatch.setattr(ta, "_maybe_selfheal_tracelens_root", _fake_heal)
+        out = asyncio.run(
+            ta.trace_analyze_handler(
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "bypass"}, session_dir=tmp_path
+            )
+        )
+        assert called["n"] == 1  # self-heal attempted on the bypass route too
+        assert out["status"] == "failed"
+        assert out["error_class"] == "tracelens_root_missing"
+
     def test_trace_analyze_handler_selfheals_incomplete_default_root(self, tmp_path, monkeypatch):
         # an incomplete default checkout (dir present, no .git) must still trigger self-heal.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
@@ -4638,7 +4650,6 @@ class TestBuildTraceAnalyzeCmd:
         state, session_dir = self._common(monkeypatch, tmp_path)
         state.model_path = "/models/sglang-model"
         state.precision = "fp8"
-        state.baseline_config_path = "/session/materialized.yaml"
         cmd, _steady = ta._build_trace_analyze_cmd(
             {"trace_input": "/t/trace"},
             session_dir=session_dir,
@@ -4656,7 +4667,6 @@ class TestBuildTraceAnalyzeCmd:
         )
         assert cmd[cmd.index("--model-path") + 1] == "/models/sglang-model"
         assert cmd[cmd.index("--precision") + 1] == "fp8"
-        assert cmd[cmd.index("--runtime-config") + 1] == "/session/materialized.yaml"
 
     def test_bypass_scriptable_cmd(self, monkeypatch, tmp_path):
         state, session_dir = self._common(monkeypatch, tmp_path)
@@ -4692,7 +4702,6 @@ class TestBuildTraceAnalyzeCmd:
         assert "--model-path" in cmd and cmd[cmd.index("--model-path") + 1] == "/models/flux"
         assert "--precision" in cmd and cmd[cmd.index("--precision") + 1] == "bf16"
         assert "--split-conc" not in cmd
-        assert "--runtime-config" not in cmd
         assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "auto"
         assert cmd[-1] == "--dry-run"
         assert steady == "auto"

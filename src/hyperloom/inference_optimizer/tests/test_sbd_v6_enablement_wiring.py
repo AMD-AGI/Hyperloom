@@ -36,6 +36,8 @@ from hyperloom.orchestrator.enablement.lane import EnablementLane
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.machine_state import ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.round_store import FAILED, RoundStore
 
@@ -177,7 +179,6 @@ def _lane(session_dir: Path, **overrides: Any):
         _maybe_escalate_to_targeted_build=_noop,
         _read_enablement_source_context=lambda _sig: "",
         _derive_checkpoint_weight_facts=lambda _log: "",
-        _framework_gpu_params=lambda: {},
         _framework_authoring_lanes_ttl=lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
         _time_budget_denial_for_action=lambda _action: None,
         action_registry=ACTION_CATALOGUE,
@@ -347,6 +348,32 @@ async def test_the_stall_cap_closes_the_lane_as_failed(_bound_session):
     assert events[0]["ext"]["result"]["reason"] == "enablement_attempts_exhausted"
     assert events[0]["ext"]["attempts"]["count"] == ENABLEMENT_MAX_ATTEMPTS
     assert events[0]["ext"]["attempts"]["landed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_the_stall_cap_closes_the_lane_on_the_real_coordinator(_bound_session, monkeypatch):
+    """``_lane`` binds writeback's close onto the lane by hand, so only a real Coordinator shows the cap reaching it."""
+    # The host preflight reads the ambient MODEL_PATH; see ``_lane``.
+    monkeypatch.setattr(EnablementLane, "_environment_verdict", lambda self: None)
+    idle = ScriptedPlan(turns=[MockTurn(intents=[])])
+    coord = Coordinator(
+        session_dir=_bound_session,
+        backends={"orchestration": MockBackend(idle), "critic": MockBackend(idle)},
+        role_registry=default_role_registry(),
+        recipe_kb=None,
+        knowledge_plane=None,
+    )
+    await _seed_stalled(coord.rounds, ENABLEMENT_MAX_ATTEMPTS)
+
+    await coord._maybe_enqueue_enablement_specialist()
+
+    assert coord.shared_state.stop_reason == "enablement_attempts_exhausted"
+    events = _events(_bound_session)
+    assert events[0]["status"] == "failed"
+    result = events[0]["ext"]["result"]
+    assert result["outcome"] == enablement_event.OUTCOME_STALLED
+    assert result["reason"] == "enablement_attempts_exhausted"
+    assert result["stall_streak"] == ENABLEMENT_MAX_ATTEMPTS
 
 
 @pytest.mark.asyncio

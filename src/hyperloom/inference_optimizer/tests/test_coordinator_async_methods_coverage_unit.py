@@ -520,13 +520,13 @@ async def test_escalate_skip_to_close_sets_pending_hint(coord: Coordinator) -> N
     assert coord.shared_state.pending_escalate_hint == "skip_to_close"
 
 
-# -- _maybe_autosubmit_specialist_patches ----------------------------------
+# -- maybe_autosubmit_specialist_patches ----------------------------------
 @pytest.mark.asyncio
 async def test_autosubmit_skipped_when_no_patches(coord: Coordinator) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
 
     task = Task(task_id="spec-1", kind="specialist", state="running", params={}, idempotency_key="k1")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": []},
     )
@@ -537,7 +537,7 @@ async def test_autosubmit_skipped_when_files_missing(coord: Coordinator) -> None
     from hyperloom.orchestrator.state.task_registry import Task
 
     task = Task(task_id="spec-2", kind="specialist", state="running", params={}, idempotency_key="k2")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": ["ghost.py"]},
     )
@@ -568,7 +568,7 @@ async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> 
         idempotency_key="k3",
     )
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -597,7 +597,7 @@ async def test_autosubmit_creates_proposal_for_artifacts_only(coord: Coordinator
     (art_dir / "tuned_fmoe.csv").write_text("cu_num,token\n304,16\n", encoding="utf-8")
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="ka1")
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": [],
@@ -629,7 +629,7 @@ async def test_autosubmit_skipped_when_artifact_source_outside_sandbox(coord: Co
         idempotency_key="ka2",
     )
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": [],
@@ -664,7 +664,7 @@ async def test_autosubmit_skipped_when_artifact_source_relative_escapes_sandbox(
     rel_escape = os.path.relpath(outside, worktree)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="ka3")
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": [],
@@ -687,7 +687,7 @@ async def test_autosubmit_routes_relative_source_in_workspace_parent(coord: Coor
     (spec_root / "tuned.csv").write_text("cu_num\n304\n", encoding="utf-8")
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="ka4")
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": [],

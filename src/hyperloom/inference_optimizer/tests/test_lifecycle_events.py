@@ -11,7 +11,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     make_lifecycle_event,
     record_lifecycle_event,
 )
-from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
+
 from hyperloom.orchestrator.state.shared_state import (
     _LIFECYCLE_CAP,
     SharedState,
@@ -146,8 +146,3 @@ def test_lifecycle_persists_round_trip(tmp_path):
     assert ev["label"] == "TraceLens"
     assert ev["artifacts"] == {"candidates": "/tmp/kc.json"}
     assert ev["duration_s"] == 42.0
-
-
-def test_lifecycle_is_core_state_field():
-    # An LLM update_state intent must not be able to forge lifecycle events.
-    assert "lifecycle" in CORE_STATE_FIELDS

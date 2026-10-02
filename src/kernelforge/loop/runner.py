@@ -252,10 +252,9 @@ def _bench_failure_detail(bench_result: dict) -> str:
 def _build_failure_tail(stdout: bytes, stderr: bytes, limit: int) -> str:
     """The tail of a failed build, taken from whichever stream carried it.
 
-    Only stderr used to be read. ninja prints the compiler's own output on
-    stdout, so a ninja failure was reported to the agent as ``BUILD FAILED:``
-    and nothing else -- the one line that would have told it what to fix went
-    to the stream nobody looked at. Both streams are read now.
+    Both streams are read. ninja prints the compiler's own output on stdout, so
+    reading stderr alone reports a ninja failure to the agent as
+    ``BUILD FAILED:`` and nothing else.
     """
     combined = b"\n".join(part.strip() for part in (stdout or b"", stderr or b"") if part.strip())
     text = combined.decode("utf-8", errors="replace").strip()

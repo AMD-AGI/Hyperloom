@@ -54,7 +54,8 @@ The following table lists the minimum requirements for running Hyperloom.
 | Python              | >= 3.10                                                |
 +---------------------+--------------------------------------------------------+
 | Inference Framework | SGLang (>= 0.5.12), vLLM (>= 0.21.0),                  |
-|                     | ATOM (preinstalled; see below), plus ``custom``        |
+|                     | ATOM (preinstalled or setup-installed; see below),     |
+|                     | plus ``custom``                                        |
 |                     | benchmark script                                       |
 +---------------------+--------------------------------------------------------+
 | Kernel Languages    | HIP, Triton, FlyDSL                                    |
@@ -75,7 +76,7 @@ The following table lists the validated Hyperloom version and component combinat
 +-------------------+---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 | Hyperloom version | Component                 | GPU                    | ROCm version                       | Ubuntu        | Python      | GitHub                      |
 +===================+===========================+========================+====================================+===============+=============+=============================+
-| 1.1.2             | `TraceLens 1.0.0`_        | Hardware-agnostic      | No dependency                      | OS-independent| >= 3.6      | |tracelens-github|          |
+| 1.1.3             | `TraceLens 1.0.0`_        | Hardware-agnostic      | No dependency                      | OS-independent| >= 3.6      | |tracelens-github|          |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 |                   | `GEAK 4.0.0`_             | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x, 10.0.0 | 22.04, 24.04  | 3.8, 3.12   | |geak-github|               |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
@@ -97,7 +98,7 @@ The following table lists the validated Hyperloom version and component combinat
    The base benchmark path remains compatible with Magpie 0.2.0. The pinned
    native AgentX pair is `Magpie v0.3.0
    <https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0>`_ plus native launch overrides, custom-model replay, and the eval
-   source-path fix at commit ``658562345ad1a7e5a617e3631f3acfcec0eade4a`` and InferenceX commit
+   source-path fix at commit ``c5c80698fef1b89cc6882264b80d5b306d4e9328`` and InferenceX commit
    ``408c015be4b22d14c69518643609669405507077``. Pass the Magpie YAML with
    ``--benchmark-config``; its ``benchmark.agentx: enable`` source switch
    automatically selects Hyperloom's persisted AgentX session and grading mode.
@@ -151,7 +152,7 @@ The following inference frameworks are supported:
        frameworks within one session
    * - ATOM
      - 7.2.4 (recorded image stack)
-     - AMD out-of-tree engine, launched as ``python3 -m atom.entrypoints.openai_server``. Supports Docker or direct execution in a preinstalled ATOM/ROCm torch environment. The recorded image-based stack used ``rocm/atom-dev:v0.1.7-rc0`` on MI355X, not a universal ATOM pip-version minimum. Other builds require local validation. An unset or empty ``KERNEL_OPT_BACKEND_ORDER`` resolves to GEAK here as it does for every framework, and explicit values are preserved.
+     - AMD out-of-tree engine, launched as ``python3 -m atom.entrypoints.openai_server``. Supports Docker, direct execution in a preinstalled ATOM/ROCm torch environment, or a bare-metal source install with ``--install-framework atom``. The recorded image-based stack used ``rocm/atom-dev:v0.1.7-rc0`` on MI355X, not a universal ATOM pip-version minimum. Other builds require local validation. An unset or empty ``KERNEL_OPT_BACKEND_ORDER`` resolves to GEAK here as it does for every framework, and explicit values are preserved.
    * - ``custom``
      - Host-defined
      - Escape hatch for your own benchmark script; Hyperloom does not manage the server lifecycle. Requires ``HYPERLOOM_BENCHMARK_BACKEND=bypass`` plus ``--framework-path`` (or ``FRAMEWORK_REPO_PATH``) and ``--benchmark-scripts-dir`` (or ``HYPERLOOM_BYPASS_SCRIPTS_DIR``); the CLI exits with status 2 when any of the three is missing.
@@ -208,8 +209,15 @@ Hyperloom does not install ROCm or torch itself.
 
 For ATOM, ``baremetal`` means running directly in the development machine's
 selected Python environment, including when the development platform itself is
-a container; it does not start an additional Docker container. ATOM must already
-be installed. Verify a real ``import atom`` and a non-empty ``torch.version.hip``
+a container; it does not start an additional Docker container. ATOM is either
+already installed there or installed by setup with ``--install-framework atom``,
+which builds AITER and then ATOM (default ``ATOM_REF``: the commit
+``rocm/atom-dev:v0.1.7-rc0`` was built from) against the existing ROCm torch in
+that Python. That Python must not also serve SGLang or vLLM: ATOM registers
+plugins that both engines load by default, so setup refuses to install ATOM
+where either imports (including a ROCm 10 vLLM venv built over that Python),
+and refuses to install SGLang, shared vLLM or ROCm 10 source vLLM where ATOM
+imports. Run ATOM in a separate container instead. Verify a real ``import atom`` and a non-empty ``torch.version.hip``
 with that Python, keep its executable first on ``PATH`` for Magpie's ``python3``
 launch, and use ``PYTHON`` with ``INFERENCE_OPTIMIZER_FORCE_PYTHON=1`` if pinning
 the interpreter. Keep any activated venv consistent; ``/opt/venv`` is not required.
@@ -219,9 +227,9 @@ Run ``python -m hyperloom.inference_optimizer.setup --check-only --
 selected interpreter first. Only after approval, repeat without ``--check-only``:
 ``none`` skips framework installation but can still write configuration and
 apply ROCm hotfixes. Preserve the selected ``USER_DATA_PATH``; an existing setup
-need not be repeated. Hyperloom does not install ATOM and does not assert a
-minimum ATOM package version derived from a Docker tag. Import checks establish
-local prerequisites, not end-to-end validation of every stack.
+need not be repeated. Hyperloom does not assert a minimum ATOM package version
+derived from a Docker tag. Import checks establish local prerequisites, not
+end-to-end validation of every stack.
 
 .. list-table::
    :header-rows: 1

@@ -83,6 +83,8 @@ def native_agentx_session(state: Any = None, *, env: Mapping[str, str] | None = 
             if (path := str(_read(state, name, "") or "").strip())
         )
     path = str(source.get("HYPERLOOM_BENCHMARK_CONFIG", "") or "").strip()
+    if str(source.get("HYPERLOOM_AGENTIC_BACKEND", "") or "").strip().lower() == "mlperf":
+        return bool(path) and config_enables_native_agentx(path)
     enabled = str(source.get("HYPERLOOM_AGENTX", "") or "").strip().lower()
     return enabled in {"1", "true", "yes", "on", "enable", "enabled"} or (
         bool(path) and config_enables_native_agentx(path)

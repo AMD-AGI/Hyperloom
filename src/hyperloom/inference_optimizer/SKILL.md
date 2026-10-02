@@ -657,6 +657,7 @@ operator's stated value is lost.
 | Expert parallel | `--ep` | Pass the prompt's EP for MoE. Default `1` outside native AgentX; a native source YAML resolves EP and rejects an explicit mismatch. |
 | Precision | `--precision` | Match the checkpoint (`bf16` default / `fp8` / ...). A benchmark YAML may supply `benchmark.precision`. Keep consistent with `--quantize`. |
 | Budget | `--max-hours` | Pass the prompt's time budget. Default `2.0`. Always set it explicitly for native AgentX: one canonical round commonly exceeds the default after model load, warmup, drain, and its 3600-second measurement. |
+| Latency SLA | `--max-latency-ms` | **Scriptable frameworks only** (`xdit`, `custom`); refused for serving, where AgentX already grades interactivity. Pass any stated ceiling on per-request latency ("must stay under 250 ms", "interactive workload"). A **constraint, not a target**: it composes with `--target-*` rather than competing, and refuses any KEEP whose mean end-to-end latency exceeds it — including one that reported no latency at all. Off when omitted, which does not lose a preference but does remove the SLA from the search. |
 | Max model len | `--max-model-len` | Optional outside native AgentX; auto-derived from ISL+OSL+headroom when omitted. Native AgentX resolves the model context; custom workloads may cap it within that verified context. |
 | External reference GPU | `--compare-against-gpu` | `target_analysis` writes `target_analysis/target_baseline.json` for query/status metadata and `competitor_target.json` for both advisory and final-report comparisons. Without a target GPU it writes `reason="no_target_gpu_configured"` and clears the competitor target. AgentX reads accepted `current_best.total_throughput`, divides by the recorded resolved recipe TP×PP×PCP GPU count (`state.tp` is only the legacy-artifact fallback), and reads `current_best.e2e_norm_intvty_p90` at `state.conc`; it does not reread raw results or recipes. Missing targets or axes remain unavailable. This is a cross-system advisory, not proof of identical measurement estimators or deployment, and never changes Objective or KEEP/REVERT. |
 | Target advisory | `--no-target-advisory` | Disable external-target hints in prompts without disabling final-report comparison. `primary_gap` uses the existing latency/throughput categories; the interactivity axis is displayed as interactivity. |
@@ -896,14 +897,12 @@ flag until its pinned launchers expose an optimizer-argv hook. Outside native
 AgentX, explicit `--max-model-len` / `$MAX_MODEL_LEN` wins over auto
 `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
-Outside native AgentX, use `--conc-sweep-concs` to override the ladder SWEEP
-measures. Native AgentX concurrency sweep defaults off; `--conc-sweep-concs`
-does not enable it, and explicit `--enable-conc-sweep` fails preflight.
+Use `--conc-sweep-concs` to override the synthetic ladder (`256,128,64,32,16,8,4,2`) or the legacy AgentX/MLPerf ladder (`1,4,8,10,14,20,28`). AgentX defaults sweep off. Legacy AgentX and MLPerf may enable it with `--enable-conc-sweep`; native AgentX measures a fixed recipe point and rejects explicit sweep enablement.
 
 ### Native Magpie AgentX contract
 
 Use Magpie-managed AgentX at commit
-`658562345ad1a7e5a617e3631f3acfcec0eade4a` and InferenceX commit
+`c5c80698fef1b89cc6882264b80d5b306d4e9328` and InferenceX commit
 `408c015be4b22d14c69518643609669405507077`. Create a source Magpie YAML with
 the public model identity, framework, launcher, effective image pin, and fixed
 concurrency. Leave recipe internals in InferenceX:

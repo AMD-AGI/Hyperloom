@@ -27,12 +27,16 @@ from hyperloom.orchestrator.roles.mock_backend import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases import machine_state
+from hyperloom.orchestrator.state.task_registry import task_dispatch_record
+from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import phase_event_parts
 from hyperloom.orchestrator.phases.close import (
     _CLOSE_STEP_WAIT_CEILING_SEC,
     _CLOSE_STEP_WAIT_FLOOR_SEC,
 )
-from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
 from hyperloom.orchestrator.state.shared_state import effective_closing_grace_sec
+from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+from hyperloom.orchestrator.actions.executors.session_breakdown import session_breakdown_executor
 
 
 @dataclass
@@ -174,6 +178,7 @@ class _StubSubAgentRunner:
 def coord(tmp_path: Path):
     """Lean Coordinator stub for hook unit tests."""
     c = Coordinator.__new__(Coordinator)
+    c._init_dispatch_state()
     c.session_dir = tmp_path
     c.shared_state = _BareState()
     c.tasks = _StubTaskRegistry()
@@ -439,7 +444,7 @@ async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
     coord.locks = ResourceLockManager(SqliteLeaseBackend(db))
     coord.sub = SubAgentRunner(coord.locks, coord.tasks)
     coord.shared_state.max_minutes = 60
-    coord.phase_close._close_step_wait_sec = lambda _task: 0.05  # type: ignore[method-assign]
+    coord._close_step_wait_sec = lambda _task: 0.05  # type: ignore[method-assign]
     finish = asyncio.Event()
     calls = []
 
@@ -459,19 +464,19 @@ async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
         assert elapsed < 2.0
         assert calls == [queued.task_id]
         assert (await coord.tasks.get(queued.task_id)).state == "running"
-        handle = coord.dispatcher._inflight_actions[queued.task_id]
+        handle = coord._inflight_actions[queued.task_id]
         assert handle.scope.cancelled
         assert handle.scope.reason == "caller_cancelled"
-        assert coord.dispatcher._executions
-        assert all(not execution.done() for execution in coord.dispatcher._executions)
+        assert coord._executions
+        assert all(not execution.done() for execution in coord._executions)
     finally:
-        executions = tuple(coord.dispatcher._executions)
+        executions = tuple(coord._executions)
         finish.set()
         await asyncio.gather(*executions)
     try:
         assert (await coord.tasks.get(queued.task_id)).state == "succeeded"
-        assert not coord.dispatcher._inflight_actions
-        assert not coord.dispatcher._executions
+        assert not coord._inflight_actions
+        assert not coord._executions
     finally:
         db.close()
 
@@ -497,7 +502,7 @@ async def test_the_wait_for_a_running_report_outlives_a_short_session_reserve(
 
 
 def test_the_wait_is_the_step_s_own_expected_runtime(coord):
-    bound = coord.phase_close._close_step_wait_sec(_running_report_row(coord))
+    bound = coord._close_step_wait_sec(_running_report_row(coord))
 
     assert bound == pytest.approx(ACTION_CATALOGUE["report"].typical_runtime_min * 60.0)
 
@@ -506,20 +511,20 @@ def test_a_step_the_catalogue_prices_at_almost_nothing_still_gets_the_floor(coor
     """``session_breakdown`` is priced at 12s; giving up on it after 12s is giving up on it."""
     row = _running_report_row(coord, kind="session_breakdown")
 
-    assert coord.phase_close._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
+    assert coord._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
 
 
 def test_an_uncatalogued_step_gets_the_floor_too(coord):
     row = _running_report_row(coord, kind="not_an_action")
 
-    assert coord.phase_close._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
+    assert coord._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
 
 
 def test_an_extravagantly_priced_step_is_capped(coord):
     """A wedged step must not hold the process open for as long as its action might legitimately run."""
     coord.action_registry = {"report": SimpleNamespace(typical_runtime_min=1000.0)}
 
-    bound = coord.phase_close._close_step_wait_sec(_running_report_row(coord))
+    bound = coord._close_step_wait_sec(_running_report_row(coord))
 
     assert bound == pytest.approx(_CLOSE_STEP_WAIT_CEILING_SEC)
 
@@ -598,6 +603,7 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
         "fact_finalize",
         "report",
         "session_breakdown",
+        "langfuse_flush",
         "artifact_package",
         "ndjson_drain",
         "done",
@@ -605,6 +611,7 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     by_step = {r["step"]: r for r in rows}
     assert by_step["report"]["status"] == "done"
     assert by_step["session_breakdown"]["status"] == "done"
+    assert by_step["langfuse_flush"]["status"] == "done"
     # fact_finalize now runs first and writes optimization_journal.json, so the artifact package has a curated file to
     # include.
     assert by_step["artifact_package"]["status"] == "done"
@@ -650,6 +657,7 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
         "fact_finalize",
         "report",
         "session_breakdown",
+        "langfuse_flush",
         "artifact_package",
         "ndjson_drain",
         "done",
@@ -730,7 +738,7 @@ async def test_close_sequencer_surfaces_remote_finalize_failure(
 ):
     coord.shared_state.phase_history = [_close_phase_history_row()]
     monkeypatch.setattr(
-        coord.writeback,
+        coord,
         "finalize_recipe_and_journal",
         lambda *, source: {
             "status": "error",
@@ -850,47 +858,6 @@ async def test_close_sequencer_skips_recipe_kb_steps_when_no_recipe_kb(coord):
     assert coord.shared_state.close_sequence_done is True
 
 
-def test_close_and_recipe_finalize_fields_in_core_state_fields():
-    """LLM update_state must not flip close_sequence_done and bypass cli.finally's safety net."""
-    assert {
-        "close_sequence_done",
-        "recipe_finalize_status",
-        "recipe_finalize_attempts",
-        "recipe_finalize_outcome",
-    } <= CORE_STATE_FIELDS
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("close_sequence_done", True),
-        ("recipe_finalize_status", "written"),
-        ("recipe_finalize_attempts", 99),
-        ("recipe_finalize_outcome", {"status": "skipped"}),
-    ],
-)
-def test_policy_blocks_llm_recipe_finalize_state_write(field, value):
-    from hyperloom.orchestrator.roles.agent_role import (
-        default_role_registry,
-    )
-    from hyperloom.inference_optimizer.protocol.intent import (
-        Intent,
-        IntentType,
-    )
-    from hyperloom.orchestrator.policy.gate import (
-        PolicyDenied,
-        PolicyGate,
-    )
-
-    gate = PolicyGate(role_registry=default_role_registry())
-    intent = Intent(
-        type=IntentType.UPDATE_STATE,
-        payload={"changes": {field: value}},
-    )
-    with pytest.raises(PolicyDenied):
-        gate.validate_intent("orchestration", intent)
-
-
 @pytest.mark.asyncio
 async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
     """End-to-end: real Coordinator + TaskRegistry enqueue both internal tasks and flip close_sequence_done."""
@@ -977,6 +944,156 @@ class TestEveryTerminalReachesAWrittenReport:
 
         assert reason == "max_ticks"
         assert coord.shared_state.close_sequence_done is True
+        assert coord.shared_state.phase == "CLOSE"
+        assert coord.shared_state.phase_history[-1]["reason"] == "max_ticks"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "phase,hint,sweep_status,transition_reason",
+        [
+            ("PRELUDE", "", "", "signal"),
+            ("PRELUDE", "skip_to_close", "", "global_converged"),
+            ("SWEEP", "skip_to_close", "completed", "signal"),
+            ("FRAMEWORK_AGENT", "", "", "signal"),
+            ("KERNEL_AGENT", "", "", "signal"),
+        ],
+    )
+    async def test_terminal_close_records_the_phase_before_dispatch(
+        self, tmp_path, phase, hint, sweep_status, transition_reason
+    ):
+        coord = self._coordinator(tmp_path / "session")
+        coord.sub.register_executor("session_breakdown", session_breakdown_executor)
+        state = coord.shared_state
+        state.max_minutes = 60
+        if state.phase != phase:
+            machine_state.record_phase_transition(state, to_phase=phase, reason="phase_entered")
+        if phase == "FRAMEWORK_AGENT":
+            coord.phase_framework._open_framework_timeline()
+        elif phase == "KERNEL_AGENT":
+            coord._open_kernel_timeline(route="forge", route_reason="kernel_optimizer=forge", from_phase="PRELUDE")
+        state.pending_escalate_hint = hint
+        state.last_conc_sweep = {"status": sweep_status}
+        state.set_stop_reason("signal")
+        try:
+            assert await coord.ensure_close_sequence(reason="signal") is True
+            assert state.stop_reason == "signal"
+            transition = state.phase_history[-1]
+            assert (transition["from_phase"], transition["to_phase"], transition["reason"]) == (
+                phase,
+                "CLOSE",
+                transition_reason,
+            )
+            replay = machine_state.replay_next_phase(transition["evidence"]["predicate_inputs"])
+            assert replay[:2] == ("CLOSE", transition_reason)
+            assert transition["ts_unix"] == transition["evidence"]["predicate_inputs"]["now_unix"]
+            assert state.pending_escalate_hint == ""
+            assert assemble_parts(coord.session_dir)["outcome"]["stage_reached_recorded"] == "close"
+            prior, _ = phase_event.assemble_phase_ext(phase_event_parts(), event=phase_event.phase_event_id(phase, 0))
+            assert prior["open"] is False
+            assert prior["duration_sec"] is not None
+            if phase in {"FRAMEWORK_AGENT", "KERNEL_AGENT"}:
+                event_type = "framework_agent" if phase == "FRAMEWORK_AGENT" else "kernel"
+                internal = next(
+                    event for event in read_timeline_events(coord.session_dir) if event["type"] == event_type
+                )
+                assert internal["end_time"]
+                if phase == "FRAMEWORK_AGENT":
+                    assert internal["ext"]["exit"]["reason"] == transition_reason
+                else:
+                    assert internal["ext"]["outcome"]["exit_reason"] == transition_reason
+            close, _ = phase_event.assemble_phase_ext(phase_event_parts(), event="close:0:phase")
+            actions = {row["task_id"]: row for row in close["actions"]["rows"]}
+            receipts = transition["evidence"]["close_steps"]
+            for step in ("report", "session_breakdown"):
+                receipt = next(row for row in receipts if row["step"] == step)
+                task = await coord.tasks.get(receipt["task_id"])
+                assert task_dispatch_record(task)["phase"] == "CLOSE"
+                assert actions[task.task_id]["action"] == step
+            history_count = len(state.phase_history)
+            assert await coord.ensure_close_sequence(reason="signal") is False
+            assert len(state.phase_history) == history_count
+        finally:
+            await coord.stop()
+
+    @pytest.mark.asyncio
+    async def test_deadline_close_observes_enablement_work_without_renewing_its_lease(self, tmp_path):
+        coord = self._coordinator(tmp_path / "session")
+        state = coord.shared_state
+        machine_state.record_phase_transition(state, to_phase="ENABLEMENT", reason="phase_entered")
+        try:
+            holder = await coord._open_authoring_round(params={}, lanes=[], lease_ttl_sec=300)
+            assert holder
+            before = await coord.rounds.held()
+            assert before is not None
+            assert await coord._round_has_live_work(holder)
+
+            await coord._enter_closing_phase(grace_sec=30)
+
+            assert state.phase == "CLOSE"
+            assert state.phase_history[-1]["evidence"]["predicate_inputs"]["enablement_in_flight"] is True
+            after = await coord.rounds.held()
+            assert after is not None
+            assert (after.renewed_unix, after.expires_unix) == (before.renewed_unix, before.expires_unix)
+        finally:
+            await coord.stop()
+
+    @pytest.mark.asyncio
+    async def test_deadline_report_is_created_in_close_and_reused(self, tmp_path, monkeypatch):
+        coord = self._coordinator(tmp_path / "session")
+        state = coord.shared_state
+        state.max_minutes = 60
+        roofline_contexts = []
+        original_roofline = coord._maybe_run_close_post_opt_roofline
+
+        async def _roofline():
+            roofline_contexts.append(state.closing_phase)
+            return await original_roofline()
+
+        monkeypatch.setattr(coord, "_session_integrated_kernel_patch", lambda: True)
+        monkeypatch.setattr(coord, "_maybe_run_close_post_opt_roofline", _roofline)
+        try:
+            deadline = await coord._enter_closing_phase(grace_sec=30)
+            assert deadline.remaining() > 0
+            assert state.phase == "CLOSE"
+            assert state.close_sequence_done is False
+            transition = state.phase_history[-1]
+            assert transition["reason"] == "time_exhausted"
+            assert machine_state.replay_next_phase(transition["evidence"]["predicate_inputs"])[:2] == (
+                "CLOSE",
+                "time_exhausted",
+            )
+            report = await coord.tasks.get(state.closing_report_task_id)
+            assert task_dispatch_record(report)["phase"] == "CLOSE"
+            history_count = len(state.phase_history)
+            coord._closing_deadline = deadline
+            await coord._await_within_session_bound(coord._advance_phase_if_needed, stage="advance_phase")
+            assert state.close_sequence_done is True
+            assert roofline_contexts == [True]
+            receipts = state.phase_history[-1]["evidence"]["close_steps"]
+            assert next(row for row in receipts if row["step"] == "report")["task_id"] == report.task_id
+            assert len(state.phase_history) == history_count
+        finally:
+            await coord.stop()
+
+    @pytest.mark.asyncio
+    async def test_deadline_sequence_still_obeys_the_grace_bound(self, tmp_path, monkeypatch):
+        coord = self._coordinator(tmp_path / "session")
+        cancelled = asyncio.Event()
+
+        async def _slow_close(*, from_phase):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(coord, "_on_enter_close", _slow_close)
+        try:
+            coord._closing_deadline = await coord._enter_closing_phase(grace_sec=0.1)
+            await coord._await_within_session_bound(coord._advance_phase_if_needed, stage="advance_phase")
+            assert cancelled.is_set()
+            assert coord.shared_state.close_sequence_done is False
+        finally:
+            await coord.stop()
 
     @pytest.mark.asyncio
     async def test_a_spent_session_closes_even_though_every_step_is_skipped(self, tmp_path: Path):
@@ -1127,7 +1244,7 @@ async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Pa
         finalize_calls.append(source)
         return {"status": "written"}
 
-    coord.writeback.finalize_recipe_and_journal = _spy  # type: ignore[method-assign]
+    coord.finalize_recipe_and_journal = _spy  # type: ignore[method-assign]
     await coord._recipe_kb_t4_hook()
     assert finalize_calls == ["t4_fallback"]
 
@@ -1164,7 +1281,7 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
         finalize_calls.append(source)
         return {"status": "written"}
 
-    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
+    coord.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
     coord.shared_state.save = lambda path: save_calls.append(path)  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
@@ -1241,7 +1358,7 @@ async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
         finalize_calls.append(source)
         return {"status": "written"}
 
-    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
+    coord.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 

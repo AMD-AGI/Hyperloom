@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
+from hyperloom.inference_optimizer.framework_paths import framework_import_name
 from .agentx_context import corpus_lines, grading_lines
 
 from ..specialists.domains import (
@@ -877,6 +878,8 @@ class SpecialistPromptInputs:
     # session actually replayed.
     benchmark_mode: str = ""
     agentx_corpus_shape: dict[str, Any] = field(default_factory=dict)
+    agentx_grading: dict[str, Any] = field(default_factory=dict)
+    agentx_backend: str = ""
 
     # Gap statement
     gap_canonical_id: str = ""
@@ -905,12 +908,15 @@ class SpecialistPromptInputs:
     # Extra knowledge-domain tags; each contributes a focus block to Section 1.
     extra_focus_tags: tuple[str, ...] = ()
 
-    # Local source navigation hint. ``worktree_base`` is empty when the
-    # framework is pip-installed rather than a checkout.
+    # Local source navigation hint. ``worktree_base`` is the tree the worktree
+    # stands for -- the checkout it was cut from, or the installed tree it holds
+    # a snapshot of -- and is empty when the specialist has no worktree.
     session_framework_tree: str = ""
     framework_source_roots: tuple[str, ...] = ()
     worktree_base: str = ""
     source_hint_directories: tuple[str, ...] = ()
+    # Framework package directory relative to the worktree; empty without a worktree.
+    worktree_package_dir: str = ""
 
     # Structured model architecture features mirrored from SharedState.model_info;
     # machine-parseable companion to ``arch_notes``. Empty dict => not warmed.
@@ -938,7 +944,6 @@ class SpecialistPromptInputs:
     scope: str = "domain"
     mode: str = MODE_PATCH
     bench: bool = False
-    lane: str = "gpu"
     # Free-form task description (only populated when scope == 'freeform').
     task_description: str = ""
 
@@ -1063,6 +1068,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         body.extend(_freeform_block(inp))
     if inp.allocated_gpu_ids:
         body.extend(_gpu_autonomy_block(inp))
+    body.extend(_cpu_selfcheck_block(inp))
     if inp.auto_retry_reason.strip():
         body.extend(_auto_retry_note_block(inp))
     return body
@@ -1144,6 +1150,22 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
         "  It prints a JSON result with ``output_throughput``. It is OPTIONAL "
         + "— you may instead write your own bench/autotune script. Throughput "
         + "does NOT have to come from rebench.",
+    ]
+
+
+def _cpu_selfcheck_block(inp: SpecialistPromptInputs) -> list[str]:
+    """Optional ``selfcheck`` helper for a patch specialist with a worktree and no GPU."""
+    if inp.allocated_gpu_ids or inp.mode != MODE_PATCH or not inp.worktree_package_dir:
+        return []
+    return [
+        "",
+        "Optional helper: ``selfcheck`` installs your worktree's package into a private venv,",
+        "imports it, byte-compiles the files you changed and runs any pytest targets you pass:",
+        "    python -m hyperloom.orchestrator.specialists.selfcheck \\",
+        f"        --worktree {inp.workspace_path} --package-dir {inp.worktree_package_dir} "
+        f"--package {framework_import_name(inp.framework)} [--pytest <target>]",
+        "  It prints a JSON result. A framework with compiled extensions (e.g. vLLM) rebuilds",
+        "  them on install, which can take well over your wall budget.",
     ]
 
 
@@ -1353,7 +1375,7 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
     if _is_agentx(inp):
         # The corpus fixes the request shape, so ISL/OSL carry no information.
         workload_rows += corpus_lines(inp.agentx_corpus_shape)
-        workload_rows += grading_lines()
+        workload_rows += grading_lines(inp.agentx_grading, inp.agentx_backend)
     else:
         if inp.isl > 0:
             workload_rows.append(f"- ISL (input seq len): {inp.isl}")
@@ -1966,15 +1988,17 @@ def _source_root_row(root: str, *, worktree_base: str) -> str:
 
     Args:
         root (str): The source root to render.
-        worktree_base (str): The checkout the specialist's worktree was cut
-            from, when there is one.
+        worktree_base (str): The tree the specialist's worktree stands for,
+            when there is one.
 
     Returns:
         str: A markdown list row for the root.
     """
     base = (worktree_base or "").rstrip("/")
-    if base and root.rstrip("/") == base:
-        return f"- {root} — git checkout; your worktree was cut from it"
+    if base and Path(root.rstrip("/")).is_relative_to(base):
+        if (Path(base) / ".git").exists():
+            return f"- {root} — git checkout; your worktree was cut from it"
+        return f"- {root} — installed package; your worktree holds a git snapshot of it, so edit its files there"
     if (Path(root) / ".git").is_dir():
         return f"- {root} — git checkout"
     return f"- {root} — installed package, no git tree: re-author upstream diffs against it, never apply them"

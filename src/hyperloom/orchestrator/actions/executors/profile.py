@@ -29,7 +29,11 @@ from hyperloom.agents.kernel.tools._trace_rank import (
 from hyperloom.common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom.common.timeutil import now_iso
-from hyperloom.common.agentx_mode import managed_native_agentx_session, native_agentx_optimization_session, native_agentx_session
+from hyperloom.common.agentx_mode import (
+    managed_native_agentx_session,
+    native_agentx_optimization_session,
+    native_agentx_session,
+)
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
     benchmark_serving_path_in,
@@ -145,13 +149,13 @@ def _instrumentation_preflight_row(bench: Any, patchers: Mapping[str, Any] | Non
     """State, before the run, whether the annotations the trace checks look for can land at all.
 
     When the TraceLens runtime patch is unavailable the env layer turns ``detailed_annotations`` and
-    ``shape_discovery`` off, which makes checks 3 and 5 certain to fail. That decision was previously read back one
-    line later and then discarded, so the post-hoc failures arrived without their cause. This only reports it --
-    the run proceeds exactly as before, because a trace without annotations is still a trace.
+    ``shape_discovery`` off, which makes checks 3 and 5 certain to fail. Recording that decision here gives the
+    post-hoc failures their cause. This only reports it -- the run proceeds unchanged, because a trace without
+    annotations is still a trace.
 
     ``patchers`` carries each patcher's own outcome. The env block records what the patch results *caused*, which
-    is not the same as which patcher ran and what it returned: a successful patch previously wrote nothing at all,
-    so "instrumentation was fine" and "nobody looked" were the same record.
+    is not the same as which patcher ran and what it returned: a successful patch records its outcome too, so
+    "instrumentation was fine" and "nobody looked" are different records.
     """
     envs = (bench or {}).get("envs") if isinstance(bench, dict) else None
     if not isinstance(envs, dict):
@@ -503,7 +507,11 @@ def _validate_trace_structure(
     # --- Check 3 (Deval): main trace has user_annotation + execute_* --- execute_* annotations = InferenceX per-step
     # writes when detailed_annotations is honoured (distinct from check 5).
     main_traces = sorted(
-        (p for p in trace_dir.glob("*.trace.json*") if p.is_file() and p.name.endswith((".trace.json", ".trace.json.gz"))),
+        (
+            p
+            for p in trace_dir.glob("*.trace.json*")
+            if p.is_file() and p.name.endswith((".trace.json", ".trace.json.gz"))
+        ),
         key=lambda p: p.stat().st_size,
         reverse=True,
     )
@@ -1927,8 +1935,10 @@ class ProfileExecutor(BenchmarkRunExecutor):
             await asyncio.to_thread(prepare_managed_profile, params, state, output_dir)
         except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError, subprocess.SubprocessError) as exc:
             return {
-                "status": "failed", "error_class": "native_profile_launch_unverified",
-                "error": str(exc), "trace_input_ready": False,
+                "status": "failed",
+                "error_class": "native_profile_launch_unverified",
+                "error": str(exc),
+                "trace_input_ready": False,
             }
         params["output_dir"] = str(output_dir)
         result = await super().__call__(ctx)
@@ -1947,8 +1957,12 @@ class ProfileExecutor(BenchmarkRunExecutor):
             except (OSError, ValueError, TypeError, KeyError, ImportError) as exc:
                 probe_error = f"{type(exc).__name__}: {exc}"
             validation = _build_trace_validate(
-                health, trace_dir=directory, framework=framework, certificate=certificate,
-                probe_error=probe_error, preflight=self._instrumentation_preflight,
+                health,
+                trace_dir=directory,
+                framework=framework,
+                certificate=certificate,
+                probe_error=probe_error,
+                preflight=self._instrumentation_preflight,
             )
             capture["trace_health"] = health
             capture["trace_validate"] = validation

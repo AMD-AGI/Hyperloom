@@ -87,7 +87,7 @@ def test_scriptable_primary_metric_stays_latency():
 def test_native_cli_mission_and_final_reports_share_correct_units(tmp_path, capsys, gpu_count, expected):
     state = _native_state(gpu_count)
     state.save(tmp_path)
-    _print_final_summary(state, "time_exhausted")
+    _print_final_summary(state, "time_exhausted", tmp_path)
     assert expected in capsys.readouterr().out
     assert expected in state.to_mission_summary()
     assert expected in state._format_current_best_for_mission()

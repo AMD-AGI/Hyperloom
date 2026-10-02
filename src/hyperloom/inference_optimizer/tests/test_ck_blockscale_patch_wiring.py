@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
+from hyperloom.inference_optimizer import gpu_types
 from hyperloom.orchestrator.actions.executors import _workload_envs
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_config_with_envs,
@@ -25,7 +25,7 @@ def _hermetic_env(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_ENABLE_PATCH", raising=False)
     monkeypatch.delenv("GPU_TYPE", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setattr(cli_model_gate, "_autodetect_gpu_type", lambda: None)
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: None)
     for key in ("CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "PRECISION", "RUN_EVAL", "FRAMEWORK", _CK_ENV):
         monkeypatch.delenv(key, raising=False)
 

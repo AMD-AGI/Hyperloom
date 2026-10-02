@@ -9,10 +9,13 @@ import hashlib
 import re
 import subprocess
 from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from .identity import canonical_sha256, native_workload_fingerprint
+import yaml
+
+from .identity import canonical_sha256, native_workload_fingerprint, verified_workload_fingerprint
 
 
 def project_root(path: str | Path) -> Path:
@@ -33,6 +36,52 @@ def server_spec(benchmark: Mapping[str, Any]) -> dict[str, Any] | None:
     resolved = agentx.get("resolved") if isinstance(agentx, Mapping) else None
     spec = resolved.get("server-launch-spec") if isinstance(resolved, Mapping) else None
     return spec if isinstance(spec, dict) else None
+
+
+def identity_benchmark(benchmark: Mapping[str, Any], expected_workload: str) -> dict[str, Any]:
+    """Bind diagnostic settings to an accepted workload while retaining candidate overrides."""
+    result = deepcopy(dict(benchmark))
+    workload = result.get("workload_spec") or {}
+    parent = workload.get("profile_parent")
+    torch = (result.get("profiler") or {}).get("torch_profiler") or {}
+    if not parent:
+        if torch.get("enabled") is True:
+            raise ValueError("Managed AgentX profiling requires an accepted profile_parent")
+        return result
+    if not isinstance(parent, Mapping) or torch.get("enabled") is not True:
+        raise ValueError("Managed AgentX profile_parent requires diagnostic torch profiling")
+    path = Path(str(parent.get("materialized_config") or ""))
+    if not path.is_absolute():
+        raise ValueError("Managed AgentX profile parent must be an absolute configuration path")
+    content = path.read_bytes()
+    if hashlib.sha256(content).hexdigest() != parent.get("config_sha256"):
+        raise ValueError("Managed AgentX profile parent configuration changed")
+    loaded = yaml.safe_load(content)
+    accepted = loaded.get("benchmark", loaded) if isinstance(loaded, dict) else None
+    if not isinstance(accepted, dict) or server_spec(accepted) is None:
+        raise ValueError("Managed AgentX profile parent is not an accepted managed configuration")
+    if ((accepted.get("profiler") or {}).get("torch_profiler") or {}).get("enabled") is True:
+        raise ValueError("Managed AgentX profile parent must be an unprofiled benchmark")
+    fingerprint = verified_workload_fingerprint(accepted)
+    if (
+        not fingerprint
+        or not expected_workload
+        or fingerprint != expected_workload
+        or fingerprint != parent.get("workload_fingerprint")
+    ):
+        raise ValueError("Managed AgentX profile parent does not match the session workload pin")
+    fixed = []
+    for value in (result, accepted):
+        config = deepcopy({key: item for key, item in value.items() if key not in {"workload_spec", "profiler"}})
+        config["agentx"].pop("launch_overrides", None)
+        fixed.append(config)
+    if fixed[0] != fixed[1]:
+        raise ValueError("Managed AgentX diagnostic configuration changed the accepted workload")
+    if "profiler" in accepted:
+        result["profiler"] = deepcopy(accepted["profiler"])
+    else:
+        result.pop("profiler", None)
+    return result
 
 
 def git_text(root: Path, *args: str) -> str:

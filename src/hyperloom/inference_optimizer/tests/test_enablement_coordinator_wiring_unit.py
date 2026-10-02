@@ -74,7 +74,6 @@ def _fake_self(**state_kw):
     # Stub weight-facts derivation to empty so the builder path stays pure.
     fake._derive_checkpoint_weight_facts = lambda _log: ""
     # No GPU pool, so dispatch degrades to the research-lane-only path.
-    fake._framework_gpu_params = lambda: {}
     return fake
 
 
@@ -331,7 +330,6 @@ def _enqueue_self(**state_kw):
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
     # No GPU pool, so dispatch stays on research_lane only.
-    fake._framework_gpu_params = lambda: {}
     fake._framework_authoring_lanes_ttl = lambda params, *, base_ttl_sec: (
         ["research_lane"],
         base_ttl_sec,
@@ -1210,7 +1208,7 @@ async def test_rearm_authored_lane_delegates_enablement(session_dir):
     async def _fake_rearm(res):
         called.append(res)
 
-    coord.phase_framework._maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
+    coord._maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
 
     res = {"status": "apply_failed", "lane": "enablement", "enablement": True}
     await coord.phase_framework._maybe_rearm_authored_lane(res)
@@ -1279,7 +1277,7 @@ async def test_rearm_authored_lane_enablement_apply_failed_is_not_counted_as_per
     async def _fake_rearm(res):
         rearm_called.append(res)
 
-    coord.phase_framework._maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
+    coord._maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
 
     # Even when lane=enablement is absent but enablement=True is present, should delegate.
     res = {"status": "apply_failed", "enablement": True}

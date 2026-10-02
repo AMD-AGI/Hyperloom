@@ -69,7 +69,7 @@ def _record_revalidations(coordinator) -> list[str]:
     async def _record(*, reason: str) -> None:
         reasons.append(reason)
 
-    coordinator.phase_kernel._revalidate_geak_candidate = _record
+    coordinator._revalidate_geak_candidate = _record
     return reasons
 
 
@@ -98,7 +98,7 @@ async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, 
         raise AssertionError("Direct dispatch fallback must refuse canonical AgentX replay")
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    c._record_geak_kernel_journey = lambda _result: None
     summary = c._geak_rebench_params(reason="unit")
     assert summary["fallback"] == "geak_harness"
     await c._run_geak_kernel_phase(from_phase="KERNEL")
@@ -344,9 +344,6 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     monkeypatch.setattr(explore, "effective_fingerprint", observe_fingerprint)
     monkeypatch.setattr(explore, "maybe_serving_lease", lambda **_kwargs: None)
     monkeypatch.setattr(explore, "teardown_lifecycle_server", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._grid_variant_filter._probe_server_help_text", lambda _framework: ""
-    )
     result = await ExploreExecutor(session_dir=coordinator.session_dir)(
         SimpleNamespace(task=task, extra={"shared_state": state})
     )
@@ -816,7 +813,7 @@ async def test_crash_recovery_tombstones_no_promote_result(coordinator, tmp_path
     st.geak_pending = {}
     revalidations = _record_revalidations(c)
 
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    c._record_geak_kernel_journey = lambda _result: None
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
@@ -852,7 +849,7 @@ def _arm_settled_candidate(coordinator, tmp_path) -> dict:
         "revalidation_error": "geak_harness_unsupported_canonical_workload",
     }
     st.geak_pending = {}
-    coordinator.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    coordinator._record_geak_kernel_journey = lambda _result: None
     return settled
 
 
@@ -975,7 +972,7 @@ async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path,
     st.geak_pending = {}
     revalidations = _record_revalidations(c)
 
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    c._record_geak_kernel_journey = lambda _result: None
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
@@ -1228,7 +1225,7 @@ async def test_a_geak_win_is_measured_and_promoted_inside_the_calling_task(coord
 
     c.sub.register_executor("explore", _explore)
 
-    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win")
+    await c._revalidate_geak_candidate(reason="geak_e2e_win")
 
     assert st.current_best["action"] == "geak_e2e"
     assert st.current_best["tput"] == pytest.approx(120.0)
@@ -1250,7 +1247,7 @@ async def test_a_failed_revalidation_settles_the_verdict_and_keeps_the_stack(coo
 
     c.sub.register_executor("explore", _explore)
 
-    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win")
+    await c._revalidate_geak_candidate(reason="geak_e2e_win")
 
     assert not st.geak_pending
     assert st.geak_result["revalidation_status"] == "failed"
@@ -1276,7 +1273,7 @@ async def test_a_cancelled_revalidation_is_recorded_before_it_propagates(coordin
     c.sub.register_executor("explore", _explore)
 
     with pytest.raises(FuturesCancelledError):
-        await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win")
+        await c._revalidate_geak_candidate(reason="geak_e2e_win")
 
     assert st.geak_pending["status"] == "rebench_cancelled"
     assert st.current_best["action"] == "baseline"
@@ -1324,7 +1321,7 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
     geak_dir = tmp_path / "geak"
     geak_dir.mkdir(exist_ok=True)
     (geak_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    c._record_geak_kernel_journey = lambda _result: None
     revalidations = _record_revalidations(c)
 
     monkeypatch = pytest.MonkeyPatch()
@@ -1365,7 +1362,7 @@ async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordina
         "revalidation_error_class": "subprocess_nonzero",
         "revalidation_error": "revalidation failed",
     }
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    c._record_geak_kernel_journey = lambda _result: None
     revalidations = _record_revalidations(c)
 
     monkeypatch = pytest.MonkeyPatch()
@@ -1426,7 +1423,7 @@ async def test_native_agentx_refuses_geak_products_regardless_of_overlay_state(
 
     monkeypatch.setattr(c, "_geak_rebench_params", dispatch)
     monkeypatch.setattr(c, "_validate_geak_via_geak_harness", fallback)
-    monkeypatch.setattr(c.phase_kernel, "_record_geak_kernel_journey", lambda _result: None)
+    monkeypatch.setattr(c, "_record_geak_kernel_journey", lambda _result: None)
     monkeypatch.setattr(
         "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
         lambda _name: (_ for _ in ()).throw(RuntimeError("runner unavailable")),

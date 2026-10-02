@@ -18,7 +18,7 @@ log = _logging.getLogger(__name__)
 
 
 class InternalTasksPhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     async def _enqueue_internal_research_scout_task(
         self,
@@ -83,13 +83,14 @@ class InternalTasksPhase(CoordinatorCollaborator):
                     params["notes"] = "\n".join(f"- {question}" for question in questions)
                 break
         await self._warm_specialist_params(params)
+        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
             idempotency_key=idempotency_key,
-            requires_lanes=["research_lane"],
+            requires_lanes=lanes,
             side_effects=["writes_results"],
-            lease_ttl_sec=1800,
+            lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )
         if not was_existing:
@@ -161,7 +162,6 @@ class InternalTasksPhase(CoordinatorCollaborator):
             "reason": str(reason),
             "scope": "domain",
             "mode": "research",
-            "lane": "cpu",
         }
         # Seed the curated checklist + rendered prompt block; best-effort.
         try:
@@ -182,13 +182,14 @@ class InternalTasksPhase(CoordinatorCollaborator):
         except Exception:
             log.exception("static-recon: checklist seeding failed")
         await self._warm_specialist_params(params)
+        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
             idempotency_key=idempotency_key,
-            requires_lanes=["research_lane"],
+            requires_lanes=lanes,
             side_effects=["writes_results"],
-            lease_ttl_sec=1800,
+            lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )
         if not was_existing:
@@ -253,13 +254,14 @@ class InternalTasksPhase(CoordinatorCollaborator):
         if digest:
             params["gap_evidence"] = {"trajectory_review": digest}
         await self._warm_specialist_params(params)
+        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
             idempotency_key=f"internal-trajectory-review-cycle{cycle}",
-            requires_lanes=["research_lane"],
+            requires_lanes=lanes,
             side_effects=["writes_results"],
-            lease_ttl_sec=1800,
+            lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )
         if not was_existing:

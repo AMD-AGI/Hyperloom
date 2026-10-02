@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Mapping
 
 from hyperloom.common.env import env_bool, env_float, env_str
@@ -96,6 +97,13 @@ def intvty_grading_enabled(*, benchmark_mode: str = "") -> bool:
     """True when interactivity grading applies; ``benchmark_mode`` is a parameter to keep this module a leaf."""
     # Passing the mode matters: the env var describes only the shell that happens to be running, so a re-baseline or
     # integrate round in a subprocess would otherwise grade an agentic measurement on the synthetic axis.
+    # The MLPerf harness publishes no per-request OSL/E2EL series, so its sessions grade on output throughput;
+    # asking for interactivity there would only degrade every round. Adding that series upstream in
+    # mlcommons/endpoints is future work, if MLPerf mandates grading on interactivity.
+    from hyperloom.common.agentx_workload import is_mlperf_backend
+
+    if is_mlperf_backend():
+        return False
     raw = env_str("HYPERLOOM_PERF_METRIC").strip().lower()
     if raw:
         return raw == INTVTY_V1
@@ -351,12 +359,35 @@ def passes_tput_guard(
     return _within_band(total_tput_per_chip_of(candidate), total_tput_per_chip_of(anchor), band)
 
 
+def latency_veto_reason(observed_ms: Any, budget_ms: float) -> str:
+    """Why the latency budget refuses this candidate, or "" when it does not.
+
+    The budget is a ceiling on mean end-to-end latency, so unlike the gain gates
+    it refuses a candidate whose throughput won: a lever that buys throughput by
+    making each stream slower is exactly the case a throughput-only comparison
+    selects for. Off entirely when *budget_ms* is not positive.
+
+    Fails closed on an unmeasured candidate — a constraint nobody measured is not
+    one anybody satisfied — which is why every lane copies ``e2el_mean_ms`` onto
+    the dict it promotes.
+    """
+    if not budget_ms or budget_ms <= 0:
+        return ""
+    if isinstance(observed_ms, bool) or not isinstance(observed_ms, (int, float)):
+        return "latency_unmeasured"
+    observed = float(observed_ms)
+    if not isfinite(observed) or observed <= 0:
+        return "latency_unmeasured"
+    return "latency_budget_exceeded" if observed > float(budget_ms) else ""
+
+
 @dataclass(frozen=True)
 class GradedComparison:
     """A candidate, the figure it must beat, and the verdict on that pair.
 
     ``candidate`` and ``reference`` are both read on ``objective``. ``tput_*`` carry total throughput and are 0.0 off
     AgentX. ``degrade_reason`` names why the interactivity axis did not apply on a session that asked for it.
+    ``veto_reason`` names a constraint that refused a candidate its throughput would otherwise have kept.
     """
 
     objective: str
@@ -366,6 +397,7 @@ class GradedComparison:
     tput_candidate: float = 0.0
     tput_reference: float = 0.0
     degrade_reason: str = ""
+    veto_reason: str = ""
 
     @property
     def comparable(self) -> bool:
@@ -408,6 +440,7 @@ __all__ = [
     "intvty_of",
     "intvty_serving_grading_enabled",
     "is_agentx_mode",
+    "latency_veto_reason",
     "output_tput_of",
     "parse_intvty_noise_pct",
     "passes_tput_guard",

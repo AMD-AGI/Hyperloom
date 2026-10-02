@@ -56,7 +56,7 @@ a `delegated_result` inbox event on a later tick.
 For deep, multi-step investigation of a single lead (reading source,
 reasoning across several steps, drafting a patch) **delegate a
 `specialist`** — there is exactly ONE specialist worker, parameterised by
-four orthogonal dials (`scope` / `mode` / `bench` / `lane`, see below). It
+three orthogonal dials (`scope` / `mode` / `bench`, see below). It
 runs autonomously and reports back a structured `specialist_done`. Do not
 try to turn your own macro loop into a synchronous blocker on long actions;
 lean on async delegation and track how dispatched specialists land.
@@ -95,9 +95,10 @@ Five tools close the act->observe loop without waiting for the next tick
 <!-- phase: FRAMEWORK_AGENT -->
 ### Watching a running specialist
 
-Nothing in this message reports in-flight specialists: `specialist_progress`
-inbox observations are sparse, and a specialist can hold the
-machine for hours. Never read silence as "nothing is running".
+In-flight tasks are listed in the `=== Tasks in flight ===` projection. A
+specialist or benchmark can hold the machine for hours; check it before
+dispatching, and prefer `send_message` / `extend_lease` over re-dispatching a
+specialist that is already in flight.
 
 Rescue moves: `send_message` / `extend_lease` for a single task;
 `prune_branch{scope='queued'}` for the queue.
@@ -235,13 +236,12 @@ has covered the gap yet.
 
 **Where a grid comes from.** `=== Untested proposals (current cycle) ===`
 carries the executable specialist proposals this cycle that no explore round
-has benched, ranked by gap severity and truncated to a count the block states.
-Draw from it first and copy an entry's fields verbatim — an entry marked
-ATOMIC is a coupled set that must go in as one variant, never split or
-re-authored. Target **4 variants per grid, hard maximum 6**: they run serially
-on one benchmark lane at roughly 13 minutes each, and a grid the round cannot
-finish is truncated from the end. Top up from the idea-generation moves only
-after the queue holds nothing else worth running.
+has benched, ranked by gap severity. The Coordinator benches its head
+automatically (4 variants at a time) whenever no explore is queued or running,
+so dispatch an `explore` only for variants **not already in this queue**.
+Target **4 variants per grid, hard maximum 6**: they run serially on one
+benchmark lane at roughly 13 minutes each, and a grid the round cannot finish
+is truncated from the end.
 
 **GPU specialists** hold the same cards as the serving stack and acquire
 `gpu_research_lane` (mutually exclusive with benchmark/profile/serving
@@ -256,8 +256,8 @@ serving benchmark, omit `gpu_count` (defaults to serving TP) or pass
 that never starts a serving server.
 
 **Honor `atomic` proposals.** A `specialist_done.proposal_set` entry
-with `"atomic": true` is a coupled set that only works together. Dispatch
-it verbatim as one explore variant — never split, drop, or re-author.
+with `"atomic": true` is a coupled set that only works together; it is
+benched as one variant — never split, drop, or re-author it into a grid.
 
 **Advisory proposal scores**: the prompt MAY carry a
 `=== Specialist proposal scores (advisory) ===` block — independent 0-10
@@ -354,6 +354,15 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   `explore` round to refresh the validated gain. The legacy
   `validate_stack` / `backends` / `params` action names are not in any
   phase's proposable set (use `explore`).
+* **A latency budget changes what a KEEP means.** When
+  `=== Latency budget (constraint) ===` is present (scriptable workloads
+  only), a throughput gain no longer predicts a KEEP: any winner over the
+  ceiling is refused, as is one that reported no end-to-end latency. The
+  refusals are in the ledgers you already read — `reason=latency_budget_exceeded`
+  or `latency_unmeasured` in the explore history, `promotion_refused` in the
+  journal. Many of them before concluding the search is exhausted means the
+  SLA is the binding limit, and the answer is a lever that buys throughput
+  without spending per-request latency, not more of the same.
 * **Config vs source patch.** The `=== Intervention mix (telemetry) ===`
   block reports `config_keeps` / `code_patch_keeps` /
   `consecutive_config_only_rounds`. Config tuning tends to plateau; when
@@ -362,8 +371,8 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   (scheduler / kv_cache / chunked-prefill), promoted via
   `integrate_patch`, is one route worth weighing against another config
   round. A `code_patch` KEEP resets the consecutive counter.
-* **You CANNOT** delegate kernel_agent-owned actions; mutate core state fields
-  (`current_best` / `stop_reason` / `baseline_tput` / ...); read or write KB
+* **You CANNOT** delegate kernel_agent-owned actions; write a state field
+  the `update_state` rule does not list as agent-writable; read or write KB
   directly (Critic owns it). You **CAN** emit `escalate_strategy_change`
   with a phase-advance / budget hint (`skip_to_kernel` / `skip_to_sweep`
   / `skip_to_close` / `extend_explore_budget` / `extend_kernel_budget`) —
@@ -470,7 +479,7 @@ likely to have worked on — a hot kernel, a known-slow path, a framework
 version well behind head — and not only when configuration search stalls.
 
 <!-- phase: FRAMEWORK_AGENT -->
-### One specialist, four dials (scope / mode / bench / lane)
+### One specialist, three dials (scope / mode / bench)
 
 Shape every `delegate{action_name='specialist'}` with these dials (code
 defaults the rest; omitting a dial is safe):
@@ -493,7 +502,7 @@ defaults the rest; omitting a dial is safe):
   — GPU specialists serialize against serving).
 
 The `=== Resource pools ===` block reports the capacities such a request is
-admitted against. A `bench` / framework-authoring specialist admits against
+admitted against. A `bench` / enablement specialist admits against
 `whole_machine_gpu_pool`; any other `needs_gpu` specialist admits against
 `serving_disjoint_gpu_pool`, which is `serving_tp` cards smaller and is `0`
 whenever serving owns every card — in that case dispatch CPU specialists, or

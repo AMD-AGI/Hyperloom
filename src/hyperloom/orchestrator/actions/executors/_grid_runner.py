@@ -43,7 +43,12 @@ from ._benchmark_interpreter import (
     _resolve_probe_python as _resolve_probe_python,
 )
 from ._accuracy_gate import materialized_run_eval_disabled
-from ._recipe_script import recipe_launch_contract
+from ._recipe_script import (
+    RecipeLeverUnavailableError,
+    apply_recipe_levers,
+    launcher_overwritten_envs,
+    recipe_owns_argv,
+)
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
@@ -131,8 +136,6 @@ from ._grid_variant_filter import (
     _XDIT_ENV_BLACKLIST as _XDIT_ENV_BLACKLIST,
     _XDIT_ENV_COMBO_BLACKLIST as _XDIT_ENV_COMBO_BLACKLIST,
     xdit_blacklist_reason as xdit_blacklist_reason,
-    _HELP_PROBE_COMMANDS as _HELP_PROBE_COMMANDS,
-    _probe_server_help_text as _probe_server_help_text,
     _detect_model_class as _detect_model_class,
     apply_compatibility_filter as apply_compatibility_filter,
     apply_user_skip_list as apply_user_skip_list,
@@ -542,6 +545,12 @@ def _build_variant_yaml(
         if server_lifecycle is not None:
             raise ValueError("Native AgentX optimizer candidates cannot change server lifecycle")
     else:
+        replacing = str(base_args_mode).strip().lower() == "replace"
+        inherited_script = (
+            ""
+            if replacing or variant.args_mode == "replace"
+            else str((bench.get("envs") or {}).get("AGENTX_SERVER_SCRIPT") or "").strip()
+        )
         envs = apply_runtime_benchmark_overrides(
             bench,
             model_path=model_path,
@@ -598,9 +607,12 @@ def _build_variant_yaml(
             envs.pop(str(k), None)
         for k, v in variant.extra_envs.items():
             envs[str(k)] = str(v)
+        from ._workload_envs import pin_mlperf_round_concurrency
+
+        pin_mlperf_round_concurrency(envs)
         # The recipe re-exports these unconditionally, so a value carried here is
         # one the run never used.
-        for k in recipe_launch_contract(bench)[1] & envs.keys():
+        for k in launcher_overwritten_envs(bench) & envs.keys():
             log.warning("grid: dropping %s for variant %s; the recipe overwrites it", k, variant.name)
             envs.pop(k, None)
         # The three AgentX bounds took this rung's CONC through ``variant_conc`` above, not through this merge: raising
@@ -694,8 +706,26 @@ def _build_variant_yaml(
 
         verify_native_source_imports(bench)
     else:
+        if recipe_owns_argv(bench):
+            env_levers: dict[str, str | None] = {
+                str(k): None
+                for k in to_str_list(base_unset_envs)
+                if k.strip().upper() not in BLOCKED_EXTERNAL_ENV_NAMES
+            }
+            env_levers.update({str(k): str(v) for k, v in (base_extra_envs or {}).items()})
+            env_levers.update(
+                {str(k): None for k in variant.unset_envs if str(k).strip().upper() not in BLOCKED_EXTERNAL_ENV_NAMES}
+            )
+            env_levers.update({str(k): str(v) for k, v in variant.extra_envs.items()})
+            envs["AGENTX_SERVER_SCRIPT"] = apply_recipe_levers(
+                bench,
+                inherited_script=inherited_script,
+                server_args=str(envs.get(extra_args_env, "")),
+                remove_args=list(dict.fromkeys(to_str_list(base_remove_args) + variant_remove)),
+                env_levers=env_levers,
+            )
         # The final write to the argument env; nothing below may touch it.
-        seal_server_argv(envs, bench.get("framework"), bench=bench)
+        seal_server_argv(envs, bench.get("framework"))
     output_subdir.mkdir(parents=True, exist_ok=True)
     out_path = output_subdir / "config.yaml"
     with out_path.open("w", encoding="utf-8") as f:
@@ -1311,17 +1341,21 @@ async def run_grid(
                 base_native_launch_overrides=base_native_launch_overrides,
             )
         except Exception as exc:  # noqa: BLE001
+            build_error = (
+                "recipe_lever_unavailable" if isinstance(exc, RecipeLeverUnavailableError) else "yaml_build_error"
+            )
             log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: yaml_build_error: %r",
+                "grid_runner: variant %d/%d name=%s aborted: %s: %r",
                 i + 1,
                 len(grid),
                 variant.name,
+                build_error,
                 exc,
             )
             _write_variant_abort_marker(
                 slot,
                 variant_name=variant.name,
-                error_class="yaml_build_error",
+                error_class=build_error,
                 error_summary=repr(exc),
                 extra_args=variant.extra_server_args,
             )
@@ -1331,8 +1365,8 @@ async def run_grid(
                     extra_server_args=variant.extra_server_args,
                     extra_envs=dict(variant.extra_envs),
                     status="failed",
-                    error=f"yaml_build_error: {exc!r}",
-                    error_class="yaml_build_error",
+                    error=f"{build_error}: {exc!r}",
+                    error_class=build_error,
                     note=variant.note,
                 )
             )
@@ -2473,8 +2507,6 @@ __all__ = [
     "_XDIT_ENV_BLACKLIST",
     "_XDIT_ENV_COMBO_BLACKLIST",
     "xdit_blacklist_reason",
-    "_HELP_PROBE_COMMANDS",
-    "_probe_server_help_text",
     "_detect_model_class",
     "apply_compatibility_filter",
     "apply_user_skip_list",

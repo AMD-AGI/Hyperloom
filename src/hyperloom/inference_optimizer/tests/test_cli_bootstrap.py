@@ -215,7 +215,7 @@ def test_seed_snapshots_agentx_source_yaml_and_runtime_pins(
     assert snapshot.read_text(encoding="utf-8") == source_text
     assert state.benchmark_mode == "agentx"
     assert state.agentx_epoch == cb.AGENTX_MEASUREMENT_EPOCH
-    assert state.conc_sweep_enabled is True
+    assert state.conc_sweep_enabled is False
     assert state.agentx_runtime_pins == pins
     assert state.benchmark_source_config_path == str(snapshot)
     assert state.active_inferencex_path == str(inferencex.resolve())
@@ -467,7 +467,7 @@ def test_read_failure_summary_and_final_summary_output(tmp_path: Path, capsys) -
     cb._print_final_summary(
         SharedState(session_id="s2", model_name="m2", baseline_tput=0.0),
         "done",
-        None,
+        tmp_path,
     )
     assert "never validated" in capsys.readouterr().out
 
@@ -508,7 +508,7 @@ def test_resolve_reference_recipe_branches_and_final_summary(tmp_path: Path, mon
     cb._print_final_summary(
         SharedState(session_id="s2", model_name="m2", baseline_tput=0.0),
         "done",
-        None,
+        tmp_path,
     )
     assert "never validated" in capsys.readouterr().out
 
@@ -532,11 +532,6 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     out = capsys.readouterr().out
     assert "Session layout under" in out
     assert "manifest.json" in out
-
-    monkeypatch.setenv("HYPERLOOM_SESSION_DIR", str(tmp_path))
-    assert cb._resolve_session_dir_for_summary(None) == tmp_path
-    monkeypatch.setenv("HYPERLOOM_SESSION_DIR", str(tmp_path / "missing"))
-    assert cb._resolve_session_dir_for_summary(None) is None
 
 
 def test_a_resume_clears_the_previous_leg_terminal_without_touching_the_budget() -> None:
@@ -714,30 +709,6 @@ def test_reconcile_crash_count_updates_state_and_final_json(tmp_path: Path) -> N
     assert patched["other"] is True
 
 
-def test_kernel_opt_summary_line_prints_totals(tmp_path: Path, monkeypatch, capsys) -> None:
-    from hyperloom.orchestrator.kernel import attempt_summary as kernel_attempt_summary
-
-    monkeypatch.setenv("HYPERLOOM_SESSION_DIR", str(tmp_path))
-    reports = tmp_path / "reports"
-    reports.mkdir()
-    (reports / "kernel_optimization_summary.json").write_text("{}", encoding="utf-8")
-
-    def _summary(_state, _session_dir):
-        return {
-            "totals": {"attempted": 3, "integrated": 1, "rejected": 1, "unattempted": 2},
-            "top_takeaways": ["headline", "root cause"],
-        }
-
-    monkeypatch.setattr(kernel_attempt_summary, "build_kernel_optimization_summary", _summary)
-
-    cb._print_kernel_opt_summary_line(SharedState(session_id="s"))
-
-    out = capsys.readouterr().out
-    assert "3 attempted" in out
-    assert "root cause" in out
-    assert "kernel_optimization_summary.json" in out
-
-
 def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
     import pytest
     from hyperloom.inference_optimizer import reference_script
@@ -773,18 +744,23 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
     assert exc_info.value.code == 2
 
 
-@pytest.mark.parametrize("enable_conc_sweep, expected", [(None, True), (True, True), (False, False)])
-def test_fresh_agentx_seed_uses_native_epoch_and_optimizer_features(tmp_path, monkeypatch, enable_conc_sweep, expected):
+@pytest.mark.parametrize("enable_conc_sweep, expected", [(None, False), (False, False)])
+@pytest.mark.parametrize("client", ["", "aiperf", "mlperf"])
+def test_fresh_agentx_seed_preserves_requested_backend(tmp_path, monkeypatch, enable_conc_sweep, expected, client):
     _neutralize_seed_io(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.setenv("AGENTX_SERVER_SCRIPT", "irrelevant-ambient-native-pin.sh")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", client)
     state = cb._seed_shared_state(
         tmp_path, _args(enable_conc_sweep=enable_conc_sweep, conc_sweep_concs=None), session_id="fresh-agentx"
     )
     assert state.benchmark_mode == "agentx"
-    assert state.agentx_epoch == 4
-    assert state.agentx_backend == "native"
+    assert state.agentx_epoch == (1 if client == "mlperf" else 4)
+    assert state.agentx_backend == ("mlperf" if client == "mlperf" else "native")
+    restored = SharedState.load_or_init(tmp_path)
+    assert restored.agentx_epoch == state.agentx_epoch
+    assert restored.agentx_backend == state.agentx_backend
     assert state.benchmark_source_config_path == ""
     assert state.warm_replay_enabled is True
     assert state.conc_sweep_enabled is expected

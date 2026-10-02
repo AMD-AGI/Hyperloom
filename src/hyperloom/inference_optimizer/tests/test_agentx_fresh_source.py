@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer.cli import _configure_benchmark_config, _finalize_benchmark_config
+from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli.agentx_source import prepare_native_agentx_source
 
 
@@ -72,7 +72,7 @@ def test_fresh_switch_builds_native_source_and_resolver_owns_launcher(
     monkeypatch, tmp_path, model, framework, runner, precision
 ):
     args = _args(model=model, framework=framework, gpu_type=runner, precision=precision)
-    assert _configure_benchmark_config(args)
+    assert cli._configure_benchmark_config(args)
     assert prepare_native_agentx_source(args)
     source = Path(os.environ["HYPERLOOM_BENCHMARK_CONFIG"])
     benchmark = yaml.safe_load(source.read_text())["benchmark"]
@@ -104,7 +104,7 @@ def test_fresh_switch_builds_native_source_and_resolver_owns_launcher(
         native, "native_execution_identity", lambda **kwargs: {"static_execution_fingerprint": "b" * 64}
     )
     monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
-    assert _finalize_benchmark_config(args)
+    assert cli._finalize_benchmark_config(args)
     assert os.environ["AGENTX_SERVER_SCRIPT"] == launcher
     assert args.tp == 4
     assert args.ep == 4
@@ -140,7 +140,7 @@ def test_fresh_source_preserves_operator_file_and_selectors(tmp_path):
     )
     original = source.read_bytes()
     args = _args(benchmark_config=str(source))
-    _configure_benchmark_config(args)
+    cli._configure_benchmark_config(args)
     prepare_native_agentx_source(args)
     generated = yaml.safe_load(Path(os.environ["HYPERLOOM_BENCHMARK_CONFIG"]).read_text())["benchmark"]
     assert source.read_bytes() == original
@@ -160,7 +160,7 @@ def test_unsupported_recipe_does_not_fall_back_to_legacy(monkeypatch, tmp_path):
     monkeypatch.setattr(native, "preview_native_recipe", ambiguous)
     monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
     with pytest.raises(ValueError, match="multiple AgentX recipes"):
-        _finalize_benchmark_config(args)
+        cli._finalize_benchmark_config(args)
     assert "aiperf_client.sh" not in Path(os.environ["HYPERLOOM_BENCHMARK_CONFIG"]).read_text()
 
 
@@ -174,14 +174,13 @@ def test_fresh_entry_clears_previous_session_before_mode_selection(monkeypatch, 
     (tmp_path / "state.json").write_text(json.dumps({"benchmark_mode": "agentx", "agentx_epoch": 1}))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(tmp_path))
     assert not native_agentx_optimization_session()
-    assert _configure_benchmark_config(_args())
+    assert cli._configure_benchmark_config(_args())
     assert "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR" not in os.environ
     assert native_agentx_optimization_session()
 
 
 @pytest.mark.parametrize("epoch", [1, 3])
 def test_resume_preflight_uses_saved_mode_and_restores_previous_pointer(monkeypatch, tmp_path, epoch):
-    import hyperloom.inference_optimizer.cli as cli
     from hyperloom.common.agentx_mode import native_agentx_session
 
     session = tmp_path / "resumed"
@@ -206,7 +205,7 @@ def test_source_preserves_explicit_launch_request(tmp_path):
         yaml.safe_dump({"benchmark": {"model": "Qwen/Qwen3-32B", "agentx": {"launch_overrides": request}}})
     )
     args = _args(benchmark_config=str(source))
-    _configure_benchmark_config(args)
+    cli._configure_benchmark_config(args)
     prepare_native_agentx_source(args)
     generated = yaml.safe_load(Path(os.environ["HYPERLOOM_BENCHMARK_CONFIG"]).read_text())["benchmark"]
     assert generated["agentx"]["launch_overrides"] == request
@@ -245,7 +244,7 @@ def test_custom_source_topology_survives_unspecified_cli_defaults(tmp_path):
         )
     )
     args = _args(benchmark_config=str(source), model=None, max_model_len=None)
-    _configure_benchmark_config(args)
+    cli._configure_benchmark_config(args)
     prepare_native_agentx_source(args)
     benchmark = yaml.safe_load(Path(os.environ["HYPERLOOM_BENCHMARK_CONFIG"]).read_text())["benchmark"]
     assert benchmark["docker_image"] == "operator/custom-image"
@@ -258,7 +257,7 @@ def test_conflicting_explicit_image_fails_before_recipe_resolution(monkeypatch, 
     source = tmp_path / "custom.yaml"
     source.write_text(yaml.safe_dump({"benchmark": {"model": "operator/custom-model", "docker_image": "source/image"}}))
     args = _args(benchmark_config=str(source), model=None)
-    _configure_benchmark_config(args)
+    cli._configure_benchmark_config(args)
     monkeypatch.setenv("HYPERLOOM_IMAGE", "operator/different-image")
     with pytest.raises(ValueError, match="HYPERLOOM_IMAGE conflicts"):
         prepare_native_agentx_source(args)

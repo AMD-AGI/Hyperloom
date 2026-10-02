@@ -417,9 +417,8 @@ class ClaudeBackend:
                 # -27,068, or -76.2%, with each arm's two replicates within 50
                 # tokens of each other. The implementer lanes of those runs
                 # split by the same amount, 44.9-47.1k against 17.4-19.6k.
-                # The two savings are sequential, not additive: while the maps
-                # were still inlined they dominated the prefix and this change
-                # measured only -5,317 against that larger baseline.
+                # The saving assumes the knowledge maps are deferred: inlined,
+                # they dominate the prefix and this line saves only 5,317 tokens.
                 # MCP tools are not part of the built-in set and are carried by
                 # ``allowed_tools`` alone.
                 tools=_builtin_tools(allowed_tools),

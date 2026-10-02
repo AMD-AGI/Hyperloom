@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 
 import hyperloom.inference_optimizer.cli as ocli
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
+from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import record_stage_reached
 from hyperloom.inference_optimizer.session.lock import SessionLock
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -49,6 +51,23 @@ def test_terminal_artifacts_keep_the_existing_write_order(tmp_path: Path, monkey
     ocli._write_cli_terminal_artifacts(tmp_path, SharedState(session_id="s"), "signal")
 
     assert order == ["final_json", "breakdown", "final_md", "package"]
+
+
+def test_terminal_safety_net_preserves_authored_stage(tmp_path: Path, monkeypatch) -> None:
+    _record_terminal_writes(monkeypatch)
+    record_stage_reached(tmp_path, "enablement")
+
+    ocli._write_cli_terminal_artifacts(tmp_path, SharedState(session_id="s", phase="PRELUDE"), "signal")
+
+    assert assemble_parts(tmp_path)["outcome"]["stage_reached_recorded"] == "enablement"
+
+
+def test_terminal_safety_net_does_not_invent_a_stage(tmp_path: Path, monkeypatch) -> None:
+    _record_terminal_writes(monkeypatch)
+
+    ocli._write_cli_terminal_artifacts(tmp_path, SharedState(session_id="s", phase="PRELUDE"), "signal")
+
+    assert "outcome" not in assemble_parts(tmp_path)
 
 
 def test_completed_close_still_gets_its_close_out_package(tmp_path: Path, monkeypatch) -> None:

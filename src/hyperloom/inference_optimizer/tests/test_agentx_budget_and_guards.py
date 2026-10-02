@@ -74,6 +74,9 @@ def _blank_agentx_runtime_pins(monkeypatch) -> None:
 def _on(monkeypatch):
     _blank_agentx_runtime_pins(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+
+    monkeypatch.delenv("HYPERLOOM_AGENTIC_BACKEND", raising=False)
+
     monkeypatch.setenv("AGENTX_MODEL_ID", "acme/Test-Model")
     monkeypatch.setenv(
         "AGENTX_SERVER_SCRIPT",
@@ -614,7 +617,8 @@ def test_resume_ignores_inherited_benchmark_yaml(monkeypatch, tmp_path):
 
 
 @pytest.mark.usefixtures("native_config")
-def test_epoch_two_preflight_rejects_explicit_concurrency_sweep(monkeypatch):
+@pytest.mark.parametrize("epoch", [None, 2, 3, 4])
+def test_native_preflight_rejects_explicit_concurrency_sweep(monkeypatch, epoch):
     _on(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
@@ -625,7 +629,7 @@ def test_epoch_two_preflight_rejects_explicit_concurrency_sweep(monkeypatch):
                 nodes=1,
                 enable_conc_sweep=True,
             ),
-            _St("agentx", 2),
+            _St("agentx", epoch) if epoch else None,
         )
     assert exc.value.code == 2
 
@@ -638,12 +642,14 @@ class _St:
         self,
         mode="",
         epoch=0,
+        backend="",
         baseline_config_path="",
         agentx_runtime_pins=None,
         active_inferencex_path="",
     ):
         self.benchmark_mode = mode
         self.agentx_epoch = epoch
+        self.agentx_backend = backend
         self.baseline_config_path = baseline_config_path
         self.agentx_runtime_pins = dict(agentx_runtime_pins or {})
         self.active_inferencex_path = active_inferencex_path
@@ -767,6 +773,21 @@ def test_resume_rejects_mode_switch(monkeypatch):
     assert "benchmark_mode" in agentx_state_is_stale(_St("synthetic", 0))
     monkeypatch.setenv("HYPERLOOM_AGENTX", "0")
     assert "benchmark_mode" in agentx_state_is_stale(_St("agentx", 1))
+
+
+def test_resume_rejects_a_backend_switch(monkeypatch):
+    """aiperf and mlperf sessions must not anchor each other, epoch unchanged."""
+    _on(monkeypatch)
+    assert agentx_state_is_stale(_St("agentx", 1, "aiperf")) == ""
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    reason = agentx_state_is_stale(_St("agentx", 1, "aiperf"))
+    assert "backend" in reason
+    assert agentx_state_is_stale(_St("agentx", 1, "mlperf")) == ""
+
+
+def test_resume_treats_a_missing_backend_as_aiperf(monkeypatch):
+    _on(monkeypatch)
+    assert agentx_state_is_stale(_St("agentx", 1, "")) == ""
 
 
 def test_fresh_shell_resume_inherits_persisted_agentx_mode(monkeypatch):
@@ -1347,3 +1368,54 @@ def test_accepted_native_resume_restores_direct_execution_identity(monkeypatch, 
     assert _ray_backend._should_use_ray_backend() is False
     assert _ray_backend.ray_gpu_specialist_exec_enabled() is False
     assert ProfileExecutor()._resolve_default_config().name.startswith("profile_")
+
+
+@pytest.mark.parametrize(
+    "backend, client", [("", "aiperf"), ("legacy", "aiperf"), ("aiperf", "aiperf"), ("mlperf", "mlperf")]
+)
+@pytest.mark.parametrize("raw_mode", ["", "1"])
+def test_bare_resume_restores_saved_legacy_client_without_upgrading_epoch(monkeypatch, backend, client, raw_mode):
+    from hyperloom.common.agentx_workload import agentx_client_script
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", raw_mode)
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "")
+    state = _St("agentx", 1, backend)
+    assert agentx_state_is_stale(state) == ""
+    assert _restore_agentx_env_from_state(state) is (raw_mode != "1")
+    assert os.environ["HYPERLOOM_AGENTIC_BACKEND"] == client
+    assert agentx_client_script() == ("mlperf_agentic_client.sh" if client == "mlperf" else "aiperf_client.sh")
+    assert (state.agentx_epoch, state.agentx_backend) == (1, backend)
+    assert agentx_state_is_stale(state) == ""
+
+
+@pytest.mark.parametrize("epoch", [2, 3, 4])
+@pytest.mark.parametrize("backend", ["", "native"])
+def test_saved_native_epoch_infers_missing_backend_and_rejects_mlperf(monkeypatch, epoch, backend):
+    from hyperloom.common.agentx_mode import managed_native_agentx_session, native_agentx_session
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "")
+    state = _St("agentx", epoch, backend)
+    assert agentx_state_is_stale(state) == ""
+    _restore_agentx_env_from_state(state)
+    assert native_agentx_session(state)
+    assert managed_native_agentx_session(state) is (epoch == 4)
+    assert state.agentx_epoch == epoch
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    assert "backend" in agentx_state_is_stale(state)
+
+
+def test_fresh_mlperf_does_not_require_native_pins_but_conflicts_with_native_yaml(monkeypatch, tmp_path, capsys):
+    _blank_agentx_runtime_pins(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "")
+    args = argparse.Namespace(framework="sglang", nodes=1, enable_conc_sweep=True)
+    _preflight_agentx_backend(args)
+    source = tmp_path / "native.yaml"
+    source.write_text("benchmark:\n  agentx: enable\n")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(source))
+    with pytest.raises(SystemExit) as exc:
+        _preflight_agentx_backend(args)
+    assert exc.value.code == 2
+    assert "MLPerf client backend" in capsys.readouterr().err

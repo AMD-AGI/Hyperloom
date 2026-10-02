@@ -393,8 +393,8 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
                 source_file=source_file,
                 task_group_aliases=task_group_aliases,
             )
-            # Match only on a real patch_path: an attempted entry with a blank patch_path used to match {"",
-            # artifact_path}, so one empty-path attempt dropped the whole sibling family from the pending list.
+            # Match only on a real patch_path: an attempted entry with a blank patch_path would match {"",
+            # artifact_path}, and one empty-path attempt would drop the whole sibling family from the pending list.
             and (not artifact_path or str(attempted.get("patch_path") or "") == artifact_path)
             for attempted in attempted_entries
         ):

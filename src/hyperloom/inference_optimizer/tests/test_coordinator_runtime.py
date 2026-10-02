@@ -49,6 +49,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 from hyperloom.orchestrator.bus.storage import SqliteConnection
+from ._dispatch_helpers import pump_until_settled
 
 
 async def _immediately(payload: dict) -> dict:
@@ -738,6 +739,7 @@ async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
     c.sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1840}))
     try:
         await c.tick(1)
+        await pump_until_settled(c)
         dones = await c.bus.tail(topic="delegated_result")
         assert any(m.payload.get("state") == "succeeded" for m in dones)
     finally:
@@ -1094,11 +1096,11 @@ async def test_promote_baseline_keeps_higher_anchor(session_dir):
 
 
 def test_inject_explore_runtime_params_includes_baseline_accuracy():
-    class DummyCoordinator:
+    class DummyCoordinator(ProposalsCollaborator):
         shared_state = SharedState(baseline_accuracy=0.81)
 
     params: dict[str, Any] = {}
-    ProposalsCollaborator(DummyCoordinator())._inject_explore_runtime_params(params)
+    DummyCoordinator()._inject_explore_runtime_params(params)
     assert params["accuracy_baseline"] == pytest.approx(0.81)
 
 
@@ -1770,7 +1772,7 @@ async def test_resume_still_closes_a_revalidation_window_that_had_its_chance(ses
         st.enablement.revalidation_task_id = task.task_id
 
         report: dict[str, Any] = {"fixes": []}
-        await c.writeback._resume_recover_pending_revalidation(report)
+        await c._resume_recover_pending_revalidation(report)
 
         assert st.enablement.validation_pending is False
         assert st.enablement.revalidation_task_id == ""
@@ -2250,7 +2252,9 @@ async def test_a_registered_run_leaves_a_row_queued_when_its_lanes_are_busy(
         requires_lanes=["profile_lane"],
         lease_ttl_sec=600,
     )
-    disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
+    disp = DispatcherCollaborator()
+    vars(disp).update(locks=locks, sub=sub)
+    disp._init_dispatch_state()
 
     assert await disp.run_task_registered(task) is None
 
@@ -2266,7 +2270,9 @@ async def test_a_registered_run_is_reachable_by_the_wall_clock_defences(tmp_path
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
-    disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
+    disp = DispatcherCollaborator()
+    vars(disp).update(locks=locks, sub=sub)
+    disp._init_dispatch_state()
     registered: list[str] = []
 
     async def runner(ctx):
@@ -2293,7 +2299,9 @@ async def test_a_registered_run_labels_its_llm_calls_with_the_action(tmp_path):
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
-    disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
+    disp = DispatcherCollaborator()
+    vars(disp).update(locks=locks, sub=sub)
+    disp._init_dispatch_state()
     seen: list[str] = []
 
     async def runner(ctx):
@@ -2369,7 +2377,7 @@ async def test_report_success_does_not_stop_run(session_dir):
             params={"session_dir": str(session_dir)},
             idempotency_key="k-report-1",
         )
-        await c._pump_dispatcher_once()
+        await pump_until_settled(c)
         after = await c.tasks.get(task.task_id)
         assert after.state == "succeeded"
         assert not (c.shared_state.stop_reason or "").strip()
@@ -2391,7 +2399,7 @@ async def test_report_success_does_not_overwrite_prior_stop_reason(session_dir):
             params={"session_dir": str(session_dir)},
             idempotency_key="k-report-pre-set",
         )
-        await c._pump_dispatcher_once()
+        await pump_until_settled(c)
         after = await c.tasks.get(task.task_id)
         assert after.state == "succeeded"
         assert c.shared_state.stop_reason == "target_reached"
@@ -2412,7 +2420,7 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
     async def _boom():
         raise RuntimeError("tick exploded mid-run")
 
-    c.phase_machine._advance_phase_if_needed = _boom  # type: ignore[assignment]
+    c._advance_phase_if_needed = _boom  # type: ignore[assignment]
 
     try:
         reason = await c.run(max_ticks=5)
@@ -2456,6 +2464,7 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
     try:
         with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
             await c.tick(1)
+        await pump_until_settled(c)
         assert any("dispatch audit" in r.getMessage() and "long_running" in r.getMessage() for r in caplog.records)
         assert await c.tasks.by_state("failed")
     finally:
@@ -2476,7 +2485,7 @@ async def test_a_failed_sweep_is_not_renamed_by_a_met_target(session_dir):
     async def _ladder_already_settled(**_kwargs):
         return None
 
-    c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
+    c._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
     try:
         reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
         assert reason == "sweep_failed"
@@ -2502,12 +2511,14 @@ async def test_a_met_target_waits_for_the_ladder_it_routed_to(session_dir):
     async def _ladder_stays_queued(**_kwargs):
         return None
 
-    c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_stays_queued  # type: ignore[method-assign]
+    c._enqueue_internal_conc_sweep_task = _ladder_stays_queued  # type: ignore[method-assign]
     try:
-        await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
+        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
+        assert reason == "max_ticks"
         assert c.shared_state.target_reached_at
         assert c.shared_state.last_conc_sweep == {}
-        assert (c.shared_state.phase or "").upper() == "SWEEP"
+        terminal = c.shared_state.phase_history[-1]
+        assert (terminal["from_phase"], terminal["to_phase"], terminal["reason"]) == ("SWEEP", "CLOSE", "max_ticks")
     finally:
         await c.stop()
 
@@ -2526,7 +2537,7 @@ async def test_target_reached_routes_through_sweep_then_close(session_dir):
     async def _ladder_already_settled(**_kwargs):
         return None
 
-    c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
+    c._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
     try:
         reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
         assert reason == "target_reached"
@@ -2559,8 +2570,8 @@ async def test_target_reached_close_still_runs_the_post_opt_roofline(session_dir
     async def _ladder_already_settled(**_kwargs):
         return None
 
-    c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
-    c.phase_close._maybe_run_close_post_opt_roofline = _record_roofline  # type: ignore[method-assign]
+    c._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
+    c._maybe_run_close_post_opt_roofline = _record_roofline  # type: ignore[method-assign]
     try:
         reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
         assert reason == "target_reached"

@@ -12,6 +12,8 @@ from typing import Mapping, MutableMapping
 
 import yaml
 
+from hyperloom.common.agentx_workload import MLPERF_CLIENT_SCRIPT, is_agentx_client_script
+
 # aiperf capability preflight is memoized per resolved binary: the probe shells out with a timeout and its result
 # cannot change within a run, so a multi-point grid must not re-probe every round.
 _PREFLIGHTED_BINS: dict[str, bool] = {}
@@ -172,6 +174,7 @@ def maybe_prepare_agentx(
         if pinned_native_session:
             raise ValueError("Pinned native AgentX config is unreadable at the launch boundary") from exc
         bench = {}
+
     from .native import (
         native_agentx_enabled,
         native_execution_identity,
@@ -207,6 +210,11 @@ def maybe_prepare_agentx(
         )
         pinned_profile_compat = True
     if native:
+        from .managed import server_spec
+
+        torch_profile = ((bench.get("profiler") or {}).get("torch_profiler") or {}).get("enabled") is True
+        if server_spec(bench) is not None and torch_profile and not allow_profile_compat:
+            raise ValueError("Managed AgentX diagnostics require the explicit profile execution path")
         if not effective_inferencex_path:
             raise ValueError(
                 "Native AgentX requires an InferenceX checkout via benchmark.inferencex_path or INFERENCEX_PATH"
@@ -293,7 +301,7 @@ def maybe_prepare_agentx(
             "name": str(preview.get("recipe") or ""),
             "config_file": config_file,
             "recipe_fingerprint": str(topology.get("recipe_fingerprint") or ""),
-            "image": str(entry.get("image") or resolved_benchmark.get("docker_image") or ""),
+            "image": str(resolved_benchmark.get("docker_image") or entry.get("image") or ""),
             "runner": str(entry.get("runner") or ""),
             "model": str(entry.get("model") or ""),
             "model_prefix": str(entry.get("model-prefix") or ""),
@@ -371,7 +379,8 @@ def maybe_prepare_agentx(
             raise ValueError("Native AgentX persisted execution identity changed after materialization")
         return True
 
-    if str(bench.get("benchmark_script") or "") != "aiperf_client.sh":
+    script = Path(str(bench.get("benchmark_script") or "")).name
+    if not is_agentx_client_script(script):
         return False
     if pinned_native_session and not pinned_profile_compat:
         raise ValueError("Pinned native AgentX session cannot use an unverified generic client")
@@ -382,7 +391,13 @@ def maybe_prepare_agentx(
     from .preflight import resolve_aiperf_bin
 
     # Deploy BEFORE preflight so the client is in place regardless of preflight memoization state.
+
     deploy_agentx_assets(Path(effective_inferencex_path) / "benchmarks")
+    if script == MLPERF_CLIENT_SCRIPT:
+        from .preflight import check_mlperf_harness
+
+        check_mlperf_harness(env)
+        return True
     aiperf_bin = resolve_aiperf_bin(env)
     raw_bench_envs = bench.get("envs")
     bench_envs = raw_bench_envs if isinstance(raw_bench_envs, dict) else {}

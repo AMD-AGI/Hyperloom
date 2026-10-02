@@ -173,7 +173,7 @@ def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]
 
 
 class PreludePhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     def _internal_analysis_kind(self) -> str:
         """Pick the kind for the next Coordinator-internal analysis task: roofline when enable_roofline else profile."""
@@ -2016,10 +2016,9 @@ class PreludePhase(CoordinatorCollaborator):
         """Settle the one-shot guard for a replay that will not run.
 
         Every refusal owes the same four things: flip the guard, state the
-        outcome, close the timeline event, and persist. The persist is the one
-        that used to be left out of some branches, and it is what makes the
-        guard mean anything -- a refusal that never reached disk would let the
-        next boot replay against the decision just taken.
+        outcome, close the timeline event, and persist. The persist is what
+        makes the guard mean anything -- a refusal that never reached disk would
+        let the next boot replay against the decision just taken.
 
         Call this after any rollback or stop-reason the branch also sets, so
         that one save carries the whole refusal.
@@ -2313,6 +2312,18 @@ class PreludePhase(CoordinatorCollaborator):
                     historical_bar,
                     3,
                 )
+        # The latency budget vetoes a replay the threshold kept, here rather than at the lift, so the drift branch
+        # rolls the replay back instead of leaving a refused config promoted on disk.
+        from hyperloom.common.perf_metric import latency_veto_reason
+
+        latency_veto = (
+            latency_veto_reason(result.get("e2el_mean_ms"), float(getattr(self.shared_state, "latency_budget_ms", 0.0)))
+            if reproduced
+            else ""
+        )
+        if latency_veto:
+            reproduced = False
+            outcome["latency_veto"] = latency_veto
         promoted_checkout = ""
         if reproduced:
             params = (task.params if task is not None else {}) or {}
@@ -2472,6 +2483,8 @@ class PreludePhase(CoordinatorCollaborator):
                     },
                     "name": "warm_replay",
                     **graded_axes_of(result),
+                    # The latency budget grades on this and fails closed without it.
+                    "e2el_mean_ms": result.get("e2el_mean_ms"),
                     "candidate_extra_server_args": warm_args,
                     "candidate_extra_envs": warm_envs,
                     "recipe_delta": {
@@ -2556,7 +2569,7 @@ class PreludePhase(CoordinatorCollaborator):
             if recorder is not None:
                 recorder.record_applied(kernel=kernel_outcome)
             outcome["status"] = "drift"
-            outcome["reason"] = (
+            outcome["reason"] = latency_veto or (
                 f"native replay rejected: {native_grade.degrade_reason or native_grade.verdict}"
                 if native_grade is not None
                 else f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%"

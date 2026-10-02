@@ -50,10 +50,10 @@ def framework_version(framework: str) -> str:
     """Read the release of the framework that owns the source.
 
     A framework that is not there, one whose distribution is not installed, and
-    one whose wheel was built on another machine each used to answer in their
-    own words -- ``none``, ``unspecified``, ``0.24.0+rocm723`` -- so one kernel
-    accumulated a page per answer. Every one of them resolves here to the
-    release, or to the single word for not knowing it.
+    one whose wheel was built on another machine each resolve here to the
+    release, or to the single word for not knowing it. Answers in their own
+    words -- ``none``, ``unspecified``, ``0.24.0+rocm723`` -- would give one
+    kernel a page per answer.
     """
     name = str(framework or "").strip().lower()
     try:

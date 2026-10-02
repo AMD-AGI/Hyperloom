@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 import asyncio
+import collections
 import hashlib
 import json
 import math
 import os
 import time
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable
 from functools import partial
 from concurrent.futures import Future
 from concurrent.futures import CancelledError as FuturesCancelledError
@@ -61,6 +62,7 @@ from .coordinator_helpers import (
 
 from .conversation import _format_inbox_event
 import logging as _logging
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -121,11 +123,9 @@ _COOPERATIVE_CANCEL_GRACE_SEC: float = (
 _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 
 
-#: Kinds the pump dispatches but does not join: it drains what it joins before
-#: returning, and an off-loop compile or the KERNEL phase's whole pipeline there
-#: would hold every reactor turn for its duration. Admission is unchanged — same
-#: budget, lane and lease gates.
-_NOT_JOINED_KINDS: frozenset[str] = frozenset({"targeted_build", "kernel_agent"})
+#: Kinds whose execution manages its own completion: the pump does not book
+#: their result. Admission is unchanged — same budget, lane and lease gates.
+_SELF_SETTLING_KINDS: frozenset[str] = frozenset({"targeted_build", "kernel_agent"})
 
 
 class _InflightAction(NamedTuple):
@@ -136,25 +136,23 @@ class _InflightAction(NamedTuple):
     scope: CancelScope
 
 
-class DispatcherCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+class DispatcherCollaborator(CoordinatorCollaborator):
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
+    def _init_dispatch_state(self) -> None:
         # Task ids already charged a failure by the dead-holder reclaim path, so
         # a late normal result for the same task cannot double-count it.
         self._dead_holder_accounted: set[str] = set()
-        # Handles on the actions currently running, ``task_id -> _InflightAction``.
-        # Kept on the collaborator and not only in the pump's frame: an action
-        # whose handle lives in a frame can only be stopped by the frame that is
-        # already blocked awaiting it, which is precisely the situation shutdown
-        # and an exhausted wall-clock budget have to break. Entries remove
-        # themselves in :meth:`run_task_registered`.
+        # Handles on the actions currently running, ``task_id -> _InflightAction``:
+        # the only reach into a dispatched action once the pump has returned.
+        # Entries remove themselves in :meth:`run_task_registered`.
         self._inflight_actions: dict[str, _InflightAction] = {}
         self._executions: set[asyncio.Task[Any]] = set()
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
+        # Finished executions awaiting bookkeeping; drained only by the pump so
+        # bookkeeping never interleaves with a reactor turn.
+        self._completion_queue: collections.deque[tuple[Task, Any]] = collections.deque()
+        # Set by the phase barrier while a transition is pending: no new spawns.
+        self.admission_frozen: bool = False
 
     async def close_db_after_executions(self) -> None:
         """Drain physical cleanup and completion before the entry-point loop exits.
@@ -181,7 +179,25 @@ class DispatcherCollaborator:
                 len(unconfirmed),
             )
             return
+        await self._drain_completions()
         self.db.close()
+
+    async def _queue_completion(self, task: Task, maybe_result: Any) -> None:
+        """Queue a finished execution for bookkeeping by the pump."""
+        self._completion_queue.append((task, maybe_result))
+
+    def has_unbooked_completions(self) -> bool:
+        """Whether a finished execution still awaits its bookkeeping."""
+        return bool(self._completion_queue)
+
+    async def _drain_completions(self) -> int:
+        """Book every queued completion in order; returns how many were booked."""
+        count = 0
+        while self._completion_queue:
+            task, result = self._completion_queue.popleft()
+            count += 1
+            await self._reap_dispatched_task(task, result)
+        return count
 
     def _registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
         """Resolve ``(requires_lanes, lease_ttl_sec)`` from the action catalogue; lanes filtered to KNOWN_LANES.
@@ -212,8 +228,8 @@ class DispatcherCollaborator:
     def _dispatch_paused_for_phase_budget(self) -> bool:
         """True when the current phase's budget is spent, so the dispatcher should stop launching NEW phase-scoped variants.
 
-        Pausing new spawns lets in-flight tasks finish and the pump return so
-        the tick can advance the phase. Scoped to the discretionary search
+        In-flight tasks keep running; the phase advance decides whether they
+        are cancelled. Scoped to the discretionary search
         phases. Applies to every session budget: the pause is driven purely by
         the phase budget remaining (charge-back for short bounded runs, the
         per-cycle window for long/unbounded runs), keeping dispatch consistent
@@ -237,7 +253,6 @@ class DispatcherCollaborator:
         *,
         reason: str,
         exempt: frozenset[str] = frozenset(),
-        only_task_ids: Collection[str] | None = None,
     ) -> list[str]:
         """Stop the running dispatched actions and wait for them to unwind.
 
@@ -268,10 +283,6 @@ class DispatcherCollaborator:
                 blocking side so it can attribute its own stop.
             exempt: Action kinds to leave running -- the closing actions, when
                 the trigger is a budget that already reserved time for them.
-            only_task_ids: Restrict the cancel to these ids, for a caller that
-                owns part of the registry rather than all of it. ``None`` reaches
-                every action that is not exempt, which is what a shutdown or a
-                spent budget needs.
 
         Returns:
             list[str]: Task ids asked to stop; cleanup may still be pending.
@@ -279,9 +290,7 @@ class DispatcherCollaborator:
         victims = [
             (task_id, entry)
             for task_id, entry in self._inflight_actions.items()
-            if entry.kind not in exempt
-            and not entry.atask.done()
-            and (only_task_ids is None or task_id in only_task_ids)
+            if entry.kind not in exempt and not entry.atask.done()
         ]
         if not victims:
             return []
@@ -404,62 +413,27 @@ class DispatcherCollaborator:
             log.exception("dispatcher: cancelled policy-denied integrate_patch reconcile failed")
 
     async def _pump_dispatcher_once(self) -> None:
-        """Dispatch queued tasks respecting per-lane capacity, re-scanning for
-        newly-fittable tasks while in-flight tasks run.
+        """Book finished executions and spawn the queued tasks that now fit; never waits on running work.
 
-        Re-scans the queue whenever an in-flight task completes
-        (FIRST_COMPLETED) or a short poll elapses, so a queued GPU task starts
-        the moment its lane frees. Everything it joins is drained before it
-        returns; :data:`_NOT_JOINED_KINDS` is dispatched and left running. Each
-        GPU lease is bound to its task_id and released by the runner.
-
-        Budget guard: once the phase's cyclic budget is spent
-        (:meth:`_dispatch_paused_for_phase_budget`), stop spawning NEW
-        phase-scoped variants — drain in-flight, then return so the tick can
-        advance the phase.
+        Dispatched tasks outlive the pump and queue their completion for a later
+        one. The pump repeats while a pass books something, so lanes freed by
+        completions already queued are refilled in the same call. New spawns stop
+        while the phase budget is spent or :attr:`admission_frozen` is set.
         """
         await self._reclaim_stale_dispatch_state()
-        inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
-        # Cumulative across the whole pump, not just the live in-flight set, so a
-        # fast task reaped before its queued->running transition is visible is
-        # not re-dispatched. A task is dispatched at most once per pump.
-        dispatched_ids: set[str] = set()
-        try:
-            while True:
-                # Wall-clock guard: a spent session budget (or a shutdown
-                # request) stops the actions already running, because waiting
-                # for them is what the budget no longer allows.
-                shutting_down = await self._cancel_inflight_that_outlived_the_session()
-                # Budget guard: stop launching NEW phase-scoped variants once the
-                # phase's cyclic budget is spent; drain in-flight then return.
-                if not shutting_down and not self._dispatch_paused_for_phase_budget():
-                    spawned = await self._spawn_fitting_queued(exclude_ids=dispatched_ids)
-                    dispatched_ids.update(t.task_id for t, _, _ in spawned)
-                    inflight.extend(spawned)
-                if not inflight:
-                    return
-                done, _pending = await asyncio.wait(
-                    [atask for _, atask, _ in inflight],
-                    timeout=self._dispatcher_poll_sec,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if not done:
-                    # Poll elapsed with no completion; re-scan in case a lane freed.
-                    continue
-                # Execution owns completion too, so a cancelled pump cannot lose it.
-                await asyncio.gather(*done, return_exceptions=True)
-                inflight = [entry for entry in inflight if entry[1] not in done]
-        finally:
-            # ``_inflight_actions`` is dispatcher-wide: the inline path registers
-            # a handle there too, and that action is meant to outlive the caller
-            # that started it. The pump owns exactly the entries still in its own
-            # ``inflight``, so leaving by any door other than the drained one --
-            # cancelled at shutdown, or a raise from the bookkeeping -- takes
-            # those and nothing else. A drained pump has nothing left to cancel.
-            await self.cancel_inflight_actions(
-                reason="dispatcher_pump_exit",
-                only_task_ids={task.task_id for task, _atask, _gpu_lease in inflight},
-            )
+        while True:
+            booked = await self._drain_completions()
+            shutting_down = await self._cancel_inflight_that_outlived_the_session()
+            if not shutting_down and not self.admission_frozen and not self._dispatch_paused_for_phase_budget():
+                await self._spawn_fitting_queued()
+            if not booked:
+                return
+
+    async def wait_for_running_work(self, *, timeout: float) -> None:
+        """Wait until a running action finishes or ``timeout`` elapses; returns at once when none runs."""
+        running = [entry.atask for entry in self._inflight_actions.values() if not entry.atask.done()]
+        if running:
+            await asyncio.wait(running, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
 
     async def _reconcile_cancelled_policy_denied_integrate_tasks(self) -> list[str]:
         """Re-queue integrate_patch rows cancelled at dispatch when policy now passes.
@@ -484,13 +458,7 @@ class DispatcherCollaborator:
             return []
 
         created: list[str] = []
-        try:
-            cancelled = await self.tasks.by_state("cancelled")
-        except Exception:
-            log.exception("dispatcher: reconcile could not list cancelled tasks")
-            return []
-
-        for task in cancelled:
+        for task in await self.tasks.by_state("cancelled"):
             if task.kind != "integrate_patch":
                 continue
             evidence = _dispatch_policy_denied_evidence(task)
@@ -510,18 +478,15 @@ class DispatcherCollaborator:
             except PolicyDenied:
                 continue
             base_key = str(task.idempotency_key or f"integrate-{task.task_id}").strip()
-            if await self.tasks.integrate_reconcile_child_exists(
-                base_key,
-                states=("succeeded",),
-            ):
-                continue
-            if await self.tasks.integrate_reconcile_child_exists(
-                base_key,
-                states=("queued", "running"),
+            child_key_prefix = f"{base_key}-reconcile"
+            if await self.tasks.exists_with_key_prefix(
+                task.kind,
+                child_key_prefix,
+                states=("succeeded", "queued", "running"),
             ):
                 continue
             for attempt in range(1, 6):
-                new_key = f"{base_key}-reconcile{attempt}"
+                new_key = f"{child_key_prefix}{attempt}"
                 new_task, was_existing = await self.tasks.create_or_return_existing(
                     kind=task.kind,
                     params=params,
@@ -539,38 +504,22 @@ class DispatcherCollaborator:
                         new_key,
                     )
                     break
-                if new_task.state in ("queued", "running", "succeeded"):
-                    break
         return created
 
-    async def _spawn_fitting_queued(
-        self,
-        *,
-        exclude_ids: set[str],
-    ) -> list[tuple[Task, "asyncio.Task[SubAgentResult]", Any]]:
+    async def _spawn_fitting_queued(self) -> None:
         """Spawn every currently lane-fitting queued task not already in flight.
 
         Pure dispatch — per-task completion bookkeeping is handled by
         :meth:`_reap_dispatched_task`. Applies the capacity /
         GPU-specialist-lease gating; each lease is bound to its task_id.
-
-        Args:
-            exclude_ids: Task ids already dispatched this pump pass; skipped so
-                a task is never dispatched twice. A dispatched
-                :data:`_NOT_JOINED_KINDS` task is added here, since it is the
-                only record of it this pass carries back.
-
-        Returns:
-            The ``(task, asyncio_task, gpu_lease)`` tuples the caller must join.
-            A :data:`_NOT_JOINED_KINDS` task is spawned and registered for
-            cancellation but deliberately absent from this list.
+        Tasks already in ``_inflight_actions`` are skipped so a task is never
+        dispatched twice across pump calls.
         """
         queued = await self.tasks.queued()
         if not queued:
-            return []
+            return
         holders = await self.locks.lane_holders()
         capacities = await self.locks.lane_capacities()
-        spawned: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         # Serving priority: pre-compute whether serving-priority is enabled
         # once per pass (a pure env-var read, zero cost). The actual slot probe
         # (serving_slot_busy()) is deferred to just before each GPU specialist
@@ -591,13 +540,9 @@ class DispatcherCollaborator:
         except Exception:  # noqa: BLE001 — never block dispatch on the probe
             pass
         for task in queued:
-            if task.task_id in exclude_ids:
-                # Already dispatched in a prior pass of this pump.
+            if task.task_id in self._inflight_actions:
                 continue
-            join_in_pump = task.kind not in _NOT_JOINED_KINDS
-            if not join_in_pump and task.task_id in self._inflight_actions:
-                # Still running from an earlier pump that returned without it.
-                continue
+            self_settling = task.kind in _SELF_SETTLING_KINDS
             retired = task.kind == "recover" and task.kind not in self.sub.executor_registry
             if not retired and await self._cancel_queued_task_over_budget(task):
                 continue
@@ -640,12 +585,11 @@ class DispatcherCollaborator:
             extra_context: dict[str, Any] = {}
             if task.kind == "specialist":
                 params = task.params or {}
-                needs_gpu = is_truthy(params.get("needs_gpu"))
+                from ..specialists.profile import requires_gpu
+
+                needs_gpu = requires_gpu(params)
                 # Absolute stop instant, tightened by the session bound.
-                specialist_deadline = self._specialist_deadline(
-                    needs_gpu=needs_gpu,
-                    params=params,
-                )
+                specialist_deadline = self._specialist_deadline(params=params)
                 extra_context["specialist_deadline"] = specialist_deadline
                 extra_context["specialist_progress_cb"] = self._specialist_progress_publisher(task)
                 if needs_gpu:
@@ -667,8 +611,8 @@ class DispatcherCollaborator:
                                 holders[lane] = max(0, int(holders.get(lane, 0)) - 1)
                         continue
                     # Whole-machine, time-shared lane vs serving-disjoint pool:
-                    # framework-authoring and bench-capable specialists lease the
-                    # whole machine from ``framework_gpu_pool``; every other GPU
+                    # enablement and bench-capable specialists lease the whole
+                    # machine from ``framework_gpu_pool``; every other GPU
                     # specialist leases from ``gpu_specialist_pool``.
                     from ..specialists.profile import (
                         holds_serving_slot,
@@ -761,17 +705,10 @@ class DispatcherCollaborator:
                         maybe_gpu_specialist_lease,
                     )
 
-                    # serving_slot: only
-                    # bench-capable specialists that start their OWN serving
-                    # loop hold the whole-machine serving_slot mutex. Authoring-
-                    # only specialists (incl. framework authoring, which does not
-                    # self-bench — its real benchmark runs through integrate_patch
-                    # / _bench_candidate under a run_grid serving lease)
-                    # take ``num_gpus`` only, so they share the GPU queue with
-                    # other specialists instead of blocking serving for their
-                    # whole (mostly CPU-bound authoring) lifetime. Physical GPU
-                    # mutual-exclusion with serving is still enforced by Ray's
-                    # ``num_gpus`` accounting.
+                    # serving_slot: only bench-capable specialists that start their
+                    # OWN serving loop hold the whole-machine serving_slot mutex;
+                    # every other GPU specialist takes ``num_gpus`` only, and Ray's
+                    # ``num_gpus`` accounting still keeps it off serving's cards.
                     gpu_specialist_lease = maybe_gpu_specialist_lease(
                         num_gpus=gpu_count,
                         serving_slot=holds_serving_slot(params),
@@ -783,11 +720,9 @@ class DispatcherCollaborator:
             # no registered executor. Kernel-owned kinds are legitimately
             # unregistered under --no-kernel, so they are excluded to avoid a
             # false positive. Dispatch is unchanged.
-            _coord = object.__getattribute__(self, "_coord")
-            _execs = getattr(getattr(_coord, "sub", None), "executor_registry", None)
+            _execs = self.sub.executor_registry
             if (
-                isinstance(_execs, dict)
-                and _execs
+                _execs
                 and task.kind not in _execs
                 and task.kind != "specialist"
                 and task.kind not in KERNEL_AGENT_OWNED_ACTIONS
@@ -806,22 +741,16 @@ class DispatcherCollaborator:
                     gpu_lease=gpu_lease,
                     gpu_specialist_lease=gpu_specialist_lease,
                     cancel_scope=cancel_scope,
-                    on_complete=partial(self._reap_dispatched_task, task, gpu_lease=gpu_lease)
-                    if join_in_pump
-                    else None,
+                    on_complete=None if self_settling else partial(self._queue_completion, task),
                 ),
             )
             self._inflight_actions[task.task_id] = _InflightAction(task.kind, atask, cancel_scope)
-            if join_in_pump:
-                spawned.append((task, atask, gpu_lease))
-            else:
-                # Nothing retrieves this handle's exception, so report it here.
-                atask.add_done_callback(self._report_unjoined_failure(task))
-                exclude_ids.add(task.task_id)
-        return spawned
+            atask.add_done_callback(self._report_spawned_failure(task))
+            if task.kind == "specialist":
+                self.shared_state.note_specialist_dispatched(str((task.params or {}).get("domain") or ""))
 
     @staticmethod
-    def _report_unjoined_failure(task: Task) -> "Callable[[asyncio.Task[Any]], None]":
+    def _report_spawned_failure(task: Task) -> "Callable[[asyncio.Task[Any]], None]":
         """Build the done-callback for a handle no caller awaits."""
 
         def _report(atask: "asyncio.Task[Any]") -> None:
@@ -870,7 +799,7 @@ class DispatcherCollaborator:
                 because it registers its handle before this coroutine starts;
                 other callers leave it ``None`` and are registered here.
             on_complete: Completion owned by the execution, independent of its
-                caller's lifetime. Inline and unjoined tasks retain their own policies.
+                caller's lifetime. Inline and self-settling tasks pass ``None``.
 
         Returns:
             The runner's result, or ``None`` when the task's lanes were busy, in
@@ -960,7 +889,7 @@ class DispatcherCollaborator:
         ):
             execution = asyncio.create_task(execute_and_complete())
         self._executions.add(execution)
-        execution.add_done_callback(self._report_unjoined_failure(task))
+        execution.add_done_callback(self._report_spawned_failure(task))
         try:
             return await asyncio.shield(execution)
         except asyncio.CancelledError:
@@ -1020,15 +949,10 @@ class DispatcherCollaborator:
 
         return _publish
 
-    def _specialist_wall_budget_sec(
-        self,
-        *,
-        needs_gpu: bool,
-        params: dict[str, Any] | None = None,
-    ) -> float:
+    def _specialist_wall_budget_sec(self, *, params: dict[str, Any] | None = None) -> float:
         """How long a specialist of this shape is worth running, ignoring the session.
 
-        A lane-tiered base (cpu 10min / gpu 60min) amplified by the macro-cycle
+        A mode-tiered base (research 10min / patch 60min) amplified by the macro-cycle
         count and hard-capped at 4h. Bench-capable patch specialists are floored
         at the rebench helper's timeout plus a 10-minute startup allowance, since
         a budget under that guarantees the kill lands mid-benchmark::
@@ -1042,32 +966,22 @@ class DispatcherCollaborator:
         as an absent budget.
 
         Args:
-            needs_gpu: Whether the specialist holds a GPU lease (selects the
-                60min GPU lane base vs the 10min cpu base).
-            params: Specialist dispatch parameters, used to identify
-                bench-capable patch specialists.
+            params: Specialist dispatch parameters; the mode picks the base and
+                bench-capable patch specialists get the rebench floor.
 
         Returns:
             float: A positive wall-clock budget in seconds.
         """
-        base_min = 60.0 if needs_gpu else 10.0
-        macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
-        budget_min = min(base_min * (macro_cycle + 1), 240.0)
-        budget_sec = budget_min * 60.0
-        from ..specialists.profile import resolve_specialist_profile
+        from ..specialists.profile import resolve_specialist_profile, wall_budget_base_min
         from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
-        profile = resolve_specialist_profile(params or {})
-        if profile.reserves_benchmark_lane:
+        macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        budget_sec = min(wall_budget_base_min(params) * (macro_cycle + 1), 240.0) * 60.0
+        if resolve_specialist_profile(params).reserves_benchmark_lane:
             budget_sec = max(budget_sec, resolve_benchmark_timeouts()[1] + 10 * 60)
         return budget_sec
 
-    def _specialist_deadline(
-        self,
-        *,
-        needs_gpu: bool,
-        params: dict[str, Any] | None = None,
-    ) -> Deadline:
+    def _specialist_deadline(self, *, params: dict[str, Any] | None = None) -> Deadline:
         """The absolute instant this specialist must have stopped by.
 
         An exhausted session yields an already-expired instant, which the reaper
@@ -1075,13 +989,12 @@ class DispatcherCollaborator:
         layer could read as "unbudgeted".
 
         Args:
-            needs_gpu: Whether the specialist holds a GPU lease.
             params: Specialist dispatch parameters.
 
         Returns:
             Deadline: The earlier of the shape budget and the session bound.
         """
-        shape = Deadline.after(self._specialist_wall_budget_sec(needs_gpu=needs_gpu, params=params))
+        shape = Deadline.after(self._specialist_wall_budget_sec(params=params))
         return shape.tightened_to(self.shared_state.session_deadline())
 
     def _resolve_serving_tp(self) -> int:
@@ -1129,7 +1042,7 @@ class DispatcherCollaborator:
         Returns:
             int: ``max(floor_ttl_sec, time_to_deadline × (1 + grace))``.
         """
-        stop_at = deadline if deadline is not None else self._specialist_deadline(needs_gpu=True, params=params)
+        stop_at = deadline if deadline is not None else self._specialist_deadline(params=params)
         return max(
             int(floor_ttl_sec or 0),
             math.ceil(max(0.0, stop_at.remaining()) * (1.0 + GPU_LEASE_TTL_GRACE)),
@@ -1175,12 +1088,7 @@ class DispatcherCollaborator:
                 task.kind,
             )
 
-    async def _reap_dispatched_task(
-        self,
-        task: Task,
-        maybe_result: Any,
-        gpu_lease: Any,
-    ) -> None:
+    async def _reap_dispatched_task(self, task: Task, maybe_result: Any) -> None:
         """Run completion bookkeeping for one finished dispatched task.
 
         Performs post-completion bookkeeping: specialist auto-retry,
@@ -1190,7 +1098,6 @@ class DispatcherCollaborator:
         Args:
             task: The finished dispatched task.
             maybe_result: The task's result, or the exception it raised.
-            gpu_lease: The GPU specialist lease to release, or ``None``.
         """
         if isinstance(maybe_result, asyncio.CancelledError):
             # Asked for, not gone wrong: the wall-clock defences stop
@@ -1264,11 +1171,10 @@ class DispatcherCollaborator:
         # integrate_patch completion handling.
         if task.kind == "integrate_patch" and result.state != "cancelled":
             await self.phase_framework.on_integrate_patch_settled(task, result)
-        # Auto-promote succeeded results into CORE_STATE_FIELDS
-        # (Coordinator-only writer).  Warm replay is deliberately routed
-        # through its promote handler even when dispatch itself failed:
-        # that handler owns rollback of pre-applied framework patches and
-        # clears the PRELUDE ``in_flight`` gate.
+        # Auto-promote succeeded results (Coordinator-only writer).  Warm
+        # replay is deliberately routed through its promote handler even when
+        # dispatch itself failed: that handler owns rollback of pre-applied
+        # framework patches and clears the PRELUDE ``in_flight`` gate.
         result_payload = dict(result.result or {})
         replay_needs_cleanup = task.kind == "replay_warm_recipe" and result.state == "failed"
         if replay_needs_cleanup:
@@ -1685,10 +1591,9 @@ class DispatcherCollaborator:
         Returns:
             A frozenset of action names eligible for inline execution.
         """
-        coord = object.__getattribute__(self, "_coord")
-        executors = getattr(coord.sub, "executor_registry", {}) or {}
+        executors = self.sub.executor_registry
         allowed: set[str] = set()
-        for name in coord.action_registry:
+        for name in self.action_registry:
             if name in self._INLINE_ACTION_DENY:
                 continue
             if name not in executors:

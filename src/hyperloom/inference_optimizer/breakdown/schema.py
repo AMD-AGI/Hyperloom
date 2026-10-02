@@ -145,7 +145,7 @@ class V6GradedAxes(TypedDict, total=False):
     ``e2e_norm_intvty_p50`` is the objective. Its guards are the tail and ``output_throughput``; the latter is not a
     member because the chip count divides both sides of that ratio, so ``output_tput_per_gpu`` -- the frontier's y
     axis, which is a member -- reproduces the guard exactly. The latency percentiles are the detail view: reported,
-    never graded. ``total_throughput`` is reported for continuity and no longer enters any verdict.
+    never graded. ``total_throughput`` is reported for continuity and enters no verdict.
 
     ``duration_seconds`` and ``request_error_rate`` are the comparability inputs. A pair is graded only when both
     replayed a window of the same length and the candidate dropped no more requests than its anchor, so a verdict
@@ -524,9 +524,9 @@ class V6RooflineKernelTable(TypedDict, total=False):
 class V6RooflineEventSnapshot(TypedDict, total=False):
     """A roofline run's own quantitative conclusion, recorded on its event.
 
-    The event used to record only ``snapshot_id``, which made the conclusion
-    reachable solely by joining against a capped session-state history that
-    later runs evict entries from."""
+    Carried on the event rather than only as ``snapshot_id``, because a join
+    against the capped session-state history fails once later runs evict the
+    entry."""
 
     snapshot_id: int | None
     ts: str
@@ -1045,8 +1045,8 @@ class V6EnablementAttempt(TypedDict, total=False):
 
     The dispatch and the settlement are recorded onto the same row from
     different ticks, so a round the session was killed between the two is on
-    the timeline as a round that was dispatched and never ruled -- which the
-    counters it used to be folded into could not express at all.
+    the timeline as a round that was dispatched and never ruled -- which a
+    counter could not express at all.
 
     The gap a round faced and the gap it revealed are separate fields.
     ``launch_log_excerpt`` is what the round was pointed at;
@@ -1587,8 +1587,8 @@ class V6Close(TypedDict, total=False):
     ``status`` is recorded by the CLOSE sequencer, not derived from ``steps``.
     ``running`` means no verdict was ever recorded, so the process died partway
     through its own close-out; ``degraded`` means the sequence finished with at
-    least one step reporting a failure. The two used to be the same word, which
-    made a healthy session indistinguishable from a damaged one.
+    least one step reporting a failure. The two are separate words so a healthy
+    session stays distinguishable from a damaged one.
     """
 
     status: Literal["running", "succeeded", "failed", "degraded"]

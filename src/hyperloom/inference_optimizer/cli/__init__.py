@@ -37,17 +37,19 @@ from .backends import (
     orchestration_runs_on_codex,
 )
 from .model_gate import (
-    _autodetect_gpu_type,
-    _gpu_runner_type,
     _load_model_max_position_embeddings,
     _finish_model_gate,
     _preflight_context_window,
     _preflight_model_config_compat,
     _preflight_unsupported_model_arch,
     _record_resumed_model_gate,
-    _resolve_gpu_type,
     _resolve_max_model_len,
     _start_model_gate,
+)
+from ..gpu_types import (
+    _autodetect_gpu_type,
+    _gpu_runner_type,
+    _resolve_gpu_type,
 )
 from ..model_config_utils import (
     summarize_model_config,
@@ -61,6 +63,8 @@ from .bootstrap import (
     _seed_shared_state,
     _snapshot_system_prompts,
     agentx_state_is_stale,
+    latency_budget_resume_conflict,
+    latency_budget_scope_error,
     parse_operator_extra_env,
     resolve_model_display_name,
 )
@@ -321,6 +325,8 @@ def _build_orchestration_prompt(
     action_registry: Mapping[str, ActionMetadata] | None = None,
     benchmark_mode: str = "",
     agentx_corpus_shape: Mapping[str, Any] | None = None,
+    agentx_grading: Mapping[str, Any] | None = None,
+    agentx_backend: str = "",
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
     registry = action_registry or ACTION_CATALOGUE
@@ -341,6 +347,8 @@ def _build_orchestration_prompt(
         transport=transport,
         benchmark_mode=benchmark_mode,
         agentx_corpus_shape=agentx_corpus_shape,
+        agentx_grading=agentx_grading,
+        agentx_backend=agentx_backend,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_kernel_search_roots(),
         session_framework_tree=resolve_framework_tree(framework),
@@ -973,8 +981,10 @@ def _preflight_agentx_backend(args: argparse.Namespace, state: Any = None) -> No
 def _preflight_native_agentx_backend(args: argparse.Namespace, framework: str, state: Any = None) -> None:
     """Check the pinned single-node launcher contract for explicit native sessions."""
     from hyperloom.inference_optimizer.agentx.native import AGENTX_REQUIRED_RUNTIME_PIN_NAMES
-    from hyperloom.common.agentx_mode import native_agentx_optimization_session
 
+    if os.environ.get("HYPERLOOM_AGENTIC_BACKEND", "").strip().lower() == "mlperf":
+        print("ERROR: native Magpie AgentX cannot use the MLPerf client backend.", file=sys.stderr)
+        raise SystemExit(2)
     if not os.environ.get("AGENTX_MODEL_ID", "").strip():
         model_value = str(getattr(args, "model", "") or "").strip()
         if model_value.count("/") == 1 and not model_value.startswith(("/", ".", "~")):
@@ -998,7 +1008,7 @@ def _preflight_native_agentx_backend(args: argparse.Namespace, framework: str, s
     if int(getattr(args, "nodes", 1) or 1) != 1:
         print(
             "ERROR: native Magpie AgentX currently supports only --nodes 1. "
-            "The selected single_node/agentic launcher ignores Hyperloom's multi-node client phase.",
+            "Hyperloom's native Magpie adapter requires a single-node replay.",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -1008,13 +1018,12 @@ def _preflight_native_agentx_backend(args: argparse.Namespace, framework: str, s
             file=sys.stderr,
         )
         raise SystemExit(2)
-    if getattr(args, "enable_conc_sweep", None) is True and not native_agentx_optimization_session(state):
+    if getattr(args, "enable_conc_sweep", None) is True:
         print(
-            "ERROR: native Magpie AgentX does not yet support Hyperloom's "
-            "post-optimization concurrency sweep. The pinned InferenceX "
-            "launcher has no optimizer-argv hook, so there is no distinct "
-            "optimized arm to compare. Omit --enable-conc-sweep and run the "
-            "desired recipe concurrency with --conc.",
+            "ERROR: native Magpie AgentX binds concurrency to the session workload. "
+            "A post-optimization concurrency sweep would change that identity. "
+            "Omit --enable-conc-sweep and start a separate session with --conc "
+            "for each desired concurrency.",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -1478,6 +1487,15 @@ def _restore_agentx_env_from_state(state: Any) -> bool:
         "enabled",
     }:
         raise ValueError(f"HYPERLOOM_AGENTX={raw!r} conflicts with the saved AgentX session mode")
+    backend = str(getattr(state, "agentx_backend", "") or "").strip().lower()
+    if int(getattr(state, "agentx_epoch", 0) or 0) == 1:
+        from hyperloom.common.agentx_workload import agentic_backend
+
+        backend = "aiperf" if backend in {"", "legacy"} else backend
+        explicit = os.environ.get("HYPERLOOM_AGENTIC_BACKEND", "").strip()
+        if explicit and agentic_backend() != backend:
+            raise ValueError("HYPERLOOM_AGENTIC_BACKEND conflicts with the saved AgentX client")
+        os.environ["HYPERLOOM_AGENTIC_BACKEND"] = backend
     if raw == "1":
         return False
     os.environ["HYPERLOOM_AGENTX"] = "1"
@@ -2144,6 +2162,10 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
     """
     if stop_reason == SUPERVISOR_RESTART_REASON:
         return
+    if not state.close_sequence_done:
+        from ..breakdown.recorder.close_out import record_close_safety_net
+
+        record_close_safety_net(session_dir)
     try:
         from ..breakdown import write_minimal_final_json
 
@@ -2250,6 +2272,11 @@ def _persist_preflight_failure_artifacts(
                 record_write_warning(session_dir, component="preflight_failure.manifest", exc=write_exc)
 
         _persist_install_event(args, session_dir)
+        from ..breakdown.recorder.close_out import record_close_safety_net
+        from ..breakdown.recorder import record_stage_reached
+
+        record_close_safety_net(session_dir)
+        record_stage_reached(session_dir, "install")
         try:
             from ..breakdown import write_breakdown_json
 
@@ -2561,6 +2588,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     )
     # Before either session branch: these are read by the fresh-launch seeding AND by the resume path, so this is the
     # one place that covers both.
+    if not args.resume_from:
+        _scope_error = latency_budget_scope_error(
+            getattr(args, "framework", None) or os.environ.get("FRAMEWORK", ""), getattr(args, "max_latency_ms", None)
+        )
+        if _scope_error:
+            print(f"ERROR: {_scope_error}.", file=sys.stderr)
+            raise SystemExit(2)
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
     # A resume may be launched from a fresh shell, where AgentX mode is only in
@@ -2677,6 +2711,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _preflight_agentx_backend(resume_preflight_args, state)
         _apply_agentx_budget_profile(args)
         resolve_benchmark_timeouts()
+
+        _latency_conflict = latency_budget_scope_error(
+            state.framework, getattr(args, "max_latency_ms", None)
+        ) or latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
+        if _latency_conflict:
+            session_lock.release()
+            print(f"ERROR: cannot resume this session -- {_latency_conflict}.", file=sys.stderr)
+            sys.exit(2)
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
@@ -2718,6 +2760,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
             if runner_gpu_type != state.gpu_type:
                 print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
+        _emit_launch_info(
+            pid=os.getpid(),
+            session_dir=session_dir,
+            session_id=str(manifest.get("session_id") or ""),
+            run_log=os.environ.get("INFERENCE_OPTIMIZER_RUN_LOG", ""),
+            gpu_type=state.gpu_type or "",
+            framework=state.framework or "",
+            model=str(state.model_path or ""),
+            launch_info_file=getattr(args, "launch_info_file", None),
+        )
         # Resolve workload knobs with the resumed state as the fallback source (explicit --isl/--conc/... on this
         # resume still win), then project the resolved values into env so resume sees the same workload contract (not
         # YAML defaults).
@@ -3210,6 +3262,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             transport=_orch_transport,
             benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
             agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+            agentx_grading=coordinator.shared_state.grading,
+            agentx_backend=coordinator.shared_state.agentx_backend,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
@@ -3229,6 +3283,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         transport=_orch_transport,
         benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
         agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+        agentx_grading=coordinator.shared_state.grading,
+        agentx_backend=coordinator.shared_state.agentx_backend,
     )
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)

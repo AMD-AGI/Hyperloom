@@ -92,8 +92,7 @@ def _gain_attribution_lines(
             )
         ]
         # Every contribution is measured against the session baseline, so the
-        # split is the ledger's own arithmetic rather than one of several
-        # attribution methods the section used to have to name.
+        # split is the ledger's own arithmetic, labelled ``stack_ledger``.
         return lines, "stack_ledger"
 
     final = as_dict(outcome_of(breakdown).get("final"))

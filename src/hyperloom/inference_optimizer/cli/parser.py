@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from math import isfinite
 from pathlib import Path
 from typing import NoReturn
 
@@ -103,6 +104,22 @@ def _positive_int_arg(value: str) -> int:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
     if parsed <= 0:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return parsed
+
+
+def _positive_ms_arg(value: str) -> float:
+    """argparse type for a millisecond ceiling.
+
+    The gate this feeds fails closed, so its switch must not fail open: an
+    unusable value has to stop the launch rather than resolve to "no budget" and
+    leave the operator believing an SLA is enforced.
+    """
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}") from exc
+    if not isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}")
     return parsed
 
 
@@ -608,6 +625,20 @@ def _build_parser() -> argparse.ArgumentParser:
             "independently of --target-gain / --target-tput / --target-baseline-dir."
         ),
     )
+    # Outside the group as well, and for a stronger reason than --target-roofline: this is a constraint rather than
+    # an objective. It does not say when to stop, it says which winners are admissible, so it composes with whichever
+    # target is in use instead of competing with one.
+    opt.add_argument(
+        "--max-latency-ms",
+        type=_positive_ms_arg,
+        default=None,
+        help=(
+            "Scriptable frameworks (xdit, custom) only. Refuse any KEEP whose mean "
+            "end-to-end latency exceeds N ms. Off by default. A candidate that "
+            "reported no end-to-end latency is refused too, since an unmeasured "
+            "constraint is not a satisfied one."
+        ),
+    )
     opt.add_argument(
         "--resume-from",
         type=str,
@@ -1068,7 +1099,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "directions. Advisory only — never gates Objective or scoring. "
         "Default on; pass ``--no-target-advisory`` to disable.",
     )
-    # Post-optimization concurrency sweep: native launchers do not expose a candidate-argv hook.
+    # Post-optimization concurrency sweep: a baseline-vs-optimized Magpie grid across CONC values (see
+    # orchestrator/conc_sweep.py). Defaults to None so bootstrap can pick by benchmark mode.
     opt.add_argument(
         "--enable-conc-sweep",
         dest="enable_conc_sweep",
@@ -1077,9 +1109,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run a post-optimization concurrency sweep (baseline vs "
         "current_best across CONC) and write "
         "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
-        "On by default for synthetic and legacy AgentX workloads, off for native AgentX. "
-        "Native AgentX rejects an explicit enable until InferenceX exposes "
-        "an optimizer-argv hook.",
+        "On by default for synthetic workloads, off under AgentX. "
+        "Native AgentX keeps concurrency fixed and rejects an explicit enable; "
+        "legacy AgentX may enable it explicitly.",
     )
     opt.add_argument(
         "--conc-sweep-concs",

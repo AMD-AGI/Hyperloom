@@ -81,3 +81,17 @@ def test_installer_initializes_submodule_for_its_new_clone(tmp_path):
 
     assert result.stdout.strip() == str(tmp_path / "cached")
     assert (tmp_path / "submodule-updates").read_text().splitlines() == [str(tmp_path / "cached")]
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_installer_normalizes_packaged_project_without_mutating_existing_checkout(tmp_path, explicit):
+    repository = tmp_path / ("user-checkout" if explicit else "cached")
+    (repository / ".git").mkdir(parents=True)
+    project = repository / "inferencex-e2e"
+    (project / "benchmarks").mkdir(parents=True)
+    library = project / "benchmarks/benchmark_lib.sh"
+    library.write_text("# upstream client\n")
+    result = _run_inferencex_install(tmp_path, explicit_path=repository if explicit else None)
+    assert result.stdout.strip() == str(project)
+    assert library.read_text() == "# upstream client\n"
+    assert not (tmp_path / "submodule-updates").exists()

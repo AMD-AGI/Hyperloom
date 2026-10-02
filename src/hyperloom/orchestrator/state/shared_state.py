@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""SharedState — single-writer (Coordinator) persisted session state, backed by atomic JSON at ``$SESSION_DIR/state.json``; enforces CORE_STATE_FIELDS guards."""
+"""SharedState — single-writer (Coordinator) persisted session state, backed by atomic JSON at ``$SESSION_DIR/state.json``; an agent writes only ``AGENT_UPDATE_FIELDS``."""
 
 from __future__ import annotations
 
@@ -127,6 +127,7 @@ def resolve_graded_comparison(
         VERDICT_REVERT,
         axis_of,
         holds_within_band,
+        latency_veto_reason,
         output_tput_of,
         perf_snapshot_from_mapping,
         resolve_grading_anchor_perf,
@@ -136,6 +137,10 @@ def resolve_graded_comparison(
     from hyperloom.inference_optimizer.grading import resolved_grading
 
     on_intvty, noise_pct = resolved_grading(state)
+    # The session's latency ceiling vetoes a candidate the gain gates would KEEP, on whichever axis graded it. A
+    # candidate that already lost carries no veto, so the ledger names the gate that actually refused it.
+    budget_ms = float(getattr(state, "latency_budget_ms", 0.0))
+    observed_ms = measurement.get("e2el_mean_ms") if isinstance(measurement, Mapping) else None
     degrade_reason = ""
     if on_intvty:
         if anchor_perf is not None:
@@ -172,13 +177,15 @@ def resolve_graded_comparison(
                 and guards_hold
                 and rounds_are_comparable(cand_perf, ref_perf)
             )
+            sla_veto = latency_veto_reason(observed_ms, budget_ms) if keep else ""
             return GradedComparison(
                 objective=GRADED_INTVTY_P50,
                 candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
                 reference=axis_of(ref_perf, GRADED_INTVTY_P50),
-                verdict=VERDICT_KEEP if keep else VERDICT_REVERT,
+                verdict=VERDICT_KEEP if keep and not sla_veto else VERDICT_REVERT,
                 tput_candidate=total_tput_of(cand_perf),
                 tput_reference=total_tput_of(ref_perf),
+                veto_reason=sla_veto,
             )
         degrade_reason = reason or "candidate_axes_missing"
 
@@ -196,12 +203,14 @@ def resolve_graded_comparison(
         verdict = VERDICT_REVERT
     else:
         verdict = VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT
+    sla_veto = latency_veto_reason(observed_ms, budget_ms) if verdict == VERDICT_KEEP else ""
     return GradedComparison(
         objective=GRADED_OUTPUT,
         candidate=candidate,
         reference=reference,
-        verdict=verdict,
+        verdict=VERDICT_REVERT if sla_veto else verdict,
         degrade_reason=degrade_reason,
+        veto_reason=sla_veto,
     )
 
 
@@ -373,7 +382,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     geak_result: dict[str, Any] = field(default_factory=dict)
     # Terminal result of the phase-level KernelForge rewrite controller.
     kernel_rewrite_controller_result: dict[str, Any] = field(default_factory=dict)
-    # SWEEP-phase post-sweep concurrency sweep; opt out via ``--no-enable-conc-sweep``.
+    # SWEEP-phase concurrency sweep; ``_seed_shared_state`` resolves it at seed time from ``--enable-conc-sweep`` and the
+    # benchmark mode.
     conc_sweep_enabled: bool = True
     # Which benchmark workload this session measures: "agentx" (agentic trace replay) or "synthetic" (ISL/OSL).
     benchmark_mode: str = ""
@@ -403,6 +413,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     conc_sweep_total_budget_sec: int = 9000
     target_summary: str = ""
     baseline_tput: float = 0.0
+    # Ceiling on mean end-to-end latency (ms) from ``--max-latency-ms``; 0.0 leaves KEEP behaviour unchanged. The
+    # only copy of the budget: it is written once at launch and archived with the session, so a resume restores it.
+    latency_budget_ms: float = 0.0
     # AgentX corpus shape: written at seed from canonical constants, overwritten with measured values after every
     # AgentX measurement. Read by semantic consumers (prompts, manifest, reports) instead of the inert state.isl /
     # state.osl placeholders. Absent on synthetic sessions.
@@ -725,7 +738,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Static-recon specialist bookkeeping (explore-opt-5 capability A); master switch ``--no-static-recon``.
     static_recon_enabled: bool = True
     static_recon_runs: int = 0
-    # Research-lane capacity locked at session start (core field; PolicyGate denies mid-session mutation).
+    # Research-lane capacity locked at session start; Coordinator-only.
     research_lane_capacity: int = 1
     # GPU pool capacity for needs_gpu specialists (0 disables); locked at session start.
     gpu_specialist_capacity: int = 0
@@ -765,7 +778,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     target_gap_pct: float = 0.0
 
     # Phase state machine fields ``phase`` — run-level pipeline phase
-    # (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/CLOSE); Coordinator-only (CORE_STATE_FIELDS).
+    # (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/CLOSE); Coordinator-only.
     phase: str = ""
     # ISO UTC timestamp the current phase was entered (breakdown.phase_segments + budget judge).
     phase_started_ts: str = ""
@@ -811,7 +824,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Model-facing advisory context built by ``recipe_kb_t0``.
     warm_start_context: dict[str, Any] = field(default_factory=dict)
 
-    # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only _refresh_gaps; CORE_STATE_FIELDS); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
+    # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only _refresh_gaps); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
     gaps: list[dict[str, Any]] = field(default_factory=list)
 
     # Orchestration working memory — macro-cycle handoff summary; only ``next_cycle_directive`` is read back (into the next cycle's CYCLE DIRECTIVE section), the rest is run-report evidence. Coordinator-only writer.
@@ -838,13 +851,12 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     #: comes from ``current_best`` on both sides and is therefore symmetric.
     #:
     #: ``ClassVar`` because a bare annotation would make this constant a
-    #: dataclass field: it would be written into every ``state.json``, accepted
-    #: back from disk, and writable through ``apply_changes`` since a constant
-    #: is not something ``CORE_STATE_FIELDS`` thinks to lock. None of that
-    #: changes behaviour while the sole reader goes through ``cls``, which is
-    #: exactly what makes it worth closing -- it decides trace staleness, so an
-    #: instance-scoped read added later would let a stored value govern whether
-    #: a profile is reused or re-run.
+    #: dataclass field: it would be written into every ``state.json`` and
+    #: accepted back from disk. Neither of those changes behaviour while the
+    #: sole reader goes through ``cls``, which is exactly what makes it worth
+    #: closing -- it decides trace staleness, so an instance-scoped read added
+    #: later would let a stored value govern whether a profile is reused or
+    #: re-run.
     PROFILE_WORKLOAD_IDENTITY_KEYS: ClassVar[tuple[str, ...]] = (
         "benchmark_mode",
         "framework",
@@ -1080,29 +1092,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return inst
 
     @classmethod
-    def _validate_resume_fields(cls, raw: Mapping[str, Any]) -> None:
-        """Reject damaged crash evidence and agent text before migrating a persisted state."""
-        for name, expected in cls.AGENT_UPDATE_FIELDS.items():
-            if name in raw and not isinstance(raw[name], expected):
-                raise ValueError(f"state.json.{name} must be {expected.__name__}, got {type(raw[name]).__name__}")
-        if "crash_count" in raw:
-            count = raw["crash_count"]
-            if not isinstance(count, int) or isinstance(count, bool):
-                raise ValueError(f"state.json.crash_count must be int, got {type(count).__name__}")
-        if "crash_timestamps" in raw:
-            timestamps = raw["crash_timestamps"]
-            if not isinstance(timestamps, list):
-                raise ValueError(f"state.json.crash_timestamps must be list, got {type(timestamps).__name__}")
-            for index, timestamp in enumerate(timestamps):
-                if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool):
-                    raise ValueError(
-                        f"state.json.crash_timestamps[{index}] must be a number, got {type(timestamp).__name__}"
-                    )
-
-    @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
-        """Construct state from a mapping, refusing invalid crash evidence or agent text with ``ValueError``."""
-        cls._validate_resume_fields(raw)
+        """Construct state from a mapping."""
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in known}
@@ -1614,54 +1605,10 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         "target_summary": str,
     }
 
-    @classmethod
-    def agent_update_errors(cls, changes: Mapping[str, Any]) -> dict[str, str]:
-        """Describe forbidden fields and invalid types; unknown keys remain soft rejections.
-
-        The untrusted path serves one caller -- an agent's UPDATE_STATE intent --
-        and the prompt advertises exactly the fields in
-        :data:`AGENT_UPDATE_FIELDS`. Everything else on the state is the
-        Coordinator's to write through its own actions, so a field outside that
-        set is refused by name rather than landing and surfacing later as a
-        confusing failure in the loop; an advertised field is refused when its
-        type is wrong.
-        """
-        known = {f.name for f in fields(cls)}
-        errors: dict[str, str] = {}
+    def apply_agent_update(self, changes: Mapping[str, Any]) -> None:
+        """Write the agent-authored fields named in ``changes``; PolicyGate has already admitted every key."""
         for key, value in changes.items():
-            if key not in known:
-                continue
-            expected = cls.AGENT_UPDATE_FIELDS.get(key)
-            if expected is None:
-                errors[key] = "Coordinator-owned field"
-            elif not isinstance(value, expected):
-                errors[key] = f"must be {expected.__name__}, got {type(value).__name__}"
-        return errors
-
-    def apply_changes(self, changes: dict[str, Any], *, allow_core: bool) -> dict[str, Any]:
-        """Apply known fields, dropping each write an untrusted caller may not make.
-
-        A core field never reaches here: PolicyGate refuses that whole intent
-        upstream. Everything this method refuses -- a non-core field outside
-        :data:`AGENT_UPDATE_FIELDS`, a wrong value type -- is dropped per key
-        while the rest of the same call is applied, and the caller reports the
-        difference as ``rejected``.
-        """
-        if not changes:
-            return {}
-        errors = {} if allow_core else self.agent_update_errors(changes)
-        applied: dict[str, Any] = {}
-        # ``fields()`` excludes ClassVar pseudo-fields, so a class constant is not writable here.
-        writable = {f.name for f in fields(self)}
-        for key, value in changes.items():
-            if key not in writable:
-                continue
-            if key in errors:
-                log.warning("apply_changes: dropping state field %r (allow_core=False): %s", key, errors[key])
-                continue
             setattr(self, key, value)
-            applied[key] = value
-        return applied
 
     def _resolve_kernel_patch_identity(
         self,
