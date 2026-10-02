@@ -738,6 +738,29 @@ def test_materialize_profile_restore_rejects_ignore_frontend_false(
     assert extra.rindex("ignore_frontend True") > extra.rindex("ignore_frontend False"), extra
 
 
+def test_materialize_profile_disables_the_summary_table_even_when_a_candidate_reenables_it(
+    tmp_path,
+    monkeypatch,
+):
+    """vLLM's post-stop key_averages() table blocked the engine and ballooned each worker past 100 GiB on an 8K-ISL
+    trace; nothing consumes it, so the profile run must never build it.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_server_args="--profiler-config.torch_profiler_dump_cuda_time_total True",
+        args_mode="replace",
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    flag = "--profiler-config.torch_profiler_dump_cuda_time_total"
+    assert extra.rindex(f"{flag} False") > extra.rindex(f"{flag} True"), extra
+
+
 def test_materialize_profile_restore_accepts_a_bound_that_already_holds(
     tmp_path,
     monkeypatch,
@@ -761,7 +784,8 @@ def test_materialize_profile_restore_accepts_a_bound_that_already_holds(
                 "--profiler-config.max_iterations 64 "
                 "--profiler-config.ignore_frontend True "
                 "--profiler-config.capture_torch_profiler True "
-                "--profiler-config.detailed_trace_annotation True"
+                "--profiler-config.detailed_trace_annotation True "
+                "--profiler-config.torch_profiler_dump_cuda_time_total False"
             ),
         },
     )
