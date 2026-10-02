@@ -483,6 +483,18 @@ def test_freeform_gpu_request_nonpositive_count_rejected(orchestration_role):
     assert exc.value.rule == "specialist_gpu_request_invalid"
 
 
+def test_gate_judges_an_enablement_gpu_request_by_the_dispatcher_rule(whole_machine):
+    """Enablement needs cards exactly where the dispatcher leases them, so the gate checks the count there only."""
+    gate = _gate_with_gpu_capacity(2)
+    bad_count = {"enablement": True, "gpu_count": 0}
+    whole_machine(True)
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_gpu_request(bad_count)
+    assert exc.value.rule == "specialist_gpu_request_invalid"
+    whole_machine(False)
+    gate._validate_specialist_gpu_request(bad_count)
+
+
 def test_domain_gpu_request_still_governed_after_refactor(orchestration_role):
     """Regression: the GPU check extracted into _validate_specialist_gpu_request must still fire on the domain-anchored path."""
     gate = _gate_with_gpu_capacity(0)
