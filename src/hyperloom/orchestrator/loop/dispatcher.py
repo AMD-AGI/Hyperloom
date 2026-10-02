@@ -11,7 +11,7 @@ import json
 import math
 import os
 import time
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable
 from functools import partial
 from concurrent.futures import Future
 from concurrent.futures import CancelledError as FuturesCancelledError
@@ -259,7 +259,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         *,
         reason: str,
         exempt: frozenset[str] = frozenset(),
-        only_task_ids: Collection[str] | None = None,
     ) -> list[str]:
         """Stop the running dispatched actions and wait for them to unwind.
 
@@ -290,10 +289,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 blocking side so it can attribute its own stop.
             exempt: Action kinds to leave running -- the closing actions, when
                 the trigger is a budget that already reserved time for them.
-            only_task_ids: Restrict the cancel to these ids, for a caller that
-                owns part of the registry rather than all of it. ``None`` reaches
-                every action that is not exempt, which is what a shutdown or a
-                spent budget needs.
 
         Returns:
             list[str]: Task ids asked to stop; cleanup may still be pending.
@@ -301,9 +296,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         victims = [
             (task_id, entry)
             for task_id, entry in self._inflight_actions.items()
-            if entry.kind not in exempt
-            and not entry.atask.done()
-            and (only_task_ids is None or task_id in only_task_ids)
+            if entry.kind not in exempt and not entry.atask.done()
         ]
         if not victims:
             return []
