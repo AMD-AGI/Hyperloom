@@ -182,7 +182,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             "new_cycle": int(new_cycle),
         }
         # Reap leases, reclaim orphaned running tasks, prune DB.
-        await run_lease_and_db_reclaim(self, summary, reason="cycle_soft_restart")
+        await run_lease_and_db_reclaim(self._coord, summary, reason="cycle_soft_restart")
         log.info(
             "cycle soft-restart %d → %d: %s",
             int(prior_cycle),
