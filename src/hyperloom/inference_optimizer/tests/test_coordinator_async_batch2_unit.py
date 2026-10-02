@@ -1496,6 +1496,8 @@ async def test_pump_dispatcher_explore_promotes(coord: Coordinator, monkeypatch)
 
     monkeypatch.setattr(coord.sub, "run_task", fake_run)
     await coord._pump_dispatcher_once()
+    await coord.wait_for_running_work(timeout=5)
+    await coord._drain_completions()
     tail = await coord.bus.tail(topic="delegated_result", n=10)
     assert any(m.payload.get("task_id") == task.task_id for m in tail)
 
@@ -1520,6 +1522,8 @@ async def test_pump_dispatcher_specialist_bookkeeping(coord: Coordinator, monkey
 
     monkeypatch.setattr(coord.sub, "run_task", fake_run)
     await coord._pump_dispatcher_once()
+    await coord.wait_for_running_work(timeout=5)
+    await coord._drain_completions()
     tail = await coord.bus.tail(topic="delegated_result", n=10)
     assert any(m.payload.get("kind") == "specialist" for m in tail)
 

@@ -9,6 +9,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from ._dispatch_helpers import pump_until_settled
 
 
 def _build_coord(
@@ -161,7 +162,7 @@ async def test_enablement_leases_whole_machine_when_capacity_zero(tmp_path, monk
         lease_ttl_sec=3600,
     )
 
-    await coord._pump_dispatcher_once()
+    await pump_until_settled(coord)
 
     assert probe.entries, "enablement GPU task never dispatched"
     tid = probe.entries[0]
@@ -259,7 +260,7 @@ async def test_explore_gpu_specialist_uses_carved_pool(tmp_path, monkeypatch):
         lease_ttl_sec=3600,
     )
 
-    await coord._pump_dispatcher_once()
+    await pump_until_settled(coord)
 
     assert probe.entries
     assert probe.gpu_ids_by_task[probe.entries[0]] == [0]
@@ -293,7 +294,7 @@ async def test_bench_specialist_leases_whole_machine_when_serving_owns_node(tmp_
         lease_ttl_sec=3600,
     )
 
-    await coord._pump_dispatcher_once()
+    await pump_until_settled(coord)
 
     assert probe.entries, "bench specialist never dispatched"
     tid = probe.entries[0]
@@ -331,7 +332,7 @@ async def test_non_bench_gpu_probe_still_uses_carved_pool(tmp_path, monkeypatch)
         lease_ttl_sec=3600,
     )
 
-    await coord._pump_dispatcher_once()
+    await pump_until_settled(coord)
 
     assert probe.entries
     # First card of the carved (serving-disjoint) pool, not card 0.
@@ -457,7 +458,7 @@ async def test_serving_priority_admits_gpu_specialist_when_slot_free(tmp_path, m
         lease_ttl_sec=3600,
     )
 
-    await coord._pump_dispatcher_once()
+    await pump_until_settled(coord)
 
     assert probe.entries, "executor must run when serving slot is free"
     assert not await coord.tasks.queued()

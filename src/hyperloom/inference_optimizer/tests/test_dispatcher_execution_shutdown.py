@@ -30,6 +30,8 @@ from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
+from ._dispatch_helpers import pump_until_settled
+
 
 def _dispatcher(tmp_path):
     db = SqliteConnection(tmp_path / "shutdown.db")
@@ -45,7 +47,6 @@ def _dispatcher(tmp_path):
         bus=MessageBus(db),
         sub=SubAgentRunner(locks, tasks),
         _stop=asyncio.Event(),
-        _dispatcher_poll_sec=0.01,
         _BUDGET_GATED_DISPATCH_PHASES=frozenset(),
         _promote_to_shared_state=AsyncMock(),
         _fact_write_hook=AsyncMock(),
@@ -66,7 +67,6 @@ async def _close(dispatcher):
 def test_asyncio_run_shutdown_waits_for_execution_and_completion(tmp_path, monkeypatch):
     """The loop exits immediately after shutdown, not after a test-only worker join."""
     dispatcher = _dispatcher(tmp_path)
-    monkeypatch.setattr(dispatcher_module, "_CANCEL_NOTICE_SEC", 0)
     entered = threading.Event()
     stop_worker = threading.Event()
     worker_done = threading.Event()
@@ -94,11 +94,8 @@ def test_asyncio_run_shutdown_waits_for_execution_and_completion(tmp_path, monke
         task = await dispatcher.tasks.create(
             kind="shutdown_test", params={}, idempotency_key="shutdown", requires_lanes=["research_lane"]
         )
-        pump = asyncio.create_task(dispatcher._pump_dispatcher_once())
+        await dispatcher._pump_dispatcher_once()
         assert await asyncio.to_thread(entered.wait, 5)
-        pump.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await pump
         # Release from outside the event loop as shutdown begins. No await after close.
         stop_worker.set()
         await _close(dispatcher)
@@ -117,41 +114,6 @@ def test_asyncio_run_shutdown_waits_for_execution_and_completion(tmp_path, monke
     finally:
         stop_worker.set()
         real_close()
-
-
-def test_cancelled_pump_late_success_is_reaped_once(tmp_path, monkeypatch):
-    dispatcher = _dispatcher(tmp_path)
-    monkeypatch.setattr(dispatcher_module, "_CANCEL_NOTICE_SEC", 0)
-
-    async def run():
-        entered = asyncio.Event()
-        finish = asyncio.Event()
-
-        async def execute(_ctx):
-            entered.set()
-            await finish.wait()
-            return {"status": "ok"}
-
-        dispatcher.sub.register_executor("shutdown_test", execute)
-        await dispatcher.tasks.create(kind="shutdown_test", params={}, idempotency_key="late-success")
-        pump = asyncio.create_task(dispatcher._pump_dispatcher_once())
-        await asyncio.wait_for(entered.wait(), 5)
-        pump.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await pump
-        executions = tuple(dispatcher._executions)
-        finish.set()
-        await asyncio.gather(*executions)
-        await dispatcher._pump_dispatcher_once()
-        events = await dispatcher.db.fetchall("SELECT payload FROM events WHERE topic='delegated_result'")
-        assert len(events) == 1
-        assert dispatcher._promote_to_shared_state.await_count == 1
-        await _close(dispatcher)
-
-    try:
-        asyncio.run(run())
-    finally:
-        dispatcher.db.close()
 
 
 def test_shutdown_requests_scope_and_keeps_unconfirmed_database_open(tmp_path, monkeypatch):
@@ -200,7 +162,7 @@ def test_normal_pump_completion_is_not_reaped_twice(tmp_path, monkeypatch):
     async def run():
         dispatcher.sub.register_executor("shutdown_test", AsyncMock(return_value={"status": "ok"}))
         await dispatcher.tasks.create(kind="shutdown_test", params={}, idempotency_key="normal-completion")
-        await dispatcher._pump_dispatcher_once()
+        await pump_until_settled(dispatcher)
         await dispatcher._pump_dispatcher_once()
         events = await dispatcher.db.fetchall("SELECT payload FROM events WHERE topic='delegated_result'")
         assert len(events) == 1

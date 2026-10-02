@@ -123,9 +123,8 @@ _COOPERATIVE_CANCEL_GRACE_SEC: float = (
 _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 
 
-#: Kinds whose execution manages its own completion: the pump neither awaits
-#: their handle nor books their result. Admission is unchanged — same budget,
-#: lane and lease gates.
+#: Kinds whose execution manages its own completion: the pump does not book
+#: their result. Admission is unchanged — same budget, lane and lease gates.
 _SELF_SETTLING_KINDS: frozenset[str] = frozenset({"targeted_build", "kernel_agent"})
 
 
@@ -135,8 +134,6 @@ class _InflightAction(NamedTuple):
     kind: str
     atask: asyncio.Task[Any]
     scope: CancelScope
-    # Its completion is queued for the pump to book, so the pump waits on it.
-    booked_by_pump: bool = False
 
 
 class DispatcherCollaborator(CoordinatorCollaborator):
@@ -146,12 +143,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # Task ids already charged a failure by the dead-holder reclaim path, so
         # a late normal result for the same task cannot double-count it.
         self._dead_holder_accounted: set[str] = set()
-        # Handles on the actions currently running, ``task_id -> _InflightAction``.
-        # Kept on the coordinator and not only in the pump's frame: an action
-        # whose handle lives in a frame can only be stopped by the frame that is
-        # already blocked awaiting it, which is precisely the situation shutdown
-        # and an exhausted wall-clock budget have to break. Entries remove
-        # themselves in :meth:`run_task_registered`.
+        # Handles on the actions currently running, ``task_id -> _InflightAction``:
+        # the only reach into a dispatched action once the pump has returned.
+        # Entries remove themselves in :meth:`run_task_registered`.
         self._inflight_actions: dict[str, _InflightAction] = {}
         self._executions: set[asyncio.Task[Any]] = set()
         # Finished executions awaiting bookkeeping; drained only by the pump so
@@ -419,12 +413,12 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             log.exception("dispatcher: cancelled policy-denied integrate_patch reconcile failed")
 
     async def _pump_dispatcher_once(self) -> None:
-        """Spawn lane-fitting queued tasks and return once a completion is booked.
+        """Book finished executions and spawn the queued tasks that now fit; never waits on running work.
 
-        Dispatched tasks outlive the pump. It returns after booking at least one
-        completion, or when no task whose completion it books is running. New
-        spawns stop while the phase budget is spent or :attr:`admission_frozen`
-        is set.
+        Dispatched tasks outlive the pump and queue their completion for a later
+        one. The pump repeats while a pass books something, so lanes freed by
+        completions already queued are refilled in the same call. New spawns stop
+        while the phase budget is spent or :attr:`admission_frozen` is set.
         """
         await self._reclaim_stale_dispatch_state()
         while True:
@@ -432,18 +426,14 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             shutting_down = await self._cancel_inflight_that_outlived_the_session()
             if not shutting_down and not self.admission_frozen and not self._dispatch_paused_for_phase_budget():
                 await self._spawn_fitting_queued()
-            if booked:
+            if not booked:
                 return
-            waitable = [
-                entry.atask
-                for entry in self._inflight_actions.values()
-                if entry.booked_by_pump and not entry.atask.done()
-            ]
-            if not waitable:
-                if self._completion_queue:
-                    continue
-                return
-            await asyncio.wait(waitable, timeout=self._dispatcher_poll_sec, return_when=asyncio.FIRST_COMPLETED)
+
+    async def wait_for_running_work(self, *, timeout: float) -> None:
+        """Wait until a running action finishes or ``timeout`` elapses; returns at once when none runs."""
+        running = [entry.atask for entry in self._inflight_actions.values() if not entry.atask.done()]
+        if running:
+            await asyncio.wait(running, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
 
     async def _reconcile_cancelled_policy_denied_integrate_tasks(self) -> list[str]:
         """Re-queue integrate_patch rows cancelled at dispatch when policy now passes.
@@ -754,9 +744,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     on_complete=None if self_settling else partial(self._queue_completion, task),
                 ),
             )
-            self._inflight_actions[task.task_id] = _InflightAction(
-                task.kind, atask, cancel_scope, booked_by_pump=not self_settling
-            )
+            self._inflight_actions[task.task_id] = _InflightAction(task.kind, atask, cancel_scope)
             atask.add_done_callback(self._report_spawned_failure(task))
             if task.kind == "specialist":
                 self.shared_state.note_specialist_dispatched(str((task.params or {}).get("domain") or ""))

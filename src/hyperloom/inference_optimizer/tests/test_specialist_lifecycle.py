@@ -18,6 +18,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
 from hyperloom.orchestrator.state.shared_state import SharedState
+from ._dispatch_helpers import pump_until_settled
 
 
 @dataclass
@@ -405,6 +406,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
             idempotency_key=task.idempotency_key,
         )
         await coord.tick(n=1)
+        await pump_until_settled(coord)
     finally:
         cli_mod.ClaudeBackend = real_claude_cls
 

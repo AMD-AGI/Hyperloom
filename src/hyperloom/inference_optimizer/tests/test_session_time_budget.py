@@ -47,6 +47,8 @@ from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
 from hyperloom.orchestrator.state.task_registry import Task
 
+from ._dispatch_helpers import pump_until_settled
+
 # The costliest action the catalogue prices, so a short budget cannot fit it.
 _EXPENSIVE_ACTION = "conc_sweep"
 _EXPENSIVE_COST_MIN = 30.0
@@ -471,7 +473,7 @@ class TestPreDispatchBackstop:
         )
         _set_budget(coord, minutes=600, elapsed_min=600.0)
 
-        await coord._pump_dispatcher_once()
+        await pump_until_settled(coord)
 
         row = await coord.tasks.get(task.task_id)
         assert row.state == "cancelled"
@@ -497,7 +499,7 @@ class TestPreDispatchBackstop:
         self,
         coord: Coordinator,
     ):
-        """The kind the pump does not join is still subject to the budget gate."""
+        """A self-settling kind is still subject to the budget gate."""
         _set_budget(coord, minutes=600)
         task, _ = await coord.tasks.create_or_return_existing(
             kind="targeted_build",
@@ -515,11 +517,11 @@ class TestPreDispatchBackstop:
         assert task.task_id not in coord._inflight_actions
 
     @pytest.mark.asyncio
-    async def test_a_targeted_build_that_fits_is_dispatched_but_not_joined(
+    async def test_a_targeted_build_that_fits_is_dispatched_and_reachable(
         self,
         coord: Coordinator,
     ):
-        """It is registered for cancellation, but the pump returns without joining it."""
+        """It is registered for cancellation like any other dispatched action."""
         _set_budget(coord, minutes=600)
         task, _ = await coord.tasks.create_or_return_existing(
             kind="targeted_build",
@@ -638,17 +640,17 @@ async def _start_action(
     return task, coord._inflight_actions[task.task_id].atask
 
 
-async def _start_action_under_pump(
+async def _start_action_by_pump(
     coord: Coordinator,
     *,
     kind: str,
     key: str,
-) -> tuple[Task, asyncio.Task, asyncio.Task]:
-    """Let a running pump dispatch the action, the way a tick does."""
+) -> tuple[Task, asyncio.Task]:
+    """Let the pump dispatch the action, the way a tick does."""
     task, started = await _queue_action(coord, kind=kind, key=key)
-    pump = asyncio.create_task(coord._pump_dispatcher_once())
+    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5.0)
     await asyncio.wait_for(started.wait(), timeout=5.0)
-    return task, coord._inflight_actions[task.task_id].atask, pump
+    return task, coord._inflight_actions[task.task_id].atask
 
 
 async def _settle(atask: asyncio.Task) -> None:
@@ -1110,7 +1112,7 @@ async def test_retired_queued_recover_emits_cancelled_result_without_failure(coo
     await coord.locks.acquire_many(
         ["server_lifecycle"], holder_id="occupied", task_id="occupied", action="baseline", ttl_sec=60
     )
-    await coord._pump_dispatcher_once()
+    await pump_until_settled(coord)
     assert (await coord.tasks.get(task.task_id)).state == "cancelled"
     event = await coord.db.fetchone("SELECT payload FROM events WHERE topic='delegated_result'")
     assert event is not None
@@ -1198,61 +1200,52 @@ class TestTheRunnerRecordsACancellation:
         assert atask.cancelled()
 
 
-def _quick_poll(coord: Coordinator) -> None:
-    """Shorten the pump's re-scan interval so a pump test is not a wall-clock test."""
-    coord._dispatcher_poll_sec = 0.05
-
-
 class TestThePumpStopsWorkItCannotWaitFor:
-    """The trigger side: a spent budget, and a shutdown request."""
+    """The trigger side: a spent budget, and a shutdown request, seen by the next pump."""
 
     @pytest.mark.asyncio
     async def test_a_budget_that_runs_out_stops_the_action(self, coord: Coordinator):
-        _quick_poll(coord)
         _set_budget(coord, minutes=600)
-        task, atask, pump = await _start_action_under_pump(coord, kind=_CHEAP_ACTION, key="p-budget")
+        task, atask = await _start_action_by_pump(coord, kind=_CHEAP_ACTION, key="p-budget")
         _set_budget(coord, minutes=600, elapsed_min=600.0)
 
-        await asyncio.wait_for(pump, timeout=10.0)
+        await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=10.0)
 
+        await _settle(atask)
         assert atask.cancelled()
         assert (await coord.tasks.get(task.task_id)).state == "running"
 
     @pytest.mark.asyncio
     async def test_the_closing_actions_keep_their_reserve(self, coord: Coordinator):
         """The budget hits zero with the closing window still to spend."""
-        _quick_poll(coord)
         _set_budget(coord, minutes=600, elapsed_min=600.0)
-        _task, atask, pump = await _start_action_under_pump(coord, kind=_CLOSING_ACTION, key="p-closing")
+        _task, atask = await _start_action_by_pump(coord, kind=_CLOSING_ACTION, key="p-closing")
+        await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=10.0)
         await asyncio.sleep(0.3)
 
         assert not atask.done()
 
-        pump.cancel()
-        await _settle(pump)
+        await coord.cancel_inflight_actions(reason="test_teardown")
+        await _settle(atask)
 
     @pytest.mark.asyncio
     async def test_a_shutdown_request_stops_the_action(self, coord: Coordinator):
         """SIGTERM sets the stop event; before this it only stopped the tick."""
-        _quick_poll(coord)
         _set_budget(coord, minutes=600)
-        _task, atask, pump = await _start_action_under_pump(coord, kind=_CHEAP_ACTION, key="p-signal")
+        _task, atask = await _start_action_by_pump(coord, kind=_CHEAP_ACTION, key="p-signal")
         coord._stop.set()
 
-        await asyncio.wait_for(pump, timeout=10.0)
+        await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=10.0)
 
+        await _settle(atask)
         assert atask.cancelled()
 
     @pytest.mark.asyncio
-    async def test_a_cancelled_pump_leaves_its_actions_to_finish_and_be_booked(self, coord: Coordinator, monkeypatch):
-        """Dispatched work outlives a cancelled pump; a later pump books its completion."""
+    async def test_dispatched_work_outlives_the_pump_and_a_later_pump_books_it(self, coord: Coordinator, monkeypatch):
+        """The pump returns while its action runs; a later pump books the completion."""
         from unittest.mock import AsyncMock
 
-        from hyperloom.orchestrator.loop import dispatcher
-
-        _quick_poll(coord)
         _set_budget(coord, minutes=600)
-        monkeypatch.setattr(dispatcher, "_CANCEL_NOTICE_SEC", 0)
         entered = threading.Event()
         finish = threading.Event()
         worker_done = threading.Event()
@@ -1274,15 +1267,12 @@ class TestThePumpStopsWorkItCannotWaitFor:
         task = await coord.tasks.create(
             kind=_CHEAP_ACTION, params={}, idempotency_key="p-orphan", requires_lanes=[_CHEAP_ACTION_LANE]
         )
-        pump = asyncio.create_task(coord._pump_dispatcher_once())
         try:
+            await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5.0)
             assert await asyncio.to_thread(entered.wait, 2)
             handle = coord._inflight_actions[task.task_id]
             executions = tuple(coord._executions)
-            pump.cancel()
-            await _settle(pump)
 
-            assert pump.cancelled()
             assert not handle.atask.done()
             assert not handle.scope.cancelled
             assert coord._inflight_actions[task.task_id] == handle
@@ -1302,7 +1292,6 @@ class TestThePumpStopsWorkItCannotWaitFor:
         finally:
             finish.set()
             await asyncio.gather(*tuple(coord._executions))
-            await _settle(pump)
 
         assert worker_done.is_set()
         assert (await coord.tasks.get(task.task_id)).state == "succeeded"
@@ -1415,8 +1404,8 @@ class TestInlineActionsAreReachableToo:
         assert outcome and "was cancelled" in outcome[0]
 
 
-class TestThePumpOnlyWaitsOnWhatItBooks:
-    """The registry is dispatcher-wide; the pump waits only on completions it books."""
+class TestThePumpWaitsOnNoAction:
+    """The registry is dispatcher-wide; the pump never waits on a running action."""
 
     @pytest.mark.asyncio
     async def test_a_tick_with_nothing_queued_leaves_an_inline_action_running(
@@ -1435,19 +1424,15 @@ class TestThePumpOnlyWaitsOnWhatItBooks:
             await _settle(inline)
 
     @pytest.mark.asyncio
-    async def test_a_cancelled_pump_cancels_no_action(
+    async def test_the_pump_returning_ends_no_action(
         self,
         coord: Coordinator,
         monkeypatch,
     ):
         """Neither its own spawn nor an inline action ends with the pump."""
-        _quick_poll(coord)
         inline = await _start_inline_action(coord, monkeypatch)
-        _task, spawned, pump = await _start_action_under_pump(coord, kind=_CLOSING_ACTION, key="own-spawn")
+        _task, spawned = await _start_action_by_pump(coord, kind=_CLOSING_ACTION, key="own-spawn")
         try:
-            pump.cancel()
-            await _settle(pump)
-
             assert not spawned.done()
             assert not inline.done()
         finally:

@@ -49,6 +49,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 from hyperloom.orchestrator.bus.storage import SqliteConnection
+from ._dispatch_helpers import pump_until_settled
 
 
 async def _immediately(payload: dict) -> dict:
@@ -738,6 +739,7 @@ async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
     c.sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1840}))
     try:
         await c.tick(1)
+        await pump_until_settled(c)
         dones = await c.bus.tail(topic="delegated_result")
         assert any(m.payload.get("state") == "succeeded" for m in dones)
     finally:
@@ -2375,7 +2377,7 @@ async def test_report_success_does_not_stop_run(session_dir):
             params={"session_dir": str(session_dir)},
             idempotency_key="k-report-1",
         )
-        await c._pump_dispatcher_once()
+        await pump_until_settled(c)
         after = await c.tasks.get(task.task_id)
         assert after.state == "succeeded"
         assert not (c.shared_state.stop_reason or "").strip()
@@ -2397,7 +2399,7 @@ async def test_report_success_does_not_overwrite_prior_stop_reason(session_dir):
             params={"session_dir": str(session_dir)},
             idempotency_key="k-report-pre-set",
         )
-        await c._pump_dispatcher_once()
+        await pump_until_settled(c)
         after = await c.tasks.get(task.task_id)
         assert after.state == "succeeded"
         assert c.shared_state.stop_reason == "target_reached"
@@ -2462,6 +2464,7 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
     try:
         with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
             await c.tick(1)
+        await pump_until_settled(c)
         assert any("dispatch audit" in r.getMessage() and "long_running" in r.getMessage() for r in caplog.records)
         assert await c.tasks.by_state("failed")
     finally:

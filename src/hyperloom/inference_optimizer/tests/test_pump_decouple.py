@@ -19,9 +19,11 @@ class _Gated:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.gate = asyncio.Event()
+        self.entered = asyncio.Event()
 
     async def __call__(self, ctx) -> dict:
         self.calls.append(ctx.task.task_id)
+        self.entered.set()
         await self.gate.wait()
         return {"runner_status": "succeeded"}
 
@@ -52,7 +54,6 @@ def coord(tmp_path: Path):
         recipe_kb=None,
         knowledge_plane=None,
     )
-    coord._dispatcher_poll_sec = 0.05
     return coord
 
 
@@ -66,48 +67,51 @@ def _in_flight_kinds(coord) -> list[str]:
     return [entry.kind for entry in coord._inflight_actions.values()]
 
 
-async def test_pump_returns_after_first_completion_while_slow_work_keeps_running(coord):
-    fast, slow = _Instant(), _Gated()
-    coord.sub.register_executor("fast_action", fast)
+async def _settle(coord) -> None:
+    await asyncio.wait_for(coord.wait_for_running_work(timeout=5), timeout=5)
+
+
+async def test_pump_returns_while_its_only_task_keeps_running(coord):
+    slow = _Gated()
     coord.sub.register_executor("slow_action", slow)
-    await _enqueue(coord, "fast_action", "fast")
     await _enqueue(coord, "slow_action", "slow")
 
     started = time.monotonic()
     await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
 
     assert time.monotonic() - started < 2
-    assert fast.calls and slow.calls
     assert _in_flight_kinds(coord) == ["slow_action"]
     slow.gate.set()
+    await _settle(coord)
     await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
-    assert _in_flight_kinds(coord) == []
+    assert slow.calls and _in_flight_kinds(coord) == []
 
 
-async def test_a_pump_that_books_a_completion_still_spawns_the_task_it_unblocked(coord):
+async def test_a_pump_that_books_a_completion_spawns_the_task_it_unblocked(coord):
     first, second = _Instant(), _Instant()
     coord.sub.register_executor("first_action", first)
     coord.sub.register_executor("second_action", second)
     await _enqueue(coord, "first_action", "first", ["benchmark_lane"])
     await _enqueue(coord, "second_action", "second", ["benchmark_lane"])
+    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await _settle(coord)
+    assert first.calls and not second.calls
 
     await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
-    await asyncio.sleep(0.1)
+    await _settle(coord)
 
-    assert first.calls and second.calls
+    assert second.calls
 
 
 async def test_a_running_task_is_not_dispatched_again_by_a_later_pump(coord):
-    fast, slow = _Instant(), _Gated()
-    coord.sub.register_executor("fast_action", fast)
+    slow = _Gated()
     coord.sub.register_executor("slow_action", slow)
-    await _enqueue(coord, "fast_action", "fast")
     await _enqueue(coord, "slow_action", "slow")
     await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
-
-    asyncio.get_running_loop().call_later(0.2, slow.gate.set)
     await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
 
+    slow.gate.set()
+    await _settle(coord)
     assert len(slow.calls) == 1
 
 
@@ -124,13 +128,15 @@ async def test_gpu_specialist_stays_exclusive_with_a_running_explore_across_pump
         {"domain": "serving_specialist", "gap_canonical_id": "gap.test"},
     )
 
-    pump = asyncio.create_task(coord._pump_dispatcher_once())
-    await asyncio.sleep(0.3)
-    assert explore.calls and not specialist.calls
+    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(explore.entered.wait(), timeout=5)
+    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    assert not specialist.calls
 
     explore.gate.set()
-    await asyncio.wait_for(pump, timeout=5)
+    await _settle(coord)
     await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await _settle(coord)
     assert specialist.calls
 
 
@@ -141,10 +147,12 @@ async def test_frozen_admission_spawns_nothing(coord):
 
     coord.admission_frozen = True
     await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await _settle(coord)
     assert not fast.calls
 
     coord.admission_frozen = False
     await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await _settle(coord)
     assert fast.calls
 
 
@@ -164,13 +172,28 @@ async def test_spawning_a_specialist_resets_its_domain_stale_counter(coord):
         {"domain": "serving_specialist", "gap_canonical_id": "gap.test"},
     )
 
-    pump = asyncio.create_task(coord._pump_dispatcher_once())
-    await asyncio.sleep(0.3)
-    assert specialist.calls
+    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
     assert coord.shared_state.rounds_since_last_specialist[anchor] == 0
 
     specialist.gate.set()
-    await asyncio.wait_for(pump, timeout=5)
+    await _settle(coord)
+    assert specialist.calls
+
+
+async def test_waiting_for_running_work_returns_when_an_action_finishes(coord):
+    slow = _Gated()
+    coord.sub.register_executor("slow_action", slow)
+    await _enqueue(coord, "slow_action", "slow")
+    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+
+    started = time.monotonic()
+    await coord.wait_for_running_work(timeout=0.2)
+    assert _in_flight_kinds(coord) == ["slow_action"]
+    assert time.monotonic() - started >= 0.2
+
+    asyncio.get_running_loop().call_later(0.1, slow.gate.set)
+    await asyncio.wait_for(coord.wait_for_running_work(timeout=60), timeout=5)
+    assert slow.calls
 
 
 async def test_an_unbooked_completion_holds_the_phase_transition(coord):
@@ -196,3 +219,27 @@ async def test_the_closing_transition_releases_a_held_barrier(coord):
     await coord._advance_phase_if_needed()
 
     assert not coord.admission_frozen
+
+
+async def test_the_closing_grace_waits_on_a_report_that_outlived_the_close_sequence(coord):
+    report = _Gated()
+    coord.sub.register_executor("report", report)
+    real_enter = coord._enter_closing_phase
+    closing_tick: list[int] = []
+
+    async def _enter(*, grace_sec: float):
+        closing_tick.append(int(coord.shared_state.tick))
+        asyncio.get_running_loop().call_later(0.5, report.gate.set)
+        return await real_enter(grace_sec=grace_sec)
+
+    async def _close_sequence(*, reason: str) -> bool:
+        coord.shared_state.close_sequence_done = True
+        return True
+
+    coord._enter_closing_phase = _enter
+    coord.ensure_close_sequence = _close_sequence
+
+    await asyncio.wait_for(coord.run(max_minutes=0.001, closing_grace_sec=30.0, tick_interval_sec=0.0), timeout=20)
+
+    assert report.calls
+    assert int(coord.shared_state.tick) - closing_tick[0] < 20
