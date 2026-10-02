@@ -80,7 +80,7 @@ class MaintenanceCollaborator(CoordinatorCollaborator):
     ) -> dict[str, Any] | None:
         """Report ownership cleanup, prune the DB, and trim ``runs/`` when disk is low."""
         summary: dict[str, Any] = {"tick": tick}
-        await run_lease_and_db_reclaim(self, summary, reason="maintenance_watchdog")
+        await run_lease_and_db_reclaim(self._coord, summary, reason="maintenance_watchdog")
         disk = self._maybe_prune_runs_for_disk()
         if disk is not None:
             summary["disk"] = disk

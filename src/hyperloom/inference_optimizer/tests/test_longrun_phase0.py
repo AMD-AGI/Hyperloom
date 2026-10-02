@@ -325,6 +325,7 @@ async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeyp
         summary = await c.maintenance.run(tick=10)
         assert summary is not None
         assert "gpu_leases_reaped" not in summary
+        assert "leases_reaped" in summary and "running_tasks_reclaimed" in summary
         assert "events_pruned" in summary and "tasks_pruned" in summary
         rows = await c.db.fetchall("SELECT COUNT(*) AS c FROM gpu_leases")
         assert int(rows[0]["c"]) == 1

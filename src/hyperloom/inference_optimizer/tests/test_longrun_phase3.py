@@ -145,8 +145,11 @@ async def test_soft_restart_summary_idempotent(cyclic_coordinator):
     summary = await c.phase_macro_cycle.run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
     assert summary is not None
     assert summary["new_cycle"] == 1
+    assert "leases_reaped" in summary
     again = await c.phase_macro_cycle.run_cycle_soft_restart(prior_cycle=1, new_cycle=2)
     assert again is not None
+    # The first restart already reclaimed everything the registry held.
+    assert again["running_tasks_reclaimed"] == 0
 
 
 async def _noop_phase_side_effects(c):
