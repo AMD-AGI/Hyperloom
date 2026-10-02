@@ -135,6 +135,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             params.setdefault("benchmark_mode", str(state.benchmark_mode))
         if getattr(state, "agentx_corpus_shape", None):
             params.setdefault("agentx_corpus_shape", dict(state.agentx_corpus_shape))
+        if isinstance(getattr(state, "grading", None), dict) and state.grading:
+            params.setdefault("agentx_grading", dict(state.grading))
+        if getattr(state, "agentx_backend", ""):
+            params.setdefault("agentx_backend", str(state.agentx_backend))
 
         # Advisory model_arch profile via arch_notes carrier (prompt-context only).
         if "arch_notes" not in params:

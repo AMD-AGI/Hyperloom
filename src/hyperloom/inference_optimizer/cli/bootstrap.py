@@ -59,6 +59,8 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 
 
 # Bump when a change makes previously recorded AgentX measurements incomparable.
+# The MLPerf client is a different workload, but it is opt-in: the epoch stays
+# so aiperf sessions remain resumable. The backend name is what resume compares.
 AGENTX_MEASUREMENT_EPOCH = 1
 
 
@@ -107,11 +109,62 @@ def agentx_state_is_stale(state: Any) -> str:
                 f"epoch {AGENTX_MEASUREMENT_EPOCH}; the recorded results describe "
                 "a different workload and cannot anchor or be compared against"
             )
+        from hyperloom.common.agentx_workload import agentic_backend
+
+        # Sessions recorded before the backend was persisted are aiperf.
+        had_backend = str(getattr(state, "agentx_backend", "") or "") or "aiperf"
+        want_backend = agentic_backend()
+        if had_backend != want_backend:
+            return (
+                f"session was measured with agentic backend {had_backend!r} but this "
+                f"run is {want_backend!r}; the recorded results describe a different "
+                "workload and cannot anchor or be compared against"
+            )
     return ""
+
+
+def latency_budget_scope_error(framework: str | None, requested_ms: float | None) -> str:
+    """Return why ``--max-latency-ms`` does not apply to *framework*, or ``\"\"``.
+
+    Scriptable workloads grade on output throughput alone and are the only frameworks compute partitioning places
+    work for, so they are the only place a throughput-only gate can buy throughput with per-request latency. AgentX
+    serving sessions already REVERT that trade on interactivity, and the fixed ISL/OSL serving mode takes no new
+    capability, so the budget is refused there rather than silently doing nothing.
+    """
+    from .. import framework_registry
+
+    if requested_ms is None or framework_registry.is_scriptable(framework):
+        return ""
+    name = str(framework or "").strip() or framework_registry.DEFAULT_FRAMEWORK
+    return (
+        f"--max-latency-ms applies only to scriptable frameworks (xdit, custom); {name!r} is a serving framework. "
+        "On AgentX the interactivity objective already refuses a throughput gain bought with per-request latency"
+    )
+
+
+def latency_budget_resume_conflict(state: Any, requested_ms: float | None) -> str:
+    """Return why ``--max-latency-ms`` cannot apply to a resumed session, or ``\"\"``.
+
+    The recorded KEEPs were graded under the archived budget, so a different
+    value would leave them judged against a constraint the new one does not
+    state. Omitting the flag keeps the archived budget.
+    """
+    if requested_ms is None:
+        return ""
+    archived = float(getattr(state, "latency_budget_ms", 0.0) or 0.0)
+    if float(requested_ms) == archived:
+        return ""
+    recorded = f"{archived:g} ms" if archived > 0 else "no budget"
+    return (
+        f"--max-latency-ms {float(requested_ms):g} differs from the {recorded} this session was "
+        "graded under; its KEEPs would be judged against a constraint they were never measured "
+        "for. Resume without the flag to keep the recorded budget, or start a fresh session"
+    )
 
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
     """Return the canonical corpus shape, until a measurement replaces it."""
+    from hyperloom.common.agentx_workload import MLPERF_CORPUS, is_mlperf_backend, mlperf_trajectories
     from hyperloom.inference_optimizer.agentx.mapping import (
         CANONICAL_CORPUS_DURATION_S,
         CANONICAL_CORPUS_ENTRIES,
@@ -120,6 +173,14 @@ def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
         CANONICAL_OSL,
         CANONICAL_PREFIX_CACHE_HIT,
     )
+
+    if is_mlperf_backend():
+        # The MLPerf corpus has no published shape; the first measurement supplies it.
+        return {
+            "corpus_loader": MLPERF_CORPUS,
+            "corpus_entries": mlperf_trajectories(),
+            "source": "canonical_mlperf",
+        }
 
     return {
         "corpus_loader": CANONICAL_CORPUS_LOADER,
@@ -221,6 +282,12 @@ def _seed_shared_state(
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
     benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
+    if _agentx_enabled():
+        from hyperloom.common.agentx_workload import agentic_backend
+
+        agentx_backend = agentic_backend()
+    else:
+        agentx_backend = ""
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -240,6 +307,9 @@ def _seed_shared_state(
         # config.json structural summary, persisted for downstream collectors.
         model_info=summarize_model_config(str(args.model)),
         framework=os.environ.get("FRAMEWORK", "sglang"),
+        # The only copy of the budget. Validated at the CLI, so anything that reaches here is usable, and archived
+        # with the session so a resume restores it without a second source to reconcile.
+        latency_budget_ms=float(getattr(args, "max_latency_ms", None) or 0.0),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI/env.
         tp=_int_arg("tp", DEFAULT_TP),
@@ -303,6 +373,7 @@ def _seed_shared_state(
         ),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
+        agentx_backend=agentx_backend,
         grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
         conc_sweep_total_budget_sec=int(

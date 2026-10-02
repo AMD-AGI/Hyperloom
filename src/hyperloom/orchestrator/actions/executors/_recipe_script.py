@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.agentx_workload import AIPERF_CLIENT_SCRIPT, is_agentx_client_script
 from hyperloom.common.io import atomic_write_text
 from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
 
@@ -23,10 +24,6 @@ log = logging.getLogger(__name__)
 # ``export NAME=value`` with no ``${NAME:-...}`` guard: the recipe's own value
 # wins over anything the caller exported under that name.
 _UNGUARDED_EXPORT_RE = re.compile(r"^[^\S\n]*export\s+([A-Za-z_][A-Za-z0-9_]*)=(?!\"?\$\{?\1[:-])", re.MULTILINE)
-
-# Spelled out rather than imported from ``agentx.deploy``: this module is on the
-# default benchmark path, which is pinned not to import the agentx package.
-_AGENTX_CLIENT_SCRIPT = "aiperf_client.sh"
 
 _SPLICE_RE = re.compile(r'^"?\$\{([A-Za-z_][A-Za-z0-9_]*)\[@\]\}"?$')
 _COPY_SUFFIX_RE = re.compile(r"\.hl-[0-9a-f]{12}(?=\.sh$)")
@@ -84,7 +81,7 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
     if not script:
         return ""
 
-    if script == _AGENTX_CLIENT_SCRIPT:
+    if is_agentx_client_script(script):
         script = str(envs.get("AGENTX_SERVER_SCRIPT") or os.environ.get("AGENTX_SERVER_SCRIPT") or "").strip()
         if not script:
             framework = str(bench.get("framework") or envs.get("FRAMEWORK") or "").strip().lower()
@@ -125,7 +122,8 @@ def recipe_owns_argv(bench: Mapping[str, Any]) -> bool:
     Same rule as ``aiperf_client.sh``: the ``AGENTX_SERVER_SCRIPT`` path relative
     to ``benchmarks/`` sits under an ``agentic/`` directory.
     """
-    if Path(str(bench.get("benchmark_script") or "")).name != _AGENTX_CLIENT_SCRIPT:
+    # Only the aiperf client hands an agentic recipe the whole lifecycle; the MLPerf client always boots the server.
+    if Path(str(bench.get("benchmark_script") or "")).name != AIPERF_CLIENT_SCRIPT:
         return False
     envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
     script = str(envs.get("AGENTX_SERVER_SCRIPT") or os.environ.get("AGENTX_SERVER_SCRIPT") or "").strip()

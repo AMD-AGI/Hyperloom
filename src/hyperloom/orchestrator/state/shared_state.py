@@ -126,6 +126,7 @@ def resolve_graded_comparison(
         VERDICT_REVERT,
         axis_of,
         holds_within_band,
+        latency_veto_reason,
         output_tput_of,
         perf_snapshot_from_mapping,
         resolve_grading_anchor_perf,
@@ -135,6 +136,10 @@ def resolve_graded_comparison(
     from hyperloom.inference_optimizer.grading import resolved_grading
 
     on_intvty, noise_pct = resolved_grading(state)
+    # The session's latency ceiling vetoes a candidate the gain gates would KEEP, on whichever axis graded it. A
+    # candidate that already lost carries no veto, so the ledger names the gate that actually refused it.
+    budget_ms = float(getattr(state, "latency_budget_ms", 0.0))
+    observed_ms = measurement.get("e2el_mean_ms") if isinstance(measurement, Mapping) else None
     degrade_reason = ""
     if on_intvty:
         if anchor_perf is not None:
@@ -158,13 +163,15 @@ def resolve_graded_comparison(
                 and guards_hold
                 and rounds_are_comparable(cand_perf, ref_perf)
             )
+            sla_veto = latency_veto_reason(observed_ms, budget_ms) if keep else ""
             return GradedComparison(
                 objective=GRADED_INTVTY_P50,
                 candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
                 reference=axis_of(ref_perf, GRADED_INTVTY_P50),
-                verdict=VERDICT_KEEP if keep else VERDICT_REVERT,
+                verdict=VERDICT_KEEP if keep and not sla_veto else VERDICT_REVERT,
                 tput_candidate=total_tput_of(cand_perf),
                 tput_reference=total_tput_of(ref_perf),
+                veto_reason=sla_veto,
             )
         degrade_reason = reason or "candidate_axes_missing"
 
@@ -182,12 +189,14 @@ def resolve_graded_comparison(
         verdict = VERDICT_REVERT
     else:
         verdict = VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT
+    sla_veto = latency_veto_reason(observed_ms, budget_ms) if verdict == VERDICT_KEEP else ""
     return GradedComparison(
         objective=GRADED_OUTPUT,
         candidate=candidate,
         reference=reference,
-        verdict=verdict,
+        verdict=VERDICT_REVERT if sla_veto else verdict,
         degrade_reason=degrade_reason,
+        veto_reason=sla_veto,
     )
 
 
@@ -363,6 +372,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     benchmark_mode: str = ""
     # Generation counter for AgentX measurements.
     agentx_epoch: int = 0
+    # Which AgentX client measured this session: "aiperf" or "mlperf". Empty on
+    # sessions that predate the field; resume treats those as aiperf. Compared
+    # on resume so the two workloads cannot anchor each other without bumping
+    # the measurement epoch (which would invalidate unchanged aiperf sessions).
+    agentx_backend: str = ""
     # The grading configuration this session was seeded with: {"objective": GRADED_INTVTY|GRADED_OUTPUT,
     # "noise_pct": float}. Recorded rather than re-derived because the derivation reads HYPERLOOM_PERF_METRIC /
     # HYPERLOOM_PERF_NOISE_PCT, and a resume is a new process: a shell that lost the variable would flip the axis
@@ -377,6 +391,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     conc_sweep_total_budget_sec: int = 9000
     target_summary: str = ""
     baseline_tput: float = 0.0
+    # Ceiling on mean end-to-end latency (ms) from ``--max-latency-ms``; 0.0 leaves KEEP behaviour unchanged. The
+    # only copy of the budget: it is written once at launch and archived with the session, so a resume restores it.
+    latency_budget_ms: float = 0.0
     # AgentX corpus shape: written at seed from canonical constants, overwritten with measured values after every
     # AgentX measurement. Read by semantic consumers (prompts, manifest, reports) instead of the inert state.isl /
     # state.osl placeholders. Absent on synthetic sessions.

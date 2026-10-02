@@ -3216,6 +3216,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     graded.degrade_reason,
                 )
                 return False
+            if graded.veto_reason:
+                log.warning(
+                    "current_best held: %s winner refused by the latency budget (%s)", task_kind, graded.veto_reason
+                )
+                return False
             if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
                 log.info(
                     "current_best held: %s winner %s intvty %.1f->%.1f tput %.1f->%.1f",
@@ -3814,6 +3819,29 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # Reads the current_best just assigned, so it has to follow it.
             self._stamp_current_best_measurement(result)
             changed = True
+            # The reference the run is measured against is itself over the SLA, so
+            # nothing that follows can clear it. Stopping here costs one baseline;
+            # continuing spends the whole --max-hours refusing every candidate to
+            # learn something already knowable.
+            from hyperloom.common.perf_metric import latency_veto_reason
+
+            baseline_veto = latency_veto_reason(
+                result.get("e2el_mean_ms"),
+                float(self.shared_state.latency_budget_ms),
+            )
+            if baseline_veto:
+                log.error(
+                    "baseline does not satisfy --max-latency-ms (%s): budget %.1f ms, baseline %s. "
+                    "No candidate can clear a ceiling the reference already breaks; stopping.",
+                    baseline_veto,
+                    float(self.shared_state.latency_budget_ms),
+                    (
+                        f"{float(result['e2el_mean_ms']):.1f} ms"
+                        if isinstance(result.get("e2el_mean_ms"), (int, float))
+                        else "reported no end-to-end latency"
+                    ),
+                )
+                self.shared_state.set_stop_reason("baseline_over_latency_budget")
         if anchor_accepted:
             audit_decision = "promoted"
         elif isinstance(tput, (int, float)) and tput > 0:
@@ -5573,6 +5601,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "extra_envs": dict(result.get("extra_envs_applied") or {}),
                 "tput": float(tput),
                 **graded_axes_of(result.get("bench_result") or result),
+                # ``graded_axes_of`` carries the throughput axes only; the latency
+                # budget grades on this one and fails closed without it.
+                "e2el_mean_ms": (result.get("bench_result") or result).get("e2el_mean_ms"),
                 "workspace": result.get("workspace"),
                 "provenance": provenance or "integrate_patch",
                 "scope": "source_patch",

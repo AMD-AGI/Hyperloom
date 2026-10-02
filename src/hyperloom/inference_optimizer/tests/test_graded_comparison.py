@@ -729,3 +729,12 @@ def test_agentx_revert_when_a_comparability_input_is_unreported(monkeypatch):
     measurement.pop("duration_seconds")
     graded = resolve_graded_comparison(state, measurement, keep_threshold_pct=2.0)
     assert graded.verdict == VERDICT_REVERT
+
+
+def test_the_mlperf_backend_grades_on_output(monkeypatch):
+    """The harness has no per-request interactivity series, so asking for it would degrade every round."""
+    from hyperloom.common.perf_metric import INTVTY_V1, intvty_grading_enabled
+
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", INTVTY_V1)
+    assert intvty_grading_enabled(benchmark_mode="agentx") is False

@@ -10,16 +10,20 @@ import shutil
 import tempfile
 from pathlib import Path
 
-# The client the AgentX switch pins as ``benchmark_script``. Downstream consumers
-# that must tell "this recipe drives a client" from "this recipe launches a
-# server" match on this name, so it lives here beside the deployment that
-# publishes it rather than being spelled out again at each reader.
-AGENTX_CLIENT_SCRIPT = "aiperf_client.sh"
+from hyperloom.common.agentx_workload import AIPERF_CLIENT_SCRIPT, MLPERF_CLIENT_SCRIPT
 
-_ASSET_FILES = (AGENTX_CLIENT_SCRIPT, "map_aiperf.py", "aiperf_phase_gate.py", "agentx_launch_capture.py")
+_ASSET_FILES = (
+    AIPERF_CLIENT_SCRIPT,
+    MLPERF_CLIENT_SCRIPT,
+    "map_aiperf.py",
+    "map_mlperf.py",
+    "aiperf_phase_gate.py",
+    "agentx_launch_capture.py",
+)
 
-# map_aiperf.py imports the mapping from its own directory under this name; the
-# prefix keeps it from clobbering an InferenceX file in the shared benchmarks dir.
+# map_aiperf.py / map_mlperf.py import the mapping from their own directory under
+# this name; the prefix keeps it from clobbering an InferenceX file in the shared
+# benchmarks dir.
 _MAPPING_MODULE = "agentx_mapping.py"
 
 
