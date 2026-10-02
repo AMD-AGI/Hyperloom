@@ -58,6 +58,11 @@ def test_build_specialist_env_inherits_provider_secrets_by_default(monkeypatch):
     assert "LD_PRELOAD" not in env
 
 
+def test_build_specialist_env_forwards_the_claude_config_dir(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/claude-config")
+    assert _build_specialist_env()["CLAUDE_CONFIG_DIR"] == "/tmp/claude-config"
+
+
 def test_build_specialist_env_forwards_oauth_token_without_mirroring_it(monkeypatch):
     """A subscription-only parent must hand the token down untouched."""
     oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))

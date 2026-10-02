@@ -133,6 +133,7 @@ _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # the same session the parent does. Not a credential.
         "CLAW_SESSION_ID",
         "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CONFIG_DIR",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
         "HOME",
