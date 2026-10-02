@@ -335,10 +335,8 @@ class _StubTask:
 
 def _coord(tmp_path: Path, scorer):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
     c = Coordinator.__new__(Coordinator)
-    c.phase_framework = FrameworkPhase(c)
     c.session_dir = tmp_path
     c.shared_state = _StubSharedState()
     c.writeback._proposal_scorer = scorer
