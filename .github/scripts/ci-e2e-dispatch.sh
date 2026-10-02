@@ -34,7 +34,12 @@
 #   BASE_REPO_URL       base repo clone url
 #   MODEL_BASE          local model base dir (optional)
 #   POLL_INTERVAL_S     seconds between polls             (default 30)
-#   POLL_MAX            max polls before giving up        (default 120)
+#   QUEUE_TIMEOUT_S     seconds to wait for a GPU before giving up (default 14400).
+#                       Counted until the run starts, so a busy cluster cannot spend
+#                       the run's own time.
+#   RUN_TIMEOUT_S       seconds to watch the run once its sandbox is ready (default
+#                       MAX_HOURS plus an hour: the agent sets up before the
+#                       optimizer's clock starts, and closes out after it stops)
 #   KNOWLEDGE_STORE_MODE  local|remote                    (default local)
 #   KB_STORE_URL / KB_STORE_TOKEN  required together when mode=remote
 #   CI_E2E_PR_CHECK_BASE  base dir for per-PR checkouts   (default /tmp/ci-e2e)
@@ -57,7 +62,8 @@ GPUS="${GPUS:-1}"
 TP="${TP:-1}"
 MAX_HOURS="${MAX_HOURS:-0.5}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-30}"
-POLL_MAX="${POLL_MAX:-120}"
+QUEUE_TIMEOUT_S="${QUEUE_TIMEOUT_S:-14400}"
+RUN_TIMEOUT_S="${RUN_TIMEOUT_S:-$(awk -v h="$MAX_HOURS" 'BEGIN{printf "%d", h*3600 + 3600}')}"
 KNOWLEDGE_STORE_MODE="${KNOWLEDGE_STORE_MODE:-local}"
 
 : "${DISPATRON_BASE_URL:?DISPATRON_BASE_URL is required}"
@@ -243,7 +249,8 @@ dispatron-ci \
   --source-dir "$SRC_DIR" \
   --pr "${PR_NUMBER:-}" \
   --poll-interval "$POLL_INTERVAL_S" \
-  --poll-max "$POLL_MAX" \
+  --queue-timeout "$QUEUE_TIMEOUT_S" \
+  --run-timeout "$RUN_TIMEOUT_S" \
   "${kb[@]}" "${insecure[@]}" &
 cli=$!
 
@@ -277,6 +284,7 @@ UID_="$(field uid)"
 result="$(field result)"
 OUT_reason="$(field reason)"
 OUT_explanation="$(field explanation)"
+OUT_timed_out_in="$(field timed_out_in)"
 OUT_platform_ref="$(field platform_ref)"
 OUT_nodes="$(field nodes)"
 OUT_queued_at="$(field queued_at)"
@@ -310,9 +318,17 @@ case "$result" in
     post_status "error" "cancelled; uid=${UID_}; sha=${HEAD_SHA:0:12}"
     report_upsert "🚫 Cancelled" ;;
   timeout)
-    summary "❌ **FAIL (timeout)** — ${OUT_explanation:-gave up waiting}. session_id=\`${UID_}\`"
-    post_status "failure" "timeout; uid=${UID_}; sha=${HEAD_SHA:0:12}"
-    report_upsert "⏱ Timed out" ;;
+    if [ "${OUT_timed_out_in:-}" = "queue" ]; then
+      # Not the change's failure: no GPU came free, so nothing of it ran. An error
+      # rather than a failure, so nobody goes looking for a bug in code that never ran.
+      summary "⏳ **NO CAPACITY** — ${OUT_explanation:-no GPU came free}. session_id=\`${UID_}\`"
+      post_status "error" "no GPU within $((QUEUE_TIMEOUT_S / 60))m; nothing ran; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+      report_upsert "⏳ No capacity"
+    else
+      summary "❌ **FAIL (timeout)** — ${OUT_explanation:-gave up waiting}. session_id=\`${UID_}\`"
+      post_status "failure" "timeout; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+      report_upsert "⏱ Timed out"
+    fi ;;
   dispatch-error)
     summary "❌ **FAIL** — the run was never dispatched; see the job log."
     post_status "error" "could not dispatch; sha=${HEAD_SHA:0:12}"
