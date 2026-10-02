@@ -91,10 +91,14 @@ class EnablementLane(CoordinatorCollaborator):
             return ""
         if state.enablement.validation_pending:
             return ""
-        if await self.rounds.held() is not None:
-            # Renews the open round's lease as a side effect; the reconciler,
-            # which runs ahead of this pump, ends a round nobody is working on.
-            await self.enablement_in_flight()
+        round_row = await self.rounds.held()
+        if round_row is not None:
+            # This pump is the lease's only heartbeat, so that asking whether the lane is in
+            # flight stays free of side effects for the terminal paths that only observe it.
+            # A round nobody is working on is left to expire; the reconciler, which runs
+            # ahead of this pump, is what ends it.
+            if await self._round_has_live_work(round_row.holder_task_id):
+                await self._renew_enablement_round(round_row)
             return ""
         # Each terminal below writes stop_reason, which routes the phase to CLOSE on the
         # next tick; returning keeps a new round from opening in the meantime.
@@ -316,10 +320,7 @@ class EnablementLane(CoordinatorCollaborator):
         round_row = await self.rounds.held()
         if round_row is None:
             return False
-        if not await self._round_has_live_work(round_row.holder_task_id):
-            return False
-        await self._renew_enablement_round(round_row)
-        return True
+        return await self._round_has_live_work(round_row.holder_task_id)
 
     async def _round_has_live_work(self, holder: str) -> bool:
         """Report whether anything is still running for the round ``holder`` holds.
