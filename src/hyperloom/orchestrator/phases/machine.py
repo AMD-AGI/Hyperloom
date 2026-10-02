@@ -193,7 +193,6 @@ class MachinePhase(CoordinatorCollaborator):
             return
         kernel_facts = await self._coord.phase_kernel.exit_facts()
         optimize_enabled = self.optimize_enabled()
-        # Only asked inside the phase: the query renews the open round's lease.
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
         enablement_in_flight = in_enablement and await self._coord.enablement_lane.enablement_in_flight()
         next_phase = _phase_state.compute_next_phase(
