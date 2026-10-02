@@ -157,7 +157,7 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # TraceLens SHA.
-TRACELENS_REF="b79f9065af079e1adbd42c0454e2b64bd3674fdd"
+TRACELENS_REF="b8082ca39b95d89335ad85632620face772c19f3"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip
