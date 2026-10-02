@@ -102,7 +102,6 @@ def _stub_external_integrate_operations(monkeypatch):
         lambda _framework: SimpleNamespace(
             provision=forbidden,
             probe=forbidden,
-            editable_refresh_argv=forbidden,
             source_import_root=lambda root: root,
         ),
     )

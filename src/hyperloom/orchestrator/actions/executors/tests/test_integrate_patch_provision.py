@@ -112,7 +112,6 @@ def _neutralize_disk_preflight(monkeypatch):
         adapter = real_get_adapter(framework, **kwargs)
         monkeypatch.setattr(adapter, "provision", forbidden)
         monkeypatch.setattr(adapter, "probe", forbidden)
-        monkeypatch.setattr(adapter, "editable_refresh_argv", forbidden)
         return adapter
 
     monkeypatch.setattr(adapters, "get_adapter", metadata_adapter)
@@ -273,6 +272,33 @@ async def test_a_runtime_only_round_reaches_the_bench(_executor, monkeypatch):
     assert await _executor._stage_apply(attempt, _params(), {}) is None
     # The sentinel carries the runtime the launch has to boot into.
     assert attempt.pending["attempt_venv_root"] == venv
+
+
+async def test_patches_apply_to_the_tree_the_runtime_imports(_executor, monkeypatch, tmp_path):
+    """A patch to the shared framework tree is invisible to a server booting the attempt runtime."""
+    runtime_tree = tmp_path / "attempt-src"
+    runtime_tree.mkdir()
+    shared_tree = tmp_path / "shared-framework"
+    shared_tree.mkdir()
+    venv = str(_executor.session_dir / "enablement" / "stacks" / "vllm" / "t-1" / "venv")
+    result = ProvisionResult(
+        ok=True,
+        runtime=FrameworkRuntime(
+            bin_path=f"{venv}/bin",
+            python_path=f"{venv}/bin/python",
+            venv_root=venv,
+            source_root=str(runtime_tree),
+        ),
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: _FakeAdapter(result)
+    )
+    attempt = _apply_ready(_executor, kept=_candidate())
+    params = _params(framework_source_root=str(shared_tree))
+    assert await _executor._stage_provision_attempt_runtime(attempt, params, "t-1") is None
+
+    assert await _executor._stage_apply(attempt, params, {}) is None
+    assert attempt.pending["framework_source_root"] == str(runtime_tree)
 
 
 async def test_a_round_that_acquired_nothing_is_still_no_patches(_executor):

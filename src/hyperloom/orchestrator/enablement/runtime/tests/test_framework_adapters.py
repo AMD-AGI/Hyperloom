@@ -207,6 +207,37 @@ def test_vllm_provision_requires_index(tmp_path):
     assert "ROCm wheel index" in result.error
 
 
+# the tree an acquired runtime imports, which is the tree its patches apply to
+
+
+def test_vllm_provision_records_the_tree_the_wheel_lands_in(tmp_path):
+    """The wheel occupies the attempt venv alone; the shared framework tree is untouched by it."""
+    purelib = "/attempt/venv/lib/python3.12/site-packages"
+    run = _FakeRun(rules=[("sysconfig", 0, f"{purelib}\n", "")], default_rc=0)
+    result = VllmRocmAdapter(run=run).provision(_wheel_action(), tmp_path / "attempt")
+    assert result.ok is True, result.error
+    assert result.runtime.source_root == purelib
+
+
+def test_sglang_editable_provision_records_the_clone_it_imports(tmp_path):
+    """An editable install executes the clone, and its diffs are cut against the repo root."""
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
+
+    action = EnablementStackAction(
+        kind="runtime_candidate",
+        framework="sglang",
+        gap_id="g",
+        capability="c",
+        acquisition_method="editable_ref",
+        repo_url="https://github.com/sgl-project/sglang.git",
+        ref="v0.4.9",
+    )
+    result = SglangAdapter(run=_FakeRun()).provision(action, tmp_path / "attempt")
+    assert result.ok is True, result.error
+    assert result.runtime.source_root == str(tmp_path / "attempt" / "src")
+    assert result.runtime.pythonpath_prefix == str(tmp_path / "attempt" / "src" / "python")
+
+
 # verify helpers
 
 

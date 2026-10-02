@@ -135,6 +135,29 @@ async def test_python_only_writes_patch(_executor, monkeypatch):
     assert attempt.localization_touched == ["vllm/model/deepseek_v4.py"]
 
 
+async def test_localizing_does_not_displace_the_runtime_action(_executor, monkeypatch):
+    """The KEEP re-provisions from the runtime action; a backport is not something to provision."""
+    import hyperloom.agents.framework.sources.github as gh
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
+
+    monkeypatch.setattr(gh, "pr_patches", lambda slug, num: _PY_DIFF)
+    runtime_action = EnablementStackAction(
+        kind="runtime_candidate",
+        framework="vllm",
+        gap_id="gap.enablement.missing_model_arch",
+        capability="deepseek_v4",
+        acquisition_method="wheel",
+        index_url="https://rocm.repo/whl",
+    )
+    attempt = _attempt()
+    attempt.stack_action = runtime_action
+
+    assert await _executor._stage_localize_source(attempt, _params(), "t-1") is None
+    assert attempt.stack_action is runtime_action
+    assert attempt.localization_action is not None
+    assert attempt.localization_action.kind == "pr_backport"
+
+
 # ---------------------------------------------------------------------------
 # compiled-closure deferral: reverted, no patch
 # ---------------------------------------------------------------------------

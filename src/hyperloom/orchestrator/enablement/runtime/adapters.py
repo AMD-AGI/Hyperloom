@@ -174,6 +174,23 @@ def _resolved_packages(python_path: str, names: list[str], *, run: RunFn = _defa
     return {str(k): {str(kk): str(vv) for kk, vv in v.items()} for k, v in parsed.items()}
 
 
+def _site_packages(python_path: str, *, run: RunFn = _default_run) -> str:
+    """Return the directory ``python_path`` installs distributions into, or ``""``.
+
+    The attempt venv inherits the host's system site-packages, so a wheel
+    installed into it occupies this tree alone -- which is therefore the only
+    tree a patch against that wheel's sources can land in.
+    """
+    argv = [python_path, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"]
+    try:
+        cp = run(argv, dict(os.environ), None)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if getattr(cp, "returncode", 1) != 0:
+        return ""
+    return (getattr(cp, "stdout", "") or "").strip()
+
+
 def _installed_version(python_path: str, package: str, *, run: RunFn = _default_run) -> str:
     """Return the installed version of ``package`` in ``python_path``, or ""."""
     argv = [
@@ -253,10 +270,6 @@ class BaseAdapter:
             pr_number=pr_number,
         )
 
-    def editable_refresh_argv(self, venv_python: str, checkout: str) -> list[str] | None:
-        """Return the argv that re-installs an editable checkout, or None."""
-        return None
-
     def source_import_root(self, framework_root: str) -> str:
         """Return the import root relative to a source snapshot's ``files/`` dir."""
         return ""
@@ -317,12 +330,6 @@ class _VenvProvisionMixin(BaseAdapter):
             argv += ["-e", editable]
         argv += list(specs)
         return self._run(argv, dict(os.environ), None)
-
-    def editable_refresh_argv(self, venv_python: str, checkout: str) -> list[str] | None:
-        """Re-install the editable checkout so localized Python changes take effect."""
-        if not venv_python or not checkout:
-            return None
-        return [str(venv_python), "-m", "pip", "install", "-e", str(checkout), "--no-deps"]
 
 
 class VllmRocmAdapter(_VenvProvisionMixin):
@@ -401,6 +408,7 @@ class VllmRocmAdapter(_VenvProvisionMixin):
             venv_root=str(attempt_dir / "venv"),
             server_args=action.server_args,
             envs=dict(action.envs),
+            source_root=_site_packages(str(python_path), run=self._run),
         )
         return ProvisionResult(
             ok=True,
@@ -490,6 +498,7 @@ class SglangAdapter(_VenvProvisionMixin):
             return ProvisionResult(ok=False, log_path=log_path, error=f"venv setup failed: {exc!r}")
 
         pythonpath_prefix = ""
+        source_root = ""
         resolved_ref = ""
         resolved_packages: dict[str, dict[str, str]] = {}
         if action.acquisition_method == "editable_ref":
@@ -507,9 +516,13 @@ class SglangAdapter(_VenvProvisionMixin):
                 )
             cp = self._pip_install(python_path, [], editable=str(checkout / "python"))
             pythonpath_prefix = str(checkout / "python")
+            # The editable install imports straight out of the clone, and its
+            # diffs are cut against the repo root that holds ``python/sglang``.
+            source_root = str(checkout)
             resolved_ref = _resolved_clone_ref(str(checkout), run=self._run)
         elif action.acquisition_method == "wheel":
             cp = self._pip_install(python_path, list(action.packages) or ["sglang"], index_url=action.index_url)
+            source_root = _site_packages(str(python_path), run=self._run)
             resolved_packages = _resolved_packages(str(python_path), list(action.packages) or ["sglang"], run=self._run)
         else:
             return ProvisionResult(ok=False, log_path=log_path, error=f"unsupported method {action.acquisition_method}")
@@ -529,6 +542,7 @@ class SglangAdapter(_VenvProvisionMixin):
             pythonpath_prefix=pythonpath_prefix,
             server_args=action.server_args,
             envs=dict(action.envs),
+            source_root=source_root,
         )
         return ProvisionResult(
             ok=True,
@@ -546,7 +560,7 @@ class AtomAdapter(BaseAdapter):
     framework = "atom"
 
     def supports(self, gap: CapabilityGap) -> bool:
-        """Localize any code gap; the backport is applied via no-git, with no editable refresh."""
+        """Localize any code gap; the backport is applied via no-git."""
         return True
 
 

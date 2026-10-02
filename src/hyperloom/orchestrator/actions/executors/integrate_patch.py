@@ -2746,7 +2746,7 @@ class IntegratePatchExecutor:
         patch_path.write_text(diff_text, encoding="utf-8")
 
         attempt.localization_patches = [patch_path]
-        attempt.stack_action = action
+        attempt.localization_action = action
         attempt.localization_touched = list(touched_paths)
         log.info(
             "integrate_patch: localization staged %s (%d file(s), kind=%s)",
@@ -2959,11 +2959,20 @@ class IntegratePatchExecutor:
                 _no_patches["patches_ungrounded"] = ungrounded
             return _no_patches
 
-        explicit_framework_root = str(params.get("framework_source_root") or "").strip() or None
-        framework_root = _resolve_framework_root(
-            explicit_framework_root,
-            patch_paths=patch_paths,
-            recorded_root=_sole_patch_root(done_payload, patch_paths, specialist_workspace=specialist_workspace),
+        # An acquired runtime is what the boot resolves, so the shared framework
+        # tree is not what the server imports: this round's patches land in the
+        # tree it runs, and the root the specialist authored against does not
+        # describe that tree.
+        runtime_source_root = attempt.runtime_source_root
+        explicit_framework_root = runtime_source_root or str(params.get("framework_source_root") or "").strip() or None
+        framework_root = (
+            resolved_explicit_root(runtime_source_root)
+            if runtime_source_root
+            else _resolve_framework_root(
+                explicit_framework_root,
+                patch_paths=patch_paths,
+                recorded_root=_sole_patch_root(done_payload, patch_paths, specialist_workspace=specialist_workspace),
+            )
         )
         if patch_paths and framework_root is None:
             _lane_early = _derive_lane(params)
@@ -3686,14 +3695,13 @@ class IntegratePatchExecutor:
             }
             kept_result["enablement_active_runtime"] = provision_result.runtime.to_state()
             kept_result["installed_versions"] = dict(getattr(provision_result, "installed_versions", {}) or {})
-        # Editable-refresh the localized closure + snapshot a manifest that
-        # survives rearm so the closure is recorded and not re-fetched.
+        # Snapshot a manifest of the localized closure that survives rearm, so
+        # the closure is recorded and not re-fetched.
         manifest = await asyncio.to_thread(
             self._finalize_localization_keep,
             attempt,
             framework_root=framework_root,
             specialist_task_id=specialist_task_id,
-            provision_result=provision_result,
         )
         if manifest:
             kept_result["enablement_localization_manifest"] = manifest
@@ -4275,37 +4283,16 @@ class IntegratePatchExecutor:
         *,
         framework_root: Path | None,
         specialist_task_id: str,
-        provision_result: Any,
     ) -> dict[str, Any]:
-        """Editable-refresh a localized closure and snapshot its manifest.
+        """Record a localization manifest via :func:`snapshot_source_layer`.
 
-        Blocking (editable-refresh up to 600s); call via ``asyncio.to_thread``.
-
-        Runs the framework adapter's editable-refresh argv against the attempt
-        interpreter (best-effort; skipped when there is no attempt runtime or no
-        refresh argv), then records a localization manifest via
-        :func:`snapshot_source_layer`. Returns the manifest dict (empty when no
-        localization ran).
+        Blocking (filesystem copies); call via ``asyncio.to_thread``. Returns the
+        manifest dict, empty when no localization ran.
         """
         touched = attempt.localization_touched
         if not touched or framework_root is None:
             return {}
-        action = attempt.stack_action
-        # Editable-refresh so localized Python changes take effect in the attempt
-        # runtime (no-op for plain wheel trees like atom).
-        try:
-            from ...enablement.runtime.adapters import get_adapter
-
-            venv_py = ""
-            if provision_result is not None and getattr(provision_result, "ok", False):
-                venv_py = str(getattr(provision_result.runtime, "python_path", "") or "")
-            fw = str(getattr(action, "framework", "") or "")
-            argv = get_adapter(fw).editable_refresh_argv(venv_py, str(framework_root)) if venv_py else None
-            if argv:
-                subprocess.run(argv, capture_output=True, text=True, timeout=600, check=False)
-        except Exception:
-            log.debug("integrate_patch: localization editable-refresh failed", exc_info=True)
-        # Manifest via the existing snapshot mechanism.
+        action = attempt.localization_action
         try:
             from ...source_snapshot import snapshot_source_layer
 
