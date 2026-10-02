@@ -58,6 +58,8 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 
 
 # Bump when a change makes previously recorded AgentX measurements incomparable.
+# The MLPerf client is a different workload, but it is opt-in: the epoch stays
+# so aiperf sessions remain resumable. The backend name is what resume compares.
 AGENTX_MEASUREMENT_EPOCH = 1
 
 
@@ -106,6 +108,17 @@ def agentx_state_is_stale(state: Any) -> str:
                 f"epoch {AGENTX_MEASUREMENT_EPOCH}; the recorded results describe "
                 "a different workload and cannot anchor or be compared against"
             )
+        from hyperloom.common.agentx_workload import agentic_backend
+
+        # Sessions recorded before the backend was persisted are aiperf.
+        had_backend = str(getattr(state, "agentx_backend", "") or "") or "aiperf"
+        want_backend = agentic_backend()
+        if had_backend != want_backend:
+            return (
+                f"session was measured with agentic backend {had_backend!r} but this "
+                f"run is {want_backend!r}; the recorded results describe a different "
+                "workload and cannot anchor or be compared against"
+            )
     return ""
 
 
@@ -150,6 +163,7 @@ def latency_budget_resume_conflict(state: Any, requested_ms: float | None) -> st
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
     """Return the canonical corpus shape, until a measurement replaces it."""
+    from hyperloom.common.agentx_workload import MLPERF_CORPUS, is_mlperf_backend, mlperf_trajectories
     from hyperloom.inference_optimizer.agentx.mapping import (
         CANONICAL_CORPUS_DURATION_S,
         CANONICAL_CORPUS_ENTRIES,
@@ -158,6 +172,14 @@ def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
         CANONICAL_OSL,
         CANONICAL_PREFIX_CACHE_HIT,
     )
+
+    if is_mlperf_backend():
+        # The MLPerf corpus has no published shape; the first measurement supplies it.
+        return {
+            "corpus_loader": MLPERF_CORPUS,
+            "corpus_entries": mlperf_trajectories(),
+            "source": "canonical_mlperf",
+        }
 
     return {
         "corpus_loader": CANONICAL_CORPUS_LOADER,
@@ -253,6 +275,12 @@ def _seed_shared_state(
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
     benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
+    if _agentx_enabled():
+        from hyperloom.common.agentx_workload import agentic_backend
+
+        agentx_backend = agentic_backend()
+    else:
+        agentx_backend = ""
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -339,6 +367,7 @@ def _seed_shared_state(
         ),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
+        agentx_backend=agentx_backend,
         grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
         conc_sweep_total_budget_sec=int(

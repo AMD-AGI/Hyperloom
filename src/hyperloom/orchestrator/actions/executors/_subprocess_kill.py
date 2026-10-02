@@ -279,8 +279,19 @@ _WARM_REUSE_PROBE_AFTER_SEC: float = 30.0
 
 
 def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[float, float]:
-    """Resolve the invocation's silence and hard caps, rejecting invalid overrides."""
+    """Resolve the invocation's silence and hard caps, rejecting invalid overrides.
+
+    An MLPerf agentic run works through a fixed trajectory count rather than a
+    fixed window, so its default hard cap is sized to that count; the stock
+    default reaped a healthy 150-trajectory baseline at 38%. An explicit
+    ``INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`` still wins.
+    """
+    from hyperloom.common.agentx_workload import is_mlperf_backend, mlperf_benchmark_timeout_sec
+
     source = os.environ if env is None else env
+    hard_default = 7800.0
+    if is_mlperf_backend(source):
+        hard_default = max(hard_default, mlperf_benchmark_timeout_sec(source))
 
     def positive(name: str, default: float) -> float:
         raw = source.get(name, str(default))
@@ -294,7 +305,7 @@ def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[fl
 
     return (
         positive("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", 600.0),
-        positive("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", 7800.0),
+        positive("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", hard_default),
     )
 
 

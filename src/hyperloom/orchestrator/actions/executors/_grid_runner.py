@@ -484,6 +484,9 @@ def _build_variant_yaml(
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
+    from ._workload_envs import pin_mlperf_round_concurrency
+
+    pin_mlperf_round_concurrency(envs)
     # The launcher re-exports these unconditionally, so a value carried here is
     # one the run never used.
     for k in launcher_overwritten_envs(bench) & envs.keys():
