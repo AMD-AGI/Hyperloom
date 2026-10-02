@@ -1138,6 +1138,8 @@ class TestEveryTerminalReachesAWrittenReport:
             assert deadline.remaining() > 0
             assert state.phase == "CLOSE"
             assert state.close_sequence_done is False
+            # The breakdown written during the sequence derives this from state.json, so it must land on entry.
+            assert state.stop_reason == "time_exhausted"
             transition = state.phase_history[-1]
             assert transition["reason"] == "time_exhausted"
             assert machine_state.replay_next_phase(transition["evidence"]["predicate_inputs"])[:2] == (

@@ -183,6 +183,14 @@ class MachinePhase(CoordinatorCollaborator):
         """Whether the optimisation phase is enabled for this run."""
         return bool(self.shared_state.framework_agent_phase_enabled)
 
+    def set_terminal_stop_reason(self, state: Any, reason: str) -> None:
+        """Derive the stop reason for a CLOSE transition. The first reason recorded wins.
+
+        Must run before CLOSE writes the session breakdown: the collector derives the stop reason from ``state.json``.
+        """
+        if not state.stop_reason:
+            state.set_stop_reason(_BUDGET_EXIT_STOP_REASONS.get(reason, reason), strict=True)
+
     async def advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick."""
         state = self.shared_state
@@ -262,9 +270,8 @@ class MachinePhase(CoordinatorCollaborator):
                 target,
                 reason,
             )
-        # Terminal transition (target=CLOSE): set stop_reason once from the transition reason.
-        if target == _phase_state.PHASE_CLOSE and not state.stop_reason:
-            state.set_stop_reason(_BUDGET_EXIT_STOP_REASONS.get(reason, reason), strict=True)
+        if target == _phase_state.PHASE_CLOSE:
+            self.set_terminal_stop_reason(state, reason)
         # A cyclic config-arm plateau winds the cycle down with ``switch_bottleneck``: record the plateaued bottleneck
         # so the next cycle steers specialists off it.
         if isinstance(evidence, dict) and evidence.get("switch_bottleneck"):

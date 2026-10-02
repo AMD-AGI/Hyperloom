@@ -873,6 +873,7 @@ class ClosePhase(CoordinatorCollaborator):
         )
         assert decision is not None and decision[0] == _phase_state.PHASE_CLOSE
         target, reason, evidence = decision
+        machine.set_terminal_stop_reason(state, reason)
         if state.pending_escalate_hint == ESCALATE_HINT_SKIP_TO_CLOSE:
             state.consume_pending_escalate_hint()
         elif state.pending_escalate_hint:
