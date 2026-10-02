@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import subprocess
 
+import pytest
 
 from hyperloom.common.failure_signature import (
     MISSING_MODEL_ARCH,
@@ -146,11 +147,15 @@ def _wheel_action() -> "ad.EnablementStackAction":
     )
 
 
+_PURELIB = "/attempt/venv/lib/python3.12/site-packages"
+
+
 def test_vllm_provision_ok(tmp_path, monkeypatch):
     # venv create ok, pip ok, torch-rocm ok, vllm-rocm ok, versions resolvable.
     run = _FakeRun(
         rules=[
             ("importlib.metadata", 0, "0.21.0", ""),
+            ("sysconfig", 0, f"{_PURELIB}\n", ""),
         ],
         default_rc=0,
     )
@@ -212,11 +217,38 @@ def test_vllm_provision_requires_index(tmp_path):
 
 def test_vllm_provision_records_the_tree_the_wheel_lands_in(tmp_path):
     """The wheel occupies the attempt venv alone; the shared framework tree is untouched by it."""
-    purelib = "/attempt/venv/lib/python3.12/site-packages"
-    run = _FakeRun(rules=[("sysconfig", 0, f"{purelib}\n", "")], default_rc=0)
+    run = _FakeRun(rules=[("sysconfig", 0, f"{_PURELIB}\n", "")], default_rc=0)
     result = VllmRocmAdapter(run=run).provision(_wheel_action(), tmp_path / "attempt")
     assert result.ok is True, result.error
-    assert result.runtime.source_root == purelib
+    assert result.runtime.source_root == _PURELIB
+
+
+def _sglang_wheel_action() -> "ad.EnablementStackAction":
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
+
+    return EnablementStackAction(
+        kind="runtime_candidate",
+        framework="sglang",
+        gap_id="g",
+        capability="c",
+        acquisition_method="wheel",
+        index_url="https://rocm.repo/whl",
+    )
+
+
+@pytest.mark.parametrize(
+    "adapter, action",
+    [
+        pytest.param(VllmRocmAdapter, _wheel_action, id="vllm"),
+        pytest.param(SglangAdapter, _sglang_wheel_action, id="sglang"),
+    ],
+)
+def test_a_wheel_runtime_with_no_site_packages_fails_to_provision(tmp_path, adapter, action):
+    """Without the tree the wheel landed in, its patches would edit a tree the server never imports."""
+    run = _FakeRun(rules=[("sysconfig", 1, "", "")], default_rc=0)
+    result = adapter(run=run).provision(action(), tmp_path / "attempt")
+    assert result.ok is False
+    assert "site-packages" in result.error
 
 
 def test_sglang_editable_provision_records_the_clone_it_imports(tmp_path):

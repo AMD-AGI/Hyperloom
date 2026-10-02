@@ -377,6 +377,9 @@ class VllmRocmAdapter(_VenvProvisionMixin):
             return ProvisionResult(ok=False, log_path=log_path, error="attempt torch is not a ROCm build")
         if not verify_vllm_rocm(str(python_path), run=self._run):
             return ProvisionResult(ok=False, log_path=log_path, error="vLLM did not report a ROCm platform")
+        source_root = _site_packages(str(python_path), run=self._run)
+        if not source_root:
+            return ProvisionResult(ok=False, log_path=log_path, error="attempt interpreter reports no site-packages")
 
         versions = {
             "vllm": _installed_version(str(python_path), "vllm", run=self._run),
@@ -389,7 +392,7 @@ class VllmRocmAdapter(_VenvProvisionMixin):
             venv_root=str(attempt_dir / "venv"),
             server_args=action.server_args,
             envs=dict(action.envs),
-            source_root=_site_packages(str(python_path), run=self._run),
+            source_root=source_root,
         )
         return ProvisionResult(
             ok=True,
@@ -514,6 +517,8 @@ class SglangAdapter(_VenvProvisionMixin):
             )
         if not verify_torch_is_rocm(str(python_path), run=self._run):
             return ProvisionResult(ok=False, log_path=log_path, error="attempt torch is not a ROCm build")
+        if not source_root:
+            return ProvisionResult(ok=False, log_path=log_path, error="attempt interpreter reports no site-packages")
 
         versions = {"sglang": _installed_version(str(python_path), "sglang", run=self._run)}
         runtime = FrameworkRuntime(
