@@ -2013,46 +2013,45 @@ async def test_stack_revert_recovery_retries_the_unwind_and_clears(tmp_path: Pat
     }
 
 
-def _age_checkpoint_to_the_previous_release(session_dir: Path) -> None:
-    """Rewrite the persisted checkpoint in the shape the current release writes.
-
-    That shape names its members and stamps every ledger row it marked, but
-    carries neither a stamp of its own nor the member identity list.
-    """
-    state = SharedState.load_or_init(session_dir)
-    state.pending_stack_validation_result = {
-        key: value
-        for key, value in state.pending_stack_validation_result.items()
-        if key not in ("stack_member_identities", "stack_validation_started_at")
-    }
-    state.pending_stack_validation_apply_results = [
-        {key: value for key, value in applied.items() if key != "stack_validation_started_at"}
-        for applied in state.pending_stack_validation_apply_results
-    ]
-    state.save(session_dir)
+_APPLY_KERNEL_PATCH_FIELDS = (
+    "status",
+    "manifest_path",
+    "target_file",
+    "backup_dir",
+    "compiled",
+    "artifact_count",
+    "cache_clear",
+    "rebuild",
+    "jit_build_backup",
+    "cpp_itfs_cache_backup",
+)
 
 
 @pytest.mark.asyncio
-async def test_a_checkpoint_written_before_this_build_still_unwinds(tmp_path: Path, monkeypatch):
-    """A session interrupted on the current release has no identities on its record.
-
-    Its members are still named explicitly and every row it marked carries the
-    attempt's stamp, so the unwind binds on those rather than refusing evidence
-    it wrote itself one release earlier.
-    """
+async def test_a_record_only_checkpoint_unwinds_instead_of_halting(tmp_path: Path, monkeypatch):
+    """Apply rows with no record still say what reached the tree, and that is enough to undo it."""
     from hyperloom.inference_optimizer.session.session_binding import session_scope
 
     stuck = await _halt_a_stack_revert(tmp_path, monkeypatch)
-    _age_checkpoint_to_the_previous_release(tmp_path)
+    state = SharedState.load_or_init(tmp_path)
+    state.pending_stack_validation_result = {}
+    # Only what apply_kernel_patch itself returns: the unwind must not lean on anything the stack layer adds.
+    state.pending_stack_validation_apply_results = [
+        {key: row[key] for key in _APPLY_KERNEL_PATCH_FIELDS if key in row}
+        for row in state.pending_stack_validation_apply_results
+    ]
+    state.save(tmp_path)
     c = _resumed_stack_coordinator(tmp_path)
+    c.shared_state.set_stop_reason("")
+    report: dict[str, Any] = {"fixes": [], "warnings": []}
 
     with session_scope(tmp_path):
-        assert await c.phase_kernel_stack.recover_interrupted_stack_validation() is True
+        await c.writeback._resume_recover_interrupted_stack(report)
 
     assert stuck.read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
-    assert (tmp_path / "k004.py").read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
+    assert c.shared_state.stop_reason == ""
+    assert [f["kind"] for f in report["fixes"]] == ["interrupted_stack_validation_recovered"]
     reloaded = SharedState.load_or_init(tmp_path)
-    assert not reloaded.pending_stack_validation_result
     assert not reloaded.pending_stack_validation_apply_results
     assert _stack_member_guards(reloaded) == {"k001": False, "k004": False}
 
