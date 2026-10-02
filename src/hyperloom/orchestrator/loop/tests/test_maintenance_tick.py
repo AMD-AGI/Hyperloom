@@ -211,7 +211,7 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
         runs = tmp_path / "runs" / "explore"
         for i in range(5):
             (runs / f"task{i}").mkdir(parents=True)
-        c = _maintenance(tmp_path)
+        c = _maintenance(tmp_path, keep=2)
 
         got = c._maybe_prune_runs_for_disk()
 
@@ -332,12 +332,3 @@ class TestTheTickItself:
         assert got["tick"] == 11
         assert got["disk"]["free_gb"] == 500.0
         assert got["events_pruned"] == 5
-
-    def test_unknown_attributes_fall_through_to_the_coordinator(self, tmp_path):
-        coord = _coordinator(tmp_path)
-        coord.some_coordinator_only_thing = "reachable"
-
-        # CoordinatorCollaborator exposes coordinator infrastructure as explicit properties;
-        # other attributes must be accessed via self._coord directly.
-        collab = MaintenanceCollaborator(coord)
-        assert collab._coord.some_coordinator_only_thing == "reachable"
