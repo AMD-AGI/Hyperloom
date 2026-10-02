@@ -392,11 +392,7 @@ class Coordinator:
     @property
     def router(self) -> IntentRouter:
         """Intent routing collaborator (extracted from this class)."""
-        r = self.__dict__.get("_router")
-        if r is None:
-            r = IntentRouter(self)
-            self.__dict__["_router"] = r
-        return r
+        return self._collaborator("_router", IntentRouter)
 
     def _collaborator(self, attr: str, factory):
         """Lazily build + cache a collaborator object; works for ``Coordinator.__new__`` test doubles too (uses ``__dict__``)."""
@@ -1345,7 +1341,6 @@ __all__ = [
     "Coordinator",
     "CoordinatorState",
     "SharedState",
-    "_infer_model_class_from_config",
     "effective_closing_grace_sec",
     # Re-exported from policy.gate; referenced via ``coordinator.<name>`` in tests.
     "SPECIALIST_FROM_AGENT_PREFIX",
