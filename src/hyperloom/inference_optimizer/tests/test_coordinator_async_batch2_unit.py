@@ -1496,6 +1496,8 @@ async def test_pump_dispatcher_explore_promotes(coord: Coordinator, monkeypatch)
 
     monkeypatch.setattr(coord.sub, "run_task", fake_run)
     await coord._pump_dispatcher_once()
+    await coord.wait_for_running_work(timeout=5)
+    await coord._drain_completions()
     tail = await coord.bus.tail(topic="delegated_result", n=10)
     assert any(m.payload.get("task_id") == task.task_id for m in tail)
 
@@ -1520,6 +1522,8 @@ async def test_pump_dispatcher_specialist_bookkeeping(coord: Coordinator, monkey
 
     monkeypatch.setattr(coord.sub, "run_task", fake_run)
     await coord._pump_dispatcher_once()
+    await coord.wait_for_running_work(timeout=5)
+    await coord._drain_completions()
     tail = await coord.bus.tail(topic="delegated_result", n=10)
     assert any(m.payload.get("kind") == "specialist" for m in tail)
 
@@ -2550,7 +2554,7 @@ async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator
     coord.shared_state.framework_agent_discover_failures = 0
     # Discovery has spent its retry budget, so the upstream lane declines and the tick reaches the terminal rung.
     coord.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
-    monkeypatch.setattr(coord.phase_framework, "_select_next_framework_agent_candidate", lambda: None)
+    monkeypatch.setattr(coord.phase_framework, "_select_next_framework_agent_candidate", lambda **_k: None)
     monkeypatch.setattr(coord.phase_framework, "_record_framework_agent_phase_done", lambda **k: None)
     await coord.phase_framework._pump_framework_agent_phase()
     assert coord.shared_state.framework_agent_phase_done is True
@@ -2569,7 +2573,7 @@ async def test_pump_framework_agent_submits_candidate_proposal(coord: Coordinato
     monkeypatch.setattr(
         coord.phase_framework,
         "_select_next_framework_agent_candidate",
-        lambda: candidate,
+        lambda exclude_ids=(): None if candidate["candidate_id"] in exclude_ids else candidate,
     )
 
     await coord.phase_framework._pump_framework_agent_phase()
@@ -2592,7 +2596,7 @@ async def test_pump_framework_agent_dedup_does_not_resubmit(coord: Coordinator, 
     monkeypatch.setattr(
         coord.phase_framework,
         "_select_next_framework_agent_candidate",
-        lambda: candidate,
+        lambda exclude_ids=(): None if candidate["candidate_id"] in exclude_ids else candidate,
     )
 
     await coord.phase_framework._pump_framework_agent_phase()

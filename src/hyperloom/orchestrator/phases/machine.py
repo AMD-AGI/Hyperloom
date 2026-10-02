@@ -197,6 +197,9 @@ class MachinePhase(CoordinatorCollaborator):
         """Scan exit conditions and transition phase at most once per tick."""
         state = self.shared_state
         if state.closing_phase and state.phase == _phase_state.PHASE_CLOSE and not state.close_sequence_done:
+            # The closing transition supersedes any barrier this machine was holding, and the closing report is
+            # dispatched by the pump.
+            self.admission_frozen = False
             await self.ensure_close_sequence(reason="time_exhausted")
             return
         await self._track_kernel_idle_streak()
@@ -218,15 +221,16 @@ class MachinePhase(CoordinatorCollaborator):
             await self._maybe_enqueue_explore_research_scout()
             await self._maybe_force_stalled_domain_specialist()
         await self._maybe_enqueue_trajectory_reviewer()
-        if next_phase is None:
+        # Admission stays frozen for as long as a transition is pending.
+        self.admission_frozen = next_phase is not None and next_phase[0] != (state.phase or "").upper()
+        if not self.admission_frozen:
             return
         target, reason, evidence = next_phase
-        if target == (state.phase or "").upper():
-            return  # already there
         prior = state.phase
         barrier_reason = f"phase_transition:{str(prior or '').strip().upper()}->{target}"
         # The next phase starts on quiet GPUs: every running action is stopped, and the transition waits until the
-        # registry confirms none is left running. Queued work the next phase does not admit is dropped here too.
+        # registry confirms none is left running and every finished one is booked in this phase. Queued work the next
+        # phase does not admit is dropped here too.
         cancelled = await self.tasks.cancel_queued(
             allowed_kinds=_phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset()),
             reason=barrier_reason,
@@ -252,9 +256,12 @@ class MachinePhase(CoordinatorCollaborator):
                 },
             )
         running = await self.tasks.running()
-        if running:
-            log.info("phase_machine: holding %s until %d running task(s) stop", barrier_reason, len(running))
+        if running or self.has_unbooked_completions():
+            log.info(
+                "phase_machine: holding %s until %d running task(s) stop and are booked", barrier_reason, len(running)
+            )
             return
+        self.admission_frozen = False
         # Consume escalate hint after a hint-driven transition.
         if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
             state.consume_pending_escalate_hint()

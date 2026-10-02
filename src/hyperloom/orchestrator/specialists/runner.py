@@ -661,6 +661,11 @@ class SpecialistRunner:
                 session_framework_tree=str(params.get("session_framework_tree") or ""),
                 framework_source_roots=tuple(params.get("framework_source_roots") or ()),
                 worktree_base=str(worktree_base) if worktree is not None and worktree_base is not None else "",
+                worktree_package_dir=(
+                    str(worktree_source.tree.relative_to(worktree_source.root))
+                    if worktree is not None and worktree_source is not None
+                    else ""
+                ),
                 source_hint_directories=tuple(params.get("source_hint_directories") or ()),
                 model_info=dict(params.get("model_info") or {}),
                 static_recon_checklist=str(params.get("static_recon_checklist") or ""),
@@ -701,7 +706,6 @@ class SpecialistRunner:
                 scope=profile.scope,
                 mode=profile.mode,
                 bench=profile.bench,
-                lane=profile.lane,
                 task_description=task_description,
                 # Coordinator-injected note when this is a bounded auto-retry.
                 auto_retry_reason=str(params.get("_auto_retry_reason") or ""),

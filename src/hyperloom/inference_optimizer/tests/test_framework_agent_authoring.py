@@ -622,7 +622,7 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
         result={"status": "reverted"},
     )
 
-    await stub._reap_dispatched_task(task, result, None)
+    await stub._reap_dispatched_task(task, result)
 
     assert recorded == ["reverted"]
     assert result.result["reauthor_attempt"] == 1
@@ -922,3 +922,53 @@ async def test_perf_explore_retry_stamps_immutable_explore_owner(
     params = stub.tasks.created[-1]["params"]
     assert params["source_phase"] == "FRAMEWORK_AGENT"
     assert params["gap_layer"] == "perf_explore"
+
+
+# ── Parallel authoring ───────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def parallel_phase(tmp_path, monkeypatch):
+    """A FRAMEWORK phase with five PR candidates, capacity 3, and recorded review submissions."""
+    from hyperloom.orchestrator.phases.framework import FrameworkPhase
+
+    stub = _stub(tmp_path)
+    stub.shared_state.research_lane_capacity = 3
+    _seed_batch(stub, *({"pr_url": f"https://github.com/ex/repo/pull/{i}", "title": f"c{i}"} for i in range(5)))
+    stub.submitted = []
+    stub.discoveries = []
+
+    async def _submit(_self, candidate, *, audit, audit_step):
+        stub.submitted.append(candidate["pr_url"])
+
+    async def _discover(_self, *, reason):
+        stub.discoveries.append(reason)
+        return False
+
+    monkeypatch.setattr(FrameworkPhase, "_submit_framework_agent_candidate_for_review", _submit)
+    monkeypatch.setattr(FrameworkPhase, "_maybe_enqueue_candidate_discovery", _discover)
+    return stub
+
+
+async def test_parallel_authoring_fills_capacity_around_candidates_in_flight(parallel_phase):
+    in_flight = "https://github.com/ex/repo/pull/0"
+    parallel_phase.tasks._running.append(
+        SimpleNamespace(kind="integrate_patch", params={"framework_agent_candidate_id": in_flight})
+    )
+
+    await parallel_phase.phase_framework._pump_framework_agent_phase()
+
+    assert parallel_phase.submitted == ["https://github.com/ex/repo/pull/1", "https://github.com/ex/repo/pull/2"]
+
+
+async def test_discovery_fallback_waits_until_nothing_is_in_flight(parallel_phase):
+    parallel_phase.shared_state.framework_agent_batches = []
+    parallel_phase.tasks._queued.append(
+        SimpleNamespace(kind="specialist", params={"framework_agent_candidate_id": "https://github.com/ex/repo/pull/9"})
+    )
+    await parallel_phase.phase_framework._pump_framework_agent_phase()
+    assert parallel_phase.discoveries == []
+
+    parallel_phase.tasks._queued.clear()
+    await parallel_phase.phase_framework._pump_framework_agent_phase()
+    assert parallel_phase.discoveries == ["candidate_pool_empty"]

@@ -95,7 +95,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
     trajectory_scope,
     trajectory_span,
 )
-from hyperloom.common.deadline import Deadline
+from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.inference_optimizer.trace.orchestration_trace import (
     write_mcp_setup_once,
 )
@@ -235,13 +235,12 @@ class Coordinator(
                 serving_tp=self._resolve_serving_tp(),
             ),
         )
-        # Framework-authoring pool over the whole node.
+        # Whole-node pool for enablement and bench specialists.
         self.framework_gpu_pool = SpecialistGpuPool(
             self.db,
             gpu_ids=resolve_whole_machine_devices(),
         )
-        # Dispatcher re-scan poll cadence: re-scan the queue while awaiting in-flight tasks so a queued GPU task
-        # starts the moment its lane frees.
+        # Poll cadence of the waits on running dispatched work (closing grace, close steps).
         self._dispatcher_poll_sec = 10.0
         # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
         try:
@@ -929,6 +928,11 @@ class Coordinator(
                             )
                         stop_reason = "time_exhausted"
                         break
+                    # No reactor turn paces the closing ticks, so wait on the running work instead.
+                    poll_sec = self._dispatcher_poll_sec
+                    await self.wait_for_running_work(
+                        timeout=min(poll_sec, seconds_until(closing_deadline, unbounded_cap=poll_sec))
+                    )
                 if (
                     self.shared_state.recent_crash_count(
                         window_sec=_CRASH_EMERGENCY_WINDOW_SEC,

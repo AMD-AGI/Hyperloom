@@ -306,7 +306,6 @@ def test_rearm_reactivation_threads_kept_action_into_next_params(monkeypatch):
     fake._discover_enablement_candidate_refs = types.MethodType(Coordinator._discover_enablement_candidate_refs, fake)
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
-    fake._framework_gpu_params = lambda: {}
     params = Coordinator._build_enablement_specialist_params(fake, "Model architecture 'Foo' is not supported")
     assert params is not None
     # The prior KEEP'd runtime is re-attached for the next round.
