@@ -71,6 +71,35 @@ _EVAL_START_PATCHED = '    export EVAL_RESULT_DIR="$results_dir"\n    echo "HYPE
 _EVAL_START_SENTINEL = "HYPERLOOM_EVAL_START"
 _EVAL_START_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_eval_start_patcher.lock")
 
+# Exact alternatives for the infx package layout. Legacy sessions still use the
+# original shell/Python text; selection is by content, never by a version guess.
+_ANCHOR_ALTERNATIVES: dict[str, dict[str, str]] = {
+    _BENCH_SERVING_LEGACY: {
+        '            extra_body={\n                "num_steps": 1,\n                "merge_profiles": True,\n                "profile_by_stage": True,\n            },': '            extra_body=__import__("json").loads(__import__("os").environ.get("PROFILE_EXTRA_BODY") or '
+        '\'{"num_steps": 1, "merge_profiles": true, "profile_by_stage": true}\'),',
+    },
+    _EVAL_DEST_LEGACY: {
+        '        target="./${stem}_conc${eval_conc}${extension}"\n'
+        "        suffix=2\n"
+        '        while [ -e "$target" ]; do\n'
+        '            target="./${stem}_conc${eval_conc}_${suffix}${extension}"': '        local target_dir="${RESULT_DIR:-.}/"\n'
+        '        target="${target_dir}${stem}_conc${eval_conc}${extension}"\n'
+        "        suffix=2\n"
+        '        while [ -e "$target" ]; do\n'
+        '            target="${target_dir}${stem}_conc${eval_conc}_${suffix}${extension}"',
+    },
+    _EVAL_START_LEGACY: {
+        "    # Read by append_lm_eval_summary.\n" + _EVAL_START_LEGACY: "    # Read by append_lm_eval_summary.\n"
+        + _EVAL_START_PATCHED,
+    },
+}
+
+
+def _matching_patch_anchor(text: str, legacy: str) -> str:
+    """Select the supported upstream spelling before counting or replacing it."""
+    return next((anchor for anchor in _ANCHOR_ALTERNATIVES.get(legacy, {}) if anchor in text), legacy)
+
+
 # Two independent answers to the same budget, injected together.
 _EVAL_PROBE_PY = """
 # --- HYPERLOOM_EVAL_PROBE (early-exit probe + per-request bounds) ------------
@@ -542,6 +571,13 @@ _EVAL_PROBE_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_eval_probe_
 # Appending needs no anchor, but it does need this file: upstream renaming or moving it puts the probe and the bounds
 # back to warn-only, and the eval runs unbounded again.
 EVAL_PROBE_TARGET_PARTS = ("utils", "evals", "patches", "lm_eval_sitecustomize.py")
+EVAL_PROBE_TARGETS = (("infx", *EVAL_PROBE_TARGET_PARTS[1:]), EVAL_PROBE_TARGET_PARTS)
+
+
+def _inferencex_project_root(path: Path | str) -> Path:
+    root = Path(path)
+    nested = root / "inferencex-e2e"
+    return nested if (nested / "benchmarks" / "benchmark_lib.sh").is_file() else root
 
 
 def _discover_inferencex_roots(
@@ -556,7 +592,7 @@ def _discover_inferencex_roots(
         if not candidate:
             return
         try:
-            resolved = Path(candidate).expanduser().resolve()
+            resolved = _inferencex_project_root(Path(candidate).expanduser().resolve())
         except OSError:
             return
         if not resolved.is_dir():
@@ -616,6 +652,9 @@ def _apply_line_replacement_atomic(
         log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
         return False
 
+    selected = _matching_patch_anchor(original, legacy)
+    patched_line = _ANCHOR_ALTERNATIVES.get(legacy, {}).get(selected, patched_line)
+    legacy = selected
     if legacy not in original:
         log.warning(missing_msg, src)
         return False
@@ -714,7 +753,7 @@ def _pick_benchmark_serving(candidates: list[Path]) -> Path:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if _BENCH_SERVING_SENTINEL in text or _BENCH_SERVING_LEGACY in text:
+        if _BENCH_SERVING_SENTINEL in text or count_anchor_hits(text, _BENCH_SERVING_LEGACY):
             return path
     return candidates[-1]
 
@@ -728,7 +767,7 @@ def benchmark_serving_path_in(root: Path | str) -> Path:
     because a gate speaks for the tree the run will execute, not for whatever else
     the environment can reach.
     """
-    base = Path(root)
+    base = _inferencex_project_root(root)
     existing = [path for path in (base.joinpath(*rel) for rel in _BENCH_SERVING_REL_PARTS) if path.is_file()]
     if not existing:
         return base.joinpath(*_BENCH_SERVING_REL_PARTS[-1])
@@ -868,8 +907,16 @@ def ensure_benchmark_lib_eval_start_patched(
 def _resolve_eval_sitecustomize_paths(
     inferencex_path: Path | str | None,
 ) -> list[Path]:
-    """Return every existing ``<root>/utils/evals/patches/lm_eval_sitecustomize.py``."""
-    return _resolve_inferencex_files(inferencex_path, *EVAL_PROBE_TARGET_PARTS)
+    """Resolve the active eval patch module in either supported project layout."""
+    return [
+        path
+        for root in _discover_inferencex_roots(inferencex_path)
+        if (
+            path := next(
+                (root.joinpath(*parts) for parts in EVAL_PROBE_TARGETS if root.joinpath(*parts).is_file()), None
+            )
+        )
+    ]
 
 
 def eval_probe_targets_exist(inferencex_path: Path | str | None = None) -> bool:
@@ -1045,7 +1092,7 @@ _ANCHOR_CONTRACT: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     ("eval_start", ("benchmarks", "benchmark_lib.sh"), _EVAL_START_SENTINEL, _EVAL_START_LEGACY),
     (
         _BENCH_SERVING_ANCHOR_NAME,
-        # The pinned revision's layout; newer checkouts are resolved by name, not by this path.
+        # Legacy sessions retain this path; newer layouts resolve the implementation by name.
         ("utils", "bench_serving", "benchmark_serving.py"),
         _BENCH_SERVING_SENTINEL,
         _BENCH_SERVING_LEGACY,
@@ -1054,8 +1101,8 @@ _ANCHOR_CONTRACT: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
 
 
 def count_anchor_hits(text: str, anchor: str) -> int:
-    """Return how many sites in ``text`` the given anchor would rewrite."""
-    return text.count(anchor)
+    """Count the supported upstream spelling that this patch would rewrite."""
+    return text.count(_matching_patch_anchor(text, anchor))
 
 
 def verify_patch_anchors(
@@ -1140,7 +1187,7 @@ def failed_patch_anchors_in(root: Path | str) -> list[AnchorStatus]:
     Returns:
         The failing subset for that root alone.
     """
-    base = Path(root)
+    base = _inferencex_project_root(root)
 
     def _resolve(name: str, parts: tuple[str, ...]) -> list[Path]:
         """Name the one file under ``base`` a patch targets, when it exists.

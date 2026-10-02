@@ -1,29 +1,29 @@
 {
-  "anchors_fingerprint": "4917512af88fd31cf58f6f29c878266b4ec702ba3d9815dedb41b00177d0d7de",
+  "anchors_fingerprint": "1b17f5de54f5da34cfb1bd085fb7ea9e64a2dcb15c81b4d53e4145d670e05449",
   "files": {
-    "benchmarks/benchmark_lib.sh": {
+    "inferencex-e2e/benchmarks/benchmark_lib.sh": {
       "anchors": {
         "eval_dest": 1,
         "eval_start": 1,
         "num_prompts": 1
       },
-      "sha256": "99467b8e61d1ee466335e572b8831db072dfe877139e9de0dbd750279b317b4e"
+      "sha256": "f3b8903721800b51da091b78dee1f54213dd35ea9811e57b4abeecfe7a0f0c43"
     },
-    "utils/bench_serving/benchmark_serving.py": {
+    "inferencex-e2e/infx/bench_serving/benchmark_serving.py": {
       "anchors": {
         "profile_extra_body": 1
       },
-      "sha256": "9bb3e5096ddc74398f8a33ec2dc7c787afa6ae7bf8f5dd2c8b2e387a280a7785"
+      "sha256": "f98529033750e38763603cc9c83bcebfd364cf58f9fd5e867eec9dcdde0e7a44"
     }
   },
   "magpie_patch": {
     "applies": true,
-    "path": "benchmarks/benchmark_lib.sh"
+    "path": "inferencex-e2e/benchmarks/benchmark_lib.sh"
   },
   "probe_target": {
-    "path": "utils/evals/patches/lm_eval_sitecustomize.py",
-    "sha256": "b46fbc383c896d16b2cf3e7f862ada35b97612d6179e71a5a7145e4dd15b2ea2"
+    "path": "inferencex-e2e/infx/evals/patches/lm_eval_sitecustomize.py",
+    "sha256": "7ddc246bedcdca084b213973bb39ed34272a47fff08d2d4cbbdcf0a5909a8d3f"
   },
-  "ref": "421312f8984c2152f4b8eafefc93ea2fa598e80f",
+  "ref": "408c015be4b22d14c69518643609669405507077",
   "refresh_with": "python scripts/refresh_inferencex_anchor_contract.py"
 }
