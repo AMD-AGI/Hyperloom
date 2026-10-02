@@ -4,6 +4,7 @@
 """Coordinator prompt composition: inbox rendering, per-tick phase/mission/advisory blocks, MCP context readers, and reactor conversation tracing."""
 
 from __future__ import annotations
+import asyncio
 import json
 import time
 from typing import Any
@@ -188,6 +189,41 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
 
 class ConversationCollaborator(CoordinatorCollaborator):
     """Coordinator mixin; its methods run with the Coordinator as ``self``."""
+
+    async def _kb_prompt_block(self, untested_proposals: str) -> str:
+        """Read shared Experience evidence once per FRAMEWORK_AGENT orchestration tick."""
+        from hyperloom.inference_optimizer.experience_kb import integration_for
+
+        integration = integration_for(self, self.session_dir)
+        if integration is None:
+            return ""
+        evidence = await asyncio.to_thread(
+            integration.read_for_framework,
+            self.shared_state,
+            untested_proposals=untested_proposals,
+        )
+        self._kb_last_read = evidence
+        if evidence.status != "completed" or not evidence.prompt_block:
+            return ""
+        block = "\n".join(
+            (
+                "=== Experience KB warm-start evidence ===",
+                ("INVARIANT: the original Recipe benchmark measurement remains the gain-accounting baseline."),
+                (
+                    "Historical configurations may seed proposals/current-best "
+                    "candidates only; never replace benchmark_baseline."
+                ),
+                evidence.prompt_block,
+            )
+        )
+        self.shared_state.record_experience_kb_injection(
+            consumer="orchestration",
+            read_id=evidence.read_id,
+            experience_ids=[str(ref.get("id") or "") for ref in evidence.rendered_refs],
+            experiences=[dict(item) for item in evidence.experiences],
+            prompt_block=block,
+        )
+        return block
 
     def _attach_orchestration_context_tools(self) -> None:
         """Bind a read-only ContextProvider to the orchestration backend (no-op without setter)."""
@@ -424,6 +460,9 @@ class ConversationCollaborator(CoordinatorCollaborator):
                 if untested_block:
                     sections.append("=== Untested proposals (current cycle) ===")
                     sections.append(untested_block)
+                kb_block = await self._kb_prompt_block(untested_block)
+                if kb_block:
+                    sections.append(kb_block)
 
         # Recipe KB T0 warm-start snapshot + structured gaps[] ledger.
         if agent_name == "orchestration":

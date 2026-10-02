@@ -4,17 +4,20 @@
 """FRAMEWORK_AGENT phase handler: authoring specialist dispatch, enablement repair, deliverable routing, and Critic-review submission/reauthor."""
 
 from __future__ import annotations
+import hashlib
 import logging as _logging
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.coerce import to_float
+from hyperloom.common.env_safety import redact_secret_values
 
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..state.attempt_ledger import record_patch_attempt
+from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 from ..state.task_registry import TaskNotFound
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
 
@@ -199,6 +202,7 @@ def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> No
 def _forward_integrate_source(
     src: dict[str, Any],
     dst: dict[str, Any],
+    done_payload: Mapping[str, Any],
 ) -> None:
     """Preserve proposal ownership across delayed ``integrate_patch`` execution."""
 
@@ -214,11 +218,24 @@ def _forward_integrate_source(
     # proposal ownership only needs the gap metadata below.
     # ``lever_kind`` travels with the proposal: the patch that lands moved the
     # same lever the specialist was dispatched against, and re-deriving it at
-    # writeback time is how attribution drifts.
-    for key in ("gap_canonical_id", "gap_layer", "lever_kind", "reauthor_attempt", "apply_retry_attempt"):
+    # writeback time is how attribution drifts. The KB exposure does too: it is
+    # what the authoring specialist was shown, and the attempt is recorded later.
+    for key in (
+        "gap_canonical_id",
+        "gap_layer",
+        "lever_kind",
+        "reauthor_attempt",
+        "apply_retry_attempt",
+        "kb_read_id",
+        "kb_rendered_refs",
+    ):
         value = src.get(key)
         if value not in (None, "", [], {}):
             dst[key] = value
+    # What the specialist says those Experiences did to the patch it wrote, already checked against them.
+    citations = done_payload.get("experience_citations")
+    if citations:
+        dst["experience_citations"] = list(citations)
 
 
 def _recorder(coord: Any):
@@ -316,6 +333,75 @@ def _settle(coord: Any, proposal_id: str, *, disposition: str, reason: str = "")
     recorder.settle_proposal(proposal_id, disposition=disposition, reason=reason)
 
 
+def _source_action_reasoning(
+    params: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> tuple[str, str]:
+    """Resolve source-attempt reasoning without disguising fallback context as authored rationale."""
+    for owner, values, fields in (
+        ("action_params", params, ("reasoning", "rationale")),
+        ("candidate", candidate, ("reasoning", "rationale", "why")),
+        ("context", params, ("gap_symptom",)),
+        ("post_action_result", result, ("reasoning",)),
+    ):
+        for field in fields:
+            value = str(values.get(field) or "").strip()
+            if value:
+                return value, f"{owner}.{field}"
+    return "", ""
+
+
+def _patch_material(session_dir: Path, paths: Iterable[str]) -> list[dict[str, str]]:
+    """Each distinct session-local patch as ``{path, sha256, content}``, in the order given.
+
+    A patch outside the session, not UTF-8, or carrying a credential is left
+    out, so the session breakdown only ever holds patch text that is safe to
+    publish whole.
+    """
+    root = Path(session_dir).resolve()
+    material: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in paths:
+        if not raw:
+            continue
+        candidate = Path(raw)
+        resolved = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+        try:
+            relative = resolved.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if relative in seen:
+            continue
+        try:
+            if not resolved.is_file():
+                continue
+            payload = resolved.read_bytes()
+        except OSError:
+            continue
+        try:
+            content = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if redact_secret_values(content) != content:
+            continue
+        seen.add(relative)
+        material.append({"path": relative, "sha256": hashlib.sha256(payload).hexdigest(), "content": content})
+    return material
+
+
+def _record_kb_exposure(recorder: Any, proposal_id: str, params: Mapping[str, Any]) -> None:
+    """Add the Experience KB read a specialist was shown to the proposal it produced.
+
+    The proposal row is an upsert whose lists merge, so a candidate shaped by
+    both a discovery and an authoring specialist keeps both reads' refs.
+    """
+    read_id = str(params.get("kb_read_id") or "")
+    refs = params.get("kb_rendered_refs") or []
+    if read_id or refs:
+        recorder.record_proposal(proposal_id, kb_read_id=read_id, rendered_refs=refs)
+
+
 def _record_source_attempt(
     coord: Any,
     *,
@@ -326,7 +412,7 @@ def _record_source_attempt(
     params: Mapping[str, Any],
     specialist_task_id: str = "",
 ) -> None:
-    """Record one authored patch's measured attempt on the framework timeline event.
+    """Record one authored deliverable's measured attempt -- a patch, or server args and envs -- on the framework event.
 
     A pure timeline recorder: the control-plane ledger write sits beside the call
     to this function, not inside it, so a phase with no open recorder still
@@ -347,6 +433,33 @@ def _record_source_attempt(
     # stack as of dispatch. Absent on a row that never reached a measurement.
     stack = result.get("measured_against")
     measured_against = {"measured_against": stack} if isinstance(stack, Mapping) and stack else {}
+    # The levers the deliverable layered onto that stack: the whole change when the specialist returned no patch.
+    levers = {"extra_server_args": params.get("extra_server_args"), "extra_envs": params.get("extra_envs")}
+    config_delta = {"config_delta": levers} if any(levers.values()) else {}
+    normalized_status = {
+        "kept": "KEEP",
+        "reverted": "REVERT",
+        "accuracy_unavailable_reject": "REVERT",
+        "failed": "FAILED",
+    }.get(status, status)
+    candidate = params.get("candidate")
+    candidate_row = candidate if isinstance(candidate, Mapping) else {}
+    reasoning, reasoning_origin = _source_action_reasoning(params, candidate_row, result)
+    patches_applied = [str(path) for path in (result.get("patches_applied") or []) if str(path)]
+    patches_reverted = [str(path) for path in (result.get("patches_reverted") or []) if str(path)]
+    patch_path = str(result.get("source_realized_patch") or result.get("patch_path") or "")
+    if not patch_path:
+        patch_path = next(iter(patches_applied or patches_reverted), "")
+    error_class = str(result.get("error_class") or "")
+    error_excerpt = str(result.get("error") or "")[:600]
+    failure_attribution = ""
+    if normalized_status in UNMEASURED_OUTCOMES:
+        failure_attribution = classify_failure_attribution(
+            error_class=error_class,
+            error_excerpt=error_excerpt,
+            reason=result.get("reason"),
+            explicit=result.get("failure_attribution"),
+        )
     recorder.record_attempt(
         task_id,
         arm=ARM_SOURCE,
@@ -354,15 +467,23 @@ def _record_source_attempt(
         proposal_ref=candidate_id,
         candidate_id=candidate_id,
         provenance=str(params.get("lever_kind") or ""),
-        outcome=status,
+        outcome=normalized_status,
         reason=str(result.get("reason") or ""),
+        reasoning=reasoning,
+        reasoning_origin=reasoning_origin,
+        experience_citations=params.get("experience_citations") or [],
         stage=str(result.get("stage") or ""),
         route=str(params.get("audit_step") or ""),
         patch_source=specialist_task_id,
-        patch_path=str(result.get("patch_path") or ""),
+        patch_path=patch_path,
+        fingerprint=str(result.get("patch_sha256") or result.get("fingerprint") or ""),
         # An attempt can apply several patches, and which ones landed is
         # not recoverable from the single primary path.
-        patches_applied=result.get("patches_applied") or [],
+        patches_applied=patches_applied,
+        patches_reverted=patches_reverted,
+        patch_material=_patch_material(
+            Path(coord._coord.session_dir), [patch_path, *patches_applied, *patches_reverted]
+        ),
         target_files=result.get("target_files") or [],
         source_ref=str(params.get("framework_agent_candidate_id") or candidate_id),
         measurement={
@@ -380,8 +501,9 @@ def _record_source_attempt(
             "passed": accuracy_pass,
         },
         failure={
-            "error_class": str(result.get("error_class") or ""),
-            "error_excerpt": str(result.get("error") or "")[:600],
+            "error_class": error_class,
+            "error_excerpt": error_excerpt,
+            "attribution": failure_attribution,
         },
         artifacts={
             "workspace": str(result.get("workspace") or ""),
@@ -399,7 +521,21 @@ def _record_source_attempt(
         ),
         attribution_eligible=(_is_kept(status) and base is not None and result.get("output_throughput") is not None),
         **measured_against,
+        **config_delta,
     )
+    _record_kb_exposure(recorder, candidate_id, params)
+    delta_pct = result.get("delta_pct")
+    keep_threshold = result.get("keep_threshold_pct")
+    if keep_threshold is None:
+        keep_threshold = params.get("keep_threshold_pct")
+    if isinstance(delta_pct, (int, float)) and isinstance(keep_threshold, (int, float)):
+        recorder.record_attempt_gate(
+            task_id,
+            "keep_threshold",
+            passed=float(delta_pct) >= float(keep_threshold),
+            observed=delta_pct,
+            threshold=keep_threshold,
+        )
     if accuracy_pass is not None:
         recorder.record_attempt_gate(
             task_id,
@@ -407,6 +543,14 @@ def _record_source_attempt(
             passed=bool(accuracy_pass),
             observed=result.get("accuracy_value"),
             threshold=result.get("accuracy_reference"),
+        )
+    parity = result.get("switch_off_parity")
+    if isinstance(parity, Mapping) and parity.get("ran"):
+        recorder.record_attempt_gate(
+            task_id,
+            "switch_off_parity",
+            passed=bool(parity.get("ok")),
+            reason=str(parity.get("reason") or ""),
         )
     _record_step(
         coord,
@@ -436,11 +580,13 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
     )
 
     run_id = str(getattr(task, "task_id", "") or "")
-    domain = str((getattr(task, "params", None) or {}).get("domain") or "")
+    discovery_params = getattr(task, "params", None) or {}
+    domain = str(discovery_params.get("domain") or "")
     kept = {coord._framework_candidate_key(cand): cand for cand in candidates}
     for cand_id, cand in kept.items():
         if not cand_id:
             continue
+        _record_kb_exposure(recorder, cand_id, discovery_params)
         recorder.record_proposal(
             cand_id,
             arm=ARM_SOURCE,
@@ -450,6 +596,7 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
             source_ref=str(cand.get("pr_url") or cand.get("head_sha") or ""),
             repo=str(cand.get("repo") or ""),
             title=str(cand.get("title") or ""),
+            reasoning=str(cand.get("reasoning") or cand.get("rationale") or cand.get("why") or ""),
             changed_files=cand.get("changed_files") or [],
             gap_canonical_id=str(cand.get("gap_canonical_id") or ""),
             route=str(cand.get("route") or ""),
@@ -1431,6 +1578,28 @@ class FrameworkPhase:
             "source": "coordinator_internal",
             **self._coord._framework_gpu_params(),
         }
+        recorder = _recorder(self)
+        if recorder is not None:
+            from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+                ARM_SOURCE,
+                PRODUCER_ORCHESTRATION,
+                STEP_PROPOSED,
+            )
+
+            recorder.record_proposal(
+                cand_id,
+                arm=ARM_SOURCE,
+                producer=PRODUCER_ORCHESTRATION,
+                title=str(candidate.get("title") or cand_id),
+                reasoning=str(params["gap_symptom"]),
+                gap_canonical_id=gap_cid,
+                route="author_via_specialist",
+            )
+            recorder.record_proposal_step(
+                cand_id,
+                step=STEP_PROPOSED,
+                reason=reason,
+            )
         await self._coord._warm_specialist_params(params)
         lanes, ttl = self._coord._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         create_kwargs: dict[str, Any] = {
@@ -2514,6 +2683,7 @@ class FrameworkPhase:
                 "changed_files": entry.get("changed_files") or [],
                 "gap_canonical_id": str(entry.get("gap_canonical_id") or "").strip(),
                 "gap_keywords": entry.get("gap_keywords") or [],
+                "reasoning": str(entry.get("reasoning") or entry.get("rationale") or entry.get("why") or "").strip(),
                 "route": str(entry.get("route") or "author_via_specialist").strip(),
                 "audit": {
                     "verdict": verdict,
@@ -2715,6 +2885,7 @@ class FrameworkPhase:
         _forward_integrate_source(
             spec_params,
             integrate_params,
+            done_payload,
         )
         # FRAMEWORK authoring provenance passthrough: propagate the PR
         # candidate/batch id onto the synthetic integrate_patch task so the
@@ -2868,6 +3039,7 @@ class FrameworkPhase:
         _forward_integrate_source(
             spec_params,
             integrate_params,
+            done_payload,
         )
         # FRAMEWORK authoring provenance passthrough for the authored-outcome bridge.
         fa_cand = str(spec_params.get("framework_agent_candidate_id") or "")

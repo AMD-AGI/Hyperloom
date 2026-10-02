@@ -247,7 +247,7 @@ def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_pa
     )
     assert round_entry["reauthor_attempt"] == 1
     integrate_params: dict[str, Any] = {}
-    _forward_integrate_source(specialist_task.params, integrate_params)
+    _forward_integrate_source(specialist_task.params, integrate_params, {})
     assert integrate_params["reauthor_attempt"] == 1
 
 

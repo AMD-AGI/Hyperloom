@@ -189,6 +189,8 @@ def test_payload_contracts_render_in_every_phase(registry):
     for phase in _ps.PHASE_NAMES:
         text = _build(registry, phase)
         assert "GRID INPUT (REQUIRED)" in text
+        assert "reasoning, provenance" in text
+        assert "Every variant requires action-time reasoning" in text
         assert "EMIT: delegate{action_name='specialist'" in text
         assert "- **explore** —" in text
         assert "- **specialist** —" in text

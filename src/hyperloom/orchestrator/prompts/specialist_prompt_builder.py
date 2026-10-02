@@ -888,6 +888,8 @@ class SpecialistPromptInputs:
 
     # Optional structured KB context. Empty in the RecipeKB-first path.
     kb_subgraph: dict[str, Any] = field(default_factory=dict)
+    # Experience service ``prompt_block`` read for this dispatch; empty when no Experience was rendered.
+    experience_kb_block: str = ""
 
     # Roofline / TraceLens evidence from ``SharedState.last_trace_analyze``;
     # empty dict renders a placeholder.
@@ -1462,6 +1464,7 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
     """
     return (
         not inp.kb_subgraph
+        and not inp.experience_kb_block
         and not inp.warm_start_recipe
         and not inp.warm_start_lessons
         and not inp.warm_start_pitfalls
@@ -1545,6 +1548,32 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
     rows.append(json.dumps(inp.kb_subgraph, sort_keys=True, separators=(",", ":")))
     rows.append("```")
     return rows
+
+
+def _section_experience_kb(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the Experience KB section; omitted when this dispatch rendered no Experience.
+
+    Args:
+        inp: Assembled prompt inputs for the current dispatch.
+
+    Returns:
+        Prompt lines carrying the Experience service block, or ``[]``.
+    """
+    if not inp.experience_kb_block:
+        return []
+    return [
+        "## 4b. EXPERIENCE KB (measured outcomes from earlier sessions)",
+        "",
+        "Compare each Experience's identity and baseline configuration with Sections 2 and 3 "
+        + "before relying on it. When one shaped a proposal, cite it in that proposal's "
+        + "``experience_citations``, or for a patch you wrote in the payload's top-level "
+        + "``experience_citations``: ``{id, stance, claim}`` with ``stance`` one of ``adopt`` "
+        + "(you did its change), ``adapt`` (you did it modified), ``avoid`` (you left it out "
+        + "because of its outcome), or ``contrast`` (you chose a different change designed "
+        + "against it), and ``claim`` one sentence on why. Only ids shown below are kept.",
+        "",
+        inp.experience_kb_block,
+    ]
 
 
 def _vendor_substitution_candidates(hot_kernels: Any) -> list[dict[str, Any]]:
@@ -2170,9 +2199,10 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                             "kb_evidence": [],
                             "pr_evidence": [],
                             "source_evidence": [],
+                            "experience_citations": [],
                         }
                     ],
-                    **({"patches_written": []} if authors_patches else {}),
+                    **({"patches_written": [], "experience_citations": []} if authors_patches else {}),
                     "summary": "≤ 500 char overview of what you tried this round",
                     "confidence": 0.6,
                     "new_findings": [],
@@ -2461,6 +2491,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             _section_gap(inp),
             _section_kb_subgraph(inp),
             _section_roofline_evidence(inp),
+            _section_experience_kb(inp),
             _section_recipe(inp),
             _section_lessons(inp),
             _section_pitfalls(inp),

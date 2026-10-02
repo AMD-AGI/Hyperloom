@@ -1795,6 +1795,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
 def _delegate_coord(tmp_path: Path):
     """Coordinator double reaching the direct explore-task creation path."""
     c = Coordinator.__new__(Coordinator)
+    c.phase_framework = FrameworkPhase(c)
     c.session_dir = tmp_path
 
     class _State(_BareSharedState):

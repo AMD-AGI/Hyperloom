@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import time
+import uuid
 from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
@@ -31,6 +32,7 @@ from .coordinator_helpers import (
     verdict_held_to_its_rule,
     verdict_map_entry_held_to_its_rule,
 )
+from hyperloom.common.coerce import to_int
 from hyperloom.common.env import is_truthy
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -47,6 +49,7 @@ from ..state.shared_state import (
     inject_stack_base_params,
     is_valid_escalate_hint,
 )
+from ..state.experience_citations import merge_citations, normalize_citations, shown_ids
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_INTENT,
@@ -120,21 +123,89 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
 }
 
 
-def _record_config_proposal(router: Any, pending: Any) -> None:
-    """Record one config-arm grid on the framework event, as it is proposed.
+def _relayed_specialist_citations(state: Any) -> dict[str, list[dict[str, str]]]:
+    """This cycle's specialist proposal citations, keyed by the change each proposal asks for."""
+    from ..actions.executors._proposal_identity import content_fingerprint
+
+    cycle = to_int(getattr(state, "macro_cycle", 0), default=0)
+    by_change: dict[str, list[dict[str, str]]] = {}
+    for entry in getattr(state, "specialist_rounds", None) or []:
+        if not isinstance(entry, dict) or to_int(entry.get("cycle"), default=0) != cycle:
+            continue
+        for proposal in entry.get("proposal_set") or []:
+            if isinstance(proposal, dict) and proposal.get("experience_citations"):
+                change = content_fingerprint(proposal)
+                by_change[change] = merge_citations(by_change.get(change, []), proposal["experience_citations"])
+    return by_change
+
+
+def _stamp_kb_exposure(
+    router: Any,
+    payload: dict[str, Any],
+    *,
+    source: str,
+) -> None:
+    """Attach the current orchestration read to proposals emitted by that tick, and the citations it supports.
+
+    A grid row that asks for exactly the change a specialist proposed this cycle also carries that specialist's
+    citations, which were checked against the read its own dispatch was shown.
+    """
+    if source != "orchestration":
+        return
+    evidence = getattr(router, "_kb_last_read", None)
+    current = evidence is not None and int(getattr(evidence, "tick", -1)) == int(
+        getattr(router.shared_state, "tick", 0) or 0
+    )
+    if current:
+        payload["kb_read_id"] = str(getattr(evidence, "read_id", "") or "")
+        payload["kb_rendered_refs"] = list(getattr(evidence, "rendered_refs", ()) or ())
+    params = payload.get("params")
+    if not isinstance(params, dict) or not isinstance(params.get("grid"), list):
+        return
+    from ..actions.executors._proposal_identity import content_fingerprint
+
+    shown = shown_ids(payload.get("kb_rendered_refs") if current else ())
+    relayed = _relayed_specialist_citations(router.shared_state)
+    grid: list[Any] = []
+    for row in params["grid"]:
+        if isinstance(row, dict):
+            carried = relayed.get(content_fingerprint(row), [])
+            if "experience_citations" in row or carried:
+                own = normalize_citations(row.get("experience_citations"), shown)
+                row = {**row, "experience_citations": merge_citations(own, carried)}
+        grid.append(row)
+    payload["params"] = {**params, "grid": grid}
+
+
+def _record_config_proposal(
+    router: Any,
+    proposal_id: str,
+    action_name: str,
+    payload: Mapping[str, Any],
+    *,
+    outcome: str = "submitted",
+) -> None:
+    """Record one config-arm grid on the framework event, as it is proposed or delegated.
 
     Recorded at proposal time rather than at approval, so a grid the Critic
     denies is still on record as a thing the phase pursued and dropped. One row
     per grid, not per variant: the measured attempts point back at the grid
     through their ``proposal_ref``.
     """
-    if str(getattr(pending, "action_name", "") or "") != "explore":
-        return
-    proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
     if not proposal_id:
         return
     recorder = router.phase_framework.timeline()
     if recorder is None:
+        return
+    kb_read_id = str(payload.get("kb_read_id") or "")
+    rendered_refs = payload.get("kb_rendered_refs") or []
+    if kb_read_id or rendered_refs:
+        recorder.record_proposal(
+            proposal_id,
+            kb_read_id=kb_read_id,
+            rendered_refs=rendered_refs,
+        )
+    if action_name != "explore":
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
         ARM_CONFIG,
@@ -143,7 +214,7 @@ def _record_config_proposal(router: Any, pending: Any) -> None:
         producer_for_provenance,
     )
 
-    params = (getattr(pending, "payload", None) or {}).get("params") or {}
+    params = payload.get("params") or {}
     grid = [row for row in (params.get("grid") or []) if isinstance(row, dict)]
     labels = {str(row.get("provenance") or "").strip() for row in grid}
     if len(labels) == 1:
@@ -161,8 +232,10 @@ def _record_config_proposal(router: Any, pending: Any) -> None:
         producer_ref=producer_ref,
         lever_kind=LEVER_CONFIG,
         scope=scopes.pop() if len(scopes) == 1 else "",
+        kb_read_id=kb_read_id,
+        rendered_refs=rendered_refs,
     )
-    recorder.record_proposal_step(proposal_id, step=STEP_PROPOSED, outcome="submitted")
+    recorder.record_proposal_step(proposal_id, step=STEP_PROPOSED, outcome=outcome)
 
 
 def _variant_review_rows(
@@ -547,6 +620,7 @@ class IntentRouter(CoordinatorCollaborator):
             await self._record_policy_denied(source, intent, denied)
             return
         payload = dict(intent.payload)
+        _stamp_kb_exposure(self, payload, source=source)
         if action_name == "integrate_patch":
             params = dict(payload.get("params") or {})
             if not await self._stamp_integrate_patch_owner(params):
@@ -592,7 +666,7 @@ class IntentRouter(CoordinatorCollaborator):
             },
         )
         _record_phase_proposal(self, pending)
-        _record_config_proposal(self, pending)
+        _record_config_proposal(self, pending.proposal_msg_id, action_name, payload)
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
         """Apply a Critic ``review_verdict`` to its target proposal."""
@@ -887,7 +961,9 @@ class IntentRouter(CoordinatorCollaborator):
             )
             return
         # delegate explore runs variants directly (no Critic pre-review).
-        params = dict(intent.payload.get("params") or {})
+        payload = dict(intent.payload)
+        _stamp_kb_exposure(self, payload, source=source)
+        params = dict(payload.get("params") or {})
         if action_name == "integrate_patch":
             if not await self._stamp_integrate_patch_owner(params):
                 await self._record_observation(
@@ -957,6 +1033,11 @@ class IntentRouter(CoordinatorCollaborator):
             ).hexdigest()[:10]
             raw_key = f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
         idempotency_key = str(raw_key)
+        # The grid's attempts join its proposal row through this id, as an approved proposal's do. Added after the
+        # key is derived, so an identical re-emit still lands on the task already running.
+        proposal_id = uuid.uuid4().hex if action_name == "explore" else ""
+        if proposal_id:
+            params["proposal_msg_id"] = proposal_id
         terminal_states = {
             "succeeded",
             "failed",
@@ -1027,6 +1108,7 @@ class IntentRouter(CoordinatorCollaborator):
             )
             return
         self.shared_state.reset_policy_denial_streak(action_name)
+        _record_config_proposal(self, proposal_id, action_name, {**payload, "params": params}, outcome="delegated")
         await self.bus.append_and_seq(
             Message.new(
                 "coordinator",

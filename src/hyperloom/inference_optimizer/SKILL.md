@@ -534,6 +534,108 @@ GEAK runtime variables, and InferenceX path. CLI preflight reads it; do not deri
 these by hand or source it in the launch shell. Generated env/config state is written to the pod-local runtime directory,
 not back into a shared WekaFS source checkout.
 
+### Experience KB service
+
+Every workspace runs its own local Experience KB service; it ships inside
+Hyperloom. `hyperloom-setup` writes the loopback `HYPERLOOM_KB_URL` and a
+generated `HYPERLOOM_KB_TOKEN` to the workspace `.env`. Load `.env` before
+launching; do not ask the user for these values again.
+
+Each optimize launch starts the service when nothing serves that URL, in the
+same environment as the optimizer (inside the container in docker mode). Its
+data and `service.log` live under `$USER_DATA_PATH/experience-kb`, and it keeps
+running after the run for the next one. When it cannot be started, the launch
+logs a warning and continues: reads return nothing and writes wait in
+`$USER_DATA_PATH/experience-kb/spool` until the service serves again, so they
+survive a removed container. A non-loopback `HYPERLOOM_KB_URL` names a
+service this workspace does not run; Hyperloom connects to it without starting
+anything. Without `HYPERLOOM_KB_URL`, Hyperloom runs without Experience KB reads
+or writes.
+
+No enable flag, declaration path, service identity, Run scope, worker identity,
+job identity, or spool path is required.
+
+The service keeps every schema written to it, so a workspace whose declaration
+changed keeps its older Experiences; a run's reads search only the schema that
+run writes.
+
+A global Experience KB, named by `HYPERLOOM_GLOBAL_KB_URL` and
+`HYPERLOOM_GLOBAL_KB_TOKEN` in `.env`, is shared through the local service;
+runs never read or write it directly. When the user asks to share or fetch
+Experiences, run in the optimizer's environment, with `.env` loaded:
+
+```bash
+python -m hyperloom.inference_optimizer.experience_kb_service push   # this workspace's Experiences not pushed yet
+python -m hyperloom.inference_optimizer.experience_kb_service pull   # the global KB's Experiences of this workspace's schemas
+```
+
+Report the one summary line each prints (global URL; `created`, `unchanged`,
+`skipped`, `rejected`) and never the token. A push resumes where an earlier one
+stopped and never sends back what was pulled. Push and pull use the service as
+it runs and never restart it under a running session; when they warn that its
+settings differ, `experience_kb_service ensure` or the next launch applies them. With `HYPERLOOM_KB_AUTO_PUSH=1`,
+every run pushes after its Experiences are written locally; a failed automatic
+push is only a warning, and the next push sends what it missed. An unusable
+switch value or a missing global KB is a launch warning, and that run does not
+push.
+
+During FRAMEWORK_AGENT the service is read at two points and the returned block
+is injected into the prompt:
+
+- every orchestration tick, with the untested proposals as context;
+- every specialist dispatch, with the specialist's domain, investigation, and
+  task as context. The block renders as the specialist prompt's
+  `EXPERIENCE KB` section.
+
+Every written Experience is readable by the next read. Retrieved evidence is
+advisory and never replaces the measured benchmark baseline. A read failure
+soft-degrades to the original prompt. An AgentX run neither reads nor writes
+Experiences: the Experience schema cannot yet tell its workload from a
+synthetic one. Neither does a run graded on anything but output throughput
+(for example `HYPERLOOM_PERF_METRIC=intvty_v1`), since every Experience records
+the throughput objective.
+
+Every complete measured attempt is written idempotently when the session
+breakdown is written. Rendered Experience references from an orchestration
+grid, proposed or delegated, are carried through to the measured Experience. A
+network write failure is spooled for retry.
+
+Each injection appends one entry to `state.json` `experience_kb_injections`
+(latest last, capped at 20); an orchestration entry is added only when its
+injected Experience set changes:
+`{tick, phase, ts, consumer, domain, gap_canonical_id, read_id, experience_ids, experiences, prompt_block}`.
+`consumer` is `orchestration` or `specialist`; `domain` and `gap_canonical_id`
+identify the specialist dispatch and are empty for orchestration.
+`prompt_block` is the injected text; each Experience appears in it under an
+`Experience <id>` heading with its complete record. A free-text field over
+2 KiB, typically a source patch in `change.content`, appears as
+`<external content sha256:...>` and is written whole under
+`<session>/experience_kb/contents/`, each patch also as its own file; the block
+ends with those paths. Records are injected whole while they fit 40,000
+characters; the rest of a read is left out, never cut. The injected agents
+cite the Experiences that shaped a proposal in its `experience_citations`,
+which reach the measured Experience's `provenance.extra`. `experiences` holds one
+summary per injected Experience, in `experience_ids` order: `experience_id`,
+`source_run_id`, `change_summary`, `decision`, `baseline_value`,
+`outcome_value`, `score`, and `why_matched`. `read_optimizer_state.py` prints
+the latest orchestration and specialist entries with one line per injected
+Experience. When a poll shows a new entry, report each Experience's summary
+together with the matching section of `prompt_block` to the user.
+
+When Experience KB is enabled, after the workload Skill resolves `MODEL_PATH`
+and `FRAMEWORK`, validate the same production path:
+
+```bash
+mkdir -p "$USER_DATA_PATH/optimizer_runs"
+python3 -m hyperloom.inference_optimizer.tools.cold_start_check \
+  --model "$MODEL_PATH" \
+  --framework "$FRAMEWORK" \
+  --require-experience-kb \
+  --output "$USER_DATA_PATH/optimizer_runs/experience-kb-cold-start.json"
+```
+
+Require `cold_start_ready=true`.
+
 ### Tool source fields (prompt → env, sandbox-only)
 
 Prompt fields naming read-only source trees consumed by sandbox-side
@@ -1377,7 +1479,8 @@ python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state
 
 It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_best`,
 `last_kernel_opt`, `last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
-`phase`, plus the recent lifecycle events.
+`phase`, the latest orchestration and specialist Experience KB injections when
+they exist, plus the recent lifecycle events.
 
 Recent action counts from SQLite (last 500 events grouped by category):
 
@@ -1565,4 +1668,5 @@ Report concise status:
 - `cumulative_gain_validated` and `current_best`
 - explore accepted/rejected summary
 - last kernel optimized, correctness, micro speedup, E2E gain, decision
+- any new `experience_kb_injections` entry: each injected Experience's summary and its section of `prompt_block`
 - whether the process is still running or stopped and why
