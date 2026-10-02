@@ -246,6 +246,11 @@ def _enablement_gap(params: dict[str, Any]) -> CapabilityGap | None:
     return gap if gap.requires_code_acquisition else None
 
 
+def _kept_stack_action(attempt: IntegrateAttempt) -> dict[str, Any]:
+    """The stack action the last kept round promoted, or ``{}`` when none was kept."""
+    return getattr(getattr(attempt.shared_state, "enablement", None), "kept_stack_action", None) or {}
+
+
 def _first_ref_in_repo(refs: Iterable[Any], repo_url: str) -> str:
     """The best-ranked candidate ref that points at ``repo_url``.
 
@@ -2576,9 +2581,8 @@ class IntegratePatchExecutor:
         from ...enablement.runtime.adapters import get_adapter
         from ...enablement.runtime.stack_actions import EnablementStackAction
 
-        enablement = getattr(attempt.shared_state, "enablement", None)
-        kept = getattr(enablement, "kept_stack_action", None)
-        if isinstance(kept, dict) and kept:
+        kept = _kept_stack_action(attempt)
+        if kept:
             action = EnablementStackAction.from_state(kept)
         else:
             gap = _enablement_gap(params)
@@ -2923,15 +2927,16 @@ class IntegratePatchExecutor:
             }
 
         _setup_ran = bool(setup_result.get("applied"))
-        # A provisioned attempt runtime is a mutation of what the next boot
-        # executes, which is what every other entry here has in common.
+        # A runtime this round acquired changes what the next boot executes; a
+        # re-provisioned kept one is the stack the last KEEP was already graded on.
+        acquired_runtime = bool(attempt.attempt_venv_root) and not _kept_stack_action(attempt)
         if (
             not patch_paths
             and not proposal_extra_args
             and not proposal_extra_envs
             and not artifact_specs
             and not _setup_ran
-            and not attempt.attempt_venv_root
+            and not acquired_runtime
         ):
             # Launch-only mode: skip the no-patches early-return and fall through to bench.
             if params.get("enablement_launch_only"):

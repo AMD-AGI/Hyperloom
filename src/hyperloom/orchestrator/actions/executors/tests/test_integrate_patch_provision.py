@@ -78,6 +78,9 @@ class _FakeAdapter:
     def probe(self, result, action):
         return self._probe_ok
 
+    def build_stack_action(self, gap, *, gpu_type=""):
+        return EnablementStackAction.from_state(_candidate())
+
 
 def _ok_result(venv_root: str) -> ProvisionResult:
     return ProvisionResult(
@@ -151,7 +154,7 @@ async def test_rounds_that_acquire_nothing_are_a_noop(_executor, monkeypatch, pa
     ],
 )
 async def test_without_a_kept_runtime_only_a_code_gap_builds_a_candidate(_executor, monkeypatch, params):
-    """A gap no code closes has no runtime to acquire from scratch."""
+    """A round that names no gap code closes has no runtime to acquire from scratch."""
     _forbid_the_adapter(monkeypatch)
     attempt = _attempt()
     assert await _executor._stage_provision_attempt_runtime(attempt, params, "t-1") is None
@@ -294,7 +297,7 @@ async def test_a_runtime_only_round_reaches_the_bench(_executor, monkeypatch):
     venv = str(_executor.session_dir / "enablement" / "stacks" / "vllm" / "t-1" / "venv")
     adapter = _FakeAdapter(_ok_result(venv))
     monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
-    attempt = _apply_ready(_executor, kept=_candidate())
+    attempt = _apply_ready(_executor)
     assert await _executor._stage_provision_attempt_runtime(attempt, _params(), "t-1") is None
     assert attempt.attempt_venv_root == venv
 
@@ -322,7 +325,7 @@ async def test_patches_apply_to_the_tree_the_runtime_imports(_executor, monkeypa
     monkeypatch.setattr(
         "hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: _FakeAdapter(result)
     )
-    attempt = _apply_ready(_executor, kept=_candidate())
+    attempt = _apply_ready(_executor)
     params = _params(framework_source_root=str(shared_tree))
     assert await _executor._stage_provision_attempt_runtime(attempt, params, "t-1") is None
 
@@ -334,6 +337,20 @@ async def test_a_round_that_acquired_nothing_is_still_no_patches(_executor):
     """No runtime and no deliverable leaves nothing for the bench to measure."""
     attempt = _apply_ready(_executor)
     out = await _executor._stage_apply(attempt, _params(), {})
+    assert out is not None
+    assert out["status"] == "no_patches"
+
+
+async def test_the_kept_runtime_alone_is_still_no_patches(_executor, monkeypatch):
+    """The last KEEP already graded the kept stack; booting it again with nothing added re-observes its wall."""
+    venv = str(_executor.session_dir / "enablement" / "stacks" / "vllm" / "t-1" / "venv")
+    adapter = _FakeAdapter(_ok_result(venv))
+    monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
+    attempt = _apply_ready(_executor, kept=_candidate())
+    assert await _executor._stage_provision_attempt_runtime(attempt, _params(_OOM_LOG), "t-1") is None
+    assert attempt.attempt_venv_root == venv
+
+    out = await _executor._stage_apply(attempt, _params(_OOM_LOG), {})
     assert out is not None
     assert out["status"] == "no_patches"
 
