@@ -1070,7 +1070,9 @@ def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
     limit", and a frontend profiler left on tracks no iterations and captures the
     entire ``start_profile``..``stop_profile`` range. A guard that accepted those
     would report success while the run stayed unbounded, which is worse than not
-    guarding -- the warning would send the next investigation the wrong way.
+    guarding -- the warning would send the next investigation the wrong way. The
+    summary table is the same kind of flag: only an explicit false keeps vLLM from
+    building it after the trace is written.
 
     Every other flag only decides what the trace contains or where it lands, so its
     presence is the whole contract.
@@ -1085,6 +1087,8 @@ def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
         return 0 < iterations <= cap
     if name == "ignore_frontend":
         return is_truthy(value)
+    if name == "torch_profiler_dump_cuda_time_total":
+        return not is_truthy(value)
     return True
 
 
@@ -1660,6 +1664,11 @@ def materialize_config_with_envs(
             # flag, but a replacing candidate wipes the YAML value too, so it
             # belongs in the set the re-assertion can restore.
             profiler_flags.append(("ignore_frontend", "--profiler-config.ignore_frontend True"))
+            # vLLM's stop path builds a key_averages() summary table in Python on every rank. Nothing here reads
+            # it, and on a long-prompt eager trace it blocks the engine and grows each worker by hundreds of GiB.
+            profiler_flags.append(
+                ("torch_profiler_dump_cuda_time_total", "--profiler-config.torch_profiler_dump_cuda_time_total False")
+            )
             pending_vllm_profiler_flags = profiler_flags
             pending_vllm_profiler_cap = max_iters
             # Injected unconditionally so the computed cap WINS over anything the YAML
