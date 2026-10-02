@@ -120,6 +120,8 @@ def _section_session_context(
     framework_source_roots: tuple[str, ...] | None = None,
     benchmark_mode: str = "",
     agentx_corpus_shape: Mapping[str, Any] | None = None,
+    agentx_grading: Mapping[str, Any] | None = None,
+    agentx_backend: str = "",
     session_framework_tree: str = "",
 ) -> list[str]:
     """Build the SESSION CONTEXT section lines.
@@ -142,6 +144,9 @@ def _section_session_context(
             the AgentX workload and grading blocks when it names AgentX.
         agentx_corpus_shape (Mapping[str, Any] | None): The session's
             ``agentx_corpus_shape``, supplying the corpus numbers.
+        agentx_grading (Mapping[str, Any] | None): The session's recorded
+            ``grading``, naming the axis the grading block describes.
+        agentx_backend (str): The session's recorded ``agentx_backend``.
 
     Returns:
         list[str]: Markdown lines describing static session context and phase
@@ -167,7 +172,7 @@ def _section_session_context(
         f"- framework_source_roots: {roots_line}  (source roots to search)",
     ]
     if is_agentx_mode(benchmark_mode):
-        lines += ["", *corpus_lines(agentx_corpus_shape), "", *grading_lines()]
+        lines += ["", *corpus_lines(agentx_corpus_shape), "", *grading_lines(agentx_grading, agentx_backend)]
     lines += [
         "",
         "Per-tick dynamic context (Phase, Mission progress, Time budget,",
@@ -1040,6 +1045,8 @@ def build_orchestration_prompt(
     references_dir: Path | None = None,
     benchmark_mode: str = "",
     agentx_corpus_shape: Mapping[str, Any] | None = None,
+    agentx_grading: Mapping[str, Any] | None = None,
+    agentx_backend: str = "",
 ) -> str:
     """Compose the Orchestration system prompt (deterministic for given inputs).
 
@@ -1122,6 +1129,8 @@ def build_orchestration_prompt(
             framework_source_roots=framework_source_roots,
             benchmark_mode=benchmark_mode,
             agentx_corpus_shape=agentx_corpus_shape,
+            agentx_grading=agentx_grading,
+            agentx_backend=agentx_backend,
             session_framework_tree=session_framework_tree,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),

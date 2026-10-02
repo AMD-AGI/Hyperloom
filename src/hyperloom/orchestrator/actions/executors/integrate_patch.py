@@ -3270,6 +3270,7 @@ class IntegratePatchExecutor:
                 state_model_path=str(getattr(shared_state, "model_path", "") or ""),
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
+                benchmark_mode=str(getattr(shared_state, "benchmark_mode", "") or ""),
             )
         except (FrameworkScriptMismatchError, RecipeLeverUnavailableError) as exc:
             return {
@@ -4413,6 +4414,7 @@ class IntegratePatchExecutor:
                 state_model_path=str(getattr(shared_state, "model_path", "") or ""),
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
+                benchmark_mode=str(getattr(shared_state, "benchmark_mode", "") or ""),
             )
             if not parity.get("ok"):
                 # An unmeasurable parity leg reverts under its own verdict: the patch
@@ -4710,6 +4712,7 @@ class IntegratePatchExecutor:
         state_model_path: str = "",
         session_deadline_sec: float | None = None,
         variant_expected_sec: float | None = None,
+        benchmark_mode: str = "",
     ) -> dict[str, Any]:
         """Verify the patch is genuinely inert with every rewrite switch unset.
 
@@ -4766,6 +4769,7 @@ class IntegratePatchExecutor:
                 variant_suffix="-parity",
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
+                benchmark_mode=benchmark_mode,
             )
         except Exception as exc:  # noqa: BLE001 — a failed probe must not read as a pass
             return {
@@ -5228,6 +5232,7 @@ class IntegratePatchExecutor:
         variant_suffix: str = "",
         session_deadline_sec: float | None = None,
         variant_expected_sec: float | None = None,
+        benchmark_mode: str = "",
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run a 1-variant Magpie bench under the patched server + accuracy gate.
 
@@ -5437,6 +5442,7 @@ class IntegratePatchExecutor:
                 eval_search_root,
                 params.get("accuracy_baseline"),
                 framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+                benchmark_mode=benchmark_mode,
             )
 
         # Raw accuracy for the KB record; ``accuracy_pass`` only carries a verdict.
@@ -5445,6 +5451,7 @@ class IntegratePatchExecutor:
             measured = parse_eval_results(
                 eval_search_root,
                 framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+                benchmark_mode=benchmark_mode,
             ).get("accuracy")
             if isinstance(measured, (int, float)):
                 measured_accuracy = float(measured)
@@ -5457,6 +5464,7 @@ class IntegratePatchExecutor:
             eval_results = parse_eval_results(
                 eval_search_root,
                 framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+                benchmark_mode=benchmark_mode,
             )
             acc = eval_results.get("accuracy")
             if isinstance(acc, (int, float)):
@@ -5551,6 +5559,7 @@ class IntegratePatchExecutor:
         result_dir: str,
         baseline_accuracy: Any,
         framework: str | None = None,
+        benchmark_mode: str = "",
     ) -> bool | None:
         """Grade a bench's accuracy against the baseline.
 
@@ -5565,7 +5574,7 @@ class IntegratePatchExecutor:
             baseline_value = float(baseline_accuracy)
         except (TypeError, ValueError):
             baseline_value = 0.0
-        eval_results = parse_eval_results(result_dir, framework=framework)
+        eval_results = parse_eval_results(result_dir, framework=framework, benchmark_mode=benchmark_mode)
         new_accuracy = eval_results.get("accuracy")
         if new_accuracy is not None and baseline_value > 0:
             return accuracy_passed(baseline_value, float(new_accuracy))

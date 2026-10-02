@@ -324,6 +324,8 @@ def _build_orchestration_prompt(
     action_registry: Mapping[str, ActionMetadata] | None = None,
     benchmark_mode: str = "",
     agentx_corpus_shape: Mapping[str, Any] | None = None,
+    agentx_grading: Mapping[str, Any] | None = None,
+    agentx_backend: str = "",
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
     registry = action_registry or ACTION_CATALOGUE
@@ -345,6 +347,8 @@ def _build_orchestration_prompt(
         transport=transport,
         benchmark_mode=benchmark_mode,
         agentx_corpus_shape=agentx_corpus_shape,
+        agentx_grading=agentx_grading,
+        agentx_backend=agentx_backend,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_kernel_search_roots(),
         session_framework_tree=resolve_framework_tree(framework),
@@ -2363,6 +2367,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             transport=_orch_transport,
             benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
             agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+            agentx_grading=coordinator.shared_state.grading,
+            agentx_backend=coordinator.shared_state.agentx_backend,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
@@ -2381,6 +2387,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             transport=_orch_transport,
             benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
             agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+            agentx_grading=coordinator.shared_state.grading,
+            agentx_backend=coordinator.shared_state.agentx_backend,
         ),
     )
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).

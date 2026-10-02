@@ -20,7 +20,9 @@ from hyperloom.inference_optimizer.agentx.deploy import (
 def test_asset_dir_has_all_files():
     d = agentx_asset_dir()
     assert (d / "aiperf_client.sh").exists()
+    assert (d / "mlperf_agentic_client.sh").exists()
     assert (d / "map_aiperf.py").exists()
+    assert (d / "map_mlperf.py").exists()
     assert (d / "aiperf_phase_gate.py").exists()
 
 
@@ -28,11 +30,14 @@ def test_deploy_copies_and_is_executable(tmp_path):
     dst = tmp_path / "benchmarks"
     written = deploy_agentx_assets(dst)
     assert (dst / "aiperf_client.sh").exists()
+    assert (dst / "mlperf_agentic_client.sh").exists()
     assert (dst / "map_aiperf.py").exists()
+    assert (dst / "map_mlperf.py").exists()
     assert (dst / "aiperf_phase_gate.py").exists()
     assert (dst / "agentx_mapping.py").read_bytes() == Path(mapping.__file__).read_bytes()
     assert os.access(dst / "aiperf_client.sh", os.X_OK)
-    assert len(written) == 4
+    assert os.access(dst / "mlperf_agentic_client.sh", os.X_OK)
+    assert len(written) == 6
 
 
 def test_deploy_idempotent(tmp_path):
