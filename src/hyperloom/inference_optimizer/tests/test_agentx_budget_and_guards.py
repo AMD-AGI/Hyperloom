@@ -216,6 +216,33 @@ def test_verdict_gate_rejects_a_failed_submission(monkeypatch):
     assert _valid(_measurement(submission_valid=False)) is False
 
 
+def test_a_declared_deviation_can_be_graded_when_the_operator_opts_in(monkeypatch):
+    """Search needs the smoke it is run on to be comparable.
+
+    Every candidate on a deviating workload is stamped non-canonical, so the
+    default refusal also refuses the A/B the smoke exists for. The opt-in buys
+    grading and nothing else: the verdict itself stays False.
+    """
+    _on(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_ALLOW_NONCANONICAL_MEASUREMENT", "1")
+    result = _measurement(submission_valid=False)
+    assert _valid(result) is True
+    assert result["submission_valid"] is False
+
+
+def test_the_deviation_opt_in_does_not_admit_an_unknown_verdict(monkeypatch):
+    """Unknown is a different claim from declared-and-deviating."""
+    _on(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_ALLOW_NONCANONICAL_MEASUREMENT", "1")
+    assert _valid(_measurement(submission_valid=None)) is False
+
+
+def test_a_declared_deviation_is_still_refused_by_default(monkeypatch):
+    _on(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_ALLOW_NONCANONICAL_MEASUREMENT", raising=False)
+    assert _valid(_measurement(submission_valid=False)) is False
+
+
 def test_verdict_gate_rejects_an_unknown_verdict(monkeypatch):
     """None means no scenario, or an aiperf too old to stamp one."""
     _on(monkeypatch)
