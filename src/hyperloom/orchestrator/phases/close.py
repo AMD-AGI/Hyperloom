@@ -376,40 +376,39 @@ class ClosePhase(CoordinatorCollaborator):
         self._coord.writeback.emit_lifecycle(step="report", status="START", detail="close_phase_entry")
         try:
             report_task = await self._enqueue_internal_report_task(reason="close_phase_entry")
-        except Exception as exc:
-            detail = f"enqueue_failed={exc!r}"
-            self._coord.writeback.emit_lifecycle(step="report", status="ERROR", detail=detail)
-            await self._record_close_step("report", status="failed", detail=detail)
-            raise
-        terminal_state = await self._run_close_task(report_task, step="1 (report)")
-        if terminal_state in {"succeeded", None}:
-            from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
+            terminal_state = await self._run_close_task(report_task, step="1 (report)")
+            if terminal_state in {"succeeded", None}:
+                from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
 
-            _rd = _reports_dir(self.session_dir)
-            _json_path = _rd / "final.json" if (_rd / "final.json").exists() else None
-            _md_path = _rd / "final.md" if (_rd / "final.md").exists() else None
-            _receipt_path = _json_path or _md_path
-            await self._record_close_step(
-                "report",
-                status="done",
-                task_id=report_task.task_id,
-                artifact_path=str(_receipt_path.relative_to(Path(self.session_dir))) if _receipt_path else "",
-                artifact_digest=hashlib.sha256(_receipt_path.read_bytes()).hexdigest() if _receipt_path else "",
-            )
-            _close_out.record_close_artifacts(self.session_dir, final_json_path=_json_path, final_md_path=_md_path)
-            self._coord.writeback.emit_lifecycle(
-                step="report",
-                status="END",
-                artifacts={
-                    "json_path": str(_json_path) if _json_path else "",
-                    "md_path": str(_md_path) if _md_path else "",
-                },
-                detail="close_phase_entry",
-            )
-        else:
-            detail = f"task_state={terminal_state!r}"
-            self._coord.writeback.emit_lifecycle(step="report", status="ERROR", detail=detail)
-            await self._record_close_step("report", status="failed", task_id=report_task.task_id, detail=detail)
+                _rd = _reports_dir(self.session_dir)
+                _json_path = _rd / "final.json" if (_rd / "final.json").exists() else None
+                _md_path = _rd / "final.md" if (_rd / "final.md").exists() else None
+                _receipt_path = _json_path or _md_path
+                await self._record_close_step(
+                    "report",
+                    status="done",
+                    task_id=report_task.task_id,
+                    artifact_path=str(_receipt_path.relative_to(Path(self.session_dir))) if _receipt_path else "",
+                    artifact_digest=hashlib.sha256(_receipt_path.read_bytes()).hexdigest() if _receipt_path else "",
+                )
+                _close_out.record_close_artifacts(self.session_dir, final_json_path=_json_path, final_md_path=_md_path)
+                self._coord.writeback.emit_lifecycle(
+                    step="report",
+                    status="END",
+                    artifacts={
+                        "json_path": str(_json_path) if _json_path else "",
+                        "md_path": str(_md_path) if _md_path else "",
+                    },
+                    detail="close_phase_entry",
+                )
+            else:
+                detail = f"task_state={terminal_state!r}"
+                self._coord.writeback.emit_lifecycle(step="report", status="ERROR", detail=detail)
+                await self._record_close_step("report", status="failed", task_id=report_task.task_id, detail=detail)
+        except Exception as exc:
+            # The failed step row itself is recorded once by ``_run_close_step``.
+            self._coord.writeback.emit_lifecycle(step="report", status="ERROR", detail=repr(exc)[:240])
+            raise
 
     async def _do_session_breakdown(self) -> None:
         """Enqueue and await the session breakdown task."""
