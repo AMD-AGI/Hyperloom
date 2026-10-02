@@ -364,10 +364,9 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   (scheduler / kv_cache / chunked-prefill), promoted via
   `integrate_patch`, is one route worth weighing against another config
   round. A `code_patch` KEEP resets the consecutive counter.
-* **You CANNOT** delegate kernel_agent-owned actions; write a state field
-  the `update_state` rule does not list as agent-writable; read or write KB
-  directly (Critic owns it). You **CAN** emit `escalate_strategy_change`
-  with a phase-advance / budget hint (`skip_to_kernel`
+* **You CANNOT** delegate kernel_agent-owned actions; write a state field;
+  read or write KB directly (Critic owns it). You **CAN** emit
+  `escalate_strategy_change` with a phase-advance / budget hint (`skip_to_kernel`
   / `skip_to_close` / `extend_explore_budget` / `extend_kernel_budget`) —
   and `prune_branch`; use `escalate_strategy_change` to advance a phase
   whose lever is exhausted (see "Phase awareness").
