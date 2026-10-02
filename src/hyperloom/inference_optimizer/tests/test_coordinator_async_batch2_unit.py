@@ -23,6 +23,7 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.roles.mcp_context_tools import ContextProvider
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+from hyperloom.orchestrator.actions.executors.explore import STACK_REVALIDATE_SOURCE
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
@@ -263,7 +264,6 @@ async def test_resume_consistency_marks_unvalidated_keeps(coord: Coordinator) ->
     warning_kinds = {w["kind"] for w in report["warnings"]}
     assert "resume_unvalidated_keeps" in warning_kinds
     assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
-    assert not any(isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
 
 
 @pytest.mark.asyncio
@@ -1291,7 +1291,7 @@ async def test_resume_consistency_clears_stale_pending_integrate_with_specialist
 
 
 @pytest.mark.asyncio
-async def test_resume_consistency_enqueues_stack_rebench_for_unvalidated(coord: Coordinator) -> None:
+async def test_resume_consistency_does_not_enqueue_stack_revalidate_for_unvalidated(coord: Coordinator) -> None:
     coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.optimization_stack = [
@@ -1313,12 +1313,11 @@ async def test_resume_consistency_enqueues_stack_rebench_for_unvalidated(coord: 
         "extra_envs": {"A": "1"},
     }
 
-    report = await coord.writeback._resume_consistency_pass()
+    await coord.writeback._resume_consistency_pass()
 
     assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
     queued = await coord.tasks.queued()
-    assert not any(t.kind == "explore" and t.params.get("source") == "resume_stack_revalidate" for t in queued)
-    assert not any(isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
+    assert not any(t.kind == "explore" and t.params.get("source") == STACK_REVALIDATE_SOURCE for t in queued)
 
 
 @pytest.mark.asyncio
