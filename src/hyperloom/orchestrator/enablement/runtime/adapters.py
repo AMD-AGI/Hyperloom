@@ -105,19 +105,24 @@ def verify_vllm_rocm(python_path: str, *, run: RunFn = _default_run) -> bool:
     return getattr(cp, "returncode", 1) == 0
 
 
+def _stdout(argv: list[str], *, run: RunFn) -> str:
+    """Return ``argv``'s stripped stdout, or ``""`` when it cannot run or exits non-zero."""
+    try:
+        cp = run(argv, dict(os.environ), None)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if getattr(cp, "returncode", 1) != 0:
+        return ""
+    return (getattr(cp, "stdout", "") or "").strip()
+
+
 def _resolved_clone_ref(checkout: str, *, run: RunFn = _default_run) -> str:
     """Return the commit a shallow clone landed on, or ``""``.
 
     The provisioner clones a branch or tag verbatim, so the action's own ``ref``
     names different bytes tomorrow; this is the identity it lacks.
     """
-    try:
-        cp = run(["git", "-C", str(checkout), "rev-parse", "HEAD"], dict(os.environ), None)
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if getattr(cp, "returncode", 1) != 0:
-        return ""
-    return (getattr(cp, "stdout", "") or "").strip()
+    return _stdout(["git", "-C", str(checkout), "rev-parse", "HEAD"], run=run)
 
 
 def _resolved_packages(python_path: str, names: list[str], *, run: RunFn = _default_run) -> dict[str, dict[str, str]]:
@@ -132,7 +137,7 @@ def _resolved_packages(python_path: str, names: list[str], *, run: RunFn = _defa
         return {}
     # Source for the attempt interpreter, not this one: a name it cannot resolve
     # is skipped and a ``RECORD`` it cannot read yields the empty digest, while
-    # anything else fails the probe and is caught by the exit-status check below.
+    # anything else fails the probe's exit status and yields no packages.
     probe = (
         "import hashlib,json,re,sys\n"
         "import importlib.metadata as m\n"
@@ -162,13 +167,7 @@ def _resolved_packages(python_path: str, names: list[str], *, run: RunFn = _defa
         "print(json.dumps(out))\n"
     )
     try:
-        cp = run([python_path, "-c", probe, *names], dict(os.environ), None)
-    except (OSError, subprocess.SubprocessError):
-        return {}
-    if getattr(cp, "returncode", 1) != 0:
-        return {}
-    try:
-        parsed = json.loads((getattr(cp, "stdout", "") or "").strip() or "{}")
+        parsed = json.loads(_stdout([python_path, "-c", probe, *names], run=run) or "{}")
     except ValueError:
         return {}
     return {str(k): {str(kk): str(vv) for kk, vv in v.items()} for k, v in parsed.items()}
@@ -181,30 +180,12 @@ def _site_packages(python_path: str, *, run: RunFn = _default_run) -> str:
     installed into it occupies this tree alone -- which is therefore the only
     tree a patch against that wheel's sources can land in.
     """
-    argv = [python_path, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"]
-    try:
-        cp = run(argv, dict(os.environ), None)
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if getattr(cp, "returncode", 1) != 0:
-        return ""
-    return (getattr(cp, "stdout", "") or "").strip()
+    return _stdout([python_path, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"], run=run)
 
 
 def _installed_version(python_path: str, package: str, *, run: RunFn = _default_run) -> str:
     """Return the installed version of ``package`` in ``python_path``, or ""."""
-    argv = [
-        python_path,
-        "-c",
-        f"import importlib.metadata as m; print(m.version({package!r}))",
-    ]
-    try:
-        cp = run(argv, dict(os.environ), None)
-    except Exception:  # noqa: BLE001
-        return ""
-    if getattr(cp, "returncode", 1) != 0:
-        return ""
-    return (getattr(cp, "stdout", "") or "").strip()
+    return _stdout([python_path, "-c", f"import importlib.metadata as m; print(m.version({package!r}))"], run=run)
 
 
 # Adapters
