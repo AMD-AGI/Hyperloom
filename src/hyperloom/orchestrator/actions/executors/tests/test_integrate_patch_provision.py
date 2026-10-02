@@ -26,13 +26,14 @@ from hyperloom.orchestrator.enablement.runtime.stack_actions import (
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 _ARCH_LOG = "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
+_OOM_LOG = "torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB"
 
 
-def _params(**extra) -> dict:
-    """Params for an enablement round dispatched on an architecture-miss verdict."""
+def _params(log: str = _ARCH_LOG, **extra) -> dict:
+    """Params for an enablement round dispatched on the verdict ``log`` classifies to."""
     return {
         "enablement": True,
-        "enablement_failure_signature": classify_failure(_ARCH_LOG).to_dict(),
+        "enablement_failure_signature": classify_failure(log).to_dict(),
         **extra,
     }
 
@@ -120,22 +121,39 @@ def _neutralize_disk_preflight(monkeypatch):
 # provision stage: which rounds acquire a runtime at all
 
 
-@pytest.mark.parametrize(
-    "params",
-    [
-        pytest.param({}, id="not_an_enablement_round"),
-        pytest.param({"enablement": True}, id="no_dispatched_verdict"),
-        pytest.param(_params(enablement_launch_only=True), id="launch_only_bench"),
-    ],
-)
-async def test_rounds_that_acquire_nothing_are_a_noop(_executor, monkeypatch, params):
-    """Only an enablement round dispatched on a code-acquirable verdict provisions."""
-
+def _forbid_the_adapter(monkeypatch) -> None:
     def _forbidden(_fw):
         pytest.fail("adapter must not be consulted for a round that acquires nothing")
 
     monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", _forbidden)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        pytest.param({}, id="not_an_enablement_round"),
+        pytest.param(_params(enablement_launch_only=True), id="launch_only_bench"),
+    ],
+)
+async def test_rounds_that_acquire_nothing_are_a_noop(_executor, monkeypatch, params):
+    """Not even a kept runtime is re-provisioned outside an acquiring enablement round."""
+    _forbid_the_adapter(monkeypatch)
     attempt = _attempt(kept=_candidate())
+    assert await _executor._stage_provision_attempt_runtime(attempt, params, "t-1") is None
+    assert attempt.provision_result is None
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        pytest.param({"enablement": True}, id="no_dispatched_verdict"),
+        pytest.param(_params(_OOM_LOG), id="resource_constraint"),
+    ],
+)
+async def test_without_a_kept_runtime_only_a_code_gap_builds_a_candidate(_executor, monkeypatch, params):
+    """A gap no code closes has no runtime to acquire from scratch."""
+    _forbid_the_adapter(monkeypatch)
+    attempt = _attempt()
     assert await _executor._stage_provision_attempt_runtime(attempt, params, "t-1") is None
     assert attempt.provision_result is None
 
@@ -160,7 +178,16 @@ async def test_dispatched_verdict_drives_the_adapter_candidate(_executor, monkey
     assert attempt.stack_action is not None
 
 
-async def test_kept_action_is_reprovisioned_instead_of_a_fresh_candidate(_executor, monkeypatch):
+@pytest.mark.parametrize(
+    "log",
+    [
+        pytest.param(_ARCH_LOG, id="code_gap"),
+        # The kept runtime is what got the boot this far; an OOM past it is
+        # still to be fixed on top of it, not on the base install.
+        pytest.param(_OOM_LOG, id="resource_constraint"),
+    ],
+)
+async def test_kept_action_is_reprovisioned_instead_of_a_fresh_candidate(_executor, monkeypatch, log):
     """Serial stacking reuses the runtime the last KEEP promoted; no new candidate is built."""
 
     class _NoBuild(_FakeAdapter):
@@ -171,7 +198,9 @@ async def test_kept_action_is_reprovisioned_instead_of_a_fresh_candidate(_execut
     monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
     kept = _candidate()
     attempt = _attempt(kept=kept)
-    assert await _executor._stage_provision_attempt_runtime(attempt, _params(), "t-1") is None
+    assert await _executor._stage_provision_attempt_runtime(attempt, _params(log), "t-1") is None
+    assert adapter.provision_calls == 1
+    assert attempt.provision_result is not None
     assert attempt.stack_action is not None
     assert attempt.stack_action.capability == EnablementStackAction.from_state(kept).capability
 

@@ -222,13 +222,22 @@ _LAUNCH_ONLY_MUTATION_FIELDS: tuple[str, ...] = (
 )
 
 
-def _enablement_gap(params: dict[str, Any]) -> CapabilityGap | None:
-    """The round's capability gap, from the verdict it was dispatched on.
+def _acquiring_round(params: dict[str, Any]) -> bool:
+    """True for an enablement round, except a launch-only bench.
 
-    None for a non-enablement round and for a launch-only bench, which carries
-    a pre-built ``runtime_override`` and may acquire nothing of its own.
+    A launch-only bench carries a pre-built ``runtime_override`` and may
+    acquire nothing of its own.
     """
-    if not params.get("enablement") or params.get("enablement_launch_only"):
+    return bool(params.get("enablement")) and not params.get("enablement_launch_only")
+
+
+def _enablement_gap(params: dict[str, Any]) -> CapabilityGap | None:
+    """The round's capability gap, when it calls for code the stack lacks.
+
+    Read from the verdict the round was dispatched on; None for a round that
+    acquires nothing and for a gap no code closes.
+    """
+    if not _acquiring_round(params):
         return None
     raw = params.get("enablement_failure_signature")
     if not isinstance(raw, dict) or not raw:
@@ -2548,10 +2557,12 @@ class IntegratePatchExecutor:
         params: dict[str, Any],
         specialist_task_id: str,
     ) -> dict[str, Any] | None:
-        """Provision the attempt-scoped runtime this round's gap calls for (Rung 3).
+        """Provision the attempt-scoped runtime this round boots on (Rung 3).
 
-        No-op when the round's gap needs no code acquisition or the framework
-        adapter can build no evidence-backed candidate. Runs a disk preflight,
+        The runtime the last kept round promoted is re-provisioned whatever this
+        round's gap, since the rest of the stack was proven on it. With none
+        kept, the framework adapter builds a fresh candidate, which only a gap
+        calling for code yields; no-op otherwise. Runs a disk preflight,
         delegates provision+probe to the framework adapter (off the event loop;
         an in-flight pip install is not killed if the await is cancelled), and on
         success stores the resolved runtime on the attempt for the gate to
@@ -2559,20 +2570,20 @@ class IntegratePatchExecutor:
         ``reverted`` dict on any provision failure (no patch side effects yet),
         or ``None`` to continue.
         """
-        gap = _enablement_gap(params)
-        if gap is None:
+        if not _acquiring_round(params):
             return None
 
         from ...enablement.runtime.adapters import get_adapter
         from ...enablement.runtime.stack_actions import EnablementStackAction
 
         enablement = getattr(attempt.shared_state, "enablement", None)
-        # Serial stacking runs on the runtime the last kept round promoted; a
-        # round with none asks the framework adapter for a fresh candidate.
         kept = getattr(enablement, "kept_stack_action", None)
         if isinstance(kept, dict) and kept:
             action = EnablementStackAction.from_state(kept)
         else:
+            gap = _enablement_gap(params)
+            if gap is None:
+                return None
             framework = str(getattr(attempt.shared_state, "framework", "") or "").strip().lower()
             gpu_type = str(getattr(attempt.shared_state, "gpu_type", "") or "").strip().lower()
             action = get_adapter(framework).build_stack_action(gap, gpu_type=gpu_type)
