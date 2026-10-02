@@ -2179,6 +2179,21 @@ def materialize_config_with_envs(
     # patch, scoped to sglang + the env present. Fail-soft (a failed patch leaves
     # the env a no-op). Honors the HYPERLOOM_ENABLE_PATCH kill switch.
     _fw = str(bench.get("framework") or "").lower()
+    # Sitecustomize still needs sglang_gc_patch, or graph capture can IndexError.
+    from ._server_patcher import resolve_sglang_shape_mode
+
+    if (
+        _tracelens_patch_enabled()
+        and "sglang" in _fw
+        and resolve_sglang_shape_mode() == "sitecustomize"
+        and not ensure_sglang_patched_for_tracelens()
+    ):
+        log.warning(
+            "SGLang graph-capture patch (sglang_gc_patch) could not be applied; "
+            "per-batch-size CUDA-graph capture can IndexError on multi-variant "
+            "models (DSA dense+sparse). Set TRACELENS_ROOT to a checkout that "
+            "contains examples/custom_workflows/inference_analysis/sglang_gc_patch."
+        )
     if _tracelens_patch_enabled() and "sglang" in _fw and "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" in envs:
         if not ensure_sglang_patched_for_ck_blockscale():
             log.warning(
