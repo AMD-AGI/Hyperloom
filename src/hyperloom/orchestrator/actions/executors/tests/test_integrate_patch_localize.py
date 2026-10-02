@@ -88,6 +88,26 @@ async def test_without_a_bridging_candidate_nothing_is_fetched(_executor):
     assert attempt.localization_patches == []
 
 
+async def test_a_bridge_repo_candidate_is_not_localized(_executor):
+    """A diff cut from aiter does not apply to the framework tree."""
+    attempt = _attempt(candidate_refs=("https://github.com/ROCm/aiter/pull/99",))
+    assert await _executor._stage_localize_source(attempt, _params(), "t-1") is None
+    assert attempt.localization_patches == []
+
+
+async def test_the_framework_ref_is_preferred_over_a_higher_ranked_bridge_ref(_executor, monkeypatch):
+    """Discovery ranks both repos into one list; only the framework's own is applicable."""
+    import hyperloom.agents.framework.sources.github as gh
+
+    fetched: list[tuple[str, int]] = []
+    monkeypatch.setattr(gh, "pr_patches", lambda slug, num: (fetched.append((slug, num)), _PY_DIFF)[1])
+    attempt = _attempt(
+        candidate_refs=("https://github.com/ROCm/aiter/pull/99", "https://github.com/ROCm/vllm/pull/1234")
+    )
+    assert await _executor._stage_localize_source(attempt, _params(), "t-1") is None
+    assert fetched == [("ROCm/vllm", 1234)]
+
+
 # ---------------------------------------------------------------------------
 # python-only -> patch written + staged
 # ---------------------------------------------------------------------------

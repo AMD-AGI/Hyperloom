@@ -41,13 +41,13 @@ def _state_qualifier(states: tuple[str, ...]) -> str:
     return "" if broad else "is:open"
 
 
-def _build_query(repo: str, states: tuple[str, ...] = ("open",)) -> str:
-    """Compose a GitHub Search query string scoped to ``repo`` and the perf terms."""
+def _build_query(repo: str, states: tuple[str, ...] = ("open",), terms: tuple[str, ...] = PERF_TERMS) -> str:
+    """Compose a GitHub Search query string scoped to ``repo`` and ``terms``."""
     parts = [f"repo:{repo}", "is:pr"]
     state_q = _state_qualifier(states)
     if state_q:
         parts.append(state_q)
-    parts.append("(" + " OR ".join(PERF_TERMS) + ")")
+    parts.append("(" + " OR ".join(terms) + ")")
     return " ".join(parts)
 
 
@@ -56,14 +56,15 @@ def search_perf_prs(
     *,
     limit: int = 5,
     states: tuple[str, ...] = ("open",),
+    terms: tuple[str, ...] = PERF_TERMS,
     timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
-    """Return perf-ish PRs via the GitHub Search API (open-only by default)."""
+    """Return PRs matching ``terms`` via the GitHub Search API (open-only by default)."""
     try:
         repo = parse_repo_slug(repo_url)
     except ValueError:
         return []
-    query = _build_query(repo, states)
+    query = _build_query(repo, states, terms)
     url = "https://api.github.com/search/issues?" + urllib.parse.urlencode(
         {"q": query, "sort": "updated", "order": "desc", "per_page": str(limit)}
     )

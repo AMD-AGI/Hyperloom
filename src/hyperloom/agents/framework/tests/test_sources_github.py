@@ -52,6 +52,27 @@ def test_build_query_scopes_repo_and_perf_terms() -> None:
         assert t in q
 
 
+def test_build_query_uses_the_given_terms() -> None:
+    """Explicit terms replace the perf set, so a failure can be searched for."""
+    q = gh._build_query("ROCm/vllm", ("all",), ("deepseekv4", "causallm"))
+    assert "(deepseekv4 OR causallm)" in q
+    assert "perf" not in q
+
+
+def test_search_perf_prs_sends_the_given_terms(monkeypatch) -> None:
+    """The composed query reaches the Search API with the caller's terms."""
+    captured: dict[str, str] = {}
+
+    def _open(req):
+        captured["url"] = req.get_full_url()
+        return _FakeResp(200, b'{"items": []}')
+
+    _install_urlopen(monkeypatch, _open)
+    gh.search_perf_prs("https://github.com/ROCm/vllm.git", terms=("deepseekv4",))
+    assert "deepseekv4" in captured["url"]
+    assert "throughput" not in captured["url"]
+
+
 def test_build_query_open_only_keeps_is_open() -> None:
     """Default open-only keeps the is:open qualifier."""
     q = gh._build_query("sgl-project/sglang", states=("open",))

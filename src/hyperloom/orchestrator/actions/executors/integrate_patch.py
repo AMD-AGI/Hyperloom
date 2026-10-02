@@ -20,7 +20,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
@@ -55,6 +55,7 @@ from ...state.shared_state import (
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 from hyperloom.common.env import is_truthy
 from hyperloom.common.failure_signature import CapabilityGap, FailureSignature
+from hyperloom.common.github_urls import repo_slug
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import VERDICT_KEEP
 from ...bringup import load_boot_observation, observation_summary, verdict_of, write_boot_observation
@@ -234,6 +235,29 @@ def _enablement_gap(params: dict[str, Any]) -> CapabilityGap | None:
         return None
     gap = CapabilityGap.from_signature(FailureSignature.from_dict(raw))
     return gap if gap.requires_code_acquisition else None
+
+
+def _first_ref_in_repo(refs: Iterable[Any], repo_url: str) -> str:
+    """The best-ranked candidate ref that points at ``repo_url``.
+
+    Discovery ranks bridge-repo PRs (aiter, HIP, ROCm) alongside the
+    framework's own, and a diff is only applicable to the tree it was cut from.
+    A bare ``"PR:1234"`` names no repo and is the framework's by construction.
+    """
+    try:
+        want = repo_slug(repo_url)
+    except ValueError:
+        return ""
+    for raw in refs:
+        ref = str(raw).strip()
+        if not ref:
+            continue
+        try:
+            if repo_slug(ref) == want:
+                return ref
+        except ValueError:
+            return ref
+    return ""
 
 
 def _established_enablement_config(params: dict[str, Any], shared_state: Any) -> tuple[str, dict[str, str]]:
@@ -2650,7 +2674,8 @@ class IntegratePatchExecutor:
         """Fetch/synthesize a localization diff and stage it for _stage_apply (Rung 4).
 
         No-op when the round's gap needs no code acquisition, no bridging
-        candidate was discovered, or the framework adapter cannot localize.
+        candidate in the framework's own repo was discovered, or the framework
+        adapter cannot localize.
         Fetches the merged-PR / vendored diff (post-Critic), rejects a
         compiled / build-backend closure to a clean revert, and writes the diff
         to a patch file recorded on ``attempt.localization_patches`` which
@@ -2662,11 +2687,6 @@ class IntegratePatchExecutor:
         if gap is None:
             return None
 
-        enablement = getattr(attempt.shared_state, "enablement", None)
-        ref = next((str(r) for r in (getattr(enablement, "candidate_refs", None) or ()) if str(r).strip()), "")
-        if not ref:
-            return None
-
         from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
         from ...enablement.runtime.adapters import get_adapter
@@ -2676,6 +2696,11 @@ class IntegratePatchExecutor:
         repo_url = repo_url_for_framework(framework)
         if not repo_url:
             return None
+        enablement = getattr(attempt.shared_state, "enablement", None)
+        ref = _first_ref_in_repo(getattr(enablement, "candidate_refs", None) or (), repo_url)
+        if not ref:
+            return None
+
         action = get_adapter(framework).build_localization_action(gap, candidate_ref=ref, repo_url=repo_url)
         if action is None:
             return None
