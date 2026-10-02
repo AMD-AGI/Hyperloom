@@ -2912,12 +2912,15 @@ class IntegratePatchExecutor:
             }
 
         _setup_ran = bool(setup_result.get("applied"))
+        # A provisioned attempt runtime is a mutation of what the next boot
+        # executes, which is what every other entry here has in common.
         if (
             not patch_paths
             and not proposal_extra_args
             and not proposal_extra_envs
             and not artifact_specs
             and not _setup_ran
+            and not attempt.attempt_venv_root
         ):
             # Launch-only mode: skip the no-patches early-return and fall through to bench.
             if params.get("enablement_launch_only"):

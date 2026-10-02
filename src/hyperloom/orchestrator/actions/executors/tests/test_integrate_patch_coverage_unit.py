@@ -1162,7 +1162,8 @@ async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_provisioned_runtime_is_retired_when_no_mutation_reaches_gate(tmp_path, monkeypatch):
+async def test_a_runtime_only_round_is_benched_and_keeps_its_runtime(tmp_path, monkeypatch):
+    """The acquired runtime is the round's whole change; retiring it unbenched discards it."""
     from types import SimpleNamespace
     from hyperloom.agents.framework import isolation
     from hyperloom.common.failure_signature import classify_failure
@@ -1206,8 +1207,8 @@ async def test_provisioned_runtime_is_retired_when_no_mutation_reaches_gate(tmp_
             },
         )
     )
-    assert result["status"] == "no_patches"
-    assert not runtime.exists()
+    assert result["status"] != "no_patches"
+    assert runtime.exists()
 
 
 @pytest.mark.asyncio

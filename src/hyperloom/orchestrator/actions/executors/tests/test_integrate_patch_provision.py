@@ -248,6 +248,41 @@ async def test_disk_preflight_failure_returns_reverted(_executor, monkeypatch):
     assert called["n"] == 0  # never reached the adapter
 
 
+# apply stage: an acquired runtime is itself the round's change
+
+
+def _apply_ready(executor, task_id: str = "t-1", *, kept: dict | None = None):
+    """An attempt the apply stage can run against, carrying no deliverable."""
+    attempt = _attempt(task_id, kept=kept)
+    attempt.specialist_task_id = "t-spec-1"
+    attempt.specialist_workspace = executor.session_dir / "ws"
+    attempt.specialist_workspace.mkdir(parents=True, exist_ok=True)
+    attempt.shared_state.save = lambda *_a, **_k: None
+    return attempt
+
+
+async def test_a_runtime_only_round_reaches_the_bench(_executor, monkeypatch):
+    """Rung 3's whole deliverable is the runtime; benching it is how the round is judged."""
+    venv = str(_executor.session_dir / "enablement" / "stacks" / "vllm" / "t-1" / "venv")
+    adapter = _FakeAdapter(_ok_result(venv))
+    monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
+    attempt = _apply_ready(_executor, kept=_candidate())
+    assert await _executor._stage_provision_attempt_runtime(attempt, _params(), "t-1") is None
+    assert attempt.attempt_venv_root == venv
+
+    assert await _executor._stage_apply(attempt, _params(), {}) is None
+    # The sentinel carries the runtime the launch has to boot into.
+    assert attempt.pending["attempt_venv_root"] == venv
+
+
+async def test_a_round_that_acquired_nothing_is_still_no_patches(_executor):
+    """No runtime and no deliverable leaves nothing for the bench to measure."""
+    attempt = _apply_ready(_executor)
+    out = await _executor._stage_apply(attempt, _params(), {})
+    assert out is not None
+    assert out["status"] == "no_patches"
+
+
 # decision gate: runtime lands in materialized YAML, not os.environ
 
 
