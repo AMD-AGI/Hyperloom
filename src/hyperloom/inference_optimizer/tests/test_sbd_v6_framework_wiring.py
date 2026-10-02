@@ -892,9 +892,9 @@ def test_a_ruling_the_critic_could_not_ground_says_so(session_dir: Path):
 
 def test_a_patch_review_lands_on_the_candidate_it_judged(session_dir: Path):
     import asyncio
-    from types import SimpleNamespace
 
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE, PRODUCER_SPECIALIST
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
@@ -906,13 +906,12 @@ def test_a_patch_review_lands_on_the_candidate_it_judged(session_dir: Path):
         source_ref="https://example.invalid/pr/1",
     )
 
-    pending = SimpleNamespace(
+    pending = PendingProposal(
         proposal_msg_id="msg-1",
-        payload={"framework_agent_candidate_id": "cand-42", "params": {"task_id": "sp-7"}},
-        action_name="integrate_patch",
         from_agent="orchestration",
-        decided=False,
-        verdict="",
+        action_name="integrate_patch",
+        predicted_gain_pct=0.0,
+        payload={"framework_agent_candidate_id": "cand-42", "params": {"task_id": "sp-7"}},
     )
     asyncio.run(
         coord.router._handle_single_verdict(

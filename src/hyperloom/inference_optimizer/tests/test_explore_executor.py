@@ -2632,8 +2632,6 @@ async def test_an_explore_winner_inside_the_budget_is_promoted_by_writeback(sub_
     explore's in-round check would be refused and explore could never move
     ``current_best``.
     """
-    from unittest.mock import AsyncMock
-
     from hyperloom.orchestrator.loop import writeback as wb
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
@@ -2679,7 +2677,6 @@ async def test_an_explore_winner_inside_the_budget_is_promoted_by_writeback(sub_
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = state
-    monkeypatch.setattr(coord, "_maybe_enqueue_watermark_roofline", AsyncMock(), raising=False)
-    await coord._promote_explore(out, None, wb._PromoteOutcome())
+    await coord.writeback._promote_explore(out, None, wb._PromoteOutcome(verdict=wb.Verdict.RECORDED))
 
     assert state.current_best["variant_name"] == "v_in_budget"

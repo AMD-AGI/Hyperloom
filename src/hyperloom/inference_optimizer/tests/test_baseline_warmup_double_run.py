@@ -151,6 +151,11 @@ def _cold_then_hot_fake_run(
     return fake_run, state
 
 
+def _unbounded_shared_state(**fields) -> SimpleNamespace:
+    """A session state whose budget never bounds a round, plus whatever the case sets."""
+    return SimpleNamespace(session_budget_usable_sec=lambda: None, **fields)
+
+
 def _executor(
     base: Path,
     tmp_path: Path,
@@ -159,7 +164,7 @@ def _executor(
         magpie_python=sys.executable,
         default_config_path=base,
         session_dir=tmp_path,
-        shared_state=SimpleNamespace(),
+        shared_state=_unbounded_shared_state(),
     )
 
 
@@ -1287,7 +1292,7 @@ def test_deferred_accuracy_is_cancelled_by_no_eval(tmp_path, with_policy):
             "post_measure_accuracy_min_tput": _HOT_TPUT - 1,
         }
     )
-    ctx.extra["shared_state"] = SimpleNamespace(eval_disabled=True, baseline_double_run=True)
+    ctx.extra["shared_state"] = _unbounded_shared_state(eval_disabled=True, baseline_double_run=True)
     if with_policy:
         ctx.task.params["post_measure_accuracy_keep_policy"] = {
             "base_tput": _HOT_TPUT - 1,
@@ -1411,7 +1416,7 @@ def test_replay_warm_recipe_double_run_forces_warmup_eval(tmp_path):
         magpie_python=sys.executable,
         default_config_path=base,
         session_dir=tmp_path,
-        shared_state=SimpleNamespace(baseline_double_run=True),
+        shared_state=_unbounded_shared_state(baseline_double_run=True),
     )
     task = SimpleNamespace(
         task_id="t-replay-warm",
@@ -1442,7 +1447,7 @@ def test_replay_warm_recipe_honours_no_eval(tmp_path):
     _write_yaml(base, framework="vllm")
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
-    shared = SimpleNamespace(baseline_double_run=True, eval_disabled=True)
+    shared = _unbounded_shared_state(baseline_double_run=True, eval_disabled=True)
     executor = BaselineExecutor(
         magpie_python=sys.executable,
         default_config_path=base,
