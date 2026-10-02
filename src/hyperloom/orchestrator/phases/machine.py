@@ -197,6 +197,9 @@ class MachinePhase(CoordinatorCollaborator):
         """Scan exit conditions and transition phase at most once per tick."""
         state = self.shared_state
         if state.closing_phase and state.phase == _phase_state.PHASE_CLOSE and not state.close_sequence_done:
+            # The closing transition supersedes any barrier this machine was holding, and the closing report is
+            # dispatched by the pump.
+            self.admission_frozen = False
             await self.ensure_close_sequence(reason="time_exhausted")
             return
         await self._track_kernel_idle_streak()

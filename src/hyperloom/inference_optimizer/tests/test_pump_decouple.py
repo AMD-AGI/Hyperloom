@@ -169,3 +169,17 @@ async def test_an_unbooked_completion_holds_the_phase_transition(coord):
 
     assert coord.shared_state.phase == "PRELUDE"
     assert coord.admission_frozen
+
+
+async def test_the_closing_transition_releases_a_held_barrier(coord):
+    async def _close_sequence(*, reason: str) -> bool:
+        return True
+
+    coord.ensure_close_sequence = _close_sequence
+    coord.admission_frozen = True
+    coord.shared_state.closing_phase = True
+    coord.shared_state.phase = "CLOSE"
+
+    await coord._advance_phase_if_needed()
+
+    assert not coord.admission_frozen
