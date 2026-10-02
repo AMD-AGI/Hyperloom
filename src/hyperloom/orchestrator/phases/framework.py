@@ -226,8 +226,8 @@ def _forward_integrate_source(
 # lightweight test stand-ins, where a ``self._record_*`` call would break every
 # stand-in that does not implement it.
 def _recorder(coord: Any):
-    """Return the framework recorder for this phase entry, or ``None``."""
-    return getattr(coord, "_framework_timeline_recorder", None)
+    """Return the framework recorder for this phase entry, or ``None`` outside an open entry."""
+    return coord._framework_timeline_recorder
 
 
 def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any) -> None:
@@ -487,6 +487,8 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
 class FrameworkPhase(CoordinatorCollaborator):
     """The FRAMEWORK_AGENT phase: upstream candidates, authored patches, deliverable routing, and the enablement hand-off."""
 
+    # Set for the span of one FRAMEWORK entry; ``None`` outside it and when the recorder is unbound.
+    _framework_timeline_recorder: Any = None
     # Max tried-candidate rows fed into the ranker/discovery working memory.
     _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
     # Tail of outcomes from the priors ledger to evaluate.

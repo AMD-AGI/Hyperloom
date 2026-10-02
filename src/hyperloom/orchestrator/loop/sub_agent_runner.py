@@ -277,7 +277,6 @@ class SubAgentRunner:
         runner = self.executor_registry.get(task.kind)
         lease: Lease | None = prebound_lease
         outcome: SubAgentResult | None = None
-        terminal_state: str | None = None
         evidence: dict[str, Any] = {}
         context = "executor_success"
         try:
@@ -299,7 +298,6 @@ class SubAgentRunner:
                         task_id=task.task_id,
                     )
                 except PolicyDenied as denied:
-                    terminal_state = "cancelled"
                     context = "dispatch_policy_denied"
                     evidence = {"reason": "policy_denied", "rule": denied.rule, "error": str(denied)}
                     rule = denied.rule or "denied"
@@ -411,7 +409,7 @@ class SubAgentRunner:
                                 evidence[CLEANUP_TREE_PGID_KEY] = pgid
                         await self._write_terminal(
                             task.task_id,
-                            terminal_state or outcome.state,
+                            outcome.state,
                             evidence=evidence,
                             context=context,
                         )
