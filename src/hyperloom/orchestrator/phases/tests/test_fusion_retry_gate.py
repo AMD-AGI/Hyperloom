@@ -23,6 +23,8 @@ def _phase(last_fusion, *, spent=0, session_dir=None):
         last_profile_trace="/tmp/decode.trace.json.gz",
         last_fusion=last_fusion,
         fusion_infra_aborts=spent,
+        fusion_withheld_retries=0,
+        macro_cycle=0,
         save=lambda *a, **k: saved.append(a),
     )
     bus = SimpleNamespace(posted=[])
@@ -31,7 +33,7 @@ def _phase(last_fusion, *, spent=0, session_dir=None):
         bus.posted.append(message)
 
     bus.append_and_seq = _append_and_seq
-    phase = SimpleNamespace(shared_state=state, bus=bus, session_dir=session_dir)
+    phase = SimpleNamespace(shared_state=state, bus=bus, session_dir=session_dir, _kernel_timeline_recorder=None)
     phase.timeline = KernelPhase.timeline.__get__(phase)
     phase._record_fusion_timeline = KernelPhase._record_fusion_timeline.__get__(phase)
     return phase
