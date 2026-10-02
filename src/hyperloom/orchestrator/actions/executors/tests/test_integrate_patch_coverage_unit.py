@@ -1162,8 +1162,11 @@ async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_a_runtime_only_round_is_benched_and_keeps_its_runtime(tmp_path, monkeypatch):
-    """The acquired runtime is the round's whole change; retiring it unbenched discards it."""
+@pytest.mark.parametrize(("verdict", "runtime_survives"), [("kept", True), ("reverted", False)])
+async def test_a_runtime_only_round_is_benched_and_its_verdict_decides_the_runtime(
+    tmp_path, monkeypatch, verdict, runtime_survives
+):
+    """The acquired runtime is the round's whole change; the gate, not the apply stage, decides its fate."""
     from types import SimpleNamespace
     from hyperloom.agents.framework import isolation
     from hyperloom.common.failure_signature import classify_failure
@@ -1195,6 +1198,14 @@ async def test_a_runtime_only_round_is_benched_and_keeps_its_runtime(tmp_path, m
             probe=lambda *_args: True,
         ),
     )
+    gated: list[str] = []
+
+    async def _gate(_self, attempt, _params, _extra):
+        assert runtime.exists()
+        gated.append(attempt.pending["attempt_venv_root"])
+        return {"status": verdict, "specialist_task_id": "spec"}
+
+    monkeypatch.setattr(IntegratePatchExecutor, "_stage_gate", _gate)
     result = await IntegratePatchExecutor(session_dir=session)(
         _make_ctx(
             "task",
@@ -1207,8 +1218,9 @@ async def test_a_runtime_only_round_is_benched_and_keeps_its_runtime(tmp_path, m
             },
         )
     )
-    assert result["status"] != "no_patches"
-    assert runtime.exists()
+    assert gated == [str(runtime)]
+    assert result["status"] == verdict
+    assert runtime.exists() is runtime_survives
 
 
 @pytest.mark.asyncio
