@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
@@ -16,6 +17,14 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 from ._optimize_fixtures import optimize_state
 from .conftest import make_coordinator
+
+
+@pytest.fixture(autouse=True)
+def _a_node_with_gpus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the whole-machine pool, so the lanes an authoring dispatch takes do not follow the host."""
+    for var in GPU_MASK_ENV_NAMES:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
 
 
 def _state() -> SharedState:
