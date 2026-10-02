@@ -249,6 +249,28 @@ def _series(report: Mapping[str, Any], name: str) -> dict[str, float] | None:
     return out
 
 
+def _intvty_from_tpot(tpot: Mapping[str, float]) -> dict[str, float]:
+    """The graded interactivity axes, as the per-user token rate each TPOT percentile implies.
+
+    The aiperf path grades the summary P10 and P50 of the per-request rate OSL/E2EL. This harness publishes no
+    such series: ``events.jsonl`` carries reply text rather than per-token deltas, and its ``output_sequence_lengths``
+    has a zero median because a tool-call-only turn emits no text. Inverting TPOT reaches the same per-user rate from
+    the per-request arithmetic the harness already did -- it derives TPOT as ``(E2EL - TTFT) / (OSL - 1)`` -- and keeps
+    the slow-tail orientation, since the P90 of a latency is the pessimistic tail just as the P10 of a rate is. It
+    excludes TTFT, so the axis is not comparable across an aiperf run and an MLPerf one; grading only ever compares
+    two runs of the same harness.
+
+    A non-positive percentile is left absent: ``perf_snapshot_from_mapping`` reads a zero as an unmeasured axis and
+    discards the whole anchor, so a partial record must not be written as a measured zero.
+    """
+    axes: dict[str, float] = {}
+    for axis, pct in (("e2e_norm_intvty_p50", "p50"), ("e2e_norm_intvty_p90", "p90")):
+        ms = tpot[pct] / _NS_PER_MS
+        if ms > 0:
+            axes[axis] = 1000.0 / ms
+    return axes
+
+
 def _inline_accuracy(scores: Mapping[str, Any]) -> tuple[float, int]:
     """The harness's inline accuracy score and the turns it could not score."""
     if not isinstance(scores, Mapping) or "score" not in scores:
@@ -267,9 +289,10 @@ def map_mlperf(
 ) -> dict[str, Any]:
     """Convert an ``inference-endpoint`` ``result_summary.json`` into the InferenceX result schema.
 
-    The harness publishes no per-request OSL/E2EL series, so no ``e2e_norm_intvty_*``
-    key is written. A field the upstream ``Report`` does not carry is absent, never
-    0.0; a file that does not match that schema raises :class:`MlperfReportError`.
+    The graded ``e2e_norm_intvty_*`` axes come from the ``tpot`` series; see
+    :func:`_intvty_from_tpot`. A field the upstream ``Report`` does not carry is
+    absent, never 0.0; a file that does not match that schema raises
+    :class:`MlperfReportError`.
 
     Args:
         report: The parsed ``result_summary.json``.
@@ -302,6 +325,11 @@ def map_mlperf(
         mapped["request_throughput"] = _finite(report["qps"], "qps")
     if report["tps"] is not None:
         mapped["output_throughput"] = _finite(report["tps"], "tps")
+        # The harness measures no input-token series, so the only token rate it publishes is the output one. Grading
+        # reads the total as a throughput guard and discards an anchor that has none, and an agentic turn's prompt is
+        # mostly cache-warm replay anyway; carrying output through as the total keeps the guard on the tokens this
+        # harness actually counted rather than inventing an input rate.
+        mapped["total_token_throughput"] = mapped["output_throughput"]
     for prefix, name in _LATENCY_SERIES:
         series = _series(report, name)
         if series is None:
@@ -311,6 +339,8 @@ def map_mlperf(
         mapped[f"median_{prefix}_ms"] = series["p50"] / _NS_PER_MS
         mapped[f"p90_{prefix}_ms"] = series["p90"] / _NS_PER_MS
         mapped[f"p99_{prefix}_ms"] = series["p99"] / _NS_PER_MS
+        if name == "tpot":
+            mapped.update(_intvty_from_tpot(series))
     osl = _series(report, "output_sequence_lengths")
     if osl is not None:
         mapped["total_output_tokens"] = int(_finite(report["output_sequence_lengths"].get("total"), "osl.total"))
