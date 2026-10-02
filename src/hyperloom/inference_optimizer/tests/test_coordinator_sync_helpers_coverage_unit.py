@@ -418,7 +418,7 @@ def _round(domain: str, finding: str, confidence, questions=()) -> dict:
 
 def _findings(coord: Coordinator) -> str:
 
-    return coord._specialist_findings_block()
+    return coord.conversation._specialist_findings_block()
 
 
 def test_specialist_findings_survive_a_non_numeric_confidence(coord: Coordinator) -> None:

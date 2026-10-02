@@ -66,7 +66,7 @@ async def test_a_patch_mode_specialist_is_owned_at_dispatch(session_dir: Path, p
     coord = _coordinator(session_dir, phase=phase)
     try:
         params = dict(_FREEFORM_PATCH)
-        assert coord._stamp_specialist_owner(params) == "FRAMEWORK_AGENT"
+        assert coord.router._stamp_specialist_owner(params) == "FRAMEWORK_AGENT"
         assert params["source_phase"] == "FRAMEWORK_AGENT"
     finally:
         await coord.stop()
@@ -82,7 +82,7 @@ async def test_a_research_specialist_names_no_owner(session_dir: Path) -> None:
     coord = _coordinator(session_dir, phase="KERNEL_AGENT")
     try:
         params = {"scope": "freeform", "task_description": "find out why prefill blocks decode"}
-        assert coord._stamp_specialist_owner(params) == ""
+        assert coord.router._stamp_specialist_owner(params) == ""
         assert "source_phase" not in params
     finally:
         await coord.stop()
@@ -98,11 +98,11 @@ async def test_the_integrate_route_accepts_the_specialist_it_owned(session_dir: 
     coord = _coordinator(session_dir, phase="KERNEL_AGENT")
     try:
         params = dict(_FREEFORM_PATCH)
-        coord._stamp_specialist_owner(params)
+        coord.router._stamp_specialist_owner(params)
         task = await coord.tasks.create(kind="specialist", params=params, idempotency_key="spec-1")
 
         integrate_params = {"specialist_task_id": task.task_id}
-        assert await coord._stamp_integrate_patch_owner(integrate_params) == "FRAMEWORK_AGENT"
+        assert await coord.router._stamp_integrate_patch_owner(integrate_params) == "FRAMEWORK_AGENT"
         assert integrate_params["source_phase"] == "FRAMEWORK_AGENT"
     finally:
         await coord.stop()
@@ -119,7 +119,7 @@ async def test_the_autosubmitted_patch_is_integrated_and_owned(session_dir: Path
     coord = _coordinator(session_dir, phase=phase)
     try:
         params = dict(_FREEFORM_PATCH)
-        coord._stamp_specialist_owner(params)
+        coord.router._stamp_specialist_owner(params)
         await _specialist_wrote_a_patch(coord, spec_params=params)
 
         await coord.reactor_pass("critic")

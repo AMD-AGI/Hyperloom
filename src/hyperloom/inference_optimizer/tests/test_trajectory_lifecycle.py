@@ -253,7 +253,7 @@ async def test_an_auto_retry_hangs_off_the_failed_task(session_dir, monkeypatch)
     c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[], default_intent=_heartbeat())))
     try:
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
-            assert await c._maybe_auto_retry_specialist(failed, result) is True
+            assert await c.specialist_dispatch.maybe_auto_retry_specialist(failed, result) is True
     finally:
         await c.stop()
 
