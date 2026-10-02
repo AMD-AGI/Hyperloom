@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.common.failure_signature import classify_failure
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
@@ -24,9 +25,27 @@ from hyperloom.orchestrator.enablement.runtime.stack_actions import (
 )
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
+_ARCH_LOG = "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
 
-def _attempt(task_id: str = "t-1"):
-    return ip.IntegrateAttempt(task_id=task_id)
+
+def _params(**extra) -> dict:
+    """Params for an enablement round dispatched on an architecture-miss verdict."""
+    return {
+        "enablement": True,
+        "enablement_failure_signature": classify_failure(_ARCH_LOG).to_dict(),
+        **extra,
+    }
+
+
+def _attempt(task_id: str = "t-1", *, kept: dict | None = None):
+    """An attempt whose shared state carries the round the executor derives from."""
+    attempt = ip.IntegrateAttempt(task_id=task_id)
+    attempt.shared_state = types.SimpleNamespace(
+        framework="vllm",
+        gpu_type="mi355x",
+        enablement=EnablementRound(kept_stack_action=dict(kept) if kept else {}),
+    )
+    return attempt
 
 
 def _candidate(framework: str = "vllm") -> dict:
@@ -80,14 +99,12 @@ def _executor(tmp_path):
 def _neutralize_disk_preflight(monkeypatch):
     """Stop the real disk_preflight from leaking the runner's free-space into these tests."""
     import hyperloom.agents.framework.isolation as iso
-    from hyperloom.orchestrator.actions.executors import _multi_node_env
     from hyperloom.orchestrator.enablement.runtime import adapters
 
     def forbidden(*_args, **_kwargs):
         pytest.fail("runtime acquisition must be stubbed by the test")
 
     monkeypatch.setattr(iso, "disk_preflight", lambda *_a, **_k: None)
-    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
     real_get_adapter = adapters.get_adapter
 
     def metadata_adapter(framework, **kwargs):
@@ -101,32 +118,63 @@ def _neutralize_disk_preflight(monkeypatch):
     monkeypatch.setattr(adapters, "get_adapter", metadata_adapter)
 
 
-# provision stage: no candidate / skip paths
+# provision stage: which rounds acquire a runtime at all
 
 
-async def test_no_candidate_is_noop(_executor):
-    attempt = _attempt()
-    out = await _executor._stage_provision_attempt_runtime(attempt, {}, "t-1")
-    assert out is None
+@pytest.mark.parametrize(
+    "params",
+    [
+        pytest.param({}, id="not_an_enablement_round"),
+        pytest.param({"enablement": True}, id="no_dispatched_verdict"),
+        pytest.param(_params(enablement_launch_only=True), id="launch_only_bench"),
+    ],
+)
+async def test_rounds_that_acquire_nothing_are_a_noop(_executor, monkeypatch, params):
+    """Only an enablement round dispatched on a code-acquirable verdict provisions."""
+
+    def _forbidden(_fw):
+        pytest.fail("adapter must not be consulted for a round that acquires nothing")
+
+    monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", _forbidden)
+    attempt = _attempt(kept=_candidate())
+    assert await _executor._stage_provision_attempt_runtime(attempt, params, "t-1") is None
     assert attempt.provision_result is None
 
 
-async def test_multi_node_skips_provision(_executor, monkeypatch):
-    monkeypatch.setattr(ip, "_read_done_payload", lambda *_a, **_k: {}, raising=False)
-    import hyperloom.orchestrator.actions.executors._multi_node_env as mn
+async def test_dispatched_verdict_drives_the_adapter_candidate(_executor, monkeypatch):
+    """The verdict the round was dispatched on is the gap the adapter builds against."""
+    seen: dict = {}
 
-    monkeypatch.setattr(mn, "is_multi_node", lambda: True)
-    called = {"n": 0}
+    class _Recorder(_FakeAdapter):
+        def build_stack_action(self, gap, *, gpu_type=""):
+            seen["gap"] = gap
+            seen["gpu_type"] = gpu_type
+            return EnablementStackAction.from_state(_candidate())
 
-    def _get_adapter(_fw):
-        called["n"] += 1
-        return _FakeAdapter(_ok_result("/x"))
-
-    monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", _get_adapter)
+    adapter = _Recorder(_ok_result(str(_executor.session_dir / "v")))
+    monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
     attempt = _attempt()
-    out = await _executor._stage_provision_attempt_runtime(attempt, {"runtime_candidate": _candidate()}, "t-1")
-    assert out is None
-    assert called["n"] == 0  # adapter never consulted in multi-node
+    assert await _executor._stage_provision_attempt_runtime(attempt, _params(), "t-1") is None
+    assert seen["gap"].kind == "missing_model_arch"
+    assert seen["gap"].requires_code_acquisition is True
+    assert seen["gpu_type"] == "mi355x"
+    assert attempt.stack_action is not None
+
+
+async def test_kept_action_is_reprovisioned_instead_of_a_fresh_candidate(_executor, monkeypatch):
+    """Serial stacking reuses the runtime the last KEEP promoted; no new candidate is built."""
+
+    class _NoBuild(_FakeAdapter):
+        def build_stack_action(self, gap, *, gpu_type=""):
+            pytest.fail("a round with a kept stack action must not build a fresh candidate")
+
+    adapter = _NoBuild(_ok_result(str(_executor.session_dir / "v")))
+    monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
+    kept = _candidate()
+    attempt = _attempt(kept=kept)
+    assert await _executor._stage_provision_attempt_runtime(attempt, _params(), "t-1") is None
+    assert attempt.stack_action is not None
+    assert attempt.stack_action.capability == EnablementStackAction.from_state(kept).capability
 
 
 # provision ok / fail
@@ -149,8 +197,8 @@ async def test_provision_runs_off_the_event_loop_thread(_executor, monkeypatch):
 
     adapter.provision = _spy_provision
     monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
-    attempt = _attempt()
-    out = await _executor._stage_provision_attempt_runtime(attempt, {"runtime_candidate": _candidate()}, "t-1")
+    attempt = _attempt(kept=_candidate())
+    out = await _executor._stage_provision_attempt_runtime(attempt, _params(), "t-1")
     assert out is None
     assert "ident" in seen
     assert seen["ident"] != loop_ident
@@ -159,8 +207,8 @@ async def test_provision_runs_off_the_event_loop_thread(_executor, monkeypatch):
 async def test_provision_fail_returns_reverted_and_gcs(_executor, monkeypatch):
     adapter = _FakeAdapter(ProvisionResult(ok=False, error="pip failed"))
     monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
-    attempt = _attempt()
-    out = await _executor._stage_provision_attempt_runtime(attempt, {"runtime_candidate": _candidate()}, "t-1")
+    attempt = _attempt(kept=_candidate())
+    out = await _executor._stage_provision_attempt_runtime(attempt, _params(), "t-1")
     assert out is not None
     assert out["status"] == "reverted"
     assert out["error_class"] == "provision_failed"
@@ -174,8 +222,8 @@ async def test_probe_fail_returns_reverted(_executor, monkeypatch):
     venv = str(_executor.session_dir / "enablement" / "stacks" / "vllm" / "t-1" / "venv")
     adapter = _FakeAdapter(_ok_result(venv), probe_ok=False)
     monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
-    attempt = _attempt()
-    out = await _executor._stage_provision_attempt_runtime(attempt, {"runtime_candidate": _candidate()}, "t-1")
+    attempt = _attempt(kept=_candidate())
+    out = await _executor._stage_provision_attempt_runtime(attempt, _params(), "t-1")
     assert out is not None
     assert out["status"] == "reverted"
     assert "probe" in out["error"]
@@ -193,8 +241,8 @@ async def test_disk_preflight_failure_returns_reverted(_executor, monkeypatch):
         "hyperloom.orchestrator.enablement.runtime.adapters.get_adapter",
         lambda _fw: called.__setitem__("n", called["n"] + 1),
     )
-    attempt = _attempt()
-    out = await _executor._stage_provision_attempt_runtime(attempt, {"runtime_candidate": _candidate()}, "t-1")
+    attempt = _attempt(kept=_candidate())
+    out = await _executor._stage_provision_attempt_runtime(attempt, _params(), "t-1")
     assert out is not None
     assert out["error_class"] == "disk_preflight_failed"
     assert called["n"] == 0  # never reached the adapter
@@ -245,7 +293,6 @@ def test_opt_venv_path_never_replaced(tmp_path):
 @pytest.mark.asyncio
 async def test_kept_stack_action_survives_rearm(monkeypatch):
     from hyperloom.orchestrator.state.shared_state import SharedState
-    from hyperloom.orchestrator.enablement.params import _maybe_build_runtime_candidate  # noqa: F401
 
     # Simulate a coordinator with just enough surface for _maybe_rearm_enablement.
     state = SharedState()
@@ -280,33 +327,3 @@ async def test_kept_stack_action_survives_rearm(monkeypatch):
     assert state.enablement.kept_stack_action == action_state
     assert state.enablement.active_runtime == runtime_state
     assert runtime_state in state.enablement.attempt_runtimes
-
-
-def test_rearm_reactivation_threads_kept_action_into_next_params(monkeypatch):
-    """A prior KEEP'd stack action is re-attached as runtime_candidate next round."""
-    import hyperloom.agents.framework.sources as src
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    monkeypatch.setattr(src, "enumerate_candidates", lambda _req: [])
-
-    kept = _candidate()
-    state = types.SimpleNamespace(
-        framework="vllm",
-        model_name="deepseek-v4",
-        gpu_type="mi355x",
-        enablement=EnablementRound(
-            kept_patches=[],
-            setup_commands=[],
-            kept_stack_action=kept,
-            localization_manifest=[],
-            last_build_failure={},
-        ),
-    )
-    fake = types.SimpleNamespace(shared_state=state)
-    fake._discover_enablement_candidate_refs = types.MethodType(Coordinator._discover_enablement_candidate_refs, fake)
-    fake._read_enablement_source_context = lambda _sig: ""
-    fake._derive_checkpoint_weight_facts = lambda _log: ""
-    params = Coordinator._build_enablement_specialist_params(fake, "Model architecture 'Foo' is not supported")
-    assert params is not None
-    # The prior KEEP'd runtime is re-attached for the next round.
-    assert params.get("runtime_candidate") == kept

@@ -208,8 +208,6 @@ class BaseAdapter:
         self,
         gap: CapabilityGap,
         *,
-        framework: str,
-        model: str,
         gpu_type: str = "",
     ) -> EnablementStackAction | None:
         """Build a candidate stack action, or None when unsupported/no-evidence."""
@@ -336,8 +334,6 @@ class VllmRocmAdapter(_VenvProvisionMixin):
         self,
         gap: CapabilityGap,
         *,
-        framework: str,
-        model: str,
         gpu_type: str = "",
     ) -> EnablementStackAction | None:
         """Build a vLLM ROCm wheel candidate; None when no ROCm index is configured."""
@@ -442,8 +438,6 @@ class SglangAdapter(_VenvProvisionMixin):
         self,
         gap: CapabilityGap,
         *,
-        framework: str,
-        model: str,
         gpu_type: str = "",
     ) -> EnablementStackAction | None:
         """Prefer an editable source ref (origin-allowlisted); else a wheel index."""

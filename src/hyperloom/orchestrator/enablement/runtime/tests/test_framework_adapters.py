@@ -63,14 +63,14 @@ def test_sglang_supports_missing_arch_not_resource_constraint():
 
 def test_atom_and_xdit_never_acquire_a_runtime():
     for adapter in (AtomAdapter(), XditAdapter()):
-        assert adapter.build_stack_action(_gap(MISSING_MODEL_ARCH), framework=adapter.framework, model="m") is None
+        assert adapter.build_stack_action(_gap(MISSING_MODEL_ARCH)) is None
 
 
 def test_get_adapter_unknown_returns_null_no_raise():
     a = get_adapter("totally_unknown_fw")
     assert isinstance(a, NullAdapter)
     assert a.supports(_gap()) is False
-    assert a.build_stack_action(_gap(), framework="x", model="m") is None
+    assert a.build_stack_action(_gap()) is None
 
 
 def test_get_adapter_case_insensitive():
@@ -84,14 +84,14 @@ def test_get_adapter_case_insensitive():
 def test_vllm_no_rocm_index_returns_none(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_VLLM_ROCM_INDEX_URL", raising=False)
     a = VllmRocmAdapter()
-    assert a.build_stack_action(_gap(), framework="vllm", model="m") is None
+    assert a.build_stack_action(_gap()) is None
 
 
 def test_vllm_with_rocm_index_builds_wheel_action(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_VLLM_ROCM_INDEX_URL", "https://rocm.repo/whl")
     monkeypatch.delenv("HYPERLOOM_ENABLEMENT_INDEX_ALLOWLIST", raising=False)
     a = VllmRocmAdapter()
-    action = a.build_stack_action(_gap(), framework="vllm", model="m", gpu_type="mi355x")
+    action = a.build_stack_action(_gap(), gpu_type="mi355x")
     assert action is not None
     assert action.acquisition_method == "wheel"
     assert action.index_url == "https://rocm.repo/whl"
@@ -102,13 +102,13 @@ def test_vllm_index_not_in_allowlist_returns_none(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_VLLM_ROCM_INDEX_URL", "https://evil.repo/whl")
     monkeypatch.setenv("HYPERLOOM_ENABLEMENT_INDEX_ALLOWLIST", "https://rocm.repo")
     a = VllmRocmAdapter()
-    assert a.build_stack_action(_gap(), framework="vllm", model="m") is None
+    assert a.build_stack_action(_gap()) is None
 
 
 def test_vllm_resource_constraint_returns_none(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_VLLM_ROCM_INDEX_URL", "https://rocm.repo/whl")
     a = VllmRocmAdapter()
-    assert a.build_stack_action(_gap(RESOURCE_CONSTRAINT), framework="vllm", model="m") is None
+    assert a.build_stack_action(_gap(RESOURCE_CONSTRAINT)) is None
 
 
 def test_sglang_editable_ref_action(monkeypatch):
@@ -116,7 +116,7 @@ def test_sglang_editable_ref_action(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_SGLANG_REF", "v0.4.9")
     monkeypatch.delenv("HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST", raising=False)
     a = SglangAdapter()
-    action = a.build_stack_action(_gap(), framework="sglang", model="m")
+    action = a.build_stack_action(_gap())
     assert action is not None
     assert action.acquisition_method == "editable_ref"
     assert action.ref == "v0.4.9"
@@ -126,7 +126,7 @@ def test_sglang_no_source_no_index_returns_none(monkeypatch):
     for k in ("HYPERLOOM_SGLANG_REPO_URL", "HYPERLOOM_SGLANG_REF", "HYPERLOOM_SGLANG_INDEX_URL"):
         monkeypatch.delenv(k, raising=False)
     a = SglangAdapter()
-    assert a.build_stack_action(_gap(), framework="sglang", model="m") is None
+    assert a.build_stack_action(_gap()) is None
 
 
 # provision + ROCm verification (mocked run)

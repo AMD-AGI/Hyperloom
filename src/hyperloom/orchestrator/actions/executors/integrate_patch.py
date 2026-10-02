@@ -54,6 +54,7 @@ from ...state.shared_state import (
 )
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 from hyperloom.common.env import is_truthy
+from hyperloom.common.failure_signature import CapabilityGap, FailureSignature
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import VERDICT_KEEP
 from ...bringup import load_boot_observation, observation_summary, verdict_of, write_boot_observation
@@ -214,12 +215,25 @@ def resolve_patch_source(params: Mapping[str, Any]) -> str:
 
 _LAUNCH_ONLY_MUTATION_FIELDS: tuple[str, ...] = (
     "patches",
-    "localization_candidate",
-    "runtime_candidate",
     "artifacts",
     "config_changes",
     "enablement_setup_commands",
 )
+
+
+def _enablement_gap(params: dict[str, Any]) -> CapabilityGap | None:
+    """The round's capability gap, from the verdict it was dispatched on.
+
+    None for a non-enablement round and for a launch-only bench, which carries
+    a pre-built ``runtime_override`` and may acquire nothing of its own.
+    """
+    if not params.get("enablement") or params.get("enablement_launch_only"):
+        return None
+    raw = params.get("enablement_failure_signature")
+    if not isinstance(raw, dict) or not raw:
+        return None
+    gap = CapabilityGap.from_signature(FailureSignature.from_dict(raw))
+    return gap if gap.requires_code_acquisition else None
 
 
 def _established_enablement_config(params: dict[str, Any], shared_state: Any) -> tuple[str, dict[str, str]]:
@@ -2510,31 +2524,37 @@ class IntegratePatchExecutor:
         params: dict[str, Any],
         specialist_task_id: str,
     ) -> dict[str, Any] | None:
-        """Provision the attempt-scoped runtime from ``params['runtime_candidate']``.
+        """Provision the attempt-scoped runtime this round's gap calls for (Rung 3).
 
-        No-op when no candidate is present or in multi-node mode.
-        Runs a disk preflight, delegates provision+probe to the framework
-        adapter (off the event loop; an in-flight pip install is not killed
-        if the await is cancelled), and on success stores the resolved runtime on
-        the attempt for the gate to
+        No-op when the round's gap needs no code acquisition or the framework
+        adapter can build no evidence-backed candidate. Runs a disk preflight,
+        delegates provision+probe to the framework adapter (off the event loop;
+        an in-flight pip install is not killed if the await is cancelled), and on
+        success stores the resolved runtime on the attempt for the gate to
         activate via the YAML-layer ``runtime_override``. Returns an early-exit
         ``reverted`` dict on any provision failure (no patch side effects yet),
         or ``None`` to continue.
         """
-        raw = params.get("runtime_candidate")
-        if not isinstance(raw, dict) or not raw:
-            return None
-
-        from ._multi_node_env import is_multi_node
-
-        if is_multi_node():
-            log.info("integrate_patch: skipping runtime provision in multi-node mode")
+        gap = _enablement_gap(params)
+        if gap is None:
             return None
 
         from ...enablement.runtime.adapters import get_adapter
         from ...enablement.runtime.stack_actions import EnablementStackAction
 
-        action = EnablementStackAction.from_state(raw)
+        enablement = getattr(attempt.shared_state, "enablement", None)
+        # Serial stacking runs on the runtime the last kept round promoted; a
+        # round with none asks the framework adapter for a fresh candidate.
+        kept = getattr(enablement, "kept_stack_action", None)
+        if isinstance(kept, dict) and kept:
+            action = EnablementStackAction.from_state(kept)
+        else:
+            framework = str(getattr(attempt.shared_state, "framework", "") or "").strip().lower()
+            gpu_type = str(getattr(attempt.shared_state, "gpu_type", "") or "").strip().lower()
+            action = get_adapter(framework).build_stack_action(gap, gpu_type=gpu_type)
+            if action is None:
+                return None
+
         attempt_dir = (
             enablement_stacks_dir(self.session_dir)
             / (action.framework or "unknown")
@@ -2627,30 +2647,38 @@ class IntegratePatchExecutor:
         params: dict[str, Any],
         specialist_task_id: str,
     ) -> dict[str, Any] | None:
-        """Fetch/synthesize a localization diff and stage it for _stage_apply.
+        """Fetch/synthesize a localization diff and stage it for _stage_apply (Rung 4).
 
-        No-op when no ``localization_candidate`` is present or in multi-node
-        mode. Fetches the merged-PR / vendored diff (post-Critic), rejects a
+        No-op when the round's gap needs no code acquisition, no bridging
+        candidate was discovered, or the framework adapter cannot localize.
+        Fetches the merged-PR / vendored diff (post-Critic), rejects a
         compiled / build-backend closure to a clean revert, and writes the diff
         to a patch file recorded on ``attempt.localization_patches`` which
         ``_stage_apply`` prepends to the patch set. Returns an early-exit
         ``reverted`` dict on any gate/fetch failure (no tree mutation yet), or
         ``None`` to continue.
         """
-        raw = params.get("localization_candidate")
-        if not isinstance(raw, dict) or not raw:
+        gap = _enablement_gap(params)
+        if gap is None:
             return None
 
-        from ._multi_node_env import is_multi_node
-
-        if is_multi_node():
-            log.info("integrate_patch: skipping localization in multi-node mode")
+        enablement = getattr(attempt.shared_state, "enablement", None)
+        ref = next((str(r) for r in (getattr(enablement, "candidate_refs", None) or ()) if str(r).strip()), "")
+        if not ref:
             return None
 
+        from hyperloom.agents.framework.repo_map import repo_url_for_framework
+
+        from ...enablement.runtime.adapters import get_adapter
         from ...enablement.runtime.localization import build_localization_diff
-        from ...enablement.runtime.stack_actions import EnablementStackAction
 
-        action = EnablementStackAction.from_state(raw)
+        framework = str(getattr(attempt.shared_state, "framework", "") or "").strip().lower()
+        repo_url = repo_url_for_framework(framework)
+        if not repo_url:
+            return None
+        action = get_adapter(framework).build_localization_action(gap, candidate_ref=ref, repo_url=repo_url)
+        if action is None:
+            return None
 
         from hyperloom.agents.framework.sources import github as _gh
 
