@@ -168,7 +168,6 @@ class EnablementParams(CoordinatorCollaborator):
             framework=framework,
             model=model or "(target model)",
             repo_url=repo_url,
-            launch_log=text,
             gpu_type=(getattr(state, "gpu_type", "") or "").strip().lower(),
         )
         plan = build_search_plan(signature, framework_repo_url=repo_url, model=model)
@@ -302,11 +301,12 @@ class EnablementParams(CoordinatorCollaborator):
             "lever_kind": LEVER_ENABLEMENT,
             "enablement_attempt": attempt,
             "enablement_failure_kind": signature.kind,
+            # The verdict this round was dispatched on. The prompt builder renders
+            # it; nothing downstream re-classifies a log to recover it.
+            "enablement_failure_signature": signature.to_dict(),
             "enablement_search_repos": list(plan.repos),
             # The before half of integrate_patch's gate.
             "enablement_before_observation_path": state.enablement.launch_observation_path,
-            # CapabilityGap projection: marks resource_constraint as not actionable.
-            "enablement_capability_gap": capability_gap.to_dict(),
             "enablement_candidate_refs": list(candidate_refs),
             # Source lines near the offending site, plus (on a weight-init
             # failure) the checkpoint's per-layer weight inventory. Rendered

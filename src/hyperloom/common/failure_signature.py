@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Pattern
 
@@ -81,6 +82,25 @@ class FailureSignature:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict for JSON output."""
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any] | None) -> "FailureSignature":
+        """Rehydrate from :meth:`to_dict`; missing keys default to ``UNKNOWN``."""
+        raw = raw or {}
+        secondary = raw.get("secondary_kinds")
+        try:
+            confidence = float(raw.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        return cls(
+            kind=str(raw.get("kind") or UNKNOWN),
+            offending_file=str(raw.get("offending_file") or ""),
+            offending_symbol=str(raw.get("offending_symbol") or ""),
+            raw_excerpt=str(raw.get("raw_excerpt") or ""),
+            confidence=confidence,
+            bridge_layer=str(raw.get("bridge_layer") or ""),
+            secondary_kinds=tuple(str(k) for k in secondary) if isinstance(secondary, (list, tuple)) else (),
+        )
 
 
 # --- CapabilityGap projection -----------------------------------------------
@@ -437,7 +457,6 @@ class EnablementRequest:
     framework: str
     model: str
     repo_url: str
-    launch_log: str = ""
     gpu_type: str = ""
     max_search_candidates: int = 5
 
@@ -457,15 +476,9 @@ class EnablementRequest:
             framework=framework,
             model=model,
             repo_url=repo_url,
-            launch_log=str(raw.get("launch_log") or ""),
             gpu_type=str(raw.get("gpu_type") or "").strip().lower(),
             max_search_candidates=int(raw.get("max_search_candidates", 5)),
         )
-
-    @property
-    def signature(self) -> FailureSignature:
-        """Classify :attr:`launch_log` on demand."""
-        return classify_failure(self.launch_log)
 
 
 # --- Runnable gate ---------------------------------------------------------

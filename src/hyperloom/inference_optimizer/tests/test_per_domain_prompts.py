@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.common.failure_signature import classify_failure
 from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAIN_KEYS,
     SPECIALIST_DOMAINS,
@@ -259,6 +260,31 @@ def test_enablement_mandate_carries_the_dispatch_evidence():
     assert "CANDIDATE BRIDGING" in user
     assert "ROCm/vllm#123" in user
     assert "vllm-project/vllm#456" in user
+
+
+def test_enablement_mandate_renders_the_dispatched_signature():
+    """The verdict the round was dispatched on reaches the prompt verbatim; the builder never re-classifies a log to recover it."""
+    domain = get_domain("enablement_specialist")
+    assert domain is not None
+    signature = classify_failure(
+        'Traceback (most recent call last):\n  File "/opt/vllm/vllm/model_executor/models/registry.py", line 7, in resolve\n'
+        "ValueError: Model architectures ['GlmForCausalLM'] are not supported for now."
+    )
+    inp = SpecialistPromptInputs(
+        task_id="task-enablement-signature",
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id="gap.enablement.missing_arch",
+        gap_symptom="boot failed",
+        gap_layer=domain.layer,
+        gap_evidence={"model": "zai-org/GLM-5"},
+        framework="vllm",
+        enablement_failure_signature=signature.to_dict(),
+    )
+    _system, user = build_specialist_prompts(inp)
+    assert "FAILURE CLASS: missing_model_arch" in user
+    assert "/opt/vllm/vllm/model_executor/models/registry.py" in user
+    assert "GlmForCausalLM" in user
 
 
 def test_enablement_mandate_omits_evidence_headers_when_not_supplied():

@@ -673,6 +673,7 @@ class SpecialistRunner:
                 enablement_candidate_refs=tuple(
                     str(r).strip() for r in (params.get("enablement_candidate_refs") or ()) if str(r).strip()
                 ),
+                enablement_failure_signature=dict(params.get("enablement_failure_signature") or {}),
                 enablement_accepted_config={
                     "extra_envs": dict(params.get("base_extra_envs") or {}),
                     "extra_server_args": str(params.get("base_extra_args") or "").strip(),
