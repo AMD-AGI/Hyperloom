@@ -619,11 +619,10 @@ class FrameworkPhase(CoordinatorCollaborator):
         FrameworkPhase._record_plateau_rows(recorder, path=PLATEAU_PATH_EXIT, evidence=evidence)
 
     def _record_advisory_plateau(self) -> None:
-        """Snapshot the plateau reading the advisory is composed from into the SBD timeline.
+        """Record the current per-lever dryness reading on the advisory path.
 
-        Recorded here rather than derived at export because the inputs are counts over a history that keeps growing:
-        a later re-derivation returns a number the agent never saw. Both arms are recorded whether or not either
-        fired -- "evaluated and did not trip" is the reading that explains a phase staying open.
+        Both arms are recorded whether or not either tripped, so the timeline
+        carries the reading as it stood when the advisory was built.
         """
         from hyperloom.inference_optimizer.breakdown.recorder.framework_event import PLATEAU_PATH_ADVISORY
 

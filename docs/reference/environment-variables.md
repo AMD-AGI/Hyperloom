@@ -84,8 +84,8 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--framework-version`, `--precision`, `--tp`, `--ep`, `--isl`, `--osl`,
   `--conc`, `--max-model-len`, `--profile-osl`.
 - **Goal / budget:** `--target-gain`, `--target-roofline`, `--max-hours`,
-  `--target-summary`, `--target-tput`, `--compare-against-gpu`. The roofline
-  target composes with the others: whichever is met first ends the run.
+  `--target-tput`, `--compare-against-gpu`. The roofline target composes with
+  the others: whichever is met first ends the run.
   `--max-latency-ms` is a constraint on KEEP rather than a target, and applies
   to scriptable frameworks (`xdit`, `custom`) only; the CLI refuses it for a
   serving framework, including on resume.
