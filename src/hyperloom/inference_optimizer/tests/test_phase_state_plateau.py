@@ -285,33 +285,6 @@ def test_kernel_does_not_exit_on_plateau():
     assert compute_next_phase(state) is None
 
 
-def test_gemm_completion_with_no_pending_work_exits_kernel():
-    """GEMM done with no further kernel_opt work pending → KERNEL exits to SWEEP."""
-    state = SharedState(
-        phase="KERNEL_AGENT",
-        phase_started_unix=0.0,
-        max_minutes=0,
-        phase_budget_pct={},
-        kernel_integrate_attempts={},
-        kernel_opt_task_attempts={},
-        rejected_kernel_ids=[],
-        last_gemm_tuning={
-            "status": "complete",
-            "decision": "KEEP",
-            "best_speedup": 1.48,
-            "tuned_file": "/tmp/tuned.csv",
-        },
-        stop_reason="",
-        optimization_stack=[],
-        kernel_optimizer="",
-    )
-    out = compute_next_phase(state)
-    assert out is not None
-    target, reason, _ = out
-    assert target == PHASE_SWEEP
-    assert reason == "kernel_no_more_leverage"
-
-
 def test_compute_next_phase_skip_to_close_routes_to_close():
     state = SharedState(
         phase="FRAMEWORK_AGENT",

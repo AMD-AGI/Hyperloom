@@ -79,7 +79,6 @@ async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, 
     st = c.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
-    st.resume_pending_revalidation = True
     st.baseline_tput = 100.0
     st.current_best = {"action": "explore", "tput": 120.0}
     st.cumulative_gain_validated = 20.0
@@ -105,7 +104,6 @@ async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, 
 
     assert st.current_best == before_best
     assert st.cumulative_gain_validated == 20.0
-    assert st.resume_pending_revalidation is True
     assert "revalidation_task_id" not in st.geak_pending
     assert st.geak_pending["revalidation_error"] == "geak_harness_unsupported_canonical_workload"
     assert not any(entry.get("action") == "geak_e2e" for entry in st.optimization_stack)
@@ -642,10 +640,9 @@ async def test_resume_stack_revalidate_rejects_same_config_noise(coordinator) ->
 async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordinator) -> None:
     """Dropping a candidate is not a revalidation of the stack behind it.
 
-    ``resume_pending_revalidation`` means the accepted stack still owes a
-    post-resume remeasure, and the contract everywhere else in this function is
-    that only a reconciled watermark clears it. Scoped to the canonical
-    workload; a replayable one keeps clearing the flag as it always has.
+    The accepted stack still owes a post-resume remeasure while the validation
+    watermark trails the optimization stack, so a ``no_material`` drop must
+    leave that watermark unreconciled. Scoped to the canonical workload.
     """
     c = coordinator
     st = c.shared_state
@@ -1235,7 +1232,6 @@ async def test_a_failed_revalidation_settles_the_verdict_and_keeps_the_stack(coo
     c = coordinator
     st = c.shared_state
     _arm_geak_win(st)
-    st.resume_pending_revalidation = True
     st.cumulative_gain_validated = 20.0
     st.cumulative_gain_validated_ts = "2026-09-08T00:00:00Z"
 
@@ -1251,7 +1247,6 @@ async def test_a_failed_revalidation_settles_the_verdict_and_keeps_the_stack(coo
     assert st.geak_result["revalidation_error_class"] == "subprocess_nonzero"
     assert st.geak_result["revalidation_error"] == "revalidation failed"
     assert st.current_best["action"] == "baseline"
-    assert st.resume_pending_revalidation is True
     assert st.cumulative_gain_validated == 20.0
     assert st.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
 

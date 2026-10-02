@@ -1317,10 +1317,12 @@ class TestThePumpOnlyCancelsWhatItSpawned:
     async def test_a_tick_with_nothing_queued_leaves_an_unjoined_action_running(self, coord: Coordinator):
         _set_budget(coord, minutes=600)
         unjoined = await _start_unjoined_action(coord, key="unjoined-idle")
+        handle = coord.dispatcher._inflight_actions[unjoined.task_id]
         try:
             await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=10.0)
 
-            assert unjoined.task_id in coord.dispatcher._inflight_actions
+            assert not handle.scope.cancelled
+            assert not handle.atask.done()
         finally:
             await coord.dispatcher.cancel_inflight_actions(reason="test")
 
@@ -1329,13 +1331,15 @@ class TestThePumpOnlyCancelsWhatItSpawned:
         _quick_poll(coord)
         _set_budget(coord, minutes=600)
         unjoined = await _start_unjoined_action(coord, key="unjoined-own")
+        handle = coord.dispatcher._inflight_actions[unjoined.task_id]
         _task, spawned, pump = await _start_action_under_pump(coord, kind=_CLOSING_ACTION, key="own-spawn")
         try:
             pump.cancel()
             await _settle(pump)
 
             assert spawned.cancelled()
-            assert unjoined.task_id in coord.dispatcher._inflight_actions
+            assert not handle.scope.cancelled
+            assert not handle.atask.done()
         finally:
             await coord.dispatcher.cancel_inflight_actions(reason="test")
 

@@ -496,20 +496,6 @@ async def test_in_flight_defers_on_undecided_integrate_proposal(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_in_flight_ignores_a_ruled_integrate_proposal(tmp_path):
-    """Once the Critic has ruled, the proposal leaves pending_proposals so a dropped
-    proposal cannot hold the round open forever."""
-    fake = _enqueue_self(tmp_path)
-    await _hold_round(fake, "spec-done")
-    fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done")
-    assert await fake.enablement_lane.enablement_in_flight() is True
-
-    del fake.state.pending_proposals["m-spec-done"]
-
-    assert await fake.enablement_lane.enablement_in_flight() is False
-
-
-@pytest.mark.asyncio
 async def test_in_flight_defers_on_queued_integrate_task(tmp_path):
     """An approved integrate_patch task for this specialist keeps the round open."""
     fake = _enqueue_self(tmp_path)

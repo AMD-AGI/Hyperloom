@@ -2344,6 +2344,11 @@ def test_close_neither_rebenches_nor_profiles_a_tree_it_refused_to_trust():
     assert PATCH_RECOVERY_INCOMPLETE_STOP_REASON in close_phase._NO_REVALIDATION_STOP_REASONS
 
     seen: list[str] = []
+
+    async def _enqueue(**_kw):
+        seen.append("enqueued")
+        return None
+
     phase = close_phase.ClosePhase.__new__(close_phase.ClosePhase)
     object.__setattr__(
         phase,
@@ -2357,9 +2362,10 @@ def test_close_neither_rebenches_nor_profiles_a_tree_it_refused_to_trust():
                 save=lambda _: None,
             ),
             session_dir=None,
-            internal_analysis_kind=lambda: seen.append("analysis_kind") or "roofline",
-            enqueue_internal_analysis_task=lambda **_kw: seen.append("enqueued"),
-            _POST_OPT_ROOFLINE_ACTIONS=frozenset({"integrate"}),
+            phase_prelude=SimpleNamespace(
+                internal_analysis_kind=lambda: seen.append("analysis_kind") or "roofline",
+                enqueue_internal_analysis_task=_enqueue,
+            ),
         ),
     )
 
