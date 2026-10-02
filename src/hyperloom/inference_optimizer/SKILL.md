@@ -657,7 +657,7 @@ operator's stated value is lost.
 | Expert parallel | `--ep` | Pass the prompt's EP for MoE. Default `1` outside native AgentX; a native source YAML resolves EP and rejects an explicit mismatch. |
 | Precision | `--precision` | Match the checkpoint (`bf16` default / `fp8` / ...). A benchmark YAML may supply `benchmark.precision`. Keep consistent with `--quantize`. |
 | Budget | `--max-hours` | Pass the prompt's time budget. Default `2.0`. Always set it explicitly for native AgentX: one canonical round commonly exceeds the default after model load, warmup, drain, and its 3600-second measurement. |
-| Max model len | `--max-model-len` | Optional outside native AgentX; auto-derived from ISL+OSL+headroom when omitted. Native InferenceX AgentX launchers unset it and use the model's native context; only the compatibility profile leg may consume it. |
+| Max model len | `--max-model-len` | Optional outside native AgentX; auto-derived from ISL+OSL+headroom when omitted. Native AgentX resolves the model context; custom workloads may cap it within that verified context. |
 | External reference GPU | `--compare-against-gpu` | `target_analysis` writes `target_analysis/target_baseline.json` for query/status metadata and `competitor_target.json` for both advisory and final-report comparisons. Without a target GPU it writes `reason="no_target_gpu_configured"` and clears the competitor target. AgentX reads accepted `current_best.total_throughput`, divides by the recorded resolved recipe TP×PP×PCP GPU count (`state.tp` is only the legacy-artifact fallback), and reads `current_best.e2e_norm_intvty_p90` at `state.conc`; it does not reread raw results or recipes. Missing targets or axes remain unavailable. This is a cross-system advisory, not proof of identical measurement estimators or deployment, and never changes Objective or KEEP/REVERT. |
 | Target advisory | `--no-target-advisory` | Disable external-target hints in prompts without disabling final-report comparison. `primary_gap` uses the existing latency/throughput categories; the interactivity axis is displayed as interactivity. |
 | Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Never runs on a resume. |
@@ -902,9 +902,9 @@ does not enable it, and explicit `--enable-conc-sweep` fails preflight.
 
 ### Native Magpie AgentX contract
 
-Use the pinned Magpie v0.3.0 plus generic eval source-path hotfix commit
-`a3339dc2776ee0c977fb3313fe89f56da7a91555` and InferenceX commit
-`3d5581562f643f9bdeb8410cd924e2c70906c966`. Create a source Magpie YAML with
+Use Magpie-managed AgentX at commit
+`658562345ad1a7e5a617e3631f3acfcec0eade4a` and InferenceX commit
+`408c015be4b22d14c69518643609669405507077`. Create a source Magpie YAML with
 the public model identity, framework, launcher, effective image pin, and fixed
 concurrency. Leave recipe internals in InferenceX:
 
@@ -916,8 +916,7 @@ benchmark:
   runner_type: mi355x
   run_mode: local
   agentx: enable
-  benchmark_script: single_node/agentic/glm5.2_fp4_mi355x_sglang_mtp.sh
-  docker_image: lmsysorg/sglang-rocm:v0.5.16-rocm720-mi35x-20260728
+  docker_image: lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260924
   gpu_selection:
     auto: false
   envs:
@@ -942,9 +941,10 @@ session state and selects AgentX grading before preflight. Do not require or
 export `HYPERLOOM_AGENTX` on this path. A fresh `HYPERLOOM_AGENTX=1` launch
 also uses Magpie native AgentX, with the normal model/framework/GPU/precision/
 concurrency inputs resolved to an unambiguous upstream recipe and launcher.
-New sessions use epoch 3 and preserve Hyperloom optimization. Persisted epoch-1
+New sessions use epoch 4 and preserve Hyperloom optimization. Persisted epoch-1
 sessions keep the legacy client; epoch-2 native sessions keep their original
-measurement-only contract and pins. Never migrate a saved epoch, baseline, or
+measurement-only contract and pins; epoch-3 sessions retain their upstream
+launcher contract. Never migrate a saved epoch, baseline, or
 KEEP record implicitly.
 `--benchmark-config` is fresh-launch only. A
 resume rejects a new source-config flag. It restores the accepted materialized
@@ -1006,10 +1006,9 @@ The source may omit `benchmark.inferencex_path`, as above. Preflight then reuses
 a writable checkout at the tested commit or clones one into the dependency
 cache. A source path only nominates a preferred checkout: a missing or
 wrong-revision path falls back to the pinned clone, while an explicit correct
-but non-writable checkout fails. The pinned Magpie local runner interpolates
-the checkout into an unquoted `bash -c` command, so its resolved absolute path
-must contain only shell-safe token characters; whitespace or shell
-metacharacters fail closed before launch.
+but non-writable checkout fails. Managed AgentX accepts the repository root
+or its `inferencex-e2e/` project directory, including spaces. Saved shell-launcher
+sessions retain their original path restrictions.
 
 The Hyperloom bridge supports local, single-node SGLang and vLLM only. Do not
 use it with multi-node/disaggregated AgentX, `server_lifecycle`, or Atom. Native
@@ -1017,31 +1016,32 @@ AgentX bypasses Hyperloom's outer Ray actor automatically; leave
 `INFERENCE_OPTIMIZER_RAY_EXEC` unset or set it to `0`, because an explicit true
 value is rejected.
 
-Normal native fixed-concurrency measurements use Magpie's AgentX result and
-require `benchmark_valid=true` plus `publishable=true`. Native Magpie v1 rejects
-profiler options and the InferenceX launcher emits no PyTorch trace. If PRELUDE
-schedules roofline/profile analysis, Hyperloom uses its phase-gated
-`aiperf_client.sh` with a generic server. That compatibility trace is diagnostic
-only and is not recipe-identical; AIPerf `profile`/`profiled` fields are workload
-statistics, not a PyTorch trace. Diagnostic profiling preserves the installed
-framework source by skipping TraceLens/CK source patches; annotation coverage
-may be lower, but subsequent native measurements keep the same framework.
-Epoch-3 native sessions use the versioned upstream launch-overrides contract.
-Each candidate needs launch evidence and canonical revalidation; a GEAK proxy
-score cannot become a KEEP result. The workload fingerprint is immutable, while
-candidate execution identities include their launch configuration. Saved
-epoch-2 sessions retain their measurement-only restrictions. Accepted results
-additionally require an
-`agentic-coding` scenario, strict matching recipe/launch/raw fingerprints, and
-a trusted fingerprint-bound topology. `publishable=true` attests Magpie's
-canonical protocol. Hyperloom separately binds the selected recipe to the exact
-audited launcher bytes and pinned checkout. It does not cryptographically prove
-the actual outer image. Its execution identity does cover the resolved
-`BenchmarkConfig` plus the effective, scrubbed launcher environment for an
-audited set of server/framework/runtime controls (including PATH,
-LD_LIBRARY_PATH, ROCm controls, and launcher knobs); authentication, cache
-routing, output paths, and unrelated login-shell variables are intentionally
-excluded.
+Normal native fixed-concurrency measurements require `benchmark_valid=true`
+and `publishable=true`. For epoch-4 profile/roofline actions, derive the
+configuration from the accepted native candidate and let Magpie own the server
+and torch profiler. Forward `num_steps`, `num_profiles`, `start_seconds`,
+`interval_seconds`, capture/flush timeouts, and `detailed_annotations` as
+structured torch profiler settings; never add a second set of framework
+profiler flags. Detailed annotations require an instrumented framework;
+unsupported runtimes fail explicitly instead of modifying accepted source.
+Preserve the existing shape and trace-quality checks before kernel analysis.
+
+Use the Magpie capture manifest to select one complete time window, retaining
+its rank traces and all other capture artifacts. Do not mix different
+`profile_index` values. Automatic count reduction can be successful; a failed
+runtime, cancellation, or incomplete capture cannot. Diagnostic results have
+`benchmark_valid=false` and `publishable=false` by design and never replace
+baseline or KEEP evidence. Saved epoch-3 sessions keep their old upstream
+launcher and compatibility-profiler path; saved epoch-2 sessions remain
+measurement-only. No saved session is automatically upgraded.
+
+Magpie-managed launch evidence binds candidate arguments, environment, source
+files, and resolved server specification. The client revision and recipe
+sources remain pinned. GEAK proxy scores cannot become KEEP results: candidates
+require Critic review where applicable and canonical native remeasurement.
+Hyperloom does not cryptographically prove the actual outer image. Credentials,
+cache routing, output paths, and unrelated shell variables remain outside the
+execution identity.
 
 Outside native AgentX, operator server flags are the workload baseline, but
 they are not sacred. When

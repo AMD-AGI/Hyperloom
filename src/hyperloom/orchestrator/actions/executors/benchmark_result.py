@@ -1550,7 +1550,7 @@ def _validate_native_agentx_protocol(
         measurement["agentx_launch_contract"] = 1
         measurement.pop("agentx_workload_fingerprint", None)
         measurement.pop("agentx_candidate_fingerprint", None)
-        for error in validate_server_launch(config, measurement.get("agentx_server_launch")):
+        for error in validate_server_launch(config, measurement.get("agentx_server_launch"), workspace=workspace):
             reject(error)
         try:
             launch_artifact = json.loads((workspace / "agentx_server_launch.json").read_text(encoding="utf-8"))

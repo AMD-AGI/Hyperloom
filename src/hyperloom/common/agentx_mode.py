@@ -96,3 +96,12 @@ def native_agentx_optimization_session(state: Any = None, *, env: Mapping[str, s
     if not native_agentx_session(state, env=source):
         return False
     return state is None or int(_read(state, "agentx_epoch", 0) or 0) >= 3
+
+
+def managed_native_agentx_session(state: Any = None, *, env: Mapping[str, str] | None = None) -> bool:
+    """Use Magpie-managed serving for fresh sessions and the saved epoch-4 contract."""
+    source = os.environ if env is None else env
+    state = _session_state(state, source)
+    if not native_agentx_session(state, env=source):
+        return False
+    return state is None or int(_read(state, "agentx_epoch", 0) or 0) >= 4

@@ -69,7 +69,7 @@ def _workload_envs(args: argparse.Namespace, benchmark: dict[str, Any], model: s
 
 
 def prepare_native_agentx_source(args: argparse.Namespace) -> bool:
-    """Snapshot fresh epoch-3 inputs without modifying an operator's YAML."""
+    """Snapshot fresh managed AgentX inputs without modifying an operator's YAML."""
     if getattr(args, "resume_from", None) or not native_agentx_session():
         return False
     benchmark = _source_benchmark()

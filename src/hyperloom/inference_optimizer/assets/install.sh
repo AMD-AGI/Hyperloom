@@ -188,7 +188,7 @@ MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # Operators can re-pin with MAGPIE_REF=<tag|sha>. Generic benchmarks keep the
 # importability contract; native AgentX additionally requires the audited
 # source identity and recipe-fingerprint capabilities.
-MAGPIE_REF="${MAGPIE_REF:-d72965776df5416dad063c00237f6e389b841162}"
+MAGPIE_REF="${MAGPIE_REF:-658562345ad1a7e5a617e3631f3acfcec0eade4a}"
 MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
 
 # aiperf (SemiAnalysis AgentX benchmark client) — pinned to an immutable commit
@@ -219,11 +219,10 @@ if [ -n "${MAGPIE_PATH:-}" ]; then
 fi
 MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
-# The launch-extension commit adds explicit candidate inputs and custom model
-# launchers to the audited AgentX replay. Keep AIPERF_REF in lockstep with its
-# utils/aiperf submodule. This ref includes unmerged upstream integration work;
-# operators may select another supported immutable commit explicitly.
-INFERENCEX_REF="${INFERENCEX_REF:-421312f8984c2152f4b8eafefc93ea2fa598e80f}"
+# Magpie owns AgentX serving; this upstream pin supplies recipes and the client.
+# Keep AIPERF_REF in lockstep with inferencex-e2e/utils/aiperf.
+# Existing sessions retain their accepted immutable dependency revisions.
+INFERENCEX_REF="${INFERENCEX_REF:-408c015be4b22d14c69518643609669405507077}"
 _INFERENCEX_SHA="$(_resolve_ref_sha "$INFERENCEX_REPO" "$INFERENCEX_REF")"
 INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX@${_INFERENCEX_SHA}}"
 
@@ -1762,7 +1761,16 @@ ensure_aiperf() {
 #     is reproducible. We still record the resolved commit into the session
 #     manifest (see manifest.py / _describe_dep) so runs stay traceable even
 #     when an operator overrides INFERENCEX_REF.
+normalize_inferencex_project() {
+  if [ ! -f "$INFERENCEX_PATH/benchmarks/benchmark_lib.sh" ] && \
+     [ -f "$INFERENCEX_PATH/inferencex-e2e/benchmarks/benchmark_lib.sh" ]; then
+    INFERENCEX_PATH="$INFERENCEX_PATH/inferencex-e2e"
+  fi
+  export INFERENCEX_PATH
+}
+
 ensure_inferencex_aiperf_submodule() {
+  normalize_inferencex_project
   if [ "$CHECK_ONLY" -eq 1 ]; then
     if [ ! -f "$INFERENCEX_PATH/utils/aiperf/pyproject.toml" ]; then
       warn "InferenceX utils/aiperf submodule is not initialized at ${INFERENCEX_PATH}"
@@ -1783,12 +1791,14 @@ ensure_inferencex_aiperf_submodule() {
 
 ensure_inferencex() {
   if [ -n "${INFERENCEX_PATH:-}" ] && [ -d "$INFERENCEX_PATH" ]; then
+    normalize_inferencex_project
     log "INFERENCEX_PATH = $INFERENCEX_PATH (preserved from env)"
     export INFERENCEX_PATH
     return 0
   fi
   INFERENCEX_PATH="$INFERENCEX_DEFAULT_DIR"
   if [ -d "$INFERENCEX_PATH/.git" ] || [ -d "$INFERENCEX_PATH/benchmarks" ]; then
+    normalize_inferencex_project
     log "InferenceX already cloned at ${INFERENCEX_PATH}; preserving existing checkout"
     export INFERENCEX_PATH
     return 0

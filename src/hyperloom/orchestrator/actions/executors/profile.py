@@ -29,7 +29,7 @@ from hyperloom.agents.kernel.tools._trace_rank import (
 from hyperloom.common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom.common.timeutil import now_iso
-from hyperloom.common.agentx_mode import native_agentx_optimization_session, native_agentx_session
+from hyperloom.common.agentx_mode import managed_native_agentx_session, native_agentx_optimization_session, native_agentx_session
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
     benchmark_serving_path_in,
@@ -77,7 +77,8 @@ def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) ->
     carry = ""
     chunk_size = 4_000_000
     try:
-        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rt", encoding="utf-8", errors="replace") as fh:
             while read < max_bytes:
                 chunk = fh.read(chunk_size)
                 if not chunk:
@@ -94,9 +95,10 @@ def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) ->
 
 
 def _sample_trace_text(path: Path) -> str | None:
-    """Read up to ``_TRACE_INSPECT_BYTES`` of decompressed text from a gzipped trace."""
+    """Read a bounded sample from a plain or compressed trace."""
     try:
-        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rt", encoding="utf-8", errors="replace") as fh:
             return fh.read(_TRACE_INSPECT_BYTES)
     except (OSError, EOFError, UnicodeDecodeError) as e:
         # Best-effort: a malformed sample must not fail the profile path.
@@ -501,7 +503,7 @@ def _validate_trace_structure(
     # --- Check 3 (Deval): main trace has user_annotation + execute_* --- execute_* annotations = InferenceX per-step
     # writes when detailed_annotations is honoured (distinct from check 5).
     main_traces = sorted(
-        (p for p in trace_dir.glob("*.trace.json.gz") if p.is_file()),
+        (p for p in trace_dir.glob("*.trace.json*") if p.is_file() and p.name.endswith((".trace.json", ".trace.json.gz"))),
         key=lambda p: p.stat().st_size,
         reverse=True,
     )
@@ -846,6 +848,8 @@ class ProfileExecutor(BenchmarkRunExecutor):
 
     def _agentx_profile_compatibility_error(self, shared_state: Any) -> str:
         """Reject a generic trace whose TP would flatten native PP/PCP ranks."""
+        if managed_native_agentx_session(shared_state):
+            return ""
         config_path = str(getattr(shared_state, "baseline_config_path", "") or "").strip()
         if not config_path:
             return (
@@ -903,6 +907,11 @@ class ProfileExecutor(BenchmarkRunExecutor):
         """
         if not agentx_session:
             return inferencex_path, None
+        from ._native_profile import managed_profile_benchmark
+
+        configured = (yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}).get("benchmark") or {}
+        if managed_profile_benchmark(configured):
+            return str(configured.get("inferencex_path") or inferencex_path), None
         try:
             source = Path(inferencex_path).expanduser().resolve()
         except (OSError, RuntimeError) as exc:
@@ -1201,6 +1210,19 @@ class ProfileExecutor(BenchmarkRunExecutor):
         output_dir: Path,
     ) -> dict[str, Any] | None:
         """Arm the host probe, then patch the InferenceX checkout Magpie will execute."""
+        from ._native_profile import managed_profile_benchmark
+
+        configured = (yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}).get("benchmark") or {}
+        if managed_profile_benchmark(configured):
+            self._host_probe_dir = ""
+            self._host_probe_status = "magpie_managed_diagnostic"
+            self._instrumentation_preflight = _check_row(
+                CHECK_INSTRUMENTATION_PREFLIGHT,
+                status="passed",
+                owner="magpie",
+                detailed_annotations=configured["profiler"]["torch_profiler"].get("detailed_annotations", False),
+            )
+            return None
         try:
             self._host_probe_dir = self._inject_host_probe(config_path, output_dir)
             self._host_probe_status = ""
@@ -1361,6 +1383,10 @@ class ProfileExecutor(BenchmarkRunExecutor):
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the profiling action for the given context."""
+        extra = getattr(ctx, "extra", None) or {}
+        state = extra.get("shared_state") or self.shared_state
+        if managed_native_agentx_session(state):
+            return await self._managed_profile(ctx, state)
         # atom: the Magpie atom wrapper bridges PROFILE=1 to atom's --torch-profiler-dir and writes standard
         # *.pt.trace.json.gz, so the executor falls through to the sglang/vllm path.
         params = ctx.task.params or {}
@@ -1887,6 +1913,49 @@ class ProfileExecutor(BenchmarkRunExecutor):
                 result["trace_manifest_path"] = str(trace_manifest_path)
             except OSError as exc:
                 log.warning("profile_executor: failed to write AgentX trace manifest: %s", exc)
+        return result
+
+    async def _managed_profile(self, ctx, state: Any) -> dict[str, Any]:
+        """Keep Magpie's accepted server and validate each independent trace window."""
+        from ._native_profile import prepare_managed_profile
+
+        params = ctx.task.params
+        if params is None:
+            params = ctx.task.params = {}
+        output_dir = self._resolve_workspace(ctx, "profile")
+        try:
+            await asyncio.to_thread(prepare_managed_profile, params, state, output_dir)
+        except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError, subprocess.SubprocessError) as exc:
+            return {
+                "status": "failed", "error_class": "native_profile_launch_unverified",
+                "error": str(exc), "trace_input_ready": False,
+            }
+        params["output_dir"] = str(output_dir)
+        result = await super().__call__(ctx)
+        if result.get("status") != "succeeded" or not result.get("trace_input_ready"):
+            result["trace_input_ready"] = False
+            return result
+        config = yaml.safe_load(Path(result["materialized_config"]).read_text(encoding="utf-8"))
+        framework = str(config["benchmark"].get("framework") or "")
+        for capture in result["profile_rounds"]:
+            directory = Path(capture["trace_dir"])
+            health = _validate_trace_structure(directory, framework)
+            certificate: dict[str, Any] = {}
+            probe_error = ""
+            try:
+                certificate = _certify_trace_dir(directory, framework)
+            except (OSError, ValueError, TypeError, KeyError, ImportError) as exc:
+                probe_error = f"{type(exc).__name__}: {exc}"
+            validation = _build_trace_validate(
+                health, trace_dir=directory, framework=framework, certificate=certificate,
+                probe_error=probe_error, preflight=self._instrumentation_preflight,
+            )
+            capture["trace_health"] = health
+            capture["trace_validate"] = validation
+            capture["trace_validate_path"] = _write_trace_certificate(directory, validation)
+        selected = result["profile_rounds"][-1]
+        for name in ("trace_health", "trace_validate", "trace_validate_path"):
+            result[name] = selected[name]
         return result
 
 

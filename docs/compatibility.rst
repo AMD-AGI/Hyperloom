@@ -97,14 +97,15 @@ The following table lists the validated Hyperloom version and component combinat
    The base benchmark path remains compatible with Magpie 0.2.0. The pinned
    native AgentX pair is `Magpie v0.3.0
    <https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0>`_ plus native launch overrides, custom-model replay, and the eval
-   source-path fix at commit ``d72965776df5416dad063c00237f6e389b841162`` and InferenceX commit
-   ``421312f8984c2152f4b8eafefc93ea2fa598e80f``. Pass the Magpie YAML with
+   source-path fix at commit ``658562345ad1a7e5a617e3631f3acfcec0eade4a`` and InferenceX commit
+   ``408c015be4b22d14c69518643609669405507077``. Pass the Magpie YAML with
    ``--benchmark-config``; its ``benchmark.agentx: enable`` source switch
    automatically selects Hyperloom's persisted AgentX session and grading mode.
    Fresh ``HYPERLOOM_AGENTX=1`` launches also select native AgentX and resolve
    a recipe from normal workload inputs. Saved epoch-1 sessions keep the legacy
-   client; saved epoch-2 native sessions keep their measurement-only contract.
-   New native sessions use epoch 3 and the upstream launch-overrides contract. ``benchmark.docker_image`` overrides/pins the effective
+   client; saved epoch-2 native sessions keep their measurement-only contract,
+   and epoch-3 sessions keep their upstream launcher contract.
+   New native sessions use epoch 4 and the Magpie-managed launch-overrides contract. ``benchmark.docker_image`` overrides/pins the effective
    recipe image and is included in its fingerprint; an existing
    ``HYPERLOOM_IMAGE`` is only a strict consistency assertion. Neither value
    starts or attests the outer container.

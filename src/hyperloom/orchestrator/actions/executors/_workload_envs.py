@@ -670,8 +670,11 @@ def apply_agentx_switch(
     _agentx_env = agentx_env_for_conc(resolved_conc)
     envs["RUN_EVAL"] = "false"
     envs["FRAMEWORK"] = framework
-    profile_compat = native_selected and _agentx_profile_requested(bench)
-    if profile_compat and not allow_profile_compat:
+    from ._native_profile import managed_profile_benchmark
+
+    profile_requested = native_selected and _agentx_profile_requested(bench)
+    profile_compat = profile_requested and not managed_profile_benchmark(bench)
+    if profile_requested and not allow_profile_compat:
         raise ValueError(
             "Native AgentX profiler/gap-analysis settings are diagnostic-only "
             "and may be materialized only by ProfileExecutor; they cannot "

@@ -297,6 +297,10 @@ _AUDITED_MAGPIE_EXECUTION_TREES = {
         "file_count": 79,
         "tree_sha256": "113f880b18ccd3ec26e6a432fcdf06a0c365520d51c3ed3c46069d33d7f07e93",
     },
+    "658562345ad1a7e5a617e3631f3acfcec0eade4a": {
+        "file_count": 86,
+        "tree_sha256": "514ca3691163bb304cef31d392d9c10bbb5a3b3570b219f95ed12c6aeae29c69",
+    },
     "d72965776df5416dad063c00237f6e389b841162": {
         "file_count": 81,
         "tree_sha256": "84dd7920ff992571c7dc6d485a4680ac3fc2afe7b6dde606dbd754d545a5729c",
@@ -588,12 +592,7 @@ def _run_magpie_recipe_resolver(
 
 
 def validate_native_checkout_path(inferencex_path: str | Path) -> Path:
-    """Return a normalized checkout path safe for pinned Magpie's ``bash -c``.
-
-    The pinned Magpie implementation interpolates this value into an unquoted
-    shell command.  Until that pin uses argv/cwd directly, reject whitespace
-    and every shell metacharacter at each native boundary.
-    """
+    """Normalize managed projects; keep historical shell launchers path-safe."""
     raw = str(inferencex_path or "")
     if not raw:
         raise ValueError("Native AgentX requires a non-empty InferenceX checkout path")
@@ -603,7 +602,11 @@ def validate_native_checkout_path(inferencex_path: str | Path) -> Path:
         resolved = Path(raw).expanduser().resolve()
     except (OSError, RuntimeError, ValueError) as exc:
         raise ValueError("Native AgentX InferenceX checkout path is not resolvable") from exc
-    if not _NATIVE_CHECKOUT_PATH_RE.fullmatch(str(resolved)):
+    from .managed import project_root
+
+    resolved = project_root(resolved)
+    managed = (resolved / "benchmarks/srt_agentic.sh").is_file()
+    if not managed and not _NATIVE_CHECKOUT_PATH_RE.fullmatch(str(resolved)):
         raise ValueError(
             f"Native AgentX InferenceX checkout path is shell-unsafe for the pinned Magpie launcher: {resolved}"
         )
@@ -659,6 +662,8 @@ def validate_native_launcher_name(script_name: str) -> PurePosixPath:
     """Validate an explicit launcher relative to ``InferenceX/benchmarks``."""
     raw = str(script_name or "").strip()
     path = PurePosixPath(raw)
+    if raw == "srt_agentic.sh":
+        return path
     if (
         not raw
         or path.is_absolute()
@@ -688,7 +693,11 @@ def resolve_native_launcher(
     if _contains_symlink(benchmarks_root, lexical_launcher):
         raise ValueError(f"AgentX launcher path must not contain symlinks: {lexical_launcher}")
     launcher = lexical_launcher.resolve()
-    agentic_root = (benchmarks_root / "single_node" / "agentic").resolve()
+    agentic_root = (
+        benchmarks_root
+        if rel.as_posix() == "srt_agentic.sh"
+        else (benchmarks_root / "single_node" / "agentic").resolve()
+    )
     try:
         launcher.relative_to(agentic_root)
     except ValueError as exc:
@@ -801,6 +810,18 @@ def validate_native_recipe_launcher(
     root = validate_native_checkout_path(inferencex_path)
     head = _checkout_head(root, label="InferenceX")
     recipe_name = str(recipe or "").strip()
+    if benchmark_script == "srt_agentic.sh":
+        launcher = resolve_native_launcher(inferencex_path=root, benchmark_script=benchmark_script)
+        from .managed import head_blob
+
+        if launcher.read_bytes() != head_blob(root, "benchmarks/srt_agentic.sh"):
+            raise ValueError("Managed AgentX client differs from pinned HEAD")
+        return {
+            "inferencex_commit": head,
+            "recipe": recipe_name,
+            "launcher": benchmark_script,
+            "launcher_sha256": _sha256_file(launcher),
+        }
     manifest_entry = _launcher_manifest(root, head).get(recipe_name)
     if manifest_entry is None:
         raise ValueError(
@@ -846,6 +867,18 @@ def native_execution_identity(
 ) -> dict[str, Any]:
     """Bind a native run to clean executable inputs from one git checkout."""
     root = validate_native_checkout_path(inferencex_path)
+    from .managed import execution_identity, server_spec
+
+    if server_spec(resolved_benchmark) is not None:
+        return execution_identity(
+            root=root,
+            benchmark=resolved_benchmark,
+            config_file=config_file,
+            expected_ref=expected_ref,
+            magpie=magpie_execution or {},
+            expected_magpie_ref=expected_magpie_ref,
+            launch_environment=native_launch_environment_identity(resolved_benchmark, launch_env=launch_env),
+        )
     launcher = resolve_native_launcher(
         inferencex_path=root,
         benchmark_script=benchmark_script,
@@ -1213,7 +1246,7 @@ def resolve_native_recipe(
     selection["auto"] = False
     resolved_benchmark["gpu_selection"] = selection
 
-    image = str(entry.get("image") or resolved_benchmark.get("docker_image") or "").strip()
+    image = str(resolved_benchmark.get("docker_image") or entry.get("image") or "").strip()
     declared_outer_image = str(
         outer_image if outer_image is not None else os.environ.get("HYPERLOOM_IMAGE", "")
     ).strip()

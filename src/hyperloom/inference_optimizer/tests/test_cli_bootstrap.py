@@ -783,7 +783,7 @@ def test_fresh_agentx_seed_uses_native_epoch_and_optimizer_features(tmp_path, mo
         tmp_path, _args(enable_conc_sweep=enable_conc_sweep, conc_sweep_concs=None), session_id="fresh-agentx"
     )
     assert state.benchmark_mode == "agentx"
-    assert state.agentx_epoch == 3
+    assert state.agentx_epoch == 4
     assert state.agentx_backend == "native"
     assert state.benchmark_source_config_path == ""
     assert state.warm_replay_enabled is True

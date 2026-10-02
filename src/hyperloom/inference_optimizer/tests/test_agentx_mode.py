@@ -17,6 +17,7 @@ import yaml
 
 from hyperloom.common.agentx_mode import (
     config_enables_native_agentx,
+    managed_native_agentx_session,
     native_agentx_session,
     native_agentx_optimization_session,
 )
@@ -110,7 +111,7 @@ assert not any(name.startswith('hyperloom.inference_optimizer.agentx') for name 
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("epoch,native,optimize", [(1, False, False), (2, True, False), (3, True, True)])
+@pytest.mark.parametrize("epoch,native,optimize", [(1, False, False), (2, True, False), (3, True, True), (4, True, True)])
 def test_saved_epoch_controls_subprocess_routing(tmp_path, epoch, native, optimize):
     state = {"benchmark_mode": "agentx", "agentx_epoch": epoch}
     (tmp_path / "state.json").write_text(json.dumps(state), encoding="utf-8")
@@ -118,6 +119,8 @@ def test_saved_epoch_controls_subprocess_routing(tmp_path, epoch, native, optimi
     assert native_agentx_session(env=env) is native
     assert native_agentx_optimization_session(env=env) is optimize
     assert native_agentx_optimization_session(state, env={"HYPERLOOM_AGENTX": "1"}) is optimize
+    assert managed_native_agentx_session(env=env) is (epoch == 4)
+    assert managed_native_agentx_session(state, env={"HYPERLOOM_AGENTX": "1"}) is (epoch == 4)
 
 
 def test_epoch_one_outranks_saved_foreign_config(tmp_path):
@@ -130,9 +133,13 @@ def test_epoch_one_outranks_saved_foreign_config(tmp_path):
 def test_fresh_agentx_optimization_has_no_extra_switch():
     assert native_agentx_optimization_session(env={"HYPERLOOM_AGENTX": "1"})
     assert not native_agentx_optimization_session(env={"HYPERLOOM_AGENTX": "0"})
+    assert managed_native_agentx_session(env={"HYPERLOOM_AGENTX": "1"})
+    assert not managed_native_agentx_session(env={"HYPERLOOM_AGENTX": "0"})
 
 
-@pytest.mark.parametrize("epoch,warm_replay,backend", [(1, True, "legacy"), (2, False, "native"), (3, True, "native")])
+@pytest.mark.parametrize(
+    "epoch,warm_replay,backend", [(1, True, "legacy"), (2, False, "native"), (3, True, "native"), (4, True, "native")]
+)
 def test_persisted_epoch_keeps_backend_and_optimization_contract(epoch, warm_replay, backend):
     from hyperloom.orchestrator.state.shared_state import SharedState
 

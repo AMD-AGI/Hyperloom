@@ -1681,8 +1681,8 @@ def _print_recipe_kb_queue_status() -> dict[str, Any]:
 
 _INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
 # MUST stay in lockstep with INFERENCEX_REF in assets/install.sh.
-_INFERENCEX_REF_DEFAULT = "421312f8984c2152f4b8eafefc93ea2fa598e80f"
-_MAGPIE_REF_DEFAULT = "d72965776df5416dad063c00237f6e389b841162"
+_INFERENCEX_REF_DEFAULT = "408c015be4b22d14c69518643609669405507077"
+_MAGPIE_REF_DEFAULT = "658562345ad1a7e5a617e3631f3acfcec0eade4a"
 _MAGPIE_GENERIC_HEALTH_CODE = "import Magpie\n"
 _MAGPIE_NATIVE_AGENTX_HEALTH_CODE = (
     _MAGPIE_SOURCE_IDENTITY_CODE
@@ -1782,6 +1782,12 @@ def _inferencex_checkout_ok(
     require_agentx_submodule: bool = False,
 ) -> bool:
     """True when ``path`` is a usable InferenceX checkout at the expected ref."""
+    from ..agentx.managed import project_root
+
+    try:
+        path = project_root(path)
+    except ValueError:
+        return False
     if not (Path(path) / "benchmarks" / "benchmark_lib.sh").is_file():
         return False
     if ref is None:
@@ -1932,9 +1938,13 @@ def _clone_inferencex(
                 check=True,
                 timeout=600,
             )
+        from ..agentx.managed import project_root
+
+        project = project_root(dest)
+        submodule = str((project / "utils/aiperf").relative_to(dest))
         if initialize_agentx_submodule:
             subprocess.run(
-                ["git", "-C", dest_str, "submodule", "sync", "--", "utils/aiperf"],
+                ["git", "-C", dest_str, "submodule", "sync", "--", submodule],
                 check=True,
                 timeout=60,
             )
@@ -1950,7 +1960,7 @@ def _clone_inferencex(
                         "--depth",
                         "1",
                         "--",
-                        "utils/aiperf",
+                        submodule,
                     ],
                     check=True,
                     timeout=600,
@@ -1965,7 +1975,7 @@ def _clone_inferencex(
                         "update",
                         "--init",
                         "--",
-                        "utils/aiperf",
+                        submodule,
                     ],
                     check=True,
                     timeout=600,
@@ -1979,7 +1989,7 @@ def _clone_inferencex(
         ):
             raise OSError(f"clone reported success but {dest_str} is missing benchmarks/benchmark_lib.sh")
         log.info("InferenceX cloned into %s at %s", dest_str, _inferencex_head_sha(dest) or ref)
-        return dest_str
+        return str(project)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
         log.warning("InferenceX clone into %s failed: %s", dest_str, exc)
         shutil.rmtree(dest, ignore_errors=True)
@@ -2629,7 +2639,10 @@ def _preflight(
             exc=exc,
         )
         raise exc
-    # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH must not survive into the child env.
+    from ..agentx.managed import project_root
+
+    inferencex_path = str(project_root(inferencex_path))
+    # Always overwrite: child processes use the normalized project directory.
     os.environ["INFERENCEX_PATH"] = inferencex_path
     # A round cd's into this checkout and bash reads the benchmark script off it for the whole run, so a revocable
     # mount that flaps fails the round on an exit code the measurement had nothing to do with. Recording it here is

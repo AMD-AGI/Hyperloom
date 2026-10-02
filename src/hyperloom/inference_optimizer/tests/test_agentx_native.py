@@ -276,6 +276,10 @@ def test_magpie_pinned_published_tree_hash_matches_independent_wheel_audit():
             "file_count": 79,
             "tree_sha256": "113f880b18ccd3ec26e6a432fcdf06a0c365520d51c3ed3c46069d33d7f07e93",
         },
+        "658562345ad1a7e5a617e3631f3acfcec0eade4a": {
+            "file_count": 86,
+            "tree_sha256": "514ca3691163bb304cef31d392d9c10bbb5a3b3570b219f95ed12c6aeae29c69",
+        },
         "d72965776df5416dad063c00237f6e389b841162": {
             "file_count": 81,
             "tree_sha256": "84dd7920ff992571c7dc6d485a4680ac3fc2afe7b6dde606dbd754d545a5729c",

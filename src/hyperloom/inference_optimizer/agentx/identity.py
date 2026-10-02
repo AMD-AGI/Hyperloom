@@ -8,8 +8,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from collections.abc import Mapping
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 # Frozen protocol options in InferenceX's version-1 launch contract. Result
@@ -130,7 +131,52 @@ def native_workload_fingerprint(benchmark: Mapping[str, Any], static_fingerprint
     return canonical_sha256({"static_execution_fingerprint": static_fingerprint, "benchmark": payload})
 
 
-def validate_server_launch(benchmark: Mapping[str, Any], evidence: Any) -> list[str]:
+def _validate_profile_receipt(
+    benchmark: Mapping[str, Any], evidence: Mapping[str, Any], workspace: Path | None
+) -> list[str]:
+    """Let the audited Magpie installation verify its diagnostic instrumentation."""
+    if workspace is None:
+        return ["server_launch_profile_workspace_missing"]
+    from hyperloom.common.env_safety import scrub_benchmark_process_env
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_benchmark_interpreter
+
+    from .native import _MAGPIE_SOURCE_IDENTITY_CODE
+
+    code = (
+        _MAGPIE_SOURCE_IDENTITY_CODE
+        + """
+import sys
+import Magpie
+from Magpie.modes.benchmark import BenchmarkConfig
+from Magpie.modes.benchmark.agentx_launch import read_launch_evidence
+package = Path(Magpie.__file__).resolve().parent
+commit, _ = _resolve_magpie_source_identity(package)
+_validate_magpie_execution_tree(package, commit)
+payload = json.load(sys.stdin)
+config = BenchmarkConfig.from_dict(payload["benchmark"])
+actual = read_launch_evidence(config, Path(payload["workspace"]))
+if actual != payload["evidence"]:
+    raise ValueError("profile receipt does not match the report")
+"""
+    )
+    import os
+
+    try:
+        checked = subprocess.run(
+            [resolve_benchmark_interpreter(), "-c", code],
+            input=json.dumps({"benchmark": dict(benchmark), "evidence": dict(evidence), "workspace": str(workspace)}),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=scrub_benchmark_process_env(dict(os.environ)),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ["server_launch_profile_verification_failed"]
+    return [] if checked.returncode == 0 else ["server_launch_profile_verification_failed"]
+
+
+def validate_server_launch(benchmark: Mapping[str, Any], evidence: Any, *, workspace: Path | None = None) -> list[str]:
     """Validate the observed upstream server launch against the submitted candidate."""
     if not has_launch_contract(benchmark):
         return []
@@ -193,6 +239,24 @@ def validate_server_launch(benchmark: Mapping[str, Any], evidence: Any) -> list[
         errors.append("server_launch_source_mismatch")
     if evidence.get("absent_source_files", []) != overrides.get("absent_source_files", []):
         errors.append("server_launch_absent_source_mismatch")
+    resolved = benchmark["agentx"].get("resolved", {})
+    spec = resolved.get("server-launch-spec") if isinstance(resolved, Mapping) else None
+    if isinstance(spec, Mapping):
+        if evidence.get("owner") != "magpie":
+            errors.append("server_launch_owner_mismatch")
+        if evidence.get("recipe_source_files") != spec.get("source_files"):
+            errors.append("server_launch_recipe_sources_mismatch")
+        profiler = benchmark.get("profiler") or {}
+        torch = profiler.get("torch_profiler") or {}
+        if torch.get("enabled") is True:
+            errors.extend(_validate_profile_receipt(benchmark, evidence, workspace))
+        else:
+            if evidence.get("server_spec_sha256") != canonical_sha256(spec):
+                errors.append("server_launch_spec_mismatch")
+            if evidence.get("base_argv") != spec.get("argv"):
+                errors.append("server_launch_recipe_argv_mismatch")
+            if evidence.get("torch_profiler") is not None:
+                errors.append("server_launch_unexpected_profile")
     return errors
 
 

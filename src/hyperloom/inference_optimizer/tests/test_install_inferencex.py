@@ -20,6 +20,8 @@ def _run_inferencex_install(tmp_path: Path, *, explicit_path: Path | None = None
     text = INSTALL_SCRIPT.read_text(encoding="utf-8")
     match = re.search(r"^ensure_inferencex\(\) \{.*?^\}", text, re.S | re.M)
     assert match is not None
+    normalize = re.search(r"^normalize_inferencex_project\(\) \{.*?^\}", text, re.S | re.M)
+    assert normalize is not None
     script = tmp_path / "installer-harness.sh"
     script.write_text(
         """set -euo pipefail
@@ -34,6 +36,8 @@ ensure_inferencex_aiperf_submodule() {
   printf '%s\\n' "$INFERENCEX_PATH" >> "$SUBMODULE_UPDATE_LOG"
 }
 """
+        + normalize.group(0)
+        + "\n"
         + match.group(0)
         + '\nensure_inferencex\nprintf "%s\\n" "$INFERENCEX_PATH"\n',
         encoding="utf-8",

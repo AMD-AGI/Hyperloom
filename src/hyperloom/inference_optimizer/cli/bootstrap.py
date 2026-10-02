@@ -59,7 +59,7 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 
 
 # Bump when a change makes previously recorded AgentX measurements incomparable.
-AGENTX_MEASUREMENT_EPOCH = 3
+AGENTX_MEASUREMENT_EPOCH = 4
 LEGACY_AGENTX_MEASUREMENT_EPOCH = 1
 
 
@@ -121,7 +121,7 @@ def agentx_state_is_stale(state: Any) -> str:
             accepted = str(getattr(state, "baseline_config_path", "") or "").strip()
             if accepted and config_enables_native_agentx(accepted):
                 return "session epoch 1 conflicts with its accepted native AgentX baseline"
-        if had_epoch not in {LEGACY_AGENTX_MEASUREMENT_EPOCH, 2, AGENTX_MEASUREMENT_EPOCH}:
+        if had_epoch not in {LEGACY_AGENTX_MEASUREMENT_EPOCH, 2, 3, AGENTX_MEASUREMENT_EPOCH}:
             return (
                 f"session carries unsupported AgentX epoch {had_epoch}; the recorded results describe "
                 "a different workload and cannot anchor or be compared against"

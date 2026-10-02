@@ -1,5 +1,5 @@
 # Native Magpie AgentX example for the pinned InferenceX revision
-# 421312f8984c2152f4b8eafefc93ea2fa598e80f. inferencex_path is intentionally
+# 408c015be4b22d14c69518643609669405507077. inferencex_path is intentionally
 # omitted: Hyperloom preflight reuses or clones the tested pin. A custom
 # benchmark.inferencex_path only nominates a preferred writable checkout.
 benchmark:
@@ -21,11 +21,9 @@ benchmark:
   #     kv_offload_backend: hicache
   agentx: enable
 
-  # InferenceX launcher identity remains explicit. Hyperloom validates it but
-  # never patches the pinned launcher. docker_image pins the effective runtime
-  # image and is included in the resolved recipe fingerprint.
-  benchmark_script: single_node/agentic/glm5.2_fp4_mi355x_sglang_mtp.sh
-  docker_image: lmsysorg/sglang-rocm:v0.5.16-rocm720-mi35x-20260728
+  # Magpie resolves serving from the pinned recipe and runs the upstream client.
+  # docker_image pins the effective runtime and participates in its fingerprint.
+  docker_image: lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260924
 
   envs:
     # This is the fixed recipe point to measure. TP/PP/PCP/EP, MODEL_PREFIX,

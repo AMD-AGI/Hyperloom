@@ -34,7 +34,7 @@ from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import now_iso
-from hyperloom.common.agentx_mode import native_agentx_optimization_session, native_agentx_session
+from hyperloom.common.agentx_mode import managed_native_agentx_session, native_agentx_optimization_session, native_agentx_session
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_ACCURACY,
     ROUND_MEASURE,
@@ -2361,6 +2361,9 @@ class BenchmarkRunExecutor:
         live_shared_state = extra.get("shared_state") or self.shared_state
         native_agentx = native_agentx_session(live_shared_state)
         native_optimizer = native_agentx_optimization_session(live_shared_state)
+        native_launch = native_optimizer and (
+            not self.allow_agentx_profile_compat or managed_native_agentx_session(live_shared_state)
+        )
         mutation_replay = (
             str(getattr(ctx.task, "kind", "") or "") == "replay_warm_recipe"
             or bool(params.get("patches"))
@@ -2465,7 +2468,7 @@ class BenchmarkRunExecutor:
             base_extra_envs["RUN_EVAL"] = "false"
         await _prepare_aiter_serving_so(base_extra_envs, output_dir)
         complete_native_snapshot = (
-            params.get("native_launch_overrides") if native_optimizer and not self.allow_agentx_profile_compat else None
+            params.get("native_launch_overrides") if native_launch else None
         )
         try:
             config_path = materialize_config_with_envs(
@@ -2487,7 +2490,7 @@ class BenchmarkRunExecutor:
                 agentx_mode=agentx_active(live_shared_state),
                 native_agentx_mode=native_agentx,
                 native_launch_overrides=None
-                if self.allow_agentx_profile_compat
+                if not native_launch
                 else params.get("native_launch_overrides") or params.get("base_native_launch_overrides"),
                 grading=getattr(live_shared_state, "grading", None),
                 allow_agentx_profile_compat=self.allow_agentx_profile_compat,
@@ -2512,7 +2515,7 @@ class BenchmarkRunExecutor:
         effective_inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
         # Apply runtime_override from params into the materialized YAML so the revalidation baseline boots under the
         # same framework runtime as the KEEP'd candidate (PATH/PYTHONPATH/framework_bin etc.).
-        if native_optimizer and not self.allow_agentx_profile_compat:
+        if native_launch:
             from ._native_candidate import update_native_candidate_file
 
             update_native_candidate_file(
@@ -3996,6 +3999,30 @@ class BenchmarkRunExecutor:
                 report = loaded if isinstance(loaded, dict) else None
             except (OSError, json.JSONDecodeError):
                 report = None
+
+        if self.allow_agentx_profile_compat:
+            from ._native_profile import managed_profile_benchmark
+            from ._managed_profile_result import diagnostic_profile_result
+
+            configured = (yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}).get("benchmark") or {}
+            if managed_profile_benchmark(configured):
+                return {
+                    **diagnostic_profile_result(
+                        report,
+                        workspace=workspace,
+                        config_path=config_path,
+                        returncode=proc_returncode,
+                        subprocess_started_unix=subprocess_started_unix,
+                    ),
+                    "returncode": proc_returncode,
+                    "output_dir": str(output_dir),
+                    "workspace": str(workspace),
+                    "report_path": str(report_path),
+                    "materialized_config": str(materialized_config_path),
+                    "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
+                    "nonfatal_warnings": round_warnings,
+                    **capture_meta,
+                }
 
         measurement = extract_benchmark_measurement(
             report,

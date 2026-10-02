@@ -116,24 +116,21 @@ PRELUDE establishes the session baseline:
 For native AgentX, Hyperloom pre-resolves every recipe point through the same
 interpreter that runs Magpie. It fills an omitted outer `--tp` from resolved
 TP×PP×PCP and treats an explicit value as an exact assertion. Topology-changing
-rounds fail before launch. The current pinned
-launchers expose no candidate-argv hook, so this is measurement integration:
-server-argument/environment candidates fail closed instead of entering the
-optimization loop. Native AgentX produces no PyTorch trace. If PRELUDE's normal
-roofline/profile analysis is admitted by its budget, it uses a generic-server
-compatibility profile; that trace is diagnostic and not recipe-identical.
-“Measurement-only” describes which native results can be accepted; it does not
-silently relabel compatibility profiling as a native measurement. The native
-`KERNEL_AGENT`/GEAK phase records a direct
-`skipped` result with `error_class=unsupported_upstream_launcher_hook` instead
-of dispatching an optimizer.
+rounds fail before launch. In fresh epoch-4 sessions, Magpie owns server
+startup and records the effective candidate arguments, environment, and source
+overlays. Hyperloom binds that evidence before accepting a result. Profile
+rounds derive from the accepted configuration and use Magpie's phase-gated
+torch capture. Each capture remains separate and diagnostic; it cannot anchor
+KEEP comparisons. GEAK proposals require review and canonical AgentX
+remeasurement before adoption. Saved epoch-2 sessions retain their earlier
+measurement-only restrictions, and epoch-3 sessions retain the upstream
+launcher and compatibility-profiler contract.
 
 Session mode is selected before PRELUDE: `--benchmark-config <yaml>` reads the
 source config, and `benchmark.agentx: enable` automatically stamps AgentX mode
-for grading and persisted state. `HYPERLOOM_AGENTX=1` without native opt-in
-keeps the legacy client and its optimization paths. The environment switch
-alone does not select native measurement, and is not a second requirement for
-the YAML path. Backend identity survives resume through the accepted/source
+for grading and persisted state. Fresh `HYPERLOOM_AGENTX=1` sessions also select
+native AgentX; no additional opt-in is required. Backend identity survives
+resume through the accepted/source
 config and measurement epoch; native-only refusals do not apply to legacy
 AgentX sessions.
 
@@ -282,11 +279,11 @@ gates.
 What the phase actually does depends on the kernel backend, and the branches
 look very different from Orchestration's side:
 
-- **Native AgentX**: the phase does not dispatch GEAK or Forge. The pinned
-  InferenceX launcher has no fingerprinted optimizer-argv hook, so the
-  Coordinator immediately records `status="skipped"` and
-  `error_class="unsupported_upstream_launcher_hook"`, then advances toward
-  SWEEP. This is a measurement-only release for native AgentX.
+- **Native AgentX**: optimization sessions dispatch diagnostic proposals and
+  require verified candidate launch evidence plus canonical AgentX
+  remeasurement before KEEP. Source changes also require the Critic review
+  and transactional integration. Only persisted epoch-2 measurement-only
+  sessions retain `unsupported_upstream_launcher_hook` and skip this phase.
 - **Default (`geak`)**: entering the phase enqueues one Coordinator-owned
   `kernel_agent` task, which holds `server_lifecycle`, `workspace_mutation` and
   `benchmark_lane` for the whole pipeline. Under GEAK it runs a single

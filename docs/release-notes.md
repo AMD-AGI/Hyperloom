@@ -25,7 +25,7 @@ it.
 - **Use native Magpie/InferenceX AgentX throughout new optimization sessions.**
   Fresh `HYPERLOOM_AGENTX=1` launches resolve the native recipe and launcher from
   ordinary workload inputs and retain Hyperloom's optimization loop. New sessions
-  persist backend `native`, epoch 3, and the versioned upstream launch contract.
+  persist backend `native`, epoch 4, and the Magpie-managed launch contract.
   Models without a registered recipe can use the formal custom workload path
   with an explicit image, TP, EP, and concurrency; Magpie validates model
   context instead of borrowing an unrelated model's launcher.
@@ -33,8 +33,8 @@ it.
   retain their measurement-only contract. No historical baseline or KEEP is
   migrated. Unsupported or ambiguous recipes fail before measurement. The
   pinned pair is Magpie v0.3.0 plus native launch overrides, custom-model replay, and the eval source-path fix at commit
-  `d72965776df5416dad063c00237f6e389b841162` and InferenceX commit
-  `421312f8984c2152f4b8eafefc93ea2fa598e80f`. Both dependencies are pinned by
+  `658562345ad1a7e5a617e3631f3acfcec0eade4a` and InferenceX commit
+  `408c015be4b22d14c69518643609669405507077`. Both dependencies are pinned by
   immutable commit for reproducible AgentX measurements. The upstream hotfix
   keeps generic GSM8K evaluation and its probe files reachable after benchmark
   directory changes. Install preserves the
@@ -52,7 +52,7 @@ it.
   `benchmark.envs.CONC`, and YAML-native `benchmark.agentx.selector`. Hyperloom
   pre-resolves each recipe through the benchmark interpreter,
   separates a canonical model id from local `MODEL_PATH`, resolves the
-  `single_node/agentic` launcher from the upstream manifest, and validates strict recipe/launch/raw
+  Magpie server specification and upstream client, and validates strict recipe/launch/raw
   fingerprints plus trusted topology. This addresses
   [#1601](https://github.com/AMD-AGI/Hyperloom/issues/1601).
   **Upgrade note:** native local mode takes its effective image pin from
@@ -63,19 +63,20 @@ it.
   the zero-based `ROCR_VISIBLE_DEVICES` mask with `gpu_selection.auto=false`.
   Native AgentX
   bypasses outer Ray; explicitly enabling `INFERENCE_OPTIMIZER_RAY_EXEC` fails.
-  New sessions use the upstream launch-overrides contract for candidate
+  New sessions use the Magpie-managed launch-overrides contract for candidate
   arguments, environments, and source overlays. Canonical revalidation checks
   launch evidence and a fixed workload fingerprint; candidate execution
   identities remain distinct. Epoch-2 resumes retain their earlier restrictions.
-  Native runs collect no PyTorch trace; PRELUDE's generic-server compatibility
-  profile remains diagnostic and is not recipe-identical. It skips TraceLens/CK
-  framework source patches to preserve subsequent native measurements, with
-  potentially reduced trace annotation coverage,
-  while GEAK proposals require canonical AgentX revalidation before acceptance.
-  AIPerf
-  `profile`/`profiled` fields are workload statistics. Finally, `publishable`
+  Epoch-4 profiling uses the accepted native candidate and Magpie's measured-phase
+  torch profiler. It supports a first-capture delay, step count, repeated captures,
+  and automatic count reduction. Complete captures are consumed separately;
+  cancelled or failed captures remain failures. Detailed annotations require a
+  compatible instrumented framework. Diagnostic results are never baseline or
+  KEEP evidence. Saved epoch-3 sessions keep their upstream launcher contract.
+  GEAK proposals require canonical AgentX revalidation before acceptance.
+  Finally, `publishable`
   is only the Magpie protocol attestation; Hyperloom separately binds the
-  selected recipe to exact audited launcher bytes and the pinned checkout. It
+  selected recipe to the resolved server specification, client sources, and pinned checkout. It
   does not cryptographically attest the actual outer image. The execution
   identity additionally hashes the effective, scrubbed launcher environment
   for audited server/framework/runtime controls, while excluding credentials,

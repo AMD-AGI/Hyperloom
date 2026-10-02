@@ -1,14 +1,13 @@
 # Native Magpie AgentX: GLM-5.2 on MI355X
 
 This example pins Magpie v0.3.0 plus native launch overrides, custom-model replay, and the eval-path fix to commit
-d72965776df5416dad063c00237f6e389b841162 and InferenceX commit
-421312f8984c2152f4b8eafefc93ea2fa598e80f. The YAML omits
+658562345ad1a7e5a617e3631f3acfcec0eade4a and InferenceX commit
+408c015be4b22d14c69518643609669405507077. The YAML omits
 `inferencex_path`, so preflight reuses or clones that tested pin. An optional
 `benchmark.inferencex_path` only nominates a preferred writable checkout:
 preflight replaces a missing or wrong-revision checkout with its pinned clone.
-Pinned Magpie currently interpolates that path into an unquoted local
-`bash -c`, so a resolved path containing whitespace or shell metacharacters is
-rejected before launch.
+Both repository-root and `inferencex-e2e/` project paths are supported for
+managed AgentX, including paths containing spaces.
 
 Run Hyperloom from inside the exact recipe image:
 
@@ -27,7 +26,7 @@ override. To use a mounted checkpoint, keep the canonical recipe id in
 
 The YAML source switch automatically enables the session-wide AgentX contract;
 fresh `HYPERLOOM_AGENTX=1` launches also select native AgentX. New sessions
-use epoch 3 and keep Hyperloom optimization. Persisted epoch-1 and epoch-2
+use epoch 4 and keep Hyperloom optimization. Persisted epoch-1 and epoch-2
 sessions keep their original backend and measurement contract.
 At `CONC=8`, the recipe has one GLM-5.2 arm: TP4/EP4 with DRAM+HiCache.
 `envs.TP` is not an arm selector and is intentionally absent. If a concurrency
@@ -42,11 +41,16 @@ into its fingerprint; an optional pre-existing `HYPERLOOM_IMAGE` must match it.
 Neither field starts a container or proves which outer image is actually
 running, so launch Hyperloom inside that image before invoking the command.
 
-New sessions use the upstream version-1 launch-overrides contract for
-optimization. Candidates require matching launch evidence and a canonical
-AgentX result; proxy scores are not accepted as optimization gains. Saved
-epoch-2 sessions retain their original measurement-only restrictions. Native measurement does not collect a PyTorch trace. If PRELUDE schedules
-roofline/profile analysis, Hyperloom uses a generic-server compatibility path;
-that trace is diagnostic and is not recipe-identical to the native AgentX run.
-It skips TraceLens/CK framework source patches to preserve subsequent native
-measurements, so trace annotation coverage may be lower.
+New sessions use Magpie-managed serving and launch evidence for optimization.
+Candidates require a canonical AgentX result; proxy and profiler scores cannot
+be accepted as gains. Saved epoch-2 and epoch-3 sessions keep their original
+measurement and launch contracts.
+
+Native diagnostic profiling retains the accepted candidate configuration and
+uses Magpie's measured-phase torch capture. It supports a first-capture delay,
+multiple captures, and automatic count reduction to fit the measurement window.
+Hyperloom selects a complete capture for kernel/roofline analysis and keeps
+other captures separately. Full shape-aware analysis requires a compatible
+instrumented framework with detailed annotations; ordinary GPU traces do not
+by themselves satisfy that requirement. Diagnostics never replace canonical
+baseline or KEEP measurements.
