@@ -244,11 +244,13 @@ def test_recipe_cancellation_preserves_group_cleanup_without_orphan_listener(tmp
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
+                # Cancellation may already have removed the owned process group.
                 pass
             process.wait(timeout=5)
         for pid, _ in owned:
             try:
                 os.waitpid(pid, 0)
             except ChildProcessError:
+                # The descendant may already have been reaped by its original parent.
                 pass
         assert libc.prctl(36, previous.value, 0, 0, 0) == 0
