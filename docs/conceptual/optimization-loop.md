@@ -165,18 +165,22 @@ authoring specialist's prompt. The rungs, in increasing complexity:
 1. **Rung 1 — serve-flag / config wire-up.** The architecture is supported and
    only a serve flag / env / tokenizer-mode / trivial registration alias is
    missing. No new code or dependencies.
-2. **Rung 2 — in-tree source patch.** A unified diff against the installed
-   source tree: register the arch, a small forward/config/tokenizer bridge, or
-   backport a merged PR. Pure Python, no compile.
+2. **Rung 2 — in-tree source patch.** A unified diff against the source tree
+   the server imports: register the arch, a small forward/config/tokenizer
+   bridge, or backport a merged PR. Pure Python, no compile.
 3. **Rung 3 — attempt-scoped runtime.** Acquire a runtime (a published
    wheel, an editable checkout at a ref, or a local source tree) into an
    isolated per-attempt venv. That venv is activated only through the
    per-variant YAML benchmark envs; the Coordinator never mutates its own
-   process environment to point at an attempt runtime.
+   process environment to point at an attempt runtime. While one is active,
+   the source tree the server imports is that runtime's own — the editable
+   checkout, or the venv's site-packages — so Rung 2 and Rung 4 patches land
+   there. A kept runtime is re-provisioned for every later round, whatever
+   that round's failure.
 4. **Rung 4 — source localization.** Localize a merged-PR or vendored
-   closure into the source tree. A change that touches compiled or
-   build-backend files cannot be satisfied by a plain source edit, so it
-   defers to Rung 5.
+   closure into the source tree the server imports. A change that touches
+   compiled or build-backend files cannot be satisfied by a plain source
+   edit, so it defers to Rung 5.
 5. **Rung 5 — off-loop compiled build.** Perform a compiled-component build
    (AITER kernels, sgl-kernel, or vLLM-from-source). Builds run *off* the
    coordinator tick loop on a dedicated single-slot build lane: each build

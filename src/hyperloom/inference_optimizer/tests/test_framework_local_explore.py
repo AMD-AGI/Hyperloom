@@ -316,6 +316,21 @@ def test_forward_enablement_carriers_boot_origin_noop():
     assert dst2 == {"config_path": "/keep.yaml"}
 
 
+def test_dispatched_verdict_reaches_the_integrate_task():
+    """The integrate task derives its rungs from the verdict, so a boot-origin round must carry it."""
+    from hyperloom.common.failure_signature import classify_failure
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _enablement_gap
+    from hyperloom.orchestrator.phases.framework import _forward_enablement_carriers
+
+    signature = classify_failure("ValueError: Model architectures ['Glm5ForCausalLM'] are not supported for now.")
+    dst: dict[str, Any] = {"enablement": True}
+    _forward_enablement_carriers({"enablement_failure_signature": signature.to_dict()}, dst)
+
+    gap = _enablement_gap(dst)
+    assert gap is not None
+    assert gap.kind == "missing_model_arch"
+
+
 # --------------------------------------------------------------------------- # Stage-3 guard: local_explore gap is
 # registered and has a real canonical id --------------------------------------------------------------------------- #
 def test_local_explore_gap_canonical_id_is_not_literal_local_explore():

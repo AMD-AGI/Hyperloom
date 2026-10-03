@@ -23,38 +23,6 @@ log = _logging.getLogger(__name__)
 ENABLEMENT_PARAMS_BUDGET_SEC: float = 45.0
 
 
-def _maybe_build_runtime_candidate(
-    capability_gap: Any,
-    *,
-    framework: str,
-    model: str,
-    gpu_type: str,
-) -> dict[str, Any] | None:
-    """Build a serialized runtime-candidate stack action, or None.
-
-    Returns None when the gap does not require code acquisition, the run is
-    multi-node (single-node-only guard), or the framework adapter cannot produce
-    an evidence-backed candidate. Fully exception-guarded.
-    """
-    if not getattr(capability_gap, "requires_code_acquisition", False):
-        return None
-    try:
-        from ..actions.executors._multi_node_env import is_multi_node
-
-        if is_multi_node():
-            return None
-        from .runtime.adapters import get_adapter
-
-        adapter = get_adapter(framework)
-        action = adapter.build_stack_action(capability_gap, framework=framework, model=model, gpu_type=gpu_type)
-        if action is None:
-            return None
-        return action.to_state()
-    except Exception:
-        log.debug("enablement: runtime-candidate construction failed", exc_info=True)
-        return None
-
-
 def _enablement_carrier_params(state: Any) -> dict[str, Any]:
     """eval-origin trigger context threaded to specialist/integrate/build tasks.
 
@@ -71,41 +39,6 @@ def _enablement_carrier_params(state: Any) -> dict[str, Any]:
     if cfg:
         out["enablement_probe_config_path"] = cfg
     return out
-
-
-def _maybe_build_localization_candidate(
-    capability_gap: Any,
-    *,
-    framework: str,
-    repo_url: str,
-    candidate_refs: tuple[str, ...],
-) -> dict[str, Any] | None:
-    """Build a serialized localization stack action, or None.
-
-    Returns None when the gap does not require code acquisition, the run is
-    multi-node, there is no merged-PR candidate ref, or the framework adapter
-    cannot localize. The compiled-closure gate runs later in the executor.
-    """
-    if not getattr(capability_gap, "requires_code_acquisition", False):
-        return None
-    ref = next((r for r in (candidate_refs or ()) if str(r).strip()), "")
-    if not ref or not repo_url:
-        return None
-    try:
-        from ..actions.executors._multi_node_env import is_multi_node
-
-        if is_multi_node():
-            return None
-        from .runtime.adapters import get_adapter
-
-        adapter = get_adapter(framework)
-        action = adapter.build_localization_action(capability_gap, candidate_ref=ref, repo_url=repo_url)
-        if action is None:
-            return None
-        return action.to_state()
-    except Exception:
-        log.debug("enablement: localization-candidate construction failed", exc_info=True)
-        return None
 
 
 class EnablementParams(CoordinatorCollaborator):
@@ -168,7 +101,6 @@ class EnablementParams(CoordinatorCollaborator):
             framework=framework,
             model=model or "(target model)",
             repo_url=repo_url,
-            launch_log=text,
             gpu_type=(getattr(state, "gpu_type", "") or "").strip().lower(),
         )
         plan = build_search_plan(signature, framework_repo_url=repo_url, model=model)
@@ -269,26 +201,6 @@ class EnablementParams(CoordinatorCollaborator):
             )
             notes = (span_note + "\n\n" + notes).strip() if notes else span_note
         gap_cid = f"gap.enablement.{signature.kind}"
-        from hyperloom.common.failure_signature import CapabilityGap
-
-        capability_gap = CapabilityGap.from_signature(signature)
-
-        # When the gap requires code acquisition (not a resource constraint) and
-        # an adapter can build an evidence-backed candidate, attach a
-        # ``runtime_candidate`` so integrate_patch provisions an attempt-scoped
-        # runtime before booting. Skipped in multi-node mode.
-        runtime_candidate = _maybe_build_runtime_candidate(
-            capability_gap, framework=framework, model=model, gpu_type=req.gpu_type
-        )
-        # When a merged-PR candidate exists, attach a ``localization_candidate``
-        # so integrate_patch localizes the closure into the source tree
-        # (compiled closures defer to the targeted build at apply).
-        localization_candidate = _maybe_build_localization_candidate(
-            capability_gap,
-            framework=framework,
-            repo_url=repo_url,
-            candidate_refs=tuple(candidate_refs),
-        )
 
         params_out: dict[str, Any] = {
             "domain": "enablement_specialist",
@@ -302,11 +214,12 @@ class EnablementParams(CoordinatorCollaborator):
             "lever_kind": LEVER_ENABLEMENT,
             "enablement_attempt": attempt,
             "enablement_failure_kind": signature.kind,
+            # The verdict this round was dispatched on. The prompt builder renders
+            # it; nothing downstream re-classifies a log to recover it.
+            "enablement_failure_signature": signature.to_dict(),
             "enablement_search_repos": list(plan.repos),
             # The before half of integrate_patch's gate.
             "enablement_before_observation_path": state.enablement.launch_observation_path,
-            # CapabilityGap projection: marks resource_constraint as not actionable.
-            "enablement_capability_gap": capability_gap.to_dict(),
             "enablement_candidate_refs": list(candidate_refs),
             # Source lines near the offending site, plus (on a weight-init
             # failure) the checkpoint's per-layer weight inventory. Rendered
@@ -324,15 +237,6 @@ class EnablementParams(CoordinatorCollaborator):
             # eval-origin trigger context (empty for boot-origin enablement).
             **_enablement_carrier_params(state),
         }
-        if runtime_candidate is not None:
-            params_out["runtime_candidate"] = runtime_candidate
-        # Re-activate a prior KEEP'd attempt runtime so serial stacking runs on
-        # the same runtime the last round promoted.
-        kept_action = state.enablement.kept_stack_action
-        if isinstance(kept_action, dict) and kept_action and "runtime_candidate" not in params_out:
-            params_out["runtime_candidate"] = kept_action
-        if localization_candidate is not None:
-            params_out["localization_candidate"] = localization_candidate
         # Inject the last targeted-build failure into the mandate.
         last_build_failure = state.enablement.last_build_failure or {}
         if isinstance(last_build_failure, dict) and last_build_failure:
