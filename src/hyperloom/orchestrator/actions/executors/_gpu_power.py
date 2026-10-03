@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
 import subprocess  # nosec B404 - fixed read-only amd-smi invocation.
 import threading
@@ -303,7 +302,7 @@ class ServerLogPhaseDriver:
 
 def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | None) -> GpuPowerRecorder | None:
     """The round's power recorder, or ``None`` when sampling is off or there is no ``amd-smi`` to sample with."""
-    if not server_log_path or not env_flag(GPU_POWER_ENV, default=not os.environ.get("PYTEST_CURRENT_TEST")):
+    if not server_log_path or not env_flag(GPU_POWER_ENV, default=True):
         return None
     if shutil.which("amd-smi") is None:
         return None

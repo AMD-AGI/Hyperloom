@@ -156,14 +156,17 @@ def test_measurement_falls_back_to_the_report_when_no_recorder_ran(tmp_path):
     assert extract_benchmark_measurement(_MAGPIE_REPORT, workspace=tmp_path)["gpu_power_avg_w"] == 313.7
 
 
-def test_builder_is_off_under_pytest_unless_asked(tmp_path, monkeypatch):
+def test_builder_follows_amd_smi_and_the_switch(tmp_path, monkeypatch):
+    """On wherever amd-smi exists, unless the operator turns it off; nothing to sample without amd-smi."""
     log_path = str(tmp_path / "server.log")
     monkeypatch.delenv("HYPERLOOM_GPU_POWER_SAMPLING", raising=False)
+    monkeypatch.setattr("shutil.which", lambda name: None)
     assert build_gpu_power_recorder(log_path, {}) is None
-    monkeypatch.setenv("HYPERLOOM_GPU_POWER_SAMPLING", "1")
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/amd-smi")
     recorder = build_gpu_power_recorder(log_path, {"HIP_VISIBLE_DEVICES": "4,5"})
     assert recorder is not None and recorder._gpus == {4, 5}
+    monkeypatch.setenv("HYPERLOOM_GPU_POWER_SAMPLING", "0")
+    assert build_gpu_power_recorder(log_path, {}) is None
     assert build_gpu_power_recorder(None, {}) is None
 
 
