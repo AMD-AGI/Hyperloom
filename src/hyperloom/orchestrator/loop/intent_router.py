@@ -28,7 +28,6 @@ from .verdicts import (
     verdict_held_to_its_rule,
     verdict_map_entry_held_to_its_rule,
 )
-from hyperloom.common.env import is_truthy
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..bus.message_bus import Message, TOPIC_ALLOWLIST
@@ -849,22 +848,12 @@ class IntentRouter(CoordinatorCollaborator):
         for attempt in range(6):
             idempotency_key = str(raw_key) if attempt == 0 else f"{raw_key}-retry{attempt}"
             lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(action_name)
-            # Bench-enabled specialists serialize against the other GPU benchmark/profile/server work via
-            # benchmark_lane (research_lane alone conflicts with nothing).
             if action_name == "specialist":
-                from ..specialists.profile import resolve_specialist_profile
+                from ..specialists.profile import requires_gpu, specialist_lanes
 
-                if resolve_specialist_profile(params).reserves_benchmark_lane:
-                    lanes = tuple(dict.fromkeys((*lanes, "benchmark_lane")))
-                # Any GPU-holding specialist serializes against serving via gpu_research_lane.
-                needs_gpu = is_truthy(params.get("needs_gpu"))
-                if needs_gpu:
-                    lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
-                    # Shared with the GPU-pool lease so the two TTLs never drift.
-                    ttl = self._coord.dispatcher.gpu_lease_ttl_sec(
-                        int(ttl or 0),
-                        params=params,
-                    )
+                lanes = tuple(specialist_lanes(params, list(lanes)))
+                if requires_gpu(params):
+                    ttl = self._coord.dispatcher.gpu_lease_ttl_sec(int(ttl or 0), params=params)
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind=action_name,
                 params=params,

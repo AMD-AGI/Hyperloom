@@ -23,7 +23,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 KERNEL_REQUEST_REF = "## 6. KERNEL-OPT REQUEST REFERENCE"
 IDEA_GENERATION = "### IDEA GENERATION"
 BASELINE_FINGERPRINT = "eight params fields"  # now in the reference doc, not in the prompt
-SPECIALIST_DIALS = "### One specialist, four dials"
+SPECIALIST_DIALS = "### One specialist, three dials"
 SPECIALIST_WATCH = "### Watching a running specialist"
 SPECIALIST_DOMAIN = "### Choosing specialist domain"
 WEB_SEARCH = "### Web search"

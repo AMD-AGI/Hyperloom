@@ -7,7 +7,8 @@ from __future__ import annotations
 import logging as _logging
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
+from hashlib import sha1
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.coerce import to_float
@@ -496,8 +497,8 @@ class FrameworkPhase(CoordinatorCollaborator):
     # Backstop: max Critic-review submissions for a single candidate before the pump force-stamps
     # ``repeated_review_abort`` and stops re-selecting it.
     _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
-    # Multi-node only: cap on specialist proposal_set entries auto-materialised into a single explore grid per round.
-    _MN_AUTO_EXPLORE_GRID_CAP: int = 6
+    # Cap on specialist proposal rows benched per automatic explore grid.
+    _AUTO_EXPLORE_GRID_CAP: int = 4
 
     def on_specialist_settled(self, task: "Task", done_payload: dict[str, Any], *, run_error: str) -> None:
         """Stamp an empty authoring round's terminal row and harvest a discovery round's candidates."""
@@ -677,90 +678,86 @@ class FrameworkPhase(CoordinatorCollaborator):
         self._open_framework_timeline()
         await self._pump_framework_agent_phase()
 
+    def _authoring_inflight_candidate_ids(self, queued: list[Any], running: list[Any]) -> set[str]:
+        """Candidate ids with a live specialist / integrate_patch task or a review proposal awaiting its verdict."""
+        in_flight = {
+            str(t.params.get("framework_agent_candidate_id") or "")
+            for t in (*queued, *running)
+            if t.kind in ("specialist", "integrate_patch") and t.params
+        }
+        for p in self.state.pending_proposals.values():
+            if p.action_name != "integrate_patch":
+                continue
+            payload = p.payload or {}
+            in_flight.add(
+                str(
+                    payload.get("framework_agent_candidate_id")
+                    or (payload.get("params") or {}).get("framework_agent_candidate_id")
+                    or ""
+                )
+            )
+        in_flight.discard("")
+        return in_flight
+
     async def _pump_framework_agent_phase(self) -> None:
-        """Drive the FRAMEWORK_AGENT phase: enqueue the next candidate. Idempotent; a discover failure flips framework_agent_phase_done so the phase advances rather than wedging."""
+        """Drive the FRAMEWORK_AGENT phase: submit candidates for review in parallel.
+
+        Up to ``research_lane_capacity`` candidates are in flight at once; landing
+        still serialises on ``workspace_mutation``. The discovery → local-explore →
+        phase-done fallback runs only once no candidate is left and none is in
+        flight. Idempotent; a discover failure flips ``framework_agent_phase_done``
+        so the phase advances rather than wedging.
+        """
         state = self.shared_state
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
         if bool(state.framework_agent_phase_done):
             return
-        # Skip if a framework task is already queued or running.
-        queued = await self.tasks.queued()
-        running = await self.tasks.running()
-        for t in (*queued, *running):
-            # A candidate landing as ``integrate_patch`` with a candidate id.
-            if getattr(t, "kind", "") == "integrate_patch" and (getattr(t, "params", None) or {}).get(
-                "framework_agent_candidate_id"
-            ):
-                return
-        # Serialize one candidate at a time: skip while a candidate proposal awaits its (durable) Critic verdict,
-        # resolved on a later tick.
-        if any(
-            getattr(p, "action_name", "") == "integrate_patch"
-            and (getattr(p, "payload", None) or {}).get("framework_agent_candidate_id")
-            for p in self.state.pending_proposals.values()
-        ):
-            return
-        # An authoring specialist (or its downstream integrate_patch) for the current candidate may still be running;
-        # wait only on a live TASK (queued/running), NOT on a pending Critic proposal.
-        _q = await self.tasks.queued()
-        _r = await self.tasks.running()
-        if any(
-            getattr(t, "kind", "") in ("specialist", "integrate_patch")
-            and bool((getattr(t, "params", None) or {}).get("framework_agent_authoring"))
-            for t in (*_q, *_r)
-        ):
-            return
-        # Proposal-window guard: the task check above misses the interval between a specialist completing and its
-        # integrate_patch becoming a live TASK (the deliverable exists only as a pending Critic proposal).
-        if await self._framework_agent_authoring_inflight():
-            return
-        # Take the next un-dispatched candidate.
-        next_candidate = self._select_next_framework_agent_candidate()
-        if next_candidate is None:
-            # Hold the phase open while authored patches are still benched or reviewed; only when a batch was
-            # discovered (an LLM-proposed integrate_patch must not keep FRAMEWORK open).
-            discovered_batch = bool(state.framework_agent_batches or [])
-            if discovered_batch and await self._framework_agent_authoring_inflight():
-                return
-            # Minimum supply: with the pool empty and no discovery in flight, ask for one.
-            if await self._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty"):
-                state.save(self.session_dir)
-                return
-            if self._framework_local_explore_arm_enabled():
-                gap, keywords = self._compose_framework_local_explore_gap()
-                title = (
-                    f"local source exploration ({gap})"
-                    if gap
-                    else "local source exploration (author a throughput patch from live source + profile)"
-                )
-                dispatched = await self._enqueue_framework_agent_local_explore_specialist(
-                    {
-                        "title": title,
-                        "repo": "(local source)",
-                        "framework": str(state.framework or "").strip().lower(),
-                        "gap_description": gap,
-                        "gap_keywords": keywords,
-                    },
-                    reason="no_new_candidates",
-                )
-                if dispatched:
-                    state.save(self.session_dir)
-                    return
-            self._record_framework_agent_phase_done(
-                reason="no_candidates_and_discovery_exhausted",
-                failure_count=int(state.framework_agent_discover_failures or 0),
+        in_flight_ids = self._authoring_inflight_candidate_ids(await self.tasks.queued(), await self.tasks.running())
+        submitted = False
+        while len(in_flight_ids) < max(1, state.research_lane_capacity):
+            candidate = self._select_next_framework_agent_candidate(exclude_ids=in_flight_ids)
+            if candidate is None:
+                break
+            await self._submit_framework_agent_candidate_for_review(
+                candidate,
+                audit=dict(candidate.get("audit") or {}),
+                audit_step=str(candidate.get("route") or "author_via_specialist"),
             )
-            state.framework_agent_phase_done = True
+            in_flight_ids.add(self._framework_candidate_key(candidate))
+            submitted = True
+        if submitted or in_flight_ids or await self._framework_agent_authoring_inflight():
+            return
+        # Minimum supply: with the pool empty and no discovery in flight, ask for one.
+        if await self._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty"):
             state.save(self.session_dir)
             return
-        # Submit the candidate as a proposal; the async Critic verdict drives the apply/author enqueue or the
-        # critic_denied row on a later tick.
-        await self._submit_framework_agent_candidate_for_review(
-            next_candidate,
-            audit=dict(next_candidate.get("audit") or {}),
-            audit_step=str(next_candidate.get("route") or "author_via_specialist"),
+        if self._framework_local_explore_arm_enabled():
+            gap, keywords = self._compose_framework_local_explore_gap()
+            title = (
+                f"local source exploration ({gap})"
+                if gap
+                else "local source exploration (author a throughput patch from live source + profile)"
+            )
+            dispatched = await self._enqueue_framework_agent_local_explore_specialist(
+                {
+                    "title": title,
+                    "repo": "(local source)",
+                    "framework": str(state.framework or "").strip().lower(),
+                    "gap_description": gap,
+                    "gap_keywords": keywords,
+                },
+                reason="no_new_candidates",
+            )
+            if dispatched:
+                state.save(self.session_dir)
+                return
+        self._record_framework_agent_phase_done(
+            reason="no_candidates_and_discovery_exhausted",
+            failure_count=int(state.framework_agent_discover_failures or 0),
         )
+        state.framework_agent_phase_done = True
+        state.save(self.session_dir)
 
     async def _framework_agent_authoring_inflight(self) -> bool:
         """True while a FRAMEWORK-authored patch for an unprocessed candidate is still in flight."""
@@ -917,8 +914,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             "framework_audit": (audit if isinstance(audit, dict) else {}),
             "source": "coordinator_internal",
             "notes": notes,
-            # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
-            **self._coord.gpu_lanes.framework_gpu_params(),
         }
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         idem = f"framework_agent_authoring:{batch_id}:{cand_id}"
@@ -1196,7 +1191,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             "source": "coordinator_internal",
             "notes": notes,
             "apply_retry_attempt": attempt,
-            **self._coord.gpu_lanes.framework_gpu_params(),
         }
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         # Gap id and attempt both repeat across cycles.
@@ -1290,10 +1284,12 @@ class FrameworkPhase(CoordinatorCollaborator):
                 out.append(cand)
         return out
 
-    def _select_next_framework_agent_candidate(self) -> dict[str, Any] | None:
-        """Return the next unprocessed candidate in the batch, in the order given."""
-        unprocessed = self._unprocessed_framework_agent_candidates()
-        return unprocessed[0] if unprocessed else None
+    def _select_next_framework_agent_candidate(self, exclude_ids: Collection[str] = ()) -> dict[str, Any] | None:
+        """Return the next unprocessed candidate whose id is not in ``exclude_ids``, in batch order."""
+        for cand in self._unprocessed_framework_agent_candidates():
+            if self._framework_candidate_key(cand) not in exclude_ids:
+                return cand
+        return None
 
     def _authoring_specialist_domain(self) -> str:
         """Pick the authoring domain that matches the session's framework kind."""
@@ -1427,7 +1423,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             "framework_audit": {},
             "framework_local_explore": True,
             "source": "coordinator_internal",
-            **self._coord.gpu_lanes.framework_gpu_params(),
         }
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
@@ -2071,6 +2066,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         """
         try:
             await self._pump_framework_agent_phase()
+            await self._maybe_bench_untested_proposals()
             await self._coord.phase_internal.maybe_enqueue_explore_research_scout()
             await self._coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
             self._record_advisory_plateau()
@@ -2530,60 +2526,43 @@ class FrameworkPhase(CoordinatorCollaborator):
             out.append(cand)
         return out
 
-    async def maybe_materialize_mn_explore(
-        self,
-        *,
-        task: "Task",
-        domain: str,
-        proposals: list[Any],
-    ) -> None:
-        """Multi-node bridge: turn a specialist ``proposal_set`` into a
-        benchmarked ``explore`` task automatically.
+    async def _maybe_bench_untested_proposals(self) -> None:
+        """Enqueue an explore grid from the highest-severity untested specialist proposals.
 
-        Single-node is a no-op (``is_multi_node()`` False): there the
-        Orchestration LLM drives ``explore`` directly. In multi-node the GPU
-        cluster lives on remote SSH pods, so the only materialisation channel is
-        a structured ``explore`` action; this helper enqueues the explore grid
-        itself. ``proposal_set`` entries reuse the explore variant schema
-        (``name`` / ``extra_args`` / ``extra_envs``) and pass straight through;
-        ``canonical_fingerprint`` dedup + the per-variant KEEP/REVERT gain gate
-        are the safety net.
-
-        Args:
-            task: The completed specialist task whose id seeds the explore
-                idempotency key.
-            domain: The specialist domain, stamped onto variant provenance.
-            proposals: The specialist ``proposal_set`` entries materialised into
-                the explore grid (capped at ``_MN_AUTO_EXPLORE_GRID_CAP``).
+        Runs in FRAMEWORK_AGENT while no explore is queued or running. The
+        idempotency key names the fingerprint set, so a grid that failed without
+        recording any variant is not re-enqueued until the queue head changes.
         """
-        from ..actions.executors._multi_node_env import is_multi_node
-        from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
+        from ..actions.executors._proposal_identity import controls_of
 
-        if not is_multi_node() or not proposals:
-            return
-        grid: list[dict[str, Any]] = []
-        for i, p in enumerate(proposals[: self._MN_AUTO_EXPLORE_GRID_CAP]):
-            if not isinstance(p, dict):
-                continue
-            fields = normalize_proposal(p)
-            if not is_executable(fields):
-                continue
-            grid.append(
-                {
-                    "name": fields["name"] or f"{domain or 'specialist'}-{task.task_id[:8]}-{i}",
-                    "extra_args": fields["extra_args"],
-                    "extra_envs": fields["extra_envs"],
-                    **controls_of(fields),
-                    "provenance": f"specialist:{domain}" if domain else "specialist",
-                    "note": fields["reason"][:200],
-                }
-            )
-        if not grid:
-            return
         state = self.shared_state
+        if (
+            state.phase or ""
+        ).strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT or state.framework_agent_phase_done:
+            return
+        dispatcher = self._coord.dispatcher
+        if dispatcher.admission_frozen or dispatcher.dispatch_paused_for_phase_budget():
+            return
+        if any(t.kind == "explore" for t in (*await self.tasks.queued(), *await self.tasks.running())):
+            return
+        rows = state.untested_proposal_rows()[: self._AUTO_EXPLORE_GRID_CAP]
+        if not rows:
+            return
+        grid = [
+            {
+                "name": row["name"],
+                "extra_args": row["extra_args"],
+                "extra_envs": dict(row["extra_envs"]),
+                **controls_of(row),
+                "provenance": f"specialist:{row['domain']}",
+                "note": row["reason"][:200],
+            }
+            for row in rows
+        ]
+        fp_hash = sha1(",".join(sorted(row["fingerprint"] for row in rows)).encode(), usedforsecurity=False)
         params: dict[str, Any] = {
-            "source": "coordinator_internal_mn",
-            "reason": f"mn_auto_materialize:{domain or 'specialist'}",
+            "source": "coordinator_internal",
+            "reason": "auto_bench_untested_proposals",
             "grid": grid,
         }
         if state.baseline_config_path:
@@ -2598,19 +2577,13 @@ class FrameworkPhase(CoordinatorCollaborator):
         etask, was_existing = await self.tasks.create_or_return_existing(
             kind="explore",
             params=params,
-            idempotency_key=f"mn-auto-explore-{task.task_id}",
+            idempotency_key=f"auto-explore-c{int(state.macro_cycle or 0)}-{fp_hash.hexdigest()[:12]}",
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )
-        log.info(
-            "mn_auto_materialize: enqueued explore task_id=%s (variants=%d, from specialist=%s domain=%s, existing=%s)",
-            etask.task_id,
-            len(grid),
-            task.task_id,
-            domain,
-            was_existing,
-        )
+        if not was_existing:
+            log.info("auto_bench: enqueued explore task_id=%s (variants=%d)", etask.task_id, len(grid))
 
     async def maybe_autosubmit_specialist_patches(
         self,

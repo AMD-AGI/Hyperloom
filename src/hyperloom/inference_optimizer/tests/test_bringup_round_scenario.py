@@ -171,7 +171,6 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         state=types.SimpleNamespace(pending_proposals={}),
         _read_enablement_source_context=lambda _sig: "",
         _derive_checkpoint_weight_facts=lambda _log: "",
-        framework_gpu_params=lambda: {},
         framework_authoring_lanes_ttl=lambda _params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
         time_budget_denial_for_action=lambda _action: None,
         # Attributes exposed by CoordinatorCollaborator properties; set directly

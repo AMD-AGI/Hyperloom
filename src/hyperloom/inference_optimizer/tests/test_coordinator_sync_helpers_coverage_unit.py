@@ -36,22 +36,22 @@ def coord(session_dir) -> Coordinator:
 
 # -- The specialist wall-clock deadline ------------------------------------
 def test_specialist_wall_budget_base_no_macro_cycle(coord: Coordinator) -> None:
-    # macro_cycle == 0 → base lane values (cpu 10min / gpu 60min).
+    # macro_cycle == 0 → base mode values (research 10min / patch 60min).
     coord.shared_state.macro_cycle = 0
-    assert coord.dispatcher._specialist_wall_budget_sec(needs_gpu=False) == 10 * 60
-    assert coord.dispatcher._specialist_wall_budget_sec(needs_gpu=True) == 60 * 60
+    assert coord.dispatcher._specialist_wall_budget_sec(params={"mode": "research"}) == 10 * 60
+    assert coord.dispatcher._specialist_wall_budget_sec(params={"mode": "patch"}) == 60 * 60
 
 
 def test_specialist_wall_budget_macro_cycle_amplifies(coord: Coordinator) -> None:
     coord.shared_state.macro_cycle = 1
-    assert coord.dispatcher._specialist_wall_budget_sec(needs_gpu=False) == 20 * 60
-    assert coord.dispatcher._specialist_wall_budget_sec(needs_gpu=True) == 120 * 60
+    assert coord.dispatcher._specialist_wall_budget_sec(params={"mode": "research"}) == 20 * 60
+    assert coord.dispatcher._specialist_wall_budget_sec(params={"mode": "patch"}) == 120 * 60
 
 
 def test_specialist_wall_budget_caps_at_4h(coord: Coordinator) -> None:
     coord.shared_state.macro_cycle = 10
-    assert coord.dispatcher._specialist_wall_budget_sec(needs_gpu=True) == 240 * 60
-    assert coord.dispatcher._specialist_wall_budget_sec(needs_gpu=False) == 110 * 60
+    assert coord.dispatcher._specialist_wall_budget_sec(params={"mode": "patch"}) == 240 * 60
+    assert coord.dispatcher._specialist_wall_budget_sec(params={"mode": "research"}) == 110 * 60
 
 
 def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> None:
@@ -60,10 +60,7 @@ def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> N
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
     params = {"scope": "domain", "mode": "patch", "bench": True}
-    budget = coord.dispatcher._specialist_wall_budget_sec(
-        needs_gpu=True,
-        params=params,
-    )
+    budget = coord.dispatcher._specialist_wall_budget_sec(params=params)
 
     assert budget == max(60 * 60, resolve_benchmark_timeouts()[1] + 10 * 60)
     assert coord.dispatcher.gpu_lease_ttl_sec(params=params) == pytest.approx(
@@ -76,10 +73,7 @@ def test_specialist_deadline_does_not_outlast_the_session(coord: Coordinator) ->
     coord.shared_state.max_minutes = 30
     coord.shared_state.begin_leg()
 
-    deadline = coord.dispatcher._specialist_deadline(
-        needs_gpu=True,
-        params={"scope": "domain", "mode": "patch", "bench": True},
-    )
+    deadline = coord.dispatcher._specialist_deadline(params={"scope": "domain", "mode": "patch", "bench": True})
 
     assert deadline.remaining() == pytest.approx(30 * 60, abs=2)
 
@@ -91,10 +85,10 @@ def test_a_spent_session_yields_an_expired_specialist_deadline(coord: Coordinato
     coord.shared_state.max_minutes = 30
     coord.shared_state.begin_leg(now_unix=_time.time() - 3_600.0)
 
-    ample = coord.dispatcher._specialist_deadline(needs_gpu=True)
+    ample = coord.dispatcher._specialist_deadline(params={"mode": "patch"})
     coord.shared_state.max_minutes = 240
     coord.shared_state.begin_leg()
-    fresh = coord.dispatcher._specialist_deadline(needs_gpu=True)
+    fresh = coord.dispatcher._specialist_deadline(params={"mode": "patch"})
 
     assert ample.expired()
     assert not fresh.expired()
@@ -107,11 +101,11 @@ def test_gpu_lease_ttl_grace_over_wall_budget(coord: Coordinator) -> None:
     from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
 
     coord.shared_state.macro_cycle = 0
-    budget = coord.dispatcher._specialist_wall_budget_sec(needs_gpu=True)  # 3600
+    budget = coord.dispatcher._specialist_wall_budget_sec(params={"mode": "patch"})  # 3600
     ttl = int(budget * (1.0 + GPU_LEASE_TTL_GRACE))
     assert ttl == int(3600 * 1.1)
     assert ttl >= budget
-    assert coord.dispatcher.gpu_lease_ttl_sec() == pytest.approx(ttl, abs=2)
+    assert coord.dispatcher.gpu_lease_ttl_sec(params={"mode": "patch"}) == pytest.approx(ttl, abs=2)
 
 
 def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> None:

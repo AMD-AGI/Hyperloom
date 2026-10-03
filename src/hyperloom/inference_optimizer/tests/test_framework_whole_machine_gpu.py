@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests that framework-family authoring specialists lease the whole machine."""
+"""Tests that enablement authoring specialists lease the whole machine, while FRAMEWORK authoring is CPU."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from ._dispatch_helpers import pump_until_settled
 
 
 def _build_coord(
@@ -95,52 +96,51 @@ class _GpuProbe:
         }
 
 
-# ── 1. params carry needs_gpu + whole-machine gpu_count (perf & enablement) ──
+# ── 1. enablement specialists request the whole machine only when it exists ──
 
 
-def test_framework_gpu_params_request_whole_machine(tmp_path, monkeypatch):
-    """The shared helper (used by BOTH the perf-framework and enablement param builders) requests the whole machine when GPUs are visible + single-node."""
-    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
-    assert coord.framework_gpu_pool.capacity == 4
-    gpu_params = coord.gpu_lanes.framework_gpu_params()
-    assert gpu_params.get("needs_gpu") is True
-    assert gpu_params.get("gpu_count") == 4
-
-
-def test_enablement_params_carry_whole_machine_gpu(tmp_path, monkeypatch):
-    """The enablement param builder merges needs_gpu + whole-machine gpu_count."""
-    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
+def _enablement_params(coord):
     coord.shared_state.framework = "sglang"
     coord.shared_state.model_name = "some/model"
-    # A missing-model-arch log classifies to an actionable signature.
     log = "Model architecture 'FooBarForCausalLM' is not supported by this build"
     params = coord.enablement_params.build_enablement_specialist_params(log)
-    assert params is not None
-    assert params.get("enablement") is True
-    assert params.get("needs_gpu") is True
-    assert params.get("gpu_count") == 4
+    assert params is not None and params.get("enablement") is True
+    return params
 
 
-def test_framework_gpu_params_empty_without_gpus(tmp_path, monkeypatch):
-    """No visible cards → no needs_gpu (never deadlock the dispatcher)."""
+def test_enablement_specialist_leases_gpu_on_a_single_node_with_cards(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.specialists.profile import requires_gpu, specialist_lanes
+
+    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
+    params = _enablement_params(coord)
+    assert requires_gpu(params) is True
+    assert specialist_lanes(params, ["research_lane"]) == ["gpu_research_lane"]
+
+
+def test_enablement_specialist_is_cpu_without_visible_cards(tmp_path, monkeypatch):
+    """No visible cards → no GPU lease, so the dispatcher never waits on an empty pool."""
+    from hyperloom.orchestrator.specialists.profile import requires_gpu
+
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0, visible_devices="")
     assert coord.framework_gpu_pool.capacity == 0
-    assert coord.gpu_lanes.framework_gpu_params() == {}
+    assert requires_gpu(_enablement_params(coord)) is False
 
 
-def test_framework_gpu_params_empty_on_multi_node(tmp_path, monkeypatch):
-    """Multi-node → no whole-machine GPU request (integrate_patch is single-node)."""
+def test_enablement_specialist_is_cpu_on_multi_node(tmp_path, monkeypatch):
+    """Multi-node → no whole-machine lease (the cards live on remote pods)."""
+    from hyperloom.orchestrator.specialists.profile import requires_gpu
+
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    assert coord.gpu_lanes.framework_gpu_params() == {}
+    assert requires_gpu(_enablement_params(coord)) is False
 
 
-# ── 2. dispatch leases the whole machine even when capacity=0 ────────────────
+# ── 2. dispatch leases the whole machine when capacity=0 (enablement) ────────────────
 
 
 @pytest.mark.asyncio
-async def test_framework_family_leases_whole_machine_when_capacity_zero(tmp_path, monkeypatch):
-    """A framework-family GPU task leases every card from ``framework_gpu_pool`` even though ``gpu_specialist_capacity=0`` empties the EXPLORE pool."""
+async def test_enablement_leases_whole_machine_when_capacity_zero(tmp_path, monkeypatch):
+    """An enablement GPU task leases every card from ``framework_gpu_pool`` even when ``gpu_specialist_capacity=0`` empties the EXPLORE pool."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
     assert coord.gpu_specialist_pool.capacity == 0  # EXPLORE pool empty
     assert coord.framework_gpu_pool.capacity == 4  # whole machine
@@ -152,49 +152,21 @@ async def test_framework_family_leases_whole_machine_when_capacity_zero(tmp_path
         params={
             "domain": "enablement_specialist",
             "gap_canonical_id": "gap.enablement.test",
-            "framework_agent_authoring": True,
             "enablement": True,
             "needs_gpu": True,
             "gpu_count": 4,
         },
         idempotency_key="fw-gpu-wholemachine",
-        requires_lanes=["research_lane", "gpu_research_lane"],
+        requires_lanes=["gpu_research_lane"],
         lease_ttl_sec=3600,
     )
 
-    await coord.dispatcher.pump_dispatcher_once()
+    await pump_until_settled(coord.dispatcher)
 
-    assert probe.entries, "framework GPU task never dispatched"
+    assert probe.entries, "enablement GPU task never dispatched"
     tid = probe.entries[0]
     assert probe.gpu_ids_by_task[tid] == [0, 1, 2, 3]
     assert not await coord.tasks.queued()
-
-
-@pytest.mark.asyncio
-async def test_framework_family_defaults_gpu_count_to_whole_machine(tmp_path, monkeypatch):
-    """Omitting ``gpu_count`` defaults a framework-family task to the whole machine (not the serving TP)."""
-    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
-    probe = _GpuProbe()
-    coord.sub.register_executor("specialist", probe)
-
-    await coord.tasks.create_or_return_existing(
-        kind="specialist",
-        params={
-            "domain": "serving_specialist",
-            "gap_canonical_id": "gap.framework.test",
-            "framework_agent_authoring": True,
-            "needs_gpu": True,
-            # no explicit gpu_count → default to whole-machine capacity
-        },
-        idempotency_key="fw-gpu-default-count",
-        requires_lanes=["research_lane", "gpu_research_lane"],
-        lease_ttl_sec=3600,
-    )
-
-    await coord.dispatcher.pump_dispatcher_once()
-
-    assert probe.entries
-    assert probe.gpu_ids_by_task[probe.entries[0]] == [0, 1, 2, 3]
 
 
 # ── 3. gpu_research_lane serializes the serving lanes (mutex) ────────────────
@@ -287,7 +259,7 @@ async def test_explore_gpu_specialist_uses_carved_pool(tmp_path, monkeypatch):
         lease_ttl_sec=3600,
     )
 
-    await coord.dispatcher.pump_dispatcher_once()
+    await pump_until_settled(coord.dispatcher)
 
     assert probe.entries
     assert probe.gpu_ids_by_task[probe.entries[0]] == [0]
@@ -321,7 +293,7 @@ async def test_bench_specialist_leases_whole_machine_when_serving_owns_node(tmp_
         lease_ttl_sec=3600,
     )
 
-    await coord.dispatcher.pump_dispatcher_once()
+    await pump_until_settled(coord.dispatcher)
 
     assert probe.entries, "bench specialist never dispatched"
     tid = probe.entries[0]
@@ -359,7 +331,7 @@ async def test_non_bench_gpu_probe_still_uses_carved_pool(tmp_path, monkeypatch)
         lease_ttl_sec=3600,
     )
 
-    await coord.dispatcher.pump_dispatcher_once()
+    await pump_until_settled(coord.dispatcher)
 
     assert probe.entries
     # First card of the carved (serving-disjoint) pool, not card 0.
@@ -485,7 +457,7 @@ async def test_serving_priority_admits_gpu_specialist_when_slot_free(tmp_path, m
         lease_ttl_sec=3600,
     )
 
-    await coord.dispatcher.pump_dispatcher_once()
+    await pump_until_settled(coord.dispatcher)
 
     assert probe.entries, "executor must run when serving slot is free"
     assert not await coord.tasks.queued()

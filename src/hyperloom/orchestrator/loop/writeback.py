@@ -3050,10 +3050,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
         self._record_specialist_round_product(task=task, round_entry=round_entry)
 
         # Per-anchor coverage ledger: every specialist completion is
-        # one "round" — tick all anchors, then zero the one that just ran so a
-        # long-idle domain's counter climbs until the hard-trigger forces it.
+        # one "round" — tick all anchors.
         self.shared_state.bump_domain_round_counters()
-        self.shared_state.note_specialist_dispatched(domain)
 
         # Persist so a resume picks up the bookkeeping without re-running the specialist.
         try:
@@ -3063,16 +3061,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "specialist bookkeeping: SharedState.save failed for task=%s",
                 task.task_id,
             )
-
-        # Multi-node only: auto-materialise the proposal_set into a
-        # benchmarked explore task. No-op single-node (LLM drives explore
-        # directly there) and no-op when the proposal_set is empty / has
-        # no applicable variants. See :meth:`maybe_materialize_mn_explore`.
-        await self._coord.phase_framework.maybe_materialize_mn_explore(
-            task=task,
-            domain=domain,
-            proposals=proposals,
-        )
 
         # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain.
         if done_payload.get("new_findings"):

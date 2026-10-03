@@ -13,6 +13,9 @@ MAX_HOURS="${MAX_HOURS:-1.0}"
 MAX_ITERS="${MAX_ITERS:-100}"
 GPU_TARGET="${GPU_TARGET:-gfx950}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-60}"
+# Seconds to wait for a GPU before giving up. Counted until the run starts; the run
+# then has its own deadline from MAX_HOURS, so a busy cluster cannot spend it.
+QUEUE_TIMEOUT_S="${QUEUE_TIMEOUT_S:-14400}"
 
 : "${DISPATRON_BASE_URL:?DISPATRON_BASE_URL is required}"
 : "${HEAD_REF:?HEAD_REF (PR head branch) is required}"
@@ -41,13 +44,6 @@ fi
 PR_CHECK_BASE="${CI_E2E_PR_CHECK_BASE:-/tmp/ci-e2e}"
 SRC_DIR="${CI_E2E_SOURCE_DIR:-${PR_CHECK_BASE%/}/pr_${PR_NUMBER:-manual}/${HEAD_SHA}/hyperloom}"
 
-# Bootstrap happens before forge-loop starts counting MAX_HOURS. Keep the
-# server-side deadline and the poll window derived from the same budget.
-BOOTSTRAP_SLACK_SEC="${CI_E2E_BOOTSTRAP_SLACK_SEC:-3600}"
-DEADLINE_SEC="${CI_E2E_DEADLINE_SEC:-$(awk -v h="$MAX_HOURS" -v s="$BOOTSTRAP_SLACK_SEC" \
-  'BEGIN{printf "%d", h*3600 + s}')}"
-POLL_MAX="${POLL_MAX:-$(awk -v d="$DEADLINE_SEC" -v i="$POLL_INTERVAL_S" \
-  'BEGIN{printf "%d", int((d + i - 1) / i) + 5}')}"
 IMAGE="${CI_E2E_IMAGE:-harbor.crusoe.primus-safe.amd.com/proxy/vllm/vllm-openai-rocm:v0.24.0}"
 
 summary() { echo "$*" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
@@ -180,7 +176,7 @@ dispatron-ci \
   --pull-ref "$PULL_REF" \
   --pr "${PR_NUMBER:-}" \
   --poll-interval "$POLL_INTERVAL_S" \
-  --poll-max "$POLL_MAX" \
+  --queue-timeout "$QUEUE_TIMEOUT_S" \
   "${insecure[@]}" &
 cli=$!
 
@@ -213,6 +209,7 @@ UID_="$(field uid)"
 result="$(field result)"
 err="$(field reason)"
 explanation="$(field explanation)"
+timed_out_in="$(field timed_out_in)"
 jobref="$(field platform_ref)"
 node="$(field nodes)"
 [ -z "$UID_" ] && UID_="$(jq -r 'select(.event=="submitted")|.uid' "$EVENTS" 2>/dev/null | tail -1 || true)"
@@ -255,9 +252,17 @@ case "$result" in
     post_status "error" "cancelled; uid=${UID_}; sha=${HEAD_SHA:0:12}"
     report_upsert "🚫 Cancelled" ;;
   timeout)
-    summary "❌ **FAIL (timeout)** — ${explanation:-gave up waiting}. session_id=\`${UID_}\`"
-    post_status "failure" "timeout; uid=${UID_}; sha=${HEAD_SHA:0:12}"
-    report_upsert "⏱ Timed out" ;;
+    if [ "${timed_out_in:-}" = "queue" ]; then
+      # Not the change's failure: no GPU came free, so nothing of it ran. An error
+      # rather than a failure, so nobody goes looking for a bug in code that never ran.
+      summary "⏳ **NO CAPACITY** — ${explanation:-no GPU came free}. session_id=\`${UID_}\`"
+      post_status "error" "no GPU within $((QUEUE_TIMEOUT_S / 60))m; nothing ran; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+      report_upsert "⏳ No capacity"
+    else
+      summary "❌ **FAIL (timeout)** — ${explanation:-gave up waiting}. session_id=\`${UID_}\`"
+      post_status "failure" "timeout; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+      report_upsert "⏱ Timed out"
+    fi ;;
   dispatch-error)
     summary "❌ **FAIL** — the run was never dispatched; see the job log."
     post_status "error" "could not dispatch; sha=${HEAD_SHA:0:12}"

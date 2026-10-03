@@ -21,6 +21,7 @@ from hyperloom.orchestrator.actions.cancel_channel import cancel_scope_listener
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
+from ._dispatch_helpers import pump_until_settled
 
 _KERNEL_AGENT_LANES = ("server_lifecycle", "workspace_mutation", "benchmark_lane")
 
@@ -396,7 +397,7 @@ async def test_a_running_kernel_agent_keeps_roofline_queued_until_it_returns(coo
 
     release.set()
     await _settle(c, agent.task_id)
-    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=5.0)
+    await pump_until_settled(c.dispatcher)
 
     assert rooflines == [roofline.task_id]
     assert (await c.tasks.get(roofline.task_id)).state == "succeeded"
