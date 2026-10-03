@@ -94,10 +94,12 @@ _EXC_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Exit|Interr
 # tracebacks through their logger, interleaving several processes' tracebacks.
 _LOG_LINE = re.compile(
     r"^(?:\((?P<proc>[^()\s]+ pid=\d+)\)[ \t]?)?"
-    r"(?:(?:DEBUG|INFO|WARNING|ERROR|CRITICAL) [\d-]+ [\d:.,]+ \[[^\]\n]*\] ?)?"
+    r"(?:(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL) [\d-]+ [\d:.,]+ \[[^\]\n]*\] ?)?"
     r"(?P<body>.*)$",
     re.MULTILINE,
 )
+# A traceback logged at these levels was caught, and the process carried on.
+_CAUGHT_LEVELS = frozenset({"DEBUG", "INFO", "WARNING"})
 
 
 @dataclass(frozen=True)
@@ -146,10 +148,13 @@ def _root_traceback(text: str) -> _Traceback | None:
     multi-process server prints a child's traceback before the parent's re-raise,
     so the root is the first traceback that names a frame, even one whose header
     was cut off. A bare exception line counts only when no traceback names a frame.
+    Lines logged below ERROR are skipped.
     """
     open_by_proc: dict[str, _Traceback] = {}
     bare: _Traceback | None = None
     for line in _LOG_LINE.finditer(text):
+        if line.group("level") in _CAUGHT_LEVELS:
+            continue
         start, proc, body = line.start(), line.group("proc") or "", line.group("body").rstrip()
         if body.startswith(_TB_HEADER):
             open_by_proc[proc] = _Traceback(anchor=start)

@@ -112,6 +112,27 @@ def test_a_child_process_root_error_keys_the_failure_not_the_parent_reraise() ->
     assert round_advanced(before, after)
 
 
+def test_a_traceback_logged_below_error_does_not_key_the_failure() -> None:
+    caught = "(APIServer pid=3) WARNING 10-02 12:50:01 [sparse_mla_triton_warmup.py:337] "
+    warmup = (
+        f"{caught}Skipping sparse MLA Triton warmup.\n"
+        f"{caught}Traceback (most recent call last):\n"
+        f'{caught}  File "/opt/vllm/model_executor/warmup/sparse_mla_triton_warmup.py", line 330, in warmup\n'
+        f"{caught}RuntimeError: Triton kernel compilation failed\n"
+    )
+    before, after = (
+        ladder.classify(server_log=warmup + _engine_core_crash(error), server_elapsed_sec=1.0, trees=["/opt/vllm"])
+        for error in (
+            "AttributeError: 'MambaSpec' object has no attribute 'x'",
+            "AttributeError: 'MambaSpec' object has no attribute 'y'",
+        )
+    )
+
+    assert after.terminal_frame is not None
+    assert after.terminal_frame.file_rel == "v1/engine/core.py"
+    assert failure_digest(before) != failure_digest(after)
+
+
 def test_the_digest_keys_on_the_failure_line_not_the_log_printed_before_it() -> None:
     root = "AttributeError: 'MambaSpec' object has no attribute 'x'"
 
