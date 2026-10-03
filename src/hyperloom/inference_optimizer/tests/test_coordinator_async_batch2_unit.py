@@ -1291,7 +1291,7 @@ async def test_resume_consistency_clears_stale_pending_integrate_with_specialist
 
 
 @pytest.mark.asyncio
-async def test_resume_consistency_does_not_enqueue_stack_revalidate_for_unvalidated(coord: Coordinator) -> None:
+async def test_resume_consistency_enqueues_stack_revalidate_for_unvalidated(coord: Coordinator) -> None:
     coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.optimization_stack = [
@@ -1313,11 +1313,13 @@ async def test_resume_consistency_does_not_enqueue_stack_revalidate_for_unvalida
         "extra_envs": {"A": "1"},
     }
 
-    await coord.writeback._resume_consistency_pass()
+    report = await coord.writeback._resume_consistency_pass()
 
     assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
     queued = await coord.tasks.queued()
-    assert not any(t.kind == "explore" and t.params.get("source") == STACK_REVALIDATE_SOURCE for t in queued)
+    (rebench,) = [t for t in queued if t.kind == "explore" and t.params.get("source") == STACK_REVALIDATE_SOURCE]
+    assert rebench.params["reason"] == "resume_unvalidated_keeps"
+    assert any(f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
 
 
 @pytest.mark.asyncio

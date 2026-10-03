@@ -5509,19 +5509,25 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 )
 
         # (4) Validation-watermark compensation: unvalidated KEEPs are reported
-        # in the warning block; the CLOSE trigger enqueues the revalidation.
+        # and one full-stack rebench is enqueued to measure them.
         if state.optimization_stack_has_unvalidated_keeps():
             stack = [e for e in (state.optimization_stack or []) if isinstance(e, dict)]
             vlen = int(state.cumulative_gain_validated_stack_len or 0)
+            generation = int(state.working_recipe_generation or 0)
             report["warnings"].append(
                 {
                     "kind": "resume_unvalidated_keeps",
                     "validated_stack_len": vlen,
                     "stack_len": len(stack),
-                    "working_recipe_generation": state.working_recipe_generation,
+                    "working_recipe_generation": generation,
                     "validated_recipe_generation": state.validated_recipe_generation,
                 }
             )
+            fix = await self.enqueue_internal_stack_rebench(
+                reason="resume_unvalidated_keeps",
+                idempotency_key=f"resume-stack-revalidate-g{generation}",
+            )
+            report["fixes"].append({"kind": "queued_resume_stack_rebench", **fix})
 
         try:
             state.save(self.session_dir)
