@@ -8,6 +8,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import shlex
 import time
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.agentx_mode import native_agentx_optimization_session
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -110,6 +112,8 @@ _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "kb_evidence",
     "pr_evidence",
     "source_evidence",
+    "runtime_override",
+    "dropped_envs",
 )
 
 
@@ -198,6 +202,8 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
+        if isinstance(raw.get("runtime_override"), dict):
+            gv.runtime_override = dict(raw["runtime_override"])
         out.append(gv)
     return out
 
@@ -447,6 +453,7 @@ class ExploreExecutor:
             }
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or extra.get("state")
+        native_optimizer = native_agentx_optimization_session(shared_state)
         eval_disabled = _explore_eval_disabled(shared_state, params)
         output_root = Path(
             params.get("output_dir")
@@ -484,6 +491,7 @@ class ExploreExecutor:
                 extra_envs={"RUN_EVAL": "false"} if eval_disabled else None,
                 out_name="explore_base.with_envs.yaml",
                 grading=getattr(shared_state, "grading", None),
+                native_launch_overrides=params.get("base_native_launch_overrides"),
             )
         except FrameworkScriptMismatchError as exc:
             return {
@@ -665,6 +673,16 @@ class ExploreExecutor:
                 base_unset_envs=base_unset_envs,
                 base_args_mode=base_args_mode,
             )
+            if native_optimizer and (gv.runtime_override or getattr(gv, "overlay_pythonpath", "")):
+                from hyperloom.inference_optimizer.agentx.identity import canonical_sha256
+
+                fp = canonical_sha256(
+                    {
+                        "config": fp,
+                        "runtime_override": gv.runtime_override,
+                        "overlay_pythonpath": getattr(gv, "overlay_pythonpath", ""),
+                    }
+                )[:16]
             gv.canonical_fp = fp  # type: ignore[attr-defined]
             if fp in unique_in_round:
                 # In-round duplicate — keep the first occurrence.
@@ -747,6 +765,7 @@ class ExploreExecutor:
         stack_remove_args = list(dict.fromkeys(base_remove_args))
         stack_unset_envs = list(dict.fromkeys(base_unset_envs))
         stack_base_args_mode = base_args_mode
+        stack_native_snapshot = params.get("base_native_launch_overrides")
         running_base_tput = base_tput
 
         def _measured_against() -> dict[str, Any]:
@@ -877,6 +896,12 @@ class ExploreExecutor:
                     args_mode=str(getattr(gv, "args_mode", "append") or "append"),
                 )
                 _carry_variant_metadata(gv, run_gv)
+                if stack_native_snapshot is not None:
+                    # The snapshot already contains the accepted base; only
+                    # this proposal's delta may be layered onto it again.
+                    run_gv.extra_envs = dict(gv.extra_envs)
+                    run_gv.remove_args = list(gv.remove_args)
+                    run_gv.unset_envs = list(gv.unset_envs)
                 # ``--no-eval`` opted the session out of accuracy entirely, so it
                 # holds for every round. The decision round additionally skips
                 # eval when a warmup preceded it: it is timed against a
@@ -914,6 +939,7 @@ class ExploreExecutor:
                             base_extra_envs=dict(stack_extra_envs),
                             base_remove_args=list(stack_remove_args),
                             base_unset_envs=list(stack_unset_envs),
+                            base_native_launch_overrides=stack_native_snapshot,
                             serving_lease=variant_lease,
                             session_deadline_sec=session_deadline_sec,
                             variant_expected_sec=warmup_expected_sec,
@@ -1011,6 +1037,7 @@ class ExploreExecutor:
                         base_extra_envs=dict(stack_extra_envs),
                         base_remove_args=list(stack_remove_args),
                         base_unset_envs=list(stack_unset_envs),
+                        base_native_launch_overrides=stack_native_snapshot,
                         server_already_ready=use_warm_decision,
                         serving_lease=variant_lease,
                         session_deadline_sec=session_deadline_sec,
@@ -1030,6 +1057,7 @@ class ExploreExecutor:
                     # A variant KEEPs when it clears the graded verdict and the accuracy gate. The axes and the
                     # threshold floor belong to resolve_graded_comparison, which every lane shares.
                     variant_meas = {
+                        **r.native_measurement,
                         GRADED_OUTPUT: r.output_throughput,
                         "input_throughput": r.input_throughput,
                         "total_throughput": r.total_token_throughput,
@@ -1172,6 +1200,8 @@ class ExploreExecutor:
 
                     decision_tput = r.output_throughput
                     tested_update[fp] = {
+                        **r.native_measurement,
+                        **({"materialized_config": r.materialized_config} if r.materialized_config else {}),
                         "fingerprint": fp,
                         "name": gv.name,
                         "extra_server_args": gv.extra_server_args,
@@ -1264,7 +1294,23 @@ class ExploreExecutor:
                         )
                         if persist_effective_args:
                             effective_control_fields["args_mode"] = "replace"
+                        native_snapshot = None
+                        if r.native_measurement.get("agentx_launch_contract") == 1:
+                            measured_config = yaml.safe_load(Path(r.materialized_config).read_text(encoding="utf-8"))
+                            native_snapshot = measured_config["benchmark"]["agentx"]["launch_overrides"]
+                            next_stack_args = next_effective_args = shlex.join(native_snapshot.get("append_args") or [])
+                            next_envs = dict(native_snapshot.get("env") or {})
+                            _keep_remove_args = list(native_snapshot.get("remove_args") or [])
+                            _keep_unset_envs = list(native_snapshot.get("unset_env") or [])
+                            effective_control_fields.update(
+                                remove_args=_keep_remove_args,
+                                unset_envs=_keep_unset_envs,
+                                args_mode="replace" if native_snapshot.get("replace_args") else "append",
+                                native_launch_overrides=native_snapshot,
+                            )
                         keep_entry = {
+                            **variant_meas,
+                            **({"materialized_config": r.materialized_config} if r.materialized_config else {}),
                             "fingerprint": fp,
                             "name": gv.name,
                             "candidate_extra_server_args": gv.extra_server_args,
@@ -1310,6 +1356,9 @@ class ExploreExecutor:
                         stack_remove_args = list(_keep_remove_args)
                         stack_unset_envs = list(_keep_unset_envs)
                         stack_base_args_mode = "replace" if persist_effective_args else "append"
+                        if native_snapshot is not None:
+                            stack_native_snapshot = native_snapshot
+                            stack_base_args_mode = "replace" if native_snapshot.get("replace_args") else "append"
                         if decision_tput and decision_tput > 0:
                             running_base_tput = decision_tput
                         if grade_on_intvty:
@@ -1521,6 +1570,10 @@ class ExploreExecutor:
             key=lambda w: float(w.get("gain_pct") or 0.0),
             default=None,
         )
+        if native_optimizer and winners:
+            # Each canonical KEEP advances the median objective and launch
+            # snapshot. Relative gains use different anchors within a round.
+            best_winner = winners[-1]
         best_gain_pct = float(best_winner.get("gain_pct") or 0.0) if best_winner else 0.0
 
         # Each KEEP advances ``running_base_tput``, so this is the final stack.

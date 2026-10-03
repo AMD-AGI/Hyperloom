@@ -184,9 +184,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "-m",
         type=Path,
         default=None,
-        help="Model path (required for new runs; ignored when "
-        "--resume-from is set — model is read from manifest.json/"
-        "state.json)",
+        help="Local model path or Hugging Face id. Required for a fresh run "
+        "unless --benchmark-config supplies benchmark.model. For native "
+        "AgentX, benchmark.model remains the canonical recipe id while a "
+        "local --model overrides only MODEL_PATH. Ignored with --resume-from, "
+        "which restores the saved model.",
     )
     opt.add_argument(
         "--quantize",
@@ -267,8 +269,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--framework",
         choices=list(framework_registry.names()),
         default=None,
-        help="Inference framework to benchmark / optimize. Resolution order: "
-        "--framework > sglang (default). Selection is "
+        help="Inference framework to benchmark / optimize. With "
+        "--benchmark-config, benchmark.framework supplies the value when this "
+        "flag is omitted and a conflicting flag is rejected; otherwise the "
+        "default is sglang. Selection is "
         "session-wide; mixing frameworks in a single session is not "
         "supported. NOTE: --framework atom is single-node-only "
         "(``--nodes>=2`` fails fast); profile / roofline, "
@@ -300,6 +304,22 @@ def _build_parser() -> argparse.ArgumentParser:
         "emit a quality_gate block in its report: for a server-less workload "
         "that gate is the only correctness signal, and a missing one scores "
         "zero, so every candidate is rejected.",
+    )
+    opt.add_argument(
+        "--benchmark-config",
+        default=None,
+        metavar="YAML",
+        help=(
+            "Magpie benchmark YAML for the initial baseline. The resolved path "
+            "is reused by downstream rounds. A source config containing "
+            "`benchmark.agentx: enable` selects native AgentX measurement; "
+            "HYPERLOOM_AGENTX does not need to be exported separately. For an "
+            "ambiguous recipe point, use benchmark.agentx.selector; "
+            "benchmark.envs.TP is not a selector. Fresh "
+            "launches only. A resume restores the accepted materialized config "
+            "and runtime pins, or the snapshotted source config when no baseline "
+            "was accepted yet."
+        ),
     )
     opt.add_argument(
         "--nodes",
@@ -338,26 +358,31 @@ def _build_parser() -> argparse.ArgumentParser:
         "--tp",
         type=int,
         default=None,
-        help="Tensor parallel size. Pass `--tp N` directly from the prompt's "
-        f"Environment block. Default: {DEFAULT_TP}.",
+        help="Tensor-parallel size outside native AgentX (default: "
+        f"{DEFAULT_TP}). Native AgentX instead resolves the physical GPU count "
+        "as recipe TP x PP x PCP; omit this flag to use that count, or pass it "
+        "as an exact consistency assertion. Custom native workloads require "
+        "an explicit single-node TP.",
     )
     opt.add_argument(
         "--conc",
         type=_positive_int_arg,
         default=None,
-        help="Magpie client concurrency cap (max in-flight requests). "
-        "Pass `--conc N` directly from the prompt. Use "
-        f"--conc-sweep-concs for a concurrency ladder. Default: {DEFAULT_CONC}.",
+        help="Magpie client concurrency cap (max in-flight requests). It may "
+        "also come from benchmark.envs.CONC. Native AgentX requires the fixed "
+        "value to exist in the selected recipe or explicit custom workload. "
+        "Native optimization sessions can sweep supported concurrency points. The default is "
+        f"{DEFAULT_CONC} and --conc-sweep-concs configures a ladder.",
     )
     opt.add_argument(
         "--max-model-len",
         dest="max_model_len",
         type=_positive_int_arg,
         default=None,
-        help="Explicit server-facing MAX_MODEL_LEN. Resolution: "
-        "--max-model-len > auto(ISL+OSL+headroom, "
-        "clamped to native context). Explicit values are preserved and "
-        "exported into the materialized Magpie YAML.",
+        help="Explicit server-facing MAX_MODEL_LEN. Synthetic resolution is --max-model-len > "
+        "auto(ISL+OSL+headroom, clamped to native context). Native InferenceX "
+        "AgentX registered recipes retain their context policy; a custom "
+        "workload validates this limit against the model's native context.",
     )
     opt.add_argument(
         "--server-args",
@@ -367,6 +392,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Framework server args to apply in every phase. Routed through "
         "the framework-specific EXTRA_*_ARGS env in Magpie YAMLs "
         "(EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS / EXTRA_ATOM_ARGS). "
+        "New native AgentX sessions use the formal launch-override contract; "
+        "persisted epoch-2 sessions retain their frozen launcher. "
         'Example: --server-args "--kv-cache-dtype fp8_e4m3 '
         '--gpu-memory-utilization 0.85".',
     )
@@ -374,12 +401,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--ep",
         type=int,
         default=None,
-        help="Expert-parallel size for MoE inference. 1 (default) keeps "
+        help="Expert-parallel size for MoE inference outside native AgentX. "
+        "1 (default) keeps "
         "experts sharded by TP (legacy behaviour). >=2 enables true "
         "expert parallelism: sglang adds `--expert-parallel-size N`, "
         "vllm adds `--enable-expert-parallel`. Typical: EP=TP for "
-        "DSr1/DSv3 on multi-node. Default: 1. "
-        "EP > TP is rejected at server-restart time.",
+        "DSr1/DSv3 on multi-node. EP > TP is rejected at server-restart time. "
+        "Native AgentX resolves EP from the recipe when omitted and treats an "
+        "explicit value as an exact consistency assertion.",
     )
     opt.add_argument(
         "--pd-mode",
@@ -476,7 +505,9 @@ def _build_parser() -> argparse.ArgumentParser:
         # for this many hours" from "the operator said nothing", and a default
         # would make an explicit value indistinguishable from absence.
         default=None,
-        help=f"Wall-clock budget in hours (default {DEFAULT_MAX_HOURS})",
+        help=f"Wall-clock budget in hours (default {DEFAULT_MAX_HOURS}). "
+        "Set it explicitly for native AgentX: model load, warmup, drain, and "
+        "the canonical 3600-second measurement commonly exceed the default.",
     )
     opt.add_argument(
         "--extend-hours",
@@ -499,8 +530,20 @@ def _build_parser() -> argparse.ArgumentParser:
             "min(120, max_hours * 60 * 0.02). Pass 0 to disable closing phase."
         ),
     )
-    opt.add_argument("--isl", type=int, default=None, help=f"Input sequence length (default {DEFAULT_ISL})")
-    opt.add_argument("--osl", type=int, default=None, help=f"Output sequence length (default {DEFAULT_OSL})")
+    opt.add_argument(
+        "--isl",
+        type=int,
+        default=None,
+        help=f"Input sequence length (default {DEFAULT_ISL}). Native AgentX "
+        "measurement uses the trace corpus distribution instead.",
+    )
+    opt.add_argument(
+        "--osl",
+        type=int,
+        default=None,
+        help=f"Output sequence length (default {DEFAULT_OSL}). Native AgentX "
+        "measurement uses the trace corpus distribution instead.",
+    )
     opt.add_argument(
         "--profile-osl",
         dest="profile_osl",
@@ -531,7 +574,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "back. Omit the flag to leave the baseline unchanged."
         ),
     )
-    opt.add_argument("--precision", type=str, default=None, help=f"Model precision (default {DEFAULT_PRECISION})")
+    opt.add_argument(
+        "--precision",
+        type=str,
+        default=None,
+        help=f"Model precision (default {DEFAULT_PRECISION}); "
+        "benchmark.precision supplies it when --benchmark-config is used.",
+    )
     opt.add_argument(
         "--framework-version",
         dest="framework_version",
@@ -987,7 +1036,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "to use plain ``profile`` instead (lighter — captures the "
         "trace only, skips trace_analyze). Behaviour is otherwise "
         "identical (same idempotency keys, same pending-task "
-        "dispatch gate, same watermark anchor update).",
+        "dispatch gate, same watermark anchor update). Native AgentX "
+        "measurement itself produces no PyTorch trace; this analysis uses the "
+        "generic-server compatibility profile and is diagnostic, not "
+        "recipe-identical.",
     )
     opt.add_argument(
         "--research-scout",
@@ -1057,20 +1109,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run a post-optimization concurrency sweep (baseline vs "
         "current_best across CONC) and write "
         "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
-        "On by default, off under AgentX (each rung is a 3600s window); "
-        "force either way with --enable-conc-sweep / --no-enable-conc-sweep.",
+        "On by default for synthetic workloads, off under AgentX. "
+        "Native AgentX keeps concurrency fixed and rejects an explicit enable; "
+        "legacy AgentX may enable it explicitly.",
     )
     opt.add_argument(
         "--conc-sweep-concs",
         dest="conc_sweep_concs",
         type=str,
         default=None,
-        help="Comma-separated CONC ladder for --enable-conc-sweep. Ordered "
+        help="Comma-separated CONC ladder for --enable-conc-sweep outside "
+        "native AgentX. Ordered "
         "high-to-low internally for single-server arm reuse, so the order given "
-        "does not matter. Defaults to the ladder for the workload: "
-        "256,128,64,32,16,8,4,2 synthetic, 1,4,8,10,14,20,28 under "
-        "HYPERLOOM_AGENTX (an agentic request carries orders of magnitude more "
-        "prompt, so the same card saturates far lower).",
+        "does not matter. The synthetic default is "
+        "256,128,64,32,16,8,4,2; legacy AgentX uses 1,4,8,10,14,20,28. "
+        "Native AgentX rejects an explicitly enabled "
+        "sweep until the pinned launcher exposes an optimizer-argv hook; this "
+        "option alone never enables a sweep.",
     )
     opt.add_argument(
         "--conc-sweep-total-budget-sec",

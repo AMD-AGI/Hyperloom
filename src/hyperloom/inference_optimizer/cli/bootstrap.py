@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_unix
+from hyperloom.common.agentx_workload import agentic_backend
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.timeutil import now_iso
@@ -59,9 +61,8 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 
 
 # Bump when a change makes previously recorded AgentX measurements incomparable.
-# The MLPerf client is a different workload, but it is opt-in: the epoch stays
-# so aiperf sessions remain resumable. The backend name is what resume compares.
-AGENTX_MEASUREMENT_EPOCH = 1
+AGENTX_MEASUREMENT_EPOCH = 4
+LEGACY_AGENTX_MEASUREMENT_EPOCH = 1
 
 
 def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
@@ -93,8 +94,15 @@ def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
 
 def agentx_state_is_stale(state: Any) -> str:
     """Return why a resumed session's AgentX state is unusable, or ``\"\"``."""
-    want_mode = "agentx" if _agentx_enabled() else "synthetic"
     had_mode = str(getattr(state, "benchmark_mode", "") or "")
+    raw_mode = os.environ.get("HYPERLOOM_AGENTX")
+    # A bare --resume-from in a fresh shell carries no mode declaration. In
+    # that case the persisted session is authoritative; only an explicitly
+    # supplied HYPERLOOM_AGENTX value is a request to switch modes.
+    if raw_mode is None or not raw_mode.strip():
+        want_mode = had_mode or "synthetic"
+    else:
+        want_mode = "agentx" if _agentx_enabled() else "synthetic"
     if had_mode and had_mode != want_mode:
         return (
             f"session was measured in benchmark_mode={had_mode!r} but this run is "
@@ -102,18 +110,32 @@ def agentx_state_is_stale(state: Any) -> str:
             "sets of measurements would overwrite each other"
         )
     if want_mode == "agentx":
+        from hyperloom.common.agentx_mode import native_agentx_session
+
         had_epoch = int(getattr(state, "agentx_epoch", 0) or 0)
-        if had_epoch != AGENTX_MEASUREMENT_EPOCH:
+        backend = str(getattr(state, "agentx_backend", "") or "").strip().lower()
+        expected_backends = {"native"} if native_agentx_session(state) else {"legacy", "aiperf", "mlperf"}
+        if backend and backend not in expected_backends:
+            return f"session AgentX backend {backend!r} conflicts with its measurement epoch {had_epoch}"
+        if had_epoch == LEGACY_AGENTX_MEASUREMENT_EPOCH:
+            from hyperloom.common.agentx_mode import config_enables_native_agentx
+
+            accepted = str(getattr(state, "baseline_config_path", "") or "").strip()
+            if accepted and config_enables_native_agentx(accepted):
+                return "session epoch 1 conflicts with its accepted native AgentX baseline"
+        if had_epoch not in {LEGACY_AGENTX_MEASUREMENT_EPOCH, 2, 3, AGENTX_MEASUREMENT_EPOCH}:
             return (
-                f"session carries AgentX epoch {had_epoch}, this build measures "
-                f"epoch {AGENTX_MEASUREMENT_EPOCH}; the recorded results describe "
+                f"session carries unsupported AgentX epoch {had_epoch}; the recorded results describe "
                 "a different workload and cannot anchor or be compared against"
             )
         from hyperloom.common.agentx_workload import agentic_backend
 
-        # Sessions recorded before the backend was persisted are aiperf.
-        had_backend = str(getattr(state, "agentx_backend", "") or "") or "aiperf"
-        want_backend = agentic_backend()
+        # A bare resume keeps the recorded client, including the public MLPerf backend.
+        had_backend = ("native" if had_epoch >= 2 else "aiperf") if backend in {"", "legacy"} else backend
+        explicit_backend = str(os.environ.get("HYPERLOOM_AGENTIC_BACKEND", "") or "").strip()
+        want_backend = agentic_backend() if explicit_backend else had_backend
+        if had_backend == "native" and want_backend == "aiperf":
+            want_backend = "native"
         if had_backend != want_backend:
             return (
                 f"session was measured with agentic backend {had_backend!r} but this "
@@ -281,13 +303,41 @@ def _seed_shared_state(
 
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
-    benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
-    if _agentx_enabled():
-        from hyperloom.common.agentx_workload import agentic_backend
+    from hyperloom.common.agentx_mode import native_agentx_session
 
-        agentx_backend = agentic_backend()
-    else:
-        agentx_backend = ""
+    native_agentx = native_agentx_session()
+    benchmark_mode = "agentx" if native_agentx or _agentx_enabled() else "synthetic"
+    _agentx_runtime_pins: dict[str, str] = {}
+    _benchmark_source_config_path = ""
+    if native_agentx:
+        from hyperloom.inference_optimizer.agentx.native import (
+            AGENTX_RUNTIME_PIN_NAMES,
+        )
+
+        for _pin_name in AGENTX_RUNTIME_PIN_NAMES:
+            _pin_value = os.environ.get(_pin_name, "").strip()
+            if _pin_value:
+                if _pin_name == "INFERENCEX_PATH":
+                    _pin_value = str(Path(_pin_value).expanduser().resolve())
+                _agentx_runtime_pins[_pin_name] = _pin_value
+        _source_config = os.environ.get("HYPERLOOM_BENCHMARK_CONFIG", "").strip()
+        if _source_config:
+            _source_path = Path(_source_config).expanduser().resolve()
+            if not _source_path.is_file():
+                raise FileNotFoundError(
+                    f"AgentX source benchmark config disappeared before session seed: {_source_path}"
+                )
+            _source_bytes = _source_path.read_bytes()
+            _expected_source_hash = os.environ.get("HYPERLOOM_BENCHMARK_CONFIG_SHA256", "").strip()
+            _actual_source_hash = hashlib.sha256(_source_bytes).hexdigest()
+            if not _expected_source_hash or _actual_source_hash != _expected_source_hash:
+                raise ValueError(f"AgentX source benchmark config changed after finalization: {_source_path}")
+            _snapshot_path = session_dir / "benchmark.source.yaml"
+            _snapshot_path.write_bytes(_source_bytes)
+            _benchmark_source_config_path = str(_snapshot_path)
+            os.environ["HYPERLOOM_BENCHMARK_CONFIG"] = str(_snapshot_path)
+            if str(getattr(args, "_generated_agentx_source", "")) == str(_source_path):
+                _source_path.unlink()
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -365,20 +415,28 @@ def _seed_shared_state(
         static_recon_enabled=bool(getattr(args, "static_recon", True)),
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
-        # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each
-        # rung is a 3600s window and the session grades at a fixed CONC.
-        # Pass --enable-conc-sweep explicitly to override.
         conc_sweep_enabled=(
-            not is_agentx_mode(benchmark_mode) if args.enable_conc_sweep is None else args.enable_conc_sweep
+            bool(getattr(args, "enable_conc_sweep", None))
+            if getattr(args, "enable_conc_sweep", None) is not None
+            else not is_agentx_mode(benchmark_mode)
         ),
         benchmark_mode=benchmark_mode,
-        agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
-        agentx_backend=agentx_backend,
+        agentx_backend=("native" if native_agentx else agentic_backend() if benchmark_mode == "agentx" else ""),
+        agentx_epoch=(
+            AGENTX_MEASUREMENT_EPOCH
+            if native_agentx
+            else LEGACY_AGENTX_MEASUREMENT_EPOCH
+            if benchmark_mode == "agentx"
+            else 0
+        ),
+        agentx_runtime_pins=_agentx_runtime_pins,
+        benchmark_source_config_path=_benchmark_source_config_path,
         grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
         conc_sweep_total_budget_sec=int(
             getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
         ),
+        active_inferencex_path=_agentx_runtime_pins.get("INFERENCEX_PATH", ""),
     )
     state.save(session_dir)
     return state
@@ -421,12 +479,10 @@ def _print_final_summary(
     print(f"  stop_reason          : {stop_reason}")
     print(f"  session_id           : {state.session_id}")
     print(f"  model                : {state.model_name}")
-    from .. import framework_registry
+    from ..performance_display import format_session_metric
 
-    print(
-        f"  baseline             : {framework_registry.format_primary_metric(getattr(state, 'framework', ''), state.baseline_tput)}"
-    )
-    if stop_reason == "baseline_failed":
+    print(f"  baseline             : {format_session_metric(state, state.baseline_tput)}")
+    if session_dir is not None and stop_reason == "baseline_failed":
         failure_summary = _read_failure_summary(session_dir)
         if failure_summary and failure_summary.get("root_cause"):
             print(

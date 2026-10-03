@@ -486,6 +486,51 @@ async def test_executor_apply_only_succeeds(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("recovery_phase", "expected_status", "expected_error"),
+    [
+        (None, "skipped", "unsupported_upstream_launcher_hook"),
+        ("restored", "skipped", "unsupported_upstream_launcher_hook"),
+        ("applied", "failed", "integrate_restore_incomplete"),
+    ],
+)
+async def test_native_agentx_rejects_integrate_patch_before_mutation(
+    tmp_path: Path, recovery_phase, expected_status, expected_error
+):
+    from types import SimpleNamespace
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(
+        session_dir,
+        "t-agentx-spec",
+        patch_contents=[_VALID_PATCH],
+    )
+    ctx = _make_ctx(
+        "t-agentx-integrate",
+        {
+            "specialist_task_id": "t-agentx-spec",
+            "framework_source_root": str(repo),
+            "apply_only": True,
+        },
+    )
+    ctx.extra["shared_state"] = SimpleNamespace(
+        benchmark_mode="agentx",
+        agentx_epoch=2,
+        pending_integrate={"recovery": {"phase": recovery_phase}} if recovery_phase else {},
+    )
+
+    result = await IntegratePatchExecutor(session_dir=session_dir)(ctx)
+
+    assert result["status"] == expected_status
+    assert result["error_class"] == expected_error
+    assert not result.get("patches_applied")
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("reuse_context", [False, True], ids=["new-context", "reused-context"])
 async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path, monkeypatch, reuse_context):
     from types import SimpleNamespace

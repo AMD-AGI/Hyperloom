@@ -481,6 +481,7 @@ def _build_summary_dict(
     session_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Assemble the machine-readable session summary dict."""
+    from hyperloom.common.agentx_mode import native_agentx_session
     from hyperloom.common.gain_math import gain_pct
 
     from ...state.shared_state import resolve_graded_comparison
@@ -504,6 +505,7 @@ def _build_summary_dict(
         # Read back by the graded-axes section: the persisted AgentX marker outlives the shell, so a report rendered
         # from a resumed session still names the mode the run was graded under.
         "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
+        "native_agentx": native_agentx_session(state),
         "grading": dict(getattr(state, "grading", None) or {}),
         "baseline_accuracy": state.baseline_accuracy,
         "current_best": state.current_best,
@@ -591,17 +593,14 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append(f"- **Budget**: {summary['max_minutes']} minutes")
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
     lines.append("")
-    # Per-framework primary metric: serving reports throughput (tok/s/GPU), scriptable xDiT reports per-image latency
-    # (e2el_mean_ms).
-    from hyperloom.inference_optimizer import framework_registry
+    from hyperloom.inference_optimizer.performance_display import format_session_metric
 
-    _fw = summary.get("framework")
     lines.append("## Throughput")
     lines.append("")
-    lines.append(f"- baseline            : `{framework_registry.format_primary_metric(_fw, summary['baseline_tput'])}`")
+    lines.append(f"- baseline            : `{format_session_metric(summary, summary['baseline_tput'])}`")
     if cb_tput is not None:
         lines.append(
-            f"- current_best        : `{framework_registry.format_primary_metric(_fw, cb_tput)}` "
+            f"- current_best        : `{format_session_metric(summary, cb_tput, measurement=cb)}` "
             f"(action=`{cb.get('action', '?')}`)"
         )
     # Printed even when never validated, so the absence is stated, not implied.

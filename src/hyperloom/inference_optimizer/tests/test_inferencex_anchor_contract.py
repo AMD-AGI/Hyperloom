@@ -18,7 +18,10 @@ from hyperloom.inference_optimizer.cli.preflight import (
 )
 from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
     _ANCHOR_CONTRACT,
+    _ANCHOR_ALTERNATIVES,
+    _BENCH_SERVING_REL_PARTS,
     EVAL_PROBE_TARGET_PARTS,
+    EVAL_PROBE_TARGETS,
     count_anchor_hits,
 )
 
@@ -52,19 +55,13 @@ def _magpie_pattern_parts() -> list[str]:
     ]
 
 
-def anchors_by_file() -> dict[str, list[tuple[str, str]]]:
-    """Group the patch anchors by the upstream file they are matched against."""
-    grouped: dict[str, list[tuple[str, str]]] = {}
-    for name, rel_parts, _sentinel, anchor in _ANCHOR_CONTRACT:
-        grouped.setdefault("/".join(rel_parts), []).append((name, anchor))
-    return grouped
-
-
 def anchors_fingerprint() -> str:
     """Fingerprint the anchor definitions themselves."""
     parts = [f"{name}\x1f{'/'.join(rel_parts)}\x1f{anchor}" for name, rel_parts, _sentinel, anchor in _ANCHOR_CONTRACT]
     parts.append(f"probe_target\x1f{PROBE_TARGET_PATH}")
     parts.extend(_magpie_pattern_parts())
+    parts.append(json.dumps(_ANCHOR_ALTERNATIVES, sort_keys=True))
+    parts.append(json.dumps([_BENCH_SERVING_REL_PARTS, EVAL_PROBE_TARGETS]))
     return hashlib.sha256("\x1e".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -73,17 +70,22 @@ def github_slug(clone_url: str) -> str:
     return clone_url.rstrip("/").removesuffix(".git").split("github.com/", 1)[-1]
 
 
-def fetch_pinned_file(rel_path: str, ref: str) -> str | None:
+def fetch_pinned_file(rel_path: str, ref: str, checkout: Path | None = None) -> str | None:
     """Fetch one upstream file at ``ref``, or ``None`` when unreachable."""
+    command = (
+        ["git", "-C", str(checkout), "show", f"{ref}:{rel_path}"]
+        if checkout is not None
+        else [
+            "gh",
+            "api",
+            f"repos/{github_slug(_INFERENCEX_REPO_DEFAULT)}/contents/{rel_path}?ref={ref}",
+            "-H",
+            "Accept: application/vnd.github.raw",
+        ]
+    )
     try:
         proc = subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/{github_slug(_INFERENCEX_REPO_DEFAULT)}/contents/{rel_path}?ref={ref}",
-                "-H",
-                "Accept: application/vnd.github.raw",
-            ],
+            command,
             capture_output=True,
             timeout=_FETCH_TIMEOUT_SEC,
         )
@@ -94,52 +96,41 @@ def fetch_pinned_file(rel_path: str, ref: str) -> str | None:
     return proc.stdout.decode("utf-8", errors="replace")
 
 
-def build_record(ref: str) -> dict:
-    """Verify every anchor against upstream at ``ref`` and return the record."""
+def upstream_candidates(paths: tuple[tuple[str, ...], ...]) -> list[str]:
+    """Resolve project-relative targets in either repository layout."""
+    return ["/".join((*prefix, *parts)) for prefix in (("inferencex-e2e",), ()) for parts in paths]
+
+
+def _fetch_target(paths: tuple[tuple[str, ...], ...], ref: str, checkout: Path | None) -> tuple[str, str]:
+    for path in upstream_candidates(paths):
+        text = fetch_pinned_file(path, ref, checkout)
+        if text is not None:
+            return path, text
+    raise RuntimeError(f"cannot read any supported path {upstream_candidates(paths)} at {ref}")
+
+
+def build_record(ref: str, checkout: Path | None = None) -> dict:
+    """Verify every active synthetic patch against immutable upstream objects."""
     files: dict[str, dict] = {}
-    texts: dict[str, str] = {}
-    for rel_path, anchors in anchors_by_file().items():
-        text = fetch_pinned_file(rel_path, ref)
-        if text is None:
-            raise RuntimeError(f"cannot fetch {rel_path} at {ref}; is `gh auth status` clean?")
-        texts[rel_path] = text
-        hits = {name: count_anchor_hits(text, anchor) for name, anchor in anchors}
-        broken = {name: n for name, n in hits.items() if n != 1}
-        if broken:
-            raise RuntimeError(
-                f"{rel_path} at {ref}: expected each anchor to match exactly one site, got {broken}. "
-                "Re-anchor these patches in _inferencex_patcher.py before recording the contract."
-            )
-        files[rel_path] = {
-            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            "anchors": hits,
-        }
-    probe_target = fetch_pinned_file(PROBE_TARGET_PATH, ref)
-    if probe_target is None:
-        raise RuntimeError(
-            f"cannot fetch {PROBE_TARGET_PATH} at {ref}. The probe and the request bounds are "
-            "appended to this file; if upstream moved it, re-home them in _inferencex_patcher.py "
-            "before recording the contract."
-        )
-    magpie_text = texts.get(MAGPIE_LIB_PATH) or fetch_pinned_file(MAGPIE_LIB_PATH, ref)
-    if magpie_text is None:
-        raise RuntimeError(f"cannot fetch {MAGPIE_LIB_PATH} at {ref}; is `gh auth status` clean?")
+    for name, parts, _sentinel, anchor in _ANCHOR_CONTRACT:
+        paths = _BENCH_SERVING_REL_PARTS if name == "profile_extra_body" else (parts,)
+        rel_path, text = _fetch_target(paths, ref, checkout)
+        hits = count_anchor_hits(text, anchor)
+        if hits != 1:
+            raise RuntimeError(f"{rel_path} at {ref}: anchor {name} matched {hits} sites, expected exactly one")
+        spec = files.setdefault(rel_path, {"sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "anchors": {}})
+        spec["anchors"][name] = hits
+    probe_path, probe_text = _fetch_target(EVAL_PROBE_TARGETS, ref, checkout)
+    magpie_path, magpie_text = _fetch_target((("benchmarks", "benchmark_lib.sh"),), ref, checkout)
     if not magpie_patch_applies(magpie_text):
-        raise RuntimeError(
-            f"{MAGPIE_LIB_PATH} at {ref}: the run_lm_eval --concurrent-requests splice no longer "
-            "finds its site. install.sh die()s when this patch cannot apply, so recording the "
-            "contract now would ship a broken install. Re-anchor _magpie_patcher.py first."
-        )
+        raise RuntimeError(f"{magpie_path} at {ref}: run_lm_eval --concurrent-requests splice no longer applies")
     return {
         "ref": ref,
         "anchors_fingerprint": anchors_fingerprint(),
         "refresh_with": REFRESH_CMD,
         "files": files,
-        "probe_target": {
-            "path": PROBE_TARGET_PATH,
-            "sha256": hashlib.sha256(probe_target.encode("utf-8")).hexdigest(),
-        },
-        "magpie_patch": {"path": MAGPIE_LIB_PATH, "applies": True},
+        "probe_target": {"path": probe_path, "sha256": hashlib.sha256(probe_text.encode("utf-8")).hexdigest()},
+        "magpie_patch": {"path": magpie_path, "applies": True},
     }
 
 
@@ -195,13 +186,13 @@ def test_record_covers_the_magpie_patch():
     assert record.get("magpie_patch", {}).get("applies") is True, (
         f"the contract predates the magpie patch check, or the splice no longer applies. {REFRESH_CMD}"
     )
-    assert record["magpie_patch"]["path"] == MAGPIE_LIB_PATH
+    assert record["magpie_patch"]["path"] in upstream_candidates((("benchmarks", "benchmark_lib.sh"),))
 
 
 # --- networked --------------------------------------------------------------
 
 
-@pytest.mark.parametrize("rel_path", sorted(anchors_by_file()))
+@pytest.mark.parametrize("rel_path", sorted(load_record()["files"]))
 def test_pinned_upstream_still_matches_every_anchor(rel_path):
     """The layer that actually re-verifies."""
     record = load_record()
@@ -209,7 +200,8 @@ def test_pinned_upstream_still_matches_every_anchor(rel_path):
     if text is None:
         pytest.skip(f"InferenceX@{record['ref'][:9]} unreachable (needs `gh` + repo access)")
 
-    hits = {name: count_anchor_hits(text, anchor) for name, anchor in anchors_by_file()[rel_path]}
+    definitions = {name: anchor for name, _parts, _sentinel, anchor in _ANCHOR_CONTRACT}
+    hits = {name: count_anchor_hits(text, definitions[name]) for name in record["files"][rel_path]["anchors"]}
     assert hits == record["files"][rel_path]["anchors"], (
         f"upstream {rel_path} no longer matches the recorded anchors. Re-anchor the affected "
         f"patches in _inferencex_patcher.py, then refresh: {REFRESH_CMD}"
@@ -223,7 +215,7 @@ def test_recorded_probe_target_is_the_path_the_patcher_appends_to():
     """The probe has no anchor to rot, but it does need this file to exist: if upstream moves it the patch degrades to a warning and the eval runs unbounded again -- the exact failure the probe was written to stop."""
     record = load_record()
 
-    assert record["probe_target"]["path"] == PROBE_TARGET_PATH, (
+    assert record["probe_target"]["path"] in upstream_candidates(EVAL_PROBE_TARGETS), (
         f"the probe target moved to {PROBE_TARGET_PATH}. Re-verify and refresh: {REFRESH_CMD}"
     )
 
@@ -231,12 +223,12 @@ def test_recorded_probe_target_is_the_path_the_patcher_appends_to():
 def test_pinned_upstream_still_carries_the_probe_target():
     """Networked counterpart: confirm the file is really there at the pin."""
     record = load_record()
-    text = fetch_pinned_file(PROBE_TARGET_PATH, record["ref"])
+    text = fetch_pinned_file(record["probe_target"]["path"], record["ref"])
     if text is None:
         pytest.skip(f"InferenceX@{record['ref'][:9]} unreachable (needs `gh` + repo access)")
 
     assert hashlib.sha256(text.encode("utf-8")).hexdigest() == record["probe_target"]["sha256"], (
-        f"{PROBE_TARGET_PATH} changed upstream. The probe and the bounds are appended to it, so "
+        f"{record['probe_target']['path']} changed upstream. The probe and the bounds are appended to it, so "
         f"re-read it before refreshing: {REFRESH_CMD}"
     )
 
@@ -244,7 +236,7 @@ def test_pinned_upstream_still_carries_the_probe_target():
 def test_pinned_upstream_still_takes_the_magpie_splice():
     """Re-verify the splice against upstream, not just against the record."""
     record = load_record()
-    text = fetch_pinned_file(MAGPIE_LIB_PATH, record["ref"])
+    text = fetch_pinned_file(record["magpie_patch"]["path"], record["ref"])
     if text is None:
         pytest.skip(f"InferenceX@{record['ref'][:9]} unreachable (needs `gh` + repo access)")
 

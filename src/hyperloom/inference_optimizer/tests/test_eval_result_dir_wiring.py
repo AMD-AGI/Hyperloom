@@ -466,7 +466,17 @@ def test_agentx_baseline_grades_requests_with_run_eval_off(tmp_path, rate, expec
     ctx.task.kind = "baseline"
     if state_in_context:
         ctx.extra["shared_state"] = state
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run):
+    # This test isolates the post-run accuracy mapping.  Native AgentX recipe
+    # materialization is covered by its own resolver/protocol suites and needs
+    # a pinned InferenceX checkout, so keep this fixture at the already-
+    # materialized config boundary.
+    with (
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.materialize_config_with_envs",
+            return_value=base,
+        ),
+        patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run),
+    ):
         result = asyncio.run(executor(ctx))
 
     assert result["status"] == "succeeded"

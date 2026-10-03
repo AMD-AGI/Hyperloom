@@ -4784,6 +4784,30 @@ async def integrate_handler(
     # {kernel_id} payload isn't failed with a phantom "missing base_tput".
     payload = _fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
+    # Native AgentX is measurement-only at this revision.  Its pinned
+    # InferenceX launchers own the complete server command and expose no
+    # fingerprinted optimizer hook, so applying a kernel/source mutation here
+    # would either benchmark an unchanged server or fail much later while
+    # materializing the native recipe.  Refuse before touching the framework
+    # tree.  The specialist integrate path enforces the same boundary.
+    state = SharedState.load_or_init(session_dir)
+    from hyperloom.common.agentx_mode import native_agentx_optimization_session, native_agentx_session
+
+    if native_agentx_session(state) and not native_agentx_optimization_session(state):
+        return {
+            "status": "skipped",
+            "error_class": "unsupported_upstream_launcher_hook",
+            "error": (
+                "Native AgentX cannot benchmark kernel, source, or runtime "
+                "mutations until the pinned InferenceX launcher exposes a "
+                "fingerprinted optimizer hook."
+            ),
+            "decision": "NEEDS_REVIEW",
+            "kernel_id": payload.get("kernel_id"),
+            "patches_applied": [],
+            "patches_reverted": [],
+        }
+
     if payload.get("_vendor_playbook_deploy_blocked"):
         # A vendor-playbook KEEP (e.g. mori dispatch/combine launch-config
         # tuning) has no deployable artifact: best_artifact_path is a copy of
@@ -4842,7 +4866,6 @@ async def integrate_handler(
         if missing_inputs is not None:
             return missing_inputs
 
-    state = SharedState.load_or_init(session_dir)
     patch_path = payload.get("patch_path")
     kernel_id = payload.get("kernel_id")
     preapplied = payload.get("preapplied_apply_result")
@@ -4947,6 +4970,16 @@ async def integrate_handler(
             "remove_args": to_str_list(payload.get("remove_args")),
             "unset_envs": to_str_list(payload.get("unset_envs")),
             "args_mode": str(payload.get("args_mode") or "append"),
+            **{
+                key: payload[key]
+                for key in (
+                    "native_launch_overrides",
+                    "base_native_launch_overrides",
+                    "runtime_override",
+                    "overlay_pythonpath",
+                )
+                if payload.get(key)
+            },
             # The only artifact that patches FlyDSL sources, so the only run that
             # needs the JIT cache key widened.
             "flydsl_source_dirs": (str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND),
@@ -5028,6 +5061,12 @@ async def integrate_handler(
             }
 
     try:
+        if native_agentx_optimization_session(state) and mode != "env_only":
+            from ..actions.executors._native_source import kernel_source_evidence
+
+            evidence = kernel_source_evidence(apply_result)
+            fake_task.params["native_source_files"] = evidence["source_files"]
+            fake_task.params["native_absent_source_files"] = evidence["absent_source_files"]
         bench_result = await _run_integrate_rebaseline_with_lock_retry(
             baseline_executor,
             ctx,

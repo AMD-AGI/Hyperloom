@@ -55,21 +55,215 @@ Requirements:
 | Field | Meaning | How to choose |
 |-------|---------|---------------|
 | `TP` | Tensor-parallel size — number of GPUs the model is sharded across | Must match the number of GPUs in your server node (for example, `8` for a single 8-GPU MI300X node) |
-| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency. The SWEEP phase separately measures a ladder around it: `256,128,64,32,16,8,4,2` for a synthetic workload, `1,4,8,10,14,20,28` under `HYPERLOOM_AGENTX`, where it runs only with `--enable-conc-sweep`. Override the ladder with `--conc-sweep-concs`. |
+| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency. Synthetic SWEEP defaults to `256,128,64,32,16,8,4,2`; legacy AgentX and MLPerf can opt into `1,4,8,10,14,20,28` with `--enable-conc-sweep`. Override either ladder with `--conc-sweep-concs`. Native AgentX measures this fixed recipe point and rejects explicit sweep enablement. |
 | `ISL` | Input sequence length — tokens in each request's prompt | Match your production workload; `1024` is a common starting point |
 | `OSL` | Output sequence length — tokens generated per response | Match your production workload; `1024` is a common starting point |
 
 ```{note}
-`ISL` / `OSL` describe the synthetic request shape. Under the opt-in agentic
-trace-replay mode (`HYPERLOOM_AGENTX=1`) request lengths come from the recorded
-trace corpus instead, so these two values do not affect what is measured — the
-server's context window is sized from the model's own configuration rather than
-from `ISL+OSL`.
+`ISL` / `OSL` describe the synthetic request shape. In a source config with
+`benchmark.agentx: enable`, request lengths come from the recorded trace corpus
+instead, so these two values do not affect what is measured — the server's
+context window is sized from the model's own configuration rather than from
+`ISL+OSL`.
 ```
 
 See [`src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)
 for the full prompt field reference (every field maps to a CLI flag defined in
 `cli/parser.py`).
+
+## Run an InferenceX AgentX workload
+
+AgentX measurement uses Magpie's native InferenceX integration. Pass a source
+Magpie YAML with `--benchmark-config`; its `benchmark.agentx: enable` switch
+automatically selects Hyperloom's AgentX session and grading mode. Alternatively,
+set `HYPERLOOM_AGENTX=1` and pass the usual model, framework, GPU, precision, and
+concurrency arguments; Magpie resolves the native recipe and launcher. This
+integration is pinned to Magpie
+[v0.3.0](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) plus native launch overrides, custom-model replay, and the generic
+eval source-path fix at commit `c5c80698fef1b89cc6882264b80d5b306d4e9328` and InferenceX commit
+`408c015be4b22d14c69518643609669405507077`.
+
+New AgentX sessions record native backend epoch 4 and retain Hyperloom's
+optimization loop. Recipe or matrix ambiguity is an error: use the existing
+`AGENTX_RECIPE`, `AGENTX_CONFIG_FILE`, or `AGENTX_SELECTOR` inputs to select the
+intended workload. A local checkpoint requires a canonical `AGENTX_MODEL_ID`
+or source `benchmark.model`; Hyperloom does not infer identity from a basename.
+When no registered recipe matches, Magpie can resolve a custom SGLang or vLLM
+workload on MI300X, MI325X, or MI355X from an explicit image, TP, EP, and
+concurrency. Supply `HYPERLOOM_IMAGE`, `--tp`, `--ep`, and `--conc`, or the
+corresponding source `docker_image` and `envs.TP`/`EP_SIZE`/`CONC` fields.
+Magpie verifies model context from the checkpoint's `config.json` or Hugging
+Face metadata; `--max-model-len` may cap it. An ambiguous registered recipe
+still requires a selector and never falls through to a custom workload.
+Model architecture, modality, and quantization support still depend on the
+chosen framework image; the generic launcher does not make every model runnable.
+Persisted epoch-1 sessions resume their legacy client, and epoch-2 native
+sessions retain the measurement-only contract; epoch-3 sessions keep their
+upstream launch contract. Resume never upgrades an epoch
+or reuses a baseline or KEEP record from another backend.
+
+For the pinned GLM-5.2 TP4 recipe, create a source YAML. It carries the public
+model identity, framework, launcher, image pin, and fixed concurrency; recipe
+internals remain in InferenceX:
+
+```yaml
+benchmark:
+  framework: sglang
+  model: amd/GLM-5.2-MXFP4
+  precision: fp4
+  runner_type: mi355x
+  run_mode: local
+  agentx: enable
+  docker_image: lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260924
+  gpu_selection:
+    auto: false
+  envs:
+    CONC: 8
+    ROCR_VISIBLE_DEVICES: 0,1,2,3
+```
+
+Then run Hyperloom inside the exact image named by the YAML:
+
+```bash
+python -m hyperloom.inference_optimizer.cli optimize \
+  --benchmark-config ./agentx-glm52.yaml \
+  --max-hours 3
+```
+
+The explicit three-hour budget is for one canonical baseline. The normal
+two-hour default is commonly shorter than model load, warmup, drain, and the
+3600-second measurement together. Size it upward if more rounds are intended.
+
+`--benchmark-config` is for a fresh launch. A resume rejects it. Once a baseline
+has been accepted, resume restores its materialized config and runtime pins;
+before that point it restores the session's snapshotted source YAML and pins.
+The installer defaults must still resolve to the pinned Magpie and InferenceX
+revisions above; changing either pin is a coordinated compatibility change.
+
+The source and resolved fields have different owners:
+
+| Owner | Fields |
+|---|---|
+| Source YAML / operator | canonical `model`, `framework`, `precision`, `runner_type`, `run_mode: local`, `benchmark_script`, effective `docker_image`, fixed `envs.CONC`, and optional `agentx.recipe` / `agentx.selector` controls |
+| InferenceX recipe | logical TP/PP/PCP/EP, `MODEL_PREFIX`, KV-offload settings, CPU DRAM allocation, corpus, duration, and AIPerf protocol |
+| Hyperloom | physical GPU reservation `TP×PP×PCP`, the zero-based ROCR mask, `gpu_selection.auto=false`, session pins, and result validation |
+
+`benchmark.model` is the exact model id in InferenceX's `amd-master.yaml`;
+the optional CLI `--model` is the local mounted checkpoint. Magpie resolves the
+recipe's TP/PP/PCP/EP, model prefix, KV-offload settings, CPU DRAM allocation,
+and AIPerf protocol. Before acquiring GPUs, Hyperloom resolves the recipe with
+the same benchmark interpreter that will execute Magpie. It runs the result in
+the already selected serving container (`run_mode: local`) and does not start a
+nested Docker container. `benchmark.docker_image` overrides and pins the
+effective recipe image, and Magpie includes that value in the recipe
+fingerprint. An existing `HYPERLOOM_IMAGE` is an optional consistency assertion
+and must match it exactly. Neither value starts a container or proves the image
+of the process already running.
+
+The example omits `benchmark.inferencex_path`. Preflight reuses a writable
+checkout at the tested commit or clones one into the dependency cache. An
+optional source path only nominates a preferred checkout: a missing or
+wrong-revision path falls back to the pinned clone, while an explicit checkout
+at the right revision that is not writable fails preflight. Managed AgentX
+accepts either the repository root or its `inferencex-e2e/` project directory,
+including paths containing spaces. Saved shell-launcher sessions retain their
+original path restrictions.
+
+If the checkpoint should come directly from Hugging Face, omit CLI `--model`;
+Hyperloom uses `benchmark.model` from the source YAML and removes
+`MODEL_PATH` from the native InferenceX subprocess so it uses its normal
+Hugging Face cache. For a local checkpoint, pass an absolute path or an
+explicit relative path such as `./models/GLM-5.2`.
+
+For native AgentX, omitted `--tp` and `--ep` are filled from the selected
+recipe. An explicit `--tp` is an exact outer resource assertion and must equal
+the resolved `TP×PP×PCP` physical GPU count; an explicit `--ep` must equal the
+resolved EP. The example therefore omits both and resolves to TP4/EP4 on
+`4×1×1` physical GPUs. Topology-changing AgentX sweeps are rejected. The pinned
+launchers overwrite logical `HIP_VISIBLE_DEVICES` with physical ROCR values,
+so Hyperloom derives `gpu_selection.auto=false` and the zero-based mask
+`ROCR_VISIBLE_DEVICES=0,...,N-1` when omitted. Explicit source values are
+assertions; a nonzero or reordered mask is rejected.
+
+The effective concurrency comes from CLI `--conc` or `benchmark.envs.CONC` and
+must exist in the selected recipe. Native AgentX concurrency sweeps default
+off; explicitly passing `--enable-conc-sweep` fails preflight because the
+pinned launcher has no distinct optimized arm to compare. `CONC=8` uniquely
+selects the example's TP4/EP4 DRAM+HiCache arm; `envs.TP` is not a selector. If
+a concurrency belongs to multiple arms, use the YAML-native object form:
+
+```yaml
+agentx:
+  enabled: true
+  selector:
+    tp: 4
+    kv_offloading: dram
+    kv_offload_backend: hicache
+```
+
+Add `agentx.recipe` only when multiple recipe names match. For an enabled
+native configuration, `AGENTX_RECIPE` and JSON `AGENTX_SELECTOR` environment
+variables provide the same selectors when the YAML does not specify them;
+they do not select the native backend by themselves. Magpie fails closed
+rather than guessing. Hyperloom writes the fixed measurement concurrency to
+`benchmark.envs.CONC` and removes a stale `benchmark.agentx.concurrency` from
+the input YAML. The resolved recipe owns
+the corpus; native `AGENTX_DATASET` and `WEKA_LOADER_OVERRIDE` overrides are
+rejected. Canonical mode runs for 3600 seconds and configures a 393-trace
+dataset-entry cap. That value is a loader ceiling, not a guarantee that 393
+traces, sessions, or requests survive availability and context-length filters.
+For a 1200-second diagnostic directly in Magpie, set
+`benchmark.agentx.mode: fast` in an enabled AgentX configuration, or pass
+`--agentx --agentx-mode fast` to its `benchmark` command. Fast results are
+non-publishable, so a full Hyperloom `optimize` rejects them as its baseline,
+including when selected through Hyperloom's `AGENTX_MODE=fast` override.
+
+This Hyperloom integration supports Magpie AgentX v1 in local, single-node
+SGLang or vLLM mode. It bypasses Hyperloom's outer Ray actor automatically;
+leave `INFERENCE_OPTIMIZER_RAY_EXEC` unset or set it to `0`, because explicitly
+setting it to `1` is rejected. Multi-node/disaggregated execution,
+`server_lifecycle`, and Atom are also unsupported.
+
+New native sessions use the Magpie-managed launch-overrides contract.
+Server arguments, environment changes, and source overlays must be represented
+in launch evidence before a canonical result can be accepted. Hyperloom keeps
+the workload fingerprint fixed while each candidate has its own execution
+identity. Unsupported launch controls fail closed. Saved epoch-2 sessions keep
+their earlier measurement-only restrictions.
+
+If PRELUDE schedules profiling, epoch-4 sessions derive a diagnostic run from
+the accepted native configuration and candidate launch. Magpie waits for
+AIPerf's measured phase, then captures the configured server steps. It owns
+`torch_profiler.start_seconds` (default 0), `num_profiles` (default 1), and
+`interval_seconds` (default 200, measured after the previous flush). Oversized
+counts are reduced to the available measurement window; complete captures can
+succeed even when fewer than requested. Capture, flush, or cancellation errors
+remain failures. Hyperloom selects a complete capture by its manifest rather
+than mixing trace files across rounds. `detailed_annotations: true` requests
+the framework instrumentation required for full shape-aware analysis; Magpie
+checks support and configures the framework. Basic traces do not by themselves
+prove that kernel shape or annotation requirements are satisfied.
+
+Profiled runs are diagnostic (`benchmark_valid=false`, `publishable=false`);
+their throughput never replaces a baseline or KEEP. Canonical measurements
+retain the recipe's replay and context policy; `ISL` and `OSL` do not reshape
+AgentX. Saved epoch-3 sessions retain their earlier compatibility profiler.
+GEAK uses diagnostic evidence to propose changes. Its proxy scores cannot
+promote a candidate: accepted source patches
+require a real Critic review and transactional integration followed by native
+AgentX measurement. A rejected review, missing artifact, or failed canonical
+run leaves the accepted configuration unchanged. Epoch-2 sessions keep their
+earlier GEAK skip.
+
+Accepted native results require `benchmark_valid=true`, `publishable=true`, an
+`agentic-coding` scenario, matching strict recipe/launch/raw fingerprints, and
+a trusted fingerprint-bound GPU topology. `publishable` attests Magpie's
+canonical protocol; Hyperloom separately binds the selected recipe, resolved
+server specification, client sources, and pinned checkout. It still cannot cryptographically
+prove the actual outer image. Its execution identity covers the resolved
+`BenchmarkConfig` plus the effective, scrubbed launcher environment for an
+audited set of server/framework/runtime controls; credentials, cache routing,
+output paths, and unrelated login-shell variables remain outside that hash.
 
 ## Monitor the run
 

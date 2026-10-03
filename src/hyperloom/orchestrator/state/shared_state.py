@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -150,6 +151,19 @@ def resolve_graded_comparison(
         else:
             ref_perf, reason = resolve_grading_anchor_perf(state)
         cand_perf = perf_snapshot_from_mapping(measurement)
+        if int(getattr(state, "agentx_epoch", 0) or 0) >= 3 and not all(
+            isinstance(perf, dict)
+            and perf.get("agentx_launch_contract") == 1
+            and perf.get("agentx_workload_fingerprint")
+            for perf in (ref_perf, cand_perf)
+        ):
+            return GradedComparison(
+                objective=GRADED_INTVTY_P50,
+                candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
+                reference=axis_of(ref_perf, GRADED_INTVTY_P50),
+                verdict=VERDICT_REVERT,
+                degrade_reason="native_workload_identity_missing",
+            )
         if ref_perf and cand_perf:
             gain = gain_pct(axis_of(cand_perf, GRADED_INTVTY_P50), axis_of(ref_perf, GRADED_INTVTY_P50))
             # The output guard reads the raw aggregate: the chip count divides both sides of the ratio, so the band
@@ -218,7 +232,10 @@ _STACK_BASE_FIELDS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
 def stack_base_params(current_best: Any) -> dict[str, Any]:
     """``base_*`` params projected from the fields ``current_best`` carries."""
     cb = current_best if isinstance(current_best, dict) else {}
-    return {key: normalize(cb[source]) for key, source, normalize in _STACK_BASE_FIELDS if source in cb}
+    params = {key: normalize(cb[source]) for key, source, normalize in _STACK_BASE_FIELDS if source in cb}
+    if isinstance(cb.get("native_launch_overrides"), dict):
+        params["base_native_launch_overrides"] = copy.deepcopy(cb["native_launch_overrides"])
+    return params
 
 
 def inject_stack_base_params(
@@ -372,11 +389,16 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     benchmark_mode: str = ""
     # Generation counter for AgentX measurements.
     agentx_epoch: int = 0
-    # Which AgentX client measured this session: "aiperf" or "mlperf". Empty on
-    # sessions that predate the field; resume treats those as aiperf. Compared
-    # on resume so the two workloads cannot anchor each other without bumping
-    # the measurement epoch (which would invalidate unchanged aiperf sessions).
+    # Backend identity is immutable across resume; epoch 1 remains the legacy client.
     agentx_backend: str = ""
+    # Immutable native AgentX identity captured before the first baseline.
+    # This is the resume fallback when a process dies before
+    # ``baseline_config_path`` has been accepted and written back.
+    agentx_runtime_pins: dict[str, str] = field(default_factory=dict)
+    # Session-owned copy of the operator's source YAML.  Used only until an
+    # accepted materialized ``baseline_config_path`` exists, so a pre-baseline
+    # crash can resume with the same AgentX selector/mode/custom envs.
+    benchmark_source_config_path: str = ""
     # The grading configuration this session was seeded with: {"objective": GRADED_INTVTY|GRADED_OUTPUT,
     # "noise_pct": float}. Recorded rather than re-derived because the derivation reads HYPERLOOM_PERF_METRIC /
     # HYPERLOOM_PERF_NOISE_PCT, and a resume is a new process: a shell that lost the variable would flip the axis
@@ -1092,6 +1114,13 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             filtered["kernel_opt_task_attempts"] = {}
         if not isinstance(filtered.get("pending_kernel_integrations"), dict):
             filtered["pending_kernel_integrations"] = {}
+        if str(filtered.get("benchmark_mode") or "").strip().lower() == "agentx":
+            from hyperloom.common.agentx_mode import native_agentx_optimization_session, native_agentx_session
+
+            if not filtered.get("agentx_backend"):
+                filtered["agentx_backend"] = "native" if native_agentx_session(filtered) else "legacy"
+            if native_agentx_session(filtered) and not native_agentx_optimization_session(filtered):
+                filtered["warm_replay_enabled"] = False
         # Normalize the unified ``explore_search`` ledger at load.
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),

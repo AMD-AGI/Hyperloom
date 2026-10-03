@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""AgentX grading: an E2E-normalised-interactivity objective guarded by per-chip throughput."""
+"""AgentX grading: median interactivity guarded by slow-tail interactivity and output throughput."""
 
 from __future__ import annotations
 
@@ -148,7 +148,7 @@ def _non_negative(value: Any) -> float | None:
     return coerced if coerced >= 0 else None
 
 
-def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, float] | None:
+def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """The graded axes from a measurement or a ``current_best``; None unless objective and guards are all positive."""
     # Requiring all of them is what stops a lane half-applying the objective. A total that is absent, null or
     # non-positive coalesces to input plus output, the same fallback ``agentx.mapping`` applies.
@@ -165,7 +165,7 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
         total = inp + out
     if intvty is None or intvty_p50 is None or total is None:
         return None
-    snap: dict[str, float] = {
+    snap: dict[str, Any] = {
         GRADED_INTVTY: intvty,
         GRADED_INTVTY_P50: intvty_p50,
         GRADED_TOTAL: total,
@@ -180,10 +180,20 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
         (GRADED_OUTPUT_PER_GPU, _positive(source.get(GRADED_OUTPUT_PER_GPU))),
         (GRADED_DURATION, duration),
         (GRADED_ERROR_RATE, error_rate),
+        ("agentx_gpu_count", _positive(source.get("agentx_gpu_count"))),
     ):
         if value is not None:
             snap[key] = value
+    snap.update(_native_comparison_identity(source))
     return snap
+
+
+def _native_comparison_identity(source: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        name: source[name]
+        for name in ("agentx_launch_contract", "agentx_workload_fingerprint", "agentx_candidate_fingerprint")
+        if name in source
+    }
 
 
 def output_tput_of(source: Mapping[str, Any] | None) -> float:
@@ -210,13 +220,22 @@ def total_tput_of(snapshot: Mapping[str, float] | None) -> float:
     return axis_of(snapshot, GRADED_TOTAL)
 
 
-def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
+def total_tput_per_chip_of(snapshot: Mapping[str, float] | None) -> float:
+    """Total token throughput per physical GPU; 0.0 when not measurable."""
+    total = total_tput_of(snapshot)
+    if total <= 0 or not isinstance(snapshot, Mapping):
+        return 0.0
+    gpu_count = _positive(snapshot.get("agentx_gpu_count"))
+    return total / gpu_count if gpu_count is not None else total
+
+
+def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, Any]:
     """The graded axes *source* carries, for stamping onto a winner record."""
     # A KEEP's ``current_best`` becomes the next candidate's anchor, and an anchor missing an axis degrades the whole
     # session to output grading. Axes are absent rather than None so a partial record is not read as a measured zero.
     if not isinstance(source, Mapping):
         return {}
-    axes: dict[str, float] = {}
+    axes: dict[str, Any] = _native_comparison_identity(source)
     intvty = _positive(source.get(GRADED_INTVTY))
     if intvty is not None:
         axes[GRADED_INTVTY] = intvty
@@ -241,10 +260,13 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
     error_rate = _non_negative(source.get(GRADED_ERROR_RATE))
     if error_rate is not None:
         axes[GRADED_ERROR_RATE] = error_rate
+    gpu_count = _positive(source.get("agentx_gpu_count"))
+    if gpu_count is not None:
+        axes["agentx_gpu_count"] = gpu_count
     return axes
 
 
-def resolve_grading_anchor_perf(state: Any) -> tuple[dict[str, float] | None, str]:
+def resolve_grading_anchor_perf(state: Any) -> tuple[dict[str, Any] | None, str]:
     """Grading anchor: the current-best snapshot, falling back to the baseline; ``reason`` names any failure."""
     # A ``current_best`` that exists but carries no axes must not fall through to ``baseline_perf`` -- that would
     # anchor a candidate against a recipe it was never measured on.
@@ -284,12 +306,17 @@ def stamp_output_per_gpu(measurement: Any, tp: Any) -> None:
     measurement[GRADED_OUTPUT_PER_GPU] = out / chips
 
 
-def rounds_are_comparable(candidate: Mapping[str, float], anchor: Mapping[str, float]) -> bool:
+def rounds_are_comparable(candidate: Mapping[str, Any], anchor: Mapping[str, Any]) -> bool:
     """Whether the pair measured the same work: equal-length windows and no extra failed requests.
 
     Fails closed on an unreported input. A truncated round still publishes plausible rates, so treating "no
     evidence" as "comparable" is what lets one KEEP on a window it never ran.
     """
+    identity_key = "agentx_workload_fingerprint"
+    if any("agentx_launch_contract" in side or identity_key in side for side in (candidate, anchor)):
+        identity = candidate.get(identity_key)
+        if not isinstance(identity, str) or len(identity) != 64 or identity != anchor.get(identity_key):
+            return False
     for side in (candidate, anchor):
         if not all(key in side for key in (GRADED_DURATION, GRADED_ERROR_RATE)):
             return False
@@ -311,6 +338,25 @@ def holds_within_band(
     """Whether candidate *key* holds within the noise band below *anchor*."""
     band = float(noise_pct if noise_pct is not None else parse_intvty_noise_pct())
     return _within_band(axis_of(candidate, key), axis_of(anchor, key), band)
+
+
+def passes_tput_guard(
+    candidate: Mapping[str, float],
+    anchor: Mapping[str, float],
+    *,
+    noise_pct: float | None = None,
+) -> bool:
+    """Whether per-chip candidate throughput holds within the band."""
+    candidate_count = _positive(candidate.get("agentx_gpu_count"))
+    anchor_count = _positive(anchor.get("agentx_gpu_count"))
+    # A one-sided topology is not comparable: dividing only one side would mix
+    # aggregate and per-chip units. Old snapshots with neither count retain the
+    # historical aggregate comparison; new native results carry both counts
+    # from the InferenceX aggregate.
+    if (candidate_count is None) != (anchor_count is None):
+        return False
+    band = float(noise_pct if noise_pct is not None else parse_intvty_noise_pct())
+    return _within_band(total_tput_per_chip_of(candidate), total_tput_per_chip_of(anchor), band)
 
 
 def latency_veto_reason(observed_ms: Any, budget_ms: float) -> str:
@@ -397,9 +443,11 @@ __all__ = [
     "latency_veto_reason",
     "output_tput_of",
     "parse_intvty_noise_pct",
+    "passes_tput_guard",
     "perf_snapshot_from_mapping",
     "resolve_grading_anchor_perf",
     "rounds_are_comparable",
     "stamp_output_per_gpu",
     "total_tput_of",
+    "total_tput_per_chip_of",
 ]

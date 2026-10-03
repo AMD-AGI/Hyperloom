@@ -28,6 +28,66 @@ is a patch release on top of 1.1.2. The per-change history is on the
 
 ### Added
 
+- **Use native Magpie/InferenceX AgentX throughout new optimization sessions.**
+  Fresh `HYPERLOOM_AGENTX=1` launches resolve the native recipe and launcher from
+  ordinary workload inputs and retain Hyperloom's optimization loop. New sessions
+  persist backend `native`, epoch 4, and the Magpie-managed launch contract.
+  Models without a registered recipe can use the formal custom workload path
+  with an explicit image, TP, EP, and concurrency; Magpie validates model
+  context instead of borrowing an unrelated model's launcher.
+  Existing epoch-1 sessions resume the legacy client; epoch-2 native sessions
+  retain their measurement-only contract. No historical baseline or KEEP is
+  migrated. Unsupported or ambiguous recipes fail before measurement. The
+  pinned pair is Magpie v0.3.0 plus native launch overrides, custom-model replay, and the eval source-path fix at commit
+  `c5c80698fef1b89cc6882264b80d5b306d4e9328` and InferenceX commit
+  `408c015be4b22d14c69518643609669405507077`. Both dependencies are pinned by
+  immutable commit for reproducible AgentX measurements. The upstream hotfix
+  keeps generic GSM8K evaluation and its probe files reachable after benchmark
+  directory changes. Install preserves the
+  audited package and launcher trees; preflight repairs Magpie files changed by an
+  earlier compatibility patch. Fixed-sequence `ISL`, `OSL`, and
+  `RANDOM_RANGE_RATIO` controls are removed by Magpie's AgentX configuration.
+  A new
+  `--benchmark-config <yaml>` option accepts the Magpie source config;
+  `benchmark.agentx: enable` automatically selects Hyperloom's AgentX session
+  and grading mode. `HYPERLOOM_AGENTX=1` is an alternative fresh-launch input,
+  not a second requirement. The YAML can provide `benchmark.model`,
+  `benchmark.precision`, `benchmark.framework`, `benchmark.runner_type`,
+  `benchmark.run_mode`, `benchmark.benchmark_script`, optional
+  `benchmark.inferencex_path`, effective `benchmark.docker_image`, fixed
+  `benchmark.envs.CONC`, and YAML-native `benchmark.agentx.selector`. Hyperloom
+  pre-resolves each recipe through the benchmark interpreter,
+  separates a canonical model id from local `MODEL_PATH`, resolves the
+  Magpie server specification and upstream client, and validates strict recipe/launch/raw
+  fingerprints plus trusted topology. This addresses
+  [#1601](https://github.com/AMD-AGI/Hyperloom/issues/1601).
+  **Upgrade note:** native local mode takes its effective image pin from
+  `benchmark.docker_image` (an override included in the fingerprint) or the
+  resolved recipe default; an existing `HYPERLOOM_IMAGE` must match it. Omitted
+  `--tp`/`--ep` are filled from resolved recipe topology; explicit values are
+  consistency assertions. Topology changes are rejected, and Hyperloom derives
+  the zero-based `ROCR_VISIBLE_DEVICES` mask with `gpu_selection.auto=false`.
+  Native AgentX
+  bypasses outer Ray; explicitly enabling `INFERENCE_OPTIMIZER_RAY_EXEC` fails.
+  New sessions use the Magpie-managed launch-overrides contract for candidate
+  arguments, environments, and source overlays. Canonical revalidation checks
+  launch evidence and a fixed workload fingerprint; candidate execution
+  identities remain distinct. Epoch-2 resumes retain their earlier restrictions.
+  Epoch-4 profiling uses the accepted native candidate and Magpie's measured-phase
+  torch profiler. It supports a first-capture delay, step count, repeated captures,
+  and automatic count reduction. Complete captures are consumed separately;
+  cancelled or failed captures remain failures. Detailed annotations require a
+  compatible instrumented framework. Diagnostic results are never baseline or
+  KEEP evidence. Saved epoch-3 sessions keep their upstream launcher contract.
+  GEAK proposals require canonical AgentX revalidation before acceptance.
+  Finally, `publishable`
+  is only the Magpie protocol attestation; Hyperloom separately binds the
+  selected recipe to the resolved server specification, client sources, and pinned checkout. It
+  does not cryptographically attest the actual outer image. The execution
+  identity additionally hashes the effective, scrubbed launcher environment
+  for audited server/framework/runtime controls, while excluding credentials,
+  cache routing, output paths, and unrelated login-shell variables.
+
 - **`--repo-scope` / `--no-repo-scope` for `forge-fuse`.** Give discovery and
   authoring the whole framework repository instead of one resolved file.
   Requires `--discover llm` or `--discover anchored`. Use when the fusion chain
@@ -1104,7 +1164,9 @@ are marked below; the full per-change list is in the
   `HYPERLOOM_AGENTX`); `--conc-sweep-concs` still overrides both. The `sweep`
   action is gone from the LLM catalogue, the executor registry and the phase
   contract, and `conc_sweep_done` / `conc_sweep_failed` collapse into
-  `sweep_done` / `sweep_failed` with no alias for the old spelling.
+  `sweep_done` / `sweep_failed` with no alias for the old spelling. This records
+  the 1.1.0 behavior; the Unreleased native AgentX bridge above supersedes its
+  AgentX default by disabling the sweep and rejecting explicit enablement.
 
 - **The post-KEEP confirmation round is removed** *(breaking change — session record)*:
   an `explore` variant and an `integrate_patch` candidate were each re-benched

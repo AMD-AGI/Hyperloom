@@ -42,7 +42,9 @@ def _checkout(tmp_path: Path, *scripts: str, lib: bool = True) -> Path:
     if lib:
         (benchmarks / "benchmark_lib.sh").write_text("# stub\n", encoding="utf-8")
     for name in scripts:
-        (benchmarks / name).write_text("# stub\n", encoding="utf-8")
+        script = benchmarks / name
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("# stub\n", encoding="utf-8")
     return benchmarks.parent
 
 
@@ -55,19 +57,16 @@ def _recipe(
     runner_type: str = "mi355x",
     envs: dict | None = None,
 ) -> str:
+    benchmark = {
+        "framework": framework,
+        "runner_type": runner_type,
+        "envs": envs if envs is not None else {"FRAMEWORK": framework},
+        "benchmark_script": benchmark_script,
+        "inferencex_path": inferencex_path,
+    }
     recipe = tmp_path / "baseline_config.with_envs.yaml"
     recipe.write_text(
-        yaml.safe_dump(
-            {
-                "benchmark": {
-                    "framework": framework,
-                    "runner_type": runner_type,
-                    "envs": envs if envs is not None else {"FRAMEWORK": framework},
-                    "benchmark_script": benchmark_script,
-                    "inferencex_path": inferencex_path,
-                }
-            }
-        ),
+        yaml.safe_dump({"benchmark": benchmark}),
         encoding="utf-8",
     )
     return str(recipe)

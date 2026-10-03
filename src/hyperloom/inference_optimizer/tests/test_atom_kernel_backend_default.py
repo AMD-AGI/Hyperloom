@@ -22,7 +22,7 @@ import os
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import _apply_atom_auto_tighten
+from hyperloom.inference_optimizer import cli
 
 
 def _args(**overrides: object) -> argparse.Namespace:
@@ -51,7 +51,7 @@ def test_an_unset_backend_is_left_for_the_shared_default(monkeypatch):
     """Writing anything here would make atom resolve differently from every other framework."""
     monkeypatch.delenv(_KEY, raising=False)
 
-    _apply_atom_auto_tighten(_args())
+    cli._apply_atom_auto_tighten(_args())
 
     assert _KEY not in os.environ
 
@@ -61,7 +61,7 @@ def test_a_named_backend_survives_verbatim(monkeypatch, value):
     """Every spelling reaches the shared resolver unedited, including the blank ones."""
     monkeypatch.setenv(_KEY, value)
 
-    _apply_atom_auto_tighten(_args())
+    cli._apply_atom_auto_tighten(_args())
 
     assert os.environ[_KEY] == value
 
@@ -72,7 +72,7 @@ def test_the_shared_default_puts_atom_on_geak(monkeypatch):
 
     monkeypatch.delenv(_KEY, raising=False)
 
-    _apply_atom_auto_tighten(_args())
+    cli._apply_atom_auto_tighten(_args())
 
     assert _raw_kernel_backend_order() == ["geak"]
 
@@ -82,7 +82,7 @@ def test_multi_node_still_fails_fast(monkeypatch):
     monkeypatch.delenv(_KEY, raising=False)
 
     with pytest.raises(SystemExit) as exc:
-        _apply_atom_auto_tighten(_args(nodes=2))
+        cli._apply_atom_auto_tighten(_args(nodes=2))
 
     assert exc.value.code == 2
     assert _KEY not in os.environ
@@ -147,31 +147,45 @@ def test_every_call_site_stays_behind_an_atom_guard():
     )
 
 
-def test_resume_reaches_the_guard_too():
-    """A resumed atom session gets the same IR-8 check the launch did.
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume", [False, True], ids=["fresh", "resume"])
+async def test_cli_rejects_multinode_atom_on_fresh_and_resume(tmp_path, monkeypatch, capsys, resume):
+    """The public CLI preserves the same IR-8 gate across startup and recovery."""
+    import json
+    from types import SimpleNamespace
 
-    ``--resume-from`` is the documented crash-recovery path, and it re-reads the
-    CLI arguments in a fresh process. A resume that skips this function would let
-    a ``--nodes>=2`` atom session start the very configuration the launch refused.
-    """
-    ast, tree = _cli_source_tree()
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
-    resume_ifs = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.If)
-        and any(isinstance(sub, ast.Attribute) and sub.attr == "resume_from" for sub in ast.walk(node.test))
-        and (node.body or node.orelse)
-    ]
-    assert resume_ifs, "no `if args.resume_from:` branch found; this test needs updating"
-
-    reached = [
-        node
-        for node in resume_ifs
-        if any(_calls_auto_tighten(ast, stmt) for stmt in node.body)
-        and any(_calls_auto_tighten(ast, stmt) for stmt in node.orelse)
-    ]
-    assert reached, (
-        "_apply_atom_auto_tighten is applied on only one side of `if args.resume_from:`; "
-        "a resumed atom session would skip the IR-8 multi-node guard"
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "0")
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
+    monkeypatch.setattr(cli, "_load_dotenv_fallback", lambda: None)
+    monkeypatch.setattr(cli, "_preflight", lambda args: {})
+    monkeypatch.setattr(cli, "_resolve_models_for_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_enforce_expected_framework", lambda framework: None)
+    monkeypatch.setattr(cli, "_apply_operator_supplied_paths", lambda *args: None)
+    monkeypatch.setattr(cli, "_persist_install_event", lambda *args: None)
+    monkeypatch.setattr(cli, "clean_stale_aiter_locks", lambda: {"dir": "", "deleted": 0})
+    monkeypatch.setattr(cli, "_acquire_session_lock_or_exit", lambda *args: SimpleNamespace(release=lambda: None))
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.session.resume_guard.ensure_resume_safe", lambda *args, **kwargs: None
     )
+
+    async def no_quantize(args):
+        pass
+
+    monkeypatch.setattr(cli, "_run_quantization_prelude", no_quantize)
+    argv = ["optimize", "--framework", "atom", "--nodes", "2", "--tp", "1", "--ep", "1"]
+    if resume:
+        session = tmp_path / "saved"
+        session.mkdir()
+        SharedState(session_id="saved", framework="atom", benchmark_mode="synthetic").save(session)
+        (session / "manifest.json").write_text(json.dumps({"session_id": "saved"}))
+        argv += ["--resume-from", str(session)]
+    else:
+        argv += ["--model", "Qwen/Qwen3-0.6B"]
+    with pytest.raises(SystemExit) as exc:
+        await cli._run_optimize(cli._build_parser().parse_args(argv))
+    assert exc.value.code == 2
+    assert "atom" in capsys.readouterr().err.lower()

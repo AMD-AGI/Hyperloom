@@ -9,9 +9,10 @@ import asyncio
 import json
 import os
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -145,6 +146,73 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
 
 
 # ProfileExecutor
+def _agentx_profile_state(
+    tmp_path: Path,
+    *,
+    tp: int = 2,
+    pp: int = 1,
+    pcp_size: int = 1,
+    include_topology: bool = True,
+) -> SimpleNamespace:
+    """Build the accepted-config state required by AgentX profile tests."""
+    import yaml
+
+    workload_spec: dict[str, object] = {}
+    if include_topology:
+        workload_spec["resolved_topology"] = {
+            "tp": tp,
+            "pp": pp,
+            "pcp_size": pcp_size,
+            "gpu_count": tp * pp * pcp_size,
+        }
+    config_path = tmp_path / "accepted-agentx-baseline.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "agentx": {"enabled": True},
+                    "workload_spec": workload_spec,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return SimpleNamespace(
+        benchmark_mode="agentx",
+        baseline_config_path=str(config_path),
+    )
+
+
+def _init_profile_inferencex_checkout(path: Path) -> str:
+    """Create the minimal tracked checkout ProfileExecutor validates."""
+    benchmark_lib = path / "benchmarks" / "benchmark_lib.sh"
+    benchmark_lib.parent.mkdir(parents=True)
+    benchmark_lib.write_text("#!/bin/sh\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(path),
+            "-c",
+            "user.name=Hyperloom Test",
+            "-c",
+            "user.email=hyperloom@example.invalid",
+            "commit",
+            "-qm",
+            "profile fixture",
+        ],
+        check=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def test_profile_default_config_path_is_in_assets():
     assert "profile_sglang.yaml" in str(PROFILE_DEFAULT_CONFIG)
     assert PROFILE_DEFAULT_CONFIG.exists(), "profile YAML must ship as a package asset"
@@ -870,9 +938,14 @@ def test_materialize_profile_agentx_clamp_warns_below_steady_floor(
 
     _clear_workload_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("AGENTX_MODEL_ID", "example/agentx-model")
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     with caplog.at_level("WARNING"):
-        out = _materialize_config_with_envs(src, tmp_path)
+        out = _materialize_config_with_envs(
+            src,
+            tmp_path,
+            allow_agentx_profile_compat=True,
+        )
     rendered = yaml.safe_load(out.read_text())
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.max_iterations 8" in extra, extra
@@ -889,10 +962,15 @@ def test_materialize_profile_agentx_clamp_warns_on_explicit_override(
 
     _clear_workload_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("AGENTX_MODEL_ID", "example/agentx-model")
     monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "64")
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     with caplog.at_level("WARNING"):
-        out = _materialize_config_with_envs(src, tmp_path)
+        out = _materialize_config_with_envs(
+            src,
+            tmp_path,
+            allow_agentx_profile_compat=True,
+        )
     rendered = yaml.safe_load(out.read_text())
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.max_iterations 8" in extra, extra
@@ -909,10 +987,15 @@ def test_materialize_profile_max_iters_override_warns_it_undoes_the_agentx_bound
 
     _clear_workload_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("AGENTX_MODEL_ID", "example/agentx-model")
     monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     with caplog.at_level("WARNING"):
-        out = _materialize_config_with_envs(src, tmp_path)
+        out = _materialize_config_with_envs(
+            src,
+            tmp_path,
+            allow_agentx_profile_compat=True,
+        )
     rendered = yaml.safe_load(out.read_text())
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     # The override is still honored verbatim; this is a visibility fix only.
@@ -1198,13 +1281,17 @@ def test_instrumentation_preflight_skips_without_an_envs_block(tmp_path):
     assert "benchmark.envs" in row["skip_reason"]
 
 
-def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
+def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path, monkeypatch):
     """The certificate must not become a trace candidate for the directory it describes.
 
     ``_trace_candidates`` rglobs the trace dir for anything ending in ``_TRACE_EXTS``, and a bare ``.json`` is in
     that tuple. A certificate written among the traces used to add a second unranked candidate, which makes
     ``require_single_rank`` resolve to nothing and lets the certificate win the size fallback over a small trace.
     """
+    tools_dir = Path(__file__).resolve().parents[2] / "agents" / "kernel" / "tools"
+    # The reader is normally launched as a standalone tool, where its sibling
+    # modules are importable from the script directory.
+    monkeypatch.syspath_prepend(str(tools_dir))
     from hyperloom.agents.kernel.tools._bypass_trace_reader import _trace_candidates, resolve_trace_file
     from hyperloom.orchestrator.actions.executors.profile import _write_trace_certificate
 
@@ -2139,7 +2226,412 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_agentx_profile_executor_passes_rank_zero_not_merged(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "state_kwargs",
+    [
+        pytest.param({"pp": 2}, id="pipeline-parallel"),
+        pytest.param({"pcp_size": 2}, id="prefill-context-parallel"),
+        pytest.param({"include_topology": False}, id="missing-topology"),
+    ],
+)
+async def test_agentx_profile_rejects_incompatible_topology_before_side_effects(
+    tmp_path,
+    monkeypatch,
+    state_kwargs,
+):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    parent_called = False
+
+    async def _fake_baseline(_self, _ctx):
+        nonlocal parent_called
+        parent_called = True
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(BaselineExecutor, "__call__", _fake_baseline)
+    output_dir = tmp_path / "must-not-be-created"
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored-root")
+    pe.shared_state = _agentx_profile_state(tmp_path, **state_kwargs)
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(
+            params={"output_dir": str(output_dir)},
+            task_id="t-agentx-incompatible-profile",
+        ),
+        extra=None,
+    )
+
+    result = await pe(ctx)
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "agentx_profile_topology_incompatible"
+    assert result["trace_input_ready"] is False
+    assert parent_called is False
+    assert not output_dir.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True, "optimization"], ids=["legacy", "native", "native-optimization"])
+async def test_profile_executor_preserves_session_identity_with_generic_template(tmp_path, monkeypatch, native):
+    import yaml
+
+    from hyperloom.inference_optimizer.agentx.runtime import _profile_compatibility_checkout
+    from hyperloom.orchestrator.actions.executors import _workload_envs
+    from hyperloom.orchestrator.actions.executors import profile as profile_mod
+
+    source = tmp_path / "inferencex"
+    head = _init_profile_inferencex_checkout(source)
+    model = tmp_path / "local-model"
+    model.mkdir()
+    for name, value in {
+        "USER_DATA_PATH": str(tmp_path),
+        "FRAMEWORK": "sglang",
+        "MODEL_PATH": str(model),
+        "GPU_TYPE": "mi355x",
+        "TP": "2",
+        "CONC": "1",
+        "INFERENCEX_PATH": str(source),
+        "INFERENCEX_REF": head,
+        "HYPERLOOM_AGENTX": "1",
+        "HYPERLOOM_ENABLE_PATCH": "1",
+        "HYPERLOOM_SGLANG_SHAPE_MODE": "patch",
+        "AGENTX_MODEL_ID": "amd/GLM-5.2-MXFP4",
+        "AGENTX_SERVER_SCRIPT": "single_node/agentic/glm.sh" if native else "legacy_server.sh",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
+    if native:
+        for name, value in {
+            "MAGPIE_REF": "a" * 40,
+            "HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT": "recipe",
+            "HYPERLOOM_AGENTX_EXPECTED_EXECUTION_FINGERPRINT": "execution",
+            "HYPERLOOM_AGENTX_GPU_COUNT": "2",
+        }.items():
+            monkeypatch.setenv(name, value)
+    config = tmp_path / "profile.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": str(model),
+                    "envs": {"TP": 2, "CONC": 1},
+                    "profiler": {"torch_profiler": {"enabled": True}},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_config = config.read_bytes()
+    framework_patch = Mock(return_value=True)
+    ck_patch = Mock(return_value=True)
+    monkeypatch.setattr(_workload_envs, "ensure_sglang_patched_for_tracelens", framework_patch)
+    monkeypatch.setattr(_workload_envs, "ensure_sglang_patched_for_ck_blockscale", ck_patch)
+    patch_roots = []
+
+    def patch_checkout(path):
+        patch_roots.append(Path(path))
+        (Path(path) / "benchmarks" / "benchmark_lib.sh").write_text("${NUM_PROMPTS:-$max_concurrency}\n")
+        serving = profile_mod.benchmark_serving_path_in(Path(path))
+        serving.parent.mkdir(parents=True, exist_ok=True)
+        serving.write_text("PROFILE_EXTRA_BODY\n")
+        return True
+
+    monkeypatch.setattr(profile_mod, "ensure_benchmark_lib_patched", patch_checkout)
+    monkeypatch.setattr(profile_mod, "ensure_benchmark_lib_eval_dest_patched", patch_checkout)
+    monkeypatch.setattr(profile_mod, "ensure_benchmark_serving_patched", patch_checkout)
+    executor = ProfileExecutor(session_dir=tmp_path)
+    executor.shared_state = _agentx_profile_state(tmp_path) if native else SimpleNamespace(benchmark_mode="agentx")
+    if native == "optimization":
+        import sys
+
+        from hyperloom.inference_optimizer.agentx.identity import canonical_sha256
+
+        executor.shared_state.agentx_epoch = 3
+        executor.shared_state.agentx_backend = "native"
+        accepted = Path(executor.shared_state.baseline_config_path)
+        accepted_config = yaml.safe_load(accepted.read_text())
+        evidence = {
+            "effective_argv": [sys.executable, "-m", "sglang.launch_server", "--mem-fraction-static", "0.73"],
+            "runtime_environment": {"PATH": os.environ["PATH"], "SGLANG_NATIVE_TEST": "1"},
+        }
+        evidence["evidence_sha256"] = canonical_sha256(evidence)
+        accepted_config["benchmark"].update(framework="sglang")
+        accepted_config["benchmark"]["workload_spec"]["server_launch"] = evidence
+        accepted.write_text(yaml.safe_dump(accepted_config))
+    captured = {}
+
+    async def measure(**kwargs):
+        bench = yaml.safe_load(kwargs["config_path"].read_text(encoding="utf-8"))["benchmark"]
+        captured.update(bench)
+        if native:
+            _profile_compatibility_checkout(
+                bench,
+                config_path=kwargs["config_path"],
+                explicit_inferencex_path=kwargs["inferencex_path"],
+                env=os.environ,
+            )
+        workspace = kwargs["output_dir"] / "benchmark_sglang_agentx"
+        traces = workspace / "torch_trace"
+        traces.mkdir(parents=True)
+        (traces / "177-TP-0-DECODE.trace.json.gz").write_bytes(b"rank-zero")
+        Path(bench["envs"]["AGENTX_CAPTURE_STATUS_PATH"]).write_text(
+            json.dumps({"capture_id": bench["envs"]["AGENTX_CAPTURE_ID"], "status": "succeeded"}),
+            encoding="utf-8",
+        )
+        return {"status": "succeeded", "framework": "sglang", "workspace": str(workspace), "submission_valid": True}
+
+    monkeypatch.setattr(executor, "_run_single_benchmark", measure)
+    output = tmp_path / "output"
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(
+            kind="profile",
+            task_id="profile-identity",
+            params={
+                "config_path": str(config),
+                "output_dir": str(output),
+                "extra_envs": {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "1"},
+                **({"native_launch_overrides": {"version": 1}} if native == "optimization" else {}),
+            },
+        ),
+        extra={},
+    )
+
+    result = await executor(ctx)
+
+    assert result["status"] == "succeeded", result
+    assert config.read_bytes() == original_config
+    assert captured["benchmark_script"] == "aiperf_client.sh"
+    assert "agentx" not in captured
+    if native == "optimization":
+        assert "--mem-fraction-static 0.73" in captured["envs"]["EXTRA_SGLANG_ARGS"]
+        assert captured["envs"]["SGLANG_NATIVE_TEST"] == "1"
+        assert captured["envs"]["HYPERLOOM_FRAMEWORK_PYTHON"] == sys.executable
+    if native:
+        assert captured["workload_spec"]["harness"] == "hyperloom-profiler-compat"
+        assert captured["envs"]["AGENTX_SERVER_SCRIPT"] == ""
+        assert captured["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "not_attempted"
+        framework_patch.assert_not_called()
+        ck_patch.assert_not_called()
+        assert set(patch_roots) == {output / ".agentx-profile-inferencex"}
+        assert not subprocess.run(
+            ["git", "-C", str(source), "status", "--porcelain"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+    else:
+        assert "harness" not in captured["workload_spec"]
+        assert captured["envs"]["AGENTX_SERVER_SCRIPT"] == "legacy_server.sh"
+        framework_patch.assert_called_once()
+        ck_patch.assert_called_once()
+        assert set(patch_roots) == {source}
+
+
+@pytest.mark.asyncio
+async def test_agentx_profile_checkout_keeps_event_loop_responsive(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+
+    source = tmp_path / "pinned-inferencex"
+    head = _init_profile_inferencex_checkout(source)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("INFERENCEX_PATH", str(source))
+    monkeypatch.setenv("INFERENCEX_REF", head)
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    config = tmp_path / "profile.yaml"
+    config.write_text("benchmark:\n  envs: {}\n", encoding="utf-8")
+    monkeypatch.setattr(baseline_mod, "materialize_config_with_envs", lambda *args, **kwargs: config)
+    executor = ProfileExecutor(session_dir=tmp_path)
+    executor.shared_state = _agentx_profile_state(tmp_path)
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(
+            kind="profile",
+            task_id="profile-slow-checkout",
+            params={"config_path": str(config), "output_dir": str(tmp_path / "output")},
+        ),
+        extra={},
+    )
+    loop = asyncio.get_running_loop()
+    clone_started = asyncio.Event()
+    release_clone = threading.Event()
+    git_run = subprocess.run
+    loop_progressed_during_clone = False
+
+    def slow_clone(argv, **kwargs):
+        nonlocal loop_progressed_during_clone
+        if argv[:2] == ["git", "clone"]:
+            loop.call_soon_threadsafe(clone_started.set)
+            loop_progressed_during_clone = release_clone.wait(timeout=5)
+            return subprocess.CompletedProcess(argv, 1, "", "simulated clone failure")
+        return git_run(argv, **kwargs)
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.profile.subprocess.run", slow_clone)
+    profile_task = asyncio.create_task(executor(ctx))
+    try:
+        await asyncio.wait_for(clone_started.wait(), timeout=10)
+        release_clone.set()
+        result = await asyncio.wait_for(profile_task, timeout=10)
+    finally:
+        release_clone.set()
+        if not profile_task.done():
+            profile_task.cancel()
+        await asyncio.gather(profile_task, return_exceptions=True)
+
+    assert loop_progressed_during_clone, "the event loop was blocked until git clone returned"
+    assert result["status"] == "failed"
+    assert result["error_class"] == "agentx_profile_checkout_unavailable"
+    assert "simulated clone failure" in result["error"]
+
+
+def test_legacy_agentx_profile_checkout_needs_no_native_pin(tmp_path, monkeypatch):
+    source = tmp_path / "legacy-inferencex"
+    source.mkdir()
+    monkeypatch.setenv("INFERENCEX_REF", "native-pin-is-not-relevant")
+    config = tmp_path / "profile.yaml"
+    original = "benchmark:\n  benchmark_script: aiperf_client.sh\n"
+    config.write_text(original, encoding="utf-8")
+    output = tmp_path / "profile-output"
+
+    selected, error = ProfileExecutor(session_dir=tmp_path)._agentx_runtime_checkout(
+        config_path=config,
+        output_dir=output,
+        inferencex_path=str(source),
+        agentx_session=False,
+    )
+
+    assert (selected, error) == (str(source), None)
+    assert config.read_text(encoding="utf-8") == original
+    assert not output.exists()
+
+
+def test_agentx_profile_checkout_rejects_symlink_to_pinned_source(tmp_path):
+    source = tmp_path / "pinned-inferencex"
+    _init_profile_inferencex_checkout(source)
+    output_dir = tmp_path / "profile-output"
+    output_dir.mkdir()
+    isolated = output_dir / ".agentx-profile-inferencex"
+    isolated.symlink_to(source, target_is_directory=True)
+    config_path = tmp_path / "profile.yaml"
+    original_config = "benchmark:\n  inferencex_path: pinned\n"
+    config_path.write_text(original_config, encoding="utf-8")
+
+    resolved, error = ProfileExecutor()._agentx_runtime_checkout(
+        config_path=config_path,
+        output_dir=output_dir,
+        inferencex_path=str(source),
+        agentx_session=True,
+    )
+
+    assert resolved == str(source)
+    assert error is not None
+    assert error["error_class"] == "agentx_profile_checkout_unavailable"
+    assert "symbolic link" in error["error"]
+    assert config_path.read_text(encoding="utf-8") == original_config
+    assert (source / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8") == "#!/bin/sh\n"
+
+
+def test_agentx_profile_checkout_rejects_nested_foreign_git_worktree(tmp_path):
+    source = tmp_path / "pinned-inferencex"
+    _init_profile_inferencex_checkout(source)
+    output_dir = tmp_path / "profile-output"
+    subprocess.run(
+        ["git", "clone", "-q", "--local", str(source), str(output_dir)],
+        check=True,
+    )
+    isolated = output_dir / ".agentx-profile-inferencex"
+    isolated.mkdir()
+    config_path = tmp_path / "profile.yaml"
+    original_config = "benchmark:\n  inferencex_path: pinned\n"
+    config_path.write_text(original_config, encoding="utf-8")
+
+    resolved, error = ProfileExecutor()._agentx_runtime_checkout(
+        config_path=config_path,
+        output_dir=output_dir,
+        inferencex_path=str(source),
+        agentx_session=True,
+    )
+
+    assert resolved == str(source)
+    assert error is not None
+    assert error["error_class"] == "agentx_profile_checkout_unavailable"
+    assert "not its own git worktree" in error["error"]
+    assert config_path.read_text(encoding="utf-8") == original_config
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(OSError("git unavailable"), id="os-error"),
+        pytest.param(
+            subprocess.TimeoutExpired(["git", "rev-parse"], 30),
+            id="timeout",
+        ),
+    ],
+)
+def test_agentx_profile_checkout_surfaces_git_process_failure(
+    tmp_path,
+    monkeypatch,
+    failure,
+):
+    source = tmp_path / "pinned-inferencex"
+    _init_profile_inferencex_checkout(source)
+    output_dir = tmp_path / "profile-output"
+    output_dir.mkdir()
+    config_path = tmp_path / "profile.yaml"
+    original_config = "benchmark:\n  inferencex_path: pinned\n"
+    config_path.write_text(original_config, encoding="utf-8")
+
+    def fail_git(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.profile.subprocess.run",
+        fail_git,
+    )
+    resolved, error = ProfileExecutor()._agentx_runtime_checkout(
+        config_path=config_path,
+        output_dir=output_dir,
+        inferencex_path=str(source),
+        agentx_session=True,
+    )
+
+    assert resolved == str(source)
+    assert error is not None
+    assert error["error_class"] == "agentx_profile_checkout_unavailable"
+    assert "cannot prepare isolated AgentX profile checkout" in error["error"]
+    assert config_path.read_text(encoding="utf-8") == original_config
+
+
+def test_agentx_profile_checkout_rejects_dirty_reused_clone(tmp_path):
+    source = tmp_path / "pinned-inferencex"
+    _init_profile_inferencex_checkout(source)
+    output_dir = tmp_path / "profile-output"
+    output_dir.mkdir()
+    isolated = output_dir / ".agentx-profile-inferencex"
+    subprocess.run(
+        ["git", "clone", "-q", "--local", "--no-hardlinks", str(source), str(isolated)],
+        check=True,
+    )
+    isolated_benchmark_lib = isolated / "benchmarks" / "benchmark_lib.sh"
+    isolated_benchmark_lib.write_text("#!/bin/sh\n# stale profiler patch\n", encoding="utf-8")
+    config_path = tmp_path / "profile.yaml"
+    original_config = "benchmark:\n  inferencex_path: pinned\n"
+    config_path.write_text(original_config, encoding="utf-8")
+
+    resolved, error = ProfileExecutor()._agentx_runtime_checkout(
+        config_path=config_path,
+        output_dir=output_dir,
+        inferencex_path=str(source),
+        agentx_session=True,
+    )
+
+    assert resolved == str(source)
+    assert error is not None
+    assert error["error_class"] == "agentx_profile_checkout_unavailable"
+    assert "not clean" in error["error"]
+    assert "stale profiler patches" in error["error"]
+    assert config_path.read_text(encoding="utf-8") == original_config
+    assert isolated_benchmark_lib.read_text(encoding="utf-8").endswith("stale profiler patch\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
+async def test_agentx_profile_executor_passes_rank_zero_not_merged(tmp_path, monkeypatch, native):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("TP", "2")
     db = SqliteConnection(tmp_path / "x.db")
@@ -2178,6 +2670,7 @@ async def test_agentx_profile_executor_passes_rank_zero_not_merged(tmp_path, mon
         }
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    pe.shared_state = _agentx_profile_state(tmp_path) if native else SimpleNamespace(benchmark_mode="agentx")
     task = await tr.create(
         kind="profile",
         params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
@@ -2236,6 +2729,7 @@ async def test_profile_executor_surfaces_failed_agentx_capture_status(tmp_path, 
         }
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    pe.shared_state = _agentx_profile_state(tmp_path)
     task = await tr.create(
         kind="profile",
         params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
@@ -2276,6 +2770,7 @@ async def test_agentx_profile_executor_rejects_missing_capture_status(tmp_path, 
         }
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    pe.shared_state = _agentx_profile_state(tmp_path)
     task = await tr.create(
         kind="profile",
         params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
@@ -2318,6 +2813,7 @@ async def test_agentx_profile_preserves_pre_capture_failure_for_recovery(tmp_pat
         }
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    pe.shared_state = _agentx_profile_state(tmp_path)
     task = await tr.create(
         kind="profile",
         params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
@@ -2550,7 +3046,7 @@ def test_upstream_sglang_capture_directory_passes_health_check(tmp_path):
 
 # kernel_request_handlers — direct unit
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_dry_run_returns_structured_result(session_dir):
+async def test_trace_analyze_handler_dry_run_returns_structured_result(session_dir, monkeypatch):
     """The handler surfaces the tool's structured JSON verbatim (status + run_id + session_id)."""
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2566,6 +3062,10 @@ async def test_trace_analyze_handler_dry_run_returns_structured_result(session_d
         # agent route, which needs a real root).
         "analysis_route": "bypass",
     }
+    # Production uses an installed /opt/venv package. The local Darwin test
+    # invokes the standalone script with system ``python3``, so expose src in
+    # the same way an installation does.
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[3]))
     res = await ta.trace_analyze_handler(payload, session_dir=session_dir)
     # Structured result surfaced verbatim by the bypass backend.
     assert res["status"] in ("ok", "succeeded", "failed")

@@ -261,3 +261,38 @@ async def test_synthetic_handoff_keeps_existing_protocol_and_metric_policy(
         "num_warmups": 3,
         "seed": 41,
     }
+
+
+@pytest.mark.parametrize("framework", ["sglang", "vllm"])
+@pytest.mark.asyncio
+async def test_native_agentx_skips_geak_before_writing_a_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, framework: str
+) -> None:
+    coord = _coord(tmp_path, framework=framework)
+    recipe_path = Path(coord.shared_state.baseline_config_path)
+    config = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
+    config["benchmark"]["agentx"] = "enable"
+    config["benchmark"]["benchmark_script"] = "single_node/agentic/glm.sh"
+    recipe_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    monkeypatch.setenv("FRAMEWORK", "vllm" if framework == "sglang" else "sglang")
+    monkeypatch.setenv("MODEL_PATH", "/models/wrong")
+    monkeypatch.setenv("GPU_TYPE", "mi300x")
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("CONC", "99")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
+        Mock(side_effect=AssertionError("native AgentX must not resolve or launch GEAK")),
+    )
+    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert not (tmp_path / "geak" / "handoff.json").exists()
+    assert coord.shared_state.geak_result == {
+        "status": "skipped",
+        "error_class": "unsupported_upstream_launcher_hook",
+        "error": (
+            "native AgentX kernel optimization is unavailable until "
+            "InferenceX exposes a fingerprinted optimizer-argv hook"
+        ),
+    }
+    assert coord.shared_state.pending_escalate_hint == "skip_to_sweep"

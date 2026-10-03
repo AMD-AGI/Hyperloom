@@ -2271,13 +2271,29 @@ class PreludePhase(CoordinatorCollaborator):
         )
         # Local legacy replay keeps any positive gain.
         reproduced = measured_gain >= keep_threshold if combined_current_contract else measured_gain > 0
+        from hyperloom.common.agentx_mode import native_agentx_optimization_session
+        from ..state.shared_state import resolve_graded_comparison
+
+        native_grade = None
+        if native_agentx_optimization_session(state):
+            # Rule before promoting any checkout or recording kernel KEEP. A
+            # throughput win alone cannot accept a native replay candidate.
+            native_grade = resolve_graded_comparison(state, result)
+            reproduced = native_grade.comparable and native_grade.verdict == "KEEP"
+            outcome["graded_objective"] = native_grade.objective
+            from hyperloom.common.gain_math import gain_pct
+
+            outcome["graded_gain_pct"] = gain_pct(native_grade.candidate, native_grade.reference)
+            outcome["graded_rejection"] = native_grade.degrade_reason
         outcome["keep_threshold_pct"] = keep_threshold
         if recorder is not None:
             recorder.record_gate(
                 GATE_KEEP_THRESHOLD,
                 passed=reproduced,
                 reason=(
-                    "cleared the approved kernel replay threshold"
+                    "native replay identity, median interactivity and guardrails"
+                    if native_grade is not None
+                    else "cleared the approved kernel replay threshold"
                     if combined_current_contract
                     else "legacy local replay keeps any positive gain"
                 ),
@@ -2346,8 +2362,10 @@ class PreludePhase(CoordinatorCollaborator):
             )
             if promoted_checkout:
                 outcome["active_framework_root"] = promoted_checkout
-                # Resume re-points $INFERENCEX_PATH at this checkout, and stops the run when it has since vanished.
-                state.active_inferencex_path = promoted_checkout
+                from hyperloom.common.agentx_mode import native_agentx_session
+
+                if not native_agentx_session(state):
+                    state.active_inferencex_path = promoted_checkout
             warm_args = str(params.get("extra_server_args") or "").strip()
             warm_envs = dict(params.get("extra_envs") or {})
             replayed_patch_refs = [
@@ -2417,21 +2435,12 @@ class PreludePhase(CoordinatorCollaborator):
             }
             if promoted_checkout:
                 entry_extra["framework_source_root"] = promoted_checkout
-            kernel_outcome = self._book_combined_kernel_keep(result, task)
-            outcome["kernel"] = dict(kernel_outcome)
-            if recorder is not None:
-                recorder.record_applied(kernel=kernel_outcome)
-            if kernel_outcome.get("kept"):
+            kernel_plan = [entry for entry in (params.get("warm_kernel_plan") or []) if isinstance(entry, dict)]
+            if kernel_plan:
                 entry_extra["kernel_replay"] = {
                     "validation": "combined_recipe_kernel",
-                    "count": kernel_outcome["kept"],
-                    "columns": sorted(
-                        {
-                            str(entry.get("column") or "")
-                            for entry in state.warm_kernel_kb_plan
-                            if isinstance(entry, dict)
-                        }
-                    ),
+                    "count": len(kernel_plan),
+                    "columns": sorted({str(entry.get("column") or "") for entry in kernel_plan}),
                 }
             patch_result = result.get("warm_patch_result")
             if isinstance(patch_result, dict):
@@ -2457,10 +2466,21 @@ class PreludePhase(CoordinatorCollaborator):
                 params["recipe_extra_server_args"] if "recipe_extra_server_args" in params else warm_args
             ).strip()
             recipe_envs = dict(params["recipe_extra_envs"] if "recipe_extra_envs" in params else warm_envs)
-            self._lift_to_current_best(
+            lifted = self._lift_to_current_best(
                 "replay_warm_recipe",
                 float(single_round_tput),
                 {
+                    **{
+                        key: result[key]
+                        for key in (
+                            "materialized_config",
+                            "agentx_server_launch",
+                            "final_overlay",
+                            "submission_valid",
+                            "native_agentx_protocol_valid",
+                        )
+                        if key in result
+                    },
                     "name": "warm_replay",
                     **graded_axes_of(result),
                     # The latency budget grades on this and fails closed without it.
@@ -2481,6 +2501,18 @@ class PreludePhase(CoordinatorCollaborator):
                 },
                 entry_extra=entry_extra,
             )
+            if native_grade is not None and not lifted:
+                if not self._require_combined_warm_rollback(result, task, outcome, recorder):
+                    return
+                outcome["status"] = "promotion_failed"
+                outcome["reason"] = "native replay did not pass the current-best promotion gate"
+                state.warm_replay_outcome = outcome
+                state.save(self.session_dir)
+                return
+            kernel_outcome = self._book_combined_kernel_keep(result, task)
+            outcome["kernel"] = dict(kernel_outcome)
+            if recorder is not None:
+                recorder.record_applied(kernel=kernel_outcome)
             if recorder is not None:
                 recorder.record_promotion(
                     promoted_checkout=promoted_checkout,
@@ -2537,8 +2569,10 @@ class PreludePhase(CoordinatorCollaborator):
             if recorder is not None:
                 recorder.record_applied(kernel=kernel_outcome)
             outcome["status"] = "drift"
-            outcome["reason"] = (
-                latency_veto or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%"
+            outcome["reason"] = latency_veto or (
+                f"native replay rejected: {native_grade.degrade_reason or native_grade.verdict}"
+                if native_grade is not None
+                else f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%"
             )
             log.info(
                 "warm-replay DRIFT: measured=%+.2f%% threshold=%+.2f%%",

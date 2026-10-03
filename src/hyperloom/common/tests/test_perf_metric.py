@@ -18,6 +18,7 @@ from hyperloom.common.perf_metric import (
     intvty_serving_grading_enabled,
     output_tput_of,
     parse_intvty_noise_pct,
+    passes_tput_guard,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
     total_tput_of,
@@ -160,6 +161,21 @@ def test_tput_guard_rejects_regression_past_band():
     anch = perf_snapshot_from_mapping(_BASELINE)
     assert cand and anch
     assert holds_within_band(cand, anch, GRADED_TOTAL) is False
+
+
+def test_tput_guard_normalizes_different_agentx_topologies_per_chip():
+    anchor = perf_snapshot_from_mapping({**_BASELINE, "total_throughput": 400.0, "agentx_gpu_count": 4})
+    candidate = perf_snapshot_from_mapping({**_BASELINE, "total_throughput": 600.0, "agentx_gpu_count": 8})
+    assert anchor and candidate
+    # Aggregate throughput improved 50%, but each chip regressed 100 -> 75.
+    assert passes_tput_guard(candidate, anchor) is False
+
+
+def test_tput_guard_rejects_one_sided_topology_metadata():
+    anchor = perf_snapshot_from_mapping({**_BASELINE, "agentx_gpu_count": 4})
+    candidate = perf_snapshot_from_mapping(_BASELINE)
+    assert anchor and candidate
+    assert passes_tput_guard(candidate, anchor) is False
 
 
 def test_vetoed_candidate_is_never_graded():

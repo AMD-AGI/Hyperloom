@@ -368,6 +368,10 @@ def _source_layer_handles(result: Mapping[str, Any]) -> dict[str, Any]:
     }
     if "source_snapshot_complete" in result:
         handles["source_snapshot_complete"] = bool(result["source_snapshot_complete"])
+    effective = result.get("effective_config") or {}
+    overlay = result.get("final_overlay") or result.get("overlay_pythonpath") or effective.get("final_overlay")
+    if overlay:
+        handles["final_overlay"] = str(overlay)
     return handles
 
 
@@ -3180,7 +3184,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             ``True`` when the configuration was accepted, ``False`` when a
             performance winner was not comparable or did not beat the anchor.
         """
-        from hyperloom.common.perf_metric import VERDICT_KEEP, graded_axes_of
+        from hyperloom.common.perf_metric import VERDICT_KEEP
 
         prebaseline_enablement = (
             task_kind == "integrate_patch"
@@ -3227,21 +3231,30 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     graded.candidate,
                 )
                 return False
+        from ..measurement.native_launch import native_launch_config
+
+        native_config = native_launch_config(bv)
+        if native_config:
+            bv = {**bv, **native_config}
         previous = self.shared_state.current_best or {}
         base_args = ""
-        if isinstance(previous, dict):
+        if isinstance(previous, dict) and not native_config:
             base_args = strip_benchmark_harness_flags(previous.get("extra_server_args"))
         # An authored-kernel overlay stays active until another KEEP replaces it.
         _overlay = str((bv.get("final_overlay") if isinstance(bv, dict) else "") or "").strip()
         if not _overlay and isinstance(previous, dict):
             _overlay = str(previous.get("final_overlay") or "").strip()
         candidate_args = ""
-        if isinstance(bv, dict):
+        if native_config:
+            candidate_args = native_config["candidate_extra_server_args"]
+        elif isinstance(bv, dict):
             candidate_args = strip_benchmark_harness_flags(
                 bv.get("candidate_extra_server_args") or bv.get("extra_server_args")
             )
         full_args = ""
-        if isinstance(bv, dict):
+        if native_config:
+            full_args = native_config["extra_server_args"]
+        elif isinstance(bv, dict):
             full_args = strip_benchmark_harness_flags(bv.get("extra_server_args"))
         controls_effective = bool(
             isinstance(bv, dict)
@@ -3252,12 +3265,12 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
         )
         # Build cumulative launch args without double-stacking; helper dedupes repeated --flag pairs (last wins).
-        if controls_effective:
+        if not native_config and controls_effective:
             # Removal/replace winners publish their effective cumulative config
             # from ExploreExecutor. Prepending the prior current_best would
             # reintroduce flags the variant deliberately removed.
             full_args = _dedupe_extra_server_args(full_args)
-        else:
+        elif not native_config:
             full_args = _merge_cumulative_extra_server_args(
                 base_args,
                 candidate_args,
@@ -3367,9 +3380,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     if bv.get("task_id"):
                         stack_entry["task_id"] = str(bv.get("task_id"))
                     if bv.get("effective_extra_server_args"):
-                        stack_entry["effective_extra_server_args"] = _dedupe_extra_server_args(
+                        stack_entry["effective_extra_server_args"] = native_config.get(
+                            "effective_extra_server_args"
+                        ) or _dedupe_extra_server_args(
                             strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
                         )
+                    if native_config:
+                        stack_entry["native_launch_overrides"] = native_config["native_launch_overrides"]
                 # Stable filter label for "what kind of optimization" (backend /
                 # param / env), so the stack can be sliced like the timeline.
                 _stack_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
@@ -3449,6 +3466,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
         for _key in to_str_list(bv.get("unset_envs") if isinstance(bv, dict) else None):
             _merged_envs.pop(_key, None)
         _merged_envs.update(_new_envs)
+        if native_config:
+            _merged_envs = dict(native_config["extra_envs"])
         current_best = {
             "action": task_kind,
             "tput": float(best_tput),
@@ -3465,15 +3484,17 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # The axes of the measurement this KEEP was graded on. Without them the
         # next round's anchor has no snapshot, and the session degrades to
         # output grading permanently after the first KEEP.
-        current_best.update(graded_axes_of(cand_source))
+        current_best.update(integrate_measurement_fields(cand_source))
+        if native_config:
+            current_best["native_launch_overrides"] = native_config["native_launch_overrides"]
         if isinstance(bv, dict):
             for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
                 if bv.get(_ctrl_key):
                     current_best[_ctrl_key] = bv.get(_ctrl_key)
             if bv.get("effective_extra_server_args"):
-                current_best["effective_extra_server_args"] = _dedupe_extra_server_args(
-                    strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
-                )
+                current_best["effective_extra_server_args"] = native_config.get(
+                    "effective_extra_server_args"
+                ) or _dedupe_extra_server_args(strip_benchmark_harness_flags(bv.get("effective_extra_server_args")))
             if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
                 current_best["args_mode"] = "replace"
         self.shared_state.current_best = current_best
@@ -3771,6 +3792,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
                 "input_throughput": result.get("input_throughput"),
                 "total_throughput": result.get("total_token_throughput"),
+                "agentx_gpu_count": result.get("agentx_gpu_count"),
                 "tpot_p90_ms": result.get("tpot_p90_ms"),
                 "e2e_norm_intvty_p90": result.get("e2e_norm_intvty_p90"),
                 "e2e_norm_intvty_p50": result.get("e2e_norm_intvty_p50"),
@@ -3785,6 +3807,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 current_best["e2e_norm_intvty_p90"] = snap["e2e_norm_intvty_p90"]
                 for _axis in (
                     "input_throughput",
+                    "agentx_gpu_count",
                     "tpot_p90_ms",
                     "e2e_norm_intvty_p50",
                     "duration_seconds",
@@ -5213,6 +5236,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         launch_evidence = evidence.get("launch_evidence") or {}
         launch_evidence = dict(launch_evidence) if isinstance(launch_evidence, Mapping) else {}
         measurement = {
+            **integrate_measurement_fields(evidence),
             "schema_version": 2,
             "tput": float(cb.get("tput") or 0.0),
             "benchmark_workspace": str(
@@ -5274,7 +5298,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     args = _merge_cumulative_extra_server_args(args, token, "")
                 else:
                     envs[name] = str(value)
-        return {
+        config = {
             "extra_server_args": args,
             "extra_envs": envs,
             "remove_args": to_str_list(cb.get("remove_args")),
@@ -5282,6 +5306,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "args_mode": "replace" if str(cb.get("args_mode") or "").strip().lower() == "replace" else "append",
             "final_overlay": str(cb.get("final_overlay") or "").strip(),
         }
+        if isinstance(cb.get("native_launch_overrides"), dict):
+            config["native_launch_overrides"] = cb["native_launch_overrides"]
+        return config
 
     def build_env_spec(
         self,
@@ -6145,6 +6172,19 @@ class WritebackCollaborator(CoordinatorCollaborator):
             ``"fallback": "geak_harness"`` when only GEAK's own harness can
             deploy the candidate.
         """
+        from hyperloom.common.agentx_mode import native_agentx_optimization_session, native_agentx_session
+
+        if native_agentx_session(self.shared_state) and not native_agentx_optimization_session(self.shared_state):
+            # The native launcher has no optimizer-argv/overlay hook.  A GEAK
+            # rebench would therefore enqueue a grid candidate that can never
+            # be represented by the canonical AgentX harness.  Refuse here as
+            # well as at KERNEL dispatch so resumed/stale handbacks cannot
+            # create an un-runnable explore task.
+            return {
+                "skipped": True,
+                "reason": "unsupported_upstream_launcher_hook",
+            }
+
         benchmark_script = baseline_benchmark_script(self.shared_state)
         recipe_generation = int(getattr(self.shared_state, "working_recipe_generation", 0) or 0)
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
@@ -6177,6 +6217,31 @@ class WritebackCollaborator(CoordinatorCollaborator):
             return {"skipped": True, "reason": "geak_no_material"}
 
         from ..actions.executors._proposal_identity import effective_fingerprint
+
+        if native_agentx_optimization_session(self.shared_state):
+            from ..phases.geak_native_revalidation import prepare_source_revalidation
+            from ..phases.geak_rebench import geak_candidate_matches
+
+            pending_source = (self.shared_state.geak_pending or {}).get("native_review") or {}
+            if pending_source.get("params") and geak_candidate_matches(pending_source.get("candidate"), ps):
+                return dict(pending_source["params"])
+            source_params = {
+                "reason": reason,
+                "extra_server_args": ps_flags,
+                "extra_envs": dict(ps_envs),
+                **ps_controls,
+                **stack_base_params({**(self.shared_state.current_best or {}), **self._current_best_launch_config()}),
+                "config_path": self.shared_state.baseline_config_path,
+                "framework": self.shared_state.framework,
+                "model_path": self.shared_state.model_path,
+            }
+            self._inject_explore_runtime_params(source_params)
+            try:
+                source_params = prepare_source_revalidation(self.session_dir, ps, source_params, overlay=ps_overlay)
+            except (OSError, ValueError) as exc:
+                return {"skipped": True, "reason": "geak_native_source_invalid", "error": str(exc)}
+            if source_params is not None:
+                return source_params
 
         # An overlay that cannot load installs nothing, so the measured delta would belong to the flags alone; drop it
         # before the run so the row cannot be read as a kernel win.

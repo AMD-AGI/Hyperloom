@@ -786,6 +786,117 @@ def test_baseline_executor_rejects_bad_result_dir(tmp_path):
     assert "result_dir" in result["error"]
 
 
+@pytest.mark.asyncio
+async def test_legacy_agentx_baseline_keeps_candidate_runtime(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    checkout = tmp_path / "legacy-inferencex"
+    monkeypatch.setenv("INFERENCEX_PATH", str(checkout))
+    base = tmp_path / "legacy.yaml"
+    _write_yaml(base, framework="sglang")
+    state = SharedState(benchmark_mode="agentx", agentx_epoch=1, baseline_double_run=False)
+    executor = BaselineExecutor(default_config_path=base, session_dir=tmp_path, shared_state=state)
+    captured = {}
+
+    async def measure(**kwargs):
+        captured.update(kwargs)
+        return {"status": "succeeded", "output_throughput": 100.0, "submission_valid": True}
+
+    monkeypatch.setattr(executor, "_run_single_benchmark", measure)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.baseline.prepare_agentx_runtime", lambda **kwargs: None
+    )
+    runtime = {"path_prefix": "/candidate/bin", "pythonpath_prefix": "/candidate/python"}
+    ctx = _make_ctx({"output_dir": str(tmp_path / "run"), "runtime_override": runtime})
+    ctx.extra["shared_state"] = state
+
+    result = await executor(ctx)
+
+    assert result["status"] == "succeeded"
+    bench = yaml.safe_load(captured["config_path"].read_text(encoding="utf-8"))["benchmark"]
+    assert bench["benchmark_script"] == "aiperf_client.sh"
+    assert bench["envs"]["PATH"].split(":")[0] == "/candidate/bin"
+    assert bench["envs"]["PYTHONPATH"].split(":")[0] == "/candidate/python"
+    assert captured["inferencex_path"] == str(checkout)
+    assert "agentx" not in bench
+
+
+def test_native_agentx_rejects_runtime_override_before_materialization(tmp_path):
+    base = tmp_path / "agentx.yaml"
+    _write_yaml(base, framework="sglang")
+    state = SimpleNamespace(
+        benchmark_mode="agentx",
+        agentx_epoch=2,
+        model_path="/models/glm",
+    )
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=state,
+    )
+    ctx = _make_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "runtime_override": {
+                "path_prefix": "/candidate/bin",
+                "pythonpath_prefix": "/candidate/python",
+            },
+        }
+    )
+    ctx.extra["shared_state"] = state
+
+    with patch("hyperloom.orchestrator.actions.executors.baseline.materialize_config_with_envs") as materialize:
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "unsupported_upstream_launcher_hook"
+    assert result["output_dir"] == str(tmp_path / "ws")
+    materialize.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "mutation_params",
+    (
+        {"patches": [{"patch_file": "candidate.patch"}]},
+        {"warm_kernel_plan": [{"column": "gemm"}]},
+    ),
+)
+def test_native_agentx_rejects_mutation_replay_before_materialization(
+    tmp_path,
+    mutation_params,
+):
+    base = tmp_path / "agentx.yaml"
+    _write_yaml(base, framework="sglang")
+    state = SimpleNamespace(
+        benchmark_mode="agentx",
+        agentx_epoch=2,
+        model_path="/models/glm",
+    )
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=state,
+    )
+    ctx = _make_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            **mutation_params,
+        }
+    )
+    ctx.extra["shared_state"] = state
+
+    with patch("hyperloom.orchestrator.actions.executors.baseline.materialize_config_with_envs") as materialize:
+        result = _run(executor(ctx))
+
+    assert result["status"] == "skipped"
+    assert result["error_class"] == "unsupported_upstream_launcher_hook"
+    assert result["output_dir"] == str(tmp_path / "ws")
+    materialize.assert_not_called()
+
+
 # reference-script base layer (precedence + 0-degrade)
 def _fw_args(materialized: Path, env_name: str = "EXTRA_VLLM_ARGS") -> str:
     cfg = yaml.safe_load(materialized.read_text())

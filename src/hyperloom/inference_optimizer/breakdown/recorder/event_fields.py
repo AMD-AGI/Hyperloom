@@ -122,7 +122,10 @@ def graded_axes(source: Any) -> dict[str, Any]:
     from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, graded_axes_of
 
     axes = graded_axes_of(source)
-    return {key: float_or_none(axes.get(key)) for key in GRADED_AXIS_KEYS}
+    recorded = {key: float_or_none(axes.get(key)) for key in GRADED_AXIS_KEYS}
+    if "agentx_gpu_count" in axes:
+        recorded["agentx_gpu_count"] = axes["agentx_gpu_count"]
+    return recorded
 
 
 def summarize_hot_kernels(rows: Any) -> dict[str, Any]:
