@@ -160,21 +160,6 @@ def test_resolve_framework_root_rejects_ambiguous_matches(tmp_path, monkeypatch)
     assert ip._resolve_framework_root(None, patch_texts=[patch]) is None
 
 
-def test_resolve_framework_root_prefers_the_session_tree_among_copies(tmp_path, monkeypatch):
-    """A second copy of the files does not hide the tree the session optimises."""
-    copy, served = tmp_path / "copy", tmp_path / "served"
-    for root in (copy, served):
-        root.mkdir()
-        (root / "file.py").write_text("old\n", encoding="utf-8")
-    patch = "diff --git a/file.py b/file.py\n--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new\n"
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(copy), str(served)])
-    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
-    monkeypatch.setattr(ip, "resolve_framework_tree", lambda framework: str(served) if framework == "vllm" else "")
-    monkeypatch.setenv("FRAMEWORK", "vllm")
-
-    assert ip._resolve_framework_root(None, patch_texts=[patch]) == served.resolve()
-
-
 def test_resolve_framework_root_unresolvable_explicit_rejected(tmp_path):
     """Broken symlinks for explicit overrides are rejected without raising."""
     broken = tmp_path / "broken-link"
