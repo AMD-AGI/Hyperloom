@@ -338,14 +338,14 @@ class EnablementBuild(CoordinatorCollaborator):
         # (component,ref,gpu_arch,cmd) tuple has not been seen before (novel), reverted when it is a repeat.
         time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
         novelty_key: list[Any] | None = None
+        # A failed build booted nothing, so the advanced rows below carry no
+        # launch log: the round's recorded boot verdict stays the one to route on.
         if fc in time_classes:
-            new_log = str(state.enablement.launch_log or "")
             res = {
                 "enablement": True,
                 "status": "advanced",
                 "advanced": True,
                 "patches_applied": [],
-                "enablement_launch_log": new_log,
             }
         else:
             from .runtime.build_actions import TargetedBuildAction as _TBA, build_novelty_key as _bnk
@@ -359,13 +359,11 @@ class EnablementBuild(CoordinatorCollaborator):
                 res = {"enablement": True, "status": "reverted"}
                 novelty_key = None
             else:
-                new_log = str(state.enablement.launch_log or "")
                 res = {
                     "enablement": True,
                     "status": "advanced",
                     "advanced": True,
                     "patches_applied": [],
-                    "enablement_launch_log": new_log,
                 }
                 novelty_key = _key
         log.info(
