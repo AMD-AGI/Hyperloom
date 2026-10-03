@@ -28,17 +28,21 @@ from hyperloom.orchestrator.enablement.mandate import (
 
 
 _SGLANG = "https://github.com/sgl-project/sglang.git"
+_ARCH_LOG = "ValueError: Model architecture 'Glm5ForCausalLM' is not supported"
 
 
-def _req(log: str = "") -> EnablementRequest:
+def _req() -> EnablementRequest:
     return EnablementRequest.from_dict(
         {
             "framework": "sglang",
             "model": "zai-org/GLM-5",
             "repo_url": "https://github.com/sgl-project/sglang.git",
-            "launch_log": log or "ValueError: Model architecture 'Glm5ForCausalLM' is not supported",
         }
     )
+
+
+def _sig(log: str = "") -> FailureSignature:
+    return classify_failure(log or _ARCH_LOG)
 
 
 # --- authoring: build_mandate ----------------------------------------------
@@ -46,20 +50,20 @@ def _req(log: str = "") -> EnablementRequest:
 
 def test_mandate_always_lists_framework_and_rocm_hip_roots() -> None:
     """Default-on: both the framework and ROCm/HIP source roots are in scope."""
-    mandate = build_mandate(_req())
+    mandate = build_mandate(_req(), _sig())
     assert any("serving-framework" in h for h in mandate.source_root_hints)
     assert any("ROCm" in h for h in mandate.source_root_hints)
 
 
 def test_mandate_rocm_hip_root_present_for_hip_failure() -> None:
     """A HIP failure still carries the ROCm/HIP source root family (always allowed)."""
-    mandate = build_mandate(_req(log="RuntimeError: hipErrorNoBinaryForGpu"))
+    mandate = build_mandate(_req(), _sig("RuntimeError: hipErrorNoBinaryForGpu"))
     assert any("ROCm" in h for h in mandate.source_root_hints)
 
 
 def test_task_description_carries_failure_context() -> None:
     """The rendered mandate embeds model, failure class, and symbol."""
-    mandate = build_mandate(_req())
+    mandate = build_mandate(_req(), _sig())
     td = mandate.task_description
     assert "GLM-5" in td
     assert "missing_model_arch" in td
@@ -68,7 +72,7 @@ def test_task_description_carries_failure_context() -> None:
 
 def test_task_description_lists_candidate_refs() -> None:
     """Provided candidate refs appear in the mandate, best-first order preserved."""
-    mandate = build_mandate(_req(), candidate_refs=("PR:123", "PR:456"))
+    mandate = build_mandate(_req(), _sig(), candidate_refs=("PR:123", "PR:456"))
     td = mandate.task_description
     assert td.index("PR:123") < td.index("PR:456")
     assert mandate.candidate_refs == ("PR:123", "PR:456")
@@ -82,7 +86,7 @@ def test_task_description_lists_secondary_failure_classes() -> None:
         offending_file="model.py",
         secondary_kinds=("import_error", "not_implemented"),
     )
-    td = build_mandate(_req(), signature=sig).task_description
+    td = build_mandate(_req(), sig).task_description
     assert "SECONDARY FAILURE CLASSES" in td
     assert "import_error" in td
     assert "not_implemented" in td
@@ -91,7 +95,7 @@ def test_task_description_lists_secondary_failure_classes() -> None:
 
 def test_mandate_authorizes_and_requires_recording_env_setup() -> None:
     """Q3: the mandate authorizes installs AND tells the specialist to record them."""
-    td = build_mandate(_req()).task_description
+    td = build_mandate(_req(), _sig()).task_description
     assert "ENVIRONMENT SETUP" in td
     assert "pip install" in td
     assert "setup_commands" in td
@@ -101,7 +105,7 @@ def test_mandate_authorizes_and_requires_recording_env_setup() -> None:
 
 def test_invariants_present_and_mention_runnable_gate() -> None:
     """Every mandate carries the invariants; runnability (not perf) is explicit."""
-    mandate = build_mandate(_req())
+    mandate = build_mandate(_req(), _sig())
     assert mandate.invariants == ENABLEMENT_PATCH_INVARIANTS
     assert any("RUNNABILITY" in inv for inv in mandate.invariants)
     assert any("git apply --check" in inv for inv in mandate.invariants)
@@ -109,14 +113,14 @@ def test_invariants_present_and_mention_runnable_gate() -> None:
 
 def test_empty_candidate_refs_filtered() -> None:
     """Blank refs are dropped."""
-    mandate = build_mandate(_req(), candidate_refs=("", "PR:7", ""))
+    mandate = build_mandate(_req(), _sig(), candidate_refs=("", "PR:7", ""))
     assert mandate.candidate_refs == ("PR:7",)
 
 
 def test_source_context_rendered_when_provided() -> None:
     """A non-empty source_context is injected under a SOURCE CONTEXT block."""
     ctx = "  100| def resolve_arch(name):\n  101|     raise ValueError(name)"
-    mandate = build_mandate(_req(), source_context=ctx)
+    mandate = build_mandate(_req(), _sig(), source_context=ctx)
     td = mandate.task_description
     assert "SOURCE CONTEXT (near offending site):" in td
     assert "raise ValueError(name)" in td
@@ -124,7 +128,7 @@ def test_source_context_rendered_when_provided() -> None:
 
 def test_source_context_omitted_when_empty() -> None:
     """No SOURCE CONTEXT block is rendered when context is empty/blank."""
-    mandate = build_mandate(_req(), source_context="   ")
+    mandate = build_mandate(_req(), _sig(), source_context="   ")
     assert "SOURCE CONTEXT" not in mandate.task_description
 
 
@@ -172,7 +176,7 @@ def test_ladder_book_personalizes_from_signature_kind() -> None:
 
 def test_mandate_embeds_ladder_book() -> None:
     """The rendered mandate now carries the ladder methodology."""
-    td = build_mandate(_req()).task_description
+    td = build_mandate(_req(), _sig()).task_description
     assert "ENABLEMENT METHODOLOGY" in td
     assert "Rung 5" in td
 
@@ -239,12 +243,7 @@ def test_empty_title_scores_zero() -> None:
 
 
 def _roots_req(framework: str = "vllm") -> EnablementRequest:
-    return EnablementRequest(
-        framework=framework,
-        model="deepseek-v4",
-        repo_url="",
-        launch_log="model arch not supported",
-    )
+    return EnablementRequest(framework=framework, model="deepseek-v4", repo_url="")
 
 
 def _roots_sig() -> FailureSignature:
@@ -307,7 +306,7 @@ def test_build_mandate_uses_resolved_roots_in_task_description():
             return_value="vllm=ok",
         ),
     ):
-        mandate = build_mandate(_roots_req(), signature=_roots_sig())
+        mandate = build_mandate(_roots_req(), _roots_sig())
     assert "/sgl-workspace/vllm" in mandate.task_description
     assert any("/sgl-workspace/vllm" in h for h in mandate.source_root_hints)
 
@@ -316,7 +315,7 @@ def test_build_mandate_explicit_root_hints_override_discovery():
     """Caller-supplied source_root_hints bypass _resolve_actual_root_hints."""
     mandate = build_mandate(
         _roots_req(),
-        signature=_roots_sig(),
+        _roots_sig(),
         source_root_hints=["/custom/root"],
     )
     assert "/custom/root" in mandate.source_root_hints
@@ -328,7 +327,7 @@ def test_build_mandate_falls_back_gracefully_when_no_roots():
         "hyperloom.orchestrator.enablement.mandate.resolve_kernel_search_roots",
         return_value=(),
     ):
-        mandate = build_mandate(_roots_req(), signature=_roots_sig())
+        mandate = build_mandate(_roots_req(), _roots_sig())
     assert _FRAMEWORK_ROOT_HINT in mandate.source_root_hints
     assert _FRAMEWORK_ROOT_HINT in mandate.task_description
 
@@ -342,10 +341,9 @@ def test_enablement_setup_guidance_in_mandate() -> None:
         framework="vllm",
         model="GLM-5.2",
         repo_url="https://github.com/ROCm/vllm.git",
-        launch_log="ValueError: weights were not initialized from checkpoint",
         gpu_type="mi300x",
     )
-    m = build_mandate(req)
+    m = build_mandate(req, classify_failure("ValueError: weights were not initialized from checkpoint"))
     assert "ENVIRONMENT SETUP" in m.task_description
     assert "setup_commands" in m.task_description
     assert ENABLEMENT_SETUP_GUIDANCE
@@ -360,13 +358,15 @@ def test_enablement_progress_contract_in_mandate() -> None:
         framework="vllm",
         model="deepseek-ai-DeepSeek-V4-Flash",
         repo_url="https://github.com/ROCm/vllm.git",
-        launch_log=(
+        gpu_type="mi355x",
+    )
+    m = build_mandate(
+        req,
+        classify_failure(
             "The checkpoint you are trying to load has model type `deepseek_v4` "
             "but Transformers does not recognize this architecture."
         ),
-        gpu_type="mi355x",
     )
-    m = build_mandate(req)
     assert "PROGRESS DELIVERABLE" in m.task_description
     # The contract must explicitly permit an advance-one-step patch and reserve an empty proposal_set for "cannot
     # advance even one step".

@@ -184,7 +184,17 @@ FRAMEWORK_CRITIC_DENIED_STATUS: str = "critic_denied"
 
 
 def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> None:
-    """Copy eval-origin trigger context from specialist params to the integrate task."""
+    """Copy the round's enablement context from specialist params to the integrate task.
+
+    The dispatched verdict and the pre-patch boot observation travel on every
+    enablement round; the eval-origin trigger context only on an eval-origin one.
+    """
+    signature = src.get("enablement_failure_signature")
+    if isinstance(signature, dict) and signature:
+        dst["enablement_failure_signature"] = dict(signature)
+    before_path = str(src.get("enablement_before_observation_path") or "")
+    if before_path:
+        dst["enablement_before_observation_path"] = before_path
     origin = str(src.get("enablement_origin") or "")
     if not origin:
         return
@@ -2707,10 +2717,6 @@ class FrameworkPhase(CoordinatorCollaborator):
         if bool(spec_params.get("enablement")):
             integrate_params["enablement"] = True
             _forward_enablement_carriers(spec_params, integrate_params)
-            # Forward the pre-patch boot observation for the runnable gate.
-            before_path = str(spec_params.get("enablement_before_observation_path") or "")
-            if before_path:
-                integrate_params["enablement_before_observation_path"] = before_path
             # Merge stacked base setup commands with any NEW setup_commands the
             # specialist proposed (e.g. a stack upgrade), so a patch-bearing
             # enablement round replays the install step instead of silently
@@ -2853,9 +2859,6 @@ class FrameworkPhase(CoordinatorCollaborator):
         if bool(spec_params.get("enablement")):
             integrate_params["enablement"] = True
             _forward_enablement_carriers(spec_params, integrate_params)
-            before_path = str(spec_params.get("enablement_before_observation_path") or "")
-            if before_path:
-                integrate_params["enablement_before_observation_path"] = before_path
             # Merge the stacked base setup commands with any NEW setup_commands the
             # specialist just proposed in this deliverable (e.g. a stack upgrade),
             # so a config-lever-only enablement round actually replays the install

@@ -20,7 +20,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
@@ -54,6 +54,8 @@ from ...state.shared_state import (
 )
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 from hyperloom.common.env import is_truthy
+from hyperloom.common.failure_signature import CapabilityGap, FailureSignature
+from hyperloom.common.github_urls import repo_slug
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import VERDICT_KEEP
 from ...bringup import load_boot_observation, observation_summary, verdict_of, write_boot_observation
@@ -215,12 +217,62 @@ def resolve_patch_source(params: Mapping[str, Any]) -> str:
 
 _LAUNCH_ONLY_MUTATION_FIELDS: tuple[str, ...] = (
     "patches",
-    "localization_candidate",
-    "runtime_candidate",
     "artifacts",
     "config_changes",
     "enablement_setup_commands",
 )
+
+
+def _acquiring_round(params: dict[str, Any]) -> bool:
+    """True for an enablement round, except a launch-only bench.
+
+    A launch-only bench carries a pre-built ``runtime_override`` and may
+    acquire nothing of its own.
+    """
+    return bool(params.get("enablement")) and not params.get("enablement_launch_only")
+
+
+def _enablement_gap(params: dict[str, Any]) -> CapabilityGap | None:
+    """The round's capability gap, when it calls for code the stack lacks.
+
+    Read from the verdict the round was dispatched on; None for a round that
+    acquires nothing and for a gap no code closes.
+    """
+    if not _acquiring_round(params):
+        return None
+    raw = params.get("enablement_failure_signature")
+    if not isinstance(raw, dict) or not raw:
+        return None
+    gap = CapabilityGap.from_signature(FailureSignature.from_dict(raw))
+    return gap if gap.requires_code_acquisition else None
+
+
+def _kept_stack_action(attempt: IntegrateAttempt) -> dict[str, Any]:
+    """The stack action the last kept round promoted, or ``{}`` when none was kept."""
+    return getattr(getattr(attempt.shared_state, "enablement", None), "kept_stack_action", None) or {}
+
+
+def _first_ref_in_repo(refs: Iterable[Any], repo_url: str) -> str:
+    """The best-ranked candidate ref that points at ``repo_url``.
+
+    Discovery ranks bridge-repo PRs (aiter, HIP, ROCm) alongside the
+    framework's own, and a diff is only applicable to the tree it was cut from.
+    A bare ``"PR:1234"`` names no repo and is the framework's by construction.
+    """
+    try:
+        want = repo_slug(repo_url)
+    except ValueError:
+        return ""
+    for raw in refs:
+        ref = str(raw).strip()
+        if not ref:
+            continue
+        try:
+            if repo_slug(ref) == want:
+                return ref
+        except ValueError:
+            return ref
+    return ""
 
 
 def _established_enablement_config(params: dict[str, Any], shared_state: Any) -> tuple[str, dict[str, str]]:
@@ -2509,31 +2561,38 @@ class IntegratePatchExecutor:
         params: dict[str, Any],
         specialist_task_id: str,
     ) -> dict[str, Any] | None:
-        """Provision the attempt-scoped runtime from ``params['runtime_candidate']``.
+        """Provision the attempt-scoped runtime this round boots on (Rung 3).
 
-        No-op when no candidate is present or in multi-node mode.
-        Runs a disk preflight, delegates provision+probe to the framework
-        adapter (off the event loop; an in-flight pip install is not killed
-        if the await is cancelled), and on success stores the resolved runtime on
-        the attempt for the gate to
+        The runtime the last kept round promoted is re-provisioned whatever this
+        round's gap, since the rest of the stack was proven on it. With none
+        kept, the framework adapter builds a fresh candidate, which only a gap
+        calling for code yields; no-op otherwise. Runs a disk preflight,
+        delegates provision+probe to the framework adapter (off the event loop;
+        an in-flight pip install is not killed if the await is cancelled), and on
+        success stores the resolved runtime on the attempt for the gate to
         activate via the YAML-layer ``runtime_override``. Returns an early-exit
         ``reverted`` dict on any provision failure (no patch side effects yet),
         or ``None`` to continue.
         """
-        raw = params.get("runtime_candidate")
-        if not isinstance(raw, dict) or not raw:
-            return None
-
-        from ._multi_node_env import is_multi_node
-
-        if is_multi_node():
-            log.info("integrate_patch: skipping runtime provision in multi-node mode")
+        if not _acquiring_round(params):
             return None
 
         from ...enablement.runtime.adapters import get_adapter
         from ...enablement.runtime.stack_actions import EnablementStackAction
 
-        action = EnablementStackAction.from_state(raw)
+        kept = _kept_stack_action(attempt)
+        if kept:
+            action = EnablementStackAction.from_state(kept)
+        else:
+            gap = _enablement_gap(params)
+            if gap is None:
+                return None
+            framework = str(getattr(attempt.shared_state, "framework", "") or "").strip().lower()
+            gpu_type = str(getattr(attempt.shared_state, "gpu_type", "") or "").strip().lower()
+            action = get_adapter(framework).build_stack_action(gap, gpu_type=gpu_type)
+            if action is None:
+                return None
+
         attempt_dir = (
             enablement_stacks_dir(self.session_dir)
             / (action.framework or "unknown")
@@ -2626,30 +2685,39 @@ class IntegratePatchExecutor:
         params: dict[str, Any],
         specialist_task_id: str,
     ) -> dict[str, Any] | None:
-        """Fetch/synthesize a localization diff and stage it for _stage_apply.
+        """Fetch/synthesize a localization diff and stage it for _stage_apply (Rung 4).
 
-        No-op when no ``localization_candidate`` is present or in multi-node
-        mode. Fetches the merged-PR / vendored diff (post-Critic), rejects a
+        No-op when the round's gap needs no code acquisition, no bridging
+        candidate in the framework's own repo was discovered, or the framework
+        adapter cannot localize.
+        Fetches the merged-PR / vendored diff (post-Critic), rejects a
         compiled / build-backend closure to a clean revert, and writes the diff
         to a patch file recorded on ``attempt.localization_patches`` which
         ``_stage_apply`` prepends to the patch set. Returns an early-exit
         ``reverted`` dict on any gate/fetch failure (no tree mutation yet), or
         ``None`` to continue.
         """
-        raw = params.get("localization_candidate")
-        if not isinstance(raw, dict) or not raw:
+        gap = _enablement_gap(params)
+        if gap is None:
             return None
 
-        from ._multi_node_env import is_multi_node
+        from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
-        if is_multi_node():
-            log.info("integrate_patch: skipping localization in multi-node mode")
-            return None
-
+        from ...enablement.runtime.adapters import get_adapter
         from ...enablement.runtime.localization import build_localization_diff
-        from ...enablement.runtime.stack_actions import EnablementStackAction
 
-        action = EnablementStackAction.from_state(raw)
+        framework = str(getattr(attempt.shared_state, "framework", "") or "").strip().lower()
+        repo_url = repo_url_for_framework(framework)
+        if not repo_url:
+            return None
+        enablement = getattr(attempt.shared_state, "enablement", None)
+        ref = _first_ref_in_repo(getattr(enablement, "candidate_refs", None) or (), repo_url)
+        if not ref:
+            return None
+
+        action = get_adapter(framework).build_localization_action(gap, candidate_ref=ref, repo_url=repo_url)
+        if action is None:
+            return None
 
         from hyperloom.agents.framework.sources import github as _gh
 
@@ -2692,7 +2760,7 @@ class IntegratePatchExecutor:
         patch_path.write_text(diff_text, encoding="utf-8")
 
         attempt.localization_patches = [patch_path]
-        attempt.stack_action = action
+        attempt.localization_action = action
         attempt.localization_touched = list(touched_paths)
         log.info(
             "integrate_patch: localization staged %s (%d file(s), kind=%s)",
@@ -2858,12 +2926,16 @@ class IntegratePatchExecutor:
             }
 
         _setup_ran = bool(setup_result.get("applied"))
+        # A runtime this round acquired changes what the next boot executes; a
+        # re-provisioned kept one is the stack the last KEEP was already graded on.
+        acquired_runtime = bool(attempt.attempt_venv_root) and not _kept_stack_action(attempt)
         if (
             not patch_paths
             and not proposal_extra_args
             and not proposal_extra_envs
             and not artifact_specs
             and not _setup_ran
+            and not acquired_runtime
         ):
             # Launch-only mode: skip the no-patches early-return and fall through to bench.
             if params.get("enablement_launch_only"):
@@ -2902,11 +2974,20 @@ class IntegratePatchExecutor:
                 _no_patches["patches_ungrounded"] = ungrounded
             return _no_patches
 
-        explicit_framework_root = str(params.get("framework_source_root") or "").strip() or None
-        framework_root = _resolve_framework_root(
-            explicit_framework_root,
-            patch_paths=patch_paths,
-            recorded_root=_sole_patch_root(done_payload, patch_paths, specialist_workspace=specialist_workspace),
+        # An acquired runtime is what the boot resolves, so the shared framework
+        # tree is not what the server imports: this round's patches land in the
+        # tree it runs, and the root the specialist authored against does not
+        # describe that tree.
+        runtime_source_root = attempt.runtime_source_root
+        explicit_framework_root = runtime_source_root or str(params.get("framework_source_root") or "").strip() or None
+        framework_root = (
+            resolved_explicit_root(runtime_source_root)
+            if runtime_source_root
+            else _resolve_framework_root(
+                explicit_framework_root,
+                patch_paths=patch_paths,
+                recorded_root=_sole_patch_root(done_payload, patch_paths, specialist_workspace=specialist_workspace),
+            )
         )
         if patch_paths and framework_root is None:
             _lane_early = _derive_lane(params)
@@ -3629,14 +3710,13 @@ class IntegratePatchExecutor:
             }
             kept_result["enablement_active_runtime"] = provision_result.runtime.to_state()
             kept_result["installed_versions"] = dict(getattr(provision_result, "installed_versions", {}) or {})
-        # Editable-refresh the localized closure + snapshot a manifest that
-        # survives rearm so the closure is recorded and not re-fetched.
+        # Snapshot a manifest of the localized closure that survives rearm, so
+        # the closure is recorded and not re-fetched.
         manifest = await asyncio.to_thread(
             self._finalize_localization_keep,
             attempt,
             framework_root=framework_root,
             specialist_task_id=specialist_task_id,
-            provision_result=provision_result,
         )
         if manifest:
             kept_result["enablement_localization_manifest"] = manifest
@@ -4218,37 +4298,16 @@ class IntegratePatchExecutor:
         *,
         framework_root: Path | None,
         specialist_task_id: str,
-        provision_result: Any,
     ) -> dict[str, Any]:
-        """Editable-refresh a localized closure and snapshot its manifest.
+        """Record a localization manifest via :func:`snapshot_source_layer`.
 
-        Blocking (editable-refresh up to 600s); call via ``asyncio.to_thread``.
-
-        Runs the framework adapter's editable-refresh argv against the attempt
-        interpreter (best-effort; skipped when there is no attempt runtime or no
-        refresh argv), then records a localization manifest via
-        :func:`snapshot_source_layer`. Returns the manifest dict (empty when no
-        localization ran).
+        Blocking (filesystem copies); call via ``asyncio.to_thread``. Returns the
+        manifest dict, empty when no localization ran.
         """
         touched = attempt.localization_touched
         if not touched or framework_root is None:
             return {}
-        action = attempt.stack_action
-        # Editable-refresh so localized Python changes take effect in the attempt
-        # runtime (no-op for plain wheel trees like atom).
-        try:
-            from ...enablement.runtime.adapters import get_adapter
-
-            venv_py = ""
-            if provision_result is not None and getattr(provision_result, "ok", False):
-                venv_py = str(getattr(provision_result.runtime, "python_path", "") or "")
-            fw = str(getattr(action, "framework", "") or "")
-            argv = get_adapter(fw).editable_refresh_argv(venv_py, str(framework_root)) if venv_py else None
-            if argv:
-                subprocess.run(argv, capture_output=True, text=True, timeout=600, check=False)
-        except Exception:
-            log.debug("integrate_patch: localization editable-refresh failed", exc_info=True)
-        # Manifest via the existing snapshot mechanism.
+        action = attempt.localization_action
         try:
             from ...source_snapshot import snapshot_source_layer
 
