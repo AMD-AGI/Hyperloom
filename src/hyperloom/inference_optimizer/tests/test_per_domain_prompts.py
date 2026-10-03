@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.common.failure_signature import classify_failure
 from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAIN_KEYS,
     SPECIALIST_DOMAINS,
@@ -17,6 +18,11 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
 )
+
+# Every enablement round is dispatched on a classified verdict.
+_DISPATCHED = classify_failure(
+    "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
+).to_dict()
 
 
 def _build(domain_key: str) -> str:
@@ -30,6 +36,7 @@ def _build(domain_key: str) -> str:
         gap_symptom="example symptom",
         gap_layer=domain.layer,
         workspace_path=f"/tmp/test/{domain_key}",
+        enablement_failure_signature=_DISPATCHED,
     )
     system, user = build_specialist_prompts(inp)
     return system + "\n" + user
@@ -201,6 +208,7 @@ def _build_split(domain_key: str) -> tuple[str, str]:
         warm_start_pitfalls=[{"attrs": {"description": "prior revert pitfall"}}],
         kb_subgraph={"nodes": ["x"]},
         workspace_path=f"/tmp/test/{domain_key}",
+        enablement_failure_signature=_DISPATCHED,
     )
     return build_specialist_prompts(inp)
 
@@ -252,6 +260,7 @@ def test_enablement_mandate_carries_the_dispatch_evidence():
         framework="vllm",
         enablement_source_context=weights,
         enablement_candidate_refs=("ROCm/vllm#123", "vllm-project/vllm#456"),
+        enablement_failure_signature=_DISPATCHED,
     )
     _system, user = build_specialist_prompts(inp)
     assert "SOURCE CONTEXT" in user
@@ -259,6 +268,31 @@ def test_enablement_mandate_carries_the_dispatch_evidence():
     assert "CANDIDATE BRIDGING" in user
     assert "ROCm/vllm#123" in user
     assert "vllm-project/vllm#456" in user
+
+
+def test_enablement_mandate_renders_the_dispatched_signature():
+    """The verdict the round was dispatched on reaches the prompt verbatim; the builder never re-classifies a log to recover it."""
+    domain = get_domain("enablement_specialist")
+    assert domain is not None
+    signature = classify_failure(
+        'Traceback (most recent call last):\n  File "/opt/vllm/vllm/model_executor/models/registry.py", line 7, in resolve\n'
+        "ValueError: Model architectures ['GlmForCausalLM'] are not supported for now."
+    )
+    inp = SpecialistPromptInputs(
+        task_id="task-enablement-signature",
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id="gap.enablement.missing_arch",
+        gap_symptom="boot failed",
+        gap_layer=domain.layer,
+        gap_evidence={"model": "zai-org/GLM-5"},
+        framework="vllm",
+        enablement_failure_signature=signature.to_dict(),
+    )
+    _system, user = build_specialist_prompts(inp)
+    assert "FAILURE CLASS: missing_model_arch" in user
+    assert "/opt/vllm/vllm/model_executor/models/registry.py" in user
+    assert "GlmForCausalLM" in user
 
 
 def test_enablement_mandate_omits_evidence_headers_when_not_supplied():
@@ -1168,6 +1202,7 @@ def test_enablement_ladder_rendered_exactly_once():
         framework="vllm",
         # notes is empty (no stacked patches, no build failure)
         notes="",
+        enablement_failure_signature=classify_failure("vllm cannot launch ModelFoo: unknown").to_dict(),
     )
     _, user = build_specialist_prompts(inp)
     count = user.count("ENABLEMENT METHODOLOGY")

@@ -925,10 +925,13 @@ class SpecialistPromptInputs:
     # the static_recon_specialist dispatch.
     static_recon_checklist: str = ""
 
-    # Enablement dispatch evidence, folded into the §1b mandate. Both are empty
-    # for every non-enablement domain, and the mandate degrades gracefully.
+    # Enablement dispatch evidence, folded into the §1b mandate. Empty for
+    # every non-enablement domain; the mandate omits whichever is empty.
     enablement_source_context: str = ""
     enablement_candidate_refs: tuple[str, ...] = ()
+    # The serialized FailureSignature the round was dispatched on; required for
+    # the enablement domain, empty for every other.
+    enablement_failure_signature: dict[str, Any] = field(default_factory=dict)
     # Env / server-arg layers prior advanced rounds accepted; the bench for this
     # round launches with them, so the mandate has to name them.
     enablement_accepted_config: dict[str, Any] = field(default_factory=dict)
@@ -2329,10 +2332,10 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
 def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     """Render the per-task enablement mandate + ladder book into the user prompt.
 
-    Classifies the failure carried in ``gap_symptom`` / ``gap_evidence`` and
-    renders the mandate's ``task_description`` (which embeds the ladder book) from
-    ``framework_agent.enablement_ops.build_mandate``. Kept in the user prompt so
-    the cached system prompt stays task-independent.
+    Renders the mandate's ``task_description`` (which embeds the ladder book)
+    from the verdict the dispatch was decided on, carried verbatim in
+    ``enablement_failure_signature``. Kept in the user prompt so the cached
+    system prompt stays task-independent.
 
     The dispatch's own evidence — source lines near the offending site (plus the
     checkpoint weight inventory on a weight-init failure) and the ranked bridging
@@ -2346,7 +2349,7 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     Returns:
         list[str]: The enablement-playbook section lines.
     """
-    from hyperloom.common.failure_signature import EnablementRequest
+    from hyperloom.common.failure_signature import EnablementRequest, FailureSignature
     from hyperloom.orchestrator.enablement.mandate import build_mandate
 
     model = str((inp.gap_evidence or {}).get("model") or "").strip()
@@ -2354,11 +2357,11 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
         framework=(inp.framework or "").strip().lower(),
         model=model or "(target model)",
         repo_url="",
-        launch_log=inp.gap_symptom or "",
         gpu_type=(inp.gpu_type or "").strip().lower(),
     )
     mandate = build_mandate(
         req,
+        FailureSignature.from_dict(inp.enablement_failure_signature),
         candidate_refs=inp.enablement_candidate_refs,
         source_context=inp.enablement_source_context,
     )

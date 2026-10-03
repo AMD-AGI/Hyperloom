@@ -102,7 +102,6 @@ def _stub_external_integrate_operations(monkeypatch):
         lambda _framework: SimpleNamespace(
             provision=forbidden,
             probe=forbidden,
-            editable_refresh_argv=forbidden,
             source_import_root=lambda root: root,
         ),
     )
@@ -494,7 +493,12 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
     from hyperloom.agents.framework import isolation
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip
     from hyperloom.orchestrator.enablement.runtime import adapters
-    from hyperloom.orchestrator.enablement.runtime.stack_actions import FrameworkRuntime, ProvisionResult
+    from hyperloom.common.failure_signature import classify_failure
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import (
+        EnablementStackAction,
+        FrameworkRuntime,
+        ProvisionResult,
+    )
 
     session = tmp_path / "session"
     _write_specialist_workspace(session, "spec-first", done_payload_override={"patches_written": []})
@@ -512,7 +516,18 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
 
     monkeypatch.setattr(isolation, "disk_preflight", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        adapters, "get_adapter", lambda _framework: SimpleNamespace(provision=provision, probe=lambda *_args: True)
+        adapters,
+        "get_adapter",
+        lambda _framework: SimpleNamespace(
+            build_stack_action=lambda _gap, **_kw: EnablementStackAction(
+                kind="runtime_candidate",
+                framework="vllm",
+                gap_id="gap.enablement.missing_model_arch",
+                capability="missing_model_arch",
+            ),
+            provision=provision,
+            probe=lambda *_args: True,
+        ),
     )
     monkeypatch.setattr(ip, "_candidate_mutation_roots", lambda **_kwargs: [])
     monkeypatch.setattr(ip, "_resolve_framework_root", lambda *_args, **_kwargs: None)
@@ -528,7 +543,10 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
         "first",
         {
             "specialist_task_id": "spec-first",
-            "runtime_candidate": {"kind": "runtime_candidate", "framework": "vllm"},
+            "enablement": True,
+            "enablement_failure_signature": classify_failure(
+                "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
+            ).to_dict(),
             "extra_envs": {"VLLM_USE_AITER": "1"},
             "apply_only": True,
         },
