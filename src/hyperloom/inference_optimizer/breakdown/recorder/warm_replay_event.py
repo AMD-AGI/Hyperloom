@@ -69,9 +69,7 @@ APPLY_PATCH = "patch"
 
 # The gates the arc can end on, in the order the settling applies them.
 # Constants because assembly selects on them, so a consumer reading "which gate
-# ended this" must not match on wording. The historical reproduce bar is not
-# among them: it never rejects, so a gate row for it would make ``blocked_by``
-# name the reason a successful arc ended. It lives in the verdict block.
+# ended this" must not match on wording.
 GATE_TPUT_VALID = "tput_valid"
 GATE_QUALITY = "quality"
 GATE_ACCURACY = "accuracy"
@@ -171,8 +169,6 @@ def _verdict(settled: Mapping[str, Any]) -> dict[str, Any]:
         "reason": str(settled.get("reason") or ""),
         "error_class": str(settled.get("error_class") or ""),
         "keep_threshold_pct": _float_or_none(settled.get("keep_threshold_pct")),
-        "below_historical_reproduce_pct": bool(settled.get("below_historical_reproduce_pct")),
-        "historical_reproduce_bar_pct": _float_or_none(settled.get("historical_reproduce_bar_pct")),
         "settled_at": str(settled.get("settled_at") or ""),
     }
 
@@ -196,7 +192,6 @@ class WarmReplayEventRecorder:
         donor: Mapping[str, Any] | None = None,
         expected_gain_pct: Any = None,
         confidence: Any = None,
-        min_reproduce_pct: Any = None,
         session_baseline_tput: Any = None,
         kernel_count: Any = None,
         recipe_suppressed: Any = None,
@@ -230,7 +225,6 @@ class WarmReplayEventRecorder:
             "donor": _as_dict(donor) or None,
             "expected_gain_pct": _float_or_none(expected_gain_pct),
             "confidence": _float_or_none(confidence),
-            "min_reproduce_pct": _float_or_none(min_reproduce_pct),
             "session_baseline_tput": _float_or_none(session_baseline_tput),
             "kernel_count": None if kernel_count is None else int(kernel_count),
             "recipe_suppressed": None if recipe_suppressed is None else bool(recipe_suppressed),
@@ -592,7 +586,6 @@ def make_warm_replay_recorder(
     donor: Mapping[str, Any] | None = None,
     expected_gain_pct: Any = None,
     confidence: Any = None,
-    min_reproduce_pct: Any = None,
     session_baseline_tput: Any = None,
     kernel_count: Any = None,
     recipe_suppressed: Any = None,
@@ -616,7 +609,6 @@ def make_warm_replay_recorder(
         donor=donor,
         expected_gain_pct=expected_gain_pct,
         confidence=confidence,
-        min_reproduce_pct=min_reproduce_pct,
         session_baseline_tput=session_baseline_tput,
         kernel_count=kernel_count,
         recipe_suppressed=recipe_suppressed,

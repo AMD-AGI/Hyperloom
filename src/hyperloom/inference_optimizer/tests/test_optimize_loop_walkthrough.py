@@ -39,13 +39,13 @@ def _coordinator(session_dir: Path):
             "critic": MockCriticBackend(),
         },
     )
-    coord.sub.register_executor("kernel_agent", coord._run_kernel_agent)
+    coord.sub.register_executor("kernel_agent", coord.phase_kernel.run_agent)
     return coord
 
 
 async def _settle_unjoined_actions(coord: Any) -> None:
     """Let the actions the pump dispatched without joining run to completion."""
-    handles = [entry.atask for entry in coord._inflight_actions.values()]
+    handles = [entry.atask for entry in coord.dispatcher._inflight_actions.values()]
     if handles:
         await asyncio.gather(*handles)
 
@@ -142,6 +142,7 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(
                 fingerprint=f"fp-{i}",
                 variant_name=f"variant-{i}",
                 outcome="REVERT",
+                adopted=False,
                 gain_pct=0.01,
                 before_tput=1500.0,
                 after_tput=1500.15,

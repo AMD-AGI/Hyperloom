@@ -114,8 +114,6 @@ async def test_e2e_mock_critic_closes_proposal_loop(session_dir):
         approved = [m for m in approved_decisions if m.payload.get("kind") == "approved_proposal"]
         assert approved, "expected at least one approved_proposal decision"
         assert approved[0].payload["action_name"] == "baseline"
-
-        pending = list(c.state.pending_proposals.values())
-        assert pending and pending[0].verdict == "approve"
+        # Decided proposals are removed from pending_proposals on verdict; verify via bus.
     finally:
         await c.stop()

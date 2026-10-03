@@ -70,19 +70,19 @@ def test_baseline_allowed_without_target_analysis(session_dir):
         session_dir,
         backends=_backends_full(),
     )
-    assert coord._sequence_denial_for_action("baseline") is None
-    assert coord._sequence_denial_for_action("target_analysis") is None
+    assert coord.dispatcher._sequence_denial_for_action("baseline") is None
+    assert coord.dispatcher._sequence_denial_for_action("target_analysis") is None
 
 
 def test_baseline_first_still_blocks_other_actions(session_dir):
     """With baseline_tput == 0, ``explore`` is denied for baseline (not target_analysis)."""
     coord = Coordinator(session_dir, backends=_backends_full())
-    denied = coord._sequence_denial_for_action("explore")
+    denied = coord.dispatcher._sequence_denial_for_action("explore")
     assert isinstance(denied, PolicyDenied)
     assert denied.rule == "execution_order"
     assert "baseline must run first" in str(denied)
-    assert coord._sequence_denial_for_action("baseline") is None
-    assert coord._sequence_denial_for_action("target_analysis") is None
+    assert coord.dispatcher._sequence_denial_for_action("baseline") is None
+    assert coord.dispatcher._sequence_denial_for_action("target_analysis") is None
 
 
 def test_integrate_gate_inactive_without_keep(session_dir):
@@ -166,7 +166,7 @@ def test_pending_keep_no_longer_blocks_other_actions(session_dir):
     )
     assert coord.shared_state.next_pending_keep_kernel_id() == "k-rmsnorm"
     for action in ("explore", "sweep", "integrate", "report"):
-        assert coord._sequence_denial_for_action(action) is None, (
+        assert coord.dispatcher._sequence_denial_for_action(action) is None, (
             f"{action!r} must not be sequence-denied by a pending KEEP"
         )
 
@@ -202,7 +202,7 @@ def test_report_allowed_when_hot_reusable_kernels_untried(session_dir):
     )
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
     coord.shared_state.explore_attempts = [{"variant_name": "x"}]
-    assert coord._sequence_denial_for_action("report") is None
+    assert coord.dispatcher._sequence_denial_for_action("report") is None
     assert coord.shared_state.untried_hot_reusable_kernels()
 
 
@@ -235,7 +235,7 @@ def test_report_always_allowed_regardless_of_hot_kernels(session_dir):
         ],
     )
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
-    assert coord._sequence_denial_for_action("report") is None
+    assert coord.dispatcher._sequence_denial_for_action("report") is None
 
 
 def test_trace_analyze_gate_does_not_block_explore_actions(session_dir):
@@ -247,7 +247,7 @@ def test_trace_analyze_gate_does_not_block_explore_actions(session_dir):
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
     for action in ("explore", "sweep", "report", "profile", "roofline"):
-        denied = coord._sequence_denial_for_action(action)
+        denied = coord.dispatcher._sequence_denial_for_action(action)
         if denied is None:
             continue
         assert "trace_analyze must run first" not in str(denied), (
@@ -265,7 +265,7 @@ def test_run_optimization_request_no_longer_blocked_by_stale_trace_analyze(
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
-    assert coord._sequence_denial_for_request("kernel_agent", "run_optimization") is None
+    assert coord.dispatcher.sequence_denial_for_request("kernel_agent", "run_optimization") is None
 
 
 def test_trace_analyze_request_itself_passes(session_dir):
@@ -276,7 +276,7 @@ def test_trace_analyze_request_itself_passes(session_dir):
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
-    assert coord._sequence_denial_for_request("kernel_agent", "trace_analyze") is None
+    assert coord.dispatcher.sequence_denial_for_request("kernel_agent", "trace_analyze") is None
 
 
 def test_legacy_select_kernels_request_kind_no_longer_recognised(session_dir):
@@ -304,4 +304,4 @@ def test_trace_analyze_gate_clears_run_opt_request_when_cache_fresh(session_dir)
         "trace_input": "/tmp/profile.tar.gz",
         "candidates_path": "/tmp/cands.json",
     }
-    assert coord._sequence_denial_for_request("kernel_agent", "run_optimization") is None
+    assert coord.dispatcher.sequence_denial_for_request("kernel_agent", "run_optimization") is None

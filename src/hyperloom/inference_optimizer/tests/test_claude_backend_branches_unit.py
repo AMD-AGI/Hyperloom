@@ -15,7 +15,6 @@ import pytest
 
 from hyperloom.orchestrator.roles import claude as cl
 from hyperloom.orchestrator.roles.base import BackendError
-from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
 
 
 # ---- SDK fakes ------------------------------------------------------------
@@ -217,13 +216,13 @@ async def test_run_idle_timeout_allows_slow_but_live_stream():
     assert len(res.intents) == 4
 
 
-# ---- run(): no-intent raises ----------------------------------------------
-async def test_run_no_intent_raises():
+# ---- run(): no intents ----------------------------------------------------
+async def test_run_without_intents_returns_an_empty_result():
     msg = _Msg(content=[TextBlock("just text")], result="hi")
     b = _backend(capture_turn_diagnostics=True)
     b.sdk_query_factory = _query([msg])
-    with pytest.raises(NoIntentEmitted):
-        await b.run("hi")
+    result = await b.run("hi")
+    assert result.intents == []
     diag = b.get_turn_diagnostic()
     assert diag["outcome"] == "no_intent"
     assert diag["raw_text"] == "hi"
@@ -234,7 +233,7 @@ async def test_run_skips_diagnostics_when_not_requested():
     msg = _Msg(content=[TextBlock("just text")], result="hi")
     b = _backend()
     b.sdk_query_factory = _query([msg])
-    await b.run("hi", allow_no_intent=True)
+    await b.run("hi")
     assert b.get_turn_diagnostic() == {}
 
 
@@ -256,7 +255,7 @@ async def test_invoke_error_result_success_with_intents():
     msg = _Msg(content=[_emit_tool_block()])
     b = _backend()
     b.sdk_query_factory = _query([msg], raise_exc=Exception("error result: success"))
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert len(res.intents) == 1
 
 
@@ -264,7 +263,7 @@ async def test_invoke_error_result_success_no_intents():
     msg = _Msg(content=[TextBlock("hello")])
     b = _backend()
     b.sdk_query_factory = _query([msg], raise_exc=Exception("error result: success"))
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert res.intents == []
 
 
@@ -272,7 +271,7 @@ async def test_invoke_other_exception_reraises():
     b = _backend()
     b.sdk_query_factory = _query([], raise_exc=RuntimeError("real failure"))
     with pytest.raises(RuntimeError, match="real failure"):
-        await b.run("hi", allow_no_intent=True)
+        await b.run("hi")
 
 
 async def test_run_raw_completion_headroom():
@@ -308,7 +307,7 @@ async def test_context_peak_prefers_the_largest_single_request():
     ]
     b = _backend()
     b.sdk_query_factory = _query(stream)
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert res.metadata["context_tokens_peak"] == 175
     # The cumulative counters are still reported verbatim for cost accounting.
     assert res.metadata["cache_read_input_tokens"] == 250
@@ -325,14 +324,14 @@ async def test_context_peak_falls_back_to_a_per_turn_estimate():
     ]
     b = _backend()
     b.sdk_query_factory = _query(stream)
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert res.metadata["context_tokens_peak"] == 100_000
 
 
 async def test_context_peak_is_zero_without_any_usage():
     b = _backend()
     b.sdk_query_factory = _query([_Msg(content=[TextBlock("hi")], result="hi")])
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert res.metadata["context_tokens_peak"] == 0
 
 
@@ -347,14 +346,14 @@ async def test_stop_reason_reaches_metadata():
     stream = [_StopMsg(content=[TextBlock("half a rep")], result="half a rep", stop_reason="max_tokens")]
     b = _backend()
     b.sdk_query_factory = _query(stream)
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert res.metadata["stop_reason"] == "max_tokens"
 
 
 async def test_stop_reason_is_none_when_the_sdk_omits_it():
     b = _backend()
     b.sdk_query_factory = _query([_Msg(content=[TextBlock("hi")], result="hi")])
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert res.metadata["stop_reason"] is None
 
 
@@ -366,7 +365,7 @@ async def test_last_reported_stop_reason_wins():
     ]
     b = _backend()
     b.sdk_query_factory = _query(stream)
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert res.metadata["stop_reason"] == "end_turn"
 
 

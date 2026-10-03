@@ -634,7 +634,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "is injected into prompts but drives no gating."
         ),
     )
-    opt.add_argument("--target-summary", type=str, default=None, help="Free-text goal summary surfaced in prompts")
     opt.add_argument(
         "--compare-against-gpu",
         type=str,
@@ -829,26 +828,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--warm-replay-min-confidence",
         dest="warm_replay_min_confidence",
         type=float,
-        default=0.7,
+        default=None,
         help="Minimum ``warm_start_recipe.confidence`` required to "
         "trigger the auto-replay. Default 0.7 means an ``exact`` "
         "seven-tuple hit (conf 1.0) and a server-returned ``relative`` "
         "match (conf 0.7) both fire, while a ``miss`` (conf 0.0) "
         "does not. Raise it above 0.7 to require an exact hit "
         "before spending a verify on the warm config.",
-    )
-    opt.add_argument(
-        "--warm-replay-min-reproduce-pct",
-        dest="warm_replay_min_reproduce_pct",
-        type=float,
-        default=0.8,
-        help="Minimum fraction of the recipe's recorded gain we need "
-        "to reproduce to count as ``status=reproduced`` and push "
-        "the warm config onto the optimization stack. Default "
-        "0.8 — a recipe claiming +25%% counts if we measure "
-        "+20%% or more. Below the threshold we record "
-        "``status=drift`` and continue with the regular optimisation "
-        "flow without inheriting the warm config.",
     )
     # PR Monitor REST + MCP are co-hosted by KB Store and derived from $KB_STORE_URL.
     opt.add_argument(
@@ -1124,30 +1110,6 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Config-arm plateau: number of trailing rounds the gain sum is computed over. Default 5.",
     )
-    opt.add_argument(
-        "--plateau-kernel-revert-streak",
-        dest="plateau_kernel_revert_streak",
-        type=int,
-        default=None,
-        help="KERNEL plateau: consecutive REVERT / NEEDS_REVIEW integrate "
-        "attempts to count as plateau (one half of the OR). "
-        "Default 3.",
-    )
-    opt.add_argument(
-        "--plateau-kernel-keep-gain",
-        dest="plateau_kernel_keep_gain",
-        type=float,
-        default=None,
-        help="KERNEL plateau: max cumulative KEEP-gain (%%) across the "
-        "lookback window below which the OR fires. Default 0.5.",
-    )
-    opt.add_argument(
-        "--plateau-kernel-lookback",
-        dest="plateau_kernel_lookback",
-        type=int,
-        default=None,
-        help="KERNEL plateau: number of trailing integrate attempts the gain sum is computed over. Default 5.",
-    )
     # phase budget percentages: each phase claims a fraction of the wall-clock budget (caps; may exit earlier).
     opt.add_argument(
         "--max-minutes-prelude-pct",
@@ -1155,7 +1117,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_prelude_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for PRELUDE as a fraction of --max-hours. Default: 0.03.",
+        help="Wall-clock budget cap for PRELUDE as a fraction of --max-hours. Default: 0.03. "
+        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
         "--max-minutes-framework-pct",
@@ -1167,7 +1130,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.38.",
+        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.38. "
+        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
@@ -1175,7 +1139,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47. "
+        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",
@@ -1183,7 +1148,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_sweep_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for SWEEP. Default: 0.05.",
+        help="Wall-clock budget cap for SWEEP. Default: 0.05. "
+        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
         "--max-minutes-close-pct",
@@ -1191,7 +1157,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_close_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for CLOSE. Default: 0.02.",
+        help="Wall-clock budget cap for CLOSE. Default: 0.02. "
+        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
 
     rec = sub.add_parser(

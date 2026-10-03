@@ -935,9 +935,7 @@ def test_build_empty_specialist_done_shape():
 def test_shared_state_specialist_rounds_default_empty():
     s = SharedState()
     assert s.specialist_rounds == []
-    assert s.last_specialist == {}
     assert s.research_lane_capacity == 1
-    assert s.rounds_since_last_specialist == {}
     assert s.rounds_since_last_keep == {}
 
 
@@ -1036,21 +1034,6 @@ def test_record_specialist_round_dedup_by_round_id():
     assert len(s.specialist_rounds) == 2
     by_round = {r["round_id"]: r for r in s.specialist_rounds}
     assert by_round["explore-001"]["proposals_total"] == 5
-
-
-def test_update_last_specialist_snapshot():
-    s = SharedState()
-    s.update_last_specialist(
-        {
-            "task_id": "task-001",
-            "domain": "serving_specialist",
-            "status": "succeeded",
-        }
-    )
-    assert s.last_specialist["task_id"] == "task-001"
-    # Non-dict inputs are ignored.
-    s.update_last_specialist("garbage")  # type: ignore[arg-type]
-    assert s.last_specialist["task_id"] == "task-001"
 
 
 # --------------------------------------------------------------------------- # Read-only specialists never receive

@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from typing import Any, NoReturn
 from hyperloom.common.perf_metric import VERDICT_KEEP, VERDICT_REVERT
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
-from ..bus.message_bus import Message
 from ..kernel._kernel_decisions import _entry_by_kernel_id
 from ..kernel.patch_lifecycle import (
     CLEANUP_ACTION_NONE,
@@ -97,9 +96,13 @@ def _revert_incomplete(stack_id: str) -> RuntimeError:
 
 
 class KernelStackPhase(CoordinatorCollaborator):
-    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
+    """KERNEL_STACK phase handler: manages kernel stack revalidation and stack-level decisions."""
 
-    async def _drain_pending_keep_integrates(self) -> None:
+    def __init__(self, coordinator) -> None:
+        """Initialise the phase with its own in-flight integrate guard."""
+        super().__init__(coordinator)
+
+    async def drain_pending_keep_integrates(self) -> None:
         """Drain pending KEEP integrates inherited from KERNEL so sweep measures full current_best. Cap 10; a dispatch failure sets ``rejected_reason=integrate_dispatch_exception`` on the per-kernel and per-task_key attempt ledgers and flips the queued record to ``dispatch_failed``; only records with no ``task_key`` are also appended to ``rejected_kernel_ids``."""
         from ..kernel.request_handlers import integrate_handler
 
@@ -134,7 +137,7 @@ class KernelStackPhase(CoordinatorCollaborator):
                 if isinstance(result, dict) and result.get("status") != "skipped":
                     state.record_kernel_integrate_result(result)
                     if str(result.get("decision") or "").upper() == "KEEP":
-                        await self._record_integrate_keep(result)
+                        await self._coord.writeback.record_integrate_keep(result)
                 state.save(self.session_dir)
             except Exception as exc:
                 log.exception(
@@ -168,7 +171,7 @@ class KernelStackPhase(CoordinatorCollaborator):
     def _positive_needs_review_integrates(self) -> list[dict[str, Any]]:
         """Return positive NEEDS_REVIEW integrate entries eligible for stack validation."""
         out: list[dict[str, Any]] = []
-        stack_resolved_ids = self._stack_resolved_kernel_ids()
+        stack_resolved_ids = self.stack_resolved_kernel_ids()
         for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
             if not isinstance(entry, dict):
                 continue
@@ -194,7 +197,7 @@ class KernelStackPhase(CoordinatorCollaborator):
         out.sort(key=lambda e: float(e.get("best_gain_pct") or 0.0), reverse=True)
         return out
 
-    def _stack_resolved_kernel_ids(self) -> set[str]:
+    def stack_resolved_kernel_ids(self) -> set[str]:
         """Kernel ids already covered by an explicitly identified kept integration."""
         resolved: set[str] = set()
         for item in self.shared_state.optimization_stack or []:
@@ -247,7 +250,7 @@ class KernelStackPhase(CoordinatorCollaborator):
         self.shared_state.pending_stack_validation_result = {}
         self.shared_state.pending_stack_validation_apply_results = []
 
-    async def _recover_interrupted_stack_validation(self) -> bool:
+    async def recover_interrupted_stack_validation(self) -> bool:
         """Settle a stack attempt a crash or halt left behind; return whether there was one.
 
         The record, an apply row and a ledger row's in-flight guard each mean an attempt started. A guard alone is
@@ -276,7 +279,7 @@ class KernelStackPhase(CoordinatorCollaborator):
             # still on the tree, so tear them down before anything else measures it.
             self._unwind_stack_patches()
         except ValueError as exc:
-            self._halt_stack_recovery(exc)
+            self.halt_stack_recovery(exc)
         self._clear_pending_stack_validation_checkpoints()
         state.save(self.session_dir)
         return True
@@ -305,9 +308,9 @@ class KernelStackPhase(CoordinatorCollaborator):
         for applied in reversed(partial_applies):
             if not lifecycle_complete(_maybe_revert_kernel_patch(applied)):
                 stack_id = str((self.shared_state.pending_stack_validation_result or {}).get("kernel_id") or "")
-                self._halt_stack_recovery(_revert_incomplete(stack_id))
+                self.halt_stack_recovery(_revert_incomplete(stack_id))
 
-    def _halt_stack_recovery(self, error: Exception) -> NoReturn:
+    def halt_stack_recovery(self, error: Exception) -> NoReturn:
         """Stop the session on stack state no resume can account for, keeping the evidence, then raise ``error``.
 
         ``_on_phase_entered`` logs and swallows whatever a phase hook raises, so the raise alone would let SWEEP
@@ -328,16 +331,16 @@ class KernelStackPhase(CoordinatorCollaborator):
         decision = str(result.get("decision") or "").upper()
         self.shared_state.record_kernel_integrate_result(result)
         if revert_owed(result):
-            self._halt_stack_recovery(_revert_incomplete(str(result.get("kernel_id") or "")))
+            self.halt_stack_recovery(_revert_incomplete(str(result.get("kernel_id") or "")))
         if decision == "KEEP":
             # Marked only once promoted, so a KEEP that dies on the way leaves no
             # row claiming a promotion that never happened.
-            await self._record_integrate_keep(result)
+            await self._coord.writeback.record_integrate_keep(result)
             self._mark_stack_validation_entries_resolved(stack, result)
         self._clear_pending_stack_validation_checkpoints()
         self.shared_state.save(self.session_dir)
 
-    async def _maybe_validate_positive_needs_review_stack(self) -> None:
+    async def maybe_validate_positive_needs_review_stack(self) -> None:
         """Run one E2E stack validation for multiple small positive kernel patches."""
         entries = self._positive_needs_review_integrates()
         if len(entries) < 2:
@@ -424,7 +427,7 @@ class KernelStackPhase(CoordinatorCollaborator):
                     "quality_ref_exempt": True,
                     # A sub-step of the KERNEL phase's own event, not a dispatched measurement, so it records into
                     # that event rather than leaving a baseline event of its own.
-                    INLINE_EVENT_PARAM: kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0)),
+                    INLINE_EVENT_PARAM: kernel_event_id(int(self.shared_state.macro_cycle or 0)),
                 },
                 idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
             )
@@ -581,47 +584,3 @@ class KernelStackPhase(CoordinatorCollaborator):
                 "stack_validation": True,
                 "stack_member_identities": identities,
             }
-
-    async def _auto_enqueue_pending_integrations(self) -> None:
-        """Auto-dispatch integrate for KEEP'd kernels awaiting integration."""
-        state = self.shared_state
-        pending_records = state.pending_kernel_integration_records()
-        if not pending_records:
-            return
-
-        for pending in pending_records:
-            kid = str(pending.get("kernel_id") or "")
-            integration_id = str(pending.get("integration_id") or "")
-            dispatch_key = integration_id or kid
-            recorded = (
-                state.integrate_attempt_count_for_integration(integration_id)
-                if integration_id
-                else state.integrate_attempt_count_for_kernel(kid)
-            )
-            mark = self._attempt_marks.get(dispatch_key)
-            if mark is not None and recorded <= mark:
-                # A prior integrate for this kernel is still in flight.
-                continue
-            log.info(
-                "auto-integrate: dispatching integrate for KEEP'd kernel %s "
-                "(IR-3 mandatory integration; recorded_attempts=%d)",
-                kid,
-                recorded,
-            )
-            await self.bus.append_and_seq(
-                Message.new(
-                    "orchestration",
-                    "kernel_agent",
-                    "request",
-                    {
-                        "kind": "integrate",
-                        "kernel_id": kid,
-                        "integration_id": integration_id,
-                        "task_group_key": str(pending.get("task_group_key") or ""),
-                        "identity_route": str(pending.get("identity_route") or ""),
-                        "source": "auto_integrate_after_kernel_opt",
-                        "mode": "patch",
-                    },
-                )
-            )
-            self._attempt_marks[dispatch_key] = recorded

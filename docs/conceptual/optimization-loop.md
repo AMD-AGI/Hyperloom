@@ -83,13 +83,14 @@ unbounded runs use the fixed per-cycle budget window.
 Whether another cycle is feasible is surfaced as `cycle_reloop_feasible` in
 the ``=== Phase ===`` block for the five middle phases.
 
-`machine_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
-actions can run in each phase. Coordinator-owned actions such as
-analysis refreshes and close sequencing might be enqueued internally even
-when the LLM is not allowed to propose them.
+`machine_state.PHASE_ALLOWED_ACTIONS` is a cross-phase transition survival
+filter, not the set the LLM can propose. The LLM-proposable set is
+`allowed_actions_for(phase)`. Coordinator-owned actions such as analysis
+refreshes and close sequencing may be enqueued internally even when the LLM
+is not allowed to propose them.
 
 Every phase transition is a GPU barrier: the Coordinator stops every running
-action and drops queued work the next phase does not allow, and commits the
+action and drops queued work the next phase does not support, and commits the
 transition only once no task is left running. Each phase therefore starts on
 quiet GPUs, and its entry hook runs on the transition itself.
 
@@ -297,8 +298,8 @@ look very different from Orchestration's side:
   `kernel_agent` task, which holds `server_lifecycle`, `workspace_mutation` and
   `benchmark_lane` for the whole pipeline. Under GEAK it runs a single
   whole-pipeline GEAK e2e run, which then sets the
-  `skip_to_sweep` escalate hint. When the run produces no win, `exit_normal_kernel`
-  honours the hint immediately and the phase closes without Orchestration ever
+  `kernel_no_more_leverage` exit. When the run produces no win, the phase machine
+  exits immediately and the phase closes without Orchestration ever
   taking a turn in it.
 - **On a GEAK win**, the same `kernel_agent` task re-measures the candidate on
   the orchestrator's own harness under the lanes it already holds, and writes
@@ -312,13 +313,15 @@ look very different from Orchestration's side:
 See [Kernel optimization execution path](../reference/kernel-execution-path.md) for the
 entry-hook branch order.
 
-The phase allowlist (`machine_state.PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`)
-admits these actions:
+The LLM-proposable actions for KERNEL_AGENT phase (`allowed_actions_for(KERNEL_AGENT)`)
+are:
 
 - `integrate`
 - `roofline`
 - `profile`
-- `kernel_agent` (Coordinator-internal; the phase's whole pipeline as one task)
+
+`kernel_agent` is Coordinator-internal; PolicyGate rejects it with
+`rule="coordinator_managed_action"` if an LLM proposes it.
 
 Within the kernel-agent request channel, the handler dispatches request kinds
 such as `trace_analyze` and `integrate`
@@ -364,28 +367,27 @@ unconditional full state projection (mission, `SharedState`, gaps,
 warm-start, scores, and the inbox events since the last turn), so the
 turn never depends on what an earlier turn happened to remember.
 
-- **Working memory**: At each macro-cycle boundary the Coordinator asks
-  the agent for a one-turn handoff summary and persists it to
-  `state.json` (`orchestration_memory`). Later projections paste it back,
-  and it feeds `next_cycle_directive`; when the agent produces nothing
-  usable, a deterministic fallback directive is derived from state.
+- **Cycle directive**: While SWEEP is open and another macro-cycle is
+  still feasible, the Coordinator appends one handoff request to an ordinary
+  Orchestration turn. The reply, plain text and no intent required, is stored
+  as `orchestration_memory` (`next_cycle_directive`, `for_cycle`,
+  `parse_error`) and reseeds the next cycle's system prompt once FRAMEWORK is
+  entered; a turn that produced nothing usable leaves the directive empty.
 - **Context tools**: A read-only MCP surface lets the agent pull what the
   projection leaves out — finished outcomes (`get_recent_outcomes`),
   in-flight work (`get_running_tasks`), failure packets (`get_failure` /
   `get_variant_failures`), reference docs (`read_reference`), the raw
   `analysis.md` (`show_analysis_md`), denial history (`why_denied`) — plus
-  `run_action_now` for a whitelist of cheap synchronous actions.
   Transports without MCP tools get the projection only.
 - **Resume**: On resume the projection is rebuilt from
   `orchestration_memory` plus the authoritative `SharedState` facts —
   not by replaying a non-deterministic transcript.
 - **Write path**: All write actions flow through `emit_intent` → the
   Coordinator's intent handler, so Critic review, the accuracy gate,
-  and PolicyGate's invariants (path sandbox,
-  resource leases, phase ordering, data dependencies, single-writer
-  rules) apply to every turn. Repetition is checked against state — the
-  tested-variant ledger and the action-failure log — not against agent
-  recall.
+  and PolicyGate's invariants (path sandbox, resource leases,
+  data dependencies, single-writer rules) apply to every turn.
+  Repetition is checked against state — the tested-variant ledger and
+  the action-failure log — not against agent recall.
 
 Critic is likewise reactive and stateless per tick. Runtime RCA and automatic
 supervision are not roles in this loop. Stopped sessions require an explicit
@@ -400,8 +402,10 @@ The loop adapts through facts, not through retired score tables:
   action attempts, kernel attempts, framework-agent progress, and warnings.
 - `RecipeKB` records durable lessons and pitfalls for future sessions.
 - Critic verdicts gate risky patches and framework candidates.
-- PolicyGate blocks retired actions, wrong-phase actions, unsafe paths,
-  and invalid envelopes before they mutate runtime state.
+- PolicyGate blocks unsafe paths, invalid envelopes, and actions whose
+  structural requirements are not met before they mutate runtime state.
+  Phase fit is guided by the prompt and enforced at the phase transition
+  by dropping incompatible queued tasks.
 
 ## What is retired
 

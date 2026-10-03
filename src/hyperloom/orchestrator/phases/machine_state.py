@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from hyperloom.common.coerce import to_unix
+from hyperloom.common.env import env_float as _env_float, env_int as _env_int
 from hyperloom.common.timeutil import now_iso as _now_iso
 from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
@@ -63,8 +64,9 @@ def phase_index(phase: str) -> int:
     return PHASE_INDEX.get((phase or "").strip().upper(), -1)
 
 
-# Phase ↔ allowed action set: ALLOWED passes R1; Coordinator-auto actions stay out of PROPOSABLE so LLM proposals are
-# denied.
+# Phase transition survival filter: actions that survive across phase boundaries.
+# LLM-proposable set is allowed_actions_for(phase); Coordinator-auto actions
+# stay out of PROPOSABLE so the prompt does not invite LLM proposals for them.
 PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_PRELUDE: frozenset(
         {
@@ -172,8 +174,7 @@ def render_phase_action_bullets(
 
 # Default phase budgets (% of wall-clock). ENABLEMENT is absent on purpose: a
 # budget apportions optimisation effort, and a combo that cannot run has nothing
-# to optimise. It carries no cap at all -- ``compute_next_phase`` does not
-# consult ``phase_cap_exceeded`` for it -- and so has no override flag either.
+# to optimise. It carries no cap at all, and so has no override flag either.
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
     # The optimisation phase carries both levers' share.
@@ -196,12 +197,7 @@ PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES: int = 24 * 60
 DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT: float = 0.5
 DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK: int = 5
 DEFAULT_PLATEAU_EXPLORE_LOOKBACK: int = 5
-DEFAULT_PLATEAU_KERNEL_REVERT_STREAK: int = 3
-DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT: float = 0.5
-DEFAULT_PLATEAU_KERNEL_LOOKBACK: int = 5
 
-
-import os as _os_env  # noqa: E402
 
 # FRAMEWORK per-candidate plateau: after this many consecutive resolved candidates without a KEEP (including
 # non-benchmarked terminal outcomes), the source arm is dry.
@@ -224,15 +220,8 @@ _CYCLE_RELOOP_MAX_BUDGET_SHARE: float = 0.5
 
 def _default_cycle_reloop_min_remaining_sec() -> float:
     """Absolute reloop floor in seconds; env-overridable via ``INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC``."""
-    raw = (_os_env.environ.get("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", "") or "").strip()
-    if raw:
-        try:
-            v = float(raw)
-            if v > 0:
-                return v
-        except (TypeError, ValueError):
-            pass  # malformed env override; fall through to the 3 h default
-    return 10800.0
+    v = _env_float("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", default=10800.0)
+    return v if v > 0 else 10800.0
 
 
 # Minimum session wall-clock (seconds) that must remain to justify opening a new macro-cycle; below this we wind down
@@ -254,7 +243,7 @@ def resolve_keep_threshold(state: Any) -> float:
     """Current-cycle KEEP threshold for every path that injects ``keep_threshold_pct``."""
     from ..actions.executors._multi_node_env import is_multi_node
 
-    cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    cycle = state.macro_cycle
     return decaying_keep_threshold_pct(cycle, multi_node=is_multi_node())
 
 
@@ -280,7 +269,7 @@ def is_long_run(state: Any) -> bool:
 def _cumulative_gain_validated(state: Any) -> float:
     """Return ``state.cumulative_gain_validated``, defensively coerced to float."""
     try:
-        return float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+        return float(state.cumulative_gain_validated or 0.0)
     except (TypeError, ValueError):
         return 0.0
 
@@ -288,13 +277,13 @@ def _cumulative_gain_validated(state: Any) -> float:
 def _cycle_reloop_min_remaining_sec(state: Any) -> float:
     """Session-scaled floor on the seconds that must remain to justify a new cycle.
 
-    The session-scaled share of :data:`DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC`
-    keeps a short run from being blocked by a threshold it can never satisfy,
-    but that share can fall below the cost of the cheapest unit of work in a
-    cycle. The floor is therefore raised back to one granted variant round, so
-    a cycle is never opened with budget it cannot spend. That raise is itself
-    capped at :data:`_CYCLE_RELOOP_MAX_BUDGET_SHARE` of the session so a run
-    too short to fund a round does not read as exhausted from its first tick.
+    The session-scaled share keeps a short run from being blocked by a threshold
+    it can never satisfy, but that share can fall below the cost of the cheapest
+    unit of work in a cycle. The floor is therefore raised back to one granted
+    variant round, so a cycle is never opened with budget it cannot spend. That
+    raise is itself capped at :data:`_CYCLE_RELOOP_MAX_BUDGET_SHARE` of the
+    session so a run too short to fund a round does not read as exhausted from
+    its first tick.
 
     Args:
         state (Any): Frozen SharedState view exposing ``max_minutes``.
@@ -304,7 +293,7 @@ def _cycle_reloop_min_remaining_sec(state: Any) -> float:
     """
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
-    effective = DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC
+    effective = _default_cycle_reloop_min_remaining_sec()
     max_minutes = _max_minutes(state)
     if max_minutes > 0:
         budget_sec = max_minutes * 60.0
@@ -316,12 +305,8 @@ def _cycle_reloop_min_remaining_sec(state: Any) -> float:
 
 def _kernel_idle_max_ticks() -> int:
     """Consecutive no-work KERNEL_AGENT ticks before winding down to SWEEP."""
-    raw = (_os_env.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "") or "").strip()
-    try:
-        val = int(raw)
-        return val if val >= 1 else 3
-    except (TypeError, ValueError):
-        return 3
+    val = _env_int("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", default=3)
+    return val if val >= 1 else 3
 
 
 KERNEL_IDLE_MAX_TICKS: int = _kernel_idle_max_ticks()
@@ -329,12 +314,8 @@ KERNEL_IDLE_MAX_TICKS: int = _kernel_idle_max_ticks()
 
 def _kernel_idle_min_seconds() -> float:
     """Wall-clock seconds a KERNEL idle streak must last before winding down."""
-    raw = (_os_env.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", "") or "").strip()
-    try:
-        val = float(raw)
-        return val if val > 0.0 else 600.0
-    except (TypeError, ValueError):
-        return 600.0
+    val = _env_float("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", default=600.0)
+    return val if val > 0.0 else 600.0
 
 
 KERNEL_IDLE_MIN_SECONDS: float = _kernel_idle_min_seconds()
@@ -350,7 +331,7 @@ KERNEL_INLINE_STEP_STALE_SECONDS: float = 3.0 * KERNEL_HEARTBEAT_SEC
 
 def kernel_inline_step_running(state: Any, *, now_unix: float | None = None) -> bool:
     """Report whether an inline kernel request is executing right now."""
-    seen = getattr(state, "kernel_inline_step_seen_unix", 0.0)
+    seen = state.kernel_inline_step_seen_unix
     try:
         seen = float(seen or 0.0)
     except (TypeError, ValueError):
@@ -385,13 +366,13 @@ def apply_escalate_budget_bump(
 
 
 def normalize_budget_pct(
-    budget: dict[str, float] | None,
+    budget_pct: dict[str, float] | None,
 ) -> dict[str, float]:
     """Return a sanitized ``phase -> pct`` mapping (budgets are upper bounds, not renormalized to 1.0)."""
     out = dict(DEFAULT_PHASE_BUDGET_PCT)
-    if not budget:
+    if not budget_pct:
         return out
-    for phase, val in budget.items():
+    for phase, val in budget_pct.items():
         canon = (phase or "").strip().upper()
         if canon not in PHASE_NAMES:
             # An unknown key silently reverts that share to its default, which reads downstream as a choice nobody
@@ -471,7 +452,7 @@ def _now_unix(state: Any) -> float:
 
 def _phase_started_unix(state: Any) -> float:
     """Return the Unix timestamp the current phase started, defensively coerced."""
-    raw = getattr(state, "phase_started_unix", 0.0)
+    raw = state.phase_started_unix
     try:
         return float(raw or 0.0)
     except (TypeError, ValueError):
@@ -480,12 +461,12 @@ def _phase_started_unix(state: Any) -> float:
 
 def _resume_boundary_unix(state: Any) -> float:
     """Return when the current run leg began, i.e. the most recent ``--resume``."""
-    return max(0.0, to_unix(getattr(state, "resumed_ts", ""), 0.0) or 0.0)
+    return max(0.0, to_unix(state.resumed_ts, 0.0) or 0.0)
 
 
 def _kernel_idle_since_unix(state: Any) -> float:
     """Return when the current KERNEL idle streak opened, defensively coerced."""
-    raw = getattr(state, "kernel_idle_since_unix", 0.0)
+    raw = state.kernel_idle_since_unix
     try:
         return max(0.0, float(raw or 0.0))
     except (TypeError, ValueError):
@@ -494,7 +475,7 @@ def _kernel_idle_since_unix(state: Any) -> float:
 
 def _pending_escalate_hint(state: Any) -> str:
     """Return a pending escalate hint to act on this tick (unknown hints → empty)."""
-    raw = str(getattr(state, "pending_escalate_hint", "") or "").strip()
+    raw = str(state.pending_escalate_hint or "").strip()
     if not raw:
         return ""
     if is_valid_escalate_hint(raw):
@@ -505,7 +486,7 @@ def _pending_escalate_hint(state: Any) -> str:
 def _max_minutes(state: Any) -> float:
     """Return the session's configured ``max_minutes`` budget, defensively coerced."""
     try:
-        return float(getattr(state, "max_minutes", 0) or 0)
+        return float(state.max_minutes or 0)
     except (TypeError, ValueError):
         return 0.0
 
@@ -513,7 +494,7 @@ def _max_minutes(state: Any) -> float:
 def _budget_minutes(state: Any) -> float:
     """Wall-clock minutes the PER-PHASE budget fractions apply to (R2)."""
     try:
-        cm = float(getattr(state, "cycle_minutes", 0) or 0)
+        cm = float(state.cycle_minutes or 0)
     except (TypeError, ValueError):
         cm = 0.0
     if cm > 0 and is_long_run(state):
@@ -558,12 +539,12 @@ def phase_cumulative_seconds(
     now_unix: float | None = None,
 ) -> float:
     """Return wall-clock seconds spent in ``phase``, summed over EVERY entry."""
-    current = (getattr(state, "phase", "") or "").strip().upper()
+    current = (state.phase or "").strip().upper()
     target = (phase or current or "").strip().upper()
     if not target:
         return 0.0
     accumulated = 0.0
-    totals = getattr(state, "phase_elapsed_totals", None)
+    totals = state.phase_elapsed_totals
     if isinstance(totals, dict):
         try:
             accumulated = max(0.0, float(totals.get(target, 0.0) or 0.0))
@@ -579,12 +560,11 @@ def phase_cumulative_seconds(
 def _phase_budget_total_seconds(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> float | None:
     """Effective TOTAL budget (seconds) allotted to the current phase."""
-    budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
-    phase = (getattr(state, "phase", "") or "").strip().upper()
+    budget = state.phase_budget_pct
+    phase = (state.phase or "").strip().upper()
     if phase not in budget:
         return None
     pct = float(budget[phase])
@@ -623,11 +603,10 @@ def _phase_budget_total_seconds(
 def phase_budget_remaining_seconds(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> float | None:
     """Return seconds left in the current phase ENTRY's budget (``None`` when budget window 0 = unlimited)."""
-    total = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
+    total = _phase_budget_total_seconds(state, now_unix=now_unix)
     if total is None:
         return None
     return max(0.0, total - phase_elapsed_seconds(state, now_unix=now_unix))
@@ -639,14 +618,10 @@ def effective_max_minutes(state: Any) -> float:
     return mm if mm > 0 else float(DEFAULT_LONGRUN_MAX_MINUTES)
 
 
-def phase_cap_seconds(
-    state: Any,
-    *,
-    budget_pct: dict[str, float] | None = None,
-) -> float | None:
+def phase_cap_seconds(state: Any) -> float | None:
     """Absolute wall-clock ceiling (seconds) for the current phase."""
-    budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
-    phase = (getattr(state, "phase", "") or "").upper()
+    budget = state.phase_budget_pct
+    phase = (state.phase or "").upper()
     if phase not in budget:
         return None
     pct = float(budget[phase])
@@ -656,19 +631,6 @@ def phase_cap_seconds(
     proportional = effective_max_minutes(state) * 60.0 * pct
     abs_cap = math.ceil(PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES * pct) * 60.0
     return float(min(proportional, abs_cap))
-
-
-def phase_cap_exceeded(
-    state: Any,
-    *,
-    budget_pct: dict[str, float] | None = None,
-    now_unix: float | None = None,
-) -> bool:
-    """True when time spent in the current phase has reached its absolute cap."""
-    cap = phase_cap_seconds(state, budget_pct=budget_pct)
-    if cap is None:
-        return False
-    return phase_cumulative_seconds(state, now_unix=now_unix) >= cap
 
 
 def session_remaining_seconds(
@@ -699,8 +661,8 @@ def session_remaining_seconds(
     if mm <= 0:
         return None
     try:
-        charged = max(0.0, float(getattr(state, "elapsed_charged_sec", 0.0) or 0.0))
-        anchor = float(getattr(state, "leg_anchor_unix", 0.0) or 0.0)
+        charged = max(0.0, float(state.elapsed_charged_sec or 0.0))
+        anchor = float(state.leg_anchor_unix or 0.0)
     except (TypeError, ValueError):
         return None
     now = float(now_unix) if now_unix is not None else time.time()
@@ -708,7 +670,7 @@ def session_remaining_seconds(
         return max(0.0, mm * 60.0 - (charged + max(0.0, now - anchor)))
     if charged > 0.0:
         return max(0.0, mm * 60.0 - charged)
-    started = to_unix(str(getattr(state, "start_ts", "") or "").strip())
+    started = to_unix(str(state.start_ts or "").strip())
     if started is None:
         return None
     return max(0.0, mm * 60.0 - max(0.0, now - started))
@@ -717,7 +679,6 @@ def session_remaining_seconds(
 def phase_status_summary(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> str:
     """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable."""
@@ -725,13 +686,8 @@ def phase_status_summary(
     elapsed = int(phase_elapsed_seconds(state, now_unix=now_unix))
     # ``remaining`` paces this entry; the absolute cap reads ``cumulative``.
     cumulative = int(phase_cumulative_seconds(state, now_unix=now_unix))
-    budget = normalize_budget_pct(budget_pct or state.phase_budget_pct)
-    budget_pct_for_phase = budget.get(phase, 0.0)
-    remaining = phase_budget_remaining_seconds(
-        state,
-        budget_pct=budget,
-        now_unix=now_unix,
-    )
+    budget_pct_for_phase = state.phase_budget_pct.get(phase, 0.0)
+    remaining = phase_budget_remaining_seconds(state, now_unix=now_unix)
     budget_line: str
     if remaining is None:
         budget_line = f"budget    : pct={budget_pct_for_phase:.2f} (unlimited run; no per-phase cap)"
@@ -744,19 +700,14 @@ def phase_status_summary(
     allowed_line = f"allowed   : {', '.join(actions_in_phase) if actions_in_phase else '(none)'}"
     lines = [
         f"phase     : {phase}",
-        f"cycle     : {int(getattr(state, 'macro_cycle', 0) or 0)}",
+        f"cycle     : {state.macro_cycle}",
         f"entered   : {state.phase_started_ts or '(unset)'}",
         budget_line,
         allowed_line,
     ]
     # Whether deferring work to a later cycle is still a real option.
     if phase in (PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
-        reloop, evidence = _reloop_decision(
-            _reloop_facts(state, now_unix=now_unix),
-            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
-            target_reached_at=str(getattr(state, "target_reached_at", "") or ""),
-        )
-        feasible = reloop and state.framework_agent_phase_enabled
+        feasible, evidence = cycle_reloop_decision(state, now_unix=now_unix)
         reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
         threshold = evidence.get("min_remaining_sec_effective")
         if threshold is not None:
@@ -774,14 +725,6 @@ def phase_status_summary(
 
 
 # plateau pure functions
-def _current_macro_cycle(state: Any) -> int:
-    """Return the current macro-cycle index."""
-    try:
-        return int(getattr(state, "macro_cycle", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
 def _row_cycle(row: dict[str, Any]) -> int:
     """Return a row cycle, treating legacy unstamped rows as cycle zero."""
     try:
@@ -797,104 +740,18 @@ def _rows_for_current_cycle(rows: Any, state: Any) -> list[dict[str, Any]]:
     dict_rows = [row for row in rows if isinstance(row, dict)]
     if not any("cycle" in row for row in dict_rows):
         return dict_rows
-    cycle = _current_macro_cycle(state)
+    cycle = state.macro_cycle
     return [row for row in dict_rows if _row_cycle(row) == cycle]
-
-
-def compute_plateau_kernel(
-    state: Any,
-    *,
-    lookback: int = DEFAULT_PLATEAU_KERNEL_LOOKBACK,
-    revert_streak_threshold: int = DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
-    keep_gain_threshold_pct: float = DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
-) -> tuple[bool, dict[str, Any]]:
-    """Real plateau_kernel → ``(triggered, evidence)``."""
-    lookback = int(lookback or 0)
-    revert_streak_threshold = int(revert_streak_threshold or 0)
-    keep_gain_threshold_pct = float(keep_gain_threshold_pct or 0.0)
-    if lookback <= 0 or revert_streak_threshold <= 0:
-        return False, {"reason": "thresholds_disabled"}
-
-    integ_attempts = getattr(state, "kernel_integrate_attempts", None) or {}
-    if not isinstance(integ_attempts, dict):
-        integ_attempts = {}
-
-    # Flatten the integrate attempt log into a time-ordered list, take the last ``lookback`` rows.
-    has_cycle = any(
-        isinstance(attempt, dict) and "cycle" in attempt
-        for entry in integ_attempts.values()
-        if isinstance(entry, dict)
-        for attempt in (entry.get("attempts") or [])
-    )
-    flat: list[tuple[str, str, float]] = []  # (decision, ts, gain_pct)
-    for ent in integ_attempts.values():
-        if not isinstance(ent, dict):
-            continue
-        for a in ent.get("attempts") or []:
-            if not isinstance(a, dict):
-                continue
-            if has_cycle and _row_cycle(a) != _current_macro_cycle(state):
-                continue
-            decision = str(a.get("decision") or "").upper().strip()
-            if not decision:
-                continue
-            ts = str(a.get("ts") or "")
-            try:
-                gain = float(a.get("gain_pct") or a.get("validated_gain_pct") or 0.0)
-            except (TypeError, ValueError):
-                gain = 0.0
-            flat.append((decision, ts, gain))
-    # Sort by ts (lexicographic on ISO works); fall back to insertion order.
-    flat.sort(key=lambda r: r[1])
-    recent = flat[-lookback:]
-
-    # Empty-data guard: empty ledger (KERNEL just entered) must NOT auto-trigger plateau (would skip kernel phase).
-    if not recent:
-        return False, {
-            "reason": "no_kernel_attempts_yet",
-            "revert_streak_threshold": int(revert_streak_threshold),
-            "keep_gain_threshold_pct": keep_gain_threshold_pct,
-            "lookback": int(lookback),
-            "attempts_seen": 0,
-        }
-
-    # REVERT streak from the tail.
-    revert_streak = 0
-    for decision, _ts, _g in reversed(recent):
-        if decision in ("REVERT", "NEEDS_REVIEW"):
-            revert_streak += 1
-        else:
-            break
-    # KEEP-gain sum across the same lookback window.
-    recent_keep_gain = sum(g for d, _t, g in recent if d == "KEEP")
-
-    triggered = revert_streak >= revert_streak_threshold or recent_keep_gain < keep_gain_threshold_pct
-    return triggered, {
-        "revert_streak": int(revert_streak),
-        "revert_streak_threshold": int(revert_streak_threshold),
-        "recent_keep_gain_pct": round(recent_keep_gain, 4),
-        "keep_gain_threshold_pct": keep_gain_threshold_pct,
-        "lookback": int(lookback),
-        "attempts_seen": len(recent),
-    }
 
 
 # Let SWEEP's recorded closeout outrank an LLM skip_to_close hint.
 _SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed", "skipped", "failed"})
 
 
-def _sweep_has_recorded_closeout(state: Any) -> bool:
-    """Whether SWEEP already recorded a result the phase machine can close on."""
-    last_conc = getattr(state, "last_conc_sweep", None) or {}
-    if isinstance(last_conc, dict):
-        return str(last_conc.get("status") or "").lower() in _SWEEP_CLOSEOUT_STATUSES
-    return False
-
-
 # per-phase judgments
 def warm_replay_in_flight(state: Any) -> bool:
     """True while the PRELUDE warm-recipe replay task has not finished (PRELUDE must not exit until False — GPU contention)."""
-    outcome = getattr(state, "warm_replay_outcome", None) or {}
+    outcome = state.warm_replay_outcome or {}
     if not isinstance(outcome, dict):
         return False
     return str(outcome.get("status") or "").strip() == "in_flight"
@@ -915,9 +772,9 @@ GEAK_TERMINAL_STATUSES = frozenset(
 
 def _geak_phase_terminal(state: Any) -> bool:
     """Return true once the GEAK-owned KERNEL phase has produced a terminal result."""
-    if str(getattr(state, "kernel_optimizer", "") or "").strip().lower() != "geak":
+    if str(state.kernel_optimizer or "").strip().lower() != "geak":
         return False
-    result = getattr(state, "geak_result", None) or {}
+    result = state.geak_result or {}
     if not isinstance(result, dict):
         return False
     return str(result.get("status") or "").strip().lower() in GEAK_TERMINAL_STATUSES
@@ -939,14 +796,14 @@ CONTROLLER_TERMINAL_STATUSES: frozenset[str] = frozenset(
 
 def _controller_phase_terminal(state: Any) -> bool:
     """Return true when this macro cycle's rewrite controller has stopped."""
-    if str(getattr(state, "kernel_optimizer", "") or "").strip().lower() != "forge":
+    if str(state.kernel_optimizer or "").strip().lower() != "forge":
         return False
-    result = getattr(state, "kernel_rewrite_controller_result", None) or {}
+    result = state.kernel_rewrite_controller_result or {}
     if not isinstance(result, dict):
         return False
     try:
         result_cycle = int(result.get("macro_cycle", -1))
-        current_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        current_cycle = int(state.macro_cycle or 0)
     except (TypeError, ValueError):
         return False
     status = str(result.get("status") or "").strip().lower()
@@ -986,7 +843,7 @@ def compute_kernel_progress_fingerprint(
     import json
 
     attempts: list[list[str]] = []
-    ledger = getattr(state, "kernel_opt_task_attempts", None)
+    ledger = state.kernel_opt_task_attempts
     if isinstance(ledger, dict):
         for ledger_id, attempt in ledger.items():
             if not isinstance(attempt, dict):
@@ -996,18 +853,18 @@ def compute_kernel_progress_fingerprint(
             )
     attempts.sort()
 
-    last_opt = getattr(state, "last_kernel_opt", None)
+    last_opt = state.last_kernel_opt
     last_opt = last_opt if isinstance(last_opt, dict) else {}
-    stack = getattr(state, "optimization_stack", None)
-    pending = getattr(state, "pending_kernel_integrations", None)
-    controller = getattr(state, "kernel_rewrite_controller_result", None)
+    stack = state.optimization_stack
+    pending = state.pending_kernel_integrations
+    controller = state.kernel_rewrite_controller_result
     controller = controller if isinstance(controller, dict) else {}
     payload = {
         "attempts": attempts,
         "inflight": sorted(str(task_id) for task_id in (inflight_task_ids or ())),
         "last_kernel_opt": [str(last_opt.get(field, "")) for field in _LAST_KERNEL_OPT_PROGRESS_FIELDS],
         "pending_integrations": sorted(str(key) for key in pending) if isinstance(pending, dict) else [],
-        "rejected": sorted(str(kid) for kid in (getattr(state, "rejected_kernel_ids", None) or [])),
+        "rejected": sorted(str(kid) for kid in (state.rejected_kernel_ids or [])),
         "stack_len": len(stack) if isinstance(stack, list) else 0,
         "rewrite_controller": [
             str(controller.get("macro_cycle", "")),
@@ -1022,7 +879,7 @@ def compute_kernel_progress_fingerprint(
 
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
-    if bool(getattr(state, "has_keep_pending_integrate", False)):
+    if state.has_keep_pending_integrate:
         return True
 
     if _controller_phase_terminal(state):
@@ -1030,14 +887,13 @@ def kernel_work_pending(state: Any) -> bool:
     if _geak_phase_terminal(state):
         return False
 
-    untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
-    if callable(untried_hot) and bool(untried_hot()):
+    if state.untried_hot_reusable_kernels():
         return True
 
-    rejected = {str(x) for x in (getattr(state, "rejected_kernel_ids", None) or [])}
+    rejected = {str(x) for x in (state.rejected_kernel_ids or [])}
     integrated_entries: list[dict[str, Any]] = []
     integrated_sources: set[str] = set()
-    for entry in getattr(state, "optimization_stack", None) or []:
+    for entry in state.optimization_stack or []:
         if not isinstance(entry, dict):
             continue
         if str(entry.get("action") or "") == "integrate":
@@ -1046,7 +902,7 @@ def kernel_work_pending(state: Any) -> bool:
             if source_file:
                 integrated_sources.add(source_file)
 
-    attempts = getattr(state, "kernel_opt_task_attempts", None) or {}
+    attempts = state.kernel_opt_task_attempts or {}
     if not isinstance(attempts, dict):
         return False
     for ledger_id, attempt in attempts.items():
@@ -1098,21 +954,6 @@ def kernel_work_pending(state: Any) -> bool:
     return False
 
 
-def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
-    """``baseline_tput > 0`` and warm-replay settled → ``prelude_done`` (else ``None``)."""
-    if warm_replay_in_flight(state):
-        return None
-    if bool(getattr(state, "baseline_measure_round_dropped", False)):
-        return None
-    try:
-        tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return None
-    if tput > 0.0:
-        return "prelude_done", {"baseline_tput": tput, **prelude_exit_viability(state)}
-    return None
-
-
 def measured_seconds(state: Any, field: str) -> float | None:
     """Read a duration an earlier round measured, or ``None`` when none did."""
     try:
@@ -1157,25 +998,6 @@ def one_more_measurement_sec(state: Any) -> float | None:
     return boot_sec + benchmark_sec
 
 
-def prelude_exit_viability(state: Any) -> dict[str, Any]:
-    """Report whether the budget PRELUDE leaves behind can still fund one optimization round."""
-    usable = session_usable_seconds(state)
-    round_sec = one_more_measurement_sec(state)
-    priced_by = "boot_plus_benchmark"
-    if round_sec is None:
-        round_sec = measured_seconds(state, "baseline_runtime_sec")
-        priced_by = "cold_round"
-    if usable is None or round_sec is None:
-        return {}
-    return {
-        "session_usable_sec": round(usable, 1),
-        "measured_round_sec": round(round_sec, 1),
-        "priced_by": priced_by,
-        "affordable_rounds": round(usable / round_sec, 2),
-        "fits_one_optimization_round": usable >= round_sec,
-    }
-
-
 def append_phase_evidence_row(history: Any, *, key: str, row: dict[str, Any]) -> bool:
     """Append ``row`` to the current phase's ``evidence[key]`` list."""
     if not isinstance(history, list) or not history:
@@ -1197,10 +1019,7 @@ def append_phase_evidence_row(history: Any, *, key: str, row: dict[str, Any]) ->
 
 def session_usable_seconds(state: Any) -> float | None:
     """Seconds a unit of work may still claim, from the session's own accounting."""
-    getter = getattr(state, "session_budget_usable_sec", None)
-    if callable(getter):
-        return getter()
-    return session_remaining_seconds(state)
+    return state.session_budget_usable_sec()
 
 
 def prelude_affordable_seconds(state: Any) -> tuple[float | None, dict[str, Any]]:
@@ -1233,209 +1052,15 @@ def prelude_can_afford(
     return affordable_sec >= cost, priced
 
 
-def exit_time_exhausted_prelude(
-    state: Any,
-    *,
-    now_unix: float | None = None,
-) -> tuple[str, dict[str, Any]] | None:
-    """Route to CLOSE when the session clock runs out before PRELUDE lands a baseline."""
-    usable = session_usable_seconds(state)
-    if usable is None or usable > 0.0:
-        return None
-    return "time_exhausted_during_prelude", {
-        "session_usable_sec": round(usable, 1),
-        "prelude_spent_sec": round(
-            phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
-            1,
-        ),
-    }
-
-
-def exit_cold_anchor_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
-    """Route to CLOSE when PRELUDE could only produce a cold anchor."""
-    if not bool(getattr(state, "baseline_measure_round_dropped", False)):
-        return None
-    usable = session_usable_seconds(state)
-    if usable is None:
-        return None
-    # Without the boot/benchmark split -- a scriptable workload runs no server, so it has no ready boundary to split
-    # on -- the cold round's whole wall-clock stands in for each half, the same upper bound the round's own gate falls
-    # back to.
-    cold_sec = measured_seconds(state, "baseline_runtime_sec")
-    round_sec = (
-        baseline_round_cost_sec(
-            state,
-            double_run=bool(getattr(state, "baseline_double_run", False)),
-        )
-        or cold_sec
-    )
-    use_sec = one_more_measurement_sec(state) or cold_sec
-    if round_sec is None or use_sec is None:
-        return None
-    if usable >= round_sec + use_sec:
-        return None
-    return "prelude_cold_anchor_low_budget", {
-        "baseline_anchor": "cold",
-        "retry_round_sec": round(round_sec, 1),
-        **prelude_exit_viability(state),
-    }
-
-
-def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
-    """Decide the PRELUDE terminal exit on repeated baseline failures."""
-    streak = int(getattr(state, "baseline_failure_streak", 0) or 0)
-    if streak >= 3:
-        return "prelude_baseline_failed", {"baseline_failure_streak": streak}
-    return None
-
-
-def exit_normal_kernel(
-    state: Any,
-    *,
-    budget_pct: dict[str, float] | None = None,
-    now_unix: float | None = None,
-    kernel_work_in_flight: bool = False,
-) -> tuple[str, dict[str, Any]] | None:
-    """KERNEL normal exit.
-
-    Args:
-        state: The session state the exit rules read.
-        budget_pct: Per-phase budget shares.
-        now_unix: Clock override for the wall-clock rules.
-        kernel_work_in_flight: Whether the ``kernel_agent`` task is queued or
-            running. It owns the phase until it returns, so only the budget
-            exits can end the phase under it.
-    """
-    if not kernel_work_in_flight:
-        leverage_exit = _kernel_leverage_exit(state, now_unix=now_unix)
-        if leverage_exit is not None:
-            return leverage_exit
-    rejected = getattr(state, "rejected_kernel_ids", None) or []
-    rejected_count = len(rejected) if isinstance(rejected, list) else 0
-    remaining = phase_budget_remaining_seconds(
-        state,
-        budget_pct=budget_pct,
-        now_unix=now_unix,
-    )
-    if remaining is not None and remaining <= 0:
-        return "kernel_phase_budget_exhausted", {
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-            "rejected_kernel_count": rejected_count,
-        }
-    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
-        return "kernel_budget_cap", {
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-            "rejected_kernel_count": rejected_count,
-        }
-    return None
-
-
-def _kernel_leverage_exit(state: Any, *, now_unix: float | None) -> tuple[str, dict[str, Any]] | None:
-    """The KERNEL exits that say the phase ran out of work rather than out of time."""
-    # ``kernel_work_pending`` answers for outstanding integrations before it short-circuits on a terminal Controller,
-    # so asking it here keeps this exit from stepping over an unintegrated KEEP.
-    if _controller_phase_terminal(state) and not kernel_work_pending(state):
-        result = getattr(state, "kernel_rewrite_controller_result", None) or {}
-        return "kernel_controller_done", {
-            "controller_status": result.get("status"),
-            "patch_count": int(result.get("patch_count") or 0),
-            "task_count": int(result.get("task_count") or 0),
-            "reason": str(result.get("reason") or ""),
-        }
-    if _pending_escalate_hint(state) == ESCALATE_HINT_SKIP_TO_SWEEP:
-        if not kernel_work_pending(state):
-            return "kernel_no_more_leverage", {
-                "evidence": "kernel_no_more_leverage",
-                "hint": ESCALATE_HINT_SKIP_TO_SWEEP,
-            }
-    # Idle-spin guard: the escalate-hint handoff above needs the kernel_agent to emit ``escalate_strategy_change``,
-    # but PolicyGate denies that intent for the kernel_agent role — so when the phase stops moving it can otherwise
-    # spin (hallucinated kernel-id requests / no-intent turns) until the wall-clock cap.
-    idle_ticks = int(getattr(state, "kernel_idle_ticks", 0) or 0)
-    idle_since = _kernel_idle_since_unix(state)
-    if idle_ticks >= KERNEL_IDLE_MAX_TICKS and idle_since > 0.0:
-        now = float(now_unix if now_unix is not None else _now_unix(state))
-        idle_seconds = max(0.0, now - idle_since)
-        if idle_seconds >= KERNEL_IDLE_MIN_SECONDS:
-            return "kernel_no_more_leverage", {
-                "evidence": "kernel_idle_no_progress",
-                "idle_ticks": idle_ticks,
-                "idle_max_ticks": KERNEL_IDLE_MAX_TICKS,
-                "idle_seconds": round(idle_seconds, 3),
-                "idle_min_seconds": KERNEL_IDLE_MIN_SECONDS,
-            }
-    return None
-
-
-#: ``reloop_blocked`` values that name the terminal SWEEP closes on. A block for
-#: any other reason keeps the ladder's own exit reason.
-_RELOOP_BLOCK_TERMINALS: dict[str, str] = {
-    "global_converged": "global_converged",
-    "max_cycles": "global_converged",
-    "target_reached": "target_reached",
-}
-
-
-def exit_normal_sweep(
-    state: Any,
-    *,
-    budget_pct: dict[str, float] | None = None,
-    now_unix: float | None = None,
-) -> tuple[str, dict[str, Any]] | None:
-    """SWEEP normal exit: the concurrency ladder's terminal state, or budget exhausted."""
-    last_conc = getattr(state, "last_conc_sweep", None) or {}
-    if isinstance(last_conc, dict):
-        status = str(last_conc.get("status") or "").lower()
-        if status == "failed":
-            return "sweep_failed", {"sweep_status": status}
-        if status in ("succeeded", "partial", "completed", "skipped"):
-            evidence: dict[str, Any] = {"sweep_status": status}
-            # A sweep that declined to run is also terminal, and the exit reason alone cannot tell the two apart
-            # afterwards. was_skipped covers both declining and spending the whole budget without a comparable pair,
-            # so it is only carried with the flag that separates them (see
-            # kernel.conc_sweep.conc_sweep_declined_to_run).
-            if last_conc.get("was_skipped"):
-                evidence["sweep_was_skipped"] = True
-                evidence["sweep_skip_budget_exhausted"] = bool(last_conc.get("budget_exhausted"))
-                evidence["sweep_skip_reason"] = str(last_conc.get("skip_reason") or "")
-                summary = last_conc.get("summary") if isinstance(last_conc.get("summary"), dict) else {}
-                spent_budget_without_pair = bool(last_conc.get("budget_exhausted")) or (
-                    str(last_conc.get("skip_reason") or "") == "budget_exhausted_no_successful_pairs"
-                )
-                ran_but_reported_no_pair = bool(summary) and int(summary.get("successful_pairs") or 0) <= 0
-                if spent_budget_without_pair or (ran_but_reported_no_pair and not evidence["sweep_skip_reason"]):
-                    return "sweep_failed", evidence
-            return "sweep_done", evidence
-    remaining = phase_budget_remaining_seconds(
-        state,
-        budget_pct=budget_pct,
-        now_unix=now_unix,
-    )
-    if remaining is not None and remaining <= 0:
-        return "sweep_budget_exhausted", {
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-        }
-    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
-        return "sweep_budget_cap", {
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-        }
-    return None
-
-
-# Transition decision (the only function the Coordinator calls each tick)
 def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
     """Pull operator-tuned plateau thresholds off :attr:`SharedState.plateau_overrides` (empty → library defaults)."""
-    overrides = getattr(state, "plateau_overrides", None) or {}
+    overrides = state.plateau_overrides or {}
     return dict(overrides) if isinstance(overrides, dict) else {}
 
 
 def _lever_attempts(state: Any, *levers: str) -> list[dict[str, Any]]:
     """This cycle's attempts on the given levers, in the order they were recorded."""
-    rows = _rows_for_current_cycle(getattr(state, "attempts", None) or [], state)
+    rows = _rows_for_current_cycle(state.attempts or [], state)
     return [r for r in rows if str(r.get("lever_kind") or "") in levers]
 
 
@@ -1515,7 +1140,7 @@ def _patch_lever_dry(state: Any, overrides: dict[str, Any]) -> tuple[bool, dict[
         overrides.get("framework_no_keep_streak", DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK),
     )
     streak = _trailing_no_keep(_lever_attempts(state, LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR))
-    exhausted = bool(getattr(state, "framework_agent_phase_done", False))
+    exhausted = bool(state.framework_agent_phase_done)
     return (streak >= streak_floor or exhausted), {
         "source_consecutive_no_keep": streak,
         "source_threshold": streak_floor,
@@ -1541,48 +1166,13 @@ def per_lever_dryness(state: Any) -> tuple[bool, dict[str, Any]]:
     }
 
 
-def _optimize_did_work_this_cycle(state: Any) -> bool:
-    """Whether the phase has dispatched or benched anything this macro-cycle."""
-    if _rows_for_current_cycle(getattr(state, "attempts", None) or [], state):
-        return True
-    return bool(_rows_for_current_cycle(getattr(state, "specialist_rounds", None) or [], state))
-
-
-def exit_normal_optimize(
-    state: Any,
-    *,
-    budget_pct: dict[str, float] | None = None,
-    now_unix: float | None = None,
-) -> tuple[str, dict[str, Any]] | None:
-    """OPTIMIZE normal exit."""
-    all_dry, arms = per_lever_dryness(state)
-
-    hint = str(getattr(state, "pending_escalate_hint", "") or "").strip()
-    if hint == ESCALATE_HINT_SKIP_TO_KERNEL:
-        # Honoured only once the phase has actually run something this cycle: a phase that dispatched nothing must not
-        # end with zero validated work.
-        if _optimize_did_work_this_cycle(state):
-            return "optimize_no_more_leverage", {**arms, "evidence": "llm_escalation", "hint": hint}
-    if hint == ESCALATE_HINT_SKIP_TO_SWEEP:
-        return "optimize_no_more_leverage", {**arms, "evidence": "skip_to_sweep", "hint": hint}
-
-    if all_dry:
-        return "optimize_no_more_leverage", {**arms, "evidence": "both_arms_plateaued", "plateau": True}
-
-    remaining = phase_budget_remaining_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
-    if remaining is not None and remaining <= 0:
-        return "optimize_phase_budget_exhausted", {
-            **arms,
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-        }
-    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
-        return "optimize_budget_cap", {
-            **arms,
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-        }
-    return None
+#: ``reloop_blocked`` values that name the terminal SWEEP closes on. A block for
+#: any other reason keeps the ladder's own exit reason.
+_RELOOP_BLOCK_TERMINALS: dict[str, str] = {
+    "global_converged": "global_converged",
+    "max_cycles": "global_converged",
+    "target_reached": "target_reached",
+}
 
 
 def _post_prelude_target(*, optimize_enabled: bool, kernel_enabled: bool) -> str:
@@ -1609,15 +1199,14 @@ def _positive_number(value: Any) -> float | None:
 def _budget_predicate_inputs(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None,
     now_unix: float,
 ) -> dict[str, Any]:
     """Normalize the clocks compared by phase budget predicates."""
-    remaining_sec = phase_budget_remaining_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
+    remaining_sec = phase_budget_remaining_seconds(state, now_unix=now_unix)
     return {
         "remaining_sec": remaining_sec,
         "current_balance": remaining_sec,
-        "cap_sec": phase_cap_seconds(state, budget_pct=budget_pct),
+        "cap_sec": phase_cap_seconds(state),
         "entry_elapsed_sec": phase_elapsed_seconds(state, now_unix=now_unix),
         "cumulative_elapsed_sec": phase_cumulative_seconds(state, now_unix=now_unix),
     }
@@ -1632,18 +1221,17 @@ def _base_workflow_predicate_inputs(
     optimize_enabled: bool,
     enablement_enabled: bool,
     enablement_in_flight: bool,
-    budget_pct: dict[str, float] | None,
 ) -> dict[str, Any]:
     hint = _pending_escalate_hint(state) or None
-    last_conc = getattr(state, "last_conc_sweep", None) or {}
+    last_conc = state.last_conc_sweep or {}
     sweep_closeout_status = str(last_conc.get("status") or "").lower() if isinstance(last_conc, dict) else ""
     return {
         "current_phase": current,
         "now_unix": now_unix,
         "global": {
-            "stop_reason": str(getattr(state, "stop_reason", "") or "").strip(),
-            "closing_phase": bool(getattr(state, "closing_phase", False)),
-            "target_reached_at": str(getattr(state, "target_reached_at", "") or ""),
+            "stop_reason": str(state.stop_reason or "").strip(),
+            "closing_phase": bool(state.closing_phase),
+            "target_reached_at": str(state.target_reached_at or ""),
             "sweep_closeout_status": sweep_closeout_status,
             "session_remaining_sec": (
                 session_remaining_seconds(state, now_unix=now_unix) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None
@@ -1658,38 +1246,36 @@ def _base_workflow_predicate_inputs(
         "plateau": None,
         "hint": hint,
         "sweep_result": None,
-        "macro_cycle": int(getattr(state, "macro_cycle", 0) or 0),
+        "macro_cycle": state.macro_cycle,
         "run_flags": {
             "kernel_enabled": bool(kernel_enabled),
             "framework_agent_enabled": bool(optimize_enabled),
             "enablement_enabled": bool(enablement_enabled),
         },
         "enablement_in_flight": bool(enablement_in_flight),
-        "phase_budget_pct": normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None)),
+        "phase_budget_pct": state.phase_budget_pct,
     }
 
 
 def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
-    outcome = getattr(state, "warm_replay_outcome", None) or {}
+    outcome = state.warm_replay_outcome or {}
     warm_status = str(outcome.get("status") or "").strip() if isinstance(outcome, dict) else ""
     return {
-        "failure_streak": int(getattr(state, "baseline_failure_streak", 0) or 0),
+        "failure_streak": int(state.baseline_failure_streak or 0),
         "warm_replay_status": warm_status,
-        "measure_round_dropped": bool(getattr(state, "baseline_measure_round_dropped", False)),
-        "tput": _number(getattr(state, "baseline_tput", 0.0)) or 0.0,
+        "measure_round_dropped": bool(state.baseline_measure_round_dropped),
+        "tput": _number(state.baseline_tput) or 0.0,
         "session_usable_sec": session_usable_seconds(state),
         "phase_spent_sec": phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
-        "runtime_sec": _positive_number(getattr(state, "baseline_runtime_sec", 0.0)),
-        "post_ready_runtime_sec": _positive_number(getattr(state, "baseline_post_ready_runtime_sec", 0.0)),
-        "warm_runtime_sec": _positive_number(getattr(state, "baseline_warm_runtime_sec", 0.0)),
-        "double_run": bool(getattr(state, "baseline_double_run", False)),
+        "runtime_sec": _positive_number(state.baseline_runtime_sec),
+        "post_ready_runtime_sec": _positive_number(state.baseline_post_ready_runtime_sec),
+        "warm_runtime_sec": _positive_number(state.baseline_warm_runtime_sec),
     }
 
 
 def _framework_predicate_inputs(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None,
     now_unix: float,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     _all_dry, evidence = per_lever_dryness(state)
@@ -1698,27 +1284,24 @@ def _framework_predicate_inputs(
         for key, value in evidence.items()
         if key not in {"config_arm_plateaued", "source_arm_plateaued", "switch_bottleneck"}
     }
-    plateau["attempt_count"] = len(_rows_for_current_cycle(getattr(state, "attempts", None) or [], state))
-    plateau["specialist_round_count"] = len(
-        _rows_for_current_cycle(getattr(state, "specialist_rounds", None) or [], state)
-    )
-    return plateau, _budget_predicate_inputs(state, budget_pct=budget_pct, now_unix=now_unix)
+    plateau["attempt_count"] = len(_rows_for_current_cycle(state.attempts or [], state))
+    plateau["specialist_round_count"] = len(_rows_for_current_cycle(state.specialist_rounds or [], state))
+    return plateau, _budget_predicate_inputs(state, now_unix=now_unix)
 
 
 def _kernel_predicate_inputs(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None,
     now_unix: float,
     kernel_work_in_flight: bool,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    controller = getattr(state, "kernel_rewrite_controller_result", None) or {}
+    controller = state.kernel_rewrite_controller_result or {}
     if not isinstance(controller, dict):
         controller = {}
     pending = {
         "kernel_work_pending": bool(kernel_work_pending(state)),
         "kernel_agent_in_flight": bool(kernel_work_in_flight),
-        "optimizer": str(getattr(state, "kernel_optimizer", "") or "").strip().lower(),
+        "optimizer": str(state.kernel_optimizer or "").strip().lower(),
         "controller_cycle": int(
             _number(controller.get("macro_cycle", -1)) if _number(controller.get("macro_cycle", -1)) is not None else -1
         ),
@@ -1728,25 +1311,31 @@ def _kernel_predicate_inputs(
         "controller_reason": str(controller.get("reason") or ""),
     }
     plateau = {
-        "idle_ticks": int(getattr(state, "kernel_idle_ticks", 0) or 0),
+        "idle_ticks": int(state.kernel_idle_ticks or 0),
         "idle_since_unix": _kernel_idle_since_unix(state),
-        "idle_max_ticks": KERNEL_IDLE_MAX_TICKS,
-        "idle_min_seconds": KERNEL_IDLE_MIN_SECONDS,
-        "rejected_kernel_count": len(getattr(state, "rejected_kernel_ids", None) or []),
+        "idle_max_ticks": _kernel_idle_max_ticks(),
+        "idle_min_seconds": _kernel_idle_min_seconds(),
+        "rejected_kernel_count": len(state.rejected_kernel_ids or []),
     }
-    return pending, plateau, _budget_predicate_inputs(state, budget_pct=budget_pct, now_unix=now_unix)
+    return pending, plateau, _budget_predicate_inputs(state, now_unix=now_unix)
 
 
 def _sweep_predicate_inputs(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None,
     now_unix: float,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    last_conc = getattr(state, "last_conc_sweep", None) or {}
+    last_conc = state.last_conc_sweep or {}
     if not isinstance(last_conc, dict):
         last_conc = {}
     summary = last_conc.get("summary") if isinstance(last_conc.get("summary"), dict) else {}
+    cycle = int(state.macro_cycle or 0)
+    saturated = state.saturated_directions or {}
+    saturated_facts = (
+        {str(key): bool(value.get("saturated")) for key, value in saturated.items() if isinstance(value, dict)}
+        if isinstance(saturated, dict)
+        else {}
+    )
     result = {
         "status": str(last_conc.get("status") or "").lower(),
         "was_skipped": bool(last_conc.get("was_skipped")),
@@ -1754,38 +1343,25 @@ def _sweep_predicate_inputs(
         "skip_reason": str(last_conc.get("skip_reason") or ""),
         "successful_pairs": int(summary.get("successful_pairs") or 0),
         "summary_present": bool(summary),
-        "reloop": _reloop_facts(state, now_unix=now_unix),
+        "reloop": {
+            "current_gain_pct": _cumulative_gain_validated(state),
+            "gain_at_cycle_start_pct": _number(state.gain_at_cycle_start) or 0.0,
+            "min_gain_pct": decaying_keep_threshold_pct(cycle),
+            "prior_no_gain_cycle_streak": int(state.no_gain_cycle_streak or 0),
+            "max_cycles": DEFAULT_MAX_MACRO_CYCLES,
+            "no_gain_cycles": DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES,
+            "saturated_directions": saturated_facts,
+            "session_remaining_sec": session_remaining_seconds(state, now_unix=now_unix),
+            "min_remaining_sec": _cycle_reloop_min_remaining_sec(state),
+        },
     }
-    return result, _budget_predicate_inputs(state, budget_pct=budget_pct, now_unix=now_unix)
-
-
-def _reloop_facts(state: Any, *, now_unix: float | None) -> dict[str, Any]:
-    """Freeze the facts :func:`_reloop_decision` weighs when SWEEP considers another macro-cycle."""
-    cycle = int(getattr(state, "macro_cycle", 0) or 0)
-    saturated = getattr(state, "saturated_directions", None) or {}
-    saturated_facts = (
-        {str(key): bool(value.get("saturated")) for key, value in saturated.items() if isinstance(value, dict)}
-        if isinstance(saturated, dict)
-        else {}
-    )
-    return {
-        "current_gain_pct": _cumulative_gain_validated(state),
-        "gain_at_cycle_start_pct": _number(getattr(state, "gain_at_cycle_start", 0.0)) or 0.0,
-        "min_gain_pct": decaying_keep_threshold_pct(cycle),
-        "prior_no_gain_cycle_streak": int(getattr(state, "no_gain_cycle_streak", 0) or 0),
-        "max_cycles": DEFAULT_MAX_MACRO_CYCLES,
-        "no_gain_cycles": DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES,
-        "saturated_directions": saturated_facts,
-        "session_remaining_sec": session_remaining_seconds(state, now_unix=now_unix),
-        "min_remaining_sec": _cycle_reloop_min_remaining_sec(state),
-    }
+    return result, _budget_predicate_inputs(state, now_unix=now_unix)
 
 
 def workflow_predicate_inputs(
     state: Any,
     *,
     kernel_enabled: bool = True,
-    budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
     optimize_enabled: bool = True,
     enablement_enabled: bool = False,
@@ -1793,7 +1369,7 @@ def workflow_predicate_inputs(
     kernel_work_in_flight: bool = False,
 ) -> dict[str, Any]:
     """Freeze primitive, normalized facts consumed by one phase decision."""
-    current = (getattr(state, "phase", "") or "").strip().upper() or PHASE_PRELUDE
+    current = (state.phase or "").strip().upper() or PHASE_PRELUDE
     frozen_now = float(now_unix if now_unix is not None else _now_unix(state))
     inputs = _base_workflow_predicate_inputs(
         state,
@@ -1803,36 +1379,26 @@ def workflow_predicate_inputs(
         optimize_enabled=optimize_enabled,
         enablement_enabled=enablement_enabled,
         enablement_in_flight=enablement_in_flight,
-        budget_pct=budget_pct,
     )
     if current == PHASE_PRELUDE:
         inputs["baseline"] = _prelude_predicate_inputs(state, now_unix=frozen_now)
     elif current == PHASE_ENABLEMENT:
-        enablement = getattr(state, "enablement", None)
-        inputs["baseline"] = {"tput": _number(getattr(state, "baseline_tput", 0.0)) or 0.0}
+        enablement = state.enablement
+        inputs["baseline"] = {"tput": _number(state.baseline_tput) or 0.0}
         inputs["pending_work"] = {
-            "validation_pending": bool(getattr(enablement, "validation_pending", False)),
+            "validation_pending": bool(enablement.validation_pending),
             "enablement_in_flight": bool(enablement_in_flight),
         }
     elif current == PHASE_FRAMEWORK_AGENT:
-        inputs["plateau"], inputs["budget"] = _framework_predicate_inputs(
-            state,
-            budget_pct=budget_pct,
-            now_unix=frozen_now,
-        )
+        inputs["plateau"], inputs["budget"] = _framework_predicate_inputs(state, now_unix=frozen_now)
     elif current == PHASE_KERNEL_AGENT:
         inputs["pending_work"], inputs["plateau"], inputs["budget"] = _kernel_predicate_inputs(
             state,
-            budget_pct=budget_pct,
             now_unix=frozen_now,
             kernel_work_in_flight=kernel_work_in_flight,
         )
     elif current == PHASE_SWEEP:
-        inputs["sweep_result"], inputs["budget"] = _sweep_predicate_inputs(
-            state,
-            budget_pct=budget_pct,
-            now_unix=frozen_now,
-        )
+        inputs["sweep_result"], inputs["budget"] = _sweep_predicate_inputs(state, now_unix=frozen_now)
     return inputs
 
 
@@ -1840,7 +1406,6 @@ def initial_workflow_predicate_inputs(
     state: Any,
     *,
     current_phase: str,
-    budget_pct: dict[str, float] | None,
     kernel_enabled: bool,
     optimize_enabled: bool,
     enablement_enabled: bool,
@@ -1854,7 +1419,6 @@ def initial_workflow_predicate_inputs(
         optimize_enabled=optimize_enabled,
         enablement_enabled=enablement_enabled,
         enablement_in_flight=False,
-        budget_pct=budget_pct,
     )
 
 
@@ -1965,9 +1529,8 @@ def _kernel_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
                 "task_count": int(pending.get("controller_task_count") or 0),
                 "reason": str(pending.get("controller_reason") or ""),
             }
-        hint = str(inputs.get("hint") or "")
-        if hint == ESCALATE_HINT_SKIP_TO_SWEEP and not work_pending:
-            return "kernel_no_more_leverage", {"evidence": "kernel_no_more_leverage", "hint": hint}
+        if not work_pending:
+            return "kernel_no_more_leverage", {"evidence": "kernel_settled"}
         idle_ticks = int(plateau.get("idle_ticks") or 0)
         idle_since = _number(plateau.get("idle_since_unix")) or 0.0
         if idle_ticks >= int(plateau.get("idle_max_ticks") or 0) and idle_since > 0.0:
@@ -2017,29 +1580,27 @@ def _sweep_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     )
 
 
-def _reloop_decision(
-    facts: dict[str, Any],
-    *,
-    macro_cycle: int,
-    target_reached_at: str,
-) -> tuple[bool, dict[str, Any]]:
-    """Decide whether SWEEP loops back into another macro-cycle, from :func:`_reloop_facts`."""
+def _reloop_decision(inputs: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    sweep = dict(inputs.get("sweep_result") or {})
+    facts = dict(sweep.get("reloop") or {})
+    cycle = int(inputs.get("macro_cycle") or 0)
     current_gain = _number(facts.get("current_gain_pct")) or 0.0
     start_gain = _number(facts.get("gain_at_cycle_start_pct")) or 0.0
     threshold = _number(facts.get("min_gain_pct")) or 0.0
     gained = (current_gain - start_gain) > threshold
     streak = 0 if gained else int(facts.get("prior_no_gain_cycle_streak") or 0) + 1
     evidence: dict[str, Any] = {
-        "macro_cycle": macro_cycle,
+        "macro_cycle": cycle,
         "min_gain_pct": round(threshold, 6),
         "cycle_gain_delta": round(current_gain - start_gain, 6),
         "cycle_gained": gained,
         "no_gain_cycle_streak_effective": streak,
     }
-    if target_reached_at:
+    global_inputs = dict(inputs.get("global") or {})
+    if str(global_inputs.get("target_reached_at") or ""):
         evidence["reloop_blocked"] = "target_reached"
         return False, evidence
-    if macro_cycle + 1 >= int(facts.get("max_cycles") or 0):
+    if cycle + 1 >= int(facts.get("max_cycles") or 0):
         evidence["reloop_blocked"] = "max_cycles"
         return False, evidence
     saturated = dict(facts.get("saturated_directions") or {})
@@ -2057,15 +1618,23 @@ def _reloop_decision(
         evidence["reloop_blocked"] = "insufficient_remaining"
         evidence["session_remaining_seconds"] = round(remaining, 2)
         return False, evidence
-    evidence.update(reloop=True, next_cycle=macro_cycle + 1)
+    evidence.update(reloop=True, next_cycle=cycle + 1)
     return True, evidence
+
+
+def cycle_reloop_decision(state: Any, *, now_unix: float | None = None) -> tuple[bool, dict[str, Any]]:
+    """Whether another macro-cycle can open from here, with the evidence the decision rests on."""
+    frozen_now = float(now_unix if now_unix is not None else _now_unix(state))
+    inputs = workflow_predicate_inputs(state, now_unix=frozen_now)
+    inputs["sweep_result"], _ = _sweep_predicate_inputs(state, now_unix=frozen_now)
+    reloop, evidence = _reloop_decision(inputs)
+    return reloop and state.framework_agent_phase_enabled, evidence
 
 
 def compute_next_phase(
     state: Any,
     *,
     kernel_enabled: bool = True,
-    budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
     optimize_enabled: bool = True,
     enablement_enabled: bool = False,
@@ -2076,7 +1645,6 @@ def compute_next_phase(
     inputs = workflow_predicate_inputs(
         state,
         kernel_enabled=kernel_enabled,
-        budget_pct=budget_pct,
         now_unix=now_unix,
         optimize_enabled=optimize_enabled,
         enablement_enabled=enablement_enabled,
@@ -2143,7 +1711,7 @@ def replay_next_phase(inputs: dict[str, Any]) -> tuple[str, str, dict[str, Any]]
                 baseline.get("post_ready_runtime_sec")
             )
             retry = runtime
-            if runtime is not None and bool(baseline.get("double_run")) and benchmark is not None:
+            if runtime is not None and benchmark is not None:
                 retry += benchmark
             viability = _prelude_viability(baseline)
             use_sec = _number(viability.get("measured_round_sec")) or runtime
@@ -2225,11 +1793,7 @@ def replay_next_phase(inputs: dict[str, Any]) -> tuple[str, str, dict[str, Any]]
         exit_reason, exit_evidence = normal
         if exit_reason == "sweep_failed":
             return _transition_result(PHASE_CLOSE, exit_reason, exit_evidence, inputs)
-        reloop, reloop_evidence = _reloop_decision(
-            dict(dict(inputs.get("sweep_result") or {}).get("reloop") or {}),
-            macro_cycle=int(inputs.get("macro_cycle") or 0),
-            target_reached_at=target_at,
-        )
+        reloop, reloop_evidence = _reloop_decision(inputs)
         if reloop and optimize_enabled:
             return _transition_result(
                 PHASE_FRAMEWORK_AGENT,
@@ -2356,11 +1920,11 @@ def make_lifecycle_event(
 # bookkeeping).
 def bank_phase_segment(state, *, until_unix: float) -> float:
     """Bank the current phase's live segment, ending at ``until_unix``, into the durable totals."""
-    phase = (getattr(state, "phase", "") or "").strip().upper()
+    phase = (state.phase or "").strip().upper()
     if not phase:
         return 0.0
     segment = phase_elapsed_seconds(state, now_unix=until_unix)
-    totals = getattr(state, "phase_elapsed_totals", None)
+    totals = state.phase_elapsed_totals
     totals = dict(totals) if isinstance(totals, dict) else {}
     try:
         banked = max(0.0, float(totals.get(phase, 0.0) or 0.0))
@@ -2380,17 +1944,16 @@ def record_phase_transition(
     ts: str | None = None,
     ts_unix: float | None = None,
 ) -> dict[str, Any]:
-    """Append a phase_history row and atomically update ``phase`` fields; these are Coordinator-only, so LLM update_state cannot drive the machine. Returns the inserted row."""
+    """Append a phase_history row and atomically update ``phase`` fields; Coordinator-only writer. Returns the inserted row."""
     from datetime import datetime as _dt, timezone as _tz
     import time as _time
 
     now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
     now_unix = float(ts_unix if ts_unix is not None else _time.time())
     from_phase = (state.phase or "").strip().upper()
-    # Read before the loopback's bump can be observed here: it increments
-    # ``macro_cycle`` on the way out of a phase, so the cycle in scope at the
-    # transition is not always the one the outgoing phase ran in.
-    prev_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    prev_cycle = state.macro_cycle
+    # The loopback opens the next cycle right after this row is recorded; the entered phase already belongs to it.
+    entry_cycle = prev_cycle + 1 if (evidence or {}).get("loopback") else prev_cycle
     # Bank the finished segment for EVERY phase so the budget guards can charge
     # a phase for the whole run instead of the current entry.
     bank_phase_segment(state, until_unix=now_unix)
@@ -2401,7 +1964,7 @@ def record_phase_transition(
         evidence=evidence,
         ts=now_ts,
         ts_unix=now_unix,
-        cycle=int(getattr(state, "macro_cycle", 0) or 0),
+        cycle=entry_cycle,
     )
     history = list(state.phase_history or [])
     history.append(row)
@@ -2426,7 +1989,7 @@ def record_phase_transition(
             "from_phase": from_phase or None,
             "to_phase": row["to_phase"],
             "reason": reason,
-            "macro_cycle": int(getattr(state, "macro_cycle", 0) or 0),
+            "macro_cycle": int(state.macro_cycle or 0),
         },
     )
     try:
@@ -2451,7 +2014,7 @@ def record_phase_transition(
             )
         phase_event.record_entry(
             phase=str(row.get("to_phase") or ""),
-            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            macro_cycle=entry_cycle,
             sequence=len(history),
             from_phase=from_phase,
             reason=str(row.get("reason") or ""),
@@ -2489,7 +2052,7 @@ def append_phase_history_event(
         evidence=evidence,
         ts=now_ts,
         ts_unix=now_unix,
-        cycle=int(getattr(state, "macro_cycle", 0) or 0),
+        cycle=state.macro_cycle,
     )
     history = list(state.phase_history or [])
     history.append(row)
@@ -2501,7 +2064,7 @@ def append_phase_history_event(
 
         phase_event.record_marker(
             phase=phase,
-            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            macro_cycle=state.macro_cycle,
             sequence=len(history),
             reason=str(row.get("reason") or ""),
             evidence=dict(row.get("evidence") or {}),
@@ -2553,9 +2116,6 @@ __all__ = [
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
     "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",
     "DEFAULT_PLATEAU_EXPLORE_LOOKBACK",
-    "DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT",
-    "DEFAULT_PLATEAU_KERNEL_LOOKBACK",
-    "DEFAULT_PLATEAU_KERNEL_REVERT_STREAK",
     "ESCALATE_HINT_BUDGET_BUMP_CAP",
     "ESCALATE_HINT_BUDGET_BUMP_DELTA",
     "LIFECYCLE_STATUS_END",
@@ -2587,19 +2147,12 @@ __all__ = [
     "apply_escalate_budget_bump",
     "bank_phase_segment",
     "compute_next_phase",
+    "cycle_reloop_decision",
     "initial_workflow_predicate_inputs",
     "replay_next_phase",
     "workflow_predicate_inputs",
     "coordinator_reserved_in_phase",
-    "compute_plateau_kernel",
-    "exit_normal_optimize",
     "per_lever_dryness",
-    "exit_normal_kernel",
-    "exit_cold_anchor_prelude",
-    "exit_normal_prelude",
-    "exit_normal_sweep",
-    "exit_terminal_prelude",
-    "exit_time_exhausted_prelude",
     "append_phase_evidence_row",
     "append_phase_history_event",
     "baseline_round_cost_sec",
@@ -2609,7 +2162,6 @@ __all__ = [
     "one_more_measurement_sec",
     "prelude_affordable_seconds",
     "prelude_can_afford",
-    "prelude_exit_viability",
     "session_usable_seconds",
     "render_phase_action_bullets",
     "compute_kernel_progress_fingerprint",

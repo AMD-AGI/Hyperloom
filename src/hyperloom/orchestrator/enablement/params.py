@@ -44,7 +44,7 @@ def _enablement_carrier_params(state: Any) -> dict[str, Any]:
 class EnablementParams(CoordinatorCollaborator):
     """Builds the enablement authoring specialist's parameters."""
 
-    def _build_enablement_specialist_params(self, launch_log: str, *, attempt: int = 0) -> dict[str, Any] | None:
+    def build_enablement_specialist_params(self, launch_log: str, *, attempt: int = 0) -> dict[str, Any] | None:
         """Build enablement-specialist params from a captured launch failure.
 
         Classifies the failure (advisory ``kind`` only — see Q1 hardening),
@@ -451,7 +451,7 @@ class EnablementParams(CoordinatorCollaborator):
 
         max_candidates = int(getattr(req, "max_search_candidates", 5) or 5)
         # The PR query service is co-hosted by KB Store.
-        plane = getattr(self, "knowledge_plane", None)
+        plane = self.knowledge_plane
         pr_enabled = bool(plane is not None and getattr(plane, "pr_monitor_enabled", False))
         pr_monitor_url = pr_monitor_base_url() if pr_enabled else ""
         pr_monitor = PRMonitorConfig(base_url=pr_monitor_url) if pr_monitor_url else None

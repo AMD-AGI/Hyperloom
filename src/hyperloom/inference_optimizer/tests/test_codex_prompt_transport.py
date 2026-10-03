@@ -39,7 +39,6 @@ _TOOL_SURFACE_TOKENS: tuple[str, ...] = (
     "WebFetch",
     "get_recent_outcomes",
     "get_running_tasks",
-    "run_action_now",
     "read_reference",
 )
 
