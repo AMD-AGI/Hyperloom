@@ -304,6 +304,7 @@ def env_fault_observation(verdict: EnvVerdict, *, session_dir: Path | None = Non
         stage_reached=stage,
         stage_failed=stage,
         matched_marker=verdict.fault,
+        failure_line=excerpt.text,
         excerpt=excerpt,
         evidence_ref=STREAM,
         env_fault=verdict.fault,

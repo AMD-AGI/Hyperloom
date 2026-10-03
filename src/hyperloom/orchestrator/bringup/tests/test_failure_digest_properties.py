@@ -16,21 +16,12 @@ from hyperloom.common.bringup import (
     TerminalFrame,
     failure_digest,
     normalise_file_rel,
+    redact,
     render_excerpt,
 )
 
-# The capture window is anchored at the failure and spends a quarter of its
-# width on preceding context. Sizing that lead to a whole number of filler lines
-# is what makes "more log before the failure" a no-op: the window then always
-# opens on the same line boundary, whatever came before it.
 _FILLER_LINE = "preflight ok\n"
-_LEAD_LINES = 5
-_EXCERPT_WIDTH = 4 * _LEAD_LINES * len(_FILLER_LINE)
-
-# The remaining three quarters must hold the whole failure line at its widest
-# draw. If it did not, a longer pid or operand would push bytes past the window
-# edge and the digest would move for a reason that is not the failure.
-_USABLE = _EXCERPT_WIDTH - _LEAD_LINES * len(_FILLER_LINE)
+_EXCERPT_WIDTH = 480
 
 _EXC_TYPES = ("ValueError", "RuntimeError", "ImportError", "OutOfMemoryError")
 _MODULES = ("hyperloom.engine.loader", "sglang.srt.server", "torch.cuda.memory")
@@ -100,7 +91,7 @@ def _noises(draw: st.DrawFn) -> _Noise:
         clock=draw(st.integers(min_value=0, max_value=999_999)),
         want=draw(st.integers(min_value=1, max_value=9_999_999)),
         have=draw(st.integers(min_value=0, max_value=9_999_999)),
-        filler_lines=draw(st.integers(min_value=_LEAD_LINES, max_value=_LEAD_LINES + 8)),
+        filler_lines=draw(st.integers(min_value=0, max_value=40)),
     )
 
 
@@ -110,10 +101,9 @@ def _observe(stage: LadderStage, frame: _Frame, noise: _Noise) -> BootObservatio
     stamp = f"2026-09-{noise.clock % 28 + 1:02d}T{noise.clock % 24:02d}:{noise.clock % 60:02d}:{noise.clock % 59:02d}"
     failure = (
         f"[{stamp}] pid={noise.pid} {frame.exc_type}: {session}/weights/shard.bin "
-        f"wants {noise.want} bytes, {noise.have} free\n"
+        f"wants {noise.want} bytes, {noise.have} free"
     )
-    assert len(failure) <= _USABLE
-    log = _FILLER_LINE * noise.filler_lines + failure
+    log = _FILLER_LINE * noise.filler_lines + failure + "\n"
     return BootObservation(
         producer="ladder",
         stage_reached=LadderStage.WEIGHTS_LOADING,
@@ -125,6 +115,7 @@ def _observe(stage: LadderStage, frame: _Frame, noise: _Noise) -> BootObservatio
             line=412,
         ),
         matched_marker="weights.shard_too_large",
+        failure_line=redact(failure, roots=[session]),
         excerpt=render_excerpt(
             log,
             anchor=len(_FILLER_LINE) * noise.filler_lines,

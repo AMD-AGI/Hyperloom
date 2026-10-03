@@ -81,6 +81,71 @@ def test_unmatched_failure_still_digests() -> None:
     assert len(failure_digest(observation)) == 64
 
 
+def _engine_core_crash(root_error: str) -> str:
+    """A multi-process boot: the engine child's root error, then the API server's re-raise."""
+    core = "(EngineCore pid=7) ERROR 10-02 12:54:57 [core.py:1242] "
+    return (
+        "(APIServer pid=3) INFO 10-02 12:50:00 [api_utils.py:273] initializing a v1 llm engine\n"
+        f"{core}Traceback (most recent call last):\n"
+        f'{core}  File "/opt/vllm/v1/engine/core.py", line 316, in _initialize_kv_caches\n'
+        f"{core}    spec.prefix_cacheable\n"
+        f"{core}{root_error}\n"
+        "(APIServer pid=3) Traceback (most recent call last):\n"
+        '(APIServer pid=3)   File "/opt/vllm/v1/engine/utils.py", line 1272, in wait_for_engine_startup\n'
+        "(APIServer pid=3)     raise RuntimeError(\n"
+        "(APIServer pid=3) RuntimeError: Engine core initialization failed. See root cause above.\n"
+    )
+
+
+def test_a_child_process_root_error_keys_the_failure_not_the_parent_reraise() -> None:
+    from hyperloom.orchestrator.bringup.observe import round_advanced
+
+    before, after = (
+        ladder.classify(server_log=_engine_core_crash(error), server_elapsed_sec=1.0, trees=["/opt/vllm"])
+        for error in ("RuntimeError: cancelled", "AttributeError: 'MambaSpec' object has no attribute 'x'")
+    )
+
+    assert after.terminal_frame == TerminalFrame(
+        exc_type="AttributeError", module="v1.engine.core", file_rel="v1/engine/core.py", line=316
+    )
+    assert failure_digest(before) != failure_digest(after)
+    assert round_advanced(before, after)
+
+
+def test_the_digest_keys_on_the_failure_line_not_the_log_printed_before_it() -> None:
+    root = "AttributeError: 'MambaSpec' object has no attribute 'x'"
+
+    def boot(interleaved: str, error: str = root) -> BootObservation:
+        crash = _engine_core_crash(error)
+        head, tail = crash.split("\n", 1)
+        return ladder.classify(server_log=f"{head}\n{interleaved}{tail}", server_elapsed_sec=1.0, trees=["/opt/vllm"])
+
+    quiet = boot("")
+    noisy = boot("(Worker_TP3 pid=91) INFO 10-02 12:54:56 [gpu_model_runner.py:4120] profiling run done\n")
+    other = boot("", error="AttributeError: 'MambaSpec' object has no attribute 'y'")
+
+    assert quiet.failure_line == root
+    assert failure_digest(quiet) == failure_digest(noisy)
+    assert failure_digest(quiet) != failure_digest(other)
+
+
+def test_a_traceback_whose_header_was_cut_off_still_keys_the_failure() -> None:
+    observation = ladder.classify(
+        server_log=(
+            '  File "/opt/vllm/model_executor/layers/mla.py", line 88, in forward\n'
+            "UnboundLocalError: cannot access local variable 'q'\n"
+            "Traceback (most recent call last):\n"
+            '  File "/opt/vllm/v1/engine/utils.py", line 1272, in wait_for_engine_startup\n'
+            "RuntimeError: Engine core initialization failed.\n"
+        ),
+        server_elapsed_sec=1.0,
+        trees=["/opt/vllm"],
+    )
+    assert observation.terminal_frame is not None
+    assert observation.terminal_frame.file_rel == "model_executor/layers/mla.py"
+    assert observation.terminal_frame.exc_type == "UnboundLocalError"
+
+
 def test_digest_ignores_stage_reached_noise() -> None:
     frame = TerminalFrame(exc_type="ValueError", module="a.b", file_rel="a/b.py", line=3)
     left = BootObservation(
