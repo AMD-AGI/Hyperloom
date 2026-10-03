@@ -31,6 +31,7 @@ PERF_TERMS = (
     "rocm",
     "aiter",
     "flash",
+    "decode",
 )
 
 #: GitHub Search answers HTTP 422 past five boolean operators.
