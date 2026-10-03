@@ -93,6 +93,38 @@ async def test_a_sweep_that_settles_on_entry_hands_off_before_the_machine_leaves
 
 
 @pytest.mark.asyncio
+async def test_a_failed_transition_save_still_enters_the_next_cycle_and_then_raises(session_dir, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    coord, _ = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
+    st = coord.shared_state
+    st.last_conc_sweep = {"status": "succeeded"}
+    entered = AsyncMock()
+    restarted = AsyncMock()
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", entered)
+    monkeypatch.setattr(coord.phase_macro_cycle, "run_cycle_soft_restart", restarted)
+    real_save = st.save
+    failed: list[bool] = []
+
+    def _save(session_dir):
+        if st.phase == ps.PHASE_FRAMEWORK_AGENT and not failed:
+            failed.append(True)
+            raise OSError("session dir unavailable")
+        real_save(session_dir)
+
+    monkeypatch.setattr(st, "save", _save)
+
+    with pytest.raises(OSError, match="session dir unavailable"):
+        await coord.phase_machine.advance_phase_if_needed()
+
+    assert st.phase == ps.PHASE_FRAMEWORK_AGENT
+    assert entered.await_args.kwargs["to_phase"] == ps.PHASE_FRAMEWORK_AGENT
+    restarted.assert_awaited_once()
+    events = await coord.bus.tail(n=20, topic="event")
+    assert any((e.payload or {}).get("kind") == "phase_transition" for e in events)
+
+
+@pytest.mark.asyncio
 async def test_no_handoff_is_requested_when_no_further_cycle_is_feasible(session_dir):
     coord, orchestration = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
     coord.shared_state.macro_cycle = ps.DEFAULT_MAX_MACRO_CYCLES - 1
