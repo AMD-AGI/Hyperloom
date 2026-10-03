@@ -3981,9 +3981,10 @@ class BenchmarkRunExecutor:
                 log.warning("baseline_executor: %s", eval_probe_summary(eval_probe))
 
         log.info(
-            "baseline_executor: %s %s (output) e2el=%.1fms",
+            "baseline_executor: %s %.1f %s (output) e2el=%.1fms",
             "success_with_warning" if warnings else "success",
-            framework_registry.format_primary_metric(eval_framework, result["output_throughput"]),
+            result["output_throughput"] or 0.0,
+            framework_registry.throughput_unit(eval_framework),
             result["e2el_mean_ms"] or 0.0,
         )
         return result
