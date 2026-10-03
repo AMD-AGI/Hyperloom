@@ -325,7 +325,12 @@ class MachinePhase(CoordinatorCollaborator):
             phase=target,
             detail=f"reason={reason}" if reason else "",
         )
-        state.save(self.session_dir)
+        # The in-memory phase has already moved, so a failed save is raised only after the entry has run.
+        save_error: OSError | None = None
+        try:
+            state.save(self.session_dir)
+        except OSError as exc:
+            save_error = exc
         log.info(
             "Coordinator.phase: %s → %s (reason=%s)",
             prior or "<unset>",
@@ -368,6 +373,8 @@ class MachinePhase(CoordinatorCollaborator):
                 prior_cycle=prior_cycle,
                 new_cycle=state.macro_cycle,
             )
+        if save_error is not None:
+            raise save_error
 
     async def _on_phase_entered(
         self,
