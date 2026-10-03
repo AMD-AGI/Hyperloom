@@ -247,3 +247,42 @@ def test_both_declared_are_both_restored(tmp_path, monkeypatch):
     assert ["amd-smi", "set", "-g", "4", "5", "6", "7", "-l", "DETERMINISM"] in smi.calls
     restore()
     assert smi.calls[-1] == ["amd-smi", "set", "-g", "4", "5", "6", "7", "-l", "AUTO"]
+
+
+@pytest.mark.parametrize(
+    ("observed", "perf_level", "unreadable_gpu"),
+    [
+        pytest.param(
+            {**_cards(gpus=range(8)), 5: {"power_cap_w": None, "perf_level": "auto"}}, None, "5", id="cap-unreadable"
+        ),
+        pytest.param(
+            {**_cards(gpus=range(8)), 6: {"power_cap_w": 1400.0, "perf_level": ""}},
+            "determinism",
+            "6",
+            id="level-unreadable",
+        ),
+    ],
+)
+def test_an_original_that_cannot_be_read_refuses_before_anything_is_set(
+    tmp_path, monkeypatch, observed, perf_level, unreadable_gpu
+):
+    """Restore skips a value it never read, so applying over one would leave the card changed after the session."""
+    restore, _, error, smi = _apply(
+        tmp_path, monkeypatch, observed=[observed, observed], perf_level=perf_level, mask="4,5,6,7"
+    )
+    assert restore is None
+    assert f"GPU(s) {unreadable_gpu}" in error and "nothing was applied" in error
+    assert smi.calls == []
+    assert orphaned_power_records(tmp_path) == {}
+
+
+def test_a_card_missing_from_the_reread_after_orphan_recovery_refuses(tmp_path, monkeypatch):
+    """The re-read after restoring an orphan can drop a card the first read listed; nothing restores what was not read."""
+    dead = PowerSettingsLease(tmp_path, {4})
+    dead.record({4: {"power_cap_w": 1400}}, applied={"power_cap_w": 900}, owner="dead")
+    dead.release()
+    reread = {gpu: row for gpu, row in _cards().items() if gpu != 7}
+    restore, _, error, smi = _apply(tmp_path, monkeypatch, observed=[_cards(cap=900.0), reread])
+    assert restore is None
+    assert "GPU(s) 7" in error and "nothing was applied" in error
+    assert smi.calls == [["amd-smi", "set", "-g", "4", "-o", "ppt0", "1400"]], "only the orphan was restored"

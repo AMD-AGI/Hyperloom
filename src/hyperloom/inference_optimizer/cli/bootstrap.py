@@ -335,6 +335,30 @@ def apply_declared_gpu_power_settings(
                 ),
             )
         originals = _originals_of(observed)
+        # A value that cannot be read cannot be put back: restore would skip it, report success and clear the record,
+        # leaving the card at the applied setting with nothing left to recover it.
+        unreadable = sorted(
+            gpu
+            for gpu in gpus
+            if gpu not in originals
+            or any(
+                originals[gpu].get(key) is None
+                or isinstance(originals[gpu].get(key), bool)
+                or originals[gpu].get(key) == ""
+                for key in touched
+            )
+        )
+        if unreadable:
+            lease.release()
+            return (
+                None,
+                {},
+                (
+                    f"the current {' / '.join(k.replace('_w', '').replace('_', ' ') for k in touched)} of GPU(s) "
+                    f"{', '.join(map(str, unreadable))} could not be read, so it could not be restored after the session; "
+                    "nothing was applied"
+                ),
+            )
         declared = {"power_cap_w": power_cap_w, "perf_level": level}
         lease.record(originals, applied={key: declared[key] for key in touched}, owner=owner)
     except GpuPowerSettingsError as exc:
