@@ -61,6 +61,13 @@ class SweepPhase(CoordinatorCollaborator):
         )
 
     async def on_enter_sweep(self, tr: "Transition") -> None:
+        """Start the ``conc_sweep``, and hand the cycle off at once when SWEEP settles on entry."""
+        await self._start_conc_sweep(tr)
+        # A settled SWEEP is left on the next advance, before this phase's pump runs again.
+        if self.shared_state.last_conc_sweep.get("status"):
+            await self.pump()
+
+    async def _start_conc_sweep(self, tr: "Transition") -> None:
         """Auto-enqueue the ``conc_sweep`` task on SWEEP entry."""
         from_phase = tr.from_phase
         state = self.shared_state
