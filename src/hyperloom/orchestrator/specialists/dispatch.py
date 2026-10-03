@@ -10,7 +10,7 @@ import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.env import env_flag, is_truthy
+from hyperloom.common.env import env_flag
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 from ..collaborator import CoordinatorCollaborator
@@ -327,20 +327,11 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         # Mirror _handle_delegate lane/ttl resolution so the retry task holds the
         # same pools as the original and cannot run concurrently with serving.
         lanes, ttl = self._registry_lanes_ttl("specialist")
-        from .profile import resolve_specialist_profile, uses_whole_machine_gpu_lane
+        from .profile import requires_gpu, specialist_lanes
 
-        if resolve_specialist_profile(retry_params).reserves_benchmark_lane:
-            lanes = list(dict.fromkeys((*lanes, "benchmark_lane")))
-        needs_gpu = is_truthy(retry_params.get("needs_gpu"))
-        if not needs_gpu and uses_whole_machine_gpu_lane(retry_params):
-            # bench specialist: ensure needs_gpu is set so gpu_research_lane is acquired.
-            needs_gpu = True
-        if needs_gpu:
-            lanes = list(dict.fromkeys((*lanes, "gpu_research_lane")))
-            ttl = self._gpu_lease_ttl_sec(
-                int(ttl or 0),
-                params=retry_params,
-            )
+        lanes = list(specialist_lanes(retry_params, list(lanes)))
+        if requires_gpu(retry_params):
+            ttl = self._gpu_lease_ttl_sec(int(ttl or 0), params=retry_params)
 
         # Stable base key across attempts: strip any prior ``-autoretryN`` suffix.
         base_key = str(task.idempotency_key or task.task_id or "")
@@ -458,8 +449,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         params: dict[str, Any],
     ) -> None:
         """Fan a specialist delegate carrying ``params.tasks=[...]`` into N
-        standard free-form specialist dispatches (scope=freeform, lane=cpu,
-        mode=research defaults). Each fanned task is re-dispatched through the
+        standard free-form specialist dispatches (scope=freeform, mode=research
+        defaults). Each fanned task is re-dispatched through the
         normal ``_handle_delegate`` path. Per-task idempotency keys derive from
         the wave key. Each entry must pass the same structural checks as
         :func:`validate_freeform_wave_task` (the PolicyGate runs these first).
@@ -484,7 +475,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             for carry in (
                 "mode",
                 "bench",
-                "lane",
                 "model",
                 "priority",
                 "timeout_minutes",
@@ -493,7 +483,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 if isinstance(task, dict) and carry in task:
                     sub_params[carry] = task[carry]
             sub_params.setdefault("mode", "research")
-            sub_params.setdefault("lane", "cpu")
             sub_payload = dict(intent.payload)
             sub_payload["params"] = sub_params
             if base_key:
@@ -516,13 +505,14 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         A real scheduling event (a domain delegate routed through PolicyGate +
         warmup + the GPU specialist pool). Idempotent per
-        ``(anchor, round, macro_cycle)`` and self-throttling (zeroes the
-        per-anchor counter on dispatch). At most one forced dispatch per tick.
+        ``(anchor, round, macro_cycle)``; a domain with a specialist already
+        queued or running is skipped, and the dispatcher zeroes the per-anchor
+        counter when the forced specialist spawns. At most one forced dispatch
+        per tick.
 
         Note:
             Side-effecting: may dispatch a domain specialist via
-            ``_handle_intent`` and mutate per-anchor throttle counters on
-            ``shared_state``. Returns nothing.
+            ``_handle_intent``. Returns nothing.
         """
         state = self.shared_state
         if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
@@ -540,13 +530,18 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         from .domains import domain_for_tag
 
+        busy_domains = {
+            str((t.params or {}).get("domain") or "")
+            for t in (*await self.tasks.queued(), *await self.tasks.running())
+            if t.kind == "specialist"
+        }
         round_id = int((state.explore_search or {}).get("cursor") or 0)
         for anchor in stalled:
             gap_cid = state.best_gap_for_anchor(anchor)
             if not gap_cid:
                 continue
             dom = domain_for_tag(anchor)
-            if dom is None:
+            if dom is None or dom.key in busy_domains:
                 continue
             params: dict[str, Any] = {
                 "domain": dom.key,
@@ -601,8 +596,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     "idempotency_key": idempotency_key,
                 },
             )
-            # Zero the counter up-front so a slow enqueue can't re-fire next tick.
-            state.note_specialist_dispatched(anchor)
             await self._handle_intent("orchestration", intent)
             try:
                 state.save(self.session_dir)

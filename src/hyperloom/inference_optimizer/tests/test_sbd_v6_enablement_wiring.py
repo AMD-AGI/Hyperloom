@@ -179,7 +179,6 @@ def _lane(session_dir: Path, **overrides: Any):
         _maybe_escalate_to_targeted_build=_noop,
         _read_enablement_source_context=lambda _sig: "",
         _derive_checkpoint_weight_facts=lambda _log: "",
-        _framework_gpu_params=lambda: {},
         _framework_authoring_lanes_ttl=lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
         _time_budget_denial_for_action=lambda _action: None,
         action_registry=ACTION_CATALOGUE,

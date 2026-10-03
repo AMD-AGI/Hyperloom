@@ -1483,7 +1483,6 @@ async def test_dispatch_failure_rolls_back_preapplied_warm_kernel(tmp_path):
             result={},
             error=("replay_warm_recipe target_file='/usr/local/vllm.py' escapes session_dir"),
         ),
-        None,
     )
 
     assert target.read_text(encoding="utf-8") == "original\n"

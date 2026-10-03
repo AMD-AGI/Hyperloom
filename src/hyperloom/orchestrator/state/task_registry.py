@@ -550,6 +550,14 @@ class TaskRegistry:
         )
         return [Task.from_row(row) for row in rows]
 
+    def queued_kind_counts_sync(self) -> dict[str, int]:
+        """Return {kind: count} for queued tasks, synchronously."""
+        rows = self.db.fetchall_sync(
+            "SELECT kind, COUNT(*) AS n FROM tasks WHERE state='queued' GROUP BY kind",
+            (),
+        )
+        return {str(row["kind"]): int(row["n"]) for row in rows}
+
     async def extend_lease(self, task_id: str, extra_sec: int) -> int:
         """Grow a running task's ``lease_ttl_sec`` by ``extra_sec``."""
         async with self.db.transaction() as cur:

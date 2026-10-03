@@ -349,8 +349,8 @@ class _RenderMixin:
             rows.append(f"  · (+{len(ordered) - max_entries} older gaps elided; see state.json `gaps[]`)")
         return "\n".join(rows)
 
-    def _untested_proposal_rows(self) -> list[dict[str, Any]]:
-        """Executable proposals from this cycle that no explore round has benched."""
+    def untested_proposal_rows(self) -> list[dict[str, Any]]:
+        """Executable proposals from this cycle that no explore round has benched, highest severity first."""
         from hyperloom.common.coerce import to_int
 
         from ...actions.executors._proposal_identity import (
@@ -395,6 +395,7 @@ class _RenderMixin:
                 row["name"] = row["name"] or f"{domain or 'specialist'}-{task_id}-{index}"
                 row["domain"] = domain
                 row["severity"] = severity
+                row["fingerprint"] = fingerprint
                 ranked.append((GAP_SEVERITY_RANK.get(severity, 0), order, row))
         ranked.sort(key=lambda r: (-r[0], -r[1]))
         return [row for _, _, row in ranked]
@@ -422,13 +423,13 @@ class _RenderMixin:
 
     def to_untested_proposals_summary(self, *, max_entries: int = 12) -> str:
         """Render the specialist proposals still waiting for a benchmark slot."""
-        rows = self._untested_proposal_rows()
+        rows = self.untested_proposal_rows()
         if not rows:
             return ""
         out = [
             "Executable specialist proposals from this cycle that no explore round has benched.",
-            "Ranked by gap severity, then most recent. Compose the next `explore` grid from these;",
-            "dispatch an ATOMIC entry verbatim as one variant — never split or re-derive its flags.",
+            "Ranked by gap severity, then most recent. The Coordinator benches the head of this",
+            "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
             "",
         ]
         out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])

@@ -63,6 +63,12 @@ async def _build_coord_with_capacity(
     return coord
 
 
+async def _pump_until_drained(coord) -> None:
+    """Pump until nothing is queued or in flight; each pump returns on its first completion."""
+    while await coord.tasks.queued() or coord._inflight_actions:
+        await coord._pump_dispatcher_once()
+
+
 class _ConcurrencyProbe:
     """Captures per-task entry/exit times to detect actual parallelism."""
 
@@ -185,7 +191,7 @@ async def test_concurrency_probe_requires_a_fresh_second_wave():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("late_entry_delay", [0.0, 0.4], ids=["default", "staggered"])
 async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path, late_entry_delay: float):
-    """capacity=4 with 4 queued specialists runs all 4 in one pump (peak concurrency 4)."""
+    """capacity=4 with 4 queued specialists runs all 4 at once (peak concurrency 4)."""
     coord = await _build_coord_with_capacity(tmp_path, capacity=4)
     probe = _ConcurrencyProbe(sleep_seconds=0.3, expected_concurrency=4)
     first_entry = asyncio.Event()
@@ -212,7 +218,7 @@ async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path, lat
             requires_lanes=["research_lane"],
         )
 
-    await coord._pump_dispatcher_once()
+    await _pump_until_drained(coord)
 
     assert len(probe.entries) == 4
     assert len(probe.exits) == 4
@@ -227,7 +233,7 @@ async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path, lat
 async def test_dispatcher_caps_concurrency_at_capacity_when_more_queued(
     tmp_path: Path,
 ):
-    """capacity=2 with 4 queued: the pump drains all 4 but never exceeds peak concurrency 2 (the lane-capacity invariant), re-dispatching as a slot frees."""
+    """capacity=2 with 4 queued: all 4 drain but never above peak concurrency 2 (the lane-capacity invariant), re-dispatching as a slot frees."""
     coord = await _build_coord_with_capacity(tmp_path, capacity=2)
     probe = _ConcurrencyProbe(sleep_seconds=0.3, expected_concurrency=2)
     coord.sub.register_executor("specialist", probe)
@@ -244,9 +250,9 @@ async def test_dispatcher_caps_concurrency_at_capacity_when_more_queued(
             requires_lanes=["research_lane"],
         )
 
-    await coord._pump_dispatcher_once()
+    await _pump_until_drained(coord)
 
-    # All four eventually run (queue fully drained in one pump) ...
+    # All four eventually run ...
     assert len(probe.entries) == 4
     assert len(probe.exits) == 4
     # ... but never more than `capacity` at once.
@@ -257,7 +263,7 @@ async def test_dispatcher_caps_concurrency_at_capacity_when_more_queued(
 
 @pytest.mark.asyncio
 async def test_dispatcher_capacity_one_serialises(tmp_path: Path):
-    """capacity=1 serialises execution (peak concurrency 1) while still draining the whole queue across re-scans within a single pump."""
+    """capacity=1 serialises execution (peak concurrency 1) while still draining the whole queue."""
     coord = await _build_coord_with_capacity(tmp_path, capacity=1)
     probe = _ConcurrencyProbe(sleep_seconds=0.1)
     coord.sub.register_executor("specialist", probe)
@@ -274,7 +280,7 @@ async def test_dispatcher_capacity_one_serialises(tmp_path: Path):
             requires_lanes=["research_lane"],
         )
 
-    await coord._pump_dispatcher_once()
+    await _pump_until_drained(coord)
     assert len(probe.entries) == 3
     peak = _max_concurrent(probe.entries, probe.exits)
     assert peak == 1, f"expected serial execution (peak 1), got {peak}"
@@ -310,7 +316,7 @@ async def test_gpu_specialist_pool_limits_concurrency_even_when_research_lane_fr
             requires_lanes=["research_lane"],
         )
 
-    await coord._pump_dispatcher_once()
+    await _pump_until_drained(coord)
 
     # Both ran (drained), but GPU concurrency never exceeded the pool cap of 1.
     assert len(probe.entries) == 2
@@ -365,7 +371,7 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
         lease_ttl_sec=5,
     )
 
-    await coord._pump_dispatcher_once()
+    await _pump_until_drained(coord)
 
     assert len(captured_ttls) == 1
     ttl = captured_ttls[0]
@@ -374,7 +380,7 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
     # The lease was taken before the deadline was read back here, so the kill is
     # this many seconds away at most; the lease must still be held then.
     assert ttl >= deadline.remaining()
-    budget = coord._specialist_wall_budget_sec(needs_gpu=True)
+    budget = coord._specialist_wall_budget_sec(params={"domain": "serving_specialist", "needs_gpu": True})
     assert ttl == pytest.approx(max(5, budget * (1.0 + GPU_LEASE_TTL_GRACE)), abs=2)
     assert probe.gpu_ids_by_task
 
