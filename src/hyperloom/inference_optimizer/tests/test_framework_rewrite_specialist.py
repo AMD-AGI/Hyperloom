@@ -309,9 +309,6 @@ class _Tasks:
 
 
 class _GpuLanesStub:
-    def framework_gpu_params(self) -> dict:
-        return {}
-
     def framework_authoring_lanes_ttl(self, _params, *, base_ttl_sec: int) -> tuple[list[str], int]:
         return [], base_ttl_sec
 

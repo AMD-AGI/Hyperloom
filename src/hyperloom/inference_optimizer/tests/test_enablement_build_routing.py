@@ -48,8 +48,7 @@ def coord(build_coord):
     # Patch build_lifecycle collaborator so the enqueue routes back to the test's _bl.
     build_coord._bl = BuildLifecycleCollaborator(build_coord)
     build_coord.build_lifecycle.enqueue_targeted_build = build_coord._bl.enqueue_targeted_build
-    # gpu_lanes stubs: return empty params / trivial lanes for tests that don't care about GPU dispatch.
-    build_coord.gpu_lanes.framework_gpu_params = lambda: {}
+    # gpu_lanes stub: trivial lanes for tests that don't care about GPU dispatch.
     build_coord.gpu_lanes.framework_authoring_lanes_ttl = lambda params, *, base_ttl_sec: (
         ["research_lane"],
         base_ttl_sec,
@@ -699,14 +698,12 @@ def _make_params_fake(**kw):
         ),
     )
     fake = types.SimpleNamespace(shared_state=state, session_dir="/tmp")
-    fake.__dict__["_coord"] = types.SimpleNamespace(gpu_lanes=types.SimpleNamespace(framework_gpu_params=lambda: {}))
     fake.build_enablement_specialist_params = types.MethodType(
         EnablementParams.build_enablement_specialist_params, fake
     )
     fake._discover_enablement_candidate_refs = lambda req, plan, *, deadline=None: []
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
-    fake.framework_gpu_params = lambda: {}
     return fake
 
 

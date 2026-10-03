@@ -23,7 +23,7 @@ from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
     resolved_within,
 )
-from hyperloom.common.env import env_bool, is_truthy
+from hyperloom.common.env import env_bool
 from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -977,8 +977,8 @@ class PolicyGate:
         """Validate a specialist's optional GPU request.
 
         The request's shape is judged here: whether the dispatch needs cards at
-        all (a bench-enabled patch specialist does whether or not it says so,
-        mirroring the dispatcher) and whether the count it names is positive.
+        all (:func:`requires_gpu`, the rule the dispatcher leases by) and whether
+        the count it names is positive.
         The pool-size arms come off the projection;
         ``SpecialistGpuPool.try_acquire`` hands out the cards.
 
@@ -991,16 +991,14 @@ class PolicyGate:
                 exceeds the pool the projection last saw.
         """
         from ..specialists.profile import (
+            requires_gpu,
             resolve_specialist_profile,
             uses_whole_machine_gpu_lane,
         )
 
-        needs_gpu = is_truthy(params.get("needs_gpu"))
-        reserves_bench_lane = resolve_specialist_profile(params).reserves_benchmark_lane
-        if not needs_gpu and reserves_bench_lane:
-            needs_gpu = True
-        if not needs_gpu:
+        if not requires_gpu(params):
             return
+        reserves_bench_lane = resolve_specialist_profile(params).reserves_benchmark_lane
         facts = self.resources
         serving_tp = facts.serving_tp
         whole_machine = uses_whole_machine_gpu_lane(params)

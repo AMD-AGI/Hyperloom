@@ -133,6 +133,7 @@ _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # the same session the parent does. Not a credential.
         "CLAW_SESSION_ID",
         "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CONFIG_DIR",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
         "HOME",
@@ -968,9 +969,14 @@ class SpecialistSubprocessDispatcher:
             env["ROCR_VISIBLE_DEVICES"] = visible
             env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = visible
         else:
-            # CPU specialists must not inherit serving GPU visibility.
+            # CPU specialists: hide all GPUs and use workspace-local compiler caches.
             for var in GPU_MASK_ENV_NAMES:
-                env.pop(var, None)
+                env[var] = ""
+            cache_root = workspace / ".cache"
+            env["TRITON_CACHE_DIR"] = str(cache_root / "triton")
+            env["TORCHINDUCTOR_CACHE_DIR"] = str(cache_root / "torchinductor")
+            env["AITER_JIT_DIR"] = str(cache_root / "aiter_jit")
+            env["INFERENCE_OPTIMIZER_AITER_JIT_DIR"] = str(cache_root / "aiter_jit")
 
         with cancel_scope_listener() as scope:
             log_fh: Any = None

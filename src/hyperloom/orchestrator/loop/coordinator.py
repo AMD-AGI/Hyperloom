@@ -75,7 +75,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
     trajectory_scope,
     trajectory_span,
 )
-from hyperloom.common.deadline import Deadline
+from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.inference_optimizer.trace.orchestration_trace import (
     write_mcp_setup_once,
 )
@@ -282,7 +282,7 @@ class Coordinator:
                 serving_tp=self.dispatcher.resolve_serving_tp(),
             ),
         )
-        # Framework-authoring pool over the whole node.
+        # Whole-node pool for enablement and bench specialists.
         self.framework_gpu_pool = SpecialistGpuPool(
             self.db,
             gpu_ids=resolve_whole_machine_devices(),
@@ -1036,6 +1036,11 @@ class Coordinator:
                             )
                         stop_reason = "time_exhausted"
                         break
+                    # No reactor turn paces the closing ticks, so wait on the running work instead.
+                    poll_sec = self.dispatcher.poll_sec
+                    await self.dispatcher.wait_for_running_work(
+                        timeout=min(poll_sec, seconds_until(closing_deadline, unbounded_cap=poll_sec))
+                    )
                 if (
                     self.shared_state.recent_crash_count(
                         window_sec=_CRASH_EMERGENCY_WINDOW_SEC,

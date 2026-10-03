@@ -163,8 +163,9 @@ jobs:
     #   * `vars.CI_E2E_RUNNER_LABEL` moves every PR that is not opted in above. For
     #     once a replacement is trusted and the whole pool should follow.
     runs-on: ${{ needs.resolve.outputs.runner_label }}
-    # Covers a full MAX_HOURS run + setup/baseline overhead.
-    timeout-minutes: 240
+    # Covers the wait for a GPU (QUEUE_TIMEOUT_S, 4h) and the run once its sandbox is
+    # ready (MAX_HOURS plus an hour of setup and close-out), with room for the rest.
+    timeout-minutes: ${{ fromJSON(vars.CI_E2E_JOB_TIMEOUT_MIN || '510') }}
     steps:
       - name: Checkout (workflow scripts only)
         uses: actions/checkout@v7
@@ -210,9 +211,10 @@ jobs:
           GH_STATUS_SHA: ${{ needs.resolve.outputs.head_sha }}
           GH_STATUS_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           STATUS_INTERVAL_S: "300"
-          # Poll long enough to cover the run budget.
           POLL_INTERVAL_S: "60"
-          POLL_MAX: "220"
+          # How long to wait for a GPU. Counted separately from the run, so a busy
+          # cluster ends the check as "no capacity" instead of spending the run's time.
+          QUEUE_TIMEOUT_S: ${{ vars.CI_E2E_QUEUE_TIMEOUT_S || '14400' }}
         run: |
           chmod +x .github/scripts/ci-e2e-dispatch.sh
           .github/scripts/ci-e2e-dispatch.sh

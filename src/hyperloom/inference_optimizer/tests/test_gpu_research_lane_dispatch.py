@@ -68,10 +68,10 @@ async def test_needs_gpu_specialist_acquires_gpu_research_lane(tmp_path):
     )
     task = await _queued_specialist(coord)
     assert "gpu_research_lane" in task.requires_lanes
-    # research_lane is kept for LLM-concurrency accounting.
-    assert "research_lane" in task.requires_lanes
+    # GPU specialists hold gpu_research_lane only; research_lane is for CPU specialists.
+    assert "research_lane" not in task.requires_lanes
     # TTL re-sourced to the time left on the specialist deadline × (1 + grace).
-    budget = coord.dispatcher._specialist_wall_budget_sec(needs_gpu=True)
+    budget = coord.dispatcher._specialist_wall_budget_sec(params={"needs_gpu": True})
     assert task.lease_ttl_sec == pytest.approx(max(1800, int(budget * (1.0 + GPU_LEASE_TTL_GRACE))), abs=2)
     # Iron law: the lane TTL outlives the kill the reaper performs at the deadline.
     assert task.lease_ttl_sec >= int(budget)

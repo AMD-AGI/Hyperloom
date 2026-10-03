@@ -199,7 +199,9 @@ jobs:
       group: forge-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_sha || needs.resolve.outputs.head_ref || github.ref }}
       cancel-in-progress: true
     runs-on: ${{ vars.FORGE_E2E_RUNNER_LABEL || 'Hyperloom-e2e-ci' }}
-    timeout-minutes: ${{ fromJSON(vars.FORGE_E2E_JOB_TIMEOUT_MIN || '240') }}
+    # Covers the wait for a GPU (QUEUE_TIMEOUT_S, 4h) and the run's own deadline once it
+    # starts (MAX_HOURS plus an hour of bootstrap, with slack), with room for the rest.
+    timeout-minutes: ${{ fromJSON(vars.FORGE_E2E_JOB_TIMEOUT_MIN || '390') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -238,7 +240,9 @@ jobs:
           STATUS_CONTEXT: ci-e2e/kernelforge
           STATUS_INTERVAL_S: "300"
           POLL_INTERVAL_S: "60"
-          CI_E2E_BOOTSTRAP_SLACK_SEC: ${{ vars.FORGE_E2E_BOOTSTRAP_SLACK_SEC || '3600' }}
+          # How long to wait for a GPU. Counted separately from the run, so a busy
+          # cluster ends the check as "no capacity" instead of spending the run's time.
+          QUEUE_TIMEOUT_S: ${{ vars.FORGE_E2E_QUEUE_TIMEOUT_S || '14400' }}
           CI_E2E_DELETE_ON_TIMEOUT: ${{ vars.FORGE_E2E_DELETE_ON_TIMEOUT || '0' }}
         run: |
           chmod +x .github/scripts/forge-ci-e2e-dispatch.sh

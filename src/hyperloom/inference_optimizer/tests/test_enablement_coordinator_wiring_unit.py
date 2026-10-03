@@ -282,7 +282,6 @@ def _enqueue_self(tmp_path, **state_kw):
     coord._run_deadline = state_kw.get("run_deadline")
     coord.enablement_params._read_enablement_source_context = lambda _sig: ""
     coord.enablement_params._derive_checkpoint_weight_facts = lambda _log: ""
-    coord.gpu_lanes.framework_gpu_params = lambda: {}
     coord.gpu_lanes.framework_authoring_lanes_ttl = lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec)
     coord.dispatcher.time_budget_denial_for_action = lambda _action: None
     return coord

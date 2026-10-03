@@ -300,18 +300,12 @@ def test_rearm_reactivation_threads_kept_action_into_next_params(monkeypatch):
             last_build_failure={},
         ),
     )
-    gpu_lanes = types.SimpleNamespace(framework_gpu_params=lambda: {})
-    fake = types.SimpleNamespace(
-        shared_state=state,
-        knowledge_plane=None,
-        _coord=types.SimpleNamespace(gpu_lanes=gpu_lanes),
-    )
+    fake = types.SimpleNamespace(shared_state=state, knowledge_plane=None)
     fake._discover_enablement_candidate_refs = types.MethodType(
         EnablementParams._discover_enablement_candidate_refs, fake
     )
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
-    fake.framework_gpu_params = lambda: {}
     params = EnablementParams.build_enablement_specialist_params(fake, "Model architecture 'Foo' is not supported")
     assert params is not None
     # The prior KEEP'd runtime is re-attached for the next round.
