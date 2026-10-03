@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, TerminalFrame
+from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.bringup import observation_summary
 from hyperloom.orchestrator.bus.storage import SqliteConnection
@@ -128,6 +129,9 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch):
     assert params["source_phase"] == "ENABLEMENT"
     assert params["enablement"] is True
     assert params["enablement_failure_kind"] == "missing_model_arch"
+    # The whole verdict travels, not just its kind, so the specialist prompt
+    # renders what the round was dispatched on instead of re-classifying.
+    assert FailureSignature.from_dict(params["enablement_failure_signature"]).kind == "missing_model_arch"
     # The pre-patch half of the gate travels as the persisted observation's
     # path, never as a re-classifiable blob of text.
     assert params["enablement_before_observation_path"] == "/s/reports/bringup/round-abc-000.json"

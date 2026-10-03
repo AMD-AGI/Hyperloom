@@ -211,9 +211,15 @@ else
   fi
 
   log "delegating server boot -> ${BUILTIN} (PROFILE=${PROFILE:-0})"
+  # InferenceX writes inferencex_result.json to $AGENTIC_OUTPUT_DIR and, when
+  # that is unset, to the checkout root ($INFMAX_CONTAINER_WORKSPACE). The
+  # pid-contract exception below only accepts the file from $RESULT_DIR, so an
+  # otherwise finished agentic replay is discarded as "wrote no pid". Point the
+  # default at this run's result dir; an explicit AGENTIC_OUTPUT_DIR still wins.
   _recipe_command=(bash "${BENCH_DIR}/${BUILTIN}")
   case "$BUILTIN" in
     */agentic/*)
+      export AGENTIC_OUTPUT_DIR="${AGENTIC_OUTPUT_DIR:-$RESULT_DIR}"
       _recipe_command=(python3 "${BENCH_DIR}/agentx_launch_capture.py" run
         --result "${RESULT_DIR}/${RESULT_FILENAME}.json" --port "$PORT"
         --config "${HYPERLOOM_LAUNCH_CONFIG_PATH:-/nonexistent}" -- "${_recipe_command[@]}") ;;

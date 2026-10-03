@@ -1162,11 +1162,20 @@ async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_provisioned_runtime_is_retired_when_no_mutation_reaches_gate(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("verdict", "runtime_survives"), [("kept", True), ("reverted", False)])
+async def test_a_runtime_only_round_is_benched_and_its_verdict_decides_the_runtime(
+    tmp_path, monkeypatch, verdict, runtime_survives
+):
+    """The acquired runtime is the round's whole change; the gate, not the apply stage, decides its fate."""
     from types import SimpleNamespace
     from hyperloom.agents.framework import isolation
+    from hyperloom.common.failure_signature import classify_failure
     from hyperloom.orchestrator.enablement.runtime import adapters
-    from hyperloom.orchestrator.enablement.runtime.stack_actions import FrameworkRuntime, ProvisionResult
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import (
+        EnablementStackAction,
+        FrameworkRuntime,
+        ProvisionResult,
+    )
 
     session = tmp_path / "session"
     workspace = _write_workspace(session, "spec")
@@ -1179,21 +1188,39 @@ async def test_provisioned_runtime_is_retired_when_no_mutation_reaches_gate(tmp_
         adapters,
         "get_adapter",
         lambda _fw: SimpleNamespace(
+            build_stack_action=lambda _gap, **_kw: EnablementStackAction(
+                kind="runtime_candidate",
+                framework="vllm",
+                gap_id="gap.enablement.missing_model_arch",
+                capability="missing_model_arch",
+            ),
             provision=lambda *_args: ProvisionResult(ok=True, runtime=FrameworkRuntime(venv_root=str(runtime))),
             probe=lambda *_args: True,
         ),
     )
+    gated: list[str] = []
+
+    async def _gate(_self, attempt, _params, _extra):
+        assert runtime.exists()
+        gated.append(attempt.pending["attempt_venv_root"])
+        return {"status": verdict, "specialist_task_id": "spec"}
+
+    monkeypatch.setattr(IntegratePatchExecutor, "_stage_gate", _gate)
     result = await IntegratePatchExecutor(session_dir=session)(
         _make_ctx(
             "task",
             {
                 "specialist_task_id": "spec",
-                "runtime_candidate": {"kind": "runtime_candidate", "framework": "vllm"},
+                "enablement": True,
+                "enablement_failure_signature": classify_failure(
+                    "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
+                ).to_dict(),
             },
         )
     )
-    assert result["status"] == "no_patches"
-    assert not runtime.exists()
+    assert gated == [str(runtime)]
+    assert result["status"] == verdict
+    assert runtime.exists() is runtime_survives
 
 
 @pytest.mark.asyncio

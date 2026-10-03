@@ -43,24 +43,37 @@ def _install_urlopen(monkeypatch, handler) -> None:
 # _build_query -----------------------------------------------------------
 
 
-def test_build_query_scopes_repo_and_perf_terms() -> None:
-    """The query is scoped to the repo's PRs and ORs every perf term."""
-    q = gh._build_query("sgl-project/sglang")
-    assert "repo:sgl-project/sglang" in q
+def test_build_query_scopes_repo_and_ors_the_terms() -> None:
+    """The query is scoped to the repo's PRs and ORs exactly the given terms."""
+    q = gh._build_query("ROCm/vllm", ("all",), terms=("deepseekv4", "causallm"))
+    assert "repo:ROCm/vllm" in q
     assert "is:pr" in q
-    for t in gh.PERF_TERMS:
-        assert t in q
+    assert "(deepseekv4 OR causallm)" in q
+
+
+def test_search_perf_prs_sends_the_given_terms(monkeypatch) -> None:
+    """The composed query reaches the Search API with the caller's terms."""
+    captured: dict[str, str] = {}
+
+    def _open(req):
+        captured["url"] = req.get_full_url()
+        return _FakeResp(200, b'{"items": []}')
+
+    _install_urlopen(monkeypatch, _open)
+    gh.search_perf_prs("https://github.com/ROCm/vllm.git", terms=("deepseekv4",))
+    assert "deepseekv4" in captured["url"]
+    assert "throughput" not in captured["url"]
 
 
 def test_build_query_open_only_keeps_is_open() -> None:
     """Default open-only keeps the is:open qualifier."""
-    q = gh._build_query("sgl-project/sglang", states=("open",))
+    q = gh._build_query("sgl-project/sglang", states=("open",), terms=gh.PERF_TERMS)
     assert "is:open" in q
 
 
 def test_build_query_all_drops_is_open() -> None:
     """Explicit all-state search omits the is:open qualifier."""
-    q = gh._build_query("sgl-project/sglang", states=("all",))
+    q = gh._build_query("sgl-project/sglang", states=("all",), terms=gh.PERF_TERMS)
     assert "is:open" not in q
     assert "is:pr" in q
 
@@ -79,7 +92,7 @@ def test_search_perf_prs_parses_items(monkeypatch) -> None:
         }
     ).encode("utf-8")
     _install_urlopen(monkeypatch, lambda req: _FakeResp(200, body))
-    out = gh.search_perf_prs("https://github.com/sgl-project/sglang.git", limit=5)
+    out = gh.search_perf_prs("https://github.com/sgl-project/sglang.git", limit=5, terms=gh.PERF_TERMS)
     assert out == [
         GitHubPr(number=11, title="fp8 fix", html_url="u11"),
         GitHubPr(number=12, title="rocm tune", html_url="u12"),
@@ -93,13 +106,13 @@ def test_search_perf_prs_best_effort_on_failure(monkeypatch) -> None:
         raise urllib.error.HTTPError(req.get_full_url(), 403, "rate", {}, io.BytesIO(b""))
 
     _install_urlopen(monkeypatch, boom)
-    out = gh.search_perf_prs("https://github.com/sgl-project/sglang.git", limit=5)
+    out = gh.search_perf_prs("https://github.com/sgl-project/sglang.git", limit=5, terms=gh.PERF_TERMS)
     assert out == []
 
 
 def test_search_perf_prs_non_github_returns_empty() -> None:
     """A non-GitHub remote should silently return [] (no network call)."""
-    out = gh.search_perf_prs("https://gitlab.com/foo/bar.git")
+    out = gh.search_perf_prs("https://gitlab.com/foo/bar.git", terms=gh.PERF_TERMS)
     assert out == []
 
 
