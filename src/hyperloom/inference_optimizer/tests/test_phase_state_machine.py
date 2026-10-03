@@ -726,7 +726,7 @@ async def test_no_kernel_framework_share_is_the_same_for_machine_dispatch_and_pr
     try:
         # Past the unredistributed share's allotment, well inside the redistributed one.
         _enter_framework_for(c, _NO_KERNEL_CYCLE_SEC * (unredistributed + share) / 2)
-        assert c.dispatcher._dispatch_paused_for_phase_budget() is False
+        assert c.dispatcher.dispatch_paused_for_phase_budget() is False
         block = await _phase_block(c)
         assert f"pct={share:.2f}" in block
         assert "remaining_sec=0 " not in block
@@ -734,7 +734,7 @@ async def test_no_kernel_framework_share_is_the_same_for_machine_dispatch_and_pr
         assert c.shared_state.phase == phase_state.PHASE_FRAMEWORK_AGENT
 
         _enter_framework_for(c, _NO_KERNEL_CYCLE_SEC * share + 60.0)
-        assert c.dispatcher._dispatch_paused_for_phase_budget() is True
+        assert c.dispatcher.dispatch_paused_for_phase_budget() is True
         assert "remaining_sec=0" in await _phase_block(c)
         await c.phase_machine.advance_phase_if_needed()
         framework_exit = c.shared_state.phase_history[-1]
@@ -753,7 +753,7 @@ async def test_extend_explore_budget_moves_the_share_every_reader_uses(no_kernel
     bumped = share + phase_state.ESCALATE_HINT_BUDGET_BUMP_DELTA
     try:
         _enter_framework_for(c, _NO_KERNEL_CYCLE_SEC * (share + bumped) / 2)
-        assert c.dispatcher._dispatch_paused_for_phase_budget() is True
+        assert c.dispatcher.dispatch_paused_for_phase_budget() is True
         assert "remaining_sec=0" in await _phase_block(c)
 
         await c.router._handle_escalate_strategy_change(
@@ -766,7 +766,7 @@ async def test_extend_explore_budget_moves_the_share_every_reader_uses(no_kernel
 
         assert c.shared_state.phase_budget_pct[phase_state.PHASE_FRAMEWORK_AGENT] == pytest.approx(bumped)
         assert SharedState.load_or_init(c.session_dir).phase_budget_pct == c.shared_state.phase_budget_pct
-        assert c.dispatcher._dispatch_paused_for_phase_budget() is False
+        assert c.dispatcher.dispatch_paused_for_phase_budget() is False
         block = await _phase_block(c)
         assert f"pct={bumped:.2f}" in block
         assert "remaining_sec=0 " not in block

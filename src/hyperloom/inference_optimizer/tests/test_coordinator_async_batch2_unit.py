@@ -1819,8 +1819,8 @@ async def test_record_specialist_result_with_proposals(coord: Coordinator) -> No
         },
         source="specialist:rec-spec-1",
     )
-    # Verify the specialist result was recorded (state saved and rounds updated).
-    assert coord.shared_state.rounds_since_last_specialist.get("kernel_agent", -1) == 0
+    (row,) = coord.shared_state.specialist_rounds
+    assert (row["task_id"], row["domain"], row["proposals_total"]) == ("rec-spec-1", "kernel_agent", 1)
 
 
 @pytest.mark.asyncio
