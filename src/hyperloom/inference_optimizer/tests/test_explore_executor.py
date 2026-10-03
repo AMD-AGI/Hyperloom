@@ -376,17 +376,13 @@ def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
         f"{ {'mem_fraction_static': 0.9, 'max_running_requests': 512, 'dp_size': 8}!r}\n",
         encoding="utf-8",
     )
-    evidence = build_launch_evidence(
-        config_path=config, actual_server_log=str(log), framework="sglang", slot=tmp_path
-    )
+    evidence = build_launch_evidence(config_path=config, actual_server_log=str(log), framework="sglang", slot=tmp_path)
     assert evidence["observed_server_launch_flags"] == ""
     assert evidence["observed_server_config"]["max_running_requests"] == 512
 
     state = SimpleNamespace(current_best_measurement={"launch_evidence": evidence})
     observed_config, observed_env = observed_launch_from_state(state)
-    kwargs = _noop_filter_kwargs(
-        tmp_path, observed_server_config=observed_config, observed_server_env=observed_env
-    )
+    kwargs = _noop_filter_kwargs(tmp_path, observed_server_config=observed_config, observed_server_env=observed_env)
 
     _, dropped = filter_baseline_noop_variants([_variant(_RESTATES_ARGV)], **kwargs)
     assert [name for name, _ in dropped] == [_CANDIDATE]
