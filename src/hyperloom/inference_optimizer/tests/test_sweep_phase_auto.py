@@ -100,6 +100,7 @@ def coord(tmp_path: Path):
     c.shared_state = _BareState()
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
+    c.backends = {}
     return c
 
 

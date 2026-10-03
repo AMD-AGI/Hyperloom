@@ -72,6 +72,27 @@ async def test_the_handoff_turn_is_billed_like_any_reactor_turn(session_dir, mon
 
 
 @pytest.mark.asyncio
+async def test_a_sweep_that_settles_on_entry_hands_off_before_the_machine_leaves(session_dir):
+    from hyperloom.orchestrator.phases.machine import Transition
+
+    coord, orchestration = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
+    st = coord.shared_state
+    st.last_conc_sweep = {}
+    st.conc_sweep_enabled = False
+
+    await coord.phase_sweep.on_enter_sweep(
+        Transition(
+            from_phase=ps.PHASE_FRAMEWORK_AGENT, to_phase=ps.PHASE_SWEEP, reason="test", evidence={}, loopback=False
+        )
+    )
+
+    assert st.last_conc_sweep["status"] == "skipped"
+    assert len(orchestration.calls) == 1
+    assert st.orchestration_memory["for_cycle"] == 0
+    assert st.orchestration_memory["next_cycle_directive"] == _DIRECTIVE
+
+
+@pytest.mark.asyncio
 async def test_no_handoff_is_requested_when_no_further_cycle_is_feasible(session_dir):
     coord, orchestration = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
     coord.shared_state.macro_cycle = ps.DEFAULT_MAX_MACRO_CYCLES - 1
