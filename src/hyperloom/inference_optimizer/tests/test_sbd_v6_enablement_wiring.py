@@ -240,7 +240,6 @@ def _lane(session_dir: Path, **overrides: Any):
         ),
         gpu_lanes=types.SimpleNamespace(
             framework_authoring_lanes_ttl=lambda *a, **k: fake.framework_authoring_lanes_ttl(*a, **k),
-            framework_gpu_params=lambda: fake.framework_gpu_params(),
         ),
         writeback=types.SimpleNamespace(
             record_observation=lambda *a, **k: fake.record_observation(*a, **k),
