@@ -6,10 +6,23 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import shlex
 
 import pytest
 
 from hyperloom.common import launch_log_evidence as evidence
+
+
+def test_launch_flags_preserve_nested_json_and_literal_tokens() -> None:
+    config = json.dumps({"method": "real", "nested": {"label": "a b", "sizes": [1, 2]}})
+    flags = ["--speculative-config", config, "--note", "a quote's value $(not-a-command) *"]
+    command = shlex.join(["serve", "/models/model with spaces", "--port", "8000", *flags])
+    assert shlex.split(evidence.split_launch_flags(command)) == flags
+    assert shlex.split(evidence.split_launch_flags("serve model --config 'unterminated")) == [
+        "--config",
+        "'unterminated",
+    ]
 
 
 @pytest.mark.parametrize("form", ["dictionary", "server_args"])

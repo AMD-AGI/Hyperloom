@@ -118,3 +118,32 @@ GEAK run that dies on an invalid device ordinal is otherwise unexplainable.
 ## GEAK documentation
 
 For detailed documentation on GEAK, see [GEAK on ROCm Docs](https://rocm.docs.amd.com/projects/geak/en/latest/).
+
+### Accepted serving launch evidence
+
+For local Linux vLLM AgentX recipes that own their full lifecycle, the AgentX
+launcher captures the actual server process while the recipe runs. It uses the
+owned process tree, PID/start time, a fresh launch nonce observed in the server
+environment, the recipe's listening endpoint, and the server log's inode. The
+receipt is sealed against the materialized config digest, workspace, and final
+measurement artifact after the recipe returns. Legacy diagnostic flags and model
+binding come only from the selected actual server log; neighboring command files
+are ignored. Log parsing cannot establish completeness.
+
+The GEAK handoff carries this receipt in `measurement_evidence.server_launch_capture`.
+Its quote-safe launch tokens preserve JSON and the model/tokenizer, topology,
+and seed semantics. `baseline_env_spec.config.server_env` contains the observed
+stable serving knobs after model-script exports, including their overrides of
+YAML values. The `serving-knobs-v1` projection excludes credentials, unrelated
+control-plane variables, local paths, device selection, and profiling controls;
+source paths and candidate overlays retain their existing source contract.
+
+The existing `BENCH_LAUNCHER` override is honored for AgentX. Native replay uses
+the captured configuration, and the paired GEAK consumer checks it before any
+client warmup or measurement. Candidate changes remain explicit.
+
+This capture path currently covers full-lifecycle `/agentic/` vLLM recipes.
+SGLang, remote/reused servers, generic server-only recipes, inaccessible procfs,
+and credential-bearing command lines do not acquire a complete receipt here.
+Strict schema-3 AgentX references without a supported process-bound capture are
+rejected; historical logs and command files cannot be upgraded into such proof.

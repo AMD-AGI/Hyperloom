@@ -988,8 +988,9 @@ class KernelPhase(CoordinatorCollaborator):
         remaining = deadline.remaining()
         grace = self.shared_state.closing_reserve_sec()
         margin = float(os.environ.get("GEAK_BUDGET_MARGIN_S", "300"))
-        # Reserve the closing window: kill the subprocess with at least ``grace`` left.
-        kill_budget = remaining - grace
+        rebench_reserve = max(0, int(os.environ.get("GEAK_REBENCH_RESERVE_S", "0")))
+        # The caller may reserve the canonical rebench in addition to closing.
+        kill_budget = remaining - grace - rebench_reserve
         # Also honour the KERNEL_AGENT phase's own wall-clock budget: cap by min(session, kernel_phase).
         phase_rem = _phase_state.phase_budget_remaining_seconds(
             self.shared_state,
@@ -1081,7 +1082,32 @@ class KernelPhase(CoordinatorCollaborator):
 
         cb = state.current_best or {}
         try:
-            env_spec = self.build_env_spec()
+            from ..source_materialization import SourceMaterializationError, materialize_source_stack
+
+            if any(
+                isinstance(entry, Mapping) and entry.get("scope") == "source_patch"
+                for entry in (cb.get("optimization_stack") or [])
+            ):
+                source_best = deepcopy(cb)
+                source = await asyncio.to_thread(
+                    materialize_source_stack, source_best, self.session_dir / "optimization_stack" / "materialized"
+                )
+                if source_best != (state.current_best or {}):
+                    raise SourceMaterializationError(
+                        "current_best_changed", "accepted state changed during source capture"
+                    )
+                env_spec = self.build_env_spec(source_materialization=source)
+            else:
+                env_spec = self.build_env_spec()
+        except SourceMaterializationError as exc:
+            recorder = self._kernel_timeline()
+            if recorder is not None:
+                recorder.finish_failed(stage="geak_handoff", error_class=exc.error_class, message=str(exc))
+            _finish_skip(
+                {"status": "error", "error_class": exc.error_class, "reason": exc.reason, "error": str(exc)},
+                record_delegation=False,
+            )
+            return
         except (OSError, TypeError, ValueError) as exc:
             log.exception("geak: cannot serialize the accepted launch configuration")
             recorder = self._kernel_timeline()
@@ -1291,8 +1317,9 @@ class KernelPhase(CoordinatorCollaborator):
         if env_spec:
             handoff["baseline_env_spec"] = env_spec
         if agentx:
-            # The saved recipe names aiperf_client.sh, not a server launcher.
-            handoff["bench_launcher"] = "native"
+            # A client-oriented model script need not implement Magpie's server phase.
+            # An explicit supported recipe launcher wins; native replay needs full evidence.
+            handoff["bench_launcher"] = str(os.environ.get("BENCH_LAUNCHER") or "native").strip().lower()
             log.info("GEAK results remain proposal proxies; canonical AgentX validation remains in Hyperloom.")
 
         out_dir = self.session_dir / "geak"

@@ -368,6 +368,8 @@ def _source_layer_handles(result: Mapping[str, Any]) -> dict[str, Any]:
     }
     if "source_snapshot_complete" in result:
         handles["source_snapshot_complete"] = bool(result["source_snapshot_complete"])
+    if "source_artifacts_outside_root" in result:
+        handles["source_artifacts_outside_root"] = result["source_artifacts_outside_root"]
     return handles
 
 
@@ -3398,6 +3400,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     # marks a snapshot unusable, so truthiness must not drop it.
                     if "source_snapshot_complete" in bv:
                         stack_entry["source_snapshot_complete"] = bool(bv["source_snapshot_complete"])
+                    if "source_artifacts_outside_root" in bv:
+                        stack_entry["source_artifacts_outside_root"] = bv["source_artifacts_outside_root"]
                     target_files = [str(path) for path in (bv.get("target_files") or []) if str(path).strip()]
                     if target_files:
                         stack_entry["target_files"] = target_files
@@ -5035,6 +5039,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "overlay_pythonpath": str(env_spec.get("overlay_pythonpath") or ""),
             "overlay_digest": str(env_spec.get("overlay_digest") or ""),
         }
+        source = env_spec.get("source_materialization")
+        if isinstance(source, Mapping):
+            payload["source_materialization_digest"] = str(source.get("manifest_sha256") or "")
         # Keep legacy identities unchanged for launches with default controls.
         for key in ("remove_args", "unset_envs"):
             values = sorted(set(to_str_list(config.get(key))))
@@ -5288,6 +5295,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         *,
         measurement: Mapping[str, Any] | None = None,
         server_launch_flags: str | None = None,
+        source_materialization: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Fully-reproducible descriptor of ``current_best``'s launch environment.
 
@@ -5295,10 +5303,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
         stack ``current_best`` was measured on:
 
           * ``config``  — cumulative server args + env vars (the reversible layer).
-          * ``source_snapshots`` — ordered durable source-layer snapshots
-            (``scope=source_patch`` entries), each a self-contained directory
-            (see :mod:`source_snapshot`) that reconstructs the patched framework
-            tree independent of the mutable live checkout.
+          * ``source_snapshots`` — ordered source-layer capture provenance.
+          * ``source_materialization`` — independently prepared complete source
+            trees; sparse snapshots alone are not importable package overlays.
           * ``overlay_pythonpath`` — the authored-kernel overlay prefix.
           * ``base_launch_recipe`` — the baseline Magpie recipe to launch from.
 
@@ -5356,6 +5363,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
         if server_launch_flags is None:
             server_launch_flags = self._measurement_launch_flags(measurement)
+        launch_evidence = (measurement or {}).get("launch_evidence") or {}
+        serving_env = launch_evidence.get("observed_server_env") if isinstance(launch_evidence, Mapping) else None
         env_spec = {
             "schema_version": 1,
             "config": {
@@ -5367,6 +5376,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 # Authoritative, COMPLETE engine flags (run-specific stripped);
                 # when unavailable, args_mode governs recipe inheritance.
                 "server_launch_flags": server_launch_flags,
+                "server_env": dict(serving_env) if isinstance(serving_env, Mapping) else None,
             },
             "source_snapshots": source_snapshots,
             "overlay_pythonpath": materialized.get("final_overlay") or "",
@@ -5390,6 +5400,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
             },
         }
+        if source_materialization is not None:
+            env_spec["source_materialization"] = dict(source_materialization)
         env_spec["launch_identity"] = self._handoff_launch_identity(env_spec)
         return env_spec
 
