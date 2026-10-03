@@ -615,6 +615,26 @@ async def test_novelty_ledger_is_appended_and_bounded(coord, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_class", ["compile_error", "timeout"])
+async def test_failed_build_leaves_the_recorded_boot_verdict_alone(coord, failure_class):
+    """A failed build booted nothing; the next round must still route on the observation the last boot recorded."""
+    from hyperloom.orchestrator.enablement.lane import _rearm_on_advanced
+
+    enablement = coord.shared_state.enablement
+    enablement.launch_log = "ValueError: architectures ['Glm5NextForConditionalGeneration'] are not supported"
+    enablement.launch_observation_path = "/session/reports/bringup/benchmark_vllm-000.json"
+    action = TargetedBuildAction(gap_id="g", framework="vllm", component="vllm_source", capability="glm5", ref="v1")
+    await _enqueue_and_transition(coord, action, "failed")
+    enablement.last_build_failure = {"failure_class": failure_class, "failure_summary": "x"}
+    await Coordinator._maybe_route_build_outcomes(coord)
+
+    _rearm_on_advanced(coord.shared_state, coord._rearm_calls[-1])
+
+    assert enablement.launch_observation_path == "/session/reports/bringup/benchmark_vllm-000.json"
+    assert "Glm5NextForConditionalGeneration" in enablement.launch_log
+
+
+@pytest.mark.asyncio
 async def test_route_same_row_not_processed_twice(coord):
     action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe", ref="v1")
     await _enqueue_and_transition(coord, action, "failed")

@@ -34,6 +34,9 @@ PERF_TERMS = (
     "decode",
 )
 
+#: GitHub Search answers HTTP 422 past five boolean operators.
+_MAX_OR_TERMS = 6
+
 
 def _state_qualifier(states: tuple[str, ...]) -> str:
     """Map pr_states to a GitHub search state qualifier."""
@@ -42,12 +45,12 @@ def _state_qualifier(states: tuple[str, ...]) -> str:
 
 
 def _build_query(repo: str, states: tuple[str, ...] = ("open",), *, terms: tuple[str, ...]) -> str:
-    """Compose a GitHub Search query string scoped to ``repo`` and ``terms``."""
+    """Compose a GitHub Search query scoped to ``repo`` that ORs the first ``_MAX_OR_TERMS`` of ``terms``."""
     parts = [f"repo:{repo}", "is:pr"]
     state_q = _state_qualifier(states)
     if state_q:
         parts.append(state_q)
-    parts.append("(" + " OR ".join(terms) + ")")
+    parts.append("(" + " OR ".join(terms[:_MAX_OR_TERMS]) + ")")
     return " ".join(parts)
 
 
@@ -65,9 +68,7 @@ def search_perf_prs(
     except ValueError:
         return []
     query = _build_query(repo, states, terms=terms)
-    url = "https://api.github.com/search/issues?" + urllib.parse.urlencode(
-        {"q": query, "sort": "updated", "order": "desc", "per_page": str(limit)}
-    )
+    url = "https://api.github.com/search/issues?" + urllib.parse.urlencode({"q": query, "per_page": str(limit)})
     req = urllib.request.Request(url, headers=_auth_headers("application/vnd.github+json"))
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - fixed GitHub HTTPS API URL.

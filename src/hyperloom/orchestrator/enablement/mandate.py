@@ -25,11 +25,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import PurePath
 from typing import Sequence
 
 from hyperloom.common.failure_signature import EnablementRequest, FailureSignature
 from hyperloom.agents.framework.keywords import extract_keywords, score_title_with_anti_signal
-from hyperloom.agents.framework.repo_map import bridge_repo_urls
+from hyperloom.agents.framework.repo_map import bridge_repo_urls, upstream_repo_urls
 from hyperloom.inference_optimizer.framework_paths import (
     resolve_kernel_search_roots,
     summarise_framework_root_discovery,
@@ -122,25 +123,27 @@ def build_search_plan(
 ) -> EnablementSearchPlan:
     """Build the repo set + ranking keywords for an enablement failure.
 
-    Includes the framework repo plus the bridge repos (ROCm / HIP / aiter) for
-    the signature's ``bridge_layer``.
+    Includes the framework repo, its upstream when the framework repo is a fork,
+    and the bridge repos (ROCm / HIP / aiter) for the signature's ``bridge_layer``.
 
     Args:
         signature: The classified failure.
         framework_repo_url: Canonical serving-framework repo URL.
-        model: Model id/path — mined for extra keyword signal.
+        model: Model id/path — its name is mined for extra keyword signal.
 
     Returns:
-        EnablementSearchPlan: The deduped repo list and ranking keywords.
+        EnablementSearchPlan: The deduped repo list and ranking keywords,
+            most discriminating first.
     """
     repos: list[str] = []
     if framework_repo_url.strip():
         repos.append(framework_repo_url.strip())
+    repos.extend(upstream_repo_urls(framework_repo_url))
     repos.extend(bridge_repo_urls(signature.bridge_layer))
 
     keywords: list[str] = []
-    keywords.extend(extract_keywords(model))
     keywords.extend(_symbol_tokens(signature.offending_symbol))
+    keywords.extend(extract_keywords(PurePath(model).name))
     keywords.extend(_KIND_SEED_KEYWORDS.get(signature.kind, ()))
 
     return EnablementSearchPlan(
