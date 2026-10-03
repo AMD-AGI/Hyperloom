@@ -283,7 +283,7 @@ def test_signature_survives_the_task_table() -> None:
 
 def test_a_payload_without_a_verdict_is_rejected() -> None:
     """An absent verdict is not an unknown one; rendering it as unknown is what the round was dispatched past."""
-    with pytest.raises(KeyError):
+    with pytest.raises(TypeError, match="'kind'"):
         FailureSignature.from_dict({})
 
 

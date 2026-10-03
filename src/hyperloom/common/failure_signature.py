@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable, Pattern
 
 
@@ -87,9 +87,11 @@ class FailureSignature:
     def from_dict(cls, raw: Mapping[str, Any]) -> "FailureSignature":
         """Rehydrate :meth:`to_dict`'s output after it crossed the task table as JSON.
 
-        JSON hands ``secondary_kinds`` back as a list.
+        JSON hands ``secondary_kinds`` back as a list. A payload without the
+        verdict fails as the dataclass does, naming the missing ``kind``.
         """
-        return cls(**{**raw, "secondary_kinds": tuple(raw["secondary_kinds"])})
+        signature = cls(**raw)
+        return replace(signature, secondary_kinds=tuple(signature.secondary_kinds))
 
 
 # --- CapabilityGap projection -----------------------------------------------
