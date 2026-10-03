@@ -248,8 +248,8 @@ class BootObservation:
         progress_witness: Milestone name to the evidence that witnessed it.
         terminal_frame: Innermost frame of the failure, when one was found.
         matched_marker: Identifier of the rule or marker that fired, or ``""``.
-        failure_line: The line that states the failure, or ``""`` when no
-            line was located; what :func:`failure_digest` keys the message on.
+        failure_text: The text that states the failure, or ``""`` when none
+            was located; what :func:`failure_digest` keys the message on.
         excerpt: Materialised evidence for ``stage_failed``, context included.
         evidence_ref: Pointer to the full artifact the excerpt was cut from.
         server_elapsed_sec: Seconds from server-process start to the
@@ -264,7 +264,7 @@ class BootObservation:
     progress_witness: Mapping[str, str] | None = None
     terminal_frame: TerminalFrame | None = None
     matched_marker: str = ""
-    failure_line: str = ""
+    failure_text: str = ""
     excerpt: Excerpt | None = None
     evidence_ref: str = ""
     server_elapsed_sec: float = 0.0
@@ -288,7 +288,7 @@ class BootObservation:
             "progress_witness": dict(self.progress_witness) if self.progress_witness is not None else None,
             "terminal_frame": self.terminal_frame.to_dict() if self.terminal_frame is not None else None,
             "matched_marker": self.matched_marker,
-            "failure_line": self.failure_line,
+            "failure_text": self.failure_text,
             "excerpt": self.excerpt.to_dict() if self.excerpt is not None else None,
             "evidence_ref": self.evidence_ref,
             "server_elapsed_sec": self.server_elapsed_sec,
@@ -316,7 +316,7 @@ class BootObservation:
             terminal_frame=TerminalFrame.from_dict(frame) if frame is not None else None,
             matched_marker=str(raw["matched_marker"]),
             # Absent from observations persisted before the field existed.
-            failure_line=str(raw.get("failure_line", "")),
+            failure_text=str(raw.get("failure_text", "")),
             excerpt=Excerpt.from_dict(excerpt) if excerpt is not None else None,
             evidence_ref=str(raw["evidence_ref"]),
             server_elapsed_sec=float(raw["server_elapsed_sec"]),
@@ -360,7 +360,7 @@ def failure_digest(observation: BootObservation) -> str:
         frame.exc_type if frame is not None else "",
         frame.module if frame is not None else "",
         frame.file_rel if frame is not None else "",
-        _message_template(observation.failure_line),
+        _message_template(observation.failure_text),
     )
     return hashlib.sha256("\x1f".join(parts).encode("utf-8", "replace")).hexdigest()
 

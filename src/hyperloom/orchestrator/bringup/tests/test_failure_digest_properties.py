@@ -115,7 +115,7 @@ def _observe(stage: LadderStage, frame: _Frame, noise: _Noise) -> BootObservatio
             line=412,
         ),
         matched_marker="weights.shard_too_large",
-        failure_line=redact(failure, roots=[session]),
+        failure_text=redact(failure, roots=[session]),
         excerpt=render_excerpt(
             log,
             anchor=len(_FILLER_LINE) * noise.filler_lines,

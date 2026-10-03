@@ -526,7 +526,7 @@ def argv_invalid_observation(verdict: ArgvVerdict, *, session_dir: Path | None =
         stage_reached=LadderStage.ARGV_PARSE,
         stage_failed=LadderStage.ARGV_PARSE,
         matched_marker=ARGV_INVALID,
-        failure_line=excerpt.text,
+        failure_text=excerpt.text,
         excerpt=excerpt,
         evidence_ref=STREAM,
     )

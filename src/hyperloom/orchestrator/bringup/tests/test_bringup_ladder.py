@@ -145,7 +145,7 @@ def test_the_digest_keys_on_the_failure_line_not_the_log_printed_before_it() -> 
     noisy = boot("(Worker_TP3 pid=91) INFO 10-02 12:54:56 [gpu_model_runner.py:4120] profiling run done\n")
     other = boot("", error="AttributeError: 'MambaSpec' object has no attribute 'y'")
 
-    assert quiet.failure_line == root
+    assert quiet.failure_text == root
     assert failure_digest(quiet) == failure_digest(noisy)
     assert failure_digest(quiet) != failure_digest(other)
 

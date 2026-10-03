@@ -329,7 +329,7 @@ def classify(
         progress_witness=progress_witness or None,
         terminal_frame=frame,
         matched_marker=signature.kind if signature.is_actionable else "",
-        failure_line=redact(failure_line, roots=redact_roots),
+        failure_text=redact(failure_line, roots=redact_roots),
         excerpt=excerpt,
         evidence_ref=stream_name,
         server_elapsed_sec=server_elapsed_sec,
