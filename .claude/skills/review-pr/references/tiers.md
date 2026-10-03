@@ -6,7 +6,7 @@ a failure surfaces, not by file size or churn.
 | Tier | File | Blast radius / failure mode |
 |---|---|---|
 | 1 | `inference_optimizer/cli/__init__.py` | Eagerly imports Coordinator, executors, `_workload_envs`, `ACTION_CATALOGUE`. Any ImportError in that chain kills the run before a session dir exists |
-| 1 | `orchestrator/loop/coordinator.py` | Coordinator wires 24 collaborator properties. A missing property or wrong factory is an `AttributeError` hours in, not at import |
+| 1 | `orchestrator/loop/coordinator.py` | Coordinator wires 23 collaborator properties. A missing property or wrong factory is an `AttributeError` hours in, not at import |
 | 1 | `orchestrator/state/shared_state.py` | Sole writer of `state.json` and the only owner of its field set. A dropped field silently changes what every phase reads, and what `--resume-from` can interpret |
 | 1 | `orchestrator/loop/writeback.py` | The one path turning a measurement into KEEP/REVERT + KB record. A win recorded as a regression, or nothing persisted and no error |
 | 1 | `orchestrator/phases/machine_state.py` | Phase identifiers, ordering, budget redistribution, exit scan. Stall in a phase forever, or wrong budget math for all phases at once |
@@ -66,6 +66,6 @@ Otherwise → Tier 3 (one phase handler, one executor helper, one agent
 tool, one KB view).
 ```
 
-Q1b is the one that bites here. `Coordinator` exposes 24 collaborator properties. A renamed
+Q1b is the one that bites here. `Coordinator` exposes 23 collaborator properties. A renamed
 collaborator class or wrong factory argument fails hours into a session when that phase is entered.
 Grep the class name, not just the symbol.
