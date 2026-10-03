@@ -4121,8 +4121,14 @@ class KernelPhase(CoordinatorCollaborator):
         await self._release_finished_roofline_gate()
         if not self._needs_roofline_for_watermark():
             return False
+        # Every crossing shares its reason, so the anchor it crossed from is what keeps the second crossing in a
+        # cycle from resolving to the first one's finished task.
+        anchor = float(self.shared_state.last_roofline_tput or 0.0)
         try:
-            task = await self._enqueue_internal_analysis_task(reason=reason)
+            task = await self._enqueue_internal_analysis_task(
+                reason=reason,
+                idem_scope=f"-from{anchor:.0f}" if anchor > 0 else "",
+            )
         except Exception as exc:
             log.exception(
                 "watermark-roofline (%s): failed to enqueue: %r",
