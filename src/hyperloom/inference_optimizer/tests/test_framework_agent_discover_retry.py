@@ -63,6 +63,7 @@ class _CoordinatorStub:
     _framework_processed_candidate_keys = FrameworkPhase._framework_processed_candidate_keys
     _stamp_framework_progress = FrameworkPhase._stamp_framework_progress
     _framework_known_candidate_ids = FrameworkPhase._framework_known_candidate_ids
+    _framework_timeline_recorder = FrameworkPhase._framework_timeline_recorder
 
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
