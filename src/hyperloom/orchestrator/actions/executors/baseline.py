@@ -3551,7 +3551,11 @@ class BenchmarkRunExecutor:
             """
             from ...bringup import observe_bringup, write_boot_observation
 
-            read = read_bringup_log(server_log)
+            # Magpie overrides $SERVER_LOG with its own per-run workspace.
+            workspace = (
+                None if server_log.exists() else select_run_workspace(output_dir, known_before=workspaces_before)
+            )
+            read = read_bringup_log(workspace / "server.log" if workspace is not None else server_log)
             verdict = observe_bringup(
                 server_log=read.text,
                 server_elapsed_sec=server_child_elapsed_sec(read.text),
