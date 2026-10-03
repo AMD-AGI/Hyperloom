@@ -92,9 +92,11 @@ _TB_HEADER = "Traceback (most recent call last):"
 _EXC_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Exit|Interrupt))\b")
 # Multi-process servers tag every child line with its role and pid and route
 # tracebacks through their logger, interleaving several processes' tracebacks.
-_LINE_PREFIX = re.compile(
-    r"^(?:\((?P<proc>[^()\s]+ pid=\d+)\)\s?)?"
-    r"(?:(?:DEBUG|INFO|WARNING|ERROR|CRITICAL) [\d-]+ [\d:.,]+ \[[^\]]*\] ?)?"
+_LOG_LINE = re.compile(
+    r"^(?:\((?P<proc>[^()\s]+ pid=\d+)\)[ \t]?)?"
+    r"(?:(?:DEBUG|INFO|WARNING|ERROR|CRITICAL) [\d-]+ [\d:.,]+ \[[^\]\n]*\] ?)?"
+    r"(?P<body>.*)$",
+    re.MULTILINE,
 )
 
 
@@ -141,19 +143,14 @@ def _root_traceback(text: str) -> _Traceback | None:
     """Return the traceback the failure started from.
 
     Python prints a chained cause before the exception it caused, and a
-    multi-process server prints a child's traceback before the parent's re-raise
-    of it, so the root is the first traceback that names a frame. One whose
-    header fell outside the text the reader kept still counts. A bare exception
-    line is the answer only when no traceback names a frame.
+    multi-process server prints a child's traceback before the parent's re-raise,
+    so the root is the first traceback that names a frame, even one whose header
+    was cut off. A bare exception line counts only when no traceback names a frame.
     """
     open_by_proc: dict[str, _Traceback] = {}
     bare: _Traceback | None = None
-    offset = 0
-    for raw in text.splitlines(keepends=True):
-        start, offset = offset, offset + len(raw)
-        prefix = _LINE_PREFIX.match(raw)
-        proc = (prefix.group("proc") or "") if prefix is not None else ""
-        body = raw[prefix.end() if prefix is not None else 0 :].rstrip()
+    for line in _LOG_LINE.finditer(text):
+        start, proc, body = line.start(), line.group("proc") or "", line.group("body").rstrip()
         if body.startswith(_TB_HEADER):
             open_by_proc[proc] = _Traceback(anchor=start)
             continue
@@ -182,7 +179,6 @@ def _terminal_frame(root: _Traceback | None, roots: Sequence[str]) -> TerminalFr
     if root.frame is None:
         return TerminalFrame(exc_type=root.exc_type)
     path, line = root.frame
-    exc_type = root.exc_type
     file_rel = normalise_file_rel(path, roots)
     module = file_rel
     if module.endswith(".py"):
@@ -190,15 +186,14 @@ def _terminal_frame(root: _Traceback | None, roots: Sequence[str]) -> TerminalFr
     if module.endswith("/__init__"):
         module = module[: -len("/__init__")]
     module = module.replace("/", ".").lstrip(".")
-    return TerminalFrame(exc_type=exc_type, module=module, file_rel=file_rel, line=int(line))
+    return TerminalFrame(exc_type=root.exc_type, module=module, file_rel=file_rel, line=int(line))
 
 
 def _failure_site(text: str, signature: rules.FailureSignature, root: _Traceback | None) -> tuple[int, str]:
     """Return where the excerpt is anchored and the line that states the failure.
 
-    The anchor leaves the frames above a rule match inside the excerpt, which is
-    where the failure's offending file is read from; the line is the failure
-    alone, so what printed before it cannot change which failure it is.
+    The anchor keeps the frames above a rule match in the excerpt, where the
+    offending file is read from; the line alone keys which failure it is.
     """
     head = signature.raw_excerpt.strip()[:40] if signature.is_actionable else ""
     if head:
@@ -207,8 +202,7 @@ def _failure_site(text: str, signature: rules.FailureSignature, root: _Traceback
         pattern = r"\s+".join(re.escape(tok) for tok in head.split())
         found = re.search(pattern, text)
         if found is not None:
-            end = text.find("\n", found.start())
-            return found.start(), text[found.start() : end if end >= 0 else len(text)].strip()
+            return found.start(), text[found.start() :].partition("\n")[0].strip()
     if root is None:
         return len(text), ""
     return root.anchor, root.exc_line

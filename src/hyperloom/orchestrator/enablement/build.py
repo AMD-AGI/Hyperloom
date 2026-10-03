@@ -338,8 +338,7 @@ class EnablementBuild(CoordinatorCollaborator):
         # (component,ref,gpu_arch,cmd) tuple has not been seen before (novel), reverted when it is a repeat.
         time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
         novelty_key: list[Any] | None = None
-        # A failed build booted nothing, so the advanced rows below carry no
-        # launch log: the round's recorded boot verdict stays the one to route on.
+        # A failed build booted nothing, so its rows carry no launch log to replace the recorded one.
         if fc in time_classes:
             res = {
                 "enablement": True,

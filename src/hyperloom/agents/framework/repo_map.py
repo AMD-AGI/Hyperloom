@@ -33,7 +33,7 @@ _FORK_TO_UPSTREAM_REPO_URLS: dict[str, tuple[str, ...]] = {
 
 def upstream_repo_urls(repo_url: str) -> tuple[str, ...]:
     """Return the upstream repo URLs of a fork, or ``()`` when ``repo_url`` is not a known fork."""
-    return _FORK_TO_UPSTREAM_REPO_URLS.get((repo_url or "").strip(), ())
+    return _FORK_TO_UPSTREAM_REPO_URLS.get(repo_url.strip(), ())
 
 
 def bridge_repo_urls(bridge_layer: str) -> tuple[str, ...]:

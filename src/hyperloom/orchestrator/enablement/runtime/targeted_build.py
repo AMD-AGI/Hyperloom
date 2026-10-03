@@ -860,10 +860,10 @@ def run_vllm_source_build(
         build_log.write_text(pip_res.stderr_tail or pip_res.stdout_tail, encoding="utf-8")
         return _fail("compile_error", f"vLLM source pip install failed (rc={pip_res.returncode})")
 
-    # The runtime prepends the worktree, so probe with that prefix: the editable
-    # finder setuptools installs runs after sys.path, where the base image's
-    # system-site vllm would otherwise win.
-    pythonpath = _os.pathsep.join(p for p in (str(worktree_dir), _os.environ.get("PYTHONPATH", "")) if p)
+    # The probes import vllm the way the runtime will: the editable finder runs
+    # after sys.path, where the base image's system-site vllm would otherwise win.
+    pythonpath_prefixes = (str(worktree_dir),)
+    pythonpath = _os.pathsep.join(p for p in (*pythonpath_prefixes, _os.environ.get("PYTHONPATH", "")) if p)
     probe_env = {**_os.environ, "PYTHONPATH": pythonpath}
 
     # ROCm platform verify (port of verify_vllm_rocm from installer)
@@ -917,7 +917,7 @@ def run_vllm_source_build(
 
     # vLLM source overlay: prepend the worktree so the attempt venv's vllm wins.
     runtime = FrameworkRuntime(
-        pythonpath_prefixes=(str(worktree_dir),),
+        pythonpath_prefixes=pythonpath_prefixes,
         entrypoint_bin_dir=str(venv_dir / "bin") if venv_dir else "",
         runtime_python_exe=attempt_py,
         runtime_env={"PYTORCH_ROCM_ARCH": gpu_arch},

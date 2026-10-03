@@ -1022,7 +1022,9 @@ def _resolve_framework_root(
     entirely.
 
     Without a recorded root, the decision falls through to
-    :func:`~...specialists.patch_safety.resolve_patch_apply_root`. Without any
+    :func:`~...specialists.patch_safety.resolve_patch_apply_root`; when the
+    patches match several trees, the session's framework tree wins if it is
+    one of them. Without any
     patches to place, the declared root wins, then the session's root, then
     the root the session's framework tree is edited at: its checkout, or the
     install root of a pip-installed package.
@@ -1066,12 +1068,10 @@ def _resolve_framework_root(
             default_root=Path(session_root) if session_root else None,
         )
         if resolution.reason == "ambiguous_root":
-            # Copies of the same files elsewhere do not make the choice ambiguous
-            # when one match is the tree the session optimises: specialists author
-            # against it and the server imports it.
-            tree = framework_apply_tree(resolve_framework_tree(os.environ.get("FRAMEWORK", "")))
-            if tree is not None and tree.root.resolve() in resolution.matches:
-                return tree.root.resolve()
+            # Specialists author against the session's tree and the server imports it.
+            apply_root = _session_apply_root()
+            if apply_root is not None and apply_root.resolve() in resolution.matches:
+                return apply_root.resolve()
         if resolution.root is None:
             log.warning(
                 "integrate_patch: Patch root resolution rejected: %s%s",
@@ -1085,6 +1085,11 @@ def _resolve_framework_root(
     session_root = resolve_session_framework_root()
     if session_root and Path(session_root).is_dir():
         return Path(session_root)
+    return _session_apply_root()
+
+
+def _session_apply_root() -> Path | None:
+    """Return the root the session's framework tree is edited at, or ``None`` when it has none."""
     tree = framework_apply_tree(resolve_framework_tree(os.environ.get("FRAMEWORK", "")))
     return tree.root if tree is not None else None
 

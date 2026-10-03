@@ -33,9 +33,7 @@ PERF_TERMS = (
     "flash",
 )
 
-#: GitHub Search rejects a query with more than five AND / OR / NOT operators
-#: (HTTP 422), so at most this many terms can be ORed; callers order theirs
-#: most-discriminating first.
+#: GitHub Search answers HTTP 422 past five boolean operators.
 _MAX_OR_TERMS = 6
 
 
@@ -46,7 +44,7 @@ def _state_qualifier(states: tuple[str, ...]) -> str:
 
 
 def _build_query(repo: str, states: tuple[str, ...] = ("open",), *, terms: tuple[str, ...]) -> str:
-    """Compose a GitHub Search query string scoped to ``repo`` and ``terms``."""
+    """Compose a GitHub Search query scoped to ``repo`` that ORs the first ``_MAX_OR_TERMS`` of ``terms``."""
     parts = [f"repo:{repo}", "is:pr"]
     state_q = _state_qualifier(states)
     if state_q:
