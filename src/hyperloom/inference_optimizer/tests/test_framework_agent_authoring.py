@@ -21,7 +21,7 @@ from .conftest import make_coordinator
 
 @pytest.fixture(autouse=True)
 def _a_node_with_gpus(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the whole-machine pool, so the lanes an authoring dispatch takes do not follow the host."""
+    """A node with GPUs to lease, so the authoring tests show FRAMEWORK authoring still takes none."""
     for var in GPU_MASK_ENV_NAMES:
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
@@ -204,7 +204,8 @@ def test_materialize_unknown_route_dispatches_both_tracks(
     pr_lead = params.get("pr_lead") or {}
     assert _CANDIDATE["pr_url"] == pr_lead.get("url") or _CANDIDATE["pr_url"] in params.get("notes", "")
     assert _CANDIDATE["diff_url"] == pr_lead.get("diff_url") or _CANDIDATE["diff_url"] in params.get("notes", "")
-    assert spec["requires_lanes"] == ["research_lane", "gpu_research_lane"]
+    assert "needs_gpu" not in params
+    assert spec["requires_lanes"] == ["research_lane"]
 
 
 def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_path: Path):
