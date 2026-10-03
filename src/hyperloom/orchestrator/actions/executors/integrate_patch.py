@@ -1065,6 +1065,13 @@ def _resolve_framework_root(
             candidate_roots=tuple(candidates),
             default_root=Path(session_root) if session_root else None,
         )
+        if resolution.reason == "ambiguous_root":
+            # Copies of the same files elsewhere do not make the choice ambiguous
+            # when one match is the tree the session optimises: specialists author
+            # against it and the server imports it.
+            tree = framework_apply_tree(resolve_framework_tree(os.environ.get("FRAMEWORK", "")))
+            if tree is not None and tree.root.resolve() in resolution.matches:
+                return tree.root.resolve()
         if resolution.root is None:
             log.warning(
                 "integrate_patch: Patch root resolution rejected: %s%s",

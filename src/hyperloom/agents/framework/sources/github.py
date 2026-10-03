@@ -31,8 +31,12 @@ PERF_TERMS = (
     "rocm",
     "aiter",
     "flash",
-    "decode",
 )
+
+#: GitHub Search rejects a query with more than five AND / OR / NOT operators
+#: (HTTP 422), so at most this many terms can be ORed; callers order theirs
+#: most-discriminating first.
+_MAX_OR_TERMS = 6
 
 
 def _state_qualifier(states: tuple[str, ...]) -> str:
@@ -47,7 +51,7 @@ def _build_query(repo: str, states: tuple[str, ...] = ("open",), *, terms: tuple
     state_q = _state_qualifier(states)
     if state_q:
         parts.append(state_q)
-    parts.append("(" + " OR ".join(terms) + ")")
+    parts.append("(" + " OR ".join(terms[:_MAX_OR_TERMS]) + ")")
     return " ".join(parts)
 
 
@@ -65,9 +69,7 @@ def search_perf_prs(
     except ValueError:
         return []
     query = _build_query(repo, states, terms=terms)
-    url = "https://api.github.com/search/issues?" + urllib.parse.urlencode(
-        {"q": query, "sort": "updated", "order": "desc", "per_page": str(limit)}
-    )
+    url = "https://api.github.com/search/issues?" + urllib.parse.urlencode({"q": query, "per_page": str(limit)})
     req = urllib.request.Request(url, headers=_auth_headers("application/vnd.github+json"))
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - fixed GitHub HTTPS API URL.
