@@ -303,6 +303,16 @@ def is_secret_shaped_env_name(key: object) -> bool:
     return any(fragment in upper for fragment in _SECRET_NAME_FRAGMENTS)
 
 
+def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, object]:
+    """Copy ``env`` with every credential's value masked, for a record that leaves this process."""
+    return {
+        key: "[REDACTED]"
+        if is_secret_shaped_env_name(key) or str(key).strip().upper() in BENCHMARK_SECRET_ENV_NAMES
+        else value
+        for key, value in (env or {}).items()
+    }
+
+
 def is_allowed_external_env_key(key: object) -> bool:
     """True when an env export from an untrusted external source is safe to carry."""
     upper = str(key or "").strip().upper()
@@ -440,6 +450,7 @@ __all__ = [
     "is_python_package_root",
     "is_secret_shaped_env_name",
     "redact_file_in_place",
+    "redact_secret_env_values",
     "redact_secret_values",
     "scrub_benchmark_process_env",
     "scrub_child_process_env",

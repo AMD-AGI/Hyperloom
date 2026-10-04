@@ -12,6 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env_safety import redact_secret_env_values
+
 from ...session.sbd_v6 import read_timeline_events
 from ..recorder.baseline_event import anchoring_eval_from_timeline
 from ..session_facts import architecture_block, grading_block, workload_signature
@@ -97,7 +99,7 @@ def collect_v6_metadata(
         "precision": str(workload.get("precision") or ""),
         "max_model_len": workload.get("max_model_len"),
         "objective": dict(workload.get("objective") or {}),
-        "launch_env": dict(state.get("operator_extra_env") or {}),
+        "launch_env": redact_secret_env_values(state.get("operator_extra_env")),
         "launch_server_args": str(state.get("operator_server_args") or state.get("server_args") or ""),
         "architecture": architecture_block(model_info, model_class=workload.get("model_class")),
     }

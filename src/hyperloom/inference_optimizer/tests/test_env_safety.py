@@ -130,6 +130,32 @@ def test_scrub_benchmark_process_env_removes_control_plane_credentials():
     }
 
 
+def test_redact_secret_env_values_masks_credentials_and_keeps_knobs():
+    env = {
+        "OPENAI_API_KEY": "plaintext",
+        "ANTHROPIC_AUTH_TOKEN": "plaintext",
+        # Allowed into a benchmark subprocess, but still a credential once the record leaves the process.
+        "HF_TOKEN": "plaintext",
+        # Listed by name only: neither carries a credential-shaped fragment.
+        "AWS_ACCESS_KEY_ID": "plaintext",
+        "ANTHROPIC_CUSTOM_HEADERS": "plaintext",
+        "TOKENIZERS_PARALLELISM": "false",
+        "DURATION": "3600",
+    }
+
+    assert common_env_safety.redact_secret_env_values(env) == {
+        "OPENAI_API_KEY": "[REDACTED]",
+        "ANTHROPIC_AUTH_TOKEN": "[REDACTED]",
+        "HF_TOKEN": "[REDACTED]",
+        "AWS_ACCESS_KEY_ID": "[REDACTED]",
+        "ANTHROPIC_CUSTOM_HEADERS": "[REDACTED]",
+        "TOKENIZERS_PARALLELISM": "false",
+        "DURATION": "3600",
+    }
+    assert env["OPENAI_API_KEY"] == "plaintext"
+    assert common_env_safety.redact_secret_env_values(None) == {}
+
+
 def test_variant_env_key_allows_workload_pins_and_blocks_hijacks():
     # Sweep, conc-sweep and shape-capture grids set these from code, so an allowlist that dropped them would silently
     # flatten every variant.

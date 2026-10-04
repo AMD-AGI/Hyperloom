@@ -169,7 +169,11 @@ GPU type, shape, precision, launch overrides, and the optimization objective
 (gain %, target throughput, baseline-relative, or time-only). Consumers should
 treat the `objective.kind` enum as the canonical optimisation goal. Its
 `architecture` sub-object is the structural model summary parsed from the
-model's own `config.json`, and is empty on non-transformers models.
+model's own `config.json`, and is empty on non-transformers models. Its
+`launch_env` keeps every operator-supplied variable name, but a credential's
+value (an API key, token, secret, password or custom-header variable) is
+written as `[REDACTED]`; replaying a session takes credentials from its own
+environment, never from the breakdown.
 
 `metadata.grading` — which axis this session was configured to grade on:
 `benchmark_mode` (`agentx` or `synthetic`), `objective`, and the `tput_guard`

@@ -162,6 +162,18 @@ def test_v6_blocks_are_additive_to_the_rest_of_the_document(tmp_path):
     assert all(event["type"] != "close" for event in after["timeline"])
 
 
+def test_the_exported_launch_env_never_carries_a_credential(tmp_path):
+    _write_json(
+        tmp_path / "state.json",
+        {"session_id": "session-v6", "operator_extra_env": {"TP": "8", "OPENAI_API_KEY": "plaintext"}},
+    )
+    _write_json(tmp_path / "manifest.json", {"session_id": "session-v6"})
+
+    launch_env = exporter.build(tmp_path)["metadata"]["task_config"]["launch_env"]
+
+    assert launch_env == {"TP": "8", "OPENAI_API_KEY": "[REDACTED]"}
+
+
 def test_an_invalid_v6_event_is_reported_without_disturbing_the_rest(tmp_path):
     before = exporter.build(tmp_path)
     path = tmp_path / "reports" / "sbd_v6" / "timeline" / "000001-install.json"

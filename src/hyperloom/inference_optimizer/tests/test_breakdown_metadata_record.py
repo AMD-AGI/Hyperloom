@@ -275,6 +275,13 @@ def test_each_producer_contributes_only_its_own_keys(tmp_path):
     assert metadata["langfuse"]["trace_id"] == "tr-1"
 
 
+def test_the_snapshot_masks_credentials_in_the_launch_env(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state(operator_extra_env={"HSA_NO_SCRATCH_RECLAIM": "1", "OPENAI_API_KEY": "plaintext"}))
+    launch_env = assemble_parts(tmp_path)[SECTION]["task_config"]["launch_env"]
+    assert launch_env == {"HSA_NO_SCRATCH_RECLAIM": "1", "OPENAI_API_KEY": "[REDACTED]"}
+
+
 def _collect(recorded=None, **overrides):
     kwargs = dict(
         exported_at_utc="2026-09-01T02:00:05+00:00",
@@ -300,6 +307,12 @@ def test_an_empty_recorded_leaf_does_not_erase_a_projected_one():
     metadata = _collect(recorded={"session": {"pid": 0, "code_revision": ""}})
     assert metadata["session"]["pid"] == 1
     assert metadata["session"]["code_revision"] == "abc1234"
+
+
+def test_the_projection_masks_credentials_in_the_launch_env():
+    state = {"operator_extra_env": {"HSA_NO_SCRATCH_RECLAIM": "1", "ANTHROPIC_AUTH_TOKEN": "plaintext"}}
+    launch_env = _collect(state=state)["task_config"]["launch_env"]
+    assert launch_env == {"HSA_NO_SCRATCH_RECLAIM": "1", "ANTHROPIC_AUTH_TOKEN": "[REDACTED]"}
 
 
 def test_the_projection_supplies_blocks_the_fragment_never_wrote():
