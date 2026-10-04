@@ -300,6 +300,9 @@ def is_secret_shaped_env_name(key: object) -> bool:
     upper = str(key or "").strip().upper()
     for exempt in _SECRET_FRAGMENT_EXEMPTIONS:
         upper = upper.replace(exempt, "")
+    # Header strings carry Authorization values, matching the ``*CUSTOM_HEADERS`` text-redaction pattern above.
+    if upper.endswith("CUSTOM_HEADERS"):
+        return True
     return any(fragment in upper for fragment in _SECRET_NAME_FRAGMENTS)
 
 

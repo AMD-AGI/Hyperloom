@@ -343,3 +343,10 @@ def test_redact_secret_values_preserves_json_around_ocp_header():
     out = common_env_safety.redact_secret_values(text)
 
     assert json.loads(out) == {"h": "Ocp-Apim-Subscription-Key: [REDACTED]", "ok": True}
+
+
+def test_any_custom_headers_name_is_secret_shaped():
+    """A generic ``*_CUSTOM_HEADERS`` name carries header credentials, like the text-redaction pattern assumes."""
+    assert common_env_safety.is_secret_shaped_env_name("SERVICE_CUSTOM_HEADERS")
+    assert common_env_safety.is_secret_shaped_env_name("service_custom_headers")
+    assert not common_env_safety.is_secret_shaped_env_name("TOKENIZERS_PARALLELISM")

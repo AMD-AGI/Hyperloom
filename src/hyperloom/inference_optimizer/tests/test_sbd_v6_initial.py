@@ -174,6 +174,20 @@ def test_the_exported_launch_env_never_carries_a_credential(tmp_path):
     assert launch_env == {"TP": "8", "OPENAI_API_KEY": "[REDACTED]"}
 
 
+def test_the_exported_launch_env_masks_a_generic_custom_headers_env(tmp_path):
+    headers = "Authorization: Bearer placeholder-not-a-secret"
+    _write_json(
+        tmp_path / "state.json",
+        {"session_id": "session-v6", "operator_extra_env": {"TP": "8", "SERVICE_CUSTOM_HEADERS": headers}},
+    )
+    _write_json(tmp_path / "manifest.json", {"session_id": "session-v6"})
+
+    document = exporter.build(tmp_path)
+
+    assert document["metadata"]["task_config"]["launch_env"] == {"TP": "8", "SERVICE_CUSTOM_HEADERS": "[REDACTED]"}
+    assert "placeholder-not-a-secret" not in json.dumps(document)
+
+
 def test_a_re_export_masks_a_credential_a_legacy_fragment_recorded_in_plaintext(tmp_path):
     from hyperloom.inference_optimizer.breakdown.recorder import recorder_for
 

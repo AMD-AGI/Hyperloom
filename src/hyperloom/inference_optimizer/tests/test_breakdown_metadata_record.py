@@ -282,6 +282,17 @@ def test_the_snapshot_masks_credentials_in_the_launch_env(tmp_path):
     assert launch_env == {"HSA_NO_SCRATCH_RECLAIM": "1", "OPENAI_API_KEY": "[REDACTED]"}
 
 
+def test_the_snapshot_masks_a_generic_custom_headers_env(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    headers = "Authorization: Bearer placeholder-not-a-secret"
+    snapshot_metadata(rec, _state(operator_extra_env={"TP": "8", "SERVICE_CUSTOM_HEADERS": headers}))
+    launch_env = assemble_parts(tmp_path)[SECTION]["task_config"]["launch_env"]
+    assert launch_env == {"TP": "8", "SERVICE_CUSTOM_HEADERS": "[REDACTED]"}
+    recorded = [path for path in tmp_path.rglob("*") if path.is_file()]
+    assert recorded
+    assert not any("placeholder-not-a-secret" in path.read_text(errors="replace") for path in recorded)
+
+
 def _collect(recorded=None, **overrides):
     kwargs = dict(
         exported_at_utc="2026-09-01T02:00:05+00:00",
