@@ -394,6 +394,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Ceiling on mean end-to-end latency (ms) from ``--max-latency-ms``; 0.0 leaves KEEP behaviour unchanged. The
     # only copy of the budget: it is written once at launch and archived with the session, so a resume restores it.
     latency_budget_ms: float = 0.0
+    # The GPU power settings the session is measured under: {"declared": {power_cap_w, perf_level}, "observed":
+    # {gpu: {power_cap_w, perf_level}}}. Read at launch and asserted on resume; never set by the optimizer.
+    gpu_power_settings: dict[str, Any] = field(default_factory=dict)
     # AgentX corpus shape: written at seed from canonical constants, overwritten with measured values after every
     # AgentX measurement. Read by semantic consumers (prompts, manifest, reports) instead of the inert state.isl /
     # state.osl placeholders. Absent on synthetic sessions.
