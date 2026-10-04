@@ -202,6 +202,30 @@ async def test_the_cli_left_behind_by_a_timed_out_turn_is_killed_and_nothing_els
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="finds the turn's processes through /proc")
+async def test_the_clis_left_behind_by_a_turn_that_fails_on_its_own_are_killed():
+    sleeper = [sys.executable, "-c", "import time; time.sleep(300)"]
+    sdk = _StallingSdk("silent", child_cmd=sleeper)
+    # Every attempt ends on its idle timeout, well inside the wall-clock bound.
+    backend = _backend(sdk, turn_timeout_s=600.0, call_timeout_s=0.1)
+    bystander = subprocess.Popen(sleeper, start_new_session=True)
+    try:
+        with pytest.raises(LLMCallFailed, match="stream idle"):
+            await _guarded(backend.run("hi", allow_no_intent=True))
+
+        assert sdk.started == 3
+        assert [await asyncio.to_thread(cli.wait, 10) for cli in sdk.children] == [-9, -9, -9]
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait()
+        for child in sdk.children:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="finds the turn's processes through /proc")
 async def test_a_turn_cancelled_by_its_caller_still_kills_its_cli():
     sleeper = [sys.executable, "-c", "import time; time.sleep(300)"]
     sdk = _StallingSdk("silent", child_cmd=sleeper)

@@ -130,10 +130,6 @@ _TURN_CLEANUP_GRACE_SEC: float = 30.0
 _TURN_MARKER_ENV: str = "HYPERLOOM_CLAUDE_TURN_ID"
 
 
-class _TurnWallClockExceeded(Exception):
-    """One ``run()`` call outlived :attr:`ClaudeBackend.turn_timeout_s`."""
-
-
 @dataclass
 class _TurnStop:
     """Set once one ``run()`` call is being stopped; its SDK task checks it at every message and before every attempt.
@@ -146,6 +142,11 @@ class _TurnStop:
     """
 
     requested: bool = False
+
+    def raise_if_requested(self) -> None:
+        """Raise the stop as a cancellation once it has been requested."""
+        if self.requested:
+            raise asyncio.CancelledError
 
 
 def _kill_turn_processes(marker: str, *, proc_root: Path = Path("/proc")) -> list[int]:
@@ -385,9 +386,8 @@ class ClaudeBackend:
 
         async def _one_attempt() -> tuple[Any, ...]:
             """Run one SDK invocation under an amplified per-attempt idle timeout."""
-            if turn_stop.requested:
-                # The turn is being stopped: never start another CLI for it.
-                raise asyncio.CancelledError
+            # The turn is being stopped: never start another CLI for it.
+            turn_stop.raise_if_requested()
             attempt_state["n"] += 1
             idle_timeout_s = self.call_timeout_s * (_RETRY_IDLE_TIMEOUT_MULTIPLIER ** (attempt_state["n"] - 1))
             return await self._invoke_and_collect(
@@ -429,18 +429,11 @@ class ClaudeBackend:
                 turn_marker=turn_marker,
                 turn_stop=turn_stop,
             )
-        except _TurnWallClockExceeded as exc:
-            self.calls.append({"warn": str(exc)})
-            error = LLMCallFailed(f"Claude backend timed out: {exc}")
-            self._finish_turn_diagnostic(outcome="backend_error", error=error)
-            raise error from exc
         except asyncio.TimeoutError as exc:
-            killed = _kill_turn_processes(turn_marker)
             log.warning(
                 "claude SDK turn timed out: stream idle for >%.0fs on every attempt (retries exhausted); "
-                "killed %d leftover CLI process(es); treating as a failed turn",
+                "treating as a failed turn",
                 self.call_timeout_s,
-                len(killed),
             )
             self.calls.append(
                 {
@@ -457,10 +450,6 @@ class ClaudeBackend:
             self._finish_turn_diagnostic(outcome="backend_error", error=error)
             raise error from exc
         except BaseException as exc:
-            if isinstance(exc, Exception):
-                # A CLI that crashed (SIGABRT included) or whose call raised may have left children behind. A
-                # cancellation is handled by ``_within_turn_bound``, once the SDK has closed the CLI.
-                _kill_turn_processes(turn_marker)
             self._finish_turn_diagnostic(outcome="backend_error", error=exc)
             # Once retries are exhausted, anything the SDK stream raised is a provider call that produced nothing
             # usable — including the gateway 400s (``litellm.BadRequestError: AnthropicException``) this telemetry
@@ -776,10 +765,10 @@ class ClaudeBackend:
         The SDK call runs in its own task so that a close which never finishes cannot hold the caller: the task is
         stopped (see :meth:`_stop_turn`), given ``_TURN_CLEANUP_GRACE_SEC`` to finish, and abandoned if it does not.
         Either way every process tagged with ``turn_marker`` is then killed. A caller cancelled mid-turn returns at
-        once; the same stop then runs in the background.
+        once; the same stop then runs in the background. A call that fails on its own also has its processes killed.
 
         Raises:
-            _TurnWallClockExceeded: The bound elapsed before ``coro`` finished.
+            LLMCallFailed: The bound elapsed before ``coro`` finished.
         """
         stop = turn_stop if turn_stop is not None else _TurnStop()
         task = asyncio.ensure_future(coro)
@@ -793,7 +782,14 @@ class ClaudeBackend:
             stopper.add_done_callback(lambda t: t.cancelled() or t.exception())
             raise
         if done:
-            return task.result()
+            try:
+                return task.result()
+            except Exception:
+                # A CLI that crashed (SIGABRT included) or whose call raised may have left children behind.
+                killed = _kill_turn_processes(turn_marker)
+                if killed:
+                    log.warning("claude SDK call failed; killed %d leftover CLI process(es)", len(killed))
+                raise
         closed, elapsed, killed = await self._stop_turn(task, stop, turn_marker)
         if closed:
             cleanup = f"SDK closed the CLI in {elapsed:.1f}s"
@@ -804,7 +800,8 @@ class ClaudeBackend:
             f"{cleanup}; killed {len(killed)} leftover CLI process(es)"
         )
         log.warning("claude SDK %s; treating as a failed turn", message)
-        raise _TurnWallClockExceeded(message)
+        self.calls.append({"warn": message})
+        raise LLMCallFailed(f"Claude backend timed out: {message}")
 
     async def _stop_turn(
         self, task: asyncio.Task[Any], stop: _TurnStop, turn_marker: str
@@ -862,6 +859,7 @@ class ClaudeBackend:
         num_turns = 0
         session_id: str | None = None
         stop_reason: str | None = None
+        turn_stop = turn_stop or _TurnStop()
         stream = self.sdk_query_factory(prompt=prompt, options=options)
         try:
             stream_iter = stream.__aiter__()
@@ -875,9 +873,8 @@ class ClaudeBackend:
                         message = await stream_iter.__anext__()
                 except StopAsyncIteration:
                     break
-                if turn_stop is not None and turn_stop.requested:
-                    # The stop's cancellation was lost in the wait above (see ``_TurnStop``): raise it here.
-                    raise asyncio.CancelledError
+                # A stop whose cancellation was lost in the wait above (see ``_TurnStop``) is raised here.
+                turn_stop.raise_if_requested()
                 requests.observe(message)
                 if getattr(message, "subtype", None) == "api_retry":
                     # Each of these resets the idle timer above; only the turn's wall-clock bound ends a retry loop.
