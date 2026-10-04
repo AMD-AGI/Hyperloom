@@ -1221,19 +1221,59 @@ def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
         print(f"Preflight: WARNING — pinned lm_eval via {source} failed; falling back")
 
 
+def _resumed_session_state(args: argparse.Namespace | None) -> dict[str, Any] | None:
+    """The persisted ``state.json`` of the session ``--resume-from`` names, or ``None``.
+
+    Preflight runs before the resume block loads the session, so anything preflight decides from a session-pinned
+    setting has to read it here. ``None`` (no session named, or no readable state) leaves the decision to the flags;
+    the resume block reports a missing or unreadable state itself.
+    """
+    raw = str(getattr(args, "resume_from", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        state = json.loads((Path(raw).expanduser() / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
 def _resolved_eval_disabled(args: argparse.Namespace) -> bool:
     """Effective ``--no-eval`` for this launch, flag or persisted."""
     if bool(getattr(args, "no_eval", False)):
         return True
-    raw = str(getattr(args, "resume_from", "") or "").strip()
-    if not raw:
-        return False
-    resumed = Path(raw).expanduser()
-    try:
-        state = json.loads((resumed / "state.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    return bool(state.get("eval_disabled"))
+    state = _resumed_session_state(args)
+    return bool(state and state.get("eval_disabled"))
+
+
+def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
+    """Apply the resumed session's pinned settings to ``args`` before any preflight check reads them.
+
+    A session's framework is fixed at creation, and the resume block re-exports the persisted one; without this, a
+    resume that does not re-pass ``--framework`` would have preflight install and probe the default framework instead
+    of the session's. An explicit ``--framework`` that differs from the persisted one is refused: the resume would
+    otherwise check one framework and run another. A kernel phase disabled at creation stays disabled, as the resume
+    block also enforces, so the TraceLens requirement is judged on the same setting the run uses.
+    """
+    if args is None:
+        return
+    state = _resumed_session_state(args)
+    if not state:
+        return
+    persisted = str(state.get("framework") or "").strip().lower()
+    if persisted:
+        requested = str(getattr(args, "framework", None) or "").strip().lower()
+        if requested and requested != persisted:
+            print(
+                f"ERROR: cannot resume this session -- it was created with --framework {persisted} and this resume "
+                f"passes --framework {requested}; a session's framework cannot change. Drop --framework (or pass "
+                f"--framework {persisted}) to resume it, or start a fresh session for {requested}.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        args.framework = persisted
+    if state.get("kernel_enabled") is False:
+        args.no_kernel = True
 
 
 def _ensure_lm_eval_dep(
@@ -2030,6 +2070,7 @@ def _preflight(
     args: argparse.Namespace | None = None,
 ) -> tuple[str, str] | None:
     """Auto-install missing runtime deps and export auth aliases."""
+    _pin_resumed_session_args(args)
     install_event = _begin_install_event(args)
     _run_install_step(
         install_event,
