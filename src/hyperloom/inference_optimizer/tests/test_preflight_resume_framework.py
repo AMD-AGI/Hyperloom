@@ -10,6 +10,7 @@ with "serving framework 'sglang' is not importable" on a host that only carries 
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -68,10 +69,9 @@ def _run_preflight_to_serving_check(monkeypatch, args) -> list[tuple[str, str]]:
 
     def run_install_step(event, *, step_id, category, action, **_kw):
         if step_id == "framework_deps":
-            try:
+            # The deps step only records which framework it was asked to install; stop it before any pip run.
+            with contextlib.suppress(_StopDeps):
                 action()
-            except _StopDeps:
-                pass
             return {}
         if step_id == "check_serving_framework":
             return action()
