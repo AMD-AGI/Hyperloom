@@ -63,8 +63,14 @@ class _StallingSdk:
             env = {**os.environ, **options.kwargs.get("env", {})}
             self.children.append(subprocess.Popen(self.child_cmd, env=env, start_new_session=True))
         try:
-            if self.mode == "silent":
+            if self.mode in ("silent", "wedged_close_silent"):
                 await asyncio.sleep(3600)
+            if self.mode == "dies_on_cancel":
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    # The cancellation never surfaces: the stream fails as one whose CLI was killed under it would.
+                    raise OSError("CLI exited") from None
             n = 0
             busy_until = time.monotonic() + 5.0
             while True:  # "retrying": a message well inside the idle budget, forever
@@ -75,7 +81,7 @@ class _StallingSdk:
                 busy = self.mode == "busy" and time.monotonic() < busy_until
                 await asyncio.sleep(0 if busy else 0.01)
         finally:
-            if self.mode == "wedged_close":
+            if self.mode in ("wedged_close", "wedged_close_silent"):
                 # A close that ignores cancellation, as a transport.close() that never returns would.
                 while not self.release_close.is_set():
                     try:
@@ -215,6 +221,51 @@ async def test_a_turn_cancelled_by_its_caller_still_kills_its_cli():
             if child.poll() is None:
                 child.kill()
                 child.wait()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_does_not_take_its_cancellation_starts_no_further_cli(monkeypatch):
+    monkeypatch.setattr(claude_mod, "_TURN_CLEANUP_GRACE_SEC", 5.0)
+    sdk = _StallingSdk("dies_on_cancel")
+    backend = _backend(sdk, turn_timeout_s=0.3)
+
+    with pytest.raises(LLMCallFailed) as raised:
+        await _guarded(backend.run("hi", allow_no_intent=True))
+
+    # The failed stream is retryable, but a turn being stopped never starts another CLI.
+    assert sdk.started == 1
+    assert "SDK closed the CLI" in str(raised.value)
+    assert backend._abandoned_turns == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="finds the turn's processes through /proc")
+async def test_a_cancelled_caller_whose_close_never_finishes_still_gets_its_cli_killed(monkeypatch):
+    monkeypatch.setattr(claude_mod, "_TURN_CLEANUP_GRACE_SEC", 0.5)
+    sleeper = [sys.executable, "-c", "import time; time.sleep(300)"]
+    sdk = _StallingSdk("wedged_close_silent", child_cmd=sleeper)
+    backend = _backend(sdk, turn_timeout_s=600.0)
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(backend.run("hi", allow_no_intent=True), timeout=0.5)
+
+        (cli,) = sdk.children
+        # Killed after the grace, although the SDK call is still closing.
+        assert await asyncio.to_thread(cli.wait, 10) == -9
+        assert sdk.closed == 0
+        assert len(backend._abandoned_turns) == 1
+    finally:
+        sdk.release_close.set()
+        for child in sdk.children:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+    for _ in range(100):
+        if not backend._abandoned_turns:
+            break
+        await asyncio.sleep(0.01)
+    assert backend._abandoned_turns == set()
+    assert backend._turn_stoppers == set()
 
 
 def test_each_turn_tags_its_cli_with_its_own_marker():
