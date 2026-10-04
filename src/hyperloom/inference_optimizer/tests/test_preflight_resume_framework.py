@@ -171,3 +171,49 @@ def test_resume_carries_the_persisted_kernel_toggle(tmp_path, kernel_enabled, ex
 
     assert args.no_kernel is expected_no_kernel
     assert preflight._tracelens_required_at_preflight(args.no_kernel, False) is (not expected_no_kernel)
+
+
+@pytest.mark.parametrize(
+    "persisted",
+    ["../x", "/tmp/sidecar/evil", "VLLM/../../evil", "no-such-framework", "   ", 7, ["vllm"], {"name": "vllm"}],
+)
+def test_a_persisted_framework_that_is_not_a_registered_name_is_refused_before_any_install(
+    monkeypatch, tmp_path, capsys, persisted
+):
+    from hyperloom.inference_optimizer import framework_deps
+
+    def began_checking(_args):
+        raise AssertionError("preflight started its install steps for a session whose framework is not registered")
+
+    def installed(*_a, **_kw):
+        raise AssertionError("preflight reached dependency installation for an unregistered framework")
+
+    monkeypatch.setattr(preflight, "_begin_install_event", began_checking)
+    monkeypatch.setattr(framework_deps, "ensure", installed)
+    monkeypatch.setattr(framework_deps, "manifest_path", installed)
+    args = _args(resume_from=str(_session(tmp_path, framework=persisted)))
+
+    with pytest.raises(SystemExit) as excinfo:
+        preflight._preflight(args)
+
+    assert excinfo.value.code == 2
+    assert "not a supported framework" in capsys.readouterr().err
+    assert args.framework is None
+
+
+@pytest.mark.parametrize("persisted", ["sglang", "vllm", "atom", " VLLM "])
+def test_a_registered_persisted_framework_still_pins(tmp_path, persisted):
+    args = _args(resume_from=str(_session(tmp_path, framework=persisted)))
+
+    preflight._pin_resumed_session_args(args)
+
+    assert args.framework == persisted.strip().lower()
+
+
+@pytest.mark.parametrize("kernel_enabled", ["false", 0, None, "no"])
+def test_only_a_boolean_false_kernel_toggle_disables_the_kernel_phase(tmp_path, kernel_enabled):
+    args = _args(resume_from=str(_session(tmp_path, framework="vllm", kernel_enabled=kernel_enabled)))
+
+    preflight._pin_resumed_session_args(args)
+
+    assert args.no_kernel is False

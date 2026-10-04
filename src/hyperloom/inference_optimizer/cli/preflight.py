@@ -1246,6 +1246,13 @@ def _resolved_eval_disabled(args: argparse.Namespace) -> bool:
     return bool(state and state.get("eval_disabled"))
 
 
+def _supported_framework_names() -> tuple[str, ...]:
+    """The framework names ``--framework`` accepts (the framework registry)."""
+    from hyperloom.inference_optimizer import framework_registry
+
+    return tuple(framework_registry.names())
+
+
 def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
     """Apply the resumed session's pinned settings to ``args`` before any preflight check reads them.
 
@@ -1260,7 +1267,18 @@ def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
     state = _resumed_session_state(args)
     if not state:
         return
-    persisted = str(state.get("framework") or "").strip().lower()
+    raw_persisted = state.get("framework")
+    persisted = raw_persisted.strip().lower() if isinstance(raw_persisted, str) else ""
+    if raw_persisted not in (None, "") and persisted not in _supported_framework_names():
+        # state.json lives on shared storage; the framework name later becomes a manifest path that preflight
+        # pip-installs from, so only a registered framework name may be pinned.
+        print(
+            f"ERROR: cannot resume this session -- its state.json records --framework {raw_persisted!r}, which is "
+            f"not a supported framework ({', '.join(_supported_framework_names())}). The session state is invalid; "
+            "start a fresh session.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     if persisted:
         requested = str(getattr(args, "framework", None) or "").strip().lower()
         if requested and requested != persisted:
