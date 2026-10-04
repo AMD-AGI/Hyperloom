@@ -99,7 +99,7 @@ def collect_v6_metadata(
         "precision": str(workload.get("precision") or ""),
         "max_model_len": workload.get("max_model_len"),
         "objective": dict(workload.get("objective") or {}),
-        "launch_env": redact_secret_env_values(state.get("operator_extra_env")),
+        "launch_env": dict(state.get("operator_extra_env") or {}),
         "launch_server_args": str(state.get("operator_server_args") or state.get("server_args") or ""),
         "architecture": architecture_block(model_info, model_class=workload.get("model_class")),
     }
@@ -157,9 +157,8 @@ def _mask_launch_env(metadata: dict[str, Any]) -> None:
     """Mask credentials in the final ``task_config.launch_env``, in place.
 
     Runs after the recorded overlay, because a fragment recorded before the
-    recorder masked its values still holds them in plaintext and would
-    otherwise replace the masked projection on every re-export. A value that
-    is not a mapping cannot be masked key by key, so it is dropped.
+    recorder masked its values still holds them in plaintext. A value that is
+    not a mapping cannot be masked key by key, so it is dropped.
     """
     task_config = metadata.get("task_config")
     if not isinstance(task_config, dict) or "launch_env" not in task_config:
