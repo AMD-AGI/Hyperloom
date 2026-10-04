@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from ..collaborator import CoordinatorCollaborator
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
+from ..roles.base import BackendError
 from ..state.orchestration_memory import MEMORY_REQUEST_PROMPT, build_memory_record, parse_memory_reply
 
 log = _logging.getLogger(__name__)
@@ -29,18 +30,27 @@ class CycleMemoryCollaborator(CoordinatorCollaborator):
 
         Returns:
             ``True`` when a record was persisted, ``False`` when no
-            orchestration backend is configured.
+            orchestration backend is configured or its turn failed.
         """
         backend = self.backends.get("orchestration")
         if backend is None:
             return False
-        result = await backend.run(
-            prompt=f"{await self._compose_prompt('orchestration')}\n\n{MEMORY_REQUEST_PROMPT}",
-            system_prompt=await self._load_system_prompt("orchestration"),
-            tools=[],
-            max_turns=0,
-            allow_no_intent=True,
-        )
+        try:
+            result = await backend.run(
+                prompt=f"{await self._compose_prompt('orchestration')}\n\n{MEMORY_REQUEST_PROMPT}",
+                system_prompt=await self._load_system_prompt("orchestration"),
+                tools=[],
+                max_turns=0,
+                allow_no_intent=True,
+            )
+        except BackendError as exc:
+            # This runs inside a phase transition: raising would leave the reloop applied but the transition
+            # unrecorded. The previous cycle's memory stays in place, as it does for an unparseable reply.
+            log.warning(
+                "_capture_cycle_memory: orchestration turn failed (%s); carrying the previous cycle's memory forward",
+                exc,
+            )
+            return False
         state = self.shared_state
         record = build_memory_record(
             parse_memory_reply(getattr(result, "raw_text", "") or ""),

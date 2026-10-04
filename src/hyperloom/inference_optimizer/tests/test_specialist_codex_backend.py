@@ -1432,6 +1432,8 @@ def test_anthropic_inprocess_keeps_claude_backend(
     backend_name, kwargs = runner.backend_factory(SimpleNamespace())
     assert backend_name == "claude"
     assert kwargs["model"] == "claude-selected-model"
+    # --specialist-per-turn-max-seconds bounds each in-process call, as it does for Codex.
+    assert kwargs["turn_timeout_s"] == 42.0
 
 
 @pytest.mark.asyncio

@@ -11,8 +11,11 @@ import importlib
 import json
 import logging
 import os
+import signal
+import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
 from hyperloom.common.llm_config import claude_sdk_env_options
@@ -111,6 +114,68 @@ _RAW_COMPLETION_MIN_MAX_TURNS: int = 8
 _RETRY_IDLE_TIMEOUT_MULTIPLIER: float = 2.0
 
 
+# Wall-clock bound on one ``run()`` call: every attempt and the backoff between them; tearing the CLI down afterwards
+# adds at most ``_TURN_CLEANUP_GRACE_SEC``. The idle timeout cannot be that bound: the CLI emits a ``system``/
+# ``api_retry`` message each time one of its own API requests times out (10 min each by default, retried up to 10
+# times), and every message resets the idle timer, so a stalled gateway can hold a turn open for well over an hour. The default sits below the coordinator's 1800 s reactor-stage
+# bound (``INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC``), the longest turn this runtime already accepts, with room
+# for the teardown below, so a reactor turn fails here as a backend error rather than being cancelled from outside;
+# and it also bounds the turns no stage bound covers, such as the macro-cycle memory capture.
+_TURN_TIMEOUT_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC"
+DEFAULT_TURN_TIMEOUT_SEC: float = 1500.0
+# How long a turn past its bound waits for the SDK to close its CLI (the SDK's own stdin-EOF / SIGTERM / SIGKILL
+# escalation is bounded at ~20 s) before abandoning the close and killing the processes itself.
+_TURN_CLEANUP_GRACE_SEC: float = 30.0
+# Set in the CLI's environment so every process of one turn (the CLI and anything it spawns) can be found and killed.
+_TURN_MARKER_ENV: str = "HYPERLOOM_CLAUDE_TURN_ID"
+
+
+class _TurnWallClockExceeded(Exception):
+    """One ``run()`` call outlived :attr:`ClaudeBackend.turn_timeout_s`."""
+
+
+def _kill_turn_processes(marker: str, *, proc_root: Path = Path("/proc")) -> list[int]:
+    """SIGKILL every process whose environment carries ``_TURN_MARKER_ENV=marker``; return their pids.
+
+    The marker is inherited, so this reaches the CLI and every process it spawned, including ones re-parented after
+    the CLI died. A process that leads its own process group (a shell the CLI started for a tool) is killed with its
+    whole group. Best-effort: a process that exits or cannot be read mid-scan is skipped.
+    """
+    needle = f"{_TURN_MARKER_ENV}={marker}".encode()
+    own_pid = os.getpid()
+    try:
+        own_pgid = os.getpgid(0)
+    except OSError:
+        own_pgid = -1
+    killed: list[int] = []
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        return killed
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == own_pid:
+            continue
+        try:
+            environ = (entry / "environ").read_bytes()
+        except OSError:
+            continue
+        if needle not in environ.split(b"\0"):
+            continue
+        try:
+            pgid = os.getpgid(pid)
+            if pgid == pid and pgid != own_pgid:
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            continue
+        killed.append(pid)
+    return killed
+
+
 def _intent_fingerprint(intent: Intent) -> str:
     """Stable key for one validated intent used to drop fallback retries."""
     return json.dumps(
@@ -193,6 +258,10 @@ class ClaudeBackend:
             default=120.0,
         )
     )
+    # Wall-clock bound on one ``run()`` call, retries included; see ``DEFAULT_TURN_TIMEOUT_SEC``.
+    turn_timeout_s: float = field(
+        default_factory=lambda: parse_call_timeout_env(_TURN_TIMEOUT_ENV, default=DEFAULT_TURN_TIMEOUT_SEC)
+    )
     # Bounded transient-failure retry/backoff.
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy.from_env)
 
@@ -216,6 +285,8 @@ class ClaudeBackend:
     _active_turn_diagnostic: dict[str, Any] | None = field(default=None, init=False)
     _last_turn_diagnostic: dict[str, Any] = field(default_factory=dict, init=False)
     _active_stderr: list[str] = field(default_factory=list, init=False)
+    # SDK calls abandoned past their bound whose close is still running; held so the task is not collected mid-close.
+    _abandoned_turns: set[asyncio.Task[Any]] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
         """Resolve the SDK and optionally register the ``emit_intent`` tool."""
@@ -274,12 +345,14 @@ class ClaudeBackend:
         # maximum number of turns (1)") before the model can emit any tool call or intent — newer bundled CLI builds
         # raise this as an error rather than returning a partial result.
         max_turns_use = max(max_turns_use, _RAW_COMPLETION_MIN_MAX_TURNS)
+        turn_marker = uuid.uuid4().hex
         try:
             options = self._build_options(
                 tools=tools or [],
                 disallowed_tools=disallowed_tools or [],
                 max_turns=max_turns_use,
                 system_prompt=system_prompt,
+                turn_marker=turn_marker,
             )
         except BaseException as exc:
             self._finish_turn_diagnostic(outcome="backend_error", error=exc)
@@ -320,18 +393,33 @@ class ClaudeBackend:
                 usage,
                 session_id,
                 stop_reason,
-            ) = await retry_with_backoff(
-                _one_attempt,
-                policy=self.retry_policy,
-                retry_on=(
-                    asyncio.TimeoutError,
-                    BackendError,
-                    ConnectionError,
-                    OSError,
+            ) = await self._within_turn_bound(
+                retry_with_backoff(
+                    _one_attempt,
+                    policy=self.retry_policy,
+                    retry_on=(
+                        asyncio.TimeoutError,
+                        BackendError,
+                        ConnectionError,
+                        OSError,
+                    ),
+                    on_retry=_note_retry,
                 ),
-                on_retry=_note_retry,
+                turn_marker=turn_marker,
             )
+        except _TurnWallClockExceeded as exc:
+            self.calls.append({"warn": str(exc)})
+            error = LLMCallFailed(f"Claude backend timed out: {exc}")
+            self._finish_turn_diagnostic(outcome="backend_error", error=error)
+            raise error from exc
         except asyncio.TimeoutError as exc:
+            killed = _kill_turn_processes(turn_marker)
+            log.warning(
+                "claude SDK turn timed out: stream idle for >%.0fs on every attempt (retries exhausted); "
+                "killed %d leftover CLI process(es); treating as a failed turn",
+                self.call_timeout_s,
+                len(killed),
+            )
             self.calls.append(
                 {
                     "warn": (
@@ -347,6 +435,10 @@ class ClaudeBackend:
             self._finish_turn_diagnostic(outcome="backend_error", error=error)
             raise error from exc
         except BaseException as exc:
+            if isinstance(exc, Exception):
+                # A CLI that crashed (SIGABRT included) or whose call raised may have left children behind. A
+                # cancellation is handled by ``_within_turn_bound``, once the SDK has closed the CLI.
+                _kill_turn_processes(turn_marker)
             self._finish_turn_diagnostic(outcome="backend_error", error=exc)
             # Once retries are exhausted, anything the SDK stream raised is a provider call that produced nothing
             # usable — including the gateway 400s (``litellm.BadRequestError: AnthropicException``) this telemetry
@@ -563,8 +655,9 @@ class ClaudeBackend:
         disallowed_tools: list[str] | None = None,
         max_turns: int,
         system_prompt: str | None,
+        turn_marker: str | None = None,
     ) -> Any:
-        """Build the SDK options object for one turn."""
+        """Build the SDK options object for one turn; ``turn_marker`` tags the CLI's processes for cleanup."""
         # Stream events are what time each model request inside the call (see ``claude_requests``).
         kwargs: dict[str, Any] = {"max_turns": max_turns, "include_partial_messages": True}
         if self.model:
@@ -575,6 +668,9 @@ class ClaudeBackend:
         if system_prompt:
             kwargs["system_prompt"] = system_prompt
         self._apply_sdk_env_options(kwargs)
+        if turn_marker:
+            # options.env is merged over the inherited environment, so a marker-only dict changes nothing else.
+            kwargs["env"] = {**dict(kwargs.get("env") or {}), _TURN_MARKER_ENV: turn_marker}
         self._apply_effort_options(kwargs)
         if self.raw_completion:
             # Single text turn: no MCP tools, all built-ins disallowed.
@@ -650,6 +746,46 @@ class ClaudeBackend:
             if self._active_turn_diagnostic is not None:
                 self._active_stderr.append(text)
 
+    async def _within_turn_bound(self, coro: Awaitable[Any], *, turn_marker: str) -> Any:
+        """Await ``coro`` for at most :attr:`turn_timeout_s`; past it, stop the call and kill its CLI.
+
+        The SDK call runs in its own task so that a close which never finishes cannot hold the caller: the task is
+        cancelled (which closes the CLI through the SDK), given ``_TURN_CLEANUP_GRACE_SEC`` to finish, and abandoned
+        if it does not. Either way every process tagged with ``turn_marker`` is then killed.
+
+        Raises:
+            _TurnWallClockExceeded: The bound elapsed before ``coro`` finished.
+        """
+        task = asyncio.ensure_future(coro)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=self.turn_timeout_s)
+        except BaseException:
+            # The caller itself was cancelled: take the SDK call down with it, and its CLI once the close is over.
+            task.cancel()
+            task.add_done_callback(lambda _t: _kill_turn_processes(turn_marker))
+            raise
+        if done:
+            return task.result()
+        started = asyncio.get_running_loop().time()
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=_TURN_CLEANUP_GRACE_SEC)
+        if done:
+            if not task.cancelled():
+                task.exception()  # Mark retrieved: the bound decides this turn's outcome, not the late result.
+            cleanup = f"SDK closed the CLI in {asyncio.get_running_loop().time() - started:.1f}s"
+        else:
+            self._abandoned_turns.add(task)
+            task.add_done_callback(self._abandoned_turns.discard)
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            cleanup = f"SDK close still running after {_TURN_CLEANUP_GRACE_SEC:g}s, abandoned"
+        killed = _kill_turn_processes(turn_marker)
+        message = (
+            f"turn exceeded its {self.turn_timeout_s:g}s wall-clock bound ({_TURN_TIMEOUT_ENV}); "
+            f"{cleanup}; killed {len(killed)} leftover CLI process(es)"
+        )
+        log.warning("claude SDK %s; treating as a failed turn", message)
+        raise _TurnWallClockExceeded(message)
+
     async def _invoke_and_collect(
         self,
         prompt: str,
@@ -689,6 +825,16 @@ class ClaudeBackend:
                 except StopAsyncIteration:
                     break
                 requests.observe(message)
+                if getattr(message, "subtype", None) == "api_retry":
+                    # Each of these resets the idle timer above; only the turn's wall-clock bound ends a retry loop.
+                    retry = getattr(message, "data", None) or {}
+                    log.warning(
+                        "claude CLI retrying its API request (attempt %s/%s, status=%s, error=%s)",
+                        retry.get("attempt"),
+                        retry.get("max_retries"),
+                        retry.get("error_status"),
+                        retry.get("error"),
+                    )
                 # Capture the session token from any message; last seen wins.
                 msg_session = getattr(message, "session_id", None)
                 if isinstance(msg_session, str) and msg_session:
