@@ -89,6 +89,14 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--max-latency-ms` is a constraint on KEEP rather than a target, and applies
   to scriptable frameworks (`xdit`, `custom`) only; the CLI refuses it for a
   serving framework, including on resume.
+- **GPU power settings (asserted, never set):** `--gpu-power-cap-w`,
+  `--gpu-perf-level`. Set them with `amd-smi set` before launch; the session
+  refuses to start or resume if a card it uses differs, and records what the
+  cards report either way. Per-round GPU power is sampled by Hyperloom over
+  the measured phase into each round's `gpu_power.json`;
+  `HYPERLOOM_GPU_POWER_SAMPLING=0` turns the sampler off (the round then falls
+  back to the benchmark report's reading) and `HYPERLOOM_GPU_POWER_INTERVAL_S`
+  sets its cadence (default 2 s, minimum 0.5 s).
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
   `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
   Per-pod sizing, the pod image and pod-side env are the provisioning
