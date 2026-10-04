@@ -5,15 +5,10 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 
-
-from hyperloom.orchestrator.loop.coordinator import (
-    Coordinator,
-    _first_present,
-    _format_inbox_event,
-    _lifecycle_paths,
-)
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.conversation import _first_present, _format_inbox_event
+from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
 
@@ -182,34 +177,6 @@ def test_skip_gemm_tuning_env(monkeypatch):
     assert Coordinator._skip_gemm_tuning() is False
 
 
-def test_build_sweep_params_skill_defaults():
-    """No recipe → SKILL defaults marker and list-shaped sweep params."""
-    st = SimpleNamespace(warm_start_recipe=None)
-    p = Coordinator._build_sweep_params_from_recipe(st)
-    assert p["source"] == "skill_md_default"
-    assert isinstance(p["conc_values"], list) and p["conc_values"]
-    assert isinstance(p["isl_osl_configs"], list)
-
-
-def test_build_sweep_params_from_recipe_grid():
-    """Recipe sweep_grid overrides defaults when fields are well-formed."""
-    st = SimpleNamespace(
-        warm_start_recipe={
-            "sweep_grid": {
-                "conc_values": [4, 8],
-                "isl_osl_configs": ["1:1", [32, 64]],
-                "num_prompts_factor": 3,
-            },
-        },
-    )
-    p = Coordinator._build_sweep_params_from_recipe(st)
-    assert p["source"] == "recipe_kb"
-    assert p["conc_values"] == [4, 8]
-    assert p["isl_osl_configs"][0] == "1:1"
-    assert p["isl_osl_configs"][1] == "32:64"
-    assert p["num_prompts_factor"] == 3
-
-
 def test_gap_layer_for_action_mapping():
     assert Coordinator._gap_layer_for_action("kernel_opt") == (
         "kernel_agent",
@@ -222,9 +189,9 @@ def test_gap_layer_for_action_mapping():
 
 
 def test_gap_layer_for_action_follows_framework_kind():
-    # A framework-layer gap on a scriptable workload must name the rewrite
-    # specialist: seeding it with serving_specialist is what steered a custom
-    # workload back onto the serving surface once EXPLORE picked the gap up.
+    # A framework-layer gap on a scriptable workload must name the rewrite specialist: seeding it with
+    # serving_specialist is what steered a custom workload back onto the serving surface once EXPLORE picked the gap
+    # up.
     assert Coordinator._gap_layer_for_action("sweep", "custom") == (
         "framework",
         "framework_rewrite_specialist",

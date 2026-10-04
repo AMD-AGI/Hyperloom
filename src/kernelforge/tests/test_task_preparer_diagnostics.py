@@ -1,12 +1,4 @@
-"""Tests that a failing preflight carries the driver's own output forward.
-
-``test_correctness`` / ``bench_wallclock`` already capture the child's
-stdout+stderr on a non-zero exit, but ``_preflight_async`` used to keep only the
-one-line verdict ("DRIVER CRASHED (exit 1)"). The repair agent therefore saw a
-crash with no traceback and spent its attempt rediscovering it — the observed
-failure mode behind "could not produce a conforming driver within the budget".
-These tests pin the tail to the result, the audit dict, and the retry prompt.
-"""
+"""Tests that a failing preflight carries the driver's own output forward."""
 
 from __future__ import annotations
 

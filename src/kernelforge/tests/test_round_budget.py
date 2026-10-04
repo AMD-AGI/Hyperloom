@@ -54,18 +54,12 @@ def _fan_out_history(planning_sec, *, lanes=3, rounds=1, measurement_sec=0.0):
     ]
 
 
-# What a round with no observed history of its own has to cover once its plans
-# exist, as the check BEFORE planning prices it: the least a session can be
-# given and the canonical measurement that judges it. Dispatch prices the same
-# execution higher, which is the asymmetry between a bound that only refuses
-# what cannot run and one that commits the loop to a session it cannot
-# interrupt.
+# What a round with no observed history of its own has to cover once its plans exist, as the check BEFORE planning
+# prices it: the least a session can be given and the canonical measurement that judges it.
 _EXECUTION_SEC = ADMISSION_SESSION_SEC + FIRST_ROUND_MEASUREMENT_SEC
 
 
-# ---------------------------------------------------------------------------
 # Before planning: a lower bound that refuses only what cannot run at all.
-# ---------------------------------------------------------------------------
 
 
 def test_first_round_is_admitted_at_full_width_without_history():
@@ -151,9 +145,7 @@ def test_single_lane_campaign_is_never_narrowed():
     assert decision.lanes == 1
 
 
-# ---------------------------------------------------------------------------
 # What the two halves of a round are priced from.
-# ---------------------------------------------------------------------------
 
 
 def test_the_planning_bound_is_the_cheapest_round_observed_not_the_worst():
@@ -217,9 +209,7 @@ def test_a_round_that_never_measured_is_not_an_observation_of_a_free_cycle():
     assert estimate_measurement_sec(history) == pytest.approx(FIRST_ROUND_MEASUREMENT_SEC)
 
 
-# ---------------------------------------------------------------------------
 # After planning: the decisive check.
-# ---------------------------------------------------------------------------
 
 
 def _dispatch(remaining_sec, *, measurement_sec=FIRST_ROUND_MEASUREMENT_SEC):
@@ -229,16 +219,12 @@ def _dispatch(remaining_sec, *, measurement_sec=FIRST_ROUND_MEASUREMENT_SEC):
     )
 
 
-# The worst of the 171 production validate-and-benchmark cycles, and a quarter
-# of what a campaign assumes before it has one of its own. The estimate is a
-# high-water over what this campaign has measured, so a campaign converges to
-# its own worst cycle: this is the LARGEST any of the production campaigns
-# would have ended up with, and most of them would have gone lower.
+# The worst of the 171 production validate-and-benchmark cycles, and a quarter of what a campaign assumes before it
+# has one of its own.
 _FAST_MEASUREMENT_SEC = 150.0
 
-# The production distribution each constant is read from, kept here so that
-# re-calibrating one has to argue with the measurement it came from rather than
-# slip past a test that only re-derives the formula.
+# The production distribution each constant is read from, kept here so that re-calibrating one has to argue with the
+# measurement it came from rather than slip past a test that only re-derives the formula.
 _SESSION_P25_SEC = 8.0 * 60.0
 _SESSION_MEDIAN_SEC = 12.3 * 60.0
 _SESSION_P90_SEC = 34.6 * 60.0
@@ -247,16 +233,11 @@ _EXTERNAL_GRACE_SEC = (11.0 - 10.75) * 3600.0
 
 
 def test_each_constant_is_the_production_number_it_claims_to_be():
-    """The values themselves, not just the arithmetic over them.
-
-    Both session prices and the floor are calibrated numbers: every other test
-    here recomputes the same formula the module does and would stay green if
-    one of them were quietly moved.
-    """
+    """The values themselves, not just the arithmetic over them."""
     assert ADMISSION_SESSION_SEC == pytest.approx(_SESSION_P25_SEC)
     assert DISPATCH_SESSION_SEC == pytest.approx(_SESSION_MEDIAN_SEC)
-    # The floor is the p90 session less the grace the external kill allows:
-    # at exactly this much time in hand, a p90 session ends as the kill lands.
+    # The floor is the p90 session less the grace the external kill allows: at exactly this much time in hand, a p90
+    # session ends as the kill lands.
     assert DISPATCH_FLOOR_SEC == pytest.approx(_SESSION_P90_SEC - _EXTERNAL_GRACE_SEC)
 
 
@@ -274,15 +255,7 @@ def test_dispatch_needs_a_session_and_the_measurement_that_judges_it():
 
 
 def test_dispatch_prices_a_session_above_the_check_taken_before_planning():
-    """The same session, the opposite asymmetry.
-
-    Before planning, a bound that is too generous refuses a round that would
-    have worked, so a session is priced at the p25 of what sessions cost. After
-    planning the loop cannot take the session back once it starts, and too
-    small a bound starts one the external timeout kills -- so the same session
-    is priced at the median. What passes the first check therefore does not
-    automatically pass the second.
-    """
+    """The same session, the opposite asymmetry."""
     assert DISPATCH_SESSION_SEC > ADMISSION_SESSION_SEC
     assert _dispatch(_EXECUTION_SEC).admitted is False
 
@@ -304,14 +277,7 @@ def test_an_expensive_measurement_cycle_still_raises_the_requirement():
 
 
 def test_the_dispatch_requirement_never_falls_below_its_floor():
-    """No history buys a lower bar, because history does not price the kill.
-
-    What the dispatch check guards is the external timeout: the loop cannot
-    interrupt the session it starts and does not size that session from what
-    remains, so a round dispatched too late runs past the deadline whatever
-    this campaign has measured. A campaign that measures quickly has observed
-    its own validation cycle, not that deadline.
-    """
+    """No history buys a lower bar, because history does not price the kill."""
     histories = [
         [],
         _fan_out_history(1500.0, measurement_sec=5.0, rounds=4),
@@ -328,10 +294,9 @@ def test_the_dispatch_requirement_never_falls_below_its_floor():
         )
         assert decision.required_sec >= DISPATCH_FLOOR_SEC
 
-    # Nor does any cycle a campaign could observe, from the cheapest
-    # production ever ran to one an order of magnitude past its worst. (A
-    # measurement of zero is not an observation of a free cycle at all -- it
-    # falls back to the constant, which is tested separately.)
+    # Nor does any cycle a campaign could observe, from the cheapest production ever ran to one an order of magnitude
+    # past its worst. (A measurement of zero is not an observation of a free cycle at all -- it falls back to the
+    # constant, which is tested separately.)
     for measured in range(5, 2000, 25):
         decision = admit_dispatch(
             remaining_sec=0.0,
@@ -349,8 +314,8 @@ def test_a_fast_campaign_lowers_the_first_check_but_not_the_second():
     measurement = estimate_measurement_sec(history)
     assert measurement == pytest.approx(_FAST_MEASUREMENT_SEC)
 
-    # Before planning, the campaign's own speed is exactly what should count:
-    # a campaign that validates quickly may keep starting rounds later.
+    # Before planning, the campaign's own speed is exactly what should count: a campaign that validates quickly may
+    # keep starting rounds later.
     admission = _admit(3600.0, history=history, measurement_sec=measurement)
     assert admission.execution_sec == pytest.approx(ADMISSION_SESSION_SEC + _FAST_MEASUREMENT_SEC)
     assert admission.execution_sec < _EXECUTION_SEC
@@ -377,18 +342,12 @@ def test_a_refusal_names_what_it_was_priced_from():
     assert "1 min remain" in summary
 
 
-# ---------------------------------------------------------------------------
 # The acceptance criterion: the rounds this policy was re-calibrated against.
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class _ProductionRound:
-    """One round of the ten 11-hour production campaigns (2026-08-17).
-
-    ``planning_min`` is None for the round whose planning never returned, which
-    can only be judged by the check taken before it.
-    """
+    """One round of the ten 11-hour production campaigns (2026-08-17)."""
 
     name: str
     remaining_min: float
@@ -396,10 +355,7 @@ class _ProductionRound:
     survived: bool
 
 
-# Round start, measured planning, and what became of the round. The two that
-# did not survive were killed by the external timeout with their lane sessions
-# still running and no report written; three of the five that survived produced
-# a KEEP, one of them the largest single gain any of the ten campaigns found.
+# Round start, measured planning, and what became of the round.
 PRODUCTION_ROUNDS = (
     _ProductionRound("gemma4-fused-moe iter 21", 30.0, 22.7, False),
     _ProductionRound("paged-attn-decode iter 13", 32.0, 23.7, False),
@@ -421,8 +377,7 @@ def _replay(round_: _ProductionRound, *, history) -> bool:
     if not admission.admitted:
         return False
     if round_.planning_min is None:
-        # Planning never returned, so the round was never asked the second
-        # question. Admitting it to planning is the whole decision here.
+        # Planning never returned, so the round was never asked the second question.
         return True
     return admit_dispatch(
         remaining_sec=(round_.remaining_min - round_.planning_min) * 60.0,
@@ -448,12 +403,7 @@ def test_the_policy_matches_what_production_did_with_these_rounds(round_):
 def test_the_verdict_does_not_change_once_the_campaign_has_observed_itself(
     round_,
 ):
-    """The same rounds, on a campaign that has already run one like them.
-
-    The one whose planning never returned is priced from the earlier round of
-    its own campaign (iteration 17, 21.9 minutes), which is what that campaign
-    would in fact have had in hand.
-    """
+    """The same rounds, on a campaign that has already run one like them."""
     planning_min = round_.planning_min if round_.planning_min else 21.9
     history = _fan_out_history(planning_min * 60.0, lanes=3)
 
@@ -468,16 +418,7 @@ def test_the_verdict_does_not_change_once_the_campaign_has_observed_itself(
 def test_the_verdict_does_not_change_on_a_campaign_that_measures_quickly(
     round_,
 ):
-    """The same rounds on a campaign whose measurement cycle is observed.
-
-    Every campaign becomes this one after its first round. The constant a
-    campaign assumes before it has measured anything is four times the worst
-    cycle production ever ran, so the first observation replaces 600 seconds
-    with something far smaller and every estimate built on it falls. These
-    verdicts must not fall with them -- what dispatch is guarding against is an
-    external deadline, and a campaign that validates quickly has learned
-    nothing about that.
-    """
+    """The same rounds on a campaign whose measurement cycle is observed."""
     planning_min = round_.planning_min if round_.planning_min else 21.9
     history = _fan_out_history(planning_min * 60.0, lanes=3, measurement_sec=_FAST_MEASUREMENT_SEC)
 
@@ -504,15 +445,12 @@ def test_the_rounds_that_died_are_separated_from_the_survivors_after_planning():
         required = _dispatch(0.0, measurement_sec=measurement_sec).required_sec
         assert max(killed) < required <= min(survived)
 
-    # The floor alone -- the part observation cannot lower -- already clears
-    # the deaths by more than twice their margin, and still refuses none of the
-    # rounds that went on to a measured candidate.
+    # The floor alone -- the part observation cannot lower -- already clears the deaths by more than twice their
+    # margin, and still refuses none of the rounds that went on to a measured candidate.
     assert 2 * max(killed) < DISPATCH_FLOOR_SEC <= min(survived)
 
 
-# ---------------------------------------------------------------------------
 # The history the estimates are read from.
-# ---------------------------------------------------------------------------
 
 
 def test_recorded_round_costs_drive_the_next_admission():
@@ -530,9 +468,8 @@ def test_recorded_round_costs_drive_the_next_admission():
     decision = _admit(1500.0, history=state.round_costs.recent)
 
     assert decision.admitted is False
-    # Both halves come from the round just recorded: the planning bound falls
-    # with each unread plan, and the measurement is the one observed, not the
-    # no-history constant.
+    # Both halves come from the round just recorded: the planning bound falls with each unread plan, and the
+    # measurement is the one observed, not the no-history constant.
     assert decision.planning_sec == pytest.approx(2400.0 - 2 * PLAN_CRITIC_TIMEOUT_SEC)
     assert decision.execution_sec == pytest.approx(ADMISSION_SESSION_SEC + 90.0)
     assert state.round_costs.rounds == 1
@@ -573,20 +510,11 @@ def test_a_round_that_did_not_plan_records_nothing():
     assert state.round_costs.rounds == 0
 
 
-# The planning share and the span it is a share OF. These pin the structure
-# that keeps them describing the same thing: the numerator cannot grow without
-# the denominator, no caller supplies a denominator of its own, and a state
-# that violates it does not load.
+# The planning share and the span it is a share OF.
 
 
 def test_planning_cannot_be_charged_without_advancing_the_span_it_is_in():
-    """``campaign_sec`` is required, so the two halves advance together.
-
-    The defect was a cumulative numerator paired with whatever span the caller
-    happened to have. Making the span an argument the caller must pass, on the
-    same call that charges the planning, is what makes that pairing impossible
-    rather than merely unlikely.
-    """
+    """``campaign_sec`` is required, so the two halves advance together."""
     state = RunState()
 
     with pytest.raises(TypeError):
@@ -602,12 +530,7 @@ def test_planning_cannot_be_charged_without_advancing_the_span_it_is_in():
 
 
 def test_the_campaign_span_is_never_left_behind_the_planning_inside_it():
-    """A clock passed short of the planning charged to it is raised, not kept.
-
-    A caller can hand over a span it measured badly -- a resumed session whose
-    own process clock is seconds old is exactly that. It cannot make the share
-    exceed 100 by doing so.
-    """
+    """A clock passed short of the planning charged to it is raised, not kept."""
     state = RunState()
 
     apply_round_cost(
@@ -647,21 +570,12 @@ def test_a_campaign_with_no_clock_reports_no_share_rather_than_zero():
 
 
 def test_planning_share_takes_no_denominator():
-    """The single way these totals become a share, by construction.
-
-    ``planning_share_pct`` reads the campaign clock stored beside the planning
-    it divides. There is no parameter for a caller to pass a different span
-    through, which is the property this test exists to keep.
-    """
+    """The single way these totals become a share, by construction."""
     assert inspect.signature(RoundCostState.planning_share_pct).parameters.keys() == {"self"}
 
 
 def test_a_state_whose_span_cannot_contain_its_planning_does_not_load():
-    """The invariant is checked at load, not only at the call that maintains it.
-
-    A checkpoint edited by hand, or written by some future path that skips
-    ``apply_round_cost``, would otherwise resurrect the share above 100.
-    """
+    """The invariant is checked at load, not only at the call that maintains it."""
     state = RunState()
     state.round_costs = RoundCostState(
         rounds=1,

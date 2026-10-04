@@ -1,19 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``multi_node/scripts`` launch and kill helpers, plus the
-Infera SSH fan-out helpers, the mn CLI kernel-op routing, ``_multi_node_env``
-and the shell-quoting / credential hardening of the rendered entrypoints.
-
-A tiny ``sys.modules`` ray stub lets CI import the scripts without Ray.
-"""
+"""Unit tests for ``multi_node/scripts`` launch and kill helpers, plus the Infera SSH fan-out helpers, the mn CLI kernel-op routing, ``_multi_node_env`` and the shell-quoting / credential hardening of the rendered entrypoints."""
 
 from __future__ import annotations
 
 import argparse
+import base64
 import importlib.util
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -74,6 +71,14 @@ def _repo_root() -> Path:
 
 def _load_script_module(unique_name: str, script_name: str):
     _install_min_ray_stub()
+    if script_name == "launch_multinode.py":
+        from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+        mod = types.ModuleType(unique_name)
+        sys.modules[unique_name] = mod
+        bundle = mn_cli._read_bundled_pod_python_script(script_name, mn_cli._LAUNCHER_DEPS)
+        exec(compile(bundle, f"{script_name}_bundle.py", "exec"), mod.__dict__)
+        return mod
     path = _repo_root() / "multi_node" / "scripts" / script_name
     spec = importlib.util.spec_from_file_location(unique_name, path)
     if spec is None or spec.loader is None:
@@ -107,10 +112,51 @@ def _kb_env(monkeypatch, tmp_path, **env):
     """Isolate resolve_kb_topology from the ambient env and any real state file."""
     monkeypatch.delenv("HYPERLOOM_MN_EXT_SERVICE_URL", raising=False)
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "state.json"))
-    for key in ("INFERENCE_OPTIMIZER_NODES", "INFERENCE_OPTIMIZER_GPUS_PER_NODE", "TP", "EP", "PD_MODE"):
+    for key in (
+        "INFERENCE_OPTIMIZER_NODES",
+        "INFERENCE_OPTIMIZER_GPUS_PER_NODE",
+        "TP",
+        "EP",
+        "PD_MODE",
+        "HYPERLOOM_PARTITION_MODE",
+    ):
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
+
+
+def test_resolve_kb_topology_carries_the_partition_mode_into_the_key(monkeypatch, tmp_path):
+    """Reader and writer both key off this one call, so the mode has to arrive through it."""
+    from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
+
+    _kb_env(monkeypatch, tmp_path, HYPERLOOM_PARTITION_MODE="CPX")
+    monkeypatch.setattr(mne, "_read_state", lambda: {})
+
+    topo = mne.resolve_kb_topology()
+
+    assert topo["partition_mode"] == "CPX"
+    assert kb_hardware_slug("MI300X", **topo) == "MI300X_cpx"
+
+
+def test_resolve_kb_topology_prefers_persisted_partition_mode_on_resume(monkeypatch, tmp_path):
+    """A resume reads the mode it recorded rather than whatever the new shell exports."""
+    _kb_env(monkeypatch, tmp_path, HYPERLOOM_PARTITION_MODE="SPX")
+    monkeypatch.setattr(mne, "_read_state", lambda: {"compute_partition": {"mode": "cpx"}})
+
+    assert mne.resolve_kb_topology()["partition_mode"] == "CPX"
+
+
+def test_resolve_kb_topology_leaves_the_partition_mode_unset_when_nobody_published_one(monkeypatch, tmp_path):
+    """No mode means the whole card, which is the key every historical row already has."""
+    from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
+
+    _kb_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(mne, "_read_state", lambda: {})
+
+    topo = mne.resolve_kb_topology()
+
+    assert topo["partition_mode"] == ""
+    assert kb_hardware_slug("MI300X", **topo) == "MI300X"
 
 
 def test_resolve_kb_topology_prefers_env_over_state(monkeypatch, tmp_path):
@@ -136,11 +182,7 @@ def test_resolve_kb_topology_falls_back_to_state_on_unparsable_env(monkeypatch, 
 
 
 def test_resolve_kb_topology_leaves_tp_unspecified_rather_than_inventing_one(monkeypatch, tmp_path):
-    """An unresolvable TP must omit the suffix, not claim the run was TP1.
-
-    ``kb_hardware_slug`` documents ``tp <= 0`` as "unspecified"; defaulting to 1
-    instead keyed such runs as a formation nobody measured.
-    """
+    """An unresolvable TP must omit the suffix, not claim the run was TP1."""
     from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
 
     _kb_env(monkeypatch, tmp_path, INFERENCE_OPTIMIZER_NODES="2", INFERENCE_OPTIMIZER_GPUS_PER_NODE="8")
@@ -154,11 +196,7 @@ def test_resolve_kb_topology_leaves_tp_unspecified_rather_than_inventing_one(mon
 
 
 def test_resolve_kb_topology_backend_matches_the_handoff_routing(monkeypatch, tmp_path):
-    """The KB key must name the control plane the run actually routes to.
-
-    A hardcoded backend default let a rayjob hand-off be keyed (and routed) as
-    infera whenever the platform omitted INFERENCE_OPTIMIZER_MN_BACKEND.
-    """
+    """The KB key must name the control plane the run actually routes to."""
     from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_MN_BACKEND", raising=False)
@@ -171,19 +209,6 @@ def test_resolve_kb_topology_backend_matches_the_handoff_routing(monkeypatch, tm
 
     assert ext.build_external_state_from_env()["backend"] == "rayjob"
     assert mne.resolve_kb_topology()["backend"] == "rayjob"
-
-
-def test_denied_extra_args_matches_sandbox_speculative_draft_rules():
-    # The pod-side copy must mirror server_args_safety: exempt the flag by name,
-    # but still constrain its value. Divergence silently blocks the sandbox-side
-    # exemption at the pod boundary.
-    mod = _load_script_module("_ln_mn_specdraft", "launch_multinode.py")
-    assert mod._denied_extra_args("--speculative-draft-model-path /wekafs/models/draft") == []
-    assert mod._denied_extra_args("--speculative-draft-model-path=/wekafs/models/draft") == []
-    for bad in ("Qwen/draft", "hf://org/draft", "/wekafs/../etc/passwd"):
-        assert mod._denied_extra_args(f"--speculative-draft-model-path {bad}")
-    assert mod._denied_extra_args("--speculative-draft-model-path --speculative-num-steps 3")
-    assert mod._denied_extra_args("--download-dir /tmp/evil") == ["--download-dir"]
 
 
 def _pd_legs_probe(lm, monkeypatch, *, healthy: set[str], log_dir: str | None = None):
@@ -211,14 +236,7 @@ def _pd_legs_probe(lm, monkeypatch, *, healthy: set[str], log_dir: str | None = 
 
 
 def test_pd_launch_waits_for_both_legs_before_reporting_done(monkeypatch):
-    """A terminal launch status has to mean the cluster served, not just spawned.
-
-    The driver used to return the moment the PD ranks were spawned, because the
-    router that owns the public port is only submitted afterwards. Its job then
-    read SUCCEEDED while the weight load had tens of minutes left, so a caller
-    retrying mid-boot could not tell a booting cluster from a dead one -- the
-    ambiguity the whole resume decision then had to work around.
-    """
+    """A terminal launch status has to mean the cluster served, not just spawned."""
     lm = _load_script_module("lm_pd_ready", "launch_multinode.py")
 
     assert _pd_legs_probe(lm, monkeypatch, healthy={"prefill", "decode"}) is True
@@ -232,15 +250,7 @@ def test_pd_launch_reports_undetermined_when_a_leg_never_answers(monkeypatch):
 
 
 def test_pd_launch_does_not_false_fail_a_silent_remote_leg(monkeypatch, tmp_path):
-    """A decode leg that has not answered yet is not "dead" from a remote PID.
-
-    The decode leader runs on a different node than this driver, so its PID is
-    in that node's namespace; the old os.kill early-abort raised
-    ProcessLookupError for a perfectly healthy remote leg and false-failed the
-    launch (the systematic ``mn_server_restart_failed`` seen only in rayjob PD).
-    With no fatal in the leg's log, a still-silent leg must read undetermined,
-    not failed.
-    """
+    """A decode leg that has not answered yet is not \"dead\" from a remote PID."""
     lm = _load_script_module("lm_pd_silent_remote", "launch_multinode.py")
     (tmp_path / "decode_0.log").write_text("loading weights...\n", encoding="utf-8")
 
@@ -248,13 +258,7 @@ def test_pd_launch_does_not_false_fail_a_silent_remote_leg(monkeypatch, tmp_path
 
 
 def test_pd_launch_fails_fast_on_a_fatal_in_a_leg_log(monkeypatch, tmp_path):
-    """A crashed leg whose nohup wrapper lingers must abort, not wait the budget.
-
-    In PD mode the decode leg can log a fatal traceback while its wrapper PID
-    stays alive (and, being remote, is not ours to os.kill anyway). Scanning the
-    leg's own log is the cross-node-safe proof of death: it lets the driver bail
-    early and tells the caller it crashed rather than was killed.
-    """
+    """A crashed leg whose nohup wrapper lingers must abort, not wait the budget."""
     lm = _load_script_module("lm_pd_fatal", "launch_multinode.py")
     (tmp_path / "decode_0.log").write_text(
         "loading weights...\nRuntimeError: HIP out of memory\n",
@@ -265,19 +269,12 @@ def test_pd_launch_fails_fast_on_a_fatal_in_a_leg_log(monkeypatch, tmp_path):
 
 
 def test_router_launch_replaces_a_live_router_instead_of_orphaning_it(tmp_path):
-    """A second router must not be stacked on top of the one already running.
-
-    The spawn ends with ``echo $! > router.pid``, so a router started while one
-    was live left the old process holding the public port with nothing naming
-    it: ``kill_multinode`` sweeps ``router*.pid``, which now points at the
-    newcomer, so the orphan survives every later kill. The resume paths reach
-    this without ever sweeping the pid dir, which is what made it reachable.
-    """
+    """A second router must not be stacked on top of the one already running."""
     lr = _load_script_module("lr_test_replace", "launch_router.py")
     pid_file = tmp_path / "router.pid"
 
-    # start_new_session mirrors the setsid the real spawn uses, so the group
-    # signalled here is the router's own and not this test runner's.
+    # start_new_session mirrors the setsid the real spawn uses, so the group signalled here is the router's own and
+    # not this test runner's.
     victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
     try:
         pid_file.write_text(str(victim.pid))
@@ -292,11 +289,7 @@ def test_router_launch_replaces_a_live_router_instead_of_orphaning_it(tmp_path):
 
 
 def test_detach_router_retires_the_previous_one_before_spawning(tmp_path):
-    """The replacement has to happen on the spawn path, not just be available.
-
-    Guards the wiring rather than the helper: it is the call inside
-    ``_detach_router`` that keeps a resume from stacking a second router.
-    """
+    """The replacement has to happen on the spawn path, not just be available."""
     lr = _load_script_module("lr_test_wiring", "launch_router.py")
     pid_file = tmp_path / "router.pid"
     log_file = tmp_path / "router.log"
@@ -322,14 +315,7 @@ def test_detach_router_retires_the_previous_one_before_spawning(tmp_path):
 
 
 def test_router_signal_never_blankets_a_group_it_does_not_lead(monkeypatch):
-    """A PID that leads no group belongs to someone else's, so signal it alone.
-
-    The router is spawned under setsid and leads its own group, which is why
-    reaching the group is right for it. A recorded PID that has since been
-    reused, though, sits in an unrelated group -- possibly the caller's own, as
-    this suite demonstrated by taking itself down -- and killpg there would
-    signal processes this has no business touching.
-    """
+    """A PID that leads no group belongs to someone else's, so signal it alone."""
     lr = _load_script_module("lr_test_group", "launch_router.py")
     group_signals: list[int] = []
     pid_signals: list[int] = []
@@ -435,8 +421,8 @@ def test_kill_remote_sigterms_then_process_exits(tmp_path, monkeypatch):
     monkeypatch.setattr("os.getpgid", _getpgid)
     monkeypatch.setattr("os.killpg", _killpg)
     monkeypatch.setattr("time.sleep", lambda _s: None)
-    # Neutralize the post-kill GPU-VRAM reclaim path so the test never shells
-    # out to rocm-smi (primary footprint + fallback per-card both stubbed).
+    # Neutralize the post-kill GPU-VRAM reclaim path so the test never shells out to rocm-smi (primary footprint +
+    # fallback per-card both stubbed).
     monkeypatch.setattr(km, "_gpu_total_used_mb", lambda: None)
     monkeypatch.setattr(km, "_gpu_used_mb_for_pgids", lambda _pgids: None)
     monkeypatch.setattr(km, "_gpu_vram_used_mb", lambda: None)
@@ -1011,7 +997,6 @@ def test_infera_disagg_flags_and_launch_args():
     assert "--extra-args" in la and "decode" in la
 
 
-# ---------------------------------------------------------------------------
 # infera_support pure-helper tests (Infera backend SSH fan-out).
 
 
@@ -1043,7 +1028,6 @@ def test_infera_build_node_launch_args_sglang_and_kill_only():
     assert "--model" not in k
 
 
-# ---------------------------------------------------------------------------
 # Infera kernel ops routing/isolation (apply-patch / kernel-bench / install-geak).
 
 
@@ -1063,8 +1047,8 @@ def test_resolve_geak_src_resolution_order(monkeypatch):
 
 
 def test_apply_patch_routes_to_infera_only_when_backend_infera(tmp_path, monkeypatch):
-    # backend=infera -> _infera_apply_patch; backend=rayjob -> legacy head_pod_ip
-    # path (EXIT_CONFIG_ERROR without head_pod_ip). Proves isolation.
+    # backend=infera -> _infera_apply_patch; backend=rayjob -> legacy head_pod_ip path (EXIT_CONFIG_ERROR without
+    # head_pod_ip).
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     sp = tmp_path / "s.json"
@@ -1141,7 +1125,6 @@ def test_install_geak_noop_for_rayjob(tmp_path, monkeypatch):
     assert mn_cli.install_geak_on_pods_best_effort() == 0
 
 
-# ---------------------------------------------------------------------------
 # infera_ssh_env_from_state isolation tests (kernel-agent GEAK SSH placement).
 
 
@@ -1156,8 +1139,8 @@ def _write_mn_state(tmp_path, monkeypatch, payload):
 
 
 def test_infera_ssh_env_empty_for_rayjob(tmp_path, monkeypatch):
-    # RayJob backend (or single-node) must yield {} so the Ray RAY_ADDRESS
-    # placement path is left completely untouched.
+    # RayJob backend (or single-node) must yield {} so the Ray RAY_ADDRESS placement path is left completely
+    # untouched.
     from hyperloom.orchestrator.actions.executors import _multi_node_env
 
     _write_mn_state(
@@ -1232,18 +1215,11 @@ def test_infera_ssh_env_empty_without_pods_or_key(tmp_path, monkeypatch):
     assert _multi_node_env.infera_ssh_env_from_state() == {}
 
 
-# ---------------------------------------------------------------------------
 # magpie_remote_env accuracy-gate interpreter tests.
 
 
 def test_magpie_remote_env_pins_eval_interpreter(tmp_path, monkeypatch):
-    """The eval must run in the interpreter preflight installed lm_eval into.
-
-    Magpie's ``magpie_run_eval_remote_direct`` runs ``${MAGPIE_EVAL_PYTHON:-python3}``
-    and has no InferenceX shim to install the harness for itself, so a bare PATH
-    ``python3`` would look for lm_eval in a different interpreter than preflight
-    installed it into and fail the gate on a box preflight called ready.
-    """
+    """The eval must run in the interpreter preflight installed lm_eval into."""
     _write_mn_state(tmp_path, monkeypatch, {"backend": "rayjob", "nodes": 2, "service_url": "http://h:8888"})
     monkeypatch.setattr(mne, "external_service_url", lambda: "")
     monkeypatch.setattr(
@@ -1281,7 +1257,6 @@ def test_magpie_remote_env_empty_for_single_node(tmp_path, monkeypatch):
     assert mne.magpie_remote_env() == {}
 
 
-# ---------------------------------------------------------------------------
 # _write_rayjob_meta sidecar JSON tests.
 
 
@@ -1325,8 +1300,8 @@ def test_export_ray_address_to_os(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     p.chmod(0o600)
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(p))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    # The head IP reaches a multi-node run through the hand-off, so supply it
-    # that way: state for >= 2 nodes is refused without one.
+    # The head IP reaches a multi-node run through the hand-off, so supply it that way: state for >= 2 nodes is
+    # refused without one.
     monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://head:8888")
     monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.0.5")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
@@ -1336,11 +1311,7 @@ def test_export_ray_address_to_os(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 
 
 def test_subcommand_state_refuses_multi_node_without_handoff(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A stale state file must not stand in for a cluster hand-off.
-
-    The guard sits on the subcommand entry, not on the raw state read: callers
-    that only ask about multi-node configuration must stay unaffected.
-    """
+    """A stale state file must not stand in for a cluster hand-off."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
     from hyperloom.inference_optimizer.multi_node._internal import external_state
 
@@ -1355,8 +1326,8 @@ def test_subcommand_state_refuses_multi_node_without_handoff(monkeypatch: pytest
     with pytest.raises(RuntimeError, match="without a cluster hand-off"):
         mn_cli._load_state()
 
-    # ... and by the file itself claiming to describe a handed-over cluster,
-    # which is what a standalone subcommand sees.
+    # ... and by the file itself claiming to describe a handed-over cluster, which is what a standalone subcommand
+    # sees.
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     with pytest.raises(RuntimeError, match="describes a handed-over cluster"):
         mn_cli._load_state()
@@ -1365,7 +1336,6 @@ def test_subcommand_state_refuses_multi_node_without_handoff(monkeypatch: pytest
     assert external_state.load_multi_node_state()["head_pod_ip"] == "10.0.0.5"
 
 
-# ---------------------------------------------------------------------------
 # Multi-node control-plane hardening (shell-quoting + credential minimization).
 
 
@@ -1384,8 +1354,7 @@ def test_multinode_entrypoint_shlex_quotes_malicious_value():
 
 
 def test_restart_entrypoint_shlex_quotes_model(monkeypatch):
-    """SWSPLAT-42404: a shell-metacharacter model must be shlex-quoted into the
-    head-pod launch entrypoint (single argv token, no command injection)."""
+    """SWSPLAT-42404: a shell-metacharacter model must be shlex-quoted into the head-pod launch entrypoint (single argv token, no command injection)."""
     import shlex
 
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
@@ -1406,8 +1375,7 @@ def test_restart_entrypoint_shlex_quotes_model(monkeypatch):
 
 
 def test_restart_entrypoint_neutralizes_malicious_extra_args(monkeypatch):
-    """A shell-metacharacter extra_args must not inject a second command into
-    the restart entrypoint; the `;` stays inside a quoted argv token."""
+    """A shell-metacharacter extra_args must not inject a second command into the restart entrypoint; the `;` stays inside a quoted argv token."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
@@ -1426,8 +1394,7 @@ def test_restart_entrypoint_neutralizes_malicious_extra_args(monkeypatch):
 
 
 def test_restart_entrypoint_preserves_legit_multi_token_extra_args(monkeypatch):
-    """Legitimate multi-token extra_args survive unchanged (no functional
-    regression from the shell-safe re-quoting)."""
+    """Legitimate multi-token extra_args survive unchanged (no functional regression from the shell-safe re-quoting)."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
@@ -1515,12 +1482,7 @@ def _bootstrap_sh() -> Path:
 
 
 def test_bootstrap_renders_env_file_path_only_no_credentials(tmp_path):
-    """bootstrap.sh must render ENV_FILE with the venv PATH only, never creds.
-
-    Regression guard for the fix that stopped writing *_API_KEY / *_BASE_URL
-    into the world-readable /etc/profile.d/hyperloom-env.sh: credentials present
-    in the process env must NOT leak into the rendered file.
-    """
+    """bootstrap.sh must render ENV_FILE with the venv PATH only, never creds."""
     # Fake framework venv with an executable python3 so section 1 resolves.
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
@@ -1558,3 +1520,224 @@ def test_bootstrap_renders_env_file_path_only_no_credentials(tmp_path):
         assert key not in rendered
         assert val not in rendered
     assert (env_file.stat().st_mode & 0o777) == 0o644
+
+
+def _isolated_patch_fixture(tmp_path):
+    aiter = tmp_path / "site-packages" / "aiter"
+    jit = aiter / "jit"
+    build = jit / "build"
+    build.mkdir(parents=True)
+    (aiter / "__init__.py").write_text("", encoding="utf-8")
+    (jit / "__init__.py").write_text("", encoding="utf-8")
+    (jit / "module_gemm.so").write_bytes(b"baseline module")
+    (build / "baseline.o").write_bytes(b"baseline build")
+    target = aiter / "kernel.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+    backup = tmp_path / "backups"
+    env = {key: value for key, value in os.environ.items() if key not in {"PYTHONPATH", "AITER_JIT_DIR"}}
+    env["HYPERLOOM_MN_KERNEL_BACKUP_DIR"] = str(backup)
+    env["INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"] = str(aiter)
+    return target, jit, backup, env
+
+
+def _run_isolated_pod(script, argv, env, *, ray_stub=None):
+    runner = "import runpy, sys; "
+    if ray_stub is not None:
+        runner += f"sys.path.insert(0, {str(ray_stub)!r}); "
+    runner += "script = sys.argv.pop(1); runpy.run_path(script, run_name='__main__')"
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", runner, str(script), *argv],
+        cwd=script.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    return json.loads(result.stdout), result.stderr
+
+
+@pytest.mark.parametrize("action", ["revert", "finalize"])
+def test_infera_bundle_executes_without_repository_pythonpath(tmp_path, action):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    script = tmp_path / "kernel_node_ops_bundle.py"
+    script.write_text(mn_cli._read_bundled_pod_python_script("kernel_node_ops.py"), encoding="utf-8")
+    target, jit, backup, env = _isolated_patch_fixture(tmp_path)
+    record, _ = _run_isolated_pod(
+        script,
+        [
+            "apply",
+            "--target-path",
+            str(target),
+            "--patch-b64",
+            base64.b64encode(b"value = 2\n").decode(),
+            "--backup-dir",
+            str(backup),
+            "--jit-build-dir",
+            str(jit / "build"),
+        ],
+        env,
+    )
+    assert record["status"] == "ok"
+    assert not (jit / "module_gemm.so").exists()
+    assert not (jit / "build").exists()
+    (jit / "module_new.so").write_bytes(b"candidate module")
+    (jit / "build").mkdir()
+    (jit / "build" / "candidate.o").write_bytes(b"candidate build")
+
+    result, _ = _run_isolated_pod(script, [action, "--records-json", json.dumps([record])], env)
+
+    _assert_isolated_patch_result(action, result, record, target, jit)
+
+
+def _assert_isolated_patch_result(action, result, record, target, jit):
+    if action == "revert":
+        assert result["status"] == "restored"
+        assert result["jit_restore"]["status"] == "restored"
+        assert (jit / "module_gemm.so").read_bytes() == b"baseline module"
+        assert not (jit / "module_new.so").exists()
+        assert (jit / "build" / "baseline.o").read_bytes() == b"baseline build"
+        assert target.read_text(encoding="utf-8") == "value = 1\n"
+    else:
+        assert result["status"] == "finalized"
+        assert not Path(record["jit_backup"]["modules_backup_path"]).exists()
+        assert not Path(record["jit_backup"]["backup_path"]).exists()
+        assert not Path(record["backup_path"]).exists()
+        assert (jit / "module_new.so").read_bytes() == b"candidate module"
+        assert target.read_text(encoding="utf-8") == "value = 2\n"
+
+
+_RAY_PATCH_STUB = """import json
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+_working_dir = None
+
+def init(**kwargs):
+    global _working_dir
+    _working_dir = Path(kwargs["runtime_env"]["working_dir"]).resolve()
+    assert _working_dir == Path(sys.argv[0]).resolve().parent
+    assert kwargs["ignore_reinit_error"] is True
+    assert kwargs["log_to_driver"] is True
+    assert (_working_dir / "aiter_jit_cache.py").is_file()
+    assert (_working_dir / "patch_path_safety.py").is_file()
+    print("RUNTIME_ENV_CONNECTED", file=sys.stderr)
+
+def nodes():
+    return [{"Alive": True, "NodeID": "test-node", "NodeManagerHostname": socket.gethostname()}]
+
+def get(ref, timeout=None):
+    return ref
+
+class Remote:
+    def __init__(self, fn):
+        self.fn = fn
+    def options(self, *, scheduling_strategy):
+        assert scheduling_strategy.node_id == "test-node"
+        assert scheduling_strategy.soft is False
+        return self
+    def remote(self, *args):
+        assert _working_dir is not None
+        with tempfile.TemporaryDirectory() as temp:
+            worker = Path(temp) / "worker"
+            shutil.copytree(_working_dir, worker)
+            runner = (
+                "import sys, json; "
+                f"sys.path[:0] = {[str(worker), str(Path(__file__).resolve().parent.parent)]!r}; "
+                "import kernel_patch_multinode as m; "
+                f"result = getattr(m, {self.fn.__name__!r})(*json.loads(sys.argv[1])); "
+                "print(json.dumps(result))"
+            )
+            proc = subprocess.run(
+                [sys.executable, "-I", "-S", "-c", runner, json.dumps(args)],
+                cwd=worker, capture_output=True, text=True, timeout=20,
+            )
+            assert proc.returncode == 0, proc.stdout + proc.stderr
+            print("ACTOR_EXECUTED " + self.fn.__name__, file=sys.stderr)
+            return json.loads(proc.stdout)
+
+def remote(**kwargs):
+    assert kwargs == {"num_cpus": 0, "num_gpus": 0}
+    return Remote
+"""
+
+
+def _stage_ray_patch_entrypoint(entrypoint, destination):
+    destination.mkdir(exist_ok=True)
+    payloads = re.findall(r'cat > "\$WORK_DIR/([^"/]+)" <<\'([^\']+)\'\n(.*?)\2\n', entrypoint, re.DOTALL)
+    assert {name for name, _, _ in payloads} == {
+        "aiter_jit_cache.py",
+        "patch_path_safety.py",
+        "kernel_patch_multinode.py",
+    }
+    core = _repo_root().parent / "common" / "aiter_jit_cache.py"
+    for name, _, source in payloads:
+        if name == "aiter_jit_cache.py":
+            assert source == core.read_text(encoding="utf-8")
+        (destination / name).write_text(source, encoding="utf-8")
+    return destination / "kernel_patch_multinode.py"
+
+
+@pytest.mark.parametrize("action", ["revert", "finalize"])
+def test_ray_patch_siblings_reach_isolated_actor_through_runtime_env(tmp_path, action):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    target, jit, backup, env = _isolated_patch_fixture(tmp_path)
+    stub = tmp_path / "ray-dependency"
+    (stub / "ray" / "util").mkdir(parents=True)
+    (stub / "ray" / "__init__.py").write_text(_RAY_PATCH_STUB, encoding="utf-8")
+    (stub / "ray" / "util" / "__init__.py").write_text("", encoding="utf-8")
+    (stub / "ray" / "util" / "scheduling_strategies.py").write_text(
+        "class NodeAffinitySchedulingStrategy:\n"
+        "    def __init__(self, node_id, soft):\n"
+        "        self.node_id, self.soft = node_id, soft\n",
+        encoding="utf-8",
+    )
+    encoded = base64.b64encode(b"value = 2\n").decode()
+    entrypoint = mn_cli._build_multinode_apply_patch_entrypoint(
+        str(target), encoded, str(backup), "gemm", 20, str(jit / "build")
+    )
+    script = _stage_ray_patch_entrypoint(entrypoint, tmp_path / "shipped")
+    applied, log = _run_isolated_pod(
+        script,
+        [
+            "apply",
+            "--target-path",
+            str(target),
+            "--patch-b64",
+            encoded,
+            "--backup-dir",
+            str(backup),
+            "--jit-build-dir",
+            str(jit / "build"),
+        ],
+        env,
+        ray_stub=stub,
+    )
+    assert "RUNTIME_ENV_CONNECTED" in log
+    assert "ACTOR_EXECUTED _apply_remote" in log
+    assert applied["status"] == "ok"
+    record = applied["per_node"][0]
+    assert not (jit / "module_gemm.so").exists()
+    assert not (jit / "build").exists()
+    (jit / "module_new.so").write_bytes(b"candidate module")
+    (jit / "build").mkdir()
+    (jit / "build" / "candidate.o").write_bytes(b"candidate build")
+    records = json.dumps({record["host"]: [record]})
+    if action == "revert":
+        entrypoint = mn_cli._build_multinode_revert_patch_entrypoint(str(target), "{}", 20, records)
+    else:
+        entrypoint = mn_cli._build_multinode_finalize_patch_entrypoint(records, 20)
+    script = _stage_ray_patch_entrypoint(entrypoint, tmp_path / "shipped")
+
+    result, log = _run_isolated_pod(script, [action, "--records-json", records], env, ray_stub=stub)
+
+    assert "RUNTIME_ENV_CONNECTED" in log
+    assert f"ACTOR_EXECUTED _{action}_remote" in log
+    assert result["status"] == "ok"
+    _assert_isolated_patch_result(action, result["per_node"][0], record, target, jit)

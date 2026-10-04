@@ -7,9 +7,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_ENABLEMENT
+from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
+from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 
 from ..collaborator import CoordinatorCollaborator
+from ..bringup import recorded_verdict, session_root
 from .params import _enablement_carrier_params
 
 if TYPE_CHECKING:
@@ -20,33 +22,8 @@ import logging as _logging
 log = _logging.getLogger(__name__)
 
 
-def _derive_gpu_arch(gpu_type: str) -> str:
-    """Map a gpu_type label to an explicit GFX arch (never silent fallback)."""
-    _MAP = {
-        "mi355x": "gfx950",
-        "rx9070xt": "gfx1201",
-        "mi300x": "gfx942",
-        "mi308x": "gfx942",
-        "mi300": "gfx942",
-        "mi250x": "gfx90a",
-        "mi250": "gfx90a",
-        "mi210": "gfx90a",
-    }
-    gt = (gpu_type or "").strip().lower()
-    for key, arch in _MAP.items():
-        if key in gt:
-            return arch
-    return ""
-
-
 def _repo_matches_targeted_build_component(repo_url: str, component: str) -> bool:
-    """Return whether a repo name is compatible with a targeted-build recipe.
-
-    This deliberately ignores the origin/owner: specialists may discover and
-    request forks on any host.  It only prevents routing an unrelated repository
-    into a component-specific recipe.  An empty URL is valid because each recipe
-    has its own built-in default repository.
-    """
+    """Return whether a repo name is compatible with a targeted-build recipe."""
     repo = (repo_url or "").strip().rstrip("/")
     if not repo:
         return True
@@ -60,6 +37,12 @@ def _repo_matches_targeted_build_component(repo_url: str, component: str) -> boo
     return any(hint in repo_name for hint in hints.get(component, ()))
 
 
+#: What ``_note_build_routed`` stamps on a row. A manifest entry is a routing
+#: sentinel only if it carries one of these; a ``BuildResult.to_state`` attempt
+#: row never does, and must not answer for a build nobody has routed.
+_ROUTING_FIELDS: tuple[str, ...] = ("routed", "probe_task_id")
+
+
 class EnablementBuild(CoordinatorCollaborator):
     """Escalates to a compiled build and routes the result back into the lane."""
 
@@ -69,51 +52,37 @@ class EnablementBuild(CoordinatorCollaborator):
         *,
         attempt: int = 0,
     ) -> None:
-        """Enqueue a targeted build row when the residual gap is a compiled miss.
-
-        No-op when a build is already queued or running (idempotent by novelty
-        key), when the env var ``HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD=1``
-        is set, on multi-node, or when the gap is not a compiled miss.
-        """
+        """Enqueue a targeted build row when the residual gap is a compiled miss."""
         import os as _os
 
         if _os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1":
             return
-        try:
-            from ..actions.executors._multi_node_env import is_multi_node
+        from ..actions.executors._multi_node_env import is_multi_node
 
-            if is_multi_node():
-                return
-        except Exception:  # noqa: BLE001
+        if is_multi_node():
             return
         try:
-            from hyperloom.agents.framework.enablement import (
+            from hyperloom.common.failure_signature import (
                 MISSING_MODEL_ARCH,
                 MISSING_WEIGHT,
                 NOT_IMPLEMENTED,
-                classify_failure,
                 is_targeted_build_candidate,
             )
-            from ..framework.build_actions import TargetedBuildAction
-
-            signature = classify_failure(launch_log)
+            from .runtime.build_actions import TargetedBuildAction
 
             state = self.shared_state
+            # The round's own filed observation; wrapper text is the fallback,
+            # named by ``degraded`` in the log line below.
+            verdict, loaded = recorded_verdict(
+                state.enablement.launch_observation_path,
+                wrapper_text=launch_log,
+                session_dir=session_root(self),
+            )
+            signature = verdict.signature
             framework = (getattr(state, "framework", "") or "").strip().lower()
             gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
 
-            # Two escalation triggers:
-            #  1. An inherently *compiled* gap (build / rocm_hip / native-dtype /
-            #     hip-kernel) — the original Rung-5 path.
-            #  2. A vLLM **arch/weight deep-failure that source patches keep
-            #     hitting**: the enablement specialist authored ≥1 source patch
-            #     (attempt >= 1) yet the boot still stops at an arch/weight/
-            #     not-implemented wall. For a genuinely new architecture, aliasing
-            #     to an existing model class in the *installed* vLLM cannot model
-            #     the new op set; the correct acquisition is a from-source vLLM
-            #     build of a version that natively implements the arch. Only fires
-            #     on vLLM (the from-source recipe target) and never on the first
-            #     attempt (give the cheap source-patch path a chance first).
+            # Two escalation triggers: 1.
             is_compiled_gap = is_targeted_build_candidate(signature, launch_log)
             arch_stall = (
                 signature.kind in (MISSING_MODEL_ARCH, MISSING_WEIGHT, NOT_IMPLEMENTED)
@@ -124,23 +93,17 @@ class EnablementBuild(CoordinatorCollaborator):
                 return
 
             # Derive novelty fields from the current failure + session context.
-            # Ref and repo_url come from the existing stack action when present;
-            # otherwise the top discovery candidate for the component is used;
-            # empty ref falls back to tag-descending autoselect.
             existing_stack = state.enablement.kept_stack_action or {}
             repo_url = str(existing_stack.get("repo_url") or "").strip()
             ref = str(existing_stack.get("ref") or "").strip()
 
-            # Pick the component from the failure evidence:
-            # sgl_kernel when the offending symbol/log names sgl-kernel;
-            # vllm_source when vLLM's own C extension is implicated;
-            # aiter (default) for all other compiled-miss gaps.
+            # Pick the component from the failure evidence: sgl_kernel when the offending symbol/log names sgl-kernel;
+            # vllm_source when vLLM's own C extension is implicated; aiter (default) for all other compiled-miss gaps.
             sym_lower = (signature.offending_symbol or "").lower()
             log_lower = launch_log.lower()
             if arch_stall and not is_compiled_gap:
-                # Arch/weight deep-failure on vLLM after source patches: the fix
-                # is a from-source vLLM build that natively implements the arch,
-                # not an aiter/sgl-kernel op build.
+                # Arch/weight deep-failure on vLLM after source patches: the fix is a from-source vLLM build that
+                # natively implements the arch, not an aiter/sgl-kernel op build.
                 component = "vllm_source"
             elif "sgl_kernel" in sym_lower or "sgl-kernel" in sym_lower or "sgl_kernel" in log_lower:
                 component = "sgl_kernel"
@@ -157,7 +120,7 @@ class EnablementBuild(CoordinatorCollaborator):
             source_pr_url = ""
             # When no operator-pinned/kept ref, try the top discovery candidate.
             if not ref:
-                from ..framework.build_actions import resolve_build_ref
+                from .runtime.build_actions import resolve_build_ref
 
                 _component_hints = {
                     "aiter": ("aiter",),
@@ -201,21 +164,26 @@ class EnablementBuild(CoordinatorCollaborator):
                 reason=reason,
                 repo_url=repo_url,
                 ref=ref,
-                gpu_arch=_derive_gpu_arch(gpu_type),
+                gpu_arch=gfx_arch_for_gpu_type(gpu_type) or "",
                 build_budget_sec=0,
                 source_pr_url=source_pr_url,
             )
             task_id = await self.enqueue_targeted_build(action)
             if task_id:
+                from hyperloom.common.bringup import failure_digest
+
                 log.info(
-                    "ENABLEMENT: enqueued targeted_build kind=%s component=%s arch_stall=%s gpu_arch=%s task=%s",
+                    "ENABLEMENT: enqueued targeted_build kind=%s component=%s arch_stall=%s "
+                    "gpu_arch=%s digest=%s degraded=%s task=%s",
                     signature.kind,
                     component,
                     bool(arch_stall and not is_compiled_gap),
                     action.gpu_arch,
+                    failure_digest(verdict.observation)[:12],
+                    loaded.degraded or "-",
                     task_id,
                 )
-        except Exception:  # noqa: BLE001 — escalation is best-effort; never wedge dispatch
+        except Exception:
             log.debug("enablement: targeted-build escalation failed", exc_info=True)
 
     async def _maybe_enqueue_specialist_requested_build(
@@ -224,18 +192,7 @@ class EnablementBuild(CoordinatorCollaborator):
         task_id: str = "",
         payload: dict[str, Any] | None = None,
     ) -> None:
-        """Enqueue a targeted build the enablement specialist explicitly requested.
-
-        The enablement specialist may emit a ``needs_targeted_build`` object in its
-        ``specialist_done.json`` (see ``ENABLEMENT_BUILD_REQUEST_GUIDANCE``) when a
-        compiled component / from-source framework build is required that a source
-        patch against the installed tree cannot deliver. This reads that request
-        from the just-finished round's workdir (task id captured at rearm into
-        ``enablement_last_specialist_task_id``) and enqueues it on the isolated,
-        ROCm-safe build lane. The field is cleared once read so the request is
-        consumed at most once; ``enqueue_targeted_build`` is additionally
-        idempotent by build-novelty key. Best-effort — never wedges dispatch.
-        """
+        """Enqueue a targeted build the enablement specialist explicitly requested."""
         import os as _os
 
         state = self.shared_state
@@ -272,7 +229,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 _consume_marker()
                 return
 
-            from ..framework.build_actions import (
+            from .runtime.build_actions import (
                 _COMPONENTS,
                 TargetedBuildAction,
                 resolve_build_ref,
@@ -280,8 +237,8 @@ class EnablementBuild(CoordinatorCollaborator):
 
             component = str(req.get("component") or "").strip().lower()
             if component not in _COMPONENTS:
-                # A from-source framework build is the safest default for an
-                # arch/model request that named no valid compiled component.
+                # A from-source framework build is the safest default for an arch/model request that named no valid
+                # compiled component.
                 component = "vllm_source"
             framework = (getattr(state, "framework", "") or "").strip().lower() or "vllm"
             gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
@@ -293,10 +250,7 @@ class EnablementBuild(CoordinatorCollaborator):
             if candidate:
                 _repo, _ref, _pr = resolve_build_ref(candidate, repo_url)
                 repo_url = _repo or repo_url
-                # Take the resolved ref verbatim, including empty. An empty ref
-                # means "not checkoutable, autoselect a tag" (an issue citation),
-                # so falling back to the raw request here would hand the builder
-                # back the very string resolution just rejected.
+                # Take the resolved ref verbatim, including empty.
                 ref = _ref
                 source_pr_url = _pr
             if not _repo_matches_targeted_build_component(repo_url, component):
@@ -317,7 +271,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 reason=f"specialist request: {reason}",
                 repo_url=repo_url,
                 ref=ref,
-                gpu_arch=_derive_gpu_arch(gpu_type),
+                gpu_arch=gfx_arch_for_gpu_type(gpu_type) or "",
                 build_budget_sec=0,
                 source_pr_url=source_pr_url,
             )
@@ -332,47 +286,26 @@ class EnablementBuild(CoordinatorCollaborator):
                     ref or "(autoselect)",
                     build_task_id,
                 )
-        except Exception:  # noqa: BLE001 — best-effort; never wedge dispatch
+        except Exception:
             log.debug("enablement: specialist-requested build enqueue failed", exc_info=True)
 
     async def _maybe_route_build_outcomes(self) -> None:
-        """Route terminal targeted_build rows to _maybe_rearm_enablement.
-
-        Called every tick from _pump_enablement_safely.  Reads succeeded/failed
-        rows, synthesises the rearm res dict (status='kept'/'reverted'/'advanced'),
-        and delegates to the existing stall-gate machinery.
-
-        Novelty: a 'timeout' or 'preflight_budget' failure_class maps to
-        'advanced' (novel attempt, time vs defect distinction — keep going); all
-        real defects map to 'reverted' (advance stall streak).
-
-        A succeeded build no longer synthesises status='kept' directly. Instead
-        it enqueues an integrate_patch launch probe so the runtime must actually
-        boot the model before KEEP is declared. Each row is read once, except that
-        a build whose probe was cancelled before it ran is read again: nothing
-        launched the runtime, so nothing has decided anything about that build.
-
-        Oldest-unrouted-first avoids starving older builds when a newer row is
-        already routed; the tradeoff is that a succeeded build whose probe cannot
-        be enqueued yet is retried every tick and can defer newer failed builds
-        until its probe opens or the budget recovers.
-        """
+        """Route terminal targeted_build rows to _maybe_rearm_enablement."""
         try:
             all_tasks = []
             for st in ("succeeded", "failed"):
                 all_tasks.extend(t for t in await self.tasks.by_state(st) if t.kind == "targeted_build")
             if not all_tasks:
                 return
-            # Oldest terminal row first so a newer, already-routed build cannot
-            # hide an older build that still needs routing.
+            # Oldest terminal row first so a newer, already-routed build cannot hide an older build that still needs
+            # routing.
             for task in sorted(
                 all_tasks,
                 key=lambda t: str(getattr(t, "updated_at", "") or ""),
             ):
                 task_id = str(getattr(task, "task_id", "") or "")
-                # Skip rows already accounted for (tracked by enablement_build_manifest),
-                # unless what they were routed to was cancelled before it ran, which
-                # leaves the build no more launched than an unrouted one.
+                # Skip rows already accounted for (tracked by enablement_build_manifest), unless what they were routed
+                # to was cancelled before it ran, which leaves the build no more launched than an unrouted one.
                 routed = self._build_routing_record(task_id)
                 if routed is not None and not await self._build_probe_was_cancelled(routed):
                     continue
@@ -382,7 +315,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 else:
                     await self._route_failed_build(task)
                 return
-        except Exception:  # noqa: BLE001 — never wedge the tick
+        except Exception:
             log.debug("enablement: route_build_outcomes failed", exc_info=True)
 
     async def _route_failed_build(self, task: "Task") -> None:
@@ -401,22 +334,20 @@ class EnablementBuild(CoordinatorCollaborator):
         if not fc and isinstance(lbf, dict):
             fc = str(lbf.get("failure_class") or "")
 
-        # Novelty ledger: time-based failures are always advanced; defect
-        # failures are advanced when the (component,ref,gpu_arch,cmd) tuple
-        # has not been seen before (novel), reverted when it is a repeat.
+        # Novelty ledger: time-based failures are always advanced; defect failures are advanced when the
+        # (component,ref,gpu_arch,cmd) tuple has not been seen before (novel), reverted when it is a repeat.
         time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
         novelty_key: list[Any] | None = None
+        # A failed build booted nothing, so its rows carry no launch log to replace the recorded one.
         if fc in time_classes:
-            new_log = str(state.enablement.launch_log or "")
             res = {
                 "enablement": True,
                 "status": "advanced",
                 "advanced": True,
                 "patches_applied": [],
-                "enablement_launch_log": new_log,
             }
         else:
-            from ..framework.build_actions import TargetedBuildAction as _TBA, build_novelty_key as _bnk
+            from .runtime.build_actions import TargetedBuildAction as _TBA, build_novelty_key as _bnk
 
             task_params = getattr(task, "params", None) or {}
             _action = _TBA.from_state(task_params)
@@ -427,13 +358,11 @@ class EnablementBuild(CoordinatorCollaborator):
                 res = {"enablement": True, "status": "reverted"}
                 novelty_key = None
             else:
-                new_log = str(state.enablement.launch_log or "")
                 res = {
                     "enablement": True,
                     "status": "advanced",
                     "advanced": True,
                     "patches_applied": [],
-                    "enablement_launch_log": new_log,
                 }
                 novelty_key = _key
         log.info(
@@ -444,7 +373,7 @@ class EnablementBuild(CoordinatorCollaborator):
         )
         # Rearm, ledger append, and manifest ack must stay together: a failed
         # rearm leaves the build unrouted and the novelty ledger unchanged.
-        self._maybe_rearm_enablement(res)
+        await self._maybe_rearm_enablement(res)
         if novelty_key is not None:
             ledger = list(state.enablement.build_novelty or [])
             ledger.append(novelty_key)
@@ -452,43 +381,21 @@ class EnablementBuild(CoordinatorCollaborator):
         self._note_build_routed(task_id)
 
     async def _route_succeeded_build(self, task: "Task", routed: dict[str, Any] | None) -> None:
-        """Turn a succeeded targeted build into a launch probe, or a no-progress round.
-
-        KEEP is declared by the probe, never here: an artifact that builds is not
-        a runtime that boots. So this either opens a probe -- and remembers which
-        one, because a probe cancelled before it ran leaves the build unlaunched
-        and worth another -- or, when the built runtime cannot even be read, ends
-        the round as a revert.
-
-        The build is recorded as accounted for only once there is something to
-        account for. A probe the budget refused leaves it unrouted on purpose: it
-        is still a probed build nothing has launched, and the manifest saying
-        otherwise is what would strand it for the rest of the session.
-
-        Args:
-            task: The succeeded ``targeted_build`` row.
-            routed: What this build was routed to before, when it is being routed
-                again after its probe was cancelled; ``None`` on the first pass.
-        """
+        """Turn a succeeded targeted build into a launch probe, or a no-progress round."""
         task_id = str(getattr(task, "task_id", "") or "")
         attempt_root = str((getattr(task, "params", {}) or {}).get("attempt_root") or "")
-        # The build's attempt_root is resolved at pump time and is NOT written
-        # back into the task params (they keep the enqueue-time default ""). Fall
-        # back to the deterministic build path keyed by task_id so a *successful*
-        # build is not wrongly rejected as ``artifact_unreadable`` (mirrors
-        # BuildLifecycle._attempt_root).
-        if not attempt_root and task_id:
-            attempt_root = str(self.session_dir / "enablement" / "builds" / task_id)
         br = None
         if attempt_root:
-            from ..framework.targeted_build import _load_result_json
+            from .runtime.targeted_build import _load_result_json
 
             br = _load_result_json(attempt_root)
 
         # If the runtime can't be read, it can't be launched → reverted.
         if br is None or not br.ok or not br.runtime.to_runtime_override():
             log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s", task_id)
-            self._maybe_rearm_enablement({"enablement": True, "status": "reverted", "reason": "artifact_unreadable"})
+            await self._maybe_rearm_enablement(
+                {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"}
+            )
             self._note_build_routed(task_id)
             return
 
@@ -505,52 +412,39 @@ class EnablementBuild(CoordinatorCollaborator):
     def _build_routing_record(self, build_task_id: str) -> dict[str, Any] | None:
         """The record of what a build's outcome was already routed to, if any.
 
-        Only the routing sentinels carry a ``task_id``; the build attempts the
-        lifecycle appends to the same manifest carry ``ok`` instead.
-
-        Args:
-            build_task_id: The ``targeted_build`` row to look for.
-
-        Returns:
-            The sentinel dict, or ``None`` when this build has not been routed.
+        Matched on a routing field as well as the id. ``BuildResult.to_state``
+        writes no ``task_id`` today, so an attempt row cannot answer here by
+        accident -- but that is an invariant of a serializer two packages away,
+        and if it ever gains one, every completed build would read as already
+        routed and its launch probe would never be enqueued. The lookup says
+        what it is looking for instead of relying on what it will not find.
         """
         for entry in reversed(list(self.shared_state.enablement.build_manifest or [])):
-            if isinstance(entry, dict) and str(entry.get("task_id") or "") == build_task_id:
+            if not isinstance(entry, dict) or str(entry.get("task_id") or "") != build_task_id:
+                continue
+            if any(field in entry for field in _ROUTING_FIELDS):
                 return entry
         return None
 
     def _note_build_routed(self, build_task_id: str, **fields: Any) -> None:
         """Record that a build's outcome has been routed, and to what.
 
-        Args:
-            build_task_id: The ``targeted_build`` row that was routed.
-            fields: What it was routed to, for a build whose outcome is a probe.
+        ``routed`` is stamped on both the append and the merge path, so a build
+        routed with no fields of its own still says it was routed. A reader
+        matching on the id alone could not tell that row from an attempt row
+        that happens to carry the same id.
         """
         manifest = list(self.shared_state.enablement.build_manifest or [])
         for idx, entry in enumerate(manifest):
             if isinstance(entry, dict) and str(entry.get("task_id") or "") == build_task_id:
-                manifest[idx] = {**entry, **fields}
+                manifest[idx] = {**entry, "routed": True, **fields}
                 break
         else:
             manifest.append({"task_id": build_task_id, "routed": True, **fields})
         self.shared_state.enablement.build_manifest = manifest
 
     async def _build_probe_was_cancelled(self, routed: dict[str, Any]) -> bool:
-        """Whether the probe a build was routed to was stopped before it ran.
-
-        A cancelled probe is no evidence about the build: the queue scan drops a
-        queued row the wall-clock budget can no longer fit, and a phase boundary
-        drops one the new phase does not allow. Either way the built runtime was
-        never launched, so the build is still owed a probe -- and without noticing
-        that, the manifest entry written when the first one was opened keeps this
-        build accounted for permanently, across resumes included.
-
-        Args:
-            routed: The build's routing record.
-
-        Returns:
-            ``True`` when the recorded probe exists and was cancelled.
-        """
+        """Whether the probe a build was routed to was stopped before it ran."""
         from ..state.task_registry import TaskNotFound
 
         probe_tid = str(routed.get("probe_task_id") or "").strip()
@@ -559,8 +453,7 @@ class EnablementBuild(CoordinatorCollaborator):
         try:
             probe = await self.tasks.get(probe_tid)
         except TaskNotFound:
-            # Pruned rather than cancelled; re-probing on a row that is gone
-            # would re-probe on every later tick too.
+            # Pruned rather than cancelled; re-probing on a row that is gone would re-probe on every later tick too.
             return False
         return str(getattr(probe, "state", "") or "") == "cancelled"
 
@@ -577,8 +470,7 @@ class EnablementBuild(CoordinatorCollaborator):
         applying any patch.  The probe completes as an ordinary integrate_patch
         task whose enablement:True result is routed by the dispatcher through
         _maybe_rearm_authored_lane → _maybe_rearm_enablement, producing a
-        genuine KEEP/advanced/reverted outcome.  The whole-machine GPU pool is
-        acquired via _framework_gpu_params.
+        genuine KEEP/advanced/reverted outcome.
 
         The probe is what declares KEEP for a build, so it must not be opened
         into a session that cannot run it: the queue scan drops a queued row the
@@ -597,8 +489,6 @@ class EnablementBuild(CoordinatorCollaborator):
             The probe ``task_id`` and the generation it sits on; the id is empty
             when nothing was enqueued.
         """
-        from hyperloom.agents.framework.enablement import classify_failure
-
         denied = self._time_budget_denial_for_action("integrate_patch")
         if denied is not None:
             log.info(
@@ -609,26 +499,25 @@ class EnablementBuild(CoordinatorCollaborator):
             return "", generation
         state = self.shared_state
         runtime_override = br.runtime.to_runtime_override()
-        launch_log = str(state.enablement.launch_log or "")
-        before_sig = classify_failure(launch_log).to_dict()
         params: dict[str, Any] = {
             "enablement": True,
             "enablement_launch_only": True,
             "lever_kind": LEVER_ENABLEMENT,
             "runtime_override": runtime_override,
             "framework": str(getattr(state, "framework", "") or ""),
-            "enablement_before_signature": before_sig,
+            # The pre-patch half of the gate: the observation the round that
+            # watched this failure persisted.
+            "enablement_before_observation_path": state.enablement.launch_observation_path,
             "source": "coordinator_internal",
-            **self._framework_gpu_params(),
             **_enablement_carrier_params(state),
         }
-        # Prefer the eval-origin probe config so the re-run keeps the original
-        # workload/eval contract; fall back to the promoted baseline config.
+        # Prefer the eval-origin probe config so the re-run keeps the original workload/eval contract; fall back to
+        # the promoted baseline config.
         cfg = str(state.enablement.probe_config_path or "") or str(getattr(state, "baseline_config_path", "") or "")
         if cfg:
             params["config_path"] = cfg
-        # The probe boots a server and mutates the tree, so it takes the lanes
-        # its own kind declares rather than a specialist's research lane.
+        # The probe boots a server and mutates the tree, so it takes the lanes its own kind declares rather than a
+        # specialist's research lane.
         lanes, ttl = self._registry_lanes_ttl("integrate_patch")
         if not lanes:
             raise RuntimeError("integrate_patch resolved to no lanes; the launch probe would run unserialised.")

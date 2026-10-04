@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Build a KB scope dict from explicit context + session memory.
-
-Every write needs the 6 mandatory dimensions
-``{org, framework, model, model_family, workload, precision}`` (contract
-§2.1); ``{scale, objective}`` are optional and ``org`` is fixed to
-``"hyperloom"`` in v1. Precedence is ``packet_context > session_context >
-"unknown"``, with client-side ``trim().lowercase()`` (G-3) so filters
-round-trip. When ``model`` / ``framework`` can't be filled, :func:`build_scope`
-raises :class:`ScopeError` — the caller skips KB and downgrades to
-``needs_review``.
-"""
+"""Build a KB scope dict from explicit context + session memory."""
 
 from __future__ import annotations
 
@@ -53,14 +43,7 @@ _UNKNOWN_VALUES: frozenset[str] = frozenset({"", "unknown", "null", "none"})
 
 
 def _normalise(value: Any) -> str:
-    """Apply contract G-3 normalisation: trim + lowercase, stringified.
-
-    Args:
-        value (Any): The value to normalise.
-
-    Returns:
-        str: The trimmed, lowercased string form (``""`` for ``None``).
-    """
+    """Apply contract G-3 normalisation: trim + lowercase, stringified."""
     if value is None:
         return ""
     text = str(value).strip().lower()
@@ -68,14 +51,7 @@ def _normalise(value: Any) -> str:
 
 
 def _is_present(value: Any) -> bool:
-    """Report whether a value is a meaningful (non-unknown) scope value.
-
-    Args:
-        value (Any): The value to test.
-
-    Returns:
-        bool: True when the normalised value is not blank/unknown/null/none.
-    """
+    """Report whether a value is a meaningful (non-unknown) scope value."""
     text = _normalise(value)
     return text not in _UNKNOWN_VALUES
 
@@ -84,16 +60,7 @@ def _pick(
     key: str,
     *sources: Mapping[str, Any] | None,
 ) -> str:
-    """Return the first present, normalised value for ``key`` across sources.
-
-    Args:
-        key (str): The scope dimension to look up.
-        *sources (Mapping[str, Any] | None): Mappings searched in priority
-            order; ``None`` entries are skipped.
-
-    Returns:
-        str: The normalised value, or ``""`` when no source has it present.
-    """
+    """Return the first present, normalised value for ``key`` across sources."""
     for src in sources:
         if not src:
             continue
@@ -103,18 +70,7 @@ def _pick(
 
 
 def derive_model_family(model: str) -> str:
-    """Best-effort family extractor for ``model`` strings.
-
-    Returns ``""`` when the model is unknown/empty so callers can decide
-    whether to default to ``"unknown"`` (and emit a warning) or to refuse
-    the write entirely.
-
-    Args:
-        model (str): The model identifier to classify.
-
-    Returns:
-        str: The matched family name, or ``""`` when no rule matches.
-    """
+    """Best-effort family extractor for ``model`` strings."""
     text = _normalise(model)
     if not text:
         return ""
@@ -130,21 +86,7 @@ def build_scope(
     session_context: Mapping[str, Any] | None = None,
     require_critical: bool = True,
 ) -> dict[str, Any]:
-    """Construct a KB scope dict from explicit + session contexts.
-
-    Args:
-        packet_context: Context from the current request. Wins on conflict.
-        session_context: Context recovered from :mod:`session_memory`.
-        require_critical: If True (default), raise :class:`ScopeError` when
-            ``model`` or ``framework`` cannot be filled. Set to False for
-            dry-run / preview callers that want to surface missing keys
-            non-fatally.
-
-    Returns:
-        A dict with all 6 critical keys (``"unknown"`` filling otherwise),
-        and any optional keys present in either input. ``org`` defaults to
-        ``"hyperloom"``.
-    """
+    """Construct a KB scope dict from explicit + session contexts."""
     pc = dict(packet_context or {})
     sc = dict(session_context or {})
 
@@ -187,21 +129,7 @@ def scope_cache_key(
     kind: str | None = None,
     limit: int = 10,
 ) -> str:
-    """Stable, hashable representation of a ``list_priors`` query.
-
-    Encodes every parameter that changes the result set so that distinct
-    queries never share a cache entry.
-
-    Args:
-        scope (Mapping[str, Any]): The scope dimensions to encode.
-        topic (str | None): Optional topic appended to the key.
-        kind (str | None): Optional row-kind filter.
-        limit (int): Maximum number of priors requested.
-
-    Returns:
-        str: A deterministic ``key=value`` join (keys sorted), with
-        optional ``topic``, ``kind``, and ``limit`` suffixes.
-    """
+    """Stable, hashable representation of a ``list_priors`` query."""
     parts = [f"{k}={scope[k]}" for k in sorted(scope.keys())]
     if topic:
         parts.append(f"topic={_normalise(topic)}")

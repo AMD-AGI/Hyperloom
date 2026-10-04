@@ -1,14 +1,13 @@
-"""Tests for `driver.runner` — prompt assembly + SDK injection.
-
-Uses ``FakeSDK`` / ``FakeOptions`` from conftest to bypass the real SDK.
-"""
+"""Tests for `driver.runner` — prompt assembly + SDK injection."""
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
+from hyperloom.agents.quantization.driver import runner as runner_module
 from hyperloom.agents.quantization.driver.runner import (
     DEFAULT_ALLOWED_TOOLS,
     AttemptResult,
@@ -18,8 +17,7 @@ from hyperloom.agents.quantization.driver.runner import (
 )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# resolve_skill_path
+# ───────────────────────────────────────────────────────────────────────────── resolve_skill_path
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -35,8 +33,17 @@ def test_resolve_skill_path_respects_override(tmp_path):
     assert p == tmp_path / "SKILL.md"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# build_attempt_prompt
+def test_quark_py310_compat_dir_is_process_singleton():
+    """Repeated attempts reuse one read-only compatibility directory."""
+    first = runner_module._prepare_quark_py310_compat()
+    second = runner_module._prepare_quark_py310_compat()
+
+    assert first == second
+    assert first.is_dir()
+    assert (first.stat().st_mode & 0o222) == 0
+
+
+# ───────────────────────────────────────────────────────────────────────────── build_attempt_prompt
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -119,8 +126,7 @@ def test_build_attempt_prompt_default_threshold_message(tmp_path):
     assert "caller did not override" in text
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# run_one_attempt — SDK injection
+# ───────────────────────────────────────────────────────────────────────────── run_one_attempt — SDK injection
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -148,22 +154,23 @@ async def test_run_one_attempt_invokes_sdk_with_prompt(tmp_path, fake_sdk, fake_
 
 
 @pytest.mark.asyncio
-async def test_run_one_attempt_sets_cwd_to_quark_root(tmp_path, fake_sdk, fake_options_cls):
+async def test_run_one_attempt_sets_cwd_to_workspace(tmp_path, fake_sdk, fake_options_cls):
     skill = tmp_path / "SKILL.md"
     skill.write_text("x", encoding="utf-8")
     qr = tmp_path / "qr"
     qr.mkdir()
+    ws = tmp_path / "ws"
 
     await run_one_attempt(
         user_prompt="x",
-        workspace=tmp_path / "ws",
+        workspace=ws,
         quark_root=qr,
         skill_path=skill,
         sdk_query_factory=fake_sdk,
         sdk_options_cls=fake_options_cls,
     )
     options = fake_sdk.received_options[0]
-    assert options.kwargs.get("cwd") == str(qr)
+    assert options.kwargs.get("cwd") == str(ws)
     assert options.kwargs.get("allowed_tools") == DEFAULT_ALLOWED_TOOLS
 
 
@@ -185,15 +192,19 @@ async def test_run_one_attempt_passes_quark_py310_env_to_sdk_options(tmp_path, f
         sdk_options_cls=fake_options_cls,
     )
 
-    compat_dir = tmp_path / "ws" / ".hyperloom_quark_py310_compat"
-    sitecustomize = compat_dir / "sitecustomize.py"
     env = fake_sdk.received_options[0].kwargs["env"]
+    pythonpath = env["PYTHONPATH"]
+    compat_dir = Path(pythonpath.split(os.pathsep)[0])
+    sitecustomize = compat_dir / "sitecustomize.py"
+    ws = tmp_path / "ws"
     assert sitecustomize.is_file()
+    assert not str(compat_dir).startswith(str(ws.resolve()))
     assert "typing.Self" in sitecustomize.read_text(encoding="utf-8")
-    assert env["PYTHONPATH"] == f"{compat_dir}{os.pathsep}/existing/pythonpath"
+    assert env["PYTHONPATH"].startswith(str(compat_dir))
     assert env["PIP_IGNORE_REQUIRES_PYTHON"] == "1"
     assert os.environ["PYTHONPATH"] == "/existing/pythonpath"
     assert "PIP_IGNORE_REQUIRES_PYTHON" not in os.environ
+    assert (sitecustomize.stat().st_mode & 0o222) == 0
 
 
 @pytest.mark.asyncio

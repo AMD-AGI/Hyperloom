@@ -1,13 +1,4 @@
-"""Preflight's eval-concurrency compat pass.
-
-InferenceX's ``run_eval`` rejects ``--concurrent-requests`` and takes concurrency
-via ``EVAL_CONCURRENT_REQUESTS`` instead, but the Magpie copy that actually
-executes is the one preflight installs -- not any source checkout. If the flag
-survives there, every ``RUN_EVAL=true`` baseline dies with
-``Unknown parameter: --concurrent-requests`` and the run halts at
-``baseline_accuracy_failed``. These tests pin the three outcomes of that pass so
-a regression surfaces here rather than four minutes into a GPU run.
-"""
+"""Preflight's eval-concurrency compat pass."""
 
 from __future__ import annotations
 

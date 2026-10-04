@@ -1,35 +1,4 @@
-"""Eval-gap policy: threshold resolution + acceptance check.
-
-``quark-torch-llm-eval`` runs one model at a time and only emits Markdown — there is
-no JSON sidecar and no built-in source-vs-quantized comparison. So SKILL.md is
-instructed to invoke ``quark-torch-llm-eval`` twice (once on source, once on
-quantized), parse the headline metric from both reports, and synthesize an
-agent-owned ``eval_report.json`` wrapper:
-
-    {
-        "metric_name": "gsm8k",
-        "dataset": "gsm8k",
-        "backend": "vllm",
-        "source_score": 0.512,
-        "quantized_score": 0.498,
-        "relative_gap": 0.0273,
-    }
-
-This module reads that file, resolves the acceptance threshold, and decides
-whether the gap is within budget. It does not parse the raw Markdown — the LLM
-normalizes scores into the schema above. Because ``relative_gap`` is authored by
-the LLM rather than measured, it is recomputed from the two scores and rejected
-when the two disagree. Keys, numeric ranges and that consistency check are all
-validated; any failure maps the attempt to ``eval_env_unavailable`` rather than
-treating absent or bogus fields as zero.
-
-Threshold resolution priority:
-
-    1. ``acceptable_eval_gap`` Python arg (caller-supplied; not None)
-    2. ``<workspace>/eval_gap_threshold.txt`` (LLM writes this when the
-       prompt mentions a tolerance)
-    3. Default ``0.03`` (3%)
-"""
+"""Eval-gap policy: threshold resolution + acceptance check."""
 
 from __future__ import annotations
 
@@ -42,23 +11,14 @@ DEFAULT_ACCEPTABLE_GAP = 0.03
 
 _REQUIRED_EVAL_KEYS = ("source_score", "quantized_score", "relative_gap")
 
-# How far the reported relative_gap may drift from the value recomputed out of
-# the two scores before the report is treated as self-contradictory.
+# How far the reported relative_gap may drift from the value recomputed out of the two scores before the report is
+# treated as self-contradictory.
 _GAP_CONSISTENCY_TOLERANCE = 0.02
 
 
 @dataclass(frozen=True)
 class EvalDecision:
-    """Outcome of comparing ``relative_gap`` to the acceptance threshold.
-
-    * ``status == "within"``: gap ≤ threshold — counts as success. Caller may
-      attach ``eval_gap_accepted`` narrative tag when a prior attempt
-      exceeded the threshold and the user accepted it.
-    * ``status == "exceeded"``: gap > threshold — classifier maps to #21
-      ``eval_gap_exceeded``.
-    * ``status == "missing"``: eval_report.json absent or malformed — handled
-      by the classifier upstream (it inspects ``eval_skipped.txt`` first).
-    """
+    """Outcome of comparing ``relative_gap`` to the acceptance threshold."""
 
     status: str  # "within" | "exceeded" | "missing"
     relative_gap: float | None
@@ -71,18 +31,7 @@ def resolve_threshold(
     *,
     acceptable_eval_gap: float | None,
 ) -> tuple[float, str]:
-    """Resolve the eval-gap threshold per the SKILL.md §5.4 priority chain.
-
-    Args:
-        workspace: Workspace directory that may hold a threshold override
-            file.
-        acceptable_eval_gap: Explicit threshold argument; takes precedence
-            when provided.
-
-    Returns:
-        A ``(threshold, source)`` tuple where ``source`` is ``"arg"``,
-        ``"file"``, or ``"default"``.
-    """
+    """Resolve the eval-gap threshold per the SKILL.md §5.4 priority chain."""
 
     if acceptable_eval_gap is not None:
         return float(acceptable_eval_gap), "arg"
@@ -104,18 +53,7 @@ def decide(
     workspace: Path,
     acceptable_eval_gap: float | None,
 ) -> EvalDecision:
-    """Decide whether an evaluation report passes the quality gap threshold.
-
-    Args:
-        eval_report: Parsed evaluation report, or ``None`` when absent.
-        workspace: Run workspace, used to resolve a per-run gap threshold file.
-        acceptable_eval_gap: Explicit maximum relative gap; falls back to the
-            workspace threshold or the default when ``None``.
-
-    Returns:
-        An :class:`EvalDecision` describing the status (``missing``,
-        ``within``, or ``exceeded``), the relative gap, and the threshold used.
-    """
+    """Decide whether an evaluation report passes the quality gap threshold."""
     threshold, source = resolve_threshold(workspace, acceptable_eval_gap=acceptable_eval_gap)
     missing = EvalDecision(
         status="missing",
@@ -138,8 +76,8 @@ def decide(
     if not all(math.isfinite(v) for v in (gap, src, qtd)):
         return missing
 
-    # relative_gap is LLM-authored, so recompute it from the scores it claims to
-    # summarise (SKILL.md §5.3) and reject a report that contradicts itself.
+    # relative_gap is LLM-authored, so recompute it from the scores it claims to summarise (SKILL.md §5.3) and reject
+    # a report that contradicts itself.
     if src > 0 and abs(gap - max(0.0, (src - qtd) / src)) > _GAP_CONSISTENCY_TOLERANCE:
         return missing
 

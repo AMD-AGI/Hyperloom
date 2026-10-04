@@ -1,41 +1,60 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``_RenderMixin`` — prompt-facing renderers for :class:`..shared_state.SharedState`
-(mission / phase / warm-start / search-ledger blocks).
-"""
+"""``_RenderMixin`` — prompt-facing renderers for :class:`..shared_state.SharedState` (mission / phase / warm-start / search-ledger blocks)."""
 
 from __future__ import annotations
 
-import os
+import time
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
+from hyperloom.common.env import env_bool
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
-
-
-def _shared_state_module():
-    """Import parent shared_state lazily to avoid a module-level cycle."""
-    from .. import shared_state
-
-    return shared_state
-
+from .attempt_audit import _AUDIT_ACTIONS
+from .phase_state import GAP_SEVERITY_RANK
 
 # Failure rows rendered into the prompt, and per-row excerpt budget.
 _FAILURES_RENDERED = 10
 _FAILURE_EXCERPT_CHARS = 600
 
+# Ordered (key, label) projection for advisory ``model_arch``; empty/None keys dropped.
+_MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
+    ("decoder_type", "decoder"),
+    ("attention", "attention"),
+    ("layer_mix", "layers"),
+    ("kv_cache_per_token", "kv/token"),
+    ("active_params", "params"),
+    ("num_experts", "experts"),
+    ("experts_per_tok", "experts/tok"),
+    ("mtp", "mtp"),
+    ("swa_window", "swa_window"),
+    ("norm", "norm"),
+)
+
+
+def render_model_arch_compact(arch: dict | None) -> str:
+    """Render the advisory ``model_arch`` profile as a single compact line (``\"\"`` when empty/not a dict)."""
+    if not isinstance(arch, dict) or not arch:
+        return ""
+    parts: list[str] = []
+    for key, label in _MODEL_ARCH_STRUCTURED_FIELDS:
+        val = arch.get(key)
+        if val is None or val == "":
+            continue
+        parts.append(f"{label}={val}")
+    notes = str(arch.get("notes") or "").strip()
+    if notes:
+        parts.append(f"notes={notes}")
+    return "; ".join(parts)
+
+
 # Width budget for artifact anchors; sized so a full uuid4 fid still fits ws=.
 _VARIANT_ANCHOR_MAX_CHARS = 100
 
-# Numeric fields a ``trace_health_warnings[]`` entry may carry, as
-# ``(key, label, suffix)`` in render order. The compact warning line is the part
-# of the blob an LLM reads first, so a gate's numbers have to reach it: a router
-# tells a comm-bound window from a host-bound one by comparing these, not by the
-# code alone. Table-driven because the previous per-field ``if`` chain silently
-# dropped every number a newly added gate carried -- a gate now registers its
-# field here rather than growing another branch.
+# Numeric fields a ``trace_health_warnings[]`` entry may carry, as ``(key, label, suffix)`` in render order.
 _WARNING_EXTRA_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("idle_pct", "idle", "%"),
     ("compute_pct", "compute", "%"),
@@ -45,20 +64,39 @@ _WARNING_EXTRA_FIELDS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+def _as_float(value: Any) -> float:
+    """Coerce a warm-start context number, 0.0 when absent or unparseable."""
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class _RenderMixin:
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
-        """Forwarding shim — implementation in :mod:`.policy`."""
-        from ...policy import gate as _m
+        """Render the most recent PolicyGate denials for prompt injection.
 
-        return _m.to_policy_denial_summary(self, top_k=top_k)
-
-    def to_intervention_mix_summary(self) -> str:
-        """Render the intervention ledger as a one-line counts summary (``""`` when empty).
+        Args:
+            top_k (int): Maximum number of newest denial rows to render.
 
         Returns:
-            str: A single-line counts summary, or ``""`` when the ledger is
-                empty.
+            str: A ``=== Recent policy denials ===`` block, or ``""`` when
+                no denials have been recorded.
         """
+        if not self.policy_denial_history:
+            return ""
+        rows = list(self.policy_denial_history)[-top_k:]
+        lines = [f"=== Recent policy denials (newest last, total={len(self.policy_denial_history)}) ==="]
+        for r in rows:
+            lines.append(
+                f"  tick={r.get('tick')} action={r.get('action_name')!r} "
+                f"rule={r.get('rule')!r} streak={r.get('streak')} "
+                f"hint={str(r.get('hint') or '')[:140]!r}"
+            )
+        return "\n".join(lines)
+
+    def to_intervention_mix_summary(self) -> str:
+        """Render the intervention ledger as a one-line counts summary (``\"\"`` when empty)."""
         mix = self.intervention_mix or []
         if not mix:
             return ""
@@ -82,15 +120,7 @@ class _RenderMixin:
         )
 
     def to_mission_summary(self, *, now: datetime | None = None) -> str:
-        """Mission-progress block printed at the top of every tick (raw/validated gain, time vs budget, stack staleness).
-
-        Args:
-            now (datetime | None): Reference time for elapsed / remaining
-                calculations; defaults to the current UTC time.
-
-        Returns:
-            str: The multi-line mission-progress block.
-        """
+        """Mission-progress block printed at the top of every tick (raw/validated gain, time vs budget, stack staleness)."""
         elapsed = self.elapsed_minutes(now=now)
         remaining = self.remaining_minutes(now=now)
         budget_line = (
@@ -129,11 +159,8 @@ class _RenderMixin:
         elif geak_pending_status in {"rebench_cancelled", "rebench_unavailable"}:
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated ({geak_pending_status})"
         elif geak_revalidation_status in {"failed", "fallback_failed"} and not geak_in_stack:
-            # A fallback rebench that also failed is the same unjudged drop; only
-            # ``no_material`` / ``no_promote`` are verdicts and stay silent here.
-            # A ``failed`` 2b is never retracted when the 2a fallback then
-            # promotes, so confirm the candidate really is out of the stack
-            # before calling it dropped.
+            # A fallback rebench that also failed is the same unjudged drop; only ``no_material`` / ``no_promote`` are
+            # verdicts and stay silent here.
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated (rebench_{geak_revalidation_status})"
         else:
             geak_pending_tag = ""
@@ -155,12 +182,7 @@ class _RenderMixin:
         return "\n".join(lines)
 
     def _format_current_best_for_mission(self) -> str:
-        """Render the ``current_best`` one-liner for the mission summary.
-
-        Returns:
-            str: ``action=... tput=... variant=...``, or ``"(none)"`` when
-                no current best is set.
-        """
+        """Render the ``current_best`` one-liner for the mission summary."""
         if not isinstance(self.current_best, dict) or not self.current_best:
             return "(none)"
         from hyperloom.inference_optimizer import framework_registry
@@ -177,236 +199,115 @@ class _RenderMixin:
             f"variant={self.current_best.get('variant_name', '?')}"
         )
 
-    def to_phase_status_summary(
-        self,
-        *,
-        budget_pct: dict[str, float] | None = None,
-        now_unix: float | None = None,
-    ) -> str:
-        """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable.
-
-        Args:
-            budget_pct (dict[str, float] | None): Per-phase budget fractions;
-                defaults to :attr:`phase_budget_pct`.
-            now_unix (float | None): Reference Unix time; defaults to now.
-
-        Returns:
-            str: The compact ``=== Phase ===`` block.
-        """
-        from ...phases.machine_state import (
-            PHASE_FRAMEWORK_AGENT,
-            PHASE_KERNEL_AGENT,
-            PHASE_SWEEP,
-            llm_proposable_actions_for,
-            normalize_budget_pct,
-            phase_budget_remaining_seconds,
-            phase_cumulative_seconds,
-            phase_elapsed_seconds,
-            session_remaining_seconds,
-            should_reloop_to_explore,
+    def to_latency_budget_summary(self) -> str:
+        """One line stating the latency budget; empty when unset. Refusals surface in the existing ledgers."""
+        budget = float(getattr(self, "latency_budget_ms", 0.0))
+        if budget <= 0:
+            return ""
+        return (
+            f"{budget:g} ms mean end-to-end: a KEEP over it, or with no latency reported, is refused "
+            "(reason latency_budget_exceeded / latency_unmeasured in explore_search and the journal)"
         )
-
-        phase = (self.phase or "").strip().upper() or "UNSET"
-        elapsed = int(phase_elapsed_seconds(self, now_unix=now_unix))
-        # ``remaining`` paces this entry; the absolute cap reads ``cumulative``.
-        # A re-entered phase needs both to be legible.
-        cumulative = int(phase_cumulative_seconds(self, now_unix=now_unix))
-        budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
-        budget_pct_for_phase = budget.get(phase, 0.0)
-        remaining = phase_budget_remaining_seconds(
-            self,
-            budget_pct=budget,
-            now_unix=now_unix,
-        )
-        budget_line: str
-        if remaining is None:
-            budget_line = f"budget    : pct={budget_pct_for_phase:.2f} (unlimited run; no per-phase cap)"
-        else:
-            budget_line = (
-                f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} "
-                f"cumulative_sec={cumulative} remaining_sec={int(remaining)}"
-            )
-        proposable = llm_proposable_actions_for(phase)
-        allowed_line = f"allowed   : {', '.join(proposable) if proposable else '(none)'}"
-        lines = [
-            f"phase     : {phase}",
-            f"cycle     : {int(getattr(self, 'macro_cycle', 0) or 0)}",
-            f"entered   : {self.phase_started_ts or '(unset)'}",
-            budget_line,
-            allowed_line,
-        ]
-        # Whether deferring work to a later cycle is still a real option. Mirrors
-        # the SWEEP-exit decision, so it is a projection before SWEEP is reached.
-        if phase in (PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
-            reloop, evidence = should_reloop_to_explore(self, now_unix=now_unix)
-            feasible = reloop and self.framework_agent_phase_enabled
-            reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
-            threshold = evidence.get("min_remaining_sec_effective")
-            if threshold is not None:
-                reloop_line += f" threshold_sec={int(threshold)}"
-            session_remaining = session_remaining_seconds(self, now_unix=now_unix)
-            if session_remaining is not None:
-                reloop_line += f" session_remaining_sec={int(session_remaining)}"
-            blocked = evidence.get("reloop_blocked")
-            if blocked:
-                reloop_line += f" blocked={blocked}"
-            if phase != PHASE_SWEEP:
-                reloop_line += " (projected)"
-            lines.append(reloop_line)
-        return "\n".join(lines)
-
-    def to_phase_budget_telemetry(
-        self,
-        *,
-        budget_pct: dict[str, float] | None = None,
-        now_unix: float | None = None,
-    ) -> str:
-        """Render the per-phase budget telemetry block for Robustness (one ``phase: elapsed=Xs cap=Ys (Z%)`` line per phase).
-
-        Args:
-            budget_pct (dict[str, float] | None): Per-phase budget fractions;
-                defaults to :attr:`phase_budget_pct`.
-            now_unix (float | None): Reference Unix time; defaults to now.
-
-        Returns:
-            str: One telemetry line per phase, or ``"(no phase history yet)"``
-                when no history exists.
-        """
-        from ...phases.machine_state import (
-            DEFAULT_PHASE_BUDGET_PCT,
-            PHASE_NAMES,
-            is_phase_transition_row,
-            normalize_budget_pct,
-            phase_elapsed_seconds,
-        )
-
-        budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
-        # Aggregate elapsed per phase using real transitions only.
-        elapsed_per_phase: dict[str, float] = {}
-        history = [row for row in (self.phase_history or []) if is_phase_transition_row(row)]
-        for idx, row in enumerate(history):
-            if not isinstance(row, dict):
-                continue
-            phase = str(row.get("to_phase") or "").upper()
-            entered = float(row.get("ts_unix") or 0.0)
-            if not phase or entered <= 0:
-                continue
-            if idx + 1 < len(history) and isinstance(history[idx + 1], dict):
-                exited = float(history[idx + 1].get("ts_unix") or entered)
-            else:
-                # Currently-active segment — measure to now.
-                elapsed_now = phase_elapsed_seconds(self, now_unix=now_unix)
-                exited = entered + elapsed_now
-            elapsed_per_phase[phase] = elapsed_per_phase.get(phase, 0.0) + max(0.0, exited - entered)
-        if not elapsed_per_phase:
-            return "(no phase history yet)"
-        mm = float(self.max_minutes or 0.0)
-        total_budget_sec = mm * 60.0
-        lines: list[str] = []
-        # Iterate PHASE_NAMES for stable order.
-        for phase in PHASE_NAMES:
-            if phase not in elapsed_per_phase:
-                continue
-            elapsed = elapsed_per_phase[phase]
-            pct = budget.get(phase, DEFAULT_PHASE_BUDGET_PCT.get(phase, 0.0))
-            cap_sec = total_budget_sec * pct if total_budget_sec > 0 else 0.0
-            used_pct = (elapsed / cap_sec * 100.0) if cap_sec > 0 else 0.0
-            cap_line = f"cap={int(cap_sec)}s" if cap_sec > 0 else "cap=unlimited"
-            lines.append(f"  {phase}: elapsed={int(elapsed)}s {cap_line} used={used_pct:.0f}%")
-        return "\n".join(lines) or "(no phase history yet)"
-
-    def to_resource_pools_summary(self) -> str:
-        """Render the GPU pool / lane capacity block.
-
-        These are the same numbers PolicyGate admits a ``needs_gpu`` dispatch
-        against, so a request can be judged schedulable before it is emitted.
-
-        Returns:
-            str: One line per pool / lane dimension.
-        """
-        from ...bus.storage.schema import DEFAULT_LANE_CAPACITIES
-        from ...policy.gate import (
-            _effective_gpu_specialist_pool_size,
-            _serving_tp_for_policy,
-            _whole_machine_pool_size,
-            gpu_specialist_ceiling,
-        )
-
-        lines = [
-            f"serving_tp={_serving_tp_for_policy(self)}",
-            f"gpu_specialist_capacity={gpu_specialist_ceiling(self)}",
-            f"serving_disjoint_gpu_pool={_effective_gpu_specialist_pool_size(self)}"
-            "  (non-bench needs_gpu specialists admit against this)",
-            f"whole_machine_gpu_pool={_whole_machine_pool_size()}"
-            "  (bench / framework-authoring specialists admit against this)",
-            f"research_lane_capacity={max(0, int(self.research_lane_capacity or 0))}  (concurrent specialists)",
-            f"gpu_research_lane_capacity={DEFAULT_LANE_CAPACITIES['gpu_research_lane']}"
-            "  (mutually exclusive with serving / benchmark / profile)",
-        ]
-        return "\n".join(lines)
 
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
-        """Render T0 warm-start snapshot for the ``=== Warm start ===`` prompt section; empty when no recipe/pitfalls.
+        """Render the ``=== Warm start ===`` prompt section from the T0 warm-start context.
 
-        Args:
-            max_lines (int): Cap on rendered lines before truncation.
+        ``recipe_kb_t0._build_warm_start_context`` already computes the
+        model-facing view on every anchor and persists it, so this renders that
+        rather than re-deriving a second one off the raw row. The three states
+        come from its ``status``; ``match`` supplies tier and confidence, and
+        ``recommended_replay`` the config — already split into args and envs, and
+        attributed to its donor, which the row itself cannot tell you.
 
-        Returns:
-            str: The warm-start summary block, or ``""`` when no recipe /
-                pitfalls are present.
+        Empty when T0 never ran (``--degraded-kb``, or a resume from before the
+        context existed).
         """
-        recipe = self.warm_start_recipe or {}
-        pitfalls = self.warm_start_pitfalls or []
-        if not recipe and not pitfalls:
+        ctx = self.warm_start_context or {}
+        if not isinstance(ctx, dict) or not ctx:
             return ""
-        out: list[str] = []
-        workload = str(recipe.get("workload") or "") if isinstance(recipe, dict) else ""
-        hw = str(recipe.get("hw") or "") if isinstance(recipe, dict) else ""
-        if workload or hw:
-            out.append(f"recipe: workload={workload or '?'} hw={hw or '?'}")
-        raw = str(recipe.get("raw") or "") if isinstance(recipe, dict) else ""
-        # Trim recipe raw text to at most 5 lines, 240 chars each.
-        if raw.strip():
-            kept = 0
-            for line in raw.splitlines():
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                out.append(f"  · {stripped[:240]}")
-                kept += 1
-                if kept >= 5:
-                    break
-            if kept == 0:
-                out.append("  · (recipe present but text was empty)")
-        else:
-            out.append("  · (no recipe text — first session for this workload/hw)")
-        if pitfalls:
-            out.append(f"pitfalls ({len(pitfalls)}):")
-            for entry in pitfalls[:5]:
-                if not isinstance(entry, dict):
-                    continue
-                snippet = str(entry.get("raw") or entry.get("symptom") or "")
-                if not snippet.strip():
-                    continue
-                first_line = snippet.splitlines()[0].strip()
-                out.append(f"  · {first_line[:240]}")
+        status = str(ctx.get("status") or "").strip()
+        if status == "miss":
+            return "recipe: none — first session for this workload/hw"
+        if status == "seed_only":
+            # T0 seeds a row for every session, so this — not ``miss`` — is what a
+            # genuine first session looks like: a row exists, nothing measured it.
+            return "recipe: seed only — first session for this workload/hw"
+
+        match = ctx.get("match")
+        match = match if isinstance(match, dict) else {}
+        head = [f"recipe: {status or 'hit'}"]
+        tier = str(match.get("tier") or "").strip()
+        if tier:
+            head.append(f"tier={tier}")
+        confidence = _as_float(match.get("confidence"))
+        if confidence > 0:
+            head.append(f"confidence={confidence:.2f}")
+        out: list[str] = [" ".join(head)]
+
+        replay = ctx.get("recommended_replay")
+        replay = replay if isinstance(replay, dict) else {}
+        best_tput = _as_float(replay.get("best_throughput"))
+        if best_tput > 0:
+            out.append(f"  · best_throughput={best_tput:.1f}")
+        args = str(replay.get("extra_server_args") or "").strip()
+        if args:
+            out.append(f"  · extra_server_args={args[:240]}")
+        envs = replay.get("extra_envs")
+        if isinstance(envs, dict) and envs:
+            rendered = " ".join(f"{k}={v}" for k, v in envs.items())
+            out.append(f"  · extra_envs={rendered[:240]}")
+        gain = _as_float(replay.get("expected_gain_pct"))
+        if gain > 0:
+            out.append(f"  · expected_gain={gain:.2f}%")
+        # A borrowed config is another workload's measurement; say so, or the
+        # numbers above read as this session's own history.
+        config_tier = str(replay.get("config_tier") or "").strip()
+        if replay and config_tier and config_tier != "self":
+            donor = str(replay.get("donor_model") or replay.get("donor_canonical_id") or "?")
+            donor_conf = _as_float(replay.get("config_confidence"))
+            suffix = f", confidence={donor_conf:.2f}" if donor_conf > 0 else ""
+            out.append(f"  · borrowed from {donor} (config_tier={config_tier}{suffix})")
+        if not replay:
+            # Remote Recipe hits replay through the section SDKs, so the context
+            # carries no config; the priors below are still real.
+            out.append("  · (no replayable config on this match)")
+
+        counts = [
+            (label, len(ctx.get(key) or []))
+            for label, key in (("proven", "proven_prior"), ("avoid", "do_not_repeat"), ("lessons", "lessons"))
+        ]
+        live = [f"{label}={n}" for label, n in counts if n]
+        if live:
+            out.append(f"  · priors: {' '.join(live)}")
+
+        # Count the rows that render, not the rows that exist: a header claiming
+        # "pitfalls (3)" above nothing is the same class of lie this block had.
+        rendered: list[str] = []
+        elided = 0
+        for entry in ctx.get("pitfalls") or []:
+            if not isinstance(entry, dict):
+                continue
+            description = str(entry.get("description") or "").strip()
+            if not description:
+                continue
+            if len(rendered) >= 5:
+                elided += 1
+                continue
+            severity = str(entry.get("severity") or "").strip()
+            suffix = f" (severity={severity})" if severity else ""
+            rendered.append(f"  · {description.splitlines()[0].strip()[:240]}{suffix}")
+        if rendered:
+            out.append(f"pitfalls ({len(rendered)}):")
+            out.extend(rendered)
+            if elided:
+                out.append(f"  · (+{elided} more elided; see state.json `warm_start_context`)")
         if max_lines and len(out) > max_lines:
             out = out[:max_lines]
-            out.append(f"  · (truncated to {max_lines} lines; see runtime/recipe_kb/.kb_warm.json for full snapshot)")
+            out.append(f"  · (truncated to {max_lines} lines)")
         return "\n".join(out)
 
     def to_gaps_summary(self, *, max_entries: int = 10, max_attempts: int = 0) -> str:
-        """Render :attr:`gaps` for prompt injection; empty when no gaps. Capped at ``max_entries`` newest rows.
-
-        Args:
-            max_entries (int): Maximum number of newest gap rows to render.
-            max_attempts (int): When > 0, include the ``max_attempts`` most
-                recent attempt rows for each gap.  0 (default) shows the count
-                and last action only (prompt-compact mode).
-
-        Returns:
-            str: The rendered gaps block, or ``""`` when no gaps exist.
-        """
+        """Render :attr:`gaps` for prompt injection; empty when no gaps. Capped at ``max_entries`` newest rows."""
         if not self.gaps:
             return ""
         # Newest first by last_updated_ts (fallback to first_seen_ts/insertion).
@@ -448,18 +349,8 @@ class _RenderMixin:
             rows.append(f"  · (+{len(ordered) - max_entries} older gaps elided; see state.json `gaps[]`)")
         return "\n".join(rows)
 
-    def _untested_proposal_rows(self) -> list[dict[str, Any]]:
-        """Executable proposals from this cycle that no explore round has benched.
-
-        Matched on the proposal's own content. The ledger is keyed on the
-        variant folded together with whatever removal controls the stack
-        carried at the time, so a KEEP that changes those controls mid-round
-        would otherwise make everything benched before it look untried.
-
-        Returns:
-            Rows ranked by gap severity then recency, each carrying the
-            normalized proposal fields plus ``domain`` / ``severity``.
-        """
+    def untested_proposal_rows(self) -> list[dict[str, Any]]:
+        """Executable proposals from this cycle that no explore round has benched, highest severity first."""
         from hyperloom.common.coerce import to_int
 
         from ...actions.executors._proposal_identity import (
@@ -483,8 +374,6 @@ class _RenderMixin:
             for g in (self.gaps or [])
             if isinstance(g, dict)
         }
-        rank = {"high": 3, "medium": 2, "low": 1}
-
         ranked: list[tuple[int, int, dict[str, Any]]] = []
         seen: set[str] = set()
         for order, entry in enumerate(self.specialist_rounds or []):
@@ -506,20 +395,14 @@ class _RenderMixin:
                 row["name"] = row["name"] or f"{domain or 'specialist'}-{task_id}-{index}"
                 row["domain"] = domain
                 row["severity"] = severity
-                ranked.append((rank.get(severity, 0), order, row))
+                row["fingerprint"] = fingerprint
+                ranked.append((GAP_SEVERITY_RANK.get(severity, 0), order, row))
         ranked.sort(key=lambda r: (-r[0], -r[1]))
         return [row for _, _, row in ranked]
 
     @staticmethod
     def _untested_proposal_line(row: dict[str, Any]) -> str:
-        """Render one queue row, marking each field it carries.
-
-        Args:
-            row: One row from :meth:`_untested_proposal_rows`.
-
-        Returns:
-            A single ``•``-prefixed line.
-        """
+        """Render one queue row, marking each field it carries."""
         parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
         if row["atomic"]:
             parts.append("ATOMIC")
@@ -539,22 +422,14 @@ class _RenderMixin:
         return _flatten_for_prompt(" ".join(parts))
 
     def to_untested_proposals_summary(self, *, max_entries: int = 12) -> str:
-        """Render the specialist proposals still waiting for a benchmark slot.
-
-        Args:
-            max_entries (int): Rows to render before collapsing the rest into a
-                count.
-
-        Returns:
-            str: The rendered queue, or ``""`` when nothing is waiting.
-        """
-        rows = self._untested_proposal_rows()
+        """Render the specialist proposals still waiting for a benchmark slot."""
+        rows = self.untested_proposal_rows()
         if not rows:
             return ""
         out = [
             "Executable specialist proposals from this cycle that no explore round has benched.",
-            "Ranked by gap severity, then most recent. Compose the next `explore` grid from these;",
-            "dispatch an ATOMIC entry verbatim as one variant — never split or re-derive its flags.",
+            "Ranked by gap severity, then most recent. The Coordinator benches the head of this",
+            "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
             "",
         ]
         out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])
@@ -563,16 +438,7 @@ class _RenderMixin:
         return "\n".join(out)
 
     def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:
-        """Render advisory multi-model proposal scores for Orchestration; no mean/sorting, rater identities anonymized. Empty when no recent round carries scores.
-
-        Args:
-            max_rounds (int): Maximum number of recent scored rounds to
-                render.
-
-        Returns:
-            str: The anonymized proposal-scores block, or ``""`` when no
-                recent round carries scores.
-        """
+        """Render advisory multi-model proposal scores for Orchestration; no mean/sorting, rater identities anonymized. Empty when no recent round carries scores."""
         rounds = [
             r
             for r in (self.specialist_rounds or [])
@@ -669,19 +535,13 @@ class _RenderMixin:
         )
 
     def to_prompt_summary(self) -> str:
-        """Compact, human-readable snapshot for prompt injection.
-
-        Returns:
-            str: A multi-line dump of the session's key fact-layer and
-                audit fields (baseline / current best / gains / kernel-opt
-                queue / attempts history / failures / phase status).
-        """
+        """Compact, human-readable snapshot for prompt injection."""
         lines = [
             f"session_id={self.session_id or '(unset)'}",
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
         ]
         # Advisory architecture profile; prompt-context only. Omitted when no profile.
-        _arch_line = _shared_state_module().render_model_arch_compact(self.model_arch)
+        _arch_line = render_model_arch_compact(self.model_arch)
         if _arch_line:
             lines.append(f"model_arch(advisory; subordinate to TraceLens analysis_md)={_arch_line}")
         lines += [
@@ -694,21 +554,18 @@ class _RenderMixin:
                 f"(stack_len_at_validation={self.cumulative_gain_validated_stack_len}, "
                 f"ts={self.cumulative_gain_validated_ts or '(never)'})"
             ),
-            f"last_sweep={self._format_last_sweep()}",
             f"current_action={self.current_action or '(idle)'}",
             f"crash_count={self.crash_count}",
             f"pruned_families={self.pruned_families or '(none)'}",
             f"last_profile_trace={self.last_profile_trace or '(none)'}",
             f"last_profile_status={self.last_profile_status or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
-            f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
             f"last_trace_analyze={self._format_trace_analyze_blob(self.last_trace_analyze)}",
             f"profiler_digest={self._format_profiler_digest()}",
             # Full TraceLens analysis.md.
             f"analysis_md={self._format_analysis_md_full()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"explore_search={self._format_search_state(self.explore_search)}",
-            f"discovered_flags={self._format_discovered_flags()}",
             f"last_kernel_opt={self._format_last_kernel_opt()}",
             # Pending KEEPs the integrate gate will drain, plus per-kernel attempt count.
             (f"pending_keep_kernels={self.pending_keep_kernel_ids() or '(none)'}"),
@@ -720,10 +577,10 @@ class _RenderMixin:
             f"last_profile={self._format_attempt(self.last_profile)}",
             f"last_gemm_tuning={self._format_attempt(self.last_gemm_tuning)}",
             f"last_explore={self._format_attempt(self.last_explore)}",
-            # last_sweep is already rendered above via the richer
-            # _format_last_sweep() (grid/best/tput); no second generic line.
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
+            f"agent_last_active={self._format_agent_last_active()}",
+            f"gain_gated_action_count={int(self.gain_gated_action_count or 0)}",
             f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
@@ -733,18 +590,25 @@ class _RenderMixin:
         ]
         return "\n".join(lines)
 
+    def _format_agent_last_active(self) -> str:
+        """Render each agent's last completed reactor pass as a relative age.
+
+        Returns:
+            str: ``orchestration=2s ago, critic=45s ago``, or ``(none)`` when no
+                agent has run yet.
+        """
+        now = time.time()
+        parts = [
+            f"{agent}={int(max(0.0, now - ts))}s ago"
+            for agent, ts in sorted((self.agent_last_active or {}).items())
+            if isinstance(ts, (int, float)) and ts > 0
+        ]
+        return ", ".join(parts) or "(none)"
+
     # Audit-trail renderers (per-action attempts + global failure log).
     @staticmethod
     def _format_attempt(entry: dict[str, Any] | None) -> str:
-        """Render one ``last_<action>`` snapshot or ``attempts[-1]`` entry.
-
-        Args:
-            entry (dict[str, Any] | None): The attempt snapshot to render.
-
-        Returns:
-            str: A compact ``status=... decision=... <metric> err=... ws=...``
-                line, or ``"(none)"`` when the entry is empty.
-        """
+        """Render one ``last_<action>`` snapshot or ``attempts[-1]`` entry."""
         if not isinstance(entry, dict) or not entry:
             return "(none)"
         metric = entry.get("key_metric")
@@ -760,14 +624,9 @@ class _RenderMixin:
         )
 
     def _format_attempts_history(self) -> str:
-        """One-line summary across the audit actions (``baseline:total(s<succ>,f<fail>) ...``).
-
-        Returns:
-            str: A per-action totals summary, or ``"(no attempts recorded)"``
-                when no attempts exist.
-        """
+        """One-line summary across the audit actions (``baseline:total(s<succ>,f<fail>) ...``)."""
         parts: list[str] = []
-        for action in sorted(_shared_state_module()._AUDIT_ACTIONS):
+        for action in sorted(_AUDIT_ACTIONS):
             attempts_attr = f"{action}_attempts"
             history = getattr(self, attempts_attr, None) or []
             if not history:
@@ -779,14 +638,7 @@ class _RenderMixin:
         return " ".join(parts) if parts else "(no attempts recorded)"
 
     def _format_last_action_failures(self) -> str:
-        """Render the most-recent global failures, each with its excerpt tail and log path.
-
-        Returns:
-            str: A newline-separated render of the last
-                :data:`_FAILURES_RENDERED` failures (with an
-                ``[+N earlier failures]`` suffix when more exist), or
-                ``"(none)"``.
-        """
+        """Render the most-recent global failures, each with its excerpt tail and log path."""
         if not self.last_action_failures:
             return "(none)"
         rows: list[str] = []
@@ -813,12 +665,7 @@ class _RenderMixin:
         return "\n".join(rows) + suffix if rows else "(none)"
 
     def _format_rejected_kernel_patches(self) -> str:
-        """Render the most recent rejected kernel patches for the prompt.
-
-        Returns:
-            str | list[str]: A list of compact per-patch lines (last 5), or
-                ``"(none)"`` when no patches have been rejected.
-        """
+        """Render the most recent rejected kernel patches for the prompt."""
         if not self.rejected_kernel_patches:
             return "(none)"
         return [
@@ -830,41 +677,18 @@ class _RenderMixin:
             if isinstance(r, dict)
         ] or "(none)"
 
-    def _format_discovered_flags(self) -> str:
-        """Render the per-framework discovered-flag counts for the prompt.
-
-        Returns:
-            str: ``<framework>:backend=N/param=M`` parts joined by commas,
-                or a hint string when no flags have been discovered yet.
-        """
-        if not self.discovered_flags:
-            return "(none — first backends/params round will populate)"
-        parts: list[str] = []
-        for fw, entry in sorted(self.discovered_flags.items()):
-            if not isinstance(entry, dict):
-                continue
-            n_b = len(entry.get("backend_flags") or [])
-            n_p = len(entry.get("param_flags") or [])
-            parts.append(f"{fw}:backend={n_b}/param={n_p}")
-        return ", ".join(parts) or "(none)"
-
     @staticmethod
     def _format_variant_line(entry: dict[str, Any]) -> str:
-        """One-line render of a search variant for prompt blocks.
-
-        Args:
-            entry (dict[str, Any]): A search-variant entry (name, gain_pct,
-                tput, extra args / envs, and — for rejected rows —
-                ``error_class`` / ``reason`` / ``wall_clock_ratio_vs_baseline``).
-
-        Returns:
-            str: A single fixed-width line summarizing the variant.
-        """
+        """One-line render of a search variant for prompt blocks."""
         name = str(entry.get("name") or "?")
         gain = entry.get("gain_pct")
-        tput = entry.get("tput") or entry.get("output_throughput")
+        result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+        tput = entry.get("tput") or entry.get("output_throughput") or result.get("output_throughput")
         gain_s = f"{gain:+.2f}%" if isinstance(gain, (int, float)) else " no_meas"
         tput_s = f" (tput={tput:.1f})" if isinstance(tput, (int, float)) and tput > 0 else ""
+        # The gain column is meaningless without the axis it was taken on.
+        graded_obj = str(entry.get("graded_objective") or "").strip()
+        graded_obj_s = f" [{graded_obj}]" if graded_obj and graded_obj != GRADED_OUTPUT else ""
         args = str(entry.get("extra_server_args") or "").strip() or "(no-flag)"
         envs = entry.get("extra_envs") or {}
         envs_s = " " + " ".join(f"{k}={v}" for k, v in sorted(envs.items())) if envs else ""
@@ -873,22 +697,16 @@ class _RenderMixin:
         if error_class:
             parts.append(f"err={error_class}")
         reason = str(entry.get("reason") or "").strip()
-        # Threshold rejections are already conveyed by the gain column. Every other
-        # reason must survive: a bare ``no_meas`` is indistinguishable from a
-        # measured zero gain, so an overtime kill would otherwise read as "the
-        # variant helped nothing" instead of "the variant ran too long to be
-        # judged" — opposite follow-up moves. The wall-clock ratio qualifies the
-        # reason, so it rides alongside it whenever the executor recorded one.
+        # Threshold rejections are already conveyed by the gain column.
         if reason and reason not in ("not_keep", "gain_below_threshold"):
             ratio = entry.get("wall_clock_ratio_vs_baseline")
             ratio_s = f" {ratio:.2f}x" if isinstance(ratio, (int, float)) and ratio > 0 else ""
-            # error_excerpt on variant rows is tail-1200 (boot assertion at end);
-            # flatten+defang prevents section-header injection from untrusted log text.
+            # error_excerpt on variant rows is tail-1200 (boot assertion at end); flatten+defang prevents
+            # section-header injection from untrusted log text.
             body = _flatten_for_prompt(str(entry.get("error_excerpt") or reason))
             parts.append(f"reason={body[-120:]}{ratio_s}")
 
         # Paths show last two segments; full path available via get_failure(fid).
-        # Progressive degradation: drop log=, then ws=, keeping fid= alone.
         fid = str(entry.get("failure_id") or "").strip()
         ws_raw = str(entry.get("workspace") or "").strip()
         log_raw = str(entry.get("server_log_path") or "").strip()
@@ -908,41 +726,15 @@ class _RenderMixin:
             anchor_s = ("  " + " ".join(anchors)) if anchors else ""
 
         suffix = "  " + " ".join(parts) if parts else ""
-        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}{suffix}{anchor_s}"
-
-    @staticmethod
-    def _enrich_with_tested_gain(
-        entry: dict[str, Any],
-        tested: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Backfill ``gain_pct``/``tput`` from the matching ``tested[fp]`` at render time.
-
-        Args:
-            entry (dict[str, Any]): The accepted-variant entry to enrich.
-            tested (dict[str, Any]): The negative ledger keyed by fingerprint,
-                used to backfill missing gain / tput.
-
-        Returns:
-            dict[str, Any]: ``entry`` itself when already complete, otherwise
-                a copy with ``gain_pct`` / ``tput`` backfilled where possible.
-        """
-        if entry.get("gain_pct") is not None and entry.get("tput") is not None:
-            return entry
-        fp = str(entry.get("fingerprint") or "")
-        snap = tested.get(fp) if fp else None
-        if not isinstance(snap, dict):
-            return entry
-        out = dict(entry)
-        if out.get("gain_pct") is None:
-            out["gain_pct"] = snap.get("gain_pct")
-        if out.get("tput") is None:
-            result = snap.get("result") if isinstance(snap.get("result"), dict) else {}
-            out["tput"] = snap.get("tput") or (result or {}).get("output_throughput")
-        return out
+        return f"{name:28s} {gain_s:>9}{graded_obj_s}{tput_s}  {args}{envs_s}{suffix}{anchor_s}"
 
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:
-        """Multi-line render of a ``*_search`` dedup ledger; counts on the head line, bodies show the last 5 accepted / 15 rejected.
+        """Multi-line render of a ``*_search`` dedup ledger.
+
+        The head line carries the counts; the body enumerates every ``tested``
+        entry, KEEPs first, with no truncation — a variant missing from the
+        ledger reads as untried and gets re-proposed.
 
         Args:
             search (dict[str, Any] | None): The search ledger to render.
@@ -952,41 +744,31 @@ class _RenderMixin:
         """
         if not search:
             return "(none)"
-        accepted = list(search.get("accepted") or [])
-        rejected = list(search.get("rejected") or [])
-        tested = search.get("tested") or {}
-        cursor = search.get("cursor", 0)
-        head = f"    cursor={cursor}  accepted={len(accepted)}  rejected={len(rejected)}  tested={len(tested)}"
-        # Surfaced on the head line because the per-variant bodies are capped,
-        # which can hide a whole round reaped by the overtime gate.
+        tested: dict[str, Any] = search.get("tested") or {}
+        head = (
+            f"    cursor={search.get('cursor', 0)}"
+            f"  accepted={len(search.get('accepted') or [])}"
+            f"  rejected={len(search.get('rejected') or [])}"
+            f"  tested={len(tested)}"
+        )
+        # Surfaced on the head line because a whole round reaped by the overtime gate is otherwise invisible.
         last_round = search.get("last_round")
         n_killed = len((last_round or {}).get("killed_overtime") or []) if isinstance(last_round, dict) else 0
         if n_killed:
             head += f"  killed_overtime(last_round)={n_killed}"
         out: list[str] = ["", head]
-        if accepted:
-            out.append("    accepted:")
-            for entry in accepted[-5:]:
-                if not isinstance(entry, dict):
-                    continue
-                out.append(
-                    "      • " + _RenderMixin._format_variant_line(_RenderMixin._enrich_with_tested_gain(entry, tested))
-                )
-        if rejected:
-            out.append("    rejected (last 15):")
-            for entry in rejected[-15:]:
-                if not isinstance(entry, dict):
-                    continue
-                out.append("      • " + _RenderMixin._format_variant_line(entry))
+        rows = [(fp, e) for fp, e in tested.items() if isinstance(e, dict)]
+        if not rows:
+            return "\n".join(out)
+        rows.sort(key=lambda row: str(row[1].get("outcome") or "").upper() != "KEEP")
+        out.append("    tested:")
+        for fp, entry in rows:
+            outcome = str(entry.get("outcome") or "?").upper()
+            out.append(f"      {str(fp)[:16]} {outcome:7s} {_RenderMixin._format_variant_line(entry)}")
         return "\n".join(out)
 
     def _format_optimization_stack(self) -> str:
-        """Render the optimization stack as ``action:variant`` parts.
-
-        Returns:
-            str | list[str]: A list of ``action:variant_name`` strings, or
-                ``"(none)"`` when the stack is empty.
-        """
+        """Render the optimization stack as ``action:variant`` parts."""
         if not self.optimization_stack:
             return "(none)"
         parts = []
@@ -998,15 +780,7 @@ class _RenderMixin:
 
     @staticmethod
     def _strip_base64_data_urls(text: str) -> str:
-        """Drop base64 image payloads before prompt injection (in-memory only). Delegates to ``hyperloom.inference_optimizer.tracelens_md``.
-
-        Args:
-            text (str): The markdown text to scrub of base64 data URLs.
-
-        Returns:
-            str: The text with base64 data URLs stripped (``""`` for falsy
-                input).
-        """
+        """Drop base64 image payloads before prompt injection (in-memory only). Delegates to ``hyperloom.inference_optimizer.tracelens_md``."""
         if not text:
             return text or ""
         from hyperloom.inference_optimizer.tracelens_md import strip_base64_data_urls
@@ -1014,12 +788,7 @@ class _RenderMixin:
         return strip_base64_data_urls(text)
 
     def _format_analysis_md_full(self) -> str:
-        """Inject TraceLens analysis.md verbatim between ``=== TraceLens Analysis ... ===`` bookends. Empty cache → one-line hint to propose ``roofline``.
-
-        Returns:
-            str: The verbatim analysis.md wrapped in bookends, or a one-line
-                hint when no TraceLens snapshot is cached.
-        """
+        """Inject TraceLens analysis.md verbatim between ``=== TraceLens Analysis ... ===`` bookends. Empty cache → one-line hint to propose ``roofline``."""
         cached = self.last_trace_analyze or {}
         md_text = cached.get("analysis_md_text") or ""
         if not md_text:
@@ -1029,10 +798,8 @@ class _RenderMixin:
                 "+10% validated-gain crossing; wait for the pending "
                 "task to land, or continue with specialist / explore "
                 "work that does not need analysis.md. `roofline` and "
-                "`profile` are Coordinator-managed and absent from "
-                "`PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 "
-                "denies any LLM-emitted propose_action/delegate "
-                "against either name with rule `phase_incompatible`.)"
+                "`profile` are Coordinator-managed; you may also propose "
+                "them directly if the situation warrants it.)"
             )
         md_text = self._strip_base64_data_urls(md_text)
         snap = cached.get("roofline_snapshot_id", "?")
@@ -1041,12 +808,9 @@ class _RenderMixin:
             gain_str = f"{float(gain):.2f}"
         except (TypeError, ValueError):
             gain_str = "?"
-        # By default point at the show_analysis_md tool; set
-        # INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE=1 to inline the verbatim md.
-        if os.getenv(
-            "INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE",
-            "0",
-        ).strip().lower() not in ("1", "true", "on", "yes"):
+        # By default point at the show_analysis_md tool; set INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE=1 to inline
+        # the verbatim md.
+        if not env_bool("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE"):
             return (
                 f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
                 "full report not inlined; see profiler_digest above or call the "
@@ -1060,13 +824,8 @@ class _RenderMixin:
         )
 
     def _format_profiler_digest(self) -> str:
-        """Compact bottleneck-focused profiler block; ``(none)`` until a snapshot lands.
-
-        Returns:
-            str: The profiler digest block, or ``"(none)"`` until a roofline
-                snapshot lands.
-        """
-        from ...kernel.roofline_snapshot import build_profiler_digest
+        """Compact bottleneck-focused profiler block; ``(none)`` until a snapshot lands."""
+        from hyperloom.inference_optimizer.roofline_snapshot import build_profiler_digest
 
         digest = build_profiler_digest(
             self.roofline_snapshots,
@@ -1077,19 +836,7 @@ class _RenderMixin:
         return f"\n{digest}\n"
 
     def _format_trace_analyze_blob(self, blob: dict[str, Any] | None) -> str:
-        """Render a trace-analyze cache blob as a compact prompt line.
-
-        Surfaces the trace input, candidates path, top kernel ids, reusable
-        native kernel ids, and any trace-health routing warnings.
-
-        Args:
-            blob (dict[str, Any] | None): A ``last_trace_analyze``-shaped
-                dict to render.
-
-        Returns:
-            str: The compact one-line render, or ``"(none)"`` when the blob
-                is empty.
-        """
+        """Render a trace-analyze cache blob as a compact prompt line."""
         if not blob:
             return "(none)"
         ids = [
@@ -1131,22 +878,3 @@ class _RenderMixin:
             else:
                 rendered.append(code)
         return f"{base}{skipped_suffix} warnings=[{'; '.join(rendered)}]"
-
-    def _format_last_sweep(self) -> str:
-        """Render the last workload sweep result for the prompt.
-
-        Returns:
-            str: ``grid_size=... best=... tput=... conc/isl/osl=...``, or
-                ``"(none)"`` when no sweep has run.
-        """
-        if not self.last_sweep:
-            return "(none)"
-        best = self.last_sweep.get("best_overall") or {}
-        if not best:
-            return f"grid_size={self.last_sweep.get('grid_size', 0)} best=(none)"
-        return (
-            f"grid_size={self.last_sweep.get('grid_size', 0)} "
-            f"best={best.get('name', '?')} "
-            f"tput={best.get('output_throughput', '?')} "
-            f"conc={best.get('conc', '?')} isl={best.get('isl', '?')} osl={best.get('osl', '?')}"
-        )

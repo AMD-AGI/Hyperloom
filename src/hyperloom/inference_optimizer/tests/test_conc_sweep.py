@@ -8,6 +8,9 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import os
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -20,18 +23,22 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
 )
+from hyperloom.orchestrator.kernel import conc_sweep as conc_sweep_module
 from hyperloom.orchestrator.kernel.conc_sweep import (
     DEFAULT_CONCS,
     DEFAULT_TOTAL_BUDGET_SEC,
+    _Arm,
     _build_arm_grid,
     _flush_conc_sweep_report,
-    _flush_partial_conc_sweep_report,
-    _has_optimization,
+    _grading_of,
+    _optimized_arm,
     _order_concs_desc,
+    _point_from_variant,
     conc_sweep_declined_to_run,
     run_conc_sweep,
 )
 from hyperloom.common.gain_math import conc_pair_comparison as _build_comparison
+from hyperloom.common.perf_metric import graded_metric_key
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -78,40 +85,236 @@ def baseline_yaml(tmp_path: Path) -> Path:
     return p
 
 
-# _has_optimization
-def test_has_optimization_args_only():
+# _optimized_arm
+def test_optimized_arm_args_only():
     s = SharedState()
     s.current_best = {"extra_server_args": "--a 1", "extra_envs": {}}
-    has, args, envs = _has_optimization(s)
-    assert has is True
-    assert args == "--a 1"
-    assert envs == {}
+    arm = _optimized_arm(s)
+    assert arm is not None
+    assert arm.name == "optimized"
+    assert arm.args == "--a 1"
+    assert arm.envs == {}
 
 
-def test_has_optimization_envs_only():
+def test_optimized_arm_envs_only():
     s = SharedState()
     s.current_best = {"extra_server_args": "", "extra_envs": {"X": "1"}}
-    has, args, envs = _has_optimization(s)
-    assert has is True
-    assert args == ""
-    assert envs == {"X": "1"}
+    arm = _optimized_arm(s)
+    assert arm is not None
+    assert arm.args == ""
+    assert arm.envs == {"X": "1"}
 
 
-def test_has_optimization_both_empty():
+def test_optimized_arm_carries_overlay_and_controls():
+    s = SharedState()
+    s.current_best = {"extra_server_args": "", "remove_args": ["--foo"], "final_overlay": " /opt/overlay "}
+    arm = _optimized_arm(s)
+    assert arm is not None
+    assert arm.overlay == "/opt/overlay"
+    assert arm.controls == {"remove_args": ["--foo"]}
+
+
+def test_optimized_arm_both_empty():
     s = SharedState()
     s.current_best = {"extra_server_args": "", "extra_envs": {}}
-    has, _args, _envs = _has_optimization(s)
-    assert has is False
+    assert _optimized_arm(s) is None
 
 
-def test_has_optimization_missing_current_best():
+def test_optimized_arm_missing_current_best():
     s = SharedState()
     s.current_best = {}
-    has, _, _ = _has_optimization(s)
-    assert has is False
+    assert _optimized_arm(s) is None
+
+
+@pytest.mark.parametrize("persistent_server", [False, True])
+@pytest.mark.parametrize(
+    "current_best, expected_args, expected_env",
+    [
+        (
+            {
+                "extra_server_args": "--trust-remote-code --max-running-requests 64 --cuda-graph-max-bs 64",
+                "args_mode": "replace",
+            },
+            "--trust-remote-code --max-running-requests 64 --cuda-graph-max-bs 64",
+            "stock",
+        ),
+        ({"extra_server_args": "", "args_mode": "replace"}, "", "stock"),
+        ({"remove_args": ["--max-running-requests"]}, "--trust-remote-code", "stock"),
+        ({"unset_envs": ["SGLANG_SWEEP_TEST"]}, "--trust-remote-code --max-running-requests 64", None),
+        (
+            {"unset_envs": ["SGLANG_SWEEP_TEST"], "extra_envs": {"SGLANG_SWEEP_TEST": "accepted 'literal'"}},
+            "--trust-remote-code --max-running-requests 64",
+            "accepted 'literal'",
+        ),
+        (
+            {"extra_server_args": "--disable-radix-cache"},
+            "--trust-remote-code --max-running-requests 64 --disable-radix-cache",
+            "stock",
+        ),
+    ],
+    ids=["complete-args", "empty-replacement", "remove-args", "unset-env", "unset-then-assign", "legacy-delta"],
+)
+def test_conc_sweep_preserves_retained_launch_controls(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    persistent_server: bool,
+    current_best: dict[str, Any],
+    expected_args: str,
+    expected_env: str | None,
+):
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
+    baseline_args = (
+        current_best.get("extra_server_args") if current_best.get("args_mode") == "replace" else ""
+    ) or "--trust-remote-code --max-running-requests 64"
+    baseline_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "envs": {
+                        "EXTRA_SGLANG_ARGS": baseline_args,
+                        "SGLANG_SWEEP_TEST": "stock",
+                    },
+                }
+            }
+        )
+    )
+    state = _make_state(baseline_config_path=str(baseline_yaml), current_best=current_best)
+    if persistent_server:
+        _patch_lifecycle_eligible(monkeypatch, [])
+    else:
+        monkeypatch.setattr(_server_lifecycle, "resolve_lifecycle_params", lambda _: {"eligible": False})
+    children = []
+
+    async def launch_children(*, grid: list[GridVariant], base_yaml_path: Path, **kwargs):
+        results = []
+        for variant in grid:
+            config = _build_variant_yaml(
+                base_yaml_path, "", variant, output_subdir=session_dir / "children" / variant.name
+            )
+            envs = yaml.safe_load(config.read_text())["benchmark"]["envs"]
+            code = "import json, os, sys; print(json.dumps([sys.argv[1:], os.environ.get('SGLANG_SWEEP_TEST')]))"
+            command = shlex.join([sys.executable, "-S", "-c", code]) + " " + envs.get("EXTRA_SGLANG_ARGS", "")
+            child = subprocess.run(
+                ["bash", "-c", "exec " + command],
+                env={"PATH": os.defpath, **envs},
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            children.append((variant.name, json.loads(child.stdout)))
+            results.append(_fake_variant(variant.name, throughput=100.0, envs=variant.extra_envs))
+        return results
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=launch_children),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 2]))
+    assert payload["status"] == "succeeded"
+    assert len(children) == 4
+    for name, (args, env) in children:
+        optimized = name.startswith("optimized_")
+        assert args == shlex.split(expected_args if optimized else baseline_args)
+        assert env == (expected_env if optimized else "stock")
 
 
 # _build_comparison
+@pytest.mark.parametrize("extra_args", ["", "--max-running-requests 64"])
+@pytest.mark.parametrize("persistent_server", [False, True])
+def test_conc_sweep_loads_retained_overlay_only_in_optimized_arm(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_args: str,
+    persistent_server: bool,
+):
+    import os
+    import subprocess
+
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle
+
+    overlay = session_dir / "retained_overlay"
+    overlay.mkdir()
+    (overlay / "sitecustomize.py").write_text("import os\nos.environ['GEAK_SWEEP_OVERLAY_MARKER'] = 'candidate'\n")
+    baseline_yaml.write_text("benchmark:\n  framework: sglang\n  envs: {}\n")
+    state = _make_state(
+        baseline_config_path=str(baseline_yaml),
+        current_best={"extra_server_args": extra_args, "extra_envs": {}, "final_overlay": str(overlay)},
+    )
+    teardown_log: list[tuple] = []
+    if persistent_server:
+        _patch_lifecycle_eligible(monkeypatch, teardown_log)
+    else:
+        monkeypatch.setattr(_server_lifecycle, "resolve_lifecycle_params", lambda _: {"eligible": False})
+    child_results: list[tuple[str, str]] = []
+
+    async def _child_run_grid(*, grid: list[GridVariant], **kwargs):
+        outputs = []
+        for variant in grid:
+            config = _build_variant_yaml(
+                baseline_yaml, "", variant, output_subdir=session_dir / "child_configs" / variant.name
+            )
+            envs = yaml.safe_load(config.read_text())["benchmark"]["envs"]
+            child = subprocess.run(
+                [sys.executable, "-B", "-c", "import os; print(os.environ.get('GEAK_SWEEP_OVERLAY_MARKER', 'stock'))"],
+                env={"PATH": os.defpath, "PYTHONDONTWRITEBYTECODE": "1", **envs},
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            child_results.append((variant.name, child.stdout.strip()))
+            outputs.append(_fake_variant(variant.name, throughput=100.0, envs=variant.extra_envs))
+        return outputs
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_child_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 2]))
+    assert payload["status"] == "succeeded"
+    assert len(child_results) == 4
+    for name, loaded in child_results:
+        assert loaded == ("candidate" if name.startswith("optimized_") else "stock")
+    if persistent_server:
+        assert len(teardown_log) == 2
+
+
+@pytest.mark.parametrize("overlay_state", ["missing", "inert", "joined", "traversal"])
+def test_conc_sweep_does_not_benchmark_without_retained_overlay(
+    session_dir: Path,
+    baseline_yaml: Path,
+    overlay_state: str,
+):
+    overlay = session_dir / "retained_overlay"
+    overlay_path = str(overlay)
+    if overlay_state != "missing":
+        overlay.mkdir()
+    if overlay_state in {"joined", "traversal"}:
+        (overlay / "sitecustomize.py").write_text("pass\n")
+        overlay_path = f"{overlay}:{overlay}" if overlay_state == "joined" else str(overlay / ".." / "retained_overlay")
+    state = _make_state(
+        baseline_config_path=str(baseline_yaml),
+        current_best={"extra_server_args": "--max-running-requests 64", "final_overlay": overlay_path},
+    )
+    with patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid") as grid:
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1]))
+    grid.assert_not_called()
+    assert payload["status"] == "skipped"
+    assert payload["skip_reason"] == "optimized_overlay_unavailable"
+    assert payload["final_overlay"] == overlay_path
+
+
 def test_build_comparison_simple_speedup():
     baseline = [
         {"conc": 1, "output_throughput": 100.0, "status": "succeeded"},
@@ -171,8 +374,8 @@ def test_build_comparison_mismatched_concs_outer_join():
     ]
     rows, summary = _build_comparison(baseline, optimized)
     assert [r["conc"] for r in rows] == [1, 4, 16]
-    assert rows[0]["optimized_tput"] is None
-    assert rows[2]["baseline_tput"] is None
+    assert rows[0]["optimized_value"] is None
+    assert rows[2]["baseline_value"] is None
     assert summary["successful_pairs"] == 1
 
 
@@ -365,8 +568,7 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
     baseline_yaml: Path,
     monkeypatch,
 ):
-    """On MI325X/MI308X conc-sweep must select the mi300x runner script, like
-    every other executor — not state.gpu_type's real type."""
+    """On MI325X/MI308X conc-sweep must select the mi300x runner script, like every other executor — not state.gpu_type's real type."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     state.gpu_type = "mi325x"
     monkeypatch.setenv("GPU_TYPE", "mi300x")
@@ -397,6 +599,54 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
 
     assert seen["materialize_gpu"] == "mi300x"
     assert seen["run_grid_gpu"] == "mi300x"
+
+
+def test_conc_sweep_preserves_baseline_script_through_variant_materialization(session_dir, baseline_yaml, monkeypatch):
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
+    baseline_yaml.write_text(
+        "benchmark:\n  framework: sglang\n  model: /models/test\n  run_mode: local\n"
+        "  benchmark_script: sglang_custom.sh\n  envs: {TP: 8, CONC: 64, ISL: 8192, OSL: 1024}\n"
+    )
+    state = _make_state(baseline_config_path=str(baseline_yaml), isl=8192)
+    state.gpu_type = "MI355X"
+    state.baseline_benchmark_script = "sglang_custom.sh"
+    monkeypatch.setenv("GPU_TYPE", "mi355x")
+    monkeypatch.setattr(_server_lifecycle, "teardown_lifecycle_server", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
+    )
+    calls = []
+
+    async def capture_grid(**kwargs):
+        variant = kwargs["grid"][0]
+        output = session_dir / f"variant_{len(calls)}"
+        output.mkdir()
+        path = _build_variant_yaml(
+            kwargs["base_yaml_path"],
+            "",
+            variant,
+            output_subdir=output,
+            gpu_type=kwargs["gpu_type"],
+            benchmark_script=kwargs.get("benchmark_script"),
+        )
+        calls.append((kwargs, yaml.safe_load(path.read_text())["benchmark"]))
+        return [_fake_variant(variant.name, throughput=120.0, envs=variant.extra_envs)]
+
+    monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.run_grid", capture_grid)
+    result = asyncio.run(run_conc_sweep(state, session_dir, concs=[64], total_budget_sec=None))
+
+    assert result["status"] == "succeeded"
+    assert [call[0]["grid"][0].name for call in calls] == ["optimized_conc64", "baseline_conc64"]
+    for kwargs, bench in calls:
+        assert bench["benchmark_script"] == "sglang_custom.sh"
+        assert bench["runner_type"] == "mi355x"
+        assert int(bench["envs"]["NUM_PROMPTS"]) == 320
+        assert bench["envs"]["RUN_EVAL"] == "false"
+        assert kwargs.get("server_lifecycle") is None
 
 
 def test_run_conc_sweep_optimized_oom_yields_failed_pair(
@@ -579,6 +829,15 @@ def test_run_conc_sweep_does_not_touch_final_json(
     assert not final_json_path.exists()
 
 
+def test_the_engine_resolves_the_ladder_from_the_session_mode(monkeypatch: pytest.MonkeyPatch):
+    """`concs=None` reaches the engine from the SDK and from a bare task alike."""
+    from hyperloom.orchestrator.kernel.conc_sweep import default_concs_for_mode
+
+    state = SharedState()
+    state.benchmark_mode = "agentx"
+    assert default_concs_for_mode(state.benchmark_mode) == [1, 4, 8, 10, 14, 20, 28]
+
+
 def test_default_concs_is_powers_of_two():
     """Doc-pin: default ladder is [256,128,64,32,16,8,4,2] (high-to-low for single-server reuse)."""
     assert DEFAULT_CONCS == [256, 128, 64, 32, 16, 8, 4, 2]
@@ -590,55 +849,6 @@ def test_default_total_budget_is_two_and_half_hours():
 
 
 # Total wall-clock budget
-def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
-    session_dir: Path,
-    baseline_yaml: Path,
-):
-    """When remaining budget cannot cover another variant, the tail is skipped."""
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-    calls = {"n": 0}
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
-        import time as _t
-
-        _t.sleep(1.2)
-        calls["n"] += 1
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
-            side_effect=_fake_run_grid,
-        ),
-        patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs",
-            side_effect=_fake_materialize,
-        ),
-    ):
-        payload = asyncio.run(
-            run_conc_sweep(
-                state,
-                session_dir,
-                concs=[1, 4, 16, 64],
-                variant_timeout_sec=1,
-                total_budget_sec=2,
-            )
-        )
-
-    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    statuses = [p["status"] for p in all_points]
-    assert "succeeded" in statuses
-    assert "skipped" in statuses
-    skipped_pts = [p for p in all_points if p["status"] == "skipped"]
-    for p in skipped_pts:
-        assert p["error_class"] == "budget_exhausted"
-    assert payload["budget_exhausted"] is True
-    assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
-    assert payload["budget_remaining_sec"] < 1
-    assert payload["total_budget_sec"] == 2
-    assert calls["n"] < 8
-
-
 def test_run_conc_sweep_none_budget_disables_gate(
     session_dir: Path,
     baseline_yaml: Path,
@@ -706,51 +916,8 @@ def test_run_conc_sweep_zero_budget_skips_without_running(
     assert payload["skip_reason"] == "no_time_budget_remaining"
     assert payload["total_budget_sec"] == 0
     assert mock_run.call_count == 0
-    # Nothing ran, so this reads as a sweep that declined rather than one that
-    # spent its budget.
+    # Nothing ran, so this reads as a sweep that declined rather than one that spent its budget.
     assert conc_sweep_declined_to_run({**payload, "was_skipped": True}) is True
-
-
-def test_run_conc_sweep_skips_when_initial_budget_below_variant_timeout(
-    session_dir: Path,
-    baseline_yaml: Path,
-):
-    """A too-small budget is reported as skipped instead of a timeout-prone run."""
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
-            side_effect=_fake_run_grid,
-        ),
-        patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs",
-            side_effect=_fake_materialize,
-        ),
-    ):
-        payload = asyncio.run(
-            run_conc_sweep(
-                state,
-                session_dir,
-                concs=[1],
-                variant_timeout_sec=3600,
-                total_budget_sec=120,
-            )
-        )
-
-    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    assert {p["status"] for p in all_points} == {"skipped"}
-    assert {p["error_class"] for p in all_points} == {"budget_exhausted"}
-    assert payload["status"] == "skipped"
-    assert payload["was_skipped"] is True
-    assert payload["skip_reason"] == "budget_exhausted_no_successful_pairs"
-    assert payload["budget_exhausted"] is True
-    assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
-    # This sweep started; only the pre-flight envelope means "declined to run".
-    assert conc_sweep_declined_to_run(payload) is False
 
 
 # ActionExecutor integration (SWEEP-phase dispatch)
@@ -767,7 +934,6 @@ def test_conc_sweep_executor_loads_state_and_dispatches(
     state.conc_sweep_enabled = True
     state.conc_sweep_concs = [1, 4]
     state.conc_sweep_total_budget_sec = 60
-    state.conc_sweep_variant_timeout_sec = 30
     state.save(session_dir)
 
     class _Task:
@@ -779,9 +945,8 @@ def test_conc_sweep_executor_loads_state_and_dispatches(
 
     captured: dict = {}
 
-    async def _fake_run(state_arg, sd, *, concs, variant_timeout_sec, total_budget_sec, **_kw):
+    async def _fake_run(state_arg, sd, *, concs, total_budget_sec, **_kw):
         captured["concs"] = list(concs)
-        captured["timeout"] = variant_timeout_sec
         captured["budget"] = total_budget_sec
         return {
             "status": "succeeded",
@@ -796,7 +961,6 @@ def test_conc_sweep_executor_loads_state_and_dispatches(
 
     assert result["status"] == "succeeded"
     assert captured["concs"] == [1, 4]
-    assert captured["timeout"] == 30
     assert captured["budget"] == 60
 
 
@@ -854,13 +1018,11 @@ def test_conc_sweep_executor_task_params_override_state(
     state = _make_state(baseline_config_path=str(baseline_yaml))
     state.conc_sweep_concs = [1]
     state.conc_sweep_total_budget_sec = 60
-    state.conc_sweep_variant_timeout_sec = 30
     state.save(session_dir)
 
     class _Task:
         params = {
             "concs": ["2", "8"],
-            "variant_timeout_sec": "45",
             "total_budget_sec": "120",
         }
 
@@ -870,9 +1032,8 @@ def test_conc_sweep_executor_task_params_override_state(
 
     captured: dict = {}
 
-    async def _fake_run(state_arg, sd, *, concs, variant_timeout_sec, total_budget_sec, **_kw):
+    async def _fake_run(state_arg, sd, *, concs, total_budget_sec, **_kw):
         captured["concs"] = list(concs)
-        captured["timeout"] = variant_timeout_sec
         captured["budget"] = total_budget_sec
         return {"status": "succeeded", "summary": {"successful_pairs": 1}}
 
@@ -883,7 +1044,7 @@ def test_conc_sweep_executor_task_params_override_state(
         result = asyncio.run(ConcSweepExecutor()(_Ctx()))
 
     assert result["status"] == "succeeded"
-    assert captured == {"concs": [2, 8], "timeout": 45, "budget": 120}
+    assert captured == {"concs": [2, 8], "budget": 120}
 
 
 def test_conc_sweep_executor_keeps_none_budget_unbounded(
@@ -908,7 +1069,7 @@ def test_conc_sweep_executor_keeps_none_budget_unbounded(
 
     captured: dict = {}
 
-    async def _fake_run(state_arg, sd, *, concs, variant_timeout_sec, total_budget_sec, **_kw):
+    async def _fake_run(state_arg, sd, *, concs, total_budget_sec, **_kw):
         captured["budget"] = total_budget_sec
         return {"status": "succeeded", "summary": {"successful_pairs": 1}}
 
@@ -990,40 +1151,39 @@ def test_record_conc_sweep_writes_last_conc_sweep():
     assert s.last_conc_sweep_watermark == watermark
 
 
-def test_exit_normal_sweep_returns_conc_sweep_done():
-    """SWEEP→CLOSE must fire on conc_sweep completion, not only sweep_done."""
+def test_exit_normal_sweep_reads_the_ladder_as_the_sweep():
+    """The concurrency ladder is the only sweep, so its status is the phase's."""
     from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
 
     class _State:
-        last_sweep = {}  # no sweep recorded
         last_conc_sweep = {}
         phase = "SWEEP"
         phase_started_ts = "2026-06-02T10:00:00+00:00"
         max_minutes = 360
         phase_budget_pct = {"SWEEP": 0.50}
 
-    # No sweep, no conc_sweep => don't exit (budget remaining).
+    # Nothing recorded => don't exit (budget remaining).
     assert exit_normal_sweep(_State()) is None
 
     _State.last_conc_sweep = {"status": "succeeded"}
     result = exit_normal_sweep(_State())
     assert result is not None
     reason, evidence = result
-    assert reason == "conc_sweep_done", reason
-    assert evidence.get("conc_sweep_status") == "succeeded"
+    assert reason == "sweep_done", reason
+    assert evidence.get("sweep_status") == "succeeded"
 
-    # Skipped also counts as "done" (action reached a terminal decision).
+    # Skipped also counts as "done" (the action reached a terminal decision).
     for terminal in ("partial", "completed", "skipped"):
         _State.last_conc_sweep = {"status": terminal}
         result = exit_normal_sweep(_State())
-        assert result is not None and result[0] == "conc_sweep_done", terminal
+        assert result is not None and result[0] == "sweep_done", terminal
 
     _State.last_conc_sweep = {"status": "failed"}
     result = exit_normal_sweep(_State())
     assert result is not None
     reason, evidence = result
-    assert reason == "conc_sweep_failed"
-    assert evidence.get("conc_sweep_status") == "failed"
+    assert reason == "sweep_failed"
+    assert evidence.get("sweep_status") == "failed"
 
 
 def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
@@ -1038,8 +1198,8 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
     )
     state.record_conc_sweep({"status": "skipped", "was_skipped": True, "skip_reason": "no_optimization_to_compare"})
     _, declined = exit_normal_sweep(state)
-    assert declined["conc_sweep_was_skipped"] is True
-    assert declined["conc_sweep_budget_exhausted"] is False
+    assert declined["sweep_was_skipped"] is True
+    assert declined["sweep_skip_budget_exhausted"] is False
 
     state.record_conc_sweep(
         {
@@ -1047,11 +1207,24 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
             "was_skipped": True,
             "budget_exhausted": True,
             "skip_reason": "budget_exhausted_no_successful_pairs",
+            "summary": {"successful_pairs": 0},
         }
     )
-    _, spent = exit_normal_sweep(state)
-    assert spent["conc_sweep_was_skipped"] is True
-    assert spent["conc_sweep_budget_exhausted"] is True
+    spent_reason, spent = exit_normal_sweep(state)
+    assert spent_reason == "sweep_failed"
+    assert spent["sweep_was_skipped"] is True
+    assert spent["sweep_skip_budget_exhausted"] is True
+
+    state.record_conc_sweep(
+        {
+            "status": "skipped",
+            "was_skipped": True,
+            "summary": {"successful_pairs": 0},
+        }
+    )
+    no_pair_reason, no_pair = exit_normal_sweep(state)
+    assert no_pair_reason == "sweep_failed"
+    assert no_pair["sweep_status"] == "skipped"
 
 
 def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
@@ -1098,18 +1271,12 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
     assert coord.shared_state.save.call_count >= 2
 
 
-# NOTE: the former ``test_conc_sweep_phase_singleton_denies_after_auto_enqueue``
-# was retired together with PolicyGate._validate_conc_sweep_singleton. conc_sweep
-# is now a Coordinator-internal action (COORDINATOR_INTERNAL_ACTIONS), so an LLM
-# conc_sweep proposal is rejected as Coordinator-managed (phase_incompatible),
-# not via a per-action singleton rule. That behaviour is covered by
-# test_sweep_phase_auto.py::test_validate_intent_denies_llm_conc_sweep_propose_as_coordinator_managed
-# and ::test_conc_sweep_is_coordinator_internal_action.
+# An LLM conc_sweep proposal is refused as ``coordinator_managed_action``; covered by
+# test_policy_gate.py::test_a_coordinator_managed_action_is_not_proposable.
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Change 2 extras: _order_concs_desc / _build_arm_grid
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Change 2 extras: _order_concs_desc /
+# _build_arm_grid ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_order_concs_desc_deduplicates_and_sorts():
@@ -1125,15 +1292,7 @@ def test_order_concs_desc_single():
 
 
 def test_build_arm_grid_single_arm_descending():
-    grid = _build_arm_grid(
-        "baseline",
-        [64, 32, 16],
-        isl=512,
-        osl=512,
-        num_prompts_factor=5,
-        arm_args="",
-        arm_envs={},
-    )
+    grid = _build_arm_grid(_Arm(name="baseline"), [64, 32, 16], isl=512, osl=512, num_prompts_factor=5)
     assert [v.name for v in grid] == ["baseline_conc64", "baseline_conc32", "baseline_conc16"]
     assert grid[0].extra_envs["CONC"] == "64"
     assert grid[0].extra_envs["RUN_EVAL"] == "false"
@@ -1141,13 +1300,11 @@ def test_build_arm_grid_single_arm_descending():
 
 def test_build_arm_grid_optimized_arm_carries_args():
     grid = _build_arm_grid(
-        "optimized",
+        _Arm(name="optimized", args="--my-flag", envs={"MY_ENV": "1"}),
         [4],
         isl=1024,
         osl=512,
         num_prompts_factor=3,
-        arm_args="--my-flag",
-        arm_envs={"MY_ENV": "1"},
     )
     assert len(grid) == 1
     assert grid[0].extra_server_args == "--my-flag"
@@ -1156,9 +1313,8 @@ def test_build_arm_grid_optimized_arm_carries_args():
     assert int(grid[0].extra_envs["NUM_PROMPTS"]) >= 4
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Change 1: soft switch + arm-major orchestration
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Change 1: soft switch + arm-major
+# orchestration ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_run_conc_sweep_single_server_arm_major_order(
@@ -1218,8 +1374,7 @@ def test_run_conc_sweep_single_server_concs_descending(
     assert base_concs == sorted(base_concs, reverse=True), f"expected descending, got {base_concs}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Change 5: _flush_conc_sweep_report / _flush_partial_conc_sweep_report
+# ───────────────────────────────────────────────────────────────────────────── Change 5: _flush_conc_sweep_report
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1246,6 +1401,265 @@ def test_flush_conc_sweep_report_writes_json_and_csv(session_dir: Path):
     assert rows[0]["arm"] == "baseline"
 
 
+class TestTheSummaryIsTakenOnTheChartsAxis:
+    """The headline speedup and the curve beside it have to be one quantity."""
+
+    def _pts(self, arm: str, out: float, total: float) -> list[dict[str, Any]]:
+        return [
+            {"arm": arm, "conc": 8, "status": "succeeded", "output_throughput": out, "total_token_throughput": total}
+        ]
+
+    def _intvty_pts(self, arm: str, intvty: float, total: float) -> list[dict[str, Any]]:
+        return [
+            {
+                "arm": arm,
+                "conc": 8,
+                "status": "succeeded",
+                "e2e_norm_intvty_p90": intvty,
+                "total_token_throughput": total,
+            }
+        ]
+
+    def test_agentx_grades_on_e2e_norm_intvty_p90(self):
+        """AgentX grades on the slow-tail interactivity axis."""
+        _comparison, summary = _build_comparison(
+            self._intvty_pts("baseline", 22.5, 20000.0),
+            self._intvty_pts("optimized", 24.0, 21000.0),
+            metric_key=graded_metric_key(benchmark_mode="agentx"),
+        )
+        assert summary["metric"] == "e2e_norm_intvty_p90"
+
+    def test_synthetic_stays_on_output_throughput(self):
+        _comparison, summary = _build_comparison(
+            self._pts("baseline", 100.0, 20000.0),
+            self._pts("optimized", 130.0, 26000.0),
+            metric_key=graded_metric_key(benchmark_mode=""),
+        )
+        assert summary["metric"] == "output_throughput"
+        assert summary["best_speedup"] == pytest.approx(1.3)
+
+    def test_the_key_follows_the_mode(self):
+        assert graded_metric_key(benchmark_mode="agentx") == "e2e_norm_intvty_p90"
+        assert graded_metric_key(benchmark_mode="AgentX") == "e2e_norm_intvty_p90"
+        assert graded_metric_key(benchmark_mode="synthetic") == "output_throughput"
+        assert graded_metric_key(benchmark_mode="") == "output_throughput"
+
+    def test_an_explicit_grading_override_wins_over_the_mode(self, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+        assert graded_metric_key(benchmark_mode="agentx") == "output_throughput"
+        from hyperloom.common.perf_metric import INTVTY_V1
+
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", INTVTY_V1)
+        assert graded_metric_key(benchmark_mode="synthetic") == "e2e_norm_intvty_p90"
+
+    def test_the_ambient_agentx_signal_reaches_the_summary(self, monkeypatch):
+        """A session whose mode never persisted still grades on the interactivity axis."""
+        monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+        assert graded_metric_key(benchmark_mode="") == "e2e_norm_intvty_p90"
+
+
+class TestTheSweepGradesOnTheAxisTheSessionKeepsOn:
+    """A curve drawn on one axis beside promotions decided on another is two answers to one question."""
+
+    @pytest.fixture(autouse=True)
+    def _no_ambient_grading(self, monkeypatch):
+        for name in ("HYPERLOOM_PERF_METRIC", "HYPERLOOM_PERF_NOISE_PCT", "HYPERLOOM_AGENTX"):
+            monkeypatch.delenv(name, raising=False)
+
+    def _state(self, **fields: Any) -> SharedState:
+        state = SharedState()
+        for key, value in fields.items():
+            setattr(state, key, value)
+        return state
+
+    def test_the_recorded_axis_beats_the_environment(self, monkeypatch):
+        """A resume is a new process, and the shell it landed in is not evidence about the axis."""
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+        state = self._state(benchmark_mode="agentx", grading={"objective": "e2e_norm_intvty_p90", "noise_pct": 3.5})
+        assert _grading_of(state) == ("e2e_norm_intvty_p90", 3.5)
+
+    def test_the_recorded_band_travels_with_the_axis(self):
+        """A lost band silently widens a 3.5% guard back to the 5% default."""
+        state = self._state(benchmark_mode="agentx", grading={"objective": "e2e_norm_intvty_p90", "noise_pct": 3.5})
+        assert _grading_of(state)[1] == 3.5
+
+    def test_a_session_with_nothing_recorded_falls_back_to_its_mode(self):
+        assert _grading_of(self._state(benchmark_mode="agentx"))[0] == "e2e_norm_intvty_p90"
+        assert _grading_of(self._state(benchmark_mode="synthetic"))[0] == "output_throughput"
+
+    def test_a_scriptable_framework_is_carved_out(self):
+        """An image framework reports no interactivity axis, so ranking every rung on it fails the whole sweep."""
+        state = self._state(benchmark_mode="agentx", framework="xdit")
+        assert _grading_of(state)[0] == "output_throughput"
+
+
+class TestTheGuardAxisIsReportedNotEnforced:
+    """A sweep exists to draw the frontier, so a rung that moved along it is a result and not a failure."""
+
+    def _pts(self, arm: str, *, intvty: float, total: float) -> list[dict[str, Any]]:
+        return [
+            {
+                "arm": arm,
+                "conc": 8,
+                "status": "succeeded",
+                "e2e_norm_intvty_p90": intvty,
+                "total_token_throughput": total,
+            }
+        ]
+
+    def test_a_rung_that_bought_interactivity_with_throughput_still_pairs(self):
+        """It ranks on the objective it gained on, and carries the throughput it gave up beside it."""
+        comparison, summary = _build_comparison(
+            self._pts("baseline", intvty=20.0, total=20000.0),
+            self._pts("optimized", intvty=30.0, total=10000.0),
+            metric_key="e2e_norm_intvty_p90",
+        )
+        row = comparison[0]
+        assert row["speedup"] == pytest.approx(1.5)
+        assert summary["successful_pairs"] == 1
+        assert summary["best_conc"] == 8
+        # Halving throughput is far outside any band, and that is visible without having dropped the rung.
+        assert row["guard_holds"] is False
+        assert summary["best_conc_guard_holds"] is False
+        assert row["baseline_guard"] == 20000.0
+        assert row["optimized_guard"] == 10000.0
+
+    def test_a_rung_that_held_throughput_says_so(self):
+        comparison, summary = _build_comparison(
+            self._pts("baseline", intvty=20.0, total=20000.0),
+            self._pts("optimized", intvty=24.0, total=19800.0),
+            metric_key="e2e_norm_intvty_p90",
+        )
+        assert comparison[0]["guard_holds"] is True
+        assert summary["guard_axis"] == "total_throughput"
+
+    def test_the_recorded_band_decides_the_verdict(self):
+        """The same pair holds under the default band and fails under a tighter one."""
+        arms = (
+            self._pts("baseline", intvty=20.0, total=20000.0),
+            self._pts("optimized", intvty=24.0, total=19200.0),
+        )
+        assert _build_comparison(*arms, metric_key="e2e_norm_intvty_p90")[0][0]["guard_holds"] is True
+        tight, _ = _build_comparison(*arms, metric_key="e2e_norm_intvty_p90", guard_noise_pct=1.0)
+        assert tight[0]["guard_holds"] is False
+
+    def test_the_output_objective_has_no_second_axis_to_hold(self):
+        comparison, summary = _build_comparison(
+            [{"arm": "baseline", "conc": 8, "status": "succeeded", "output_throughput": 100.0}],
+            [{"arm": "optimized", "conc": 8, "status": "succeeded", "output_throughput": 130.0}],
+            metric_key="output_throughput",
+        )
+        assert summary["guard_axis"] == ""
+        assert summary["best_conc_guard_holds"] is None
+        assert comparison[0]["guard_holds"] is None
+
+    def test_an_unmeasured_guard_axis_is_null_not_a_failure(self):
+        """Null says the axis was never measured; False would say it was, and fell outside."""
+        comparison, _summary = _build_comparison(
+            [{"arm": "baseline", "conc": 8, "status": "succeeded", "e2e_norm_intvty_p90": 20.0}],
+            [{"arm": "optimized", "conc": 8, "status": "succeeded", "e2e_norm_intvty_p90": 30.0}],
+            metric_key="e2e_norm_intvty_p90",
+        )
+        assert comparison[0]["guard_holds"] is None
+        assert comparison[0]["baseline_guard"] is None
+
+
+class TestAnUnreportedTotalComesFromItsHalves:
+    """A row graded on the total axis must not read as unmeasured."""
+
+    def _variant(self, **kw: Any) -> VariantResult:
+        return VariantResult(
+            name="baseline_c8", extra_server_args="", extra_envs={"CONC": "8"}, status="succeeded", **kw
+        )
+
+    def test_the_halves_sum_when_the_parser_named_no_total(self):
+        point = _point_from_variant(
+            self._variant(input_throughput=24000.0, output_throughput=180.0),
+            arm="baseline",
+        )
+        assert point["total_token_throughput"] == pytest.approx(24180.0)
+
+    def test_a_reported_total_is_not_recomputed(self):
+        point = _point_from_variant(
+            self._variant(input_throughput=1.0, output_throughput=1.0, total_token_throughput=25984.8),
+            arm="baseline",
+        )
+        assert point["total_token_throughput"] == pytest.approx(25984.8)
+
+    def test_a_missing_half_leaves_the_total_unmeasured(self):
+        point = _point_from_variant(self._variant(output_throughput=180.0), arm="baseline")
+        assert point["total_token_throughput"] is None
+
+
+# --- the chart's data contract ---
+
+
+class TestTheCurveCarriesBothAxisPairs:
+    """A point has to carry whichever pair its mode is plotted on."""
+
+    def _variant(self, **kw: Any) -> VariantResult:
+        base: dict[str, Any] = {
+            "name": "optimized_conc8",
+            "extra_server_args": "",
+            "extra_envs": {"CONC": "8"},
+            "status": "succeeded",
+        }
+        base.update(kw)
+        return VariantResult(**base)
+
+    def test_the_agentic_pair_reaches_the_point(self):
+        point = _point_from_variant(
+            self._variant(
+                output_throughput=183.44,
+                total_token_throughput=25984.8,
+                input_throughput=25801.36,
+                intvty_p90=447.2,  # VariantResult field name
+                tpot_p90_ms=2.4,
+            ),
+            arm="optimized",
+        )
+        assert point["total_token_throughput"] == pytest.approx(25984.8)
+        # _point_from_variant maps VariantResult.intvty_p90 -> e2e_norm_intvty_p90 dict key
+        assert point["e2e_norm_intvty_p90"] == pytest.approx(447.2)
+        assert point["input_throughput"] == pytest.approx(25801.36)
+        assert point["tpot_p90_ms"] == pytest.approx(2.4)
+
+    def test_the_synthetic_pair_is_unaffected(self):
+        point = _point_from_variant(
+            self._variant(output_throughput=1200.0, e2el_mean_ms=850.0),
+            arm="baseline",
+        )
+        assert point["output_throughput"] == pytest.approx(1200.0)
+        assert point["e2el_mean_ms"] == pytest.approx(850.0)
+        assert point["e2e_norm_intvty_p90"] is None
+
+    def test_the_csv_carries_the_agentic_axes_too(self, session_dir: Path):
+        """The CSV is the download button; it has to draw the same chart."""
+        rdir = session_dir / "reports"
+        rdir.mkdir(parents=True, exist_ok=True)
+        json_path = rdir / "conc_sweep_summary.json"
+        csv_path = rdir / "conc_sweep_raw.csv"
+        point = _point_from_variant(
+            self._variant(total_token_throughput=25984.8, intvty_p90=447.2),
+            arm="optimized",
+        )
+        _flush_conc_sweep_report(
+            {
+                "schema_version": "1.0",
+                "status": "succeeded",
+                "report_json_path": str(json_path),
+                "report_csv_path": str(csv_path),
+                "baseline": {"points": []},
+                "optimized": {"points": [point]},
+            },
+            session_dir,
+        )
+        row = next(iter(csv.DictReader(csv_path.open())))
+        assert row["e2e_norm_intvty_p90"] == "447.2"
+        assert row["total_token_throughput"] == "25984.8"
+
+
 def test_flush_conc_sweep_report_is_atomic(session_dir: Path, monkeypatch: pytest.MonkeyPatch):
     """_flush_conc_sweep_report silently catches IO errors."""
     rdir = session_dir / "reports"
@@ -1266,43 +1680,106 @@ def test_flush_conc_sweep_report_is_atomic(session_dir: Path, monkeypatch: pytes
     _flush_conc_sweep_report(payload, session_dir)  # must not raise
 
 
-def test_flush_partial_conc_sweep_report_marks_in_progress(session_dir: Path):
-    """_flush_partial_conc_sweep_report writes status=in_progress."""
-    rdir = session_dir / "reports"
-    rdir.mkdir(parents=True, exist_ok=True)
-    json_path = rdir / "conc_sweep_summary.json"
-    csv_path = rdir / "conc_sweep_raw.csv"
-    state = _make_state()
-    result = _fake_variant(
-        "baseline_conc4", throughput=100.0, envs={"CONC": "4", "ISL": "512", "OSL": "512", "NUM_PROMPTS": "20"}
-    )
-    _flush_partial_conc_sweep_report(
-        results=[result],
-        state=state,
-        session_dir=session_dir,
-        json_path=json_path,
-        csv_path=csv_path,
-        concs=[4, 8],
-        isl=512,
-        osl=512,
-        opt_args="--x",
-        opt_envs={},
-        workspace=session_dir / "ws",
-        started_at=0.0,
-        total_budget_sec=9000,
-        has_budget=True,
-        budget_exhausted=False,
-        budget_skip_reason="",
-        budget_remaining_sec=None,
-        partial=True,
-    )
-    assert json_path.exists()
-    loaded = json.loads(json_path.read_text())
-    assert loaded["status"] == "in_progress"
+def _record_summary_writes(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Capture ``conc_sweep_summary.json`` as it stands on disk after every write."""
+    writes: list[dict[str, Any]] = []
+    real_flush = conc_sweep_module._flush_conc_sweep_report
+
+    def _flush(payload: dict[str, Any], session_dir: Path) -> Exception | None:
+        error = real_flush(payload, session_dir)
+        writes.append(json.loads(Path(payload["report_json_path"]).read_text()))
+        return error
+
+    monkeypatch.setattr(conc_sweep_module, "_flush_conc_sweep_report", _flush)
+    return writes
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Change 3: plotting
+_END_ONLY_FIELDS = {"roofline_ceiling", "was_skipped", "skip_reason"}
+
+
+def test_mid_sweep_summary_is_the_final_report_in_progress(
+    session_dir: Path, baseline_yaml: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Every write between rungs carries the final report's fields, for the rungs measured so far."""
+    writes = _record_summary_writes(monkeypatch)
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], total_budget_sec=9000))
+
+    *progress, final = writes
+    assert [write["status"] for write in progress] == ["in_progress"] * 4
+    assert final["status"] == "succeeded"
+    assert [[p["conc"] for p in write["optimized"]["points"]] for write in progress] == [
+        [16],
+        [4, 16],
+        [4, 16],
+        [4, 16],
+    ]
+    assert [[p["conc"] for p in write["baseline"]["points"]] for write in progress] == [[], [], [16], [4, 16]]
+    varying = {"status", "comparison", "summary", "elapsed_sec", "baseline", "optimized"}
+    for write in progress:
+        assert set(write) == set(final) - _END_ONLY_FIELDS
+        assert {k: v for k, v in write.items() if k not in varying} == {
+            k: v for k, v in final.items() if k not in varying | _END_ONLY_FIELDS
+        }
+    assert progress[-1]["comparison"] == final["comparison"]
+    assert final == json.loads(json.dumps(payload))
+
+
+def test_mid_sweep_summary_keeps_the_requested_conc_order(
+    session_dir: Path, baseline_yaml: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """``concs_requested`` is the caller's ladder in every write, not the order the sweep visits it in."""
+    writes = _record_summary_writes(monkeypatch)
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 8, 4]))
+
+    assert len(writes) > 1
+    assert [write["concs_requested"] for write in writes] == [[1, 8, 4]] * len(writes)
+
+
+def test_mid_sweep_summary_writes_the_remaining_budget_as_the_final_report_does(
+    session_dir: Path, baseline_yaml: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Once the budget stops the sweep, every later write names the same remaining seconds."""
+    writes = _record_summary_writes(monkeypatch)
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        stopped = _fake_variant(grid[0].name, throughput=None, status="skipped", envs=grid[0].extra_envs)
+        stopped.error_class = "budget_exhausted"
+        return [stopped]
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], total_budget_sec=9000))
+
+    *progress, final = writes
+    assert progress and all(write["budget_exhausted"] for write in progress)
+    assert final["budget_skip_reason"] == "insufficient_remaining_for_variant"
+    assert 0.0 < final["budget_remaining_sec"] <= 9000.0
+    assert [write["budget_remaining_sec"] for write in progress] == [final["budget_remaining_sec"]] * len(progress)
+    assert payload["budget_remaining_sec"] == final["budget_remaining_sec"]
+
+
+# ───────────────────────────────────────────────────────────────────────────── Change 3: plotting
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1363,6 +1840,140 @@ def test_render_conc_sweep_curve_from_file(tmp_path: Path):
     assert result.exists()
 
 
+class TestTheChartFollowsTheGradedAxis:
+    """The chart has to show the ranking the session was scored by."""
+
+    def _payload(self, mode: str, metric: str) -> dict[str, Any]:
+        return {
+            "benchmark_mode": mode,
+            "summary": {"metric": metric},
+            "baseline": {
+                "points": [
+                    {
+                        "conc": 8,
+                        "output_throughput": 183.44,
+                        "total_token_throughput": 25984.8,
+                        "e2e_norm_intvty_p90": 447.2,
+                    }
+                ]
+            },
+            "optimized": {"points": []},
+        }
+
+    def test_the_total_axis_reads_interactivity_and_total(self):
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        axes = plot._axes_for_metric("total_token_throughput", tp_eff=8.0)
+        xs, ys = plot._arm_series(self._payload("agentx", "total_token_throughput")["baseline"]["points"], 8.0, axes)
+        assert xs == [pytest.approx(447.2)]
+        assert ys == [pytest.approx(25984.8 / 8.0)]
+        assert "P90 Interactivity" in axes.x_label
+        assert "per Chip" in axes.y_label
+
+    def test_the_output_axis_keeps_the_output_pair(self):
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        axes = plot._axes_for_metric("output_throughput", tp_eff=8.0)
+        xs, ys = plot._arm_series(self._payload("synthetic", "output_throughput")["baseline"]["points"], 8.0, axes)
+        assert xs == [pytest.approx(183.44 / 8)]
+        assert ys == [pytest.approx(183.44 / 8.0)]
+
+    def test_a_summary_naming_no_metric_reads_as_the_comparison_default(self):
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        assert plot._graded_metric_of({}) == "output_throughput"
+        assert plot._graded_metric_of({"summary": {"metric": ""}}) == "output_throughput"
+        assert plot._graded_metric_of({"summary": {"metric": "total_token_throughput"}}) == "total_token_throughput"
+
+    @pytest.mark.parametrize(
+        ("mode", "env"),
+        [
+            ("agentx", {}),
+            ("synthetic", {}),
+            ("agentx", {"HYPERLOOM_PERF_METRIC": "output_throughput"}),
+            ("synthetic", {"HYPERLOOM_PERF_METRIC": "intvty_v1"}),
+            ("", {"HYPERLOOM_AGENTX": "1"}),
+        ],
+    )
+    def test_the_chart_plots_the_field_the_summary_graded(self, monkeypatch, mode: str, env: dict[str, str]):
+        """Binds both sides: whichever way the session resolved its axis, the curve reads the same point field the summary took its speedups on."""
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+        monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+
+        metric = graded_metric_key(benchmark_mode=mode)
+        payload = self._payload(mode, metric)
+        chart_metric = plot._graded_metric_of(payload)
+        axes = plot._axes_for_metric(chart_metric, tp_eff=8.0)
+        _xs, ys = plot._arm_series(payload["baseline"]["points"], 8.0, axes)
+
+        # AgentX chart: x = interactivity, y = total_token_throughput / tp.
+        # Synthetic chart: x = output_throughput / conc, y = output_throughput / tp.
+        from hyperloom.common.perf_metric import GRADED_OUTPUT
+
+        if chart_metric != GRADED_OUTPUT:
+            # AgentX: y is total throughput per chip
+            assert ys == [pytest.approx(25984.8 / 8.0)]
+        else:
+            # Synthetic: y is output throughput per TP
+            assert ys == [pytest.approx(183.44 / 8.0)]
+
+    def test_a_rung_missing_its_axis_is_dropped_not_zeroed(self):
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        axes = plot._axes_for_metric("total_token_throughput", tp_eff=1.0)
+        points = [
+            {"conc": 8, "total_token_throughput": 25984.8},
+            {"conc": 4, "total_token_throughput": 20000.0, "e2e_norm_intvty_p90": 500.0},
+        ]
+        xs, ys = plot._arm_series(points, 1.0, axes)
+        assert xs == [pytest.approx(500.0)]
+        assert ys == [pytest.approx(20000.0)]
+
+
+class TestTheRooflineNeedsBothItsAxisAndARealShape:
+    """``_ceiling_series`` returns a decode-only output-throughput bound, in the output pair's units, computed from the session's ISL/OSL."""
+
+    def _payload(self, mode: str, metric: str) -> dict[str, Any]:
+        return {
+            "benchmark_mode": mode,
+            "summary": {"metric": metric},
+            "roofline_ceiling": {"rows": [{"conc": 8, "t_peak_tok_s": 4000.0}]},
+            "baseline": {
+                "points": [
+                    {
+                        "conc": 8,
+                        "output_throughput": 183.44,
+                        "total_token_throughput": 25984.8,
+                        "e2e_norm_intvty_p90": 447.2,
+                    }
+                ]
+            },
+            "optimized": {"points": []},
+        }
+
+    def _drew_it(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]) -> bool:
+        from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+
+        calls = _install_fake_matplotlib(monkeypatch)
+        out_path = tmp_path / "curve.png"
+        assert render_conc_sweep_curve(payload, out_path, tp=8, draw_ceiling=True) == out_path
+        return any("roofline" in str(kwargs.get("label", "")).lower() for _args, kwargs in calls["plots"])
+
+    def test_a_synthetic_output_chart_draws_it(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """Positive control: without it the two denials below prove nothing."""
+        assert self._drew_it(tmp_path, monkeypatch, self._payload("synthetic", "output_throughput")) is True
+
+    def test_a_total_y_axis_is_not_the_bounds_axis(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        assert self._drew_it(tmp_path, monkeypatch, self._payload("synthetic", "total_token_throughput")) is False
+
+    def test_an_agentic_replay_has_no_real_isl_to_bound(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        assert self._drew_it(tmp_path, monkeypatch, self._payload("agentx", "output_throughput")) is False
+
+
 def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1393,20 +2004,21 @@ def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
 def test_conc_sweep_plot_series_helpers_filter_and_sort_points():
     from hyperloom.orchestrator.kernel import conc_sweep_plot
 
+    axes = conc_sweep_plot._axes_for_metric("output_throughput", 2.0)
     xs, ys = conc_sweep_plot._arm_series(
         [
             {"conc": 4, "output_throughput": 800.0},
-            {"conc": 2, "output_throughput": "300"},
+            {"conc": 2, "output_throughput": 300.0},
             {"conc": 0, "output_throughput": 1000.0},
             {"conc": 1, "output_throughput": None},
-            {"conc": "bad", "output_throughput": 10},
             {"conc": 8, "output_throughput": -1},
         ],
-        tp_eff=2.0,
+        2.0,
+        axes,
     )
     assert xs == [150.0, 200.0]
     assert ys == [150.0, 400.0]
-    assert conc_sweep_plot._arm_series([{"conc": 0, "output_throughput": 0}], 1.0) == ([], [])
+    assert conc_sweep_plot._arm_series([{"conc": 0, "output_throughput": 0}], 1.0, axes) == ([], [])
 
     cx, cy = conc_sweep_plot._ceiling_series(
         {
@@ -1425,9 +2037,8 @@ def test_conc_sweep_plot_series_helpers_filter_and_sort_points():
     assert conc_sweep_plot._ceiling_series({"rows": [{"conc": 0, "t_peak_tok_s": 0}]}, 1.0) == ([], [])
 
 
-def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
-
+def _install_fake_matplotlib(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Render through a stand-in pyplot and return what the chart asked it to do."""
     calls: dict[str, Any] = {"plots": [], "annotations": [], "labels": [], "titles": [], "closed": False}
 
     class _FakePatch:
@@ -1495,7 +2106,13 @@ def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatc
     fake_matplotlib.pyplot = fake_pyplot
     monkeypatch.setitem(sys.modules, "matplotlib", fake_matplotlib)
     monkeypatch.setitem(sys.modules, "matplotlib.pyplot", fake_pyplot)
+    return calls
 
+
+def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+
+    calls = _install_fake_matplotlib(monkeypatch)
     payload = {
         "baseline": {"points": [{"conc": 4, "output_throughput": 800.0}]},
         "optimized": {"points": [{"conc": 8, "output_throughput": 1200.0}]},
@@ -1533,16 +2150,14 @@ def test_format_conc_sweep_curve_section_with_png():
 
     lines = _format_conc_sweep_curve_section({"conc_sweep_curve_png": "reports/conc_sweep_curve.png"})
     embed = next(line for line in lines if line.startswith("!["))
-    # final.md lives in reports/, so the embed must use the basename, not the
-    # session-root-relative "reports/conc_sweep_curve.png" (which would resolve
-    # to reports/reports/... and 404).
+    # final.md lives in reports/, so the embed must use the basename, not the session-root-relative
+    # "reports/conc_sweep_curve.png" (which would resolve to reports/reports/... and 404).
     assert embed == "![Concurrency sweep curve](conc_sweep_curve.png)"
     assert "reports/conc_sweep_curve.png" not in embed
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Change 1: single-server Option A boot/reuse path (lifecycle-eligible)
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Change 1: single-server Option A
+# boot/reuse path (lifecycle-eligible) ─────────────────────────────────────────────────────────────────────────────
 
 
 def _patch_lifecycle_eligible(monkeypatch: pytest.MonkeyPatch, teardown_log: list[tuple]):
@@ -1577,7 +2192,6 @@ def test_single_server_option_a_boot_and_reuse(
                 "name": grid[0].name,
                 "server_lifecycle": kw.get("server_lifecycle"),
                 "server_already_ready": kw.get("server_already_ready"),
-                "preclean_before_run": kw.get("preclean_before_run"),
             }
         )
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
@@ -1600,17 +2214,67 @@ def test_single_server_option_a_boot_and_reuse(
     assert boot["name"] == "optimized_conc64", f"boot should be highest conc; got {boot['name']}"
     assert boot["server_already_ready"] is False
     assert boot["server_lifecycle"]["cleanup"] is False
-    assert boot["preclean_before_run"] is True
 
     # Middle reuse round: server_already_ready=True, cleanup=False.
     mid = opt_calls[1]
     assert mid["server_already_ready"] is True
     assert mid["server_lifecycle"]["cleanup"] is False
-    assert mid["preclean_before_run"] is False
 
     # Last reuse round: cleanup=True.
     last = opt_calls[-1]
     assert last["server_lifecycle"]["cleanup"] is True
+
+
+def test_single_server_boot_only_is_measured_by_reuse_round(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Booting the persistent server is not a data point; the same CONC must still run as a client round."""
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    teardown_log: list[tuple] = []
+    _patch_lifecycle_eligible(monkeypatch, teardown_log)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
+    )
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
+        variant = grid[0]
+        calls.append(
+            {
+                "name": variant.name,
+                "server_lifecycle": kw.get("server_lifecycle"),
+                "server_already_ready": kw.get("server_already_ready"),
+                "base_extra_envs": kw.get("base_extra_envs") or {},
+            }
+        )
+        if kw.get("server_lifecycle") and kw.get("server_already_ready") is False:
+            booted = _fake_variant(
+                variant.name,
+                throughput=None,
+                envs=variant.extra_envs,
+                status="succeeded",
+                error=None,
+            )
+            booted.note = "server_lifecycle_boot_only"
+            return [booted]
+        return [_fake_variant(variant.name, throughput=100.0, envs=variant.extra_envs)]
+
+    monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.run_grid", _fake_run_grid)
+
+    payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[32, 16]))
+
+    assert [call["name"] for call in calls[:3]] == [
+        "optimized_conc32",
+        "optimized_conc32",
+        "optimized_conc16",
+    ]
+    boot, measured_boot = calls[0], calls[1]
+    assert boot["server_already_ready"] is False
+    assert boot["base_extra_envs"] == {"MAGPIE_RUN_PHASE": "server"}
+    assert measured_boot["server_already_ready"] is True
+    assert payload["summary"]["successful_pairs"] == 2
 
 
 def test_single_server_boot_retry_descend(
@@ -1771,46 +2435,9 @@ def test_single_server_reuse_exception_recorded_as_failed(
     failed = [p for p in all_points if p["status"] == "failed"]
     # Each arm: boot(conc16) ok, reuse(conc4) raises → at least 2 failed points.
     assert len(failed) >= 2
-    assert any((p.get("error_class") or "").startswith("single_server_reuse") for p in failed)
-
-
-def test_single_server_reuse_loop_budget_exhausted(
-    session_dir: Path,
-    baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Task budget exhausted mid-arm skips remaining reuse points."""
-    teardown_log: list[tuple] = []
-    _patch_lifecycle_eligible(monkeypatch, teardown_log)
-
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
-        import time as _t
-
-        # Boot round consumes the whole budget so reuse points get skipped.
-        if kw.get("server_already_ready") is False:
-            _t.sleep(1.2)
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
-    ):
-        payload = asyncio.run(
-            run_conc_sweep(
-                state,
-                session_dir,
-                concs=[4, 16, 64],
-                variant_timeout_sec=1,
-                total_budget_sec=2,
-            )
-        )
-
-    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    skipped = [p for p in all_points if p["status"] == "skipped"]
-    assert len(skipped) > 0
-    assert payload["budget_exhausted"] is True
+    # The exception's own type survives; the round it broke in is the message.
+    assert any(p.get("error_class") == "RuntimeError" for p in failed)
+    assert any((p.get("error") or "").startswith("single_server_reuse: ") for p in failed)
 
 
 def test_single_server_boot_exception_falls_back(
@@ -1841,7 +2468,8 @@ def test_single_server_boot_exception_falls_back(
     # conc64 boot exception → recorded as failed; conc16 boots and succeeds.
     failed = [p for p in all_points if p["status"] == "failed" and p["conc"] == 64]
     assert len(failed) >= 1
-    assert any((p.get("error_class") or "").startswith("single_server_boot") for p in failed)
+    assert any(p.get("error_class") == "RuntimeError" for p in failed)
+    assert any((p.get("error") or "").startswith("single_server_boot: ") for p in failed)
 
 
 def test_single_server_pre_arm_skip_on_closing_phase(

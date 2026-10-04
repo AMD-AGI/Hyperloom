@@ -1,0 +1,390 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+from __future__ import annotations
+
+import pytest
+
+from hyperloom.common.env import EnvValueError
+from hyperloom.common.gain_math import gain_pct
+from hyperloom.common.perf_metric import (
+    GRADED_INTVTY,
+    GRADED_TOTAL,
+    INTVTY_V1,
+    agentx_enabled,
+    holds_within_band,
+    intvty_grading_enabled,
+    intvty_of,
+    intvty_serving_grading_enabled,
+    output_tput_of,
+    parse_intvty_noise_pct,
+    perf_snapshot_from_mapping,
+    resolve_grading_anchor_perf,
+    total_tput_of,
+)
+
+_KEEP_THRESHOLD_PCT = 1.0
+
+# Shaped like a measured AgentX round: prefill dominates the token budget (~114k prompt / ~806 output tokens), so
+# total is essentially input. e2e_norm_intvty_p90 is the slow tail, P10 of per-request OSL/E2EL_s; the p50 is the
+# median of the same rate and runs well above it on this heavy-tailed corpus.
+_BASELINE = {
+    "input_throughput": 25801.36,
+    "output_throughput": 183.44,
+    "total_throughput": 25984.80,
+    "e2e_norm_intvty_p90": 22.56,  # realistic Kimi-K3 p10 value
+    "e2e_norm_intvty_p50": 56.55,
+}
+
+
+def _measured(**pct: float) -> dict[str, float]:
+    """Baseline with named axes scaled; total re-derived on demand."""
+    out = {k: v for k, v in _BASELINE.items() if k != "total_throughput"}
+    for axis, delta in pct.items():
+        out[axis] = _BASELINE[axis] * (1.0 + delta / 100.0)
+    return out
+
+
+def _graded_gain(candidate: dict[str, float], anchor: dict[str, float]) -> float | None:
+    """Compose the primitives the way the decision round does."""
+    cand = perf_snapshot_from_mapping(candidate)
+    base = perf_snapshot_from_mapping(anchor)
+    assert cand and base
+    if not holds_within_band(cand, base, GRADED_INTVTY):
+        return None
+    return gain_pct(intvty_of(cand), intvty_of(base))
+
+
+@pytest.mark.parametrize(
+    "mode,env,expected",
+    [
+        ("", "", False),
+        ("synthetic", "0", False),
+        ("agentx", "0", True),
+        (" AgentX ", "", True),
+        ("synthetic", "true", True),
+        (None, "1", True),
+    ],
+)
+def test_agentx_active_uses_workload_identity_not_grading_override(monkeypatch, mode, env, expected):
+    from hyperloom.common.perf_metric import agentx_active
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", env)
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    assert agentx_active(benchmark_mode=mode) is expected
+
+
+def test_snapshot_carries_both_graded_axes():
+    snap = perf_snapshot_from_mapping(_BASELINE)
+    assert snap is not None
+    assert snap["e2e_norm_intvty_p90"] == pytest.approx(_BASELINE["e2e_norm_intvty_p90"])
+    assert snap["total_throughput"] == pytest.approx(_BASELINE["total_throughput"])
+
+
+def test_intvty_of_reads_slow_tail_field():
+    snap = perf_snapshot_from_mapping(_BASELINE)
+    assert snap is not None
+    assert intvty_of(snap) == pytest.approx(_BASELINE["e2e_norm_intvty_p90"])
+
+
+def test_total_falls_back_to_input_plus_output():
+    data = {k: v for k, v in _BASELINE.items() if k != "total_throughput"}
+    snap = perf_snapshot_from_mapping(data)
+    assert snap is not None
+    assert total_tput_of(snap) == pytest.approx(_BASELINE["input_throughput"] + _BASELINE["output_throughput"])
+
+
+def test_snapshot_requires_both_graded_axes():
+    # Missing e2e_norm_intvty_p90 -> None
+    assert perf_snapshot_from_mapping({"output_throughput": 1.0, "total_throughput": 100.0}) is None
+    assert perf_snapshot_from_mapping({"e2e_norm_intvty_p90": 22.56}) is None
+    assert perf_snapshot_from_mapping(None) is None
+
+
+def test_degenerate_axis_is_not_a_snapshot():
+    assert perf_snapshot_from_mapping({**_BASELINE, "e2e_norm_intvty_p90": 0.0}) is None
+    # total absent and cannot be derived
+    assert perf_snapshot_from_mapping({"e2e_norm_intvty_p90": 22.56, "output_throughput": 183.44}) is None
+
+
+def test_unusable_total_falls_back_to_input_plus_output():
+    for bad in (0.0, -1.0, None, "n/a"):
+        snap = perf_snapshot_from_mapping({**_BASELINE, "total_throughput": bad})
+        assert snap is not None
+        assert total_tput_of(snap) == pytest.approx(_BASELINE["input_throughput"] + _BASELINE["output_throughput"])
+
+
+def test_intvty_lift_is_keepable():
+    """A +3% interactivity improvement is above the 2% AgentX floor."""
+    candidate = _measured(e2e_norm_intvty_p90=3.0, input_throughput=0.0, output_throughput=0.0)
+    gain = _graded_gain(candidate, _BASELINE)
+    assert gain is not None and gain >= 2.0
+
+
+def test_sub_threshold_lift_is_a_gain_but_below_floor():
+    candidate = _measured(e2e_norm_intvty_p90=1.0, input_throughput=0.5, output_throughput=0.5)
+    gain = _graded_gain(candidate, _BASELINE)
+    assert gain is not None and 0.0 < gain < 2.0
+
+
+def test_trading_input_for_output_with_intvty_unchanged_is_neutral():
+    """Interactivity unchanged: gain == 0, not a loss."""
+    candidate = _measured(input_throughput=-10.0, output_throughput=8.0)
+    gain = _graded_gain(candidate, _BASELINE)
+    assert gain is not None and gain == pytest.approx(0.0)
+
+
+def test_intvty_gate_vetoes_regression_past_band():
+    candidate = perf_snapshot_from_mapping(_measured(e2e_norm_intvty_p90=-6.0))
+    anchor = perf_snapshot_from_mapping(_BASELINE)
+    assert candidate and anchor
+    assert holds_within_band(candidate, anchor, GRADED_INTVTY) is False
+
+
+def test_intvty_gate_allows_movement_within_band():
+    candidate = perf_snapshot_from_mapping(_measured(e2e_norm_intvty_p90=-4.0))
+    anchor = perf_snapshot_from_mapping(_BASELINE)
+    assert candidate and anchor
+    assert holds_within_band(candidate, anchor, GRADED_INTVTY) is True
+
+
+def test_tput_guard_allows_within_band():
+    cand = perf_snapshot_from_mapping({**_BASELINE, "total_throughput": _BASELINE["total_throughput"] * 0.97})
+    anch = perf_snapshot_from_mapping(_BASELINE)
+    assert cand and anch
+    assert holds_within_band(cand, anch, GRADED_TOTAL) is True
+
+
+def test_tput_guard_rejects_regression_past_band():
+    cand = perf_snapshot_from_mapping({**_BASELINE, "total_throughput": _BASELINE["total_throughput"] * 0.90})
+    anch = perf_snapshot_from_mapping(_BASELINE)
+    assert cand and anch
+    assert holds_within_band(cand, anch, GRADED_TOTAL) is False
+
+
+def test_vetoed_candidate_is_never_graded():
+    candidate = _measured(e2e_norm_intvty_p90=-20.0, input_throughput=50.0)
+    assert _graded_gain(candidate, _BASELINE) is None
+
+
+def test_default_band_matches_upstream_measured_noise(monkeypatch):
+    """Upstream records run-to-run noise on this workload as 1-5%."""
+    monkeypatch.delenv("HYPERLOOM_PERF_NOISE_PCT", raising=False)
+    assert parse_intvty_noise_pct() == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize("raw,expected", [("2.5", 2.5), ("0", 0.0), ("", 5.0)])
+def test_band_env_override(monkeypatch, raw, expected):
+    monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", raw)
+    assert parse_intvty_noise_pct() == pytest.approx(expected)
+
+
+def test_a_band_with_a_unit_on_it_does_not_grade_against_the_default(monkeypatch):
+    """The band decides KEEP vs REVERT, so a value nobody can read must not become 5%."""
+    monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5%")
+    with pytest.raises(EnvValueError, match="HYPERLOOM_PERF_NOISE_PCT"):
+        parse_intvty_noise_pct()
+
+
+def test_an_agentx_run_grades_on_total_without_being_asked(monkeypatch):
+    """The corpus this grading exists for must not need an opt-in to get it."""
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    assert intvty_grading_enabled() is True
+
+
+def test_a_synthetic_run_still_grades_on_output(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    assert intvty_grading_enabled() is False
+
+
+def test_an_explicit_metric_overrides_the_agentx_default(monkeypatch):
+    """The escape hatch has to work in both directions."""
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    assert intvty_grading_enabled() is False
+
+
+def test_an_explicit_metric_still_opts_a_synthetic_run_in(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", INTVTY_V1)
+    assert intvty_grading_enabled() is True
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "no", "off", ""])
+def test_agentx_off_tokens_do_not_enable_grading(monkeypatch, raw):
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", raw)
+    assert intvty_grading_enabled() is False
+
+
+def test_an_unreadable_agentx_value_is_not_silently_off(monkeypatch):
+    """Grading the wrong metric for a whole run is worse than refusing to start."""
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "nonsense")
+    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
+        intvty_grading_enabled()
+
+
+def test_the_wrapper_reader_answers_by_the_same_rule_as_the_grader(monkeypatch):
+    """One variable, one vocabulary: this is the reader the workload and server-args paths ask."""
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "off")
+    assert agentx_enabled() is False
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "nonsense")
+    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
+        agentx_enabled()
+
+
+def test_a_grid_variant_env_is_read_by_the_same_rule(monkeypatch):
+    """A variant's environment is built before it exists as a process, so it arrives as a mapping."""
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    assert agentx_enabled({"HYPERLOOM_AGENTX": "1"}) is True
+    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
+        agentx_enabled({"HYPERLOOM_AGENTX": "ture"})
+
+
+# --- the persisted marker ---
+
+
+def test_the_persisted_benchmark_mode_enables_grading_without_the_env_var(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    assert intvty_grading_enabled(benchmark_mode="agentx") is True
+    assert intvty_serving_grading_enabled(benchmark_mode="AgentX") is True
+
+
+def test_a_synthetic_benchmark_mode_does_not_enable_grading(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    for mode in ("", "synthetic", "sweep", None):
+        assert intvty_grading_enabled(benchmark_mode=mode or "") is False
+
+
+def test_an_explicit_metric_still_outranks_the_persisted_marker(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    assert intvty_grading_enabled(benchmark_mode="agentx") is False
+
+
+def test_a_scriptable_framework_still_grades_on_output_under_the_marker(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    assert intvty_serving_grading_enabled(scriptable=True, benchmark_mode="agentx") is False
+
+
+# --- resolve_grading_anchor_perf ---
+
+
+class _State:
+    def __init__(self, current_best=None, baseline_perf=None):
+        self.current_best = current_best
+        self.baseline_perf = baseline_perf
+
+
+def test_anchor_perf_uses_current_best_when_axes_present():
+    state = _State(current_best=_BASELINE, baseline_perf={})
+    snap, reason = resolve_grading_anchor_perf(state)
+    assert reason == ""
+    assert snap is not None
+    assert snap["total_throughput"] == pytest.approx(_BASELINE["total_throughput"])
+
+
+def test_anchor_perf_does_not_fall_through_to_baseline_when_current_best_lacks_axes():
+    bad_best = {"action": "explore", "tput": 200.0}  # no e2e_norm_intvty_p90 / total_throughput
+    state = _State(current_best=bad_best, baseline_perf=_BASELINE)
+    snap, reason = resolve_grading_anchor_perf(state)
+    assert snap is None
+    assert reason == "current_best_axes_missing"
+
+
+def test_anchor_perf_uses_baseline_when_current_best_empty():
+    state = _State(current_best={}, baseline_perf=_BASELINE)
+    snap, reason = resolve_grading_anchor_perf(state)
+    assert reason == ""
+    assert snap is not None
+    assert snap["total_throughput"] == pytest.approx(_BASELINE["total_throughput"])
+
+
+def test_anchor_perf_returns_missing_reason_when_both_absent():
+    state = _State(current_best={}, baseline_perf=None)
+    snap, reason = resolve_grading_anchor_perf(state)
+    assert snap is None
+    assert reason == "baseline_perf_missing"
+
+
+# --- output_tput_of ---
+
+
+def test_output_tput_of_prefers_the_measurement_field_over_tput():
+    assert output_tput_of({**_BASELINE, "tput": 1.0}) == pytest.approx(_BASELINE["output_throughput"])
+
+
+def test_output_tput_of_falls_back_to_tput():
+    assert output_tput_of({"tput": 183.0}) == pytest.approx(183.0)
+
+
+def test_output_tput_of_reports_zero_when_absent():
+    assert output_tput_of({}) == 0.0
+    assert output_tput_of(None) == 0.0
+
+
+def test_output_per_gpu_is_stamped_from_the_session_chip_count():
+    """The frontier's y axis is derived here so consumers read one figure, not a division they each repeat."""
+    from hyperloom.common.perf_metric import GRADED_OUTPUT_PER_GPU, stamp_output_per_gpu
+
+    measurement = dict(_BASELINE)
+    stamp_output_per_gpu(measurement, 8)
+    assert measurement[GRADED_OUTPUT_PER_GPU] == pytest.approx(_BASELINE["output_throughput"] / 8)
+
+
+def test_output_per_gpu_is_left_unstamped_without_a_chip_count():
+    """A missing or zero chip count must not publish the aggregate as if it were per GPU."""
+    from hyperloom.common.perf_metric import GRADED_OUTPUT_PER_GPU, stamp_output_per_gpu
+
+    for chips in (None, 0, "", -1):
+        measurement = dict(_BASELINE)
+        stamp_output_per_gpu(measurement, chips)
+        assert GRADED_OUTPUT_PER_GPU not in measurement, f"chips={chips!r} should leave the axis unstamped"
+
+
+def test_graded_axes_publish_the_display_figures():
+    """SBD reads these through graded_axes_of, so they have to survive the projection."""
+    from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, GRADED_OUTPUT_PER_GPU, graded_axes_of
+
+    source = {
+        **_BASELINE,
+        GRADED_OUTPUT_PER_GPU: 22.93,
+        "ttft_p50_ms": 110.0,
+        "ttft_p90_ms": 240.0,
+        "tpot_p50_ms": 18.0,
+        "tpot_p90_ms": 34.0,
+    }
+    axes = graded_axes_of(source)
+    assert axes[GRADED_OUTPUT_PER_GPU] == 22.93
+    assert (axes["ttft_p50_ms"], axes["ttft_p90_ms"]) == (110.0, 240.0)
+    assert (axes["tpot_p50_ms"], axes["tpot_p90_ms"]) == (18.0, 34.0)
+    for key in (GRADED_OUTPUT_PER_GPU, "ttft_p50_ms", "ttft_p90_ms", "tpot_p50_ms", "tpot_p90_ms"):
+        assert key in GRADED_AXIS_KEYS
+
+
+def test_the_comparability_inputs_are_published_axes():
+    """A verdict SBD cannot re-derive is a verdict nobody can audit.
+
+    ``rounds_are_comparable`` refuses a pair on these two, so publishing the objective and its guards while
+    omitting them leaves a reader unable to tell a REVERT on the objective from one on a drifted window.
+    """
+    from hyperloom.common.perf_metric import (
+        GRADED_AXIS_KEYS,
+        GRADED_DURATION,
+        GRADED_ERROR_RATE,
+        graded_axes_of,
+    )
+
+    axes = graded_axes_of({**_BASELINE, GRADED_DURATION: 3600.0, GRADED_ERROR_RATE: 0.0})
+    assert GRADED_DURATION in GRADED_AXIS_KEYS
+    assert GRADED_ERROR_RATE in GRADED_AXIS_KEYS
+    assert axes[GRADED_DURATION] == 3600.0
+    # Zero errors is a measured fact, not a missing one: coalescing it away would publish the clean round and the
+    # unreported round as the same thing.
+    assert axes[GRADED_ERROR_RATE] == 0.0

@@ -1,8 +1,4 @@
-"""Coverage tests for the MCP server tool definitions and test/bench tools.
-
-Hermetic: test/bench drivers are tiny Python scripts written to tmp_path and
-run via the same interpreter. No GPU, no real kernels.
-"""
+"""Coverage tests for the MCP server tool definitions and test/bench tools."""
 
 from __future__ import annotations
 
@@ -16,8 +12,8 @@ from kernelforge.mcp_server.tools.bench import (
     calculate_mean_case_speedup,
 )
 
-# Alias avoids pytest-asyncio (auto mode) collecting the imported coroutine as
-# a test just because its name starts with "test_".
+# Alias avoids pytest-asyncio (auto mode) collecting the imported coroutine as a test just because its name starts
+# with "test_".
 from kernelforge.mcp_server.tools.test import test_correctness as run_correctness
 
 
@@ -28,9 +24,7 @@ def _write_driver(tmp_path, name: str, body: str) -> str:
 
 
 def _run_and_flush(coro):
-    """Run a coroutine, then pump the loop so a killed subprocess transport
-    finishes closing before the loop is torn down (avoids a spurious
-    'Event loop is closed' unraisable warning on the timeout path)."""
+    """Run a coroutine, then pump the loop so a killed subprocess transport finishes closing before the loop is torn down (avoids a spurious 'Event loop is closed' unraisable warning on the timeout path)."""
     loop = asyncio.new_event_loop()
     try:
         result = loop.run_until_complete(coro)
@@ -107,8 +101,9 @@ def test_correctness_allclose_and_maxdiff(tmp_path):
     assert result["max_diff"] == 1.2e-05
 
 
-def test_correctness_no_metric(tmp_path):
-    drv = _write_driver(tmp_path, "d.py", "print('nothing useful')\n")
+@pytest.mark.parametrize("output", ["nothing useful", "max_diff: 0.5"])
+def test_correctness_no_metric(tmp_path, output):
+    drv = _write_driver(tmp_path, "d.py", f"print({output!r})\n")
     result = asyncio.run(run_correctness(drv))
     assert result["passed"] is False
     assert result["outcome"] == "invalid_result"

@@ -23,9 +23,7 @@ def _base(**kw):
     return defaults
 
 
-# ---------------------------------------------------------------------------
 # vLLM: backward-compat — no framework_python → bare vllm serve
-# ---------------------------------------------------------------------------
 
 
 def test_vllm_no_framework_python_uses_console_script():
@@ -40,9 +38,7 @@ def test_vllm_no_framework_python_python_exe_ignored():
     assert "/some/python" not in cmd
 
 
-# ---------------------------------------------------------------------------
 # vLLM: framework_python set → python -m vllm.entrypoints.openai.api_server
-# ---------------------------------------------------------------------------
 
 
 def test_vllm_framework_python_switches_to_module_launch():
@@ -95,9 +91,7 @@ def test_vllm_framework_python_includes_profiler():
     assert "/tmp/prof" in cmd
 
 
-# ---------------------------------------------------------------------------
 # sglang: framework_python replaces python_exe
-# ---------------------------------------------------------------------------
 
 
 def test_sglang_framework_python_replaces_python_exe():
@@ -120,9 +114,7 @@ def test_sglang_no_framework_python_uses_python_exe():
     assert cmd[0] == "/default/python"
 
 
-# ---------------------------------------------------------------------------
 # atom: framework_python replaces python_exe
-# ---------------------------------------------------------------------------
 
 
 def test_atom_framework_python_replaces_python_exe():
@@ -135,9 +127,7 @@ def test_atom_framework_python_replaces_python_exe():
     assert cmd[0] == "/venv/bin/python3.11"
 
 
-# ---------------------------------------------------------------------------
 # unknown framework raises
-# ---------------------------------------------------------------------------
 
 
 def test_unknown_framework_raises():

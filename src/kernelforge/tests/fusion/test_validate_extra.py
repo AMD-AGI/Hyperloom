@@ -97,11 +97,7 @@ def test_vllm_probe_all_ok(monkeypatch):
 
 
 def test_launch_cmd_matches_framework():
-    """Repro: serving smoke must launch the framework's own server, not always sglang.
-
-    A vLLM run previously always shelled out to ``sglang.launch_server`` and died
-    with ``ModuleNotFoundError: sglang`` before the fusion was ever validated.
-    """
+    """Repro: serving smoke must launch the framework's own server, not always sglang."""
     for fw in ("vllm", "vllm-aiter"):
         cmd = _serving_smoke_launch_cmd(fw, "/m", 8977, "")
         assert cmd[:2] == ["vllm", "serve"], f"{fw} must launch vllm serve, got {cmd[:2]}"
@@ -111,11 +107,7 @@ def test_launch_cmd_matches_framework():
 
 
 def test_launch_cmd_matches_session_tp_block_size_and_max_model_len():
-    """Serving smoke must boot with the session's TP / KV block size / max len.
-
-    MiniMax MSA died on TP=1 + default block-size 16 ("No common block size for 16")
-    while the real session served TP=8 and --block-size 128.
-    """
+    """Serving smoke must boot with the session's TP / KV block size / max len."""
     cmd = _serving_smoke_launch_cmd(
         "vllm",
         "/m",

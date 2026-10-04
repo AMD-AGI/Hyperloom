@@ -138,10 +138,9 @@ def test_a_remote_child_gets_only_kb_store_credentials() -> None:
     assert child["KB_STORE_TOKEN"] == "kb-token"
     assert "GBRAIN_BASE_URL" not in child
     assert "GBRAIN_TOKEN" not in child
-    assert child["KERNELFORGE_GBRAIN_ENABLED"] == "false"
 
 
-def test_a_remote_child_without_gbrain_is_told_so_rather_than_left_guessing() -> None:
+def test_ambient_gbrain_credentials_never_reach_a_remote_child() -> None:
     remote = KnowledgeConfig.from_env(
         {
             "KNOWLEDGE_STORE_MODE": "remote",
@@ -150,38 +149,81 @@ def test_a_remote_child_without_gbrain_is_told_so_rather_than_left_guessing() ->
         }
     )
     child: dict[str, str] = {
-        "KERNELFORGE_GBRAIN_ENABLED": "true",
         "GBRAIN_BASE_URL": "https://ambient.invalid",
         "GBRAIN_TOKEN": "ambient-secret",
     }
     remote.apply_to_child_env(child)
     assert child["KB_STORE_URL"] == "https://kb.test"
-    assert child["KERNELFORGE_GBRAIN_ENABLED"] == "false"
     assert "GBRAIN_BASE_URL" not in child
     assert "GBRAIN_TOKEN" not in child
 
 
-def test_a_local_child_reaches_for_neither_backend() -> None:
+def test_a_local_child_keeps_pr_service_url_without_recipe_token() -> None:
     local = KnowledgeConfig.from_env(
         {
             "KNOWLEDGE_STORE_MODE": "local",
+            "KB_STORE_URL": "https://kb.test",
+            "KB_STORE_TOKEN": "must-not-cross",
             "GBRAIN_BASE_URL": "https://gbrain.test",
             "GBRAIN_TOKEN": "gbrain-token",
         }
     )
     child: dict[str, str] = {
-        "KERNELFORGE_GBRAIN_ENABLED": "true",
         "KB_STORE_URL": "https://kb.test",
         "KB_STORE_TOKEN": "kb-token",
         "GBRAIN_BASE_URL": "https://gbrain.test",
         "GBRAIN_TOKEN": "gbrain-token",
     }
     local.apply_to_child_env(child)
-    assert "KB_STORE_URL" not in child
+    assert child["KB_STORE_URL"] == "https://kb.test"
     assert "KB_STORE_TOKEN" not in child
     assert "GBRAIN_BASE_URL" not in child
     assert "GBRAIN_TOKEN" not in child
-    assert child["KERNELFORGE_GBRAIN_ENABLED"] == "false"
+
+
+def test_a_local_child_defaults_to_global_pr_service() -> None:
+    from hyperloom.common.pr_monitor_urls import DEFAULT_KB_STORE_URL
+
+    local = KnowledgeConfig.from_env({"KNOWLEDGE_STORE_MODE": "local"})
+    child: dict[str, str] = {}
+
+    local.apply_to_child_env(child)
+
+    assert child["KB_STORE_URL"] == DEFAULT_KB_STORE_URL
+    assert "KB_STORE_TOKEN" not in child
+
+
+def test_a_local_child_omits_unreachable_pr_service() -> None:
+    local = KnowledgeConfig.from_env(
+        {
+            "KNOWLEDGE_STORE_MODE": "local",
+            "HYPERLOOM_PR_MONITOR_ENABLED": "0",
+        }
+    )
+    child = {"KB_STORE_URL": "https://ambient.invalid"}
+
+    local.apply_to_child_env(child)
+
+    assert child["HYPERLOOM_PR_MONITOR_ENABLED"] == "0"
+    assert "KB_STORE_URL" not in child
+
+
+def test_a_remote_child_keeps_recipe_url_when_pr_monitor_is_disabled() -> None:
+    remote = KnowledgeConfig.from_env(
+        {
+            "KNOWLEDGE_STORE_MODE": "remote",
+            "KB_STORE_URL": "https://kb.test",
+            "KB_STORE_TOKEN": "kb-token",
+            "HYPERLOOM_PR_MONITOR_ENABLED": "0",
+        }
+    )
+    child: dict[str, str] = {}
+
+    remote.apply_to_child_env(child)
+
+    assert child["HYPERLOOM_PR_MONITOR_ENABLED"] == "0"
+    assert child["KB_STORE_URL"] == "https://kb.test"
+    assert child["KB_STORE_TOKEN"] == "kb-token"
 
 
 def test_a_kernelforge_child_never_stages_into_the_inference_draft() -> None:

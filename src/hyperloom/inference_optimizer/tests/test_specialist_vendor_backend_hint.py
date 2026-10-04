@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""ROOFLINE EVIDENCE names vendor-backend substitution for hot ATen ops.
-
-A high-GPU-share ``aten::`` op is dispatching into some backend library. The
-specialist may not rewrite that library's kernel body, but the call site in its
-own worktree chooses the backend, and swapping it is an ordinary source rewrite.
-Without this the evidence reads as "attention is 60% of device time" with no
-indication that anything may be done about it, and specialists have gone after
-1%-scale glue instead.
-"""
+"""ROOFLINE EVIDENCE names vendor-backend substitution for hot ATen ops."""
 
 from __future__ import annotations
 

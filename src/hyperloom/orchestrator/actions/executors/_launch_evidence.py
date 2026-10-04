@@ -1,0 +1,167 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Shared, bounded launch-evidence construction for benchmark measurements."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from hyperloom.common.launch_log_evidence import (
+    launch_argv_from_log,
+    observed_model_binding_from_log,
+    observed_sglang_server_identity_from_log,
+    observed_vllm_server_identity_from_log,
+)
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+
+log = logging.getLogger(__name__)
+
+
+def _digest_operand(value: str) -> str:
+    """Digest a model operand: two digests compare, the paths could not travel."""
+    text = str(value or "").strip()
+    return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}" if text else ""
+
+
+def _binding_from_vllm_identity(identity: dict[str, Any]) -> dict[str, Any]:
+    """Derive the binding from a vLLM ``non-default args`` parse.
+
+    Separate from the SGLang one because the field names differ; sharing a table
+    would silently read ``{}`` for one of the two frameworks.
+    """
+    model = str(identity.get("model") or "")
+    if not model:
+        return {}
+    return {
+        "model_digest": _digest_operand(model),
+        "tokenizer_digest": _digest_operand(str(identity.get("tokenizer") or "")),
+        "served_model_digest": _digest_operand(str(identity.get("served_model_name") or "")),
+        "tp": str(identity.get("tensor_parallel_size") or ""),
+        "dp": str(identity.get("data_parallel_size") or ""),
+        "pp": str(identity.get("pipeline_parallel_size") or ""),
+    }
+
+
+def _binding_from_identity(identity: dict[str, Any]) -> dict[str, Any]:
+    """Derive the binding from an SGLang identity parse, which has no argv line."""
+    model = str(identity.get("model_path") or "")
+    if not model:
+        return {}
+    return {
+        "model_digest": _digest_operand(model),
+        "tokenizer_digest": _digest_operand(str(identity.get("tokenizer_path") or "")),
+        "served_model_digest": _digest_operand(str(identity.get("served_model_name") or "")),
+        "tp": str(identity.get("tp_size") or ""),
+        "dp": str(identity.get("dp_size") or ""),
+        "pp": "",
+    }
+
+
+def build_launch_evidence(
+    *,
+    config_path: Path,
+    actual_server_log: str | None,
+    framework: str,
+    slot: Path,
+    caller_reused_ready_server: bool = False,
+    requested_server_args: str | None = None,
+    requested_server_env: dict[str, str] | None = None,
+    model_path: str | None = None,
+) -> dict[str, Any]:
+    """Build declared and observed evidence for one measured server launch."""
+    raw_config = b""
+    benchmark: dict[str, Any] = {}
+    try:
+        raw_config = config_path.read_bytes()
+        parsed = yaml.safe_load(raw_config.decode("utf-8")) or {}
+        if isinstance(parsed, dict):
+            raw_benchmark = parsed.get("benchmark")
+            benchmark = raw_benchmark if isinstance(raw_benchmark, dict) else {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        log.debug("launch evidence could not read materialized config %s", config_path, exc_info=True)
+
+    resolved_framework = str(benchmark.get("framework") or framework or "sglang").strip().lower()
+    args_env = server_args_env_name(resolved_framework)
+    envs = benchmark.get("envs") if isinstance(benchmark.get("envs"), dict) else {}
+    declared_env = {str(key): str(value) for key, value in envs.items() if str(key) != args_env}
+    declared_args = str(envs.get(args_env) or "").strip()
+    requested_env = requested_server_env if requested_server_env is not None else declared_env
+    requested_args = str(requested_server_args).strip() if requested_server_args is not None else declared_args
+    recipe_digest = f"sha256:{hashlib.sha256(raw_config).hexdigest()}" if raw_config else ""
+
+    observed_flags = ""
+    observed_server_identity: dict[str, Any] = {}
+    observed_model_binding: dict[str, Any] = {}
+    if actual_server_log:
+        try:
+            observed_flags = launch_argv_from_log(actual_server_log, resolved_framework)
+            # Read from the raw launch line, which still carries the operands
+            # ``split_launch_flags`` strips: without it the evidence records only
+            # the *requested* model and cannot detect a server that resolved a
+            # different one.
+            observed_model_binding = observed_model_binding_from_log(actual_server_log, resolved_framework)
+            if not observed_flags and resolved_framework == "sglang":
+                observed_server_identity = observed_sglang_server_identity_from_log(actual_server_log)
+                if not observed_model_binding:
+                    observed_model_binding = _binding_from_identity(observed_server_identity)
+            elif not observed_flags and resolved_framework == "vllm":
+                # vLLM prints no argv line at all -- not in any log, successful
+                # or failed -- so the argv reader above is empty for every vLLM
+                # session and every requested setting would be judged
+                # unconfirmed. The resolved argument dict it DOES print is the
+                # observed side.
+                observed_server_identity = observed_vllm_server_identity_from_log(actual_server_log)
+                if not observed_model_binding:
+                    observed_model_binding = _binding_from_vllm_identity(observed_server_identity)
+        except Exception:
+            log.debug("launch evidence could not inspect server log %s", actual_server_log, exc_info=True)
+
+    warmup_root = slot / "warmup_round"
+    actual_path = Path(actual_server_log) if actual_server_log else None
+    reused_from_warmup = bool(actual_path and actual_path.is_relative_to(warmup_root))
+    reused = bool(caller_reused_ready_server or reused_from_warmup)
+    return {
+        "schema_version": 1,
+        "materialized_config_path": str(config_path) if raw_config else "",
+        "recipe_digest": recipe_digest,
+        "framework": resolved_framework,
+        "model_path": str(model_path if model_path is not None else benchmark.get("model") or ""),
+        "requested_server_args": requested_args,
+        "requested_server_flags": requested_args,
+        "requested_server_env": requested_env,
+        "actual_server_log_path": actual_server_log or "",
+        "observed_server_launch_flags": observed_flags,
+        "observed_server_identity": observed_server_identity,
+        "observed_model_binding": observed_model_binding,
+        "requested_model_digest": _digest_operand(
+            str(model_path if model_path is not None else benchmark.get("model") or "")
+        ),
+        "warm_reuse": {
+            "reused_ready_server": reused,
+            "provenance": (
+                "warmup_round"
+                if reused_from_warmup
+                else ("caller_ready_server" if caller_reused_ready_server else "fresh_or_unobserved")
+            ),
+            "source_server_log_path": actual_server_log or "",
+        },
+    }
+
+
+def persist_launch_evidence(evidence: dict[str, Any], *, slot: Path) -> str:
+    """Persist evidence in its owning slot and return its path."""
+    try:
+        slot.mkdir(parents=True, exist_ok=True)
+        path = slot / "launch_evidence.json"
+        path.write_text(json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8")
+        return str(path)
+    except OSError:
+        log.warning("launch evidence could not persist in %s", slot, exc_info=True)
+        return ""

@@ -1,20 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the in-memory index cache on loop/archive.py.
-
-The candidate archive treats each iter_NNN/meta.json as the on-disk authority
-and memoizes the reconciled index so hot readers (render_digest / load_index /
-max_iteration) stop re-parsing every meta.json on each call — turning a per-
-campaign O(N^2) scan into O(N). These tests pin the cache contract:
-
-  * a warm cache serves load_index() without re-parsing meta.json,
-  * record() folds its new line into the cache without a rescan,
-  * an unexpected external change (mtime bump) invalidates the cache,
-  * a degraded op invalidates the cache (self-heal on next read),
-  * a transient scan error is NOT cached (best-effort view is re-checked),
-  * a fresh instance (resume) rebuilds the index from disk.
-
-Filesystem via tmp_path; no LLM / GPU."""
+"""Unit tests for the in-memory index cache on loop/archive.py."""
 
 from __future__ import annotations
 
@@ -89,8 +75,8 @@ def test_record_folds_new_entry_without_rescan(tmp_path):
 
     spy = _MetaSpy(archive).install()
     archive.record(_rec(2))
-    # record's internal load_index is a cache hit and the target dir does not
-    # pre-exist, so no meta.json is parsed during the record itself.
+    # record's internal load_index is a cache hit and the target dir does not pre-exist, so no meta.json is parsed
+    # during the record itself.
     assert spy.calls == 0
 
     idx = archive.load_index()
@@ -103,8 +89,8 @@ def test_external_change_invalidates_cache(tmp_path):
     archive.record(_rec(1))
     assert [e["iter"] for e in archive.load_index()] == [1]  # warm
 
-    # A second writer on the same root (what a stray/concurrent process would
-    # look like) bumps root's mtime; the first instance must notice and rescan.
+    # A second writer on the same root (what a stray/concurrent process would look like) bumps root's mtime; the first
+    # instance must notice and rescan.
     other = CandidateArchive(str(tmp_path), kernel_file="k.py")
     other.record(_rec(2))
 
@@ -134,8 +120,8 @@ def test_transient_scan_error_is_not_cached(tmp_path):
     archive.record(_rec(1))
     archive.record(_rec(2))
 
-    # Make the very next reconcile look transient: one dir reports "unavailable"
-    # and marks degraded, exactly like a transient I/O error mid-scan.
+    # Make the very next reconcile look transient: one dir reports "unavailable" and marks degraded, exactly like a
+    # transient I/O error mid-scan.
     orig = archive._inspect_complete_meta
     state = {"tripped": False}
 
@@ -163,8 +149,8 @@ def test_fresh_instance_rebuilds_index_from_disk(tmp_path):
     writer.record(_rec(1))
     writer.record(_rec(2, decision="REVERT_PERF"))
 
-    # Simulate --resume: a brand-new instance with an empty in-memory cache must
-    # reconstruct the full index by scanning meta.json on disk.
+    # Simulate --resume: a brand-new instance with an empty in-memory cache must reconstruct the full index by
+    # scanning meta.json on disk.
     resumed = CandidateArchive(str(tmp_path), kernel_file="k.py")
     assert resumed._index_cache is None
     idx = resumed.load_index()
@@ -177,8 +163,8 @@ def test_missing_index_line_recovered_via_reconcile(tmp_path):
     archive.record(_rec(1))
     archive.record(_rec(2))
 
-    # Drop index.jsonl entirely (meta.json remains authoritative) and clear the
-    # in-memory cache — reconcile must rebuild the index from the dirs.
+    # Drop index.jsonl entirely (meta.json remains authoritative) and clear the in-memory cache — reconcile must
+    # rebuild the index from the dirs.
     archive.index_path.unlink()
     archive._invalidate_cache()
     idx = archive.load_index()

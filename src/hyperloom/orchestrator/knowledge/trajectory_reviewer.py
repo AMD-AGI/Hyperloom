@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic trajectory review — synthesise candidate directions from the
-whole optimization lineage when the search stalls.
-
-Reads the optimization journal, the ``explore_search`` winners history, and the
-roofline snapshots on :class:`SharedState`, then renders an advisory block
-naming exhausted directions to avoid and an under-exploited bottleneck to push.
-Read-only and fail-soft; never raises and never gates phase advance.
-"""
+"""Deterministic trajectory review — synthesise candidate directions from the whole optimization lineage when the search stalls."""
 
 from __future__ import annotations
 
@@ -16,12 +9,12 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ..state.optimization_journal import (
+from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_NO_PROMOTE,
     OUTCOME_REVERT,
     Journal,
 )
-from ..kernel.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS, dominant_direction
+from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS, dominant_direction
 
 log = logging.getLogger(__name__)
 
@@ -32,42 +25,18 @@ _EXHAUSTED_MAX_GAIN_PCT: float = 1.0
 
 
 def _load_journal_entries(session_dir: Path, shared_state: Any) -> list[Any]:
-    """Return journal entries (empty on miss); header fields are read-only here.
-
-    Args:
-        session_dir: The session directory holding the optimization journal.
-        shared_state: The session's shared state, read for journal header
-            fields.
-
-    Returns:
-        The journal entries, or ``[]`` when the journal cannot be loaded.
-    """
-    try:
-        journal = Journal.load_or_create(
-            session_dir,
-            session_id=str(getattr(shared_state, "session_id", "") or ""),
-            model=str(getattr(shared_state, "model_name", "") or ""),
-            hardware=str(getattr(shared_state, "hardware", "") or ""),
-        )
-    except Exception:  # noqa: BLE001 — review must never crash
-        return []
+    """Return journal entries (empty on miss); header fields are read-only here."""
+    journal = Journal.load_or_create(
+        session_dir,
+        session_id=str(getattr(shared_state, "session_id", "") or ""),
+        model=str(getattr(shared_state, "model_name", "") or ""),
+        hardware=str(getattr(shared_state, "hardware", "") or ""),
+    )
     return list(getattr(journal, "entries", []) or [])
 
 
 def _exhausted_clusters(entries: list[Any]) -> list[dict[str, Any]]:
-    """Group repeated REVERT / no_promote attempts by (kind, change); dead ends first.
-
-    Only outcomes that measured something count: a step recorded as
-    ``OUTCOME_SKIP`` never ran, and clustering it would advise the model to
-    abandon a direction nothing was learned about.
-
-    Args:
-        entries: The optimization journal entries to cluster.
-
-    Returns:
-        Exhausted-cluster dicts (``kind`` / ``change`` / ``count`` /
-        ``max_gain``) sorted by attempt count descending.
-    """
+    """Group repeated REVERT / no_promote attempts by (kind, change); dead ends first."""
     clusters: dict[tuple[str, str], dict[str, Any]] = {}
     for e in entries:
         outcome = getattr(e, "outcome", "")
@@ -92,16 +61,7 @@ def _exhausted_clusters(entries: list[Any]) -> list[dict[str, Any]]:
 
 
 def _stalled_cycle_count(shared_state: Any) -> int:
-    """Consecutive most-recent macro-cycles that produced no explore winner.
-
-    Args:
-        shared_state: The session's shared state, read for explore winners
-            history and the current macro cycle.
-
-    Returns:
-        The count of consecutive most-recent macro-cycles with no explore
-        winner.
-    """
+    """Consecutive most-recent macro-cycles that produced no explore winner."""
     search = getattr(shared_state, "explore_search", None) or {}
     wh = search.get("winners_history") if isinstance(search, dict) else None
     cycles_with_winner = {
@@ -121,21 +81,7 @@ def build_trajectory_digest(
     *,
     max_directions: int = 5,
 ) -> str:
-    """Render the advisory trajectory-review block; ``""`` when nothing to report.
-
-    Deterministic aggregation only (no model call). Surfaces stall depth,
-    exhausted directions to avoid, and the dominant roofline bottleneck with a
-    suggested specialist lever to redirect exploration.
-
-    Args:
-        session_dir: The session directory holding the optimization journal.
-        shared_state: The session's shared state.
-        max_directions: Maximum number of exhausted directions to list.
-
-    Returns:
-        The advisory trajectory-review block, or ``""`` when there is nothing
-        to report.
-    """
+    """Render the advisory trajectory-review block; ``\"\"`` when nothing to report."""
     try:
         entries = _load_journal_entries(Path(session_dir), shared_state)
         snaps = [s for s in (getattr(shared_state, "roofline_snapshots", None) or []) if isinstance(s, dict)]
@@ -172,7 +118,7 @@ def build_trajectory_digest(
             return ""
         lines.append("advisory only: redirect exploration with this; it does not gate phase advance.")
         return "\n".join(lines)
-    except Exception:  # noqa: BLE001 — review must never crash
+    except Exception:
         log.exception("trajectory_reviewer: build_trajectory_digest failed")
         return ""
 

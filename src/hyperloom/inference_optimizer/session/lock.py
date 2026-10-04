@@ -1,37 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Single-optimizer session lock.
-
-A long ``python -m hyperloom.inference_optimizer.cli optimize`` run is guarded by a robustness monitor
-that re-launches the optimizer via ``--resume-from`` if it judges the process dead.
-During the slow serving cold-start that liveness check can misfire and spawn a
-**second** optimizer on the same ``session_dir``; the two then contend for the
-shared ``coordinator.db`` leases and both write ``state.json``, corrupting the
-session.
-
-This module is the authoritative backstop: whichever optimizer owns a session
-holds an exclusive advisory lock (``flock`` on POSIX) on
-``<session_dir>/runtime/optimizer.lock`` for its whole lifetime. A second
-optimizer fails to acquire the lock and must refuse to run *before* touching
-``state.json`` or any lease. The kernel drops the lock automatically when the
-holder exits or crashes, so there is no stale-lock recovery to get wrong.
-
-The lock file body is a small JSON document (``pid`` / ``hostname`` /
-``started_at`` / ``heartbeat_at``) so the monitor can read the *authoritative*
-owner pid instead of trusting a wrapper pidfile.
-
-The lock file is intentionally never unlinked on release: unlinking a flock'd
-path races a concurrent acquirer (it would flock a now-unlinked inode while a
-newcomer creates and flocks a fresh file). A stale body is harmless — the next
-acquirer flocks the same inode and overwrites it.
-
-That overwrite keeps only the *current* owner, so each acquisition is also
-appended to ``<session_dir>/runtime/pod_history.jsonl``. A session whose sandbox
-is rebuilt mid-run otherwise records only its first owner (in
-``manifest.json``) and its last (in the lock body), and reads like a single-pod
-session in post-mortem.
-"""
+"""Single-optimizer session lock."""
 
 from __future__ import annotations
 
@@ -57,14 +27,7 @@ except ImportError:  # pragma: no cover - non-POSIX dev hosts (e.g. Windows).
 
 
 def _pid_alive(pid: int | None) -> bool:
-    """Best-effort liveness probe for ``pid`` (used only on the fcntl-less path).
-
-    Args:
-        pid (int | None): Candidate owner pid; ``None`` / non-positive → dead.
-
-    Returns:
-        bool: ``True`` when the pid appears to reference a live process.
-    """
+    """Best-effort liveness probe for ``pid`` (used only on the fcntl-less path)."""
     if not pid or pid <= 0:
         return False
     try:
@@ -80,15 +43,7 @@ def _pid_alive(pid: int | None) -> bool:
 
 
 def read_owner(session_dir: Path) -> dict[str, Any] | None:
-    """Read the lock file's owner metadata without acquiring the lock.
-
-    Args:
-        session_dir (Path): The session root directory.
-
-    Returns:
-        dict | None: The parsed owner document, or ``None`` when the lock file
-            is absent / empty / malformed.
-    """
+    """Read the lock file's owner metadata without acquiring the lock."""
     path = session_paths.optimizer_lock_path(session_dir)
     try:
         raw = path.read_text(encoding="utf-8").strip()
@@ -107,12 +62,7 @@ class SessionAlreadyRunning(RuntimeError):
     """Raised when another live optimizer already owns the session."""
 
     def __init__(self, session_dir: Path, owner: dict[str, Any] | None):
-        """Capture the contended session and the current owner metadata.
-
-        Args:
-            session_dir (Path): The session whose lock could not be acquired.
-            owner (dict | None): The existing owner document, if readable.
-        """
+        """Capture the contended session and the current owner metadata."""
         self.session_dir = Path(session_dir)
         self.owner = owner or {}
         who = ""
@@ -131,38 +81,20 @@ class SessionLockPathError(RuntimeError):
 
 
 class SessionLock:
-    """Exclusive, crash-safe, single-optimizer-per-session lock.
-
-    Acquire once at optimizer startup (both fresh ``optimize`` and
-    ``--resume-from``); hold for the whole run. Use as a context manager or call
-    :meth:`acquire` / :meth:`release` explicitly.
-    """
+    """Exclusive, crash-safe, single-optimizer-per-session lock."""
 
     def __init__(self, session_dir: Path):
-        """Bind the lock to a session directory (does not acquire yet).
-
-        Args:
-            session_dir (Path): The session root directory to guard.
-        """
+        """Bind the lock to a session directory (does not acquire yet)."""
         self.session_dir = Path(session_dir)
         self.path = session_paths.optimizer_lock_path(self.session_dir)
         self._fd: int | None = None
         self._started_at: str = ""
 
     def acquire(self) -> SessionLock:
-        """Acquire the session lock or raise :class:`SessionAlreadyRunning`.
-
-        Returns:
-            SessionLock: ``self`` once the lock is held.
-
-        Raises:
-            SessionAlreadyRunning: When a live optimizer already owns the
-                session.
-        """
+        """Acquire the session lock or raise :class:`SessionAlreadyRunning`."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Non-inheritable fd (PEP 446) so serving subprocesses don't keep the
-        # lock alive past the optimizer. 0o600: owner-only. O_NOFOLLOW refuses
-        # a symlinked lock path so it cannot redirect the lock/write elsewhere.
+        # Non-inheritable fd (PEP 446) so serving subprocesses don't keep the lock alive past the optimizer. 0o600:
+        # owner-only.
         open_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
         try:
             fd = os.open(self.path, open_flags, 0o600)
@@ -221,16 +153,7 @@ class SessionLock:
         }
 
     def _append_pod_history(self, owner: dict[str, Any]) -> None:
-        """Append this acquisition to the pod-ownership ledger (never raises).
-
-        One line per acquire, so a session whose sandbox is rebuilt mid-run keeps
-        the full owner chain instead of just the first (``manifest.json``) and
-        last (``optimizer.lock``) pod. Purely observational: a failure here must
-        never stop an optimizer that already holds the lock.
-
-        Args:
-            owner (dict): The owner document just written to the lock body.
-        """
+        """Append this acquisition to the pod-ownership ledger (never raises)."""
         record = {
             "acquired_at": owner.get("started_at"),
             "hostname": owner.get("hostname"),

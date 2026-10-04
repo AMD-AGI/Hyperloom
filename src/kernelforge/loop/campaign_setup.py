@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.knowledge.experience_integration import git_checkout_branch
+from kernelforge.llm.git import ensure_commit_identity
 from kernelforge.loop.campaign_config import (
     CampaignConfig,
     CampaignConfigStore,
@@ -61,15 +62,16 @@ def resolve_campaign(
     bench_repeat: int = 1,
     commit_new_paths: list[str] | None = None,
 ) -> CampaignResolution:
-    """Resolve or create the immutable campaign configuration.
-
-    Checks out ``git_branch`` for a fresh campaign before the config snapshots
-    HEAD. Raises OSError or ValueError; the CLI converts those to ClickException.
-    """
+    """Resolve or create the immutable campaign configuration."""
     workspace = Path(workspace_dir).resolve()
     campaign_store = CampaignConfigStore(str(workspace))
     campaign_root = campaign_store.root
     state_path = campaign_root / "run_state.json"
+
+    # Before the resume branch: a resumed campaign commits into this workspace too.
+    written_identity = ensure_commit_identity(workspace)
+    if written_identity:
+        print(f"  [git] workspace had no commit identity; set {written_identity}")
 
     campaign_inputs_supplied = any(
         value not in (None, "") for value in (kernel, driver, source_files, program_md_file, operator_name)
@@ -96,8 +98,8 @@ def resolve_campaign(
     if not resolved_kernel_backend:
         resolved_kernel_backend = env_backend_override()
     if resolved_kernel_backend:
-        # ``normalize_kernel_backend_name`` already returns the bare backend key, so
-        # this is the name the operator asked for, spelled canonically.
+        # ``normalize_kernel_backend_name`` already returns the bare backend key, so this is the name the operator
+        # asked for, spelled canonically.
         normalized = normalize_kernel_backend_name(resolved_kernel_backend)
         resolved_kernel_backend = resolve_kernel_backend_override(resolved_kernel_backend)
         if resolved_kernel_backend != normalized:
@@ -109,8 +111,7 @@ def resolve_campaign(
     if not kernel or not driver:
         raise ValueError("fresh campaign requires --kernel and --driver")
 
-    # Put a fresh campaign on its development branch BEFORE the immutable
-    # config snapshots the branch/base_commit.
+    # Put a fresh campaign on its development branch BEFORE the immutable config snapshots the branch/base_commit.
     if git_branch:
         checkout_message = git_checkout_branch(str(workspace), git_branch)
         if checkout_message:
@@ -121,12 +122,10 @@ def resolve_campaign(
         validate_pending_campaign_head(str(workspace), existing_campaign.base_commit)
 
     provisional_campaign = create_campaign_config(
-        # Measurement semantics travel with the campaign: a resumed session must
-        # not re-derive them from CLI defaults.
+        # Measurement semantics travel with the campaign: a resumed session must not re-derive them from CLI defaults.
         nproc_per_node=nproc_per_node,
         bench_repeat=bench_repeat,
-        # What a KEEP may ship beyond the tracked diff is part of the campaign,
-        # not of one session's invocation.
+        # What a KEEP may ship beyond the tracked diff is part of the campaign, not of one session's invocation.
         commit_new_paths=list(commit_new_paths or []),
         workspace_dir=str(workspace),
         kernel=kernel,
@@ -155,9 +154,8 @@ def resolve_campaign(
         campaign = existing_campaign
     else:
         campaign = provisional_campaign
-        # Defer the immutable save until AFTER task preparation when prep will
-        # run: prep may repair the driver (changing its digest) and commit
-        # scaffolding (advancing HEAD).
+        # Defer the immutable save until AFTER task preparation when prep will run: prep may repair the driver
+        # (changing its digest) and commit scaffolding (advancing HEAD).
         if prepare_task and not resume:
             save_deferred = True
         else:

@@ -10,18 +10,7 @@ log = logging.getLogger(__name__)
 
 
 def is_forward_env_key_allowed(key: str) -> bool:
-    """Return True when ``key`` may be forwarded over SSH to pod processes.
-
-    Default-allow: any POSIX-shaped key is forwarded unless it is a member of
-    :data:`hyperloom.common.env_safety.BLOCKED_UNTRUSTED_ENV_NAMES`. No prefix
-    or substring matching, so tuning knobs are never dropped.
-
-    Args:
-        key: Environment variable name to evaluate.
-
-    Returns:
-        bool: True when the key is allowed for SSH forwarding.
-    """
+    """Return True when ``key`` may be forwarded over SSH to pod processes."""
     if not valid_env_key(key):
         return False
     return key not in BLOCKED_UNTRUSTED_ENV_NAMES
@@ -32,15 +21,7 @@ def filter_forward_env(
     *,
     warn_on_drop: bool = True,
 ) -> dict[str, str]:
-    """Drop disallowed keys from an env dict destined for SSH forwarding.
-
-    Args:
-        env: Raw key/value pairs to filter.
-        warn_on_drop: When True, log a warning for each dropped key.
-
-    Returns:
-        dict[str, str]: The filtered env mapping.
-    """
+    """Drop disallowed keys from an env dict destined for SSH forwarding."""
     out: dict[str, str] = {}
     for raw_key, raw_val in env.items():
         key = str(raw_key)
@@ -52,31 +33,14 @@ def filter_forward_env(
 
 
 def assert_env_key_shapes(env: dict[str, str]) -> None:
-    """Raise ValueError when any env key is not a valid POSIX identifier.
-
-    Used for credential-bearing SSH stdin scripts where values are quoted and
-    only key-shape injection (F002.1) must be blocked.
-
-    Args:
-        env: Key/value pairs about to be injected into a remote shell.
-
-    Raises:
-        ValueError: When one or more keys fail :func:`valid_env_key`.
-    """
+    """Raise ValueError when any env key is not a valid POSIX identifier."""
     bad = [str(k) for k in env if not valid_env_key(str(k))]
     if bad:
         raise ValueError(f"invalid SSH env key names: {bad!r}")
 
 
 def assert_forward_env_keys(env: dict[str, str]) -> None:
-    """Raise ValueError when any env key is not allowed for SSH forwarding.
-
-    Args:
-        env: Key/value pairs about to be injected into a remote shell.
-
-    Raises:
-        ValueError: When one or more keys fail :func:`is_forward_env_key_allowed`.
-    """
+    """Raise ValueError when any env key is not allowed for SSH forwarding."""
     bad = [str(k) for k in env if not is_forward_env_key_allowed(str(k))]
     if bad:
         raise ValueError(f"disallowed SSH forward env keys: {bad!r}")

@@ -1,41 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Local knowledge loader for the forge-loop.
-
-Assembles the layered knowledge block injected into the agent system prompt for
-one kernel-optimization task. The block is built from the curated
-``local_knowledge/`` tree in reading order:
-
-  1. ``hardware/`` and ``common_methodology/`` — always (mandatory background).
-  2. ``framework/aiter/`` — only when the target is an AITER-framework operator.
-  3. ``languages/<language>/`` — the kernel's implementation language.
-
-Each level is loaded per the KernelForge INDEX convention: a folder that has an
-``INDEX.md`` is navigated through it and that map is loaded WHOLE; a folder
-without one falls back to a flat ``<relative path> — <one-line descriptor>``
-listing. Full card content stays on disk and is fetched with the ``Read`` tool
-on demand (progressive disclosure).
-
-Design goals:
-  * The block is generated LIVE from the directory tree at prompt-build time, so
-    adding, removing, or retitling a file needs NO code change.
-  * The per-file descriptor (flat-listing fallback) is auto-extracted from the
-    file itself (a fallback chain), never a hand-maintained table — so
-    descriptions stay in sync.
-
-Descriptor fallback chain (first hit wins) — every source is mined from the file
-itself, so descriptions stay in sync with no hand-maintained table:
-  * .py : first non-empty line of the module docstring
-  1. first sentence of a ``## TL;DR`` section
-  2. YAML front-matter ``description:`` (folded ``>`` scalars supported)
-  3. YAML front-matter ``title:``
-  4. the intro blockquote (``> ...`` right under the H1 — the guide pattern)
-  5. first ``# H1`` heading
-  6. first ``## H2`` heading
-  7. first prose line
-  8. the file stem
-"""
+"""Local knowledge loader for the forge-loop."""
 
 from __future__ import annotations
 
@@ -45,8 +11,7 @@ from pathlib import Path
 
 from kernelforge.resources import resource_path
 
-# local_knowledge/ lives at the repo root in source checkouts and under
-# kernelforge/data in built wheels.
+# local_knowledge/ lives at the repo root in source checkouts and under kernelforge/data in built wheels.
 _DEFAULT_ROOT = resource_path("local_knowledge")
 
 # Only these extensions are indexed (docs + runnable skeletons/scripts).
@@ -61,11 +26,7 @@ _PY_SKIP_COMMENT = re.compile(r"^#\s*(spdx-|copyright|!|-\*-|type:|noqa)", re.IG
 
 
 def _clip(s: str, limit: int = 220) -> str:
-    """Collapse whitespace to one line; end on a full sentence when possible.
-
-    Prefers a complete first sentence; only appends '…' when a single sentence
-    genuinely exceeds ``limit`` (so descriptions are not cut mid-thought).
-    """
+    """Collapse whitespace to one line; end on a full sentence when possible."""
     s = re.sub(r"\s+", " ", s).strip().strip("*`").strip()
     # A complete first sentence, if it fits, reads best.
     dot = s.find(". ")
@@ -203,14 +164,29 @@ def _flat_listing(folder: Path) -> str:
     return "\n".join(out)
 
 
-def _render_level(root: Path, rel: str) -> str:
-    """Render one knowledge level as a titled section.
+def _strip_frontmatter(text: str) -> str:
+    """Drop a leading ``---`` YAML block from a knowledge map.
 
-    Per the KernelForge convention: if the folder has an ``INDEX.md`` it is the
-    navigation map and is loaded WHOLE; otherwise fall back to a flat
-    ``<path> — <descriptor>`` listing of the folder's files. Returns "" when the
-    folder is missing or empty.
+    The block carries title/kind/scope/updated -- metadata describing the file
+    to whoever maintains the KB. It is not navigation: nothing downstream
+    reads it, and an agent handed it learns nothing it cannot see from the H1
+    on the next line. It is inlined into every implementer, specialist,
+    orchestration and analysis prompt, so it is paid for once per map per
+    session and then again on every turn that re-reads the prefix.
     """
+    if not text.startswith("---"):
+        return text
+    lines = text.split("\n")
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return "\n".join(lines[index + 1 :]).lstrip("\n")
+    # An opening fence with no close is not front matter; leave it alone
+    # rather than swallow the whole map.
+    return text
+
+
+def _render_level(root: Path, rel: str) -> str:
+    """Render one knowledge level as a titled section."""
     folder = root / rel
     if not folder.is_dir():
         return ""
@@ -218,7 +194,7 @@ def _render_level(root: Path, rel: str) -> str:
     index = folder / "INDEX.md"
     if index.is_file():
         try:
-            body = index.read_text(encoding="utf-8", errors="replace").strip()
+            body = _strip_frontmatter(index.read_text(encoding="utf-8", errors="replace").strip()).strip()
         except OSError:
             body = ""
         if body:
@@ -229,30 +205,69 @@ def _render_level(root: Path, rel: str) -> str:
     return f"{header}\n\n{listing}"
 
 
+def _render_pointer(root: Path, rel: str, *, carried: bool = True) -> str:
+    """Render one knowledge level as a one-line pointer instead of its whole map.
+
+    Used for the SECOND language a backend carries, and for every pillar when
+    ``defer_all`` is set. Triton and Gluon carry each other so a campaign knows
+    that switching is an available move rather than a different project -- but
+    knowing the move exists needs the map's location, not its 2.7k-token body
+    inlined ahead of every turn of every session. The pointer keeps the
+    affordance and defers the map to a ``Read`` the agent makes only if it
+    actually needs it.
+
+    ``carried`` picks the wording: a level the backend merely carries is an
+    available move ("if this task crosses into ..."), while a deferred pillar is
+    the map itself and reads as one.
+    """
+    folder = root / rel
+    if not folder.is_dir():
+        return ""
+    index = folder / "INDEX.md"
+    if not index.is_file():
+        # No map to defer; a flat listing is already short, so inline it.
+        return _render_level(root, rel)
+    title = ""
+    try:
+        body = _strip_frontmatter(index.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        body = ""
+    for line in body.split("\n"):
+        if line.startswith("# "):
+            title = line[2:].strip()
+            break
+    header = f"## {rel}/  —  base: {folder}"
+    what = f" — {title}" if title else ""
+    call = (
+        f"`Read` `{index}` if this task crosses into `{rel}`."
+        if carried
+        else f"`Read` `{index}` for this pillar's map before opening any card under it."
+    )
+    return f"{header}\n\nMap not inlined{what}. {call}"
+
+
 def build_forge_knowledge(
     root: str | Path | None = None,
     *,
     language: str | Sequence[str] | None = None,
     include_aiter: bool = False,
     include_mori: bool = False,
+    defer_all: bool = False,
 ) -> str:
     """Assemble the layered knowledge block for one forge-loop kernel task.
 
-    Layers, in reading order (see module docstring):
-      1. ``hardware/`` + ``common_methodology/`` — always.
-      2. ``framework/aiter/`` — only when ``include_aiter`` (an AITER operator).
-      3. ``framework/mori/`` — only when ``include_mori`` (experimental,
-         ablation-only knob; off by default — see ``config.include_mori_kb``).
-      4. ``languages/<language>/`` — when ``language`` is given and its folder
-         exists.
+    Layers, in reading order: ``hardware/`` + ``common_methodology/`` always;
+    ``framework/aiter/`` when ``include_aiter``; ``framework/mori/`` when
+    ``include_mori`` (ablation-only, off by default); ``languages/<language>/``
+    when given and present. ``language`` accepts a sequence (triton/gluon are one
+    toolchain and carry each other); duplicates collapse. Each level follows the
+    INDEX.md convention. Returns "" if the root or all levels are missing.
 
-    ``language`` accepts a sequence, rendered in the order given, for a backend
-    served by more than one language folder (triton/gluon are one toolchain and
-    carry each other; see ``kernel_backends.constants.resolve_language_dirs``).
-    Duplicates collapse so the same folder is never rendered twice.
-
-    Each level is loaded per the INDEX.md convention (whole INDEX.md if present,
-    else a flat file listing). Returns "" if the root or all levels are missing.
+    ``defer_all`` renders EVERY level as a pointer rather than only the carried
+    language -- the ablation behind ``Config.defer_knowledge_maps``. It is off by
+    default: the maps are what tells an agent a card exists at all, and whether it
+    still goes looking without them is a question for an A/B, not for arithmetic
+    on their token cost.
     """
     root_path = Path(root) if root else _DEFAULT_ROOT
     if not root_path.exists():
@@ -264,10 +279,25 @@ def build_forge_knowledge(
     if include_mori:
         rels.append("framework/mori")
     languages = [language] if isinstance(language, str) else list(language or ())
-    for name in dict.fromkeys(item for item in languages if item):
-        rels.append(f"languages/{name}")
+    deferred: set[str] = set()
+    for position, name in enumerate(dict.fromkeys(item for item in languages if item)):
+        rel = f"languages/{name}"
+        rels.append(rel)
+        # The primary language is inlined whole; every language after it is the
+        # one the backend merely carries, and is deferred to a pointer.
+        if position:
+            deferred.add(rel)
+    if defer_all:
+        deferred.update(rels)
 
-    sections = [s for s in (_render_level(root_path, rel) for rel in rels) if s]
+    def render(rel: str) -> str:
+        if rel not in deferred:
+            return _render_level(root_path, rel)
+        # A level deferred only because the backend merely carries it reads as an
+        # available move; one deferred by the ablation is the pillar itself.
+        return _render_pointer(root_path, rel, carried=not defer_all)
+
+    sections = [s for s in (render(rel) for rel in rels) if s]
     if not sections:
         return ""
 

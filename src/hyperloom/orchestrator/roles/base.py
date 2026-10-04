@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Backend protocol — what the Coordinator needs from any LLM provider.
-
-Concrete implementations return a :class:`BackendTurnResult` carrying the
-turn's intents; the Coordinator handles validation, PolicyGate, persistence.
-"""
+"""Backend protocol — what the Coordinator needs from any LLM provider."""
 
 from __future__ import annotations
 
@@ -23,20 +19,7 @@ log = logging.getLogger(__name__)
 
 
 def parse_call_timeout_env(env_name: str, *, default: float) -> float:
-    """Read a per-call wall-clock timeout from ``env_name``, default on miss/error.
-
-    Returns ``default`` (logging a WARNING) when the env var is unset, empty,
-    or not a positive finite float — a malformed knob must not be fatal.
-
-    Args:
-        env_name: Name of the environment variable holding the timeout seconds.
-        default: Fallback timeout in seconds used when the env var is missing
-            or malformed.
-
-    Returns:
-        The parsed positive finite timeout in seconds, or ``default`` on any
-        miss or parse error.
-    """
+    """Read a per-call wall-clock timeout from ``env_name``, default on miss/error."""
     raw = os.environ.get(env_name)
     if raw is None or not raw.strip():
         return default
@@ -62,19 +45,7 @@ def parse_call_timeout_env(env_name: str, *, default: float) -> float:
 
 
 def build_chat_messages(system_prompt: str | None, user_content: str) -> list[dict[str, Any]]:
-    """Assemble an OpenAI-style chat ``messages`` list.
-
-    Prepends a ``system`` message only when *system_prompt* is non-empty, then
-    appends the ``user`` message. Returns a fresh list each call (callers may
-    mutate it, e.g. to append tool/assistant turns).
-
-    Args:
-        system_prompt: Optional system message content.
-        user_content: The user message content.
-
-    Returns:
-        A new ``[{"role": ...}, ...]`` list.
-    """
+    """Assemble an OpenAI-style chat ``messages`` list."""
     messages: list[dict[str, Any]] = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -87,29 +58,12 @@ class BackendError(RuntimeError):
 
 
 class LLMCallFailed(BackendError):
-    """The model request itself failed — no usable response came back.
-
-    A :class:`BackendError` covers everything a backend can get wrong, most of
-    which never touches the provider: a missing ``--review`` path, an
-    unreadable ``emit.json``, an unsupported runtime phase, an absent SDK. Only
-    the subset raised around an actual provider call belongs in the LLM error
-    rate, so those sites raise this instead and the trace layer records an
-    ``error`` row for it alone. Counting every ``BackendError`` would let
-    deterministic local faults masquerade as provider failures.
-
-    Subclasses :class:`BackendError` so existing ``except BackendError``
-    handlers (retry, error-streak accounting) are unaffected.
-    """
+    """The model request itself failed — no usable response came back."""
 
 
 @dataclass(frozen=True)
 class RetryPolicy:
-    """Bounded exponential-backoff policy for transient LLM call failures.
-
-    ``max_attempts`` counts the FIRST try (so ``1`` disables retry). Delay grows
-    ``base_delay_s * multiplier**(attempt-1)`` capped at ``max_delay_s`` plus up
-    to ``jitter_s`` of randomization.
-    """
+    """Bounded exponential-backoff policy for transient LLM call failures."""
 
     max_attempts: int = 3
     base_delay_s: float = 1.0
@@ -122,33 +76,11 @@ class RetryPolicy:
         cls,
         prefix: str = "INFERENCE_OPTIMIZER_LLM_RETRY",
     ) -> "RetryPolicy":
-        """Build a policy from ``<prefix>_{ATTEMPTS,BASE_S,MAX_S,MULT,JITTER_S}``.
-
-        Malformed values fall back to the dataclass default for that field.
-        ``<prefix>_ATTEMPTS=1`` (or ``0``) disables retry.
-
-        Args:
-            prefix: The environment-variable prefix to read the policy fields
-                from.
-
-        Returns:
-            A :class:`RetryPolicy` populated from the environment, with
-            per-field fallback to the dataclass defaults.
-        """
+        """Build a policy from ``<prefix>_{ATTEMPTS,BASE_S,MAX_S,MULT,JITTER_S}``."""
         d = cls()
 
         def _num(suffix: str, default: float, *, cast: Callable[[float], Any]):
-            """Read ``<prefix>_<suffix>`` as a number, falling back to ``default``.
-
-            Args:
-                suffix: The env-var suffix appended to ``prefix``.
-                default: Fallback returned when the var is unset or invalid.
-                cast: Callable applied to the parsed float for the final value.
-
-            Returns:
-                The cast parsed value, or ``default`` when missing, non-finite,
-                negative, or unparseable.
-            """
+            """Read ``<prefix>_<suffix>`` as a number, falling back to ``default``."""
             raw = os.environ.get(f"{prefix}_{suffix}")
             if raw is None or not raw.strip():
                 return default
@@ -171,15 +103,7 @@ class RetryPolicy:
         )
 
     def delay_for(self, attempt: int) -> float:
-        """Backoff delay (seconds) before retry ``attempt`` (1-based prior attempt).
-
-        Args:
-            attempt: The 1-based number of the prior attempt that just failed.
-
-        Returns:
-            The backoff delay in seconds (capped at ``max_delay_s`` plus
-            optional jitter).
-        """
+        """Backoff delay (seconds) before retry ``attempt`` (1-based prior attempt)."""
         raw = self.base_delay_s * (self.multiplier ** max(0, attempt - 1))
         capped = min(self.max_delay_s, raw)
         if self.jitter_s > 0:
@@ -195,26 +119,7 @@ async def retry_with_backoff(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     on_retry: Callable[[int, BaseException, float], None] | None = None,
 ) -> Any:
-    """Await ``fn()`` with bounded exponential-backoff retry on ``retry_on``.
-
-    Re-raises the last exception once ``policy.max_attempts`` is exhausted. The
-    ``sleep`` seam keeps tests deterministic (inject a no-op / fake clock).
-
-    Args:
-        fn: The zero-arg awaitable factory to invoke each attempt.
-        policy: The retry policy bounding attempts and backoff delay.
-        retry_on: The exception types that trigger a retry.
-        sleep: Awaitable sleep used between attempts (injectable for tests).
-        on_retry: Optional callback ``(attempt, exc, delay)`` invoked before
-            each retry; its own exceptions are swallowed.
-
-    Returns:
-        The successful result of ``fn()``.
-
-    Raises:
-        BaseException: Re-raises the last exception from ``fn()`` once
-            ``policy.max_attempts`` is exhausted.
-    """
+    """Await ``fn()`` with bounded exponential-backoff retry on ``retry_on``."""
     attempt = 0
     while True:
         attempt += 1
@@ -240,14 +145,7 @@ async def retry_with_backoff(
 
 
 def safe_int(value: Any) -> int:
-    """Coerce a possibly-missing usage value to a non-negative int.
-
-    Args:
-        value (Any): A token-count value that may be ``None`` or non-numeric.
-
-    Returns:
-        int: The integer value, or ``0`` when it is falsy or not coercible.
-    """
+    """Coerce a possibly-missing usage value to a non-negative int."""
     try:
         return int(value or 0)
     except (TypeError, ValueError):
@@ -265,10 +163,7 @@ class BackendTurnResult:
 
 @runtime_checkable
 class Backend(Protocol):
-    """Async LLM backend protocol used by the Coordinator reactor loop.
-
-    Backends are stateful but each ``run`` invocation is one logical turn.
-    """
+    """Async LLM backend protocol used by the Coordinator reactor loop."""
 
     async def run(
         self,
@@ -278,21 +173,7 @@ class Backend(Protocol):
         tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
-        """Run one logical turn for the given prompt and return its intents.
-
-        Args:
-            prompt (str): The user/turn prompt to send to the backend.
-            system_prompt (str | None): Optional system prompt establishing the
-                backend's role and rules for this turn.
-            tools (list[str] | None): Optional list of tool names the backend is
-                allowed to use this turn.
-            max_turns (int): Maximum number of internal agentic sub-turns the
-                backend may take to produce its result.
-
-        Returns:
-            BackendTurnResult: The intents emitted this turn plus any raw text
-            and metadata.
-        """
+        """Run one logical turn for the given prompt and return its intents."""
 
 
 __all__ = [

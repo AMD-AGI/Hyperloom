@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Behavior-lock tests for optimize exit-code semantics: multi-node topology
-gates exit 2, and a session already held exits 3 (SESSION_BUSY_EXIT_CODE)."""
+"""Behavior-lock tests for optimize exit-code semantics: multi-node topology gates exit 2, and a session already held exits 3 (SESSION_BUSY_EXIT_CODE)."""
 
 from __future__ import annotations
 
@@ -13,7 +12,82 @@ from pathlib import Path
 import pytest
 
 import hyperloom.inference_optimizer.cli as ocli
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
+from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import record_stage_reached
 from hyperloom.inference_optimizer.session.lock import SessionLock
+from hyperloom.orchestrator.state.shared_state import SharedState
+
+
+def _record_terminal_writes(monkeypatch) -> list[str]:
+    """Capture every terminal artifact the close-out writes, in order."""
+    order: list[str] = []
+    for name, label in (
+        ("write_minimal_final_json", "final_json"),
+        ("write_breakdown_json", "breakdown"),
+        ("write_minimal_final_report", "final_md"),
+        ("package_session_artifacts", "package"),
+    ):
+        monkeypatch.setattr(
+            f"hyperloom.inference_optimizer.breakdown.{name}",
+            lambda *_a, _label=label, **_kw: order.append(_label),
+        )
+    return order
+
+
+def test_resumable_restart_writes_no_terminal_artifacts(tmp_path: Path, monkeypatch) -> None:
+    order = _record_terminal_writes(monkeypatch)
+
+    ocli._write_cli_terminal_artifacts(
+        tmp_path,
+        SharedState(session_id="s"),
+        "supervisor_restart_requested",
+    )
+
+    assert order == []
+
+
+def test_terminal_artifacts_keep_the_existing_write_order(tmp_path: Path, monkeypatch) -> None:
+    order = _record_terminal_writes(monkeypatch)
+
+    ocli._write_cli_terminal_artifacts(tmp_path, SharedState(session_id="s"), "signal")
+
+    assert order == ["final_json", "breakdown", "final_md", "package"]
+
+
+def test_terminal_safety_net_preserves_authored_stage(tmp_path: Path, monkeypatch) -> None:
+    _record_terminal_writes(monkeypatch)
+    record_stage_reached(tmp_path, "enablement")
+
+    ocli._write_cli_terminal_artifacts(tmp_path, SharedState(session_id="s", phase="PRELUDE"), "signal")
+
+    assert assemble_parts(tmp_path)["outcome"]["stage_reached_recorded"] == "enablement"
+
+
+def test_terminal_safety_net_does_not_invent_a_stage(tmp_path: Path, monkeypatch) -> None:
+    _record_terminal_writes(monkeypatch)
+
+    ocli._write_cli_terminal_artifacts(tmp_path, SharedState(session_id="s", phase="PRELUDE"), "signal")
+
+    assert "outcome" not in assemble_parts(tmp_path)
+
+
+def test_completed_close_still_gets_its_close_out_package(tmp_path: Path, monkeypatch) -> None:
+    """The sequencer wrote the reports; the package is the session's, not the sequencer's."""
+    order = _record_terminal_writes(monkeypatch)
+
+    state = SharedState(session_id="s", close_sequence_done=True)
+    ocli._write_cli_terminal_artifacts(tmp_path, state, "signal")
+
+    assert order == ["final_json", "package"]
+
+
+def test_optimize_has_no_supervisor_launcher_hooks() -> None:
+    import inspect
+
+    source = inspect.getsource(ocli)
+    assert "spawn_supervisor" not in source
+    assert "stop_supervisor" not in source
+    assert "orchestrator.supervisor" not in source
 
 
 def test_multinode_tp_exceeds_total_gpus_exits_2() -> None:

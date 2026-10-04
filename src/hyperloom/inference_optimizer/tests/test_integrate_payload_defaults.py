@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as kernel_agent_tool
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
@@ -56,8 +58,8 @@ class TestFillIntegrateDefaultsFromState:
             session_dir=session_dir,
         )
 
-        # base_tput prefers current_best.tput (900) over the raw baseline (800):
-        # the candidate must beat the recipe it stacks onto, not just baseline.
+        # base_tput prefers current_best.tput (900) over the raw baseline (800): the candidate must beat the recipe it
+        # stacks onto, not just baseline.
         assert out["base_tput"] == 900.0
         assert out["config_path"] == "/tmp/base.yaml"
         assert out["extra_server_args"] == "--page-size 16"
@@ -123,6 +125,130 @@ class TestFillIntegrateDefaultsFromState:
             "SHARED": "candidate",
         }
 
+    @pytest.mark.parametrize(
+        "remove_args,unset_envs",
+        [
+            ([" --disable-cuda-graph ", ""], [" YAML_DROP ", ""]),
+            (" --disable-cuda-graph ", " YAML_DROP "),
+        ],
+        ids=["lists", "strings"],
+    )
+    def test_current_best_recipe_controls_are_defaulted(self, session_dir, remove_args, unset_envs):
+        state = _seed_state(session_dir, current_best_args="--page-size 16")
+        state.current_best.update(remove_args=remove_args, unset_envs=unset_envs, args_mode="replace")
+        state.save(session_dir)
+        payload = {"kernel_id": "k_recipe"}
+
+        out = krh._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+
+        assert out["remove_args"] == ["--disable-cuda-graph"]
+        assert out["unset_envs"] == ["YAML_DROP"]
+        assert out["args_mode"] == "replace"
+        assert out["extra_server_args"] == "--page-size 16"
+        assert payload == {"kernel_id": "k_recipe"}
+
+    @pytest.mark.parametrize(
+        "requested",
+        [
+            {
+                "extra_server_args": "--page-size 32",
+                "remove_args": ["--disable-overlap-schedule"],
+                "unset_envs": ["REQUEST_DROP"],
+                "args_mode": "append",
+            },
+            {"remove_args": [], "unset_envs": [], "args_mode": ""},
+        ],
+        ids=["overrides", "explicit-empty"],
+    )
+    def test_payload_recipe_controls_override_defaults(self, session_dir, requested):
+        state = _seed_state(session_dir, current_best_args="--page-size 16")
+        state.current_best.update(remove_args=["--disable-cuda-graph"], unset_envs=["STATE_DROP"], args_mode="replace")
+        state.save(session_dir)
+        payload = {"kernel_id": "k_recipe", **requested}
+
+        out = krh._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+
+        assert {key: out[key] for key in requested} == requested
+        assert payload == {"kernel_id": "k_recipe", **requested}
+
+    @pytest.mark.parametrize("explicit_unset", [False, True], ids=["inherited-unset", "requested-unset"])
+    def test_candidate_envs_override_only_inherited_unsets(self, session_dir, explicit_unset):
+        current_envs = {"CURRENT_ONLY": "1", "REENABLE": "state"}
+        state = _seed_state(session_dir, current_best_envs=current_envs)
+        state.current_best["unset_envs"] = ["CURRENT_ONLY", "REENABLE"]
+        state.save(session_dir)
+        payload = {"kernel_id": "k_recipe", "extra_envs": {"REENABLE": "candidate"}}
+        if explicit_unset:
+            payload["unset_envs"] = [" CURRENT_ONLY ", "REENABLE"]
+
+        out = krh._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+
+        assert out["extra_envs"] == ({} if explicit_unset else {"REENABLE": "candidate"})
+        assert out["unset_envs"] == (["CURRENT_ONLY", "REENABLE"] if explicit_unset else ["CURRENT_ONLY"])
+        assert payload["extra_envs"] == {"REENABLE": "candidate"}
+        assert SharedState.load_or_init(session_dir).current_best["extra_envs"] == current_envs
+
+    def test_paired_empty_recipe_controls_do_not_inherit_live_defaults(self, session_dir):
+        state = _seed_state(session_dir, current_best_args="--page-size 16", current_best_envs={"LIVE_ONLY": "1"})
+        state.current_best.update(remove_args=["--disable-cuda-graph"], unset_envs=["LIVE_DROP"], args_mode="replace")
+        state.save(session_dir)
+        payload = {
+            "kernel_id": "gemm_paired_A0",
+            "source": "forge_gemm_paired",
+            "paired_reference": {"tput": 800.0},
+            "config_path": "/tmp/base.yaml",
+            "extra_server_args": "",
+            "extra_envs": {},
+            "remove_args": [],
+            "unset_envs": [],
+            "args_mode": "",
+        }
+
+        out = krh._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+
+        assert out == {**payload, "base_tput": 800.0}
+
+    def test_fusion_record_activates_the_env_flag_and_keep_bar(self, session_dir):
+        """A fusion sibling's env flag + keep bar are folded in from its record."""
+        from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
+        from hyperloom.orchestrator.kernel.nomination_result import NominatedPatch
+
+        state = _seed_state(session_dir, current_best_envs={"KEEP_ME": "1"})
+        record = enqueue_nominated_patch(
+            state,
+            patch=NominatedPatch(
+                kernel_name="fuse_a",
+                patch_path="/out/fuse_a.patch",
+                target_file="/repo/a.py",
+                env_flag="ZAYA_FUSED_A",
+            ),
+            keep_threshold_pct=3.0,
+        )
+        state.save(session_dir)
+
+        out = krh._fill_integrate_defaults_from_state(
+            {"kernel_id": "fuse_a", "integration_id": record["integration_id"]},
+            session_dir=session_dir,
+        )
+
+        # current_best env survives AND the fused path is now active.
+        assert out["extra_envs"] == {"KEEP_ME": "1", "ZAYA_FUSED_A": "1"}
+        assert out["keep_threshold_pct"] == pytest.approx(3.0)
+        assert out["source"] == "forge_fusion"
+        assert out["action_label"] == "fusion"
+
+    def test_a_non_fusion_record_adds_no_fusion_fields(self, session_dir):
+        """The fusion folding is opt-in on ``source='forge_fusion'``."""
+        _seed_state(session_dir, baseline_tput=800.0)
+
+        out = krh._fill_integrate_defaults_from_state(
+            {"kernel_id": "k_abc"},
+            session_dir=session_dir,
+        )
+
+        assert "keep_threshold_pct" not in out
+        assert out.get("source") != "forge_fusion"
+
     def test_empty_state_no_op(self, session_dir):
         _seed_state(session_dir)
 
@@ -168,14 +294,7 @@ class TestFillIntegrateDefaultsFromState:
         assert out["base_tput"] == 750.0
 
     def test_base_tput_prefers_current_best_over_baseline(self, session_dir):
-        """A candidate must be judged against the CURRENT BEST recipe it stacks
-        onto (current_best.tput), not the raw baseline.
-
-        Otherwise a kernel/fusion that beats baseline but regresses vs the
-        established best (e.g. a warm-replay recipe) is wrongly KEEP'd instead of
-        REVERT'd (observed: forge_fusion adopted at negative gain vs current_best
-        while still positive vs baseline, dragging the final recipe down).
-        """
+        """A candidate must be judged against the CURRENT BEST recipe it stacks onto (current_best.tput), not the raw baseline."""
         _seed_state(
             session_dir,
             baseline_tput=800.0,
@@ -190,8 +309,7 @@ class TestFillIntegrateDefaultsFromState:
         assert out["base_tput"] == 900.0  # current_best, NOT baseline 800
 
     def test_base_tput_falls_back_to_baseline_without_current_best(self, session_dir):
-        # No current_best recorded yet (early kernel phase) -> baseline is the
-        # only reference available.
+        # No current_best recorded yet (early kernel phase) -> baseline is the only reference available.
         _seed_state(session_dir, baseline_tput=800.0)
 
         out = krh._fill_integrate_defaults_from_state(
@@ -202,11 +320,117 @@ class TestFillIntegrateDefaultsFromState:
         assert out["base_tput"] == 800.0
 
 
+class TestBareKernelIdMustNotGuessBetweenSiblings:
+    """One ``kernel_id`` can name several pending siblings."""
+
+    @staticmethod
+    def _enqueue(state, *, kernel_name: str, target_file: str, micro_speedup: float) -> dict:
+        from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
+        from hyperloom.orchestrator.kernel.nomination_result import NominatedPatch
+
+        record = enqueue_nominated_patch(
+            state,
+            patch=NominatedPatch(
+                kernel_name=kernel_name,
+                patch_path=f"/out/{Path(target_file).stem}.patch",
+                target_file=target_file,
+                micro_speedup=micro_speedup,
+            ),
+            keep_threshold_pct=3.0,
+        )
+        assert record is not None
+        return record
+
+    def _seed_two_siblings(self, session_dir: Path) -> list[str]:
+        state = _seed_state(session_dir, baseline_tput=800.0)
+        first = self._enqueue(state, kernel_name="fuse_a", target_file="/repo/a.py", micro_speedup=1.9)
+        second = self._enqueue(state, kernel_name="fuse_a", target_file="/repo/b.py", micro_speedup=1.2)
+        state.save(session_dir)
+
+        pending = SharedState.load_or_init(session_dir).pending_kernel_integration_records()
+        assert [str(record.get("kernel_id")) for record in pending] == ["fuse_a", "fuse_a"]
+        return [str(first["integration_id"]), str(second["integration_id"])]
+
+    def test_ambiguous_bare_kernel_id_is_refused_by_name(self, session_dir):
+        ids = self._seed_two_siblings(session_dir)
+
+        with pytest.raises(krh.AmbiguousIntegrationTarget) as excinfo:
+            krh._fill_integrate_defaults_from_state(
+                {"kernel_id": "fuse_a"},
+                session_dir=session_dir,
+            )
+
+        assert type(excinfo.value) is krh.AmbiguousIntegrationTarget
+        assert str(excinfo.value) == (
+            "integrate refused: kernel_id='fuse_a' matches 2 pending integration "
+            "records; an explicit integration_id is required to bind the "
+            f"KEEP/REVERT verdict. candidates={sorted(ids)!r}"
+        )
+
+    def test_an_unresolvable_integration_id_does_not_reopen_the_guess(self, session_dir):
+        """A named id that matches nothing is not a licence to fall back."""
+        ids = self._seed_two_siblings(session_dir)
+
+        with pytest.raises(krh.AmbiguousIntegrationTarget) as excinfo:
+            krh._fill_integrate_defaults_from_state(
+                {"kernel_id": "fuse_a", "integration_id": "kernel-integration:gone"},
+                session_dir=session_dir,
+            )
+
+        assert f"candidates={sorted(ids)!r}" in str(excinfo.value)
+
+    def test_an_explicit_integration_id_still_binds_its_own_sibling(self, session_dir):
+        ids = self._seed_two_siblings(session_dir)
+
+        out = krh._fill_integrate_defaults_from_state(
+            {"kernel_id": "fuse_a", "integration_id": ids[1]},
+            session_dir=session_dir,
+        )
+
+        assert out["integration_id"] == ids[1]
+        assert out["kernel_id"] == "fuse_a"
+
+    def test_a_single_pending_sibling_still_resolves_from_a_bare_kernel_id(self, session_dir):
+        state = _seed_state(session_dir, baseline_tput=800.0)
+        only = self._enqueue(state, kernel_name="fuse_a", target_file="/repo/a.py", micro_speedup=1.9)
+        state.save(session_dir)
+
+        out = krh._fill_integrate_defaults_from_state(
+            {"kernel_id": "fuse_a"},
+            session_dir=session_dir,
+        )
+
+        assert out["integration_id"] == only["integration_id"]
+        assert out["kernel_id"] == "fuse_a"
+        assert out["base_tput"] == 800.0
+
+    def test_a_kernel_id_with_no_pending_record_is_unaffected(self, session_dir):
+        self._seed_two_siblings(session_dir)
+
+        out = krh._fill_integrate_defaults_from_state(
+            {"kernel_id": "gemm_tune_fmoe_ck"},
+            session_dir=session_dir,
+        )
+
+        assert out["kernel_id"] == "gemm_tune_fmoe_ck"
+        assert "integration_id" not in out
+
+    @pytest.mark.asyncio
+    async def test_integrate_handler_refuses_before_applying_anything(self, session_dir):
+        self._seed_two_siblings(session_dir)
+
+        with pytest.raises(krh.AmbiguousIntegrationTarget) as excinfo:
+            await krh.integrate_handler(
+                {"kernel_id": "fuse_a"},
+                session_dir=session_dir,
+            )
+
+        assert type(excinfo.value) is krh.AmbiguousIntegrationTarget
+        assert "an explicit integration_id is required" in str(excinfo.value)
+
+
 class TestVendorPlaybookDeployBlocked:
-    """A vendor-playbook KEEP (e.g. mori dispatch/combine) must never reach
-    apply_kernel_patch: its best_artifact_path is a KernelForge task-bundle
-    config copy, not a rewrite of the real installed operator source
-    (PR #1191 review finding #1)."""
+    """A vendor-playbook KEEP (e.g. mori dispatch/combine) must never reach apply_kernel_patch: its best_artifact_path is a KernelForge task-bundle config copy, not a rewrite of the real installed operator source (PR #1191 review finding #1)."""
 
     def test_backfilled_from_kernel_opt_attempts_ledger(self, session_dir):
         state = SharedState.load_or_init(session_dir)
@@ -226,8 +450,7 @@ class TestVendorPlaybookDeployBlocked:
         assert out["_vendor_playbook_deploy_blocked"] is True
 
     def test_backfilled_from_last_kernel_opt_when_ledger_missing(self, session_dir):
-        """An LLM-initiated integrate can name a kernel_id that never made it
-        into kernel_opt_attempts yet; last_kernel_opt must still catch it."""
+        """An LLM-initiated integrate can name a kernel_id that never made it into kernel_opt_attempts yet; last_kernel_opt must still catch it."""
         state = SharedState.load_or_init(session_dir)
         state.last_kernel_opt = {
             "kernel_id": "k010",
@@ -277,56 +500,6 @@ class TestVendorPlaybookDeployBlocked:
         assert result["decision"] == "NEEDS_REVIEW"
 
 
-class TestIntegrateRebaselineTimeout:
-    def test_explicit_budget_wins(self, tmp_path):
-        config = tmp_path / "config.yaml"
-        config.write_text("benchmark:\n  timeout_seconds: 7200\n")
-
-        assert (
-            krh._integrate_rebaseline_timeout_sec(
-                {
-                    "config_path": str(config),
-                    "budget_minutes": 15,
-                },
-                default_timeout_sec=7800,
-            )
-            == 900
-        )
-
-    def test_benchmark_contract_replaces_legacy_cap(self, tmp_path):
-        config = tmp_path / "config.yaml"
-        config.write_text("benchmark:\n  timeout_seconds: 7200\n")
-
-        assert (
-            krh._integrate_rebaseline_timeout_sec(
-                {"config_path": str(config)},
-                default_timeout_sec=7800,
-            )
-            == 7200
-        )
-
-    def test_shorter_benchmark_contract_is_preserved(self, tmp_path):
-        config = tmp_path / "config.yaml"
-        config.write_text("benchmark:\n  timeout_seconds: 2400\n")
-
-        assert (
-            krh._integrate_rebaseline_timeout_sec(
-                {"config_path": str(config)},
-                default_timeout_sec=7800,
-            )
-            == 2400
-        )
-
-    def test_executor_default_is_preserved(self):
-        assert (
-            krh._integrate_rebaseline_timeout_sec(
-                {},
-                default_timeout_sec=7800,
-            )
-            == 7800
-        )
-
-
 class TestIntegrateHandlerHonoursStateDefault:
     @pytest.mark.asyncio
     async def test_missing_base_tput_in_payload_still_runs_when_state_has_one(
@@ -364,17 +537,18 @@ class TestIntegrateHandlerHonoursStateDefault:
         session_dir,
         monkeypatch,
     ):
-        """GEMM tuning validation has no patch; it must still run E2E with envs."""
+        """GEMM tuning validation has no patch; mode=env_only must still run E2E."""
         _seed_state(session_dir, baseline_tput=1000.0, baseline_config_path="/tmp/base.yaml")
         captured: dict[str, object] = {}
 
         from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
 
         class FakeBaselineExecutor:
-            default_timeout_sec = baseline_mod.BASELINE_DEFAULT_TIMEOUT_SEC
+            default_timeout_sec = 7800
 
-            def __init__(self, *, session_dir):
+            def __init__(self, *, session_dir, shared_state):
                 self.session_dir = session_dir
+                captured["shared_state"] = shared_state
 
             async def __call__(self, ctx):
                 captured["params"] = dict(ctx.task.params)
@@ -385,6 +559,7 @@ class TestIntegrateHandlerHonoursStateDefault:
         result = await krh.integrate_handler(
             {
                 "source": "forge_gemm_tuning",
+                "mode": "env_only",
                 "kernel_id": "gemm_tune_fmoe_ck",
                 "base_tput": 1000.0,
                 "config_path": "/tmp/base.yaml",
@@ -397,21 +572,117 @@ class TestIntegrateHandlerHonoursStateDefault:
         assert result["status"] == "ok", result
         assert result["decision"] == "KEEP"
         assert result["new_tput"] == 1100.0
+        assert captured["shared_state"].baseline_tput == 1000.0
+        assert captured["shared_state"].baseline_config_path == "/tmp/base.yaml"
         assert captured["params"]["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}
         assert captured["params"]["defer_accuracy_until_after_measure"] is True
         assert captured["params"]["post_measure_accuracy_min_tput"] == pytest.approx(1010.0)
+        assert "env_only" in result["advisory"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "controls",
+    [{"remove_args": ["--disable-cuda-graph"]}, {"args_mode": "replace"}],
+    ids=["remove-only", "replace-only"],
+)
+async def test_control_only_integrate_measures_without_resolving_historical_patch(session_dir, monkeypatch, controls):
+    from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    state = _seed_state(session_dir, baseline_tput=1000.0, baseline_config_path="/tmp/base.yaml")
+    state.last_kernel_opt = {
+        "kernel_id": "gemm_controls_only",
+        "best_artifact_path": "/tmp/unrelated.patch",
+        "source_file": "/tmp/unrelated.py",
+    }
+    state.save(session_dir)
+    captured = {}
+    resolve = Mock(wraps=krh._resolve_integrate_payload)
+    monkeypatch.setattr(krh, "_resolve_integrate_payload", resolve)
+
+    class FakeBaselineExecutor:
+        default_timeout_sec = 7800
+
+        def __init__(self, *, session_dir, shared_state):
+            self.session_dir = session_dir
+
+        async def __call__(self, ctx):
+            captured.update(ctx.task.params)
+            return {"output_throughput": 1100.0, "completed_requests": 10}
+
+    monkeypatch.setattr(baseline_mod, "BaselineExecutor", FakeBaselineExecutor)
+
+    result = await krh.integrate_handler(
+        {"kernel_id": "gemm_controls_only", "source": "forge_gemm_tuning", "mode": "env_only", **controls},
+        session_dir=session_dir,
+    )
+
+    resolve.assert_not_called()
+    assert result["status"] == "ok", result
+    assert result["new_tput"] == 1100.0
+    assert result["apply_result"]["reason"] == "env_only_no_patch_applied"
+    assert captured["extra_envs"] == {}
+    assert captured["extra_server_args"] == ""
+    assert {key: captured[key] for key in controls} == controls
+
+
+@pytest.mark.asyncio
+async def test_bare_kernel_id_with_inherited_controls_still_resolves_and_applies_patch(
+    session_dir, tmp_path, monkeypatch
+):
+    from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    target = tmp_path / "kernel.py"
+    artifact = tmp_path / "optimized.py"
+    target.write_text("def kernel():\n    return 'original'\n", encoding="utf-8")
+    artifact.write_text("def kernel():\n    return 'optimized'\n", encoding="utf-8")
+    monkeypatch.setattr(kernel_agent_tool._load_apply_tool(), "known_target_roots", lambda: [str(tmp_path)])
+    state = _seed_state(session_dir, baseline_tput=1000.0, baseline_config_path="/tmp/base.yaml")
+    state.current_best = {
+        "action": "integrate",
+        "tput": 1000.0,
+        "extra_server_args": "",
+        "extra_envs": {},
+        "remove_args": ["--disable-cuda-graph"],
+    }
+    state.last_kernel_opt = {
+        "kernel_id": "k_patch",
+        "best_artifact_path": str(artifact),
+        "source_file": str(target),
+    }
+    state.save(session_dir)
+    captured = {}
+    resolve = Mock(wraps=krh._resolve_integrate_payload)
+    monkeypatch.setattr(krh, "_resolve_integrate_payload", resolve)
+
+    class FakeBaselineExecutor:
+        default_timeout_sec = 7800
+
+        def __init__(self, *, session_dir, shared_state):
+            self.session_dir = session_dir
+
+        async def __call__(self, ctx):
+            captured["source_during_measurement"] = target.read_text(encoding="utf-8")
+            captured["params"] = dict(ctx.task.params)
+            return {"output_throughput": 1100.0, "completed_requests": 10}
+
+    monkeypatch.setattr(baseline_mod, "BaselineExecutor", FakeBaselineExecutor)
+
+    result = await krh.integrate_handler({"kernel_id": "k_patch"}, session_dir=session_dir)
+
+    resolve.assert_called_once()
+    assert result["status"] == "ok", result
+    assert result["apply_result"]["status"] == "ok"
+    assert result["apply_result"].get("reason") != "env_only_no_patch_applied"
+    assert result["patch_path"] == str(artifact)
+    assert captured["source_during_measurement"] == artifact.read_text(encoding="utf-8")
+    assert captured["params"]["remove_args"] == ["--disable-cuda-graph"]
 
 
 class TestApplybackProvenanceSurvivesTheLedgerFallbacks:
-    """An apply-back must arm the strict accuracy gate however it was resolved.
-
-    Provenance used to reach the payload only through the pending record, so
-    every KEEP that fell back to a ledger -- which is what the ``source_file``
-    dedup forces for the second and later KEEPs against one file -- looked like
-    an ordinary kernel patch. That is the one artifact whose correctness was
-    proven against a standalone reference only, so it must never be gradeable on
-    throughput alone.
-    """
+    """An apply-back must arm the strict accuracy gate however it was resolved."""
 
     def _seed_attempt_ledger(self, session_dir: Path, *, kernel_id: str) -> None:
         state = SharedState.load_or_init(session_dir)

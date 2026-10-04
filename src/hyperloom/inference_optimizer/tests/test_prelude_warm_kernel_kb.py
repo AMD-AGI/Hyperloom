@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PRELUDE preparation of the inference Recipe's kernel section.
-
-PRELUDE reads nested ``value.kernel.gemm/fusion/rewrite`` through
-:class:`KernelAgentKB` from the same already-downloaded inference Recipe used by
-Explore and Framework. The Recipe replay task grades the combined set once.
-"""
+"""PRELUDE preparation of the inference Recipe's kernel section."""
 
 from __future__ import annotations
 
@@ -16,10 +11,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors.baseline import (
+    restore_warm_kernel_snapshots,
+    revert_warm_kernel_patches,
+)
 from hyperloom.orchestrator.knowledge.agent_kb import KernelAgentKB
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
 )
+from hyperloom.orchestrator.phases import prelude as prelude_mod
 from hyperloom.orchestrator.phases.prelude import PreludePhase
 
 
@@ -30,7 +30,6 @@ class _StubPrelude:
     _parse_diff_target = staticmethod(PreludePhase._parse_diff_target)
     _resolve_kernel_target_path = PreludePhase._resolve_kernel_target_path
     _warm_kernel_extra_envs = staticmethod(PreludePhase._warm_kernel_extra_envs)
-    _revert_warm_kernel_patches = staticmethod(PreludePhase._revert_warm_kernel_patches)
     _snapshot_warm_kernel_target = PreludePhase._snapshot_warm_kernel_target
     _set_warm_kernel_outcome = PreludePhase._set_warm_kernel_outcome
     _prepare_warm_kernel_kb = PreludePhase._prepare_warm_kernel_kb
@@ -41,7 +40,7 @@ class _StubPrelude:
 
     def _resolve_kernel_target_paths(self, entry: dict) -> list[str]:
         """Resolve fixture Patch headers under the fixture's framework root."""
-        from hyperloom.orchestrator.framework.paths import (
+        from hyperloom.inference_optimizer.framework_paths import (
             resolve_session_framework_root,
         )
         from hyperloom.orchestrator.specialists.patch_safety import (
@@ -166,7 +165,7 @@ def test_resolve_target_from_diff_header_against_roots(monkeypatch, tmp_path: Pa
         encoding="utf-8",
     )
 
-    import hyperloom.orchestrator.framework.paths as paths
+    import hyperloom.inference_optimizer.framework_paths as paths
 
     monkeypatch.setattr(paths, "resolve_session_framework_root", lambda: str(root))
     stub = _StubPrelude(tmp_path)
@@ -222,11 +221,11 @@ def test_warm_kernel_apply_prefers_deploy_patch_over_source_snapshot(
         return str(snapshot_dir)
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._maybe_apply_kernel_patch",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._maybe_apply_kernel_patch",
         _apply,
     )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers.materialize_unified_patch_snapshot",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool.materialize_unified_patch_snapshot",
         _materialize,
     )
     session_dir = tmp_path / "session"
@@ -278,7 +277,7 @@ def test_warm_kernel_apply_prefers_deploy_patch_over_source_snapshot(
 def test_multi_file_manifest_and_target_snapshot_both_roll_back(
     tmp_path: Path,
 ) -> None:
-    from hyperloom.orchestrator.kernel.request_handlers import (
+    from hyperloom.orchestrator.actions.executors._kernel_agent_tool import (
         _maybe_apply_kernel_patch,
     )
 
@@ -322,7 +321,6 @@ def test_multi_file_manifest_and_target_snapshot_both_roll_back(
             "target_file": str(target),
             "snapshot_dir": str(materialized),
             "kernel_repo": str(live),
-            "allow_unknown_target": True,
         },
         session_dir=session_dir,
         kernel_id="multi",
@@ -332,7 +330,7 @@ def test_multi_file_manifest_and_target_snapshot_both_roll_back(
     assert (live / "pkg/a.py").read_text(encoding="utf-8") == "new-a\n"
     assert (live / "pkg/b.py").read_text(encoding="utf-8") == "new-b\n"
 
-    rollback = PreludePhase._revert_warm_kernel_patches(
+    rollback = revert_warm_kernel_patches(
         [applied],
         [snapshot],
     )
@@ -382,6 +380,7 @@ async def test_one_shot_save_failure_stops_before_kernel_apply(
 @pytest.mark.asyncio
 async def test_prepared_state_save_failure_rolls_back_kernel_set(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target = tmp_path / "serving/kernel.py"
     target.parent.mkdir(parents=True)
@@ -402,10 +401,12 @@ async def test_prepared_state_save_failure_rolls_back_kernel_set(
             raise OSError("state unavailable")
 
     stub.shared_state.save = _save
-    stub._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
         lambda applied, snapshots=None: (
             rollbacks.append((list(applied), list(snapshots or []))) or {"ok": True, "errors": []}
-        )
+        ),
     )
 
     outcome = await stub._prepare_warm_kernel_kb()
@@ -499,7 +500,10 @@ async def test_set_is_staged_without_a_separate_rebaseline(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_prepared_set_waits_for_combined_verdict(tmp_path: Path) -> None:
+async def test_prepared_set_waits_for_combined_verdict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     target = tmp_path / "serving" / "kernel.py"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("old", encoding="utf-8")
@@ -510,11 +514,13 @@ async def test_prepared_set_waits_for_combined_verdict(tmp_path: Path) -> None:
     )
     stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
     reverted: list[list[dict]] = []
-    stub._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
         lambda applied, snapshots=None: {
             "ok": not bool(reverted.append(applied)),
             "errors": [],
-        }
+        },
     )
 
     outcome = await stub._prepare_warm_kernel_kb()
@@ -549,7 +555,7 @@ async def test_kernel_snapshot_is_durable_before_first_mutation(
     with pytest.raises(SystemExit, match="crash window"):
         await stub._prepare_warm_kernel_kb()
 
-    restored = PreludePhase._restore_warm_kernel_snapshots(stub.shared_state.warm_replay_pending["kernel_snapshots"])
+    restored = restore_warm_kernel_snapshots(stub.shared_state.warm_replay_pending["kernel_snapshots"])
     assert restored["ok"] is True
     assert target.read_text() == "old"
 
@@ -637,8 +643,8 @@ async def test_loaded_zero_mutation_plan_clears_warm_pending(
 
 @pytest.mark.asyncio
 async def test_fusion_env_switches_reach_the_measurement(tmp_path: Path) -> None:
-    # A fusion patch only takes effect with its recorded env switches; applying
-    # the file alone re-measures the unfused path and reverts a good champion.
+    # A fusion patch only takes effect with its recorded env switches; applying the file alone re-measures the unfused
+    # path and reverts a good champion.
     target = tmp_path / "serving" / "model.py"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("old", encoding="utf-8")
@@ -674,8 +680,8 @@ async def test_fusion_env_switches_reach_the_measurement(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 async def test_gemm_without_env_var_is_deferred(tmp_path: Path) -> None:
-    # Nothing names the env var that should carry the tuned table, so there is
-    # no safe way to re-apply it: defer rather than guess.
+    # Nothing names the env var that should carry the tuned table, so there is no safe way to re-apply it: defer
+    # rather than guess.
     record = _kernel_record(
         tmp_path,
         {"gemm": {"optimizations": [{"tuned_file": "kernel/gemm/t.csv"}]}},

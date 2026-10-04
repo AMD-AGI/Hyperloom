@@ -13,9 +13,9 @@ import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Collection, Mapping
+from typing import Any, Collection, Final, Mapping
 
-from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_ENABLEMENT,
     LEVER_SOURCE_PATCH,
@@ -101,24 +101,7 @@ def _patch_declared_targets(path: Any) -> tuple[str, ...]:
 
 
 def _kernel_apply_root(patch_source: Any, target_file: Any, declared: Any = None) -> str:
-    """Return the directory a kernel patch's declared paths are relative to.
-
-    The absolute target and the patch's own relative path for it pin the root
-    between them: the root is what remains of the target once its declared tail
-    is removed. This is the inverse of what replay does when it places the
-    patch, so recording it here is what lets replay skip searching for a tree
-    the diff merely happens to fit.
-
-    Args:
-        patch_source: The patch file, read for its declared targets when
-            ``declared`` is not supplied.
-        target_file: An absolute path the patch was applied to.
-        declared: The patch's declared relative targets, when already parsed.
-
-    Returns:
-        The absolute root, or ``""`` when the target does not end with any
-        declared path -- which means the two do not describe the same apply.
-    """
+    """Return the directory a kernel patch's declared paths are relative to."""
     target = Path(str(target_file or ""))
     if not target.is_absolute():
         return ""
@@ -131,11 +114,7 @@ def _kernel_apply_root(patch_source: Any, target_file: Any, declared: Any = None
 
 
 def _kernel_host_origin(apply_root: str) -> dict[str, Any]:
-    """Wrap a kernel apply root in the one subtree that may carry host paths.
-
-    ``sanitize_shared_knowledge`` strips absolute paths everywhere else, so this
-    key is what makes the root survive publication.
-    """
+    """Wrap a kernel apply root in the one subtree that may carry host paths."""
     root = str(apply_root or "").strip()
     return {HOST_ORIGIN_KEY: {"apply_root": root}} if root.startswith("/") else {}
 
@@ -148,17 +127,58 @@ def _positive_int(value: Any) -> int | None:
     return resolved if resolved > 0 else None
 
 
-def _workload_shape(state: Any) -> dict[str, int]:
-    """Return the replay-sensitive workload dimensions."""
+#: Every dimension either supported identity scheme may place in its scope.
+_SCOPE_SHAPE_KEYS: Final[tuple[str, ...]] = ("tp", "conc", "isl", "osl")
+
+#: Every key ``workload_shape`` can publish. :func:`knowledge_to_warm_recipe` projects exactly these onto the warm
+#: row, derived from the writer so the projection cannot quietly drop a dimension the writer started publishing.
+SHAPE_KEYS: Final[tuple[str, ...]] = (*_SCOPE_SHAPE_KEYS, "ep", "partitions")
+
+
+def workload_shape(state: Any, *, scope: RecipeScope | None = None) -> dict[str, int]:
+    """Return the workload dimensions a row records about the machine it ran on.
+
+    Identity-scoped dimensions come from the same validated ``RecipeScope`` the
+    Store request uses, so AgentX never republishes its inert ISL/OSL defaults.
+    ``ep`` and ``partitions`` describe the same thing the ``canonical_id``'s hardware slug now encodes, so this is a
+    description of the run rather than the gate on replaying it. Both are omitted at their default value -- ``ep <=
+    1`` is dense and one partition is the whole card -- which keeps a row that merely took the CLI's ``--ep`` default
+    from claiming a formation it never chose.
+    """
+    resolved_scope = scope or RecipeScope.from_state(state)
     extra = _mapping(getattr(state, "baseline_workload_extra", {}))
-    shape: dict[str, int] = {}
-    for key in ("tp", "conc", "isl", "osl"):
-        value = _positive_int(getattr(state, key, None))
-        if value is None:
-            value = _positive_int(extra.get(key))
-        if value is not None:
-            shape[key] = value
+    shape = {
+        key: value
+        for key, value in resolved_scope.as_dict().items()
+        if key != "kernel_optimizer" and isinstance(value, int)
+    }
+    ep = _positive_int(getattr(state, "ep", None))
+    if ep is None:
+        ep = _positive_int(extra.get("ep"))
+    if ep is not None and ep > 1:
+        shape["ep"] = ep
+    partitions = _partition_count(state)
+    if partitions is not None:
+        shape["partitions"] = partitions
     return shape
+
+
+def _partition_count(state: Any) -> int | None:
+    """Partitions per card, for a mode that actually divides the card.
+
+    The count the launch published wins over one re-derived from the mode name: ``published_shape()`` already put it
+    there from ``HYPERLOOM_PARTITION_COUNT``, and a second derivation is a second thing to keep in agreement. SPX is
+    omitted along with an unpublished mode, since one partition is the whole card and every row that recorded no mode
+    was running on exactly that.
+    """
+    partition = _mapping(getattr(state, "compute_partition", {}))
+    count = _positive_int(partition.get("partitions"))
+    if count is None:
+        from hyperloom.common.gpu_partition import MODE_PARTITION_COUNTS
+
+        mode = str(partition.get("mode") or "").strip().upper()
+        count = MODE_PARTITION_COUNTS.get(mode) if mode else None
+    return count if count is not None and count > 1 else None
 
 
 class _Files:
@@ -326,11 +346,7 @@ _KERNEL_ACTIONS = frozenset(
 
 
 def _is_kernel_entry(entry: Mapping[str, Any]) -> bool:
-    """Whether a stack entry belongs to the kernel column.
-
-    Kernel work is published from its own sub-columns, so the same entry must
-    not also land in the config layer and be replayed twice.
-    """
+    """Whether a stack entry belongs to the kernel column."""
     if patch_lever_kind(entry) in _NON_KERNEL_LEVERS:
         return False
     action = str(entry.get("action") or "").strip().lower()
@@ -351,7 +367,7 @@ def _apply_recipe_delta(
     config: dict[str, Any],
     delta: Mapping[str, Any],
 ) -> dict[str, Any]:
-    from ...actions.executors._grid_server_args import compose_server_args
+    from hyperloom.inference_optimizer.grid_server_args import compose_server_args
     from ...loop.coordinator_helpers import _dedupe_extra_server_args
 
     mode = str(delta.get("args_mode") or "append").strip().lower()
@@ -525,19 +541,16 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
     if not patch_ref:
         raise RemoteRecipeValidationError(f"accepted kernel/fusion patch cannot be materialized: {patch_source!r}")
     declared = _patch_declared_targets(patch_source)
-    # Recorded now or never: replay has no way back to the checkout this was
-    # measured on, and a record that cannot name it cannot be replayed.
+    # Recorded now or never: replay has no way back to the checkout this was measured on, and a record that cannot
+    # name it cannot be replayed.
     apply_root = str(result.get("kernel_repo") or "").strip() or _kernel_apply_root(
         patch_source,
         stack_rows[-1].get("target_file") or result.get("source_file") or result.get("target_file"),
         declared,
     )
     if not apply_root.startswith("/"):
-        # Degrade per item, not per session: a rootless kernel item would poison
-        # the whole combined warm replay (kernel_apply_root_missing), so it is
-        # dropped from the Recipe rather than published broken. Aborting the
-        # entire publish here would also throw away config, patch, and the other
-        # kernel columns, which is a worse outcome than losing this one item.
+        # Degrade per item, not per session: a rootless kernel item would poison the whole combined warm replay
+        # (kernel_apply_root_missing), so it is dropped from the Recipe rather than published broken.
         log.warning(
             "kernel/fusion KEEP dropped from Recipe: cannot derive the checkout it "
             "was applied into (patch=%r); publishing the rest of the session",
@@ -570,8 +583,6 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
         **_kernel_host_origin(apply_root),
     }
     # Remove duplicate local-path aliases after establishing canonical refs.
-    # ``kernel_repo`` goes too: the apply root's one home is host_origin, and
-    # left here the sanitizer would strip it and leave the field silently empty.
     for key in (
         "patch_path",
         "target_file",
@@ -649,8 +660,7 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
         slug = hashlib.sha256(
             f"{integration_id}|{entry.get('kernel_id')}|{entry.get('patch_path')}".encode()
         ).hexdigest()[:10]
-        # The integrated stack row is authoritative.  A matched micro attempt
-        # may only fill a path that older stack rows omitted.
+        # The integrated stack row is authoritative.
         patch_source = entry.get("patch_path") or raw.get("last_artifact_path") or raw.get("artifact_path")
         patch = files.add(
             patch_source,
@@ -663,17 +673,16 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
                 f"integration_id={integration_id!r} patch={patch_source!r}"
             )
         declared = _patch_declared_targets(patch_source)
-        # Recorded now or never: replay has no way back to the checkout this was
-        # measured on, and a record that cannot name it cannot be replayed.
+        # Recorded now or never: replay has no way back to the checkout this was measured on, and a record that cannot
+        # name it cannot be replayed.
         apply_root = str(raw.get("last_deploy_repo_root") or "").strip() or _kernel_apply_root(
             patch_source,
             entry.get("target_file"),
             declared,
         )
         if not apply_root.startswith("/"):
-            # Drop this one item, not the whole session: a rootless kernel item
-            # would poison the combined warm replay, and raising would take
-            # config/patch/other kernel items down with it.
+            # Drop this one item, not the whole session: a rootless kernel item would poison the combined warm replay,
+            # and raising would take config/patch/other kernel items down with it.
             log.warning(
                 "kernel/rewrite KEEP dropped from Recipe: cannot derive the checkout it "
                 "was applied into (integration_id=%r); publishing the rest of the session",
@@ -740,16 +749,7 @@ def _worked_from_stack(stack: list[dict[str, Any]], gains: list[Any]) -> list[di
 
 
 def has_new_keep(state: Any) -> bool:
-    """True when the promoted KEEP-only stack has a performance optimization entry.
-
-    ``optimization_stack`` is the accepted stack, not the attempt ledger;
-    individual rows therefore do not carry a redundant KEEP decision.
-    Pre-baseline enablement KEEPs (``baseline_enablement``) establish a runnable
-    anchor but are not performance optimizations; they alone do not qualify for
-    KB writeback. ``recipe_publishable`` is deliberately not consulted: it filters
-    the config layer inside :func:`build_publishable_recipe_config`, and gating the
-    whole write on it would publish nothing for an enablement-only session.
-    """
+    """True when the promoted KEEP-only stack has a performance optimization entry."""
     for raw in getattr(state, "optimization_stack", []) or []:
         if not isinstance(raw, Mapping):
             continue
@@ -802,8 +802,8 @@ def _adopt_replayed_prior(
     )
     if replay_index < 0:
         raise RemoteRecipeValidationError("replayed prior overlays have no replay_warm_recipe stack entry")
-    # The prior column already lists its overlays in replay order, so the order
-    # they are re-adopted in is the order they were replayed in.
+    # The prior column already lists its overlays in replay order, so the order they are re-adopted in is the order
+    # they were replayed in.
     candidates = [
         str(ref) for ref in (_mapping(prior_value.get(PATCH_SECTION)).get("patches") or []) if str(ref) in replayed_refs
     ]
@@ -813,10 +813,8 @@ def _adopt_replayed_prior(
             f"successfully replayed prior overlays are absent from prior knowledge: {sorted(missing_metadata)!r}"
         )
 
-    # Prior apply roots keyed by the prior ref, so a re-homed overlay carries
-    # forward the checkout it must be applied into. Without this the adopted
-    # overlay publishes rootless and the next generation's replay skips the
-    # whole Recipe with framework_apply_root_missing.
+    # Prior apply roots keyed by the prior ref, so a re-homed overlay carries forward the checkout it must be applied
+    # into.
     prior_roots: dict[str, str] = {}
     for prov_row in _mapping(prior_value.get(PATCH_SECTION)).get("provenance") or []:
         if not isinstance(prov_row, Mapping):
@@ -881,11 +879,7 @@ def _adopt_replayed_prior(
             adopted_roots[new_ref] = prior_root
         member_index += 1
 
-    # Re-home the prior apply roots onto the new refs, under the replay stack
-    # index the adopted overlays now live at. Every adopted overlay whose prior
-    # record named a root keeps it, so a re-published Recipe stays replayable
-    # rather than losing its provenance one generation on. An overlay whose
-    # prior record was already rootless stays rootless -- nothing is invented.
+    # Re-home the prior apply roots onto the new refs, under the replay stack index the adopted overlays now live at.
     if adopted_roots:
         node = _mapping(value.get(PATCH_SECTION))
         rows = [dict(row) for row in (node.get("provenance") or []) if isinstance(row, Mapping)]
@@ -1007,11 +1001,7 @@ def _adopt_prior_kernel(
 
 
 def _validate_patch_column(value: Mapping[str, Any]) -> None:
-    """Fail closed on an overlay ref the replay order cannot be derived from.
-
-    The refs carry the stack and member index the column is ordered by, so a
-    malformed one would silently reorder or drop an overlay on replay.
-    """
+    """Fail closed on an overlay ref the replay order cannot be derived from."""
     refs = _mapping(value.get(PATCH_SECTION)).get("patches") or []
     seen: set[str] = set()
     for raw_ref in refs:
@@ -1036,14 +1026,7 @@ def merge_staged_sections(
     only: Collection[str] | None = None,
     required: Collection[str] | None = None,
 ) -> list[str]:
-    """Merge each staged column into ``value``, adopting the files it names.
-
-    A column owns its own shape, so the staged knowledge map is carried across
-    whole rather than reduced to a known set of keys. Only ref *lists* are
-    unioned with what ``value`` already holds, because those are the one place
-    two producers legitimately contribute to the same column: an adopted prior
-    overlay and a freshly staged one.
-    """
+    """Merge each staged column into ``value``, adopting the files it names."""
     merged: list[str] = []
     required_names = set(required or ())
     for name in sections.sections():
@@ -1099,15 +1082,9 @@ def build_remote_knowledge(
     files_dir: str | Path,
     *,
     sections: Any,
+    metrics: Mapping[str, float] | None = None,
 ) -> KnowledgeBundle:
-    """Construct the final opaque knowledge document and temporary files tree.
-
-    Every column is staged through its own facade and then merged, so this owns
-    the assembly rule and none of the columns' shapes. ``config`` and ``kernel``
-    are published here from the settled stack; ``patch`` was staged member by
-    member as each KEEP landed, because its bytes do not outlive the worktree
-    they came from.
-    """
+    """Construct the final opaque knowledge document and temporary files tree."""
     if sections is None:
         raise RemoteRecipeValidationError("a Recipe can only be built from a staged draft")
     scope = RecipeScope.from_state(state)
@@ -1143,9 +1120,8 @@ def build_remote_knowledge(
         except (TypeError, ValueError):
             continue
         dropped_entries.add((str(row.get("owner") or "").upper(), stack_index))
-    # ``config`` and ``kernel`` are staged unconditionally just below, so only
-    # ``patch`` is conditional: a KEEP that harvested overlays demands it, and a
-    # record published without them would replay a weaker stack than measured.
+    # ``config`` and ``kernel`` are staged unconditionally just below, so only ``patch`` is conditional: a KEEP that
+    # harvested overlays demands it, and a record published without them would replay a weaker stack than measured.
     required_columns = {CONFIG_SECTION, KERNEL_SECTION}
     if any(
         (owner := str(item.get("kb_required_owner") or "").strip().upper())
@@ -1153,9 +1129,6 @@ def build_remote_knowledge(
         for item in stack
     ):
         required_columns.add(PATCH_SECTION)
-    current_best = _mapping(getattr(state, "current_best", {}))
-    optimized_throughput = _number(current_best.get("tput"))
-    validated_gain = _number(getattr(state, "cumulative_gain_validated", 0.0))
     gains = list(getattr(state, "gain_per_stack_entry", []) or [])
     worked = _experience(state, "what_worked") or _worked_from_stack(stack, gains)
 
@@ -1175,8 +1148,8 @@ def build_remote_knowledge(
     missing_columns = required_columns - set(staged_sections)
     if missing_columns:
         raise RemoteRecipeValidationError(f"required staged columns are missing: {sorted(missing_columns)!r}")
-    # Carrying the prior record forward runs last: it unions rows and refs into
-    # the assembled columns, so it must see what staging already contributed.
+    # Carrying the prior record forward runs last: it unions rows and refs into the assembled columns, so it must see
+    # what staging already contributed.
     _adopt_replayed_prior(state, sections, value, files, stack)
     if scope.kernel_optimizer == "forge":
         _adopt_prior_kernel(state, sections, value, files)
@@ -1185,9 +1158,8 @@ def build_remote_knowledge(
         {
             "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
             "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
-            "optimized_throughput": optimized_throughput,
-            "validated_e2e_gain": validated_gain,
-            "workload_shape": _workload_shape(state),
+            **dict(metrics or {}),
+            "workload_shape": workload_shape(state, scope=scope),
             "value": value,
             "what_worked": worked,
             "what_failed": _experience(state, "last_action_failures"),
@@ -1223,8 +1195,7 @@ def has_replay_material(document: Mapping[str, Any]) -> bool:
     config = _mapping(value.get(CONFIG_SECTION))
     if str(config.get("extra_server_args") or "").strip() or _mapping(config.get("extra_envs")):
         return True
-    # ``provenance`` is deliberately not consulted: it describes the overlays
-    # rather than being replayable itself.
+    # ``provenance`` is deliberately not consulted: it describes the overlays rather than being replayable itself.
     patches = _mapping(value.get(PATCH_SECTION)).get("patches")
     if isinstance(patches, list) and patches:
         return True
@@ -1263,7 +1234,10 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
     for ref in raw_patches:
         validate_relative_path(ref)
     session_id = str(document.get("session_id") or "")
-    validated_gain = _number(knowledge.get("validated_e2e_gain"))
+    interactivity_gain = _number(knowledge.get("interactivity_gain_pct"))
+    validated_gain = (
+        interactivity_gain if "interactivity_gain_pct" in knowledge else _number(knowledge.get("validated_e2e_gain"))
+    )
     view = _mapping(document.get("view"))
     replayable = bool(view.get("replayable")) if isinstance(view.get("replayable"), bool) else True
     row = {
@@ -1288,7 +1262,7 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         "replay_disabled_reason": str(view.get("replay_disabled_reason") or ""),
     }
     for key, value in _mapping(knowledge.get("workload_shape")).items():
-        if key in {"tp", "conc", "isl", "osl"}:
+        if key in SHAPE_KEYS:
             resolved = _positive_int(value)
             if resolved is not None:
                 row[key] = resolved
@@ -1308,4 +1282,5 @@ __all__ = [
     "has_new_keep",
     "match_rewrite_attempt",
     "merge_staged_sections",
+    "workload_shape",
 ]

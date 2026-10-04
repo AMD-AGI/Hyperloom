@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A run that produced nothing usable must leave the framework as it found it.
-
-Observed live: a failed pass left a pip-installed vllm carrying code that never
-passed validation, and it had to be restored by hand.
-"""
+"""A run that produced nothing usable must leave the framework as it found it."""
 
 from __future__ import annotations
 
@@ -55,12 +51,7 @@ def test_the_source_is_restored(tmp_path):
 
 
 def test_a_missing_snapshot_does_not_swallow_the_body_exception(tmp_path):
-    """``return`` in ``finally`` would eat this, which is why CodeQL flags it.
-
-    Compile-pass uses this manager around live edits. If the snapshot itself
-    failed (no file, unreadable), a later exception must still be the caller's
-    to handle -- otherwise a failed smoke looks like success.
-    """
+    """``return`` in ``finally`` would eat this, which is why CodeQL flags it."""
     missing = tmp_path / "does-not-exist.py"
     with pytest.raises(RuntimeError, match="smoke failed"):
         with _live_file_restored(str(missing)):
@@ -132,13 +123,7 @@ def test_the_pristine_snapshot_still_defaults_to_its_own_directory(tmp_path):
 
 
 def test_a_framework_module_survives_a_failed_snapshot_copy(tmp_path, monkeypatch):
-    """Copying a sibling may fail without failing the run, so it cannot be the judge.
-
-    Snapshotting a sibling is deliberately non-fatal. If the rollback then treats
-    "absent from the snapshot" as "author wrote it", one unlucky copy -- a
-    permission error, a full disk -- is enough to delete a framework file out of
-    site-packages.
-    """
+    """Copying a sibling may fail without failing the run, so it cannot be the judge."""
     root, source, out = _tree(tmp_path, with_framework_fused=True)
     shipped = source.parent / "llama_fused_moe.py"
     real_copy = cli.shutil.copy2
@@ -160,13 +145,7 @@ def test_a_framework_module_survives_a_failed_snapshot_copy(tmp_path, monkeypatc
 
 
 def test_the_model_source_is_never_the_file_that_gets_deleted(tmp_path):
-    """The source's own name can match the marker, and it was just restored.
-
-    The inventory lists the source's SIBLINGS -- export needs to tell a new module
-    from a shipped one, and the source is neither. "Absent from the inventory"
-    therefore also describes the source itself, so a model file named like
-    ``fused_moe.py`` would be restored from the snapshot and then deleted.
-    """
+    """The source's own name can match the marker, and it was just restored."""
     root, source, out = _tree(tmp_path, source_name="fused_moe.py")
     pristine = _snapshot_fusion_source(str(root), str(source), out)
     source.write_text(AUTHORED, encoding="utf-8")
@@ -214,12 +193,7 @@ def test_an_accepted_attempt_with_a_patch_is_already_restored():
 
 
 def test_an_accepted_attempt_whose_export_came_back_empty_needs_discarding():
-    """The run looks successful right up to there being nothing to show for it.
-
-    This is the branch that used to fall through: not a failure, so the failed
-    path was skipped, and no patch, so the restore was skipped too -- leaving the
-    framework carrying edits that no artifact records.
-    """
+    """The run looks successful right up to there being nothing to show for it."""
     assert _needs_discard(True, None) is True
     assert _needs_discard(True, SimpleNamespace(patch="")) is True
 
@@ -238,12 +212,7 @@ class ToyLMDecoderLayer(torch.nn.Module):
 
 
 def _fake_framework(tmp_path):
-    """An sglang-shaped tree under --framework-root, so nothing real is touched.
-
-    ``--framework-root`` is honoured ahead of the installed package, and the
-    ``__init__.py`` chain pins the package root inside tmp_path, which keeps the
-    rollback away from whatever sglang this machine happens to have installed.
-    """
+    """An sglang-shaped tree under --framework-root, so nothing real is touched."""
     root = tmp_path / "framework"
     models = root / "sglang" / "srt" / "models"
     models.mkdir(parents=True)
@@ -277,16 +246,11 @@ def _trace(tmp_path):
 
 
 def test_a_kept_run_restores_the_framework(tmp_path, monkeypatch):
-    """The ordinary success path: patch exported, tree put back.
-
-    This is the case a refactor of the surrounding branches can silently drop --
-    the restore hangs off the same condition as the export, so folding it under
-    another branch leaves the author's edits sitting in the framework.
-    """
+    """The ordinary success path: patch exported, tree put back."""
     root, source = _fake_framework(tmp_path)
-    restored: list[str] = []
+    baseline = source.read_text(encoding="utf-8")
 
-    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config):
+    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config, on_keep=None):
         source.write_text(
             FRAMEWORK_SOURCE.replace("import torch\n", "import torch\nFUSED = 1\n"),
             encoding="utf-8",
@@ -312,11 +276,6 @@ def test_a_kept_run_restores_the_framework(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "run_fusion_loop", fake_run_fusion_loop)
     monkeypatch.setattr(cli, "_author_baseline_harness", lambda *a, **k: (True, ""))
     monkeypatch.setattr(cli, "serving_smoke", lambda *a, **k: (True, ""))
-    monkeypatch.setattr(
-        cli,
-        "restore_exported_changes",
-        lambda *a, **k: restored.append("restored"),
-    )
 
     out = tmp_path / "out"
     result = CliRunner().invoke(
@@ -336,4 +295,6 @@ def test_a_kept_run_restores_the_framework(tmp_path, monkeypatch):
         ],
     )
     assert result.exit_code == 0, result.output
-    assert restored == ["restored"], "a KEPT run must put the framework back"
+    assert source.read_text(encoding="utf-8") == baseline, (
+        "a KEPT run must put the framework back (multi-patch restores via shadow reset)"
+    )

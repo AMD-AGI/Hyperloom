@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``record_trace_analyze`` recovers a thin TraceLens envelope from the on-disk
-kernel-roofline report.
-
-A ``status=ok`` envelope that lost its payload keys in transit used to cache an
-empty ``last_trace_analyze``, which silently emptied every downstream consumer
-(``roofline_snapshots``, the specialist ROOFLINE EVIDENCE section, the kernel
-phase) while the analysis itself sat complete on disk.
-"""
+"""``record_trace_analyze`` recovers a thin TraceLens envelope from the on-disk kernel-roofline report."""
 
 from __future__ import annotations
 

@@ -1,27 +1,4 @@
-"""Measurement driver for rewriting SGLang MXFP8 grouped GEMM to FlyDSL.
-
-The driver owns the complete workload and is protected during rewrite. It times
-the two grouped-GEMM calls from one MiniMax-M3 MoE forward:
-
-* GEMM1: shared token activations times gate/up weights, BF16 output.
-* GEMM2: routed activations times down weights, FP32 output with top-k weights.
-
-The generated ``kernel.py`` must expose this exact interface::
-
-    build_mxfp8_grouped_gemm_module(
-        experts, n_cols, k_cols, num_valid_tokens, num_sorted_tokens,
-        top_k, block_m, out_dtype, a_div, mul_weight
-    ) -> launch_fn
-
-    launch_fn(
-        a_q, a_scale, w, w_scale, out, topk_weights,
-        sorted_token_ids, expert_ids, num_tokens_post_padded,
-        stream=fx.Stream(...)
-    )
-
-Inputs use OCP MXFP8 E4M3 values with uint8 E8M0 scales per 1x32 block.
-The launch must write ``out`` in place and must use the supplied stream.
-"""
+"""Measurement driver for rewriting SGLang MXFP8 grouped GEMM to FlyDSL."""
 
 from __future__ import annotations
 

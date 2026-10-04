@@ -88,6 +88,8 @@ subtrees:
     title: Optimization loop
   - file: kernelforge/how-to/run-a-campaign.md
     title: Run a campaign
+  - file: kernelforge/how-to/assembly.md
+    title: Assembly candidates
   - file: kernelforge/how-to/autonomous-loop.md
     title: Autonomous overnight loop
   - file: kernelforge/how-to/kernel-fusion.md

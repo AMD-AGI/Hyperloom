@@ -1,24 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Idempotent, backward-compatible patchers for the InferenceX checkout.
-
-Each ``ensure_*`` function rewrites one upstream file in place: ``$NUM_PROMPTS``
-support and ``PROFILE_EXTRA_BODY`` consumption for profiling, the eval-artifact
-redirect to ``$RESULT_DIR``, the ``HYPERLOOM_EVAL_START`` phase marker, and the
-generation-pathology probe plus per-request generation bounds and model-derived
-terminators appended to lm-eval's ``lm_eval_sitecustomize.py``.
-
-Applied in place, once: idempotent via a sentinel substring, serialized across
-processes via ``fcntl.flock``, written atomically.
-
-The four line-replacement patches are gated on locating exact upstream text, so a
-``False`` return is ambiguous on its own -- it reads the same whether there was
-nothing to patch or the anchor rotted. :func:`verify_patch_anchors` reports that
-distinction without touching the checkout, so callers can assert the contract
-instead of inferring it. The probe needs none of this: it is appended to a real
-file, and :func:`eval_probe_targets_exist` already separates the two cases.
-"""
+"""Idempotent, backward-compatible patchers for the InferenceX checkout."""
 
 from __future__ import annotations
 
@@ -37,8 +20,8 @@ from ._patch_sentinel import file_contains_sentinel
 log = logging.getLogger(__name__)
 
 
-# Exact upstream line, whitespace-anchored so we don't match an unrelated
-# ``num_prompts`` reference elsewhere in the file.
+# Exact upstream line, whitespace-anchored so we don't match an unrelated ``num_prompts`` reference elsewhere in the
+# file.
 _LEGACY_LINE = '        num_prompts="$max_concurrency"'
 _PATCHED_LINE = '        num_prompts="${NUM_PROMPTS:-$max_concurrency}"'
 # "Already patched?" sentinel.
@@ -48,15 +31,14 @@ _PATCH_SENTINEL = "${NUM_PROMPTS:-$max_concurrency}"
 _LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_patcher.lock")
 
 
-# ``benchmark_serving.py`` hardcodes the ``/start_profile`` ``extra_body`` and
-# never reads Hyperloom's ``PROFILE_EXTRA_BODY`` env. Single-line replacement
-# gated on the exact legacy text; sentinel is ``PROFILE_EXTRA_BODY``.
+# ``benchmark_serving.py`` hardcodes the ``/start_profile`` ``extra_body`` and never reads Hyperloom's
+# ``PROFILE_EXTRA_BODY`` env.
 _BENCH_SERVING_LEGACY = (
     '                                         extra_body={"num_steps": 1, '
     '"merge_profiles": True, "profile_by_stage": True},'
 )
-# JSON fallback uses lowercase ``true``; ``json.loads`` maps it back so the
-# dict matches the upstream literal byte-for-byte.
+# JSON fallback uses lowercase ``true``; ``json.loads`` maps it back so the dict matches the upstream literal
+# byte-for-byte.
 _BENCH_SERVING_PATCHED = (
     "                                         extra_body=__import__('json')."
     "loads(__import__('os').environ.get('PROFILE_EXTRA_BODY') or "
@@ -64,41 +46,32 @@ _BENCH_SERVING_PATCHED = (
 )
 _BENCH_SERVING_SENTINEL = "PROFILE_EXTRA_BODY"
 _BENCH_SERVING_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_serving_patcher.lock")
+#: Contract name for the patch above; shared with ``_ANCHOR_CONTRACT`` so the resolver and the
+#: contract cannot drift apart.
+_BENCH_SERVING_ANCHOR_NAME = "profile_extra_body"
+#: Layouts the implementation has shipped under, newest first. SemiAnalysisAI/InferenceX#3022
+#: moved the Python tools into ``infx/`` and left ``utils/`` as a forwarding shim, so a checkout
+#: can carry both paths while only one of them holds the line this patch rewrites.
+_BENCH_SERVING_REL_PARTS: tuple[tuple[str, ...], ...] = (
+    ("infx", "bench_serving", "benchmark_serving.py"),
+    ("utils", "bench_serving", "benchmark_serving.py"),
+)
 
-# ``append_lm_eval_summary`` does ``mv ./`` — eval artifacts land in the process
-# cwd (the InferenceX checkout), escaping the session. Redirect to ``$RESULT_DIR``
-# (Hyperloom's session dir), falling back to ``.`` when unset.
+# ``append_lm_eval_summary`` does ``mv ./`` — eval artifacts land in the process cwd (the InferenceX checkout),
+# escaping the session.
 _EVAL_DEST_LEGACY = 'mv -f "$jf" ./ || echo "WARN: failed to move ${jf}" >&2'
 _EVAL_DEST_PATCHED = 'mv -f "$jf" "${RESULT_DIR:-.}/" || echo "WARN: failed to move ${jf}" >&2'
 _EVAL_DEST_SENTINEL = '"${RESULT_DIR:-.}/"'
 _EVAL_DEST_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_eval_dest_patcher.lock")
 
-# The explore overtime kill bounds the throughput phase only, but benchmark and
-# eval share one Magpie subprocess, so Hyperloom cannot see the boundary. Emit a
-# sentinel on the last line before ``lm_eval`` starts; the soft-deadline watcher
-# retires the deadline when it appears. Anchored on the unique
-# ``EVAL_RESULT_DIR`` export — ``set -x`` occurs three times in the file.
+# The explore overtime kill bounds the throughput phase only, but benchmark and eval share one Magpie subprocess, so
+# Hyperloom cannot see the boundary.
 _EVAL_START_LEGACY = '    export EVAL_RESULT_DIR="$results_dir"'
 _EVAL_START_PATCHED = '    export EVAL_RESULT_DIR="$results_dir"\n    echo "HYPERLOOM_EVAL_START" >&2'
 _EVAL_START_SENTINEL = "HYPERLOOM_EVAL_START"
 _EVAL_START_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_eval_start_patcher.lock")
 
-# Two independent answers to the same budget, injected together. InferenceX runs
-# lm-eval with ``--gen_kwargs max_tokens=min(16384, ctx-4096)``, so a model that
-# does not terminate burns that budget on every one of GSM8K's 1319 docs and
-# takes the whole baseline timeout with it.
-#
-# The probe handles a model that never emits EOS at all: it short-circuits the
-# remaining requests, which voids the eval (~0 score) and is only safe because it
-# waits for a decisive ratio. The bounds handle the ordinary case that ratio can
-# never catch -- a healthy model whose hardest samples do not converge -- by
-# capping each request so those samples are truncated individually and the rest
-# of the measurement survives. The bounds also supply the terminators the model
-# declares, which lm-eval structurally cannot: eos_string holds one value and the
-# concurrent path never sends even that.
-#
-# Appended to ``lm_eval_sitecustomize.py``, so both land after InferenceX's own
-# patches and need no anchor line.
+# Two independent answers to the same budget, injected together.
 _EVAL_PROBE_PY = """
 # --- HYPERLOOM_EVAL_PROBE (early-exit probe + per-request bounds) ------------
 import json as _hl_json
@@ -219,6 +192,7 @@ def _hl_eval_probe_install():
                 self.cache_hook.add_partial("generate_until", cache_key, answer)
             return answers
 
+    _hl_probe_amodel_call._hl_prev_amodel_call = _hl_prev_amodel_call
     _hl_api.TemplateAPI.amodel_call = _hl_probe_amodel_call
 
 
@@ -450,43 +424,135 @@ _hl_eval_bounds_install()
 # --- end HYPERLOOM_EVAL_PROBE -----------------------------------------------
 """
 
+_EVAL_UNBOUND_OUTPUTS_PY = '''
+# --- HYPERLOOM_EVAL_UNBOUND_OUTPUTS -----------------------------------------
+def _hl_eval_unbound_outputs_install():
+    """Keep a refused connection from ending the eval on UnboundLocalError.
+
+    ``TemplateAPI.amodel_call`` logs ``outputs`` when a request fails, but that
+    name is only bound once a response has been parsed. A connect that never got
+    one therefore raises UnboundLocalError from inside the handler -- over the
+    real connection error, and before the ``raise`` that would have let the retry
+    see it. The round ends on a Python-level fault instead of the server being
+    unreachable, and the cause is gone from the log.
+
+    Upstream fixed this in EleutherAI/lm-evaluation-harness#3293 by reading the
+    name through ``locals()``. InferenceX force-reinstalls a ref that predates
+    that fix over whatever is installed, so the harness this run ends up on has
+    it regardless of what was pinned; re-binding the method here is what survives
+    that reinstall. Once InferenceX moves its ref past the fix, this whole block
+    can go.
+    """
+    try:
+        from lm_eval.models.api_models import TemplateAPI as _hl_api
+    except Exception:
+        return
+
+    outer = getattr(_hl_api, "amodel_call", None)
+    if outer is None or getattr(outer, "_hl_unbound_outputs_guard", False):
+        return
+
+    def _hl_is_vulnerable_source(source):
+        return "{outputs}" in source and "locals().get('outputs'" not in source
+
+    def _hl_read_installed_amodel_call_source():
+        import inspect as _hl_inspect
+
+        try:
+            from lm_eval.models import api_models as _hl_mod
+        except Exception:
+            return ""
+        try:
+            path = _hl_inspect.getfile(_hl_mod)
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except Exception:
+            return ""
+        lines = text.splitlines()
+        start = None
+        base_indent = None
+        for idx, line in enumerate(lines):
+            stripped = line.lstrip()
+            if stripped.startswith("async def amodel_call"):
+                start = idx
+                base_indent = len(line) - len(stripped)
+                break
+        if start is None:
+            return ""
+        body = [lines[start]]
+        for line in lines[start + 1 :]:
+            if not line.strip():
+                body.append(line)
+                continue
+            indent = len(line) - len(line.lstrip())
+            if indent <= base_indent and line.lstrip().startswith(("def ", "async def ", "@")):
+                break
+            body.append(line)
+        return "\\n".join(body)
+
+    def _hl_upstream_still_vulnerable():
+        installed = _hl_read_installed_amodel_call_source()
+        if installed and _hl_is_vulnerable_source(installed):
+            return True
+        import inspect as _hl_inspect
+
+        call = outer
+        seen = set()
+        while call is not None and id(call) not in seen:
+            seen.add(id(call))
+            try:
+                source = _hl_inspect.getsource(call)
+            except Exception:
+                source = ""
+            if _hl_is_vulnerable_source(source):
+                return True
+            call = getattr(call, "_hl_prev_amodel_call", None) or getattr(call, "__wrapped__", None)
+        return False
+
+    if not _hl_upstream_still_vulnerable():
+        return
+
+    async def _hl_amodel_call(self, *args, **kwargs):
+        try:
+            return await outer(self, *args, **kwargs)
+        except UnboundLocalError:
+            # The handler destroyed the exception it was reporting. Nothing here
+            # can recover it, so surface why the eval stopped instead.
+            raise RuntimeError(
+                "lm_eval request failed before a response was parsed; the harness "
+                "error handler then raised UnboundLocalError over the original "
+                "error (EleutherAI/lm-evaluation-harness#3293). The usual cause is "
+                "a refused connection to the served endpoint."
+            ) from None
+
+    _hl_amodel_call._hl_unbound_outputs_guard = True
+    _hl_api.amodel_call = _hl_amodel_call
+
+
+_hl_eval_unbound_outputs_install()
+# --- end HYPERLOOM_EVAL_UNBOUND_OUTPUTS -------------------------------------
+'''
+
+_EVAL_UNBOUND_OUTPUTS_SENTINEL = "HYPERLOOM_EVAL_UNBOUND_OUTPUTS"
+_EVAL_UNBOUND_OUTPUTS_LEGACY_MARKER = "return await call(self, *args, **kwargs)"
+_EVAL_UNBOUND_OUTPUTS_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_eval_unbound_outputs_patcher.lock")
+
 _EVAL_PROBE_SENTINEL = "HYPERLOOM_EVAL_PROBE"
 _EVAL_PROBE_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_eval_probe_patcher.lock")
-# Appending needs no anchor, but it does need this file: upstream renaming or
-# moving it puts the probe and the bounds back to warn-only, and the eval runs
-# unbounded again. That is what the anchor contract pins in its place.
+# Appending needs no anchor, but it does need this file: upstream renaming or moving it puts the probe and the bounds
+# back to warn-only, and the eval runs unbounded again.
 EVAL_PROBE_TARGET_PARTS = ("utils", "evals", "patches", "lm_eval_sitecustomize.py")
 
 
 def _discover_inferencex_roots(
     inferencex_path: Path | str | None,
 ) -> list[Path]:
-    """Return every InferenceX checkout root Hyperloom should patch.
-
-    Magpie loads its bundled ``$MAGPIE_PATH/InferenceX`` at runtime, not
-    ``$INFERENCEX_PATH``, so all discovered roots (deduped by resolved path)
-    are patched: ``inferencex_path`` arg, ``$INFERENCEX_PATH``,
-    ``$MAGPIE_PATH/InferenceX``. Returns ``[]`` when none resolve.
-
-    Args:
-        inferencex_path: Caller-provided override root to include in the scan.
-
-    Returns:
-        A deduped list of resolved InferenceX checkout directories, or ``[]``
-        when none resolve.
-    """
+    """Return every InferenceX checkout root Hyperloom should patch."""
     roots: list[Path] = []
     seen: set[Path] = set()
 
     def _add(candidate: Path | str | None) -> None:
-        """Resolve and append a candidate root if it is a new directory.
-
-        Args:
-            candidate (Path | str | None): A candidate InferenceX root.
-
-        Returns:
-            None: Mutates the enclosing ``roots``/``seen`` collections.
-        """
+        """Resolve and append a candidate root if it is a new directory."""
         if not candidate:
             return
         try:
@@ -512,18 +578,7 @@ def _resolve_inferencex_files(
     inferencex_path: Path | str | None,
     *rel_parts: str,
 ) -> list[Path]:
-    """Return every existing ``<root>/<*rel_parts>`` across discovered roots.
-
-    One entry per :func:`_discover_inferencex_roots` root whose joined relative
-    path is an existing file. ``[]`` = skip patching.
-
-    Args:
-        inferencex_path: Caller-provided override root to include in the scan.
-        *rel_parts: Relative path components joined onto each discovered root.
-
-    Returns:
-        A list of existing files, or ``[]`` when none exist.
-    """
+    """Return every existing ``<root>/<*rel_parts>`` across discovered roots."""
     out: list[Path] = []
     for root in _discover_inferencex_roots(inferencex_path):
         candidate = root.joinpath(*rel_parts)
@@ -535,29 +590,12 @@ def _resolve_inferencex_files(
 def _resolve_benchmark_lib_paths(
     inferencex_path: Path | str | None,
 ) -> list[Path]:
-    """Return every existing ``<root>/benchmarks/benchmark_lib.sh`` to patch
-    (one per :func:`_discover_inferencex_roots` root). ``[]`` = skip patching.
-
-    Args:
-        inferencex_path: Caller-provided override root to include in the scan.
-
-    Returns:
-        A list of existing ``benchmark_lib.sh`` paths, or ``[]`` when none
-        exist.
-    """
+    """Return every existing ``<root>/benchmarks/benchmark_lib.sh`` to patch (one per :func:`_discover_inferencex_roots` root)."""
     return _resolve_inferencex_files(inferencex_path, "benchmarks", "benchmark_lib.sh")
 
 
 def _is_patched(src: Path) -> bool:
-    """Return whether ``benchmark_lib.sh`` already carries the patch.
-
-    Args:
-        src (Path): The ``benchmark_lib.sh`` file to inspect.
-
-    Returns:
-        bool: ``True`` if the patch sentinel is present; ``False`` on a
-        miss or read error.
-    """
+    """Return whether ``benchmark_lib.sh`` already carries the patch."""
     return file_contains_sentinel(src, _PATCH_SENTINEL, log, "_inferencex_patcher")
 
 
@@ -566,30 +604,10 @@ def _apply_line_replacement_atomic(
     legacy: str,
     patched_line: str,
     *,
-    tmp_prefix: str,
     missing_msg: str,
     success_msg: str,
 ) -> bool:
-    """Replace a single exact ``legacy`` line with ``patched_line`` in ``src``
-    via temp-file + atomic rename so a crash mid-write cannot leave a corrupt
-    file.
-
-    Shared by both InferenceX patches (``benchmark_lib.sh`` and
-    ``benchmark_serving.py``); they differ only in the legacy/patched text,
-    temp-file prefix, and log messages.
-
-    Args:
-        src: The file to patch in place.
-        legacy: Exact legacy line that must be present to patch.
-        patched_line: Replacement text for ``legacy`` (first occurrence).
-        tmp_prefix: Temp-file prefix for the atomic write.
-        missing_msg: Warning (one ``%s`` for ``src``) when ``legacy`` is absent.
-        success_msg: Info (one ``%s`` for ``src``) logged on a successful write.
-
-    Returns:
-        bool: ``True`` when the patched bytes were written; ``False`` when the
-        legacy line is missing or any IO step fails.
-    """
+    """Replace a single exact ``legacy`` line with ``patched_line`` in ``src`` via temp-file + atomic rename so a crash mid-write cannot leave a corrupt file."""
     try:
         original = src.read_text(encoding="utf-8")
     except OSError as e:
@@ -607,7 +625,6 @@ def _apply_line_replacement_atomic(
     if not atomic_write_text(
         src,
         patched,
-        tmp_prefix=tmp_prefix,
         log_prefix="_inferencex_patcher",
     ):
         return False
@@ -625,25 +642,7 @@ def _ensure_patched(
     empty_msg: str,
     failure_msg: str,
 ) -> bool:
-    """Drive a set of discovered files to patched state.
-
-    Empty fast-path: ``log.info(empty_msg)`` + ``False``. All-already-patched
-    fast-path skips the lock. Otherwise, under the lock, each source is
-    re-checked and patched; a failed apply emits ``log.warning(failure_msg,
-    src)`` and the remaining roots are still attempted.
-
-    Args:
-        sources: Discovered files to patch.
-        is_patched: "Already patched?" predicate for one file.
-        apply_patch: In-place atomic patcher for one file (True on success).
-        lock_path: Cross-process lock file path.
-        empty_msg: Info message logged when ``sources`` is empty.
-        failure_msg: Warning message (one ``%s`` for ``src``) on apply failure.
-
-    Returns:
-        True when at least one source is patched (or already patched), False
-        when none could be patched.
-    """
+    """Drive a set of discovered files to patched state."""
     if not sources:
         log.info(empty_msg)
         return False
@@ -669,20 +668,7 @@ def _ensure_patched(
 def ensure_benchmark_lib_patched(
     inferencex_path: Path | str | None = None,
 ) -> bool:
-    """Ensure InferenceX ``benchmark_lib.sh`` honours ``$NUM_PROMPTS``.
-
-    Returns ``True`` when patched at exit, ``False`` (non-fatal) when the file
-    is missing or the legacy line is absent. Concurrency-safe (flock +
-    atomic rename; already-patched fast-path skips the lock).
-
-    Args:
-        inferencex_path: Caller-provided override root; defaults to env-based
-            discovery when ``None``.
-
-    Returns:
-        True when at least one discovered ``benchmark_lib.sh`` is patched (or
-        already patched), False when none could be patched.
-    """
+    """Ensure InferenceX ``benchmark_lib.sh`` honours ``$NUM_PROMPTS``."""
     return _ensure_patched(
         _resolve_benchmark_lib_paths(inferencex_path),
         _is_patched,
@@ -691,7 +677,6 @@ def ensure_benchmark_lib_patched(
             _apply_line_replacement_atomic,
             legacy=_LEGACY_LINE,
             patched_line=_PATCHED_LINE,
-            tmp_prefix=".benchmark_lib.sh.hyperloom_",
             missing_msg=(
                 "_inferencex_patcher: expected legacy line not found in %s; "
                 "the file may already have been hand-patched to a "
@@ -711,58 +696,64 @@ def ensure_benchmark_lib_patched(
     )
 
 
-# =====================================================================
 # PROFILE_EXTRA_BODY consumer patch for benchmark_serving.py
-# =====================================================================
+def _pick_benchmark_serving(candidates: list[Path]) -> Path:
+    """Return the copy this patch acts on: the one already patched or still holding the anchor.
+
+    Args:
+        candidates: Existing files, in ``_BENCH_SERVING_REL_PARTS`` order.
+
+    Returns:
+        The anchored copy, else the legacy path so a tree carrying neither still
+        reports where the patch belongs.
+    """
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _BENCH_SERVING_SENTINEL in text or _BENCH_SERVING_LEGACY in text:
+            return path
+    return candidates[-1]
+
+
+def benchmark_serving_path_in(root: Path | str) -> Path:
+    """Return the ``benchmark_serving.py`` this patch targets under exactly one checkout.
+
+    Callers that read the file back to confirm the patch landed must resolve it the
+    same way the patcher wrote it: a fixed path reads the forwarding shim on a
+    post-#3022 checkout and concludes the patch is missing. Scoped to one root
+    because a gate speaks for the tree the run will execute, not for whatever else
+    the environment can reach.
+    """
+    base = Path(root)
+    existing = [path for path in (base.joinpath(*rel) for rel in _BENCH_SERVING_REL_PARTS) if path.is_file()]
+    if not existing:
+        return base.joinpath(*_BENCH_SERVING_REL_PARTS[-1])
+    return _pick_benchmark_serving(existing)
+
+
 def _resolve_benchmark_serving_paths(
     inferencex_path: Path | str | None,
 ) -> list[Path]:
-    """Return every existing
-    ``<root>/utils/bench_serving/benchmark_serving.py`` to patch (one per
-    :func:`_discover_inferencex_roots` root, including Magpie's bundled copy).
-    Independent of the benchmark_lib.sh resolver.
-
-    Args:
-        inferencex_path: Caller-provided override root to include in the scan.
-
-    Returns:
-        A list of existing ``benchmark_serving.py`` paths, or ``[]`` when none
-        exist.
-    """
-    return _resolve_inferencex_files(inferencex_path, "utils", "bench_serving", "benchmark_serving.py")
+    """Return the ``benchmark_serving.py`` to patch, one per :func:`_discover_inferencex_roots` root."""
+    out: list[Path] = []
+    for root in _discover_inferencex_roots(inferencex_path):
+        existing = [path for path in (root.joinpath(*rel) for rel in _BENCH_SERVING_REL_PARTS) if path.is_file()]
+        if existing:
+            out.append(_pick_benchmark_serving(existing))
+    return out
 
 
 def _is_benchmark_serving_patched(src: Path) -> bool:
-    """Return whether ``benchmark_serving.py`` already carries the patch.
-
-    Args:
-        src (Path): The ``benchmark_serving.py`` file to inspect.
-
-    Returns:
-        bool: ``True`` if the ``PROFILE_EXTRA_BODY`` sentinel is present;
-        ``False`` on a miss or read error.
-    """
+    """Return whether ``benchmark_serving.py`` already carries the patch."""
     return file_contains_sentinel(src, _BENCH_SERVING_SENTINEL, log, "_inferencex_patcher")
 
 
 def ensure_benchmark_serving_patched(
     inferencex_path: Path | str | None = None,
 ) -> bool:
-    """Ensure InferenceX ``benchmark_serving.py`` reads ``PROFILE_EXTRA_BODY``
-    on ``/start_profile``.
-
-    Returns ``True`` when patched at exit, ``False`` (non-fatal) when missing.
-    Concurrency-safe; independent lock file from
-    :func:`ensure_benchmark_lib_patched` so the two patches don't serialize.
-
-    Args:
-        inferencex_path: Caller-provided override root; defaults to env-based
-            discovery when ``None``.
-
-    Returns:
-        True when at least one discovered ``benchmark_serving.py`` is patched
-        (or already patched), False when none could be patched.
-    """
+    """Ensure InferenceX ``benchmark_serving.py`` reads ``PROFILE_EXTRA_BODY`` on ``/start_profile``."""
     return _ensure_patched(
         _resolve_benchmark_serving_paths(inferencex_path),
         _is_benchmark_serving_patched,
@@ -770,7 +761,6 @@ def ensure_benchmark_serving_patched(
             _apply_line_replacement_atomic,
             legacy=_BENCH_SERVING_LEGACY,
             patched_line=_BENCH_SERVING_PATCHED,
-            tmp_prefix=".benchmark_serving.py.hyperloom_",
             missing_msg=(
                 "_inferencex_patcher: expected legacy `extra_body=` line not "
                 "found in %s; InferenceX layout may have changed and Hyperloom "
@@ -801,38 +791,14 @@ def ensure_benchmark_serving_patched(
 
 
 def _is_eval_dest_patched(src: Path) -> bool:
-    """Return whether ``benchmark_lib.sh`` already redirects eval artifacts to
-    ``$RESULT_DIR`` (the eval-dest sentinel is present).
-
-    Args:
-        src (Path): The ``benchmark_lib.sh`` file to inspect.
-
-    Returns:
-        bool: ``True`` if the eval-dest sentinel is present; ``False`` on a
-        miss or read error.
-    """
+    """Return whether ``benchmark_lib.sh`` already redirects eval artifacts to ``$RESULT_DIR`` (the eval-dest sentinel is present)."""
     return file_contains_sentinel(src, _EVAL_DEST_SENTINEL, log, "_inferencex_patcher")
 
 
 def ensure_benchmark_lib_eval_dest_patched(
     inferencex_path: Path | str | None = None,
 ) -> bool:
-    """Ensure ``append_lm_eval_summary`` moves eval artifacts to ``$RESULT_DIR``
-    instead of the process cwd (the InferenceX checkout).
-
-    Returns ``True`` when patched at exit, ``False`` (non-fatal) when the file
-    is missing or the legacy line is absent (falls back to the scan-side
-    salvage in :mod:`benchmark_result`). Concurrency-safe; independent lock so
-    it does not serialize with the NUM_PROMPTS patch on the same file.
-
-    Args:
-        inferencex_path: Caller-provided override root; defaults to env-based
-            discovery when ``None``.
-
-    Returns:
-        True when at least one discovered ``benchmark_lib.sh`` is patched (or
-        already patched), False when none could be patched.
-    """
+    """Ensure ``append_lm_eval_summary`` moves eval artifacts to ``$RESULT_DIR`` instead of the process cwd (the InferenceX checkout)."""
     return _ensure_patched(
         _resolve_benchmark_lib_paths(inferencex_path),
         _is_eval_dest_patched,
@@ -840,7 +806,6 @@ def ensure_benchmark_lib_eval_dest_patched(
             _apply_line_replacement_atomic,
             legacy=_EVAL_DEST_LEGACY,
             patched_line=_EVAL_DEST_PATCHED,
-            tmp_prefix=".benchmark_lib.sh.eval_dest_",
             missing_msg=(
                 "_inferencex_patcher: expected eval-artifact ``mv ./`` line not "
                 "found in %s; upstream layout may have changed. Eval artifacts "
@@ -863,38 +828,14 @@ def ensure_benchmark_lib_eval_dest_patched(
 
 
 def _is_eval_start_patched(src: Path) -> bool:
-    """Return whether ``benchmark_lib.sh`` already emits the eval-start sentinel.
-
-    Args:
-        src (Path): The ``benchmark_lib.sh`` file to inspect.
-
-    Returns:
-        bool: ``True`` if the eval-start sentinel is present; ``False`` on a
-        miss or read error.
-    """
+    """Return whether ``benchmark_lib.sh`` already emits the eval-start sentinel."""
     return file_contains_sentinel(src, _EVAL_START_SENTINEL, log, "_inferencex_patcher")
 
 
 def ensure_benchmark_lib_eval_start_patched(
     inferencex_path: Path | str | None = None,
 ) -> bool:
-    """Ensure ``run_eval`` announces the benchmark→eval boundary on stderr.
-
-    The explore overtime kill bounds the throughput phase only; without this
-    marker the eval's wall-clock is charged against a throughput-only anchor and
-    every gated variant is killed. Returns ``True`` when patched at exit,
-    ``False`` (non-fatal) when the file is missing or the anchor line is absent —
-    the deadline then behaves as before. Concurrency-safe; independent lock so it
-    does not serialize with the other patches on the same file.
-
-    Args:
-        inferencex_path: Caller-provided override root; defaults to env-based
-            discovery when ``None``.
-
-    Returns:
-        True when at least one discovered ``benchmark_lib.sh`` is patched (or
-        already patched), False when none could be patched.
-    """
+    """Ensure ``run_eval`` announces the benchmark→eval boundary on stderr."""
     return _ensure_patched(
         _resolve_benchmark_lib_paths(inferencex_path),
         _is_eval_start_patched,
@@ -902,7 +843,6 @@ def ensure_benchmark_lib_eval_start_patched(
             _apply_line_replacement_atomic,
             legacy=_EVAL_START_LEGACY,
             patched_line=_EVAL_START_PATCHED,
-            tmp_prefix=".benchmark_lib.sh.eval_start_",
             missing_msg=(
                 "_inferencex_patcher: expected EVAL_RESULT_DIR export not found "
                 "in %s; upstream layout may have changed. The overtime kill will "
@@ -931,10 +871,7 @@ def _resolve_eval_sitecustomize_paths(
 
 
 def eval_probe_targets_exist(inferencex_path: Path | str | None = None) -> bool:
-    """Whether any discovered InferenceX root carries the probe target file.
-
-    Separates "present and unpatchable" from "laid out somewhere we do not look".
-    """
+    """Whether any discovered InferenceX root carries the probe target file."""
     return bool(_resolve_eval_sitecustomize_paths(inferencex_path))
 
 
@@ -951,35 +888,107 @@ def _apply_eval_probe_atomic(src: Path) -> bool:
         log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
         return False
     patched = original + _EVAL_PROBE_PY
-    if not atomic_write_text(
-        src,
-        patched,
-        tmp_prefix=".lm_eval_sitecustomize.eval_probe_",
-        log_prefix="_inferencex_patcher",
-    ):
+    if not atomic_write_text(src, patched, log_prefix="_inferencex_patcher"):
         return False
     log.info("_inferencex_patcher: appended eval generation-pathology probe to %s", src)
     return True
 
 
+def _is_eval_unbound_outputs_patched(src: Path) -> bool:
+    """Return whether ``lm_eval_sitecustomize.py`` already carries the guard."""
+    return file_contains_sentinel(src, _EVAL_UNBOUND_OUTPUTS_SENTINEL, log, "_inferencex_patcher")
+
+
+def _rewrite_eval_unbound_outputs_block(text: str) -> str | None:
+    """Replace a legacy guard block that inspected the bound ``amodel_call``."""
+    start = text.find("# --- HYPERLOOM_EVAL_UNBOUND_OUTPUTS")
+    end = text.find("# --- end HYPERLOOM_EVAL_UNBOUND_OUTPUTS")
+    if start < 0 or end < 0 or _EVAL_UNBOUND_OUTPUTS_LEGACY_MARKER not in text[start:end]:
+        return None
+    end = text.find("\n", end)
+    if end < 0:
+        end = len(text)
+    else:
+        end += 1
+    return text[:start] + _EVAL_UNBOUND_OUTPUTS_PY.lstrip("\n") + text[end:]
+
+
+def _upgrade_eval_unbound_outputs_block(src: Path) -> bool:
+    """Refresh an already-appended guard when its install logic was superseded."""
+    try:
+        original = src.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
+        return False
+    rewritten = _rewrite_eval_unbound_outputs_block(original)
+    if rewritten is None or rewritten == original:
+        return False
+    if not atomic_write_text(
+        src,
+        rewritten,
+        log_prefix="_inferencex_patcher",
+    ):
+        return False
+    log.info("_inferencex_patcher: upgraded eval refused-connection guard in %s", src)
+    return True
+
+
+def _apply_eval_unbound_outputs_atomic(src: Path) -> bool:
+    """Append the refused-connection guard to ``src`` via temp-file + atomic rename."""
+    try:
+        original = src.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
+        return False
+    if _is_eval_unbound_outputs_patched(src):
+        return True
+    patched = original + _EVAL_UNBOUND_OUTPUTS_PY
+    if not atomic_write_text(
+        src,
+        patched,
+        log_prefix="_inferencex_patcher",
+    ):
+        return False
+    log.info("_inferencex_patcher: appended eval refused-connection guard to %s", src)
+    return True
+
+
+def ensure_eval_unbound_outputs_patched(
+    inferencex_path: Path | str | None = None,
+) -> bool:
+    """Ensure a refused connection cannot end the eval on UnboundLocalError.
+
+    Separate from the pin in ``cli/preflight.py``: that decides what gets
+    installed, and InferenceX's ``_install_lm_eval_deps`` force-reinstalls its
+    own ref over it before every accuracy round. This runs in the harness the
+    round actually ends up on.
+    """
+    sources = _resolve_eval_sitecustomize_paths(inferencex_path)
+    for src in sources:
+        if _is_eval_unbound_outputs_patched(src):
+            _upgrade_eval_unbound_outputs_block(src)
+    return _ensure_patched(
+        sources,
+        _is_eval_unbound_outputs_patched,
+        _apply_eval_unbound_outputs_atomic,
+        _EVAL_UNBOUND_OUTPUTS_LOCK_PATH,
+        empty_msg=(
+            "_inferencex_patcher: no InferenceX root discovered "
+            "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
+            "utils/evals/patches/lm_eval_sitecustomize.py missing — "
+            "skipping eval refused-connection guard"
+        ),
+        failure_msg=(
+            "_inferencex_patcher: failed to append the eval refused-connection guard to %s; "
+            "other discovered roots will still be attempted"
+        ),
+    )
+
+
 def ensure_eval_probe_patched(
     inferencex_path: Path | str | None = None,
 ) -> bool:
-    """Ensure the early-exit probe is appended to ``lm_eval_sitecustomize.py``.
-
-    The probe watches ``finish_reason`` on completed responses; once the pattern
-    says the model never terminates it short-circuits the remaining requests, so
-    lm-eval finishes in seconds with a ~0 score instead of burning the budget.
-
-    Args:
-        inferencex_path: Caller-provided override root; defaults to env-based
-            discovery when ``None``.
-
-    Returns:
-        True when at least one target is patched (or already patched); False when
-        none were found or none could be patched. :func:`eval_probe_targets_exist`
-        tells the two apart.
-    """
+    """Ensure the early-exit probe is appended to ``lm_eval_sitecustomize.py``."""
     return _ensure_patched(
         _resolve_eval_sitecustomize_paths(inferencex_path),
         _is_eval_probe_patched,
@@ -997,18 +1006,7 @@ def ensure_eval_probe_patched(
     )
 
 
-# =====================================================================
 # Anchor contract
-# =====================================================================
-# The probe no longer has an anchor to rot: it is appended to a real file, and
-# ``eval_probe_targets_exist`` already separates "present and unpatchable" from
-# "laid out somewhere we do not look". The four patches below are still gated on
-# locating exact upstream text, which makes a cosmetic upstream edit
-# indistinguishable from "nothing to patch": the ``ensure_*`` call returns False,
-# no caller reads it, and the run proceeds with the patch silently absent -- the
-# same failure mode that took the probe offline before it was re-homed.
-# Verification is therefore separate from patching, so a caller can assert the
-# contract instead of inferring it from a boolean nobody reads.
 
 
 @dataclass(frozen=True)
@@ -1022,12 +1020,7 @@ class AnchorStatus:
 
     @property
     def ok(self) -> bool:
-        """True when the patch is applied, or applicable exactly once.
-
-        Two or more hits is a failure, not a success: every patch here rewrites
-        a single site, so an ambiguous anchor means the file drifted into a
-        shape the patcher was never written for.
-        """
+        """True when the patch is applied, or applicable exactly once."""
         return self.patched or self.hits == 1
 
     def describe(self) -> str:
@@ -1049,7 +1042,8 @@ _ANCHOR_CONTRACT: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     ("eval_dest", ("benchmarks", "benchmark_lib.sh"), _EVAL_DEST_SENTINEL, _EVAL_DEST_LEGACY),
     ("eval_start", ("benchmarks", "benchmark_lib.sh"), _EVAL_START_SENTINEL, _EVAL_START_LEGACY),
     (
-        "profile_extra_body",
+        _BENCH_SERVING_ANCHOR_NAME,
+        # The pinned revision's layout; newer checkouts are resolved by name, not by this path.
         ("utils", "bench_serving", "benchmark_serving.py"),
         _BENCH_SERVING_SENTINEL,
         _BENCH_SERVING_LEGACY,
@@ -1058,15 +1052,7 @@ _ANCHOR_CONTRACT: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
 
 
 def count_anchor_hits(text: str, anchor: str) -> int:
-    """Return how many sites in ``text`` the given anchor would rewrite.
-
-    Args:
-        text: Full contents of the file the patch targets.
-        anchor: The literal upstream text the patch replaces.
-
-    Returns:
-        The number of matching sites.
-    """
+    """Return how many sites in ``text`` the given anchor would rewrite."""
     return text.count(anchor)
 
 
@@ -1089,9 +1075,31 @@ def verify_patch_anchors(
         One :class:`AnchorStatus` per (patch, existing file) pair, in
         ``_ANCHOR_CONTRACT`` order. Empty when no InferenceX tree resolves.
     """
+
+    def _resolve(name: str, parts: tuple[str, ...]) -> list[Path]:
+        """Name the files one patch targets across every discovered root."""
+        if name == _BENCH_SERVING_ANCHOR_NAME:
+            return _resolve_benchmark_serving_paths(inferencex_path)
+        return _resolve_inferencex_files(inferencex_path, *parts)
+
+    return _verify_anchors(_resolve)
+
+
+def _verify_anchors(resolve: Callable[[str, tuple[str, ...]], list[Path]]) -> list[AnchorStatus]:
+    """Report anchor status for whichever files ``resolve`` names per patch.
+
+    Args:
+        resolve: Maps a patch's contract name and relative path parts to the files
+            to inspect. The name is what lets a patch whose file moved upstream
+            resolve across layouts instead of through one fixed path.
+
+    Returns:
+        One :class:`AnchorStatus` per (patch, readable file) pair, in
+        ``_ANCHOR_CONTRACT`` order.
+    """
     out: list[AnchorStatus] = []
     for name, rel_parts, sentinel, anchor in _ANCHOR_CONTRACT:
-        for path in _resolve_inferencex_files(inferencex_path, *rel_parts):
+        for path in resolve(name, rel_parts):
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
             except OSError as exc:
@@ -1111,26 +1119,57 @@ def verify_patch_anchors(
 def failed_patch_anchors(
     inferencex_path: Path | str | None = None,
 ) -> list[AnchorStatus]:
-    """Return only the anchors that no longer hold. Empty means the contract is intact.
+    """Return only the anchors that no longer hold. Empty means the contract is intact."""
+    return [status for status in verify_patch_anchors(inferencex_path) if not status.ok]
+
+
+def failed_patch_anchors_in(root: Path | str) -> list[AnchorStatus]:
+    """Return the anchors that no longer hold in exactly one checkout.
+
+    :func:`failed_patch_anchors` reports the union across every root the
+    environment can reach, which is what patching needs and what a gate must
+    not use: Magpie benchmarks the single tree named by
+    ``benchmark.inferencex_path``, so rot in an unrelated site-packages copy
+    says nothing about the run being launched.
 
     Args:
-        inferencex_path: Caller-provided override root; defaults to env-based
-            discovery when ``None``.
+        root: The checkout the run will execute.
 
     Returns:
-        The failing subset of :func:`verify_patch_anchors`.
+        The failing subset for that root alone.
     """
-    return [status for status in verify_patch_anchors(inferencex_path) if not status.ok]
+    base = Path(root)
+
+    def _resolve(name: str, parts: tuple[str, ...]) -> list[Path]:
+        """Name the one file under ``base`` a patch targets, when it exists.
+
+        Args:
+            name: The patch's contract name.
+            parts: The patch's relative path components.
+
+        Returns:
+            A single-entry list, or ``[]`` when the file is absent.
+        """
+        if name == _BENCH_SERVING_ANCHOR_NAME:
+            existing = [p for p in (base.joinpath(*rel) for rel in _BENCH_SERVING_REL_PARTS) if p.is_file()]
+            return [_pick_benchmark_serving(existing)] if existing else []
+        path = base.joinpath(*parts)
+        return [path] if path.is_file() else []
+
+    return [status for status in _verify_anchors(_resolve) if not status.ok]
 
 
 __all__ = [
     "AnchorStatus",
+    "benchmark_serving_path_in",
     "count_anchor_hits",
     "ensure_benchmark_lib_patched",
     "ensure_benchmark_lib_eval_dest_patched",
     "ensure_benchmark_lib_eval_start_patched",
     "ensure_benchmark_serving_patched",
     "ensure_eval_probe_patched",
+    "ensure_eval_unbound_outputs_patched",
     "failed_patch_anchors",
+    "failed_patch_anchors_in",
     "verify_patch_anchors",
 ]

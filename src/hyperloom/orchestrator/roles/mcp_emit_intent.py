@@ -1,27 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The intent contract, and the in-process MCP server exposing ``emit_intent``.
-
-This module owns what an agent is allowed to say, for every provider. The
-Claude path takes it as a real tool: :func:`build_emit_intent_server` wires
-:data:`EMIT_INTENT_TOOL_NAME` into the SDK and each tool_use block becomes one
-validated :class:`Intent`. The Codex path takes it as an enforced structured
-output: :func:`build_intent_envelope_schema` renders the same contract as a
-JSON schema for one role's intent set.
-
-Both are generated from :class:`IntentType` and ``_PAYLOAD_REQUIRED``, never
-from a hand-written literal — a hand-written Codex list once offered 5 of the
-orchestration role's 12 intents, which silently removed the Coordinator's only
-route to the kernel agent.
-
-In-process MCP avoids extra processes; :func:`build_emit_intent_server` accepts
-factory overrides for tests. The SDK rewrites the tool name to
-:data:`EMIT_INTENT_TOOL_QUALIFIED` when forwarding to Claude.
-"""
+"""The intent contract, and the in-process MCP server exposing ``emit_intent``."""
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Callable, Iterable
 
@@ -41,11 +25,8 @@ EMIT_INTENT_TOOL_NAME = "emit_intent"
 EMIT_INTENT_TOOL_QUALIFIED = f"mcp__{MCP_SERVER_NAME}__{EMIT_INTENT_TOOL_NAME}"
 
 
-# Vocabulary a required-field name cannot carry on its own: closed value sets
-# and the one optional dial each type honours. Rendered as its own clause by
-# :func:`payload_constraints`, never mixed into the required-field list --
-# appended there, they read as required keys, and a note naming a field that is
-# already required printed it twice.
+# Vocabulary a required-field name cannot carry on its own: closed value sets and the one optional dial each type
+# honours.
 _PAYLOAD_FIELD_NOTES: dict[IntentType, tuple[str, ...]] = {
     IntentType.REVIEW_VERDICT: ("verdict ∈ approve|reject|redirect|advise|needs_review",),
     IntentType.EXTEND_LEASE: ("reason is optional",),
@@ -55,35 +36,13 @@ _PAYLOAD_FIELD_NOTES: dict[IntentType, tuple[str, ...]] = {
 
 
 def _ordered_intents(allowed_intents: Iterable[IntentType]) -> list[IntentType]:
-    """Return the allowed types in :class:`IntentType` declaration order.
-
-    A role's intent set is a frozenset, whose iteration order varies per
-    process. The wire contract must not.
-
-    Args:
-        allowed_intents: The intent types a role may emit.
-
-    Returns:
-        The allowed types, deduplicated and in enum declaration order.
-    """
+    """Return the allowed types in :class:`IntentType` declaration order."""
     allowed = set(allowed_intents)
     return [t for t in IntentType if t in allowed]
 
 
 def payload_contract(allowed_intents: Iterable[IntentType]) -> str:
-    """Describe the required payload keys of each allowed intent type.
-
-    Generated from ``_PAYLOAD_REQUIRED`` so the description cannot drift from
-    what :func:`validate_envelope` actually enforces. Only the required keys:
-    what a value may be, and which optional dial a type honours, are different
-    claims and are rendered by :func:`payload_constraints`.
-
-    Args:
-        allowed_intents: The intent types a role may emit.
-
-    Returns:
-        A single-line ``"<type>:{<field>,...}"`` listing, comma separated.
-    """
+    """Describe the required payload keys of each allowed intent type."""
     parts: list[str] = []
     for intent_type in _ordered_intents(allowed_intents):
         fields = _PAYLOAD_REQUIRED.get(intent_type, ())
@@ -92,19 +51,7 @@ def payload_contract(allowed_intents: Iterable[IntentType]) -> str:
 
 
 def payload_constraints(allowed_intents: Iterable[IntentType]) -> str:
-    """Describe the value sets and optional dials the required-key list cannot.
-
-    Kept apart from :func:`payload_contract` so neither claim is stated as the
-    other: a constraint listed among required keys reads as a key the model must
-    send, and one naming an already-required field printed that field twice.
-
-    Args:
-        allowed_intents: The intent types a role may emit.
-
-    Returns:
-        A single-line ``"<type>.<clause>"`` listing, semicolon separated, or an
-        empty string when no allowed type carries a note.
-    """
+    """Describe the value sets and optional dials the required-key list cannot."""
     parts: list[str] = []
     for intent_type in _ordered_intents(allowed_intents):
         for note in _PAYLOAD_FIELD_NOTES.get(intent_type, ()):
@@ -113,41 +60,13 @@ def payload_constraints(allowed_intents: Iterable[IntentType]) -> str:
 
 
 def constraints_sentence(allowed_intents: Iterable[IntentType]) -> str:
-    """Render the constraints as a trailing sentence, or nothing at all.
-
-    A role whose types carry no note has no constraints to state, and embedding
-    the empty string unconditionally told it ``Constraints: .``
-
-    Args:
-        allowed_intents: The intent types a role may emit.
-
-    Returns:
-        ``" Constraints: <clauses>."`` with a leading space, or ``""``.
-    """
+    """Render the constraints as a trailing sentence, or nothing at all."""
     constraints = payload_constraints(allowed_intents)
     return f" Constraints: {constraints}." if constraints else ""
 
 
 def build_intent_envelope_schema(allowed_intents: Iterable[IntentType]) -> dict[str, Any]:
-    """Render one role's intent contract as an OpenAI-strict JSON schema.
-
-    Strict structured outputs (which Azure enforces) require every object to
-    declare ``additionalProperties: false`` and list every property in
-    ``required``, and cannot express a free-form object at all — so the payload
-    travels as a JSON string that the caller decodes and hands to the shared
-    :func:`validate_envelope`.
-
-    Args:
-        allowed_intents: The intent types the role may emit; becomes the
-            ``intent_type`` enum verbatim.
-
-    Returns:
-        The schema for the ``{"intents": [...]}`` envelope.
-
-    Raises:
-        ValueError: If ``allowed_intents`` is empty, which would produce a
-            schema no reply could ever satisfy.
-    """
+    """Render one role's intent contract as an OpenAI-strict JSON schema."""
     ordered = _ordered_intents(allowed_intents)
     if not ordered:
         raise ValueError("build_intent_envelope_schema requires at least one allowed IntentType")
@@ -198,11 +117,22 @@ EMIT_INTENT_TOOL_INPUT_SCHEMA: dict[str, Any] = {
                 f"{constraints_sentence(IntentType)}"
             ),
         },
+        "__unparsedToolInput": {
+            "type": "object",
+            "description": (
+                "Internal fallback produced by the Claude Code streaming parser. Never emit this deliberately."
+            ),
+        },
     },
-    "required": ["intent_type", "payload"],
+    "anyOf": [
+        {"required": ["intent_type", "payload"]},
+        {"required": ["__unparsedToolInput"]},
+    ],
     "additionalProperties": False,
 }
 
+# The fallback branch lets the MCP handler acknowledge parser-generated wrappers instead of returning an error the
+# model cannot repair.
 
 EMIT_INTENT_TOOL_DESCRIPTION = (
     "Emit ONE structured intent into the inference_optimizer system. This "
@@ -211,35 +141,109 @@ EMIT_INTENT_TOOL_DESCRIPTION = (
     "intents in a single turn, call this tool multiple times."
 )
 
+# Exception-only: Claude Code stores a tool JSON string the streaming parser did not promote to an object.
+_UNPARSED_TOOL_INPUT_KEY = "__unparsedToolInput"
+_EMIT_INTENT_TOP_LEVEL_KEYS = {"intent_type", "payload", _UNPARSED_TOOL_INPUT_KEY}
+
+
+def decode_emit_intent_input(raw_input: Any) -> tuple[dict[str, Any], str | None]:
+    """Decode a parser fallback and report why decoding failed.
+
+    Accepts the three shapes ``emit_intent`` tool input arrives in:
+
+    1. a native object (direct Anthropic API);
+    2. Claude Code's ``__unparsedToolInput.raw`` wrapper;
+    3. a JSON *string* envelope, as emitted by OpenAI-compatible / litellm
+       style proxies, optionally with ``payload`` itself stringified.
+
+    A caller that can see shape 3 hands it through unchanged: a non-dict input replaced
+    with ``{}`` would decode "successfully" to an empty intent and stall the
+    orchestrator with no error.
+    """
+    if isinstance(raw_input, str):
+        try:
+            raw_input = json.loads(raw_input)
+        except (TypeError, ValueError):
+            return {}, "emit_intent tool input string is not valid JSON"
+        if not isinstance(raw_input, dict):
+            return {}, "emit_intent tool input string did not decode to a JSON object"
+    if not isinstance(raw_input, dict):
+        return {}, f"emit_intent tool input must be an object, got {type(raw_input).__name__}"
+    payload = raw_input.get("payload")
+    if isinstance(payload, str):
+        try:
+            decoded_payload = json.loads(payload)
+        except (TypeError, ValueError):
+            decoded_payload = None
+        if isinstance(decoded_payload, dict):
+            raw_input = {**raw_input, "payload": decoded_payload}
+    if "intent_type" in raw_input or _UNPARSED_TOOL_INPUT_KEY not in raw_input:
+        return raw_input, None
+    wrapped = raw_input.get(_UNPARSED_TOOL_INPUT_KEY)
+    if not isinstance(wrapped, dict):
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY} must be an object"
+    raw = wrapped.get("raw")
+    if not isinstance(raw, str) or not raw.strip():
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY}.raw must be a non-empty JSON object string"
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY}.raw is not valid JSON"
+    if not isinstance(parsed, dict):
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY}.raw must decode to a JSON object"
+    return parsed, None
+
+
+def is_unparsed_tool_wrapper(raw_input: Any) -> bool:
+    """Whether ``input`` is Claude Code's wrapped unparsed tool JSON object.
+
+    The wrapper also arrives inside the JSON-*string* envelope that
+    OpenAI-compatible / litellm style proxies emit. Decoding that envelope here
+    keeps fallback detection — and therefore the retry deduplication in
+    :meth:`ClaudeBackend._invoke_and_collect` — in step with
+    :func:`decode_emit_intent_input`, which already accepts both shapes.
+    """
+    if isinstance(raw_input, str):
+        try:
+            raw_input = json.loads(raw_input)
+        except (TypeError, ValueError):
+            return False
+    if not isinstance(raw_input, dict):
+        return False
+    if "intent_type" in raw_input:
+        return False
+    wrapped = raw_input.get(_UNPARSED_TOOL_INPUT_KEY)
+    return isinstance(wrapped, dict) and isinstance(wrapped.get("raw"), str)
+
+
+def coerce_emit_intent_input(raw_input: Any) -> dict[str, Any]:
+    """Return native emit_intent input, decoding the wrapper only as fallback."""
+    if not isinstance(raw_input, dict):
+        return {}
+    coerced, _ = decode_emit_intent_input(raw_input)
+    return coerced
+
 
 def validate_emit_intent_input(payload: dict[str, Any]) -> None:
-    """Eager single-intent validation (mirrors :func:`validate_envelope`).
-
-    Checks the tool-input shape (only ``intent_type`` and ``payload`` keys,
-    both present), that ``intent_type`` is a known :class:`IntentType`, and
-    that the inner payload carries every required field for that type.
-
-    Args:
-        payload (dict[str, Any]): The raw ``emit_intent`` tool input to
-            validate.
-
-    Raises:
-        IntentValidationError: If the input is not a dict, has unexpected or
-            missing top-level keys, names an unknown intent type, or omits a
-            required payload field.
-    """
+    """Eager single-intent validation (mirrors :func:`validate_envelope`)."""
     if not isinstance(payload, dict):
         raise IntentValidationError(f"emit_intent input must be an object, got {type(payload).__name__}")
-    extra = set(payload.keys()) - {"intent_type", "payload"}
+    original_extra = set(payload) - _EMIT_INTENT_TOP_LEVEL_KEYS
+    if original_extra:
+        raise IntentValidationError(f"emit_intent input has unexpected keys: {sorted(original_extra)!r}")
+    coerced, decode_error = decode_emit_intent_input(payload)
+    if decode_error is not None:
+        raise IntentValidationError(f"emit_intent: {decode_error}")
+    extra = set(coerced) - _EMIT_INTENT_TOP_LEVEL_KEYS
     if extra:
         raise IntentValidationError(f"emit_intent input has unexpected keys: {sorted(extra)!r}")
-    if "intent_type" not in payload or "payload" not in payload:
+    if "intent_type" not in coerced or "payload" not in coerced:
         raise IntentValidationError("emit_intent input requires both 'intent_type' and 'payload'")
     try:
-        intent_type = IntentType(payload["intent_type"])
+        intent_type = IntentType(coerced["intent_type"])
     except ValueError as exc:
-        raise IntentValidationError(f"emit_intent: unknown intent_type {payload['intent_type']!r}") from exc
-    inner = payload["payload"]
+        raise IntentValidationError(f"emit_intent: unknown intent_type {coerced['intent_type']!r}") from exc
+    inner = coerced["payload"]
     if not isinstance(inner, dict):
         raise IntentValidationError(f"emit_intent: 'payload' must be an object, got {type(inner).__name__}")
     required = _PAYLOAD_REQUIRED.get(intent_type, ())
@@ -251,15 +255,7 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> None:
 
 
 async def _emit_intent_handler(args: dict[str, Any]) -> dict[str, Any]:
-    """Default handler — validate then ack; errors return is_error=True.
-
-    Args:
-        args: The raw ``emit_intent`` tool input to validate.
-
-    Returns:
-        An MCP tool result dict acknowledging success, or carrying the
-        validation error with ``is_error=True``.
-    """
+    """Default handler — validate then ack; errors return is_error=True."""
     try:
         validate_emit_intent_input(args)
     except IntentValidationError as exc:
@@ -278,26 +274,7 @@ def build_emit_intent_server(
     server_factory: Callable[..., Any] | None = None,
     handler: Callable[[dict[str, Any]], Any] | None = None,
 ) -> Any | None:
-    """Build the in-process MCP server config exposing ``emit_intent``.
-
-    Returns the SDK ``McpSdkServerConfig`` for
-    :class:`ClaudeAgentOptions.mcp_servers`, or ``None`` if the SDK lacks
-    in-process MCP helpers. ``tool_factory`` / ``server_factory`` /
-    ``handler`` are test seams.
-
-    Args:
-        sdk_module: Explicit SDK module to use, or ``None`` to import the real
-            one.
-        tool_factory: Override for the SDK ``tool`` decorator factory (tests).
-        server_factory: Override for the SDK ``create_sdk_mcp_server`` factory
-            (tests).
-        handler: Override for the tool handler; defaults to
-            :func:`_emit_intent_handler`.
-
-    Returns:
-        The constructed in-process MCP server config, or ``None`` when the SDK
-        lacks the required in-process MCP helpers.
-    """
+    """Build the in-process MCP server config exposing ``emit_intent``."""
     sdk = _resolve_sdk(sdk_module)
     handler = handler or _emit_intent_handler
 
@@ -329,6 +306,9 @@ __all__ = [
     "MCP_SERVER_NAME",
     "build_emit_intent_server",
     "build_intent_envelope_schema",
+    "coerce_emit_intent_input",
+    "decode_emit_intent_input",
+    "is_unparsed_tool_wrapper",
     "payload_contract",
     "validate_emit_intent_input",
 ]

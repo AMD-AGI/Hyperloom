@@ -1,16 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ``_grid_runner`` process-reaping (``_kill_stale_servers``) and
-the ``run_grid`` per-variant failure branches (yaml build error, magpie
-timeout, server-dead / overtime sentinels, missing workspace, invalid
-measurement)."""
+"""Coverage for the ``run_grid`` per-variant failure branches (yaml build error, magpie timeout, server-dead / overtime sentinels, missing workspace, invalid measurement)."""
 
 from __future__ import annotations
 
-import io
 import json
-import os
 import subprocess
 from pathlib import Path
 
@@ -30,105 +25,6 @@ def _single_node(monkeypatch):
     from hyperloom.orchestrator.actions.executors import _multi_node_env
 
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
-
-
-def test_kill_stale_servers_noop_in_multi_node(monkeypatch):
-    from hyperloom.orchestrator.actions.executors import _multi_node_env
-
-    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
-    slept: list = []
-    monkeypatch.setattr("time.sleep", lambda *_a: slept.append(True))
-    gr._kill_stale_servers()
-    assert slept == []
-
-
-def _proc_open_factory(cmdlines: dict[str, bytes], maps: dict[str, str]):
-    """Build a fake ``open`` that serves /proc cmdline + maps from dicts."""
-    real_open = open
-
-    def _fake_open(path, mode="r", *args, **kwargs):
-        p = str(path)
-        if p.endswith("/cmdline"):
-            data = cmdlines.get(p)
-            if data is None:
-                raise OSError("no cmdline")
-            return io.BytesIO(data)
-        if p.endswith("/maps"):
-            data = maps.get(p)
-            if data is None:
-                raise OSError("no maps")
-            return io.StringIO(data)
-        return real_open(path, mode, *args, **kwargs)
-
-    return _fake_open
-
-
-def test_kill_stale_servers_kills_pattern_and_orphan_atom(monkeypatch):
-    killpg_calls: list[int] = []
-    kill_calls: list[int] = []
-    removed: list[str] = []
-    slept: list[int] = []
-
-    monkeypatch.setattr(os, "getpid", lambda: 999)
-    monkeypatch.setattr(os, "getpgrp", lambda: 100)
-    monkeypatch.setattr(os, "listdir", lambda _p: ["1", "2", "999", "abc"])
-    cmdlines = {
-        "/proc/1/cmdline": b"vllm serve\x00--model\x00m\x00",  # _KILL_PATTERNS
-        "/proc/2/cmdline": b"python\x00--multiprocessing-fork\x00",
-    }
-    maps = {"/proc/2/maps": "7f00 r-xp /ATOM/atom/libfoo.so\n"}
-    monkeypatch.setattr("builtins.open", _proc_open_factory(cmdlines, maps))
-
-    pgid_map = {1: 50, 2: 60}
-    monkeypatch.setattr(os, "getpgid", lambda pid: pgid_map[pid])
-    monkeypatch.setattr(os, "killpg", lambda pgid, sig: killpg_calls.append(pgid))
-    monkeypatch.setattr(os, "kill", lambda pid, sig: kill_calls.append(pid))
-    monkeypatch.setattr("glob.glob", lambda pat: [f"{pat}_seg"])
-    monkeypatch.setattr(os, "remove", lambda f: removed.append(f))
-    monkeypatch.setattr("time.sleep", lambda s: slept.append(s))
-
-    gr._kill_stale_servers()
-
-    assert set(killpg_calls) == {50, 60}
-    assert set(kill_calls) == {1, 2}
-    assert removed  # /dev/shm segments cleared
-    assert slept == [8]
-
-
-def test_kill_stale_servers_swallows_proc_errors(monkeypatch):
-    slept: list[int] = []
-
-    def _raise_getpgrp():
-        raise OSError("no pgrp")
-
-    monkeypatch.setattr(os, "getpid", lambda: 999)
-    monkeypatch.setattr(os, "getpgrp", _raise_getpgrp)  # my_pgid = -1
-    monkeypatch.setattr(os, "listdir", lambda _p: ["3", "4"])
-    cmdlines = {
-        "/proc/3/cmdline": b"sglang.srt\x00",  # matches; getpgid raises below
-    }
-    monkeypatch.setattr("builtins.open", _proc_open_factory(cmdlines, {}))
-
-    def _getpgid(_pid):
-        raise OSError("gone")
-
-    monkeypatch.setattr(os, "getpgid", _getpgid)
-
-    def _kill(_pid, _sig):
-        raise ProcessLookupError("already dead")
-
-    monkeypatch.setattr(os, "kill", _kill)
-    monkeypatch.setattr(os, "killpg", lambda *_a: (_ for _ in ()).throw(OSError()))
-    monkeypatch.setattr("glob.glob", lambda pat: [f"{pat}_seg"])
-
-    def _remove(_f):
-        raise OSError("held")
-
-    monkeypatch.setattr(os, "remove", _remove)
-    monkeypatch.setattr("time.sleep", lambda s: slept.append(s))
-
-    gr._kill_stale_servers()  # all errors swallowed
-    assert slept == [2]
 
 
 def _write_base_yaml(path: Path) -> None:
@@ -173,7 +69,6 @@ async def test_run_grid_yaml_build_error_branch(tmp_path, monkeypatch):
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
     )
     assert len(results) == 1
     assert results[0].status == "failed"
@@ -194,7 +89,6 @@ async def test_run_grid_magpie_timeout_branch(tmp_path, monkeypatch):
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
     )
     assert results[0].status == "failed"
     assert results[0].error_class == "magpie_timeout"
@@ -214,73 +108,10 @@ async def test_run_grid_server_dead_branch(tmp_path, monkeypatch):
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
     )
     assert results[0].status == "failed"
     assert results[0].error_class == "server_init_dead"
     assert results[0].returncode == gr.SERVER_DEAD_RETURNCODE
-
-
-@pytest.mark.asyncio
-async def test_run_grid_overtime_kill_branch(tmp_path, monkeypatch):
-    base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
-
-    def _overtime(*_a, **_k):
-        return gr.OVERTIME_KILL_RETURNCODE, "", ""
-
-    monkeypatch.setattr(gr, "_run_magpie", _overtime)
-    results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
-        grid=[GridVariant("vA")],
-        output_root=tmp_path / "out",
-        variant_timeout_sec=5,
-        soft_deadline_sec=1.0,
-    )
-    assert results[0].status == "failed"
-    assert results[0].killed_overtime is True
-    assert results[0].estimated_output_throughput is None
-
-
-@pytest.mark.asyncio
-async def test_run_grid_overtime_kill_estimates_tput_from_server_log(
-    tmp_path,
-    monkeypatch,
-):
-    """A killed-overtime variant salvages a rough output tput from the engine's
-    partial ``server.log`` decode-throughput logs."""
-    base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
-
-    def _overtime(*_a, output_dir, **_k):
-        # Mimic the engine dumping periodic decode throughput before the reaper.
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        (Path(output_dir) / "server.log").write_text(
-            "Decode batch. gen throughput (token/s): 100.0, #queue-req: 0\n"
-            "Decode batch. gen throughput (token/s): 900.0, #queue-req: 0\n"
-            "Decode batch. gen throughput (token/s): 1000.0, #queue-req: 0\n"
-            "Decode batch. gen throughput (token/s): 1100.0, #queue-req: 0\n"
-            "Decode batch. gen throughput (token/s): 1200.0, #queue-req: 0\n"
-        )
-        return gr.OVERTIME_KILL_RETURNCODE, "", ""
-
-    monkeypatch.setattr(gr, "_run_magpie", _overtime)
-    results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
-        grid=[GridVariant("vA")],
-        output_root=tmp_path / "out",
-        variant_timeout_sec=5,
-        soft_deadline_sec=1.0,
-    )
-    r = results[0]
-    assert r.status == "failed"
-    assert r.killed_overtime is True
-    assert r.output_throughput is None
-    # warmup trim drops the 100.0 ramp -> mean(900,1000,1100,1200)=1050.0
-    assert r.estimated_output_throughput == pytest.approx(1050.0)
-    assert any(w.startswith("estimated_output_throughput_from_server_log:") for w in r.nonfatal_warnings)
 
 
 @pytest.mark.asyncio
@@ -297,7 +128,6 @@ async def test_run_grid_no_workspace_branch_stops_on_failure(tmp_path, monkeypat
         base_extra_args="",
         grid=[GridVariant("vA"), GridVariant("vB")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
         keep_going_on_failure=False,
     )
     assert len(results) == 1
@@ -305,7 +135,79 @@ async def test_run_grid_no_workspace_branch_stops_on_failure(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_agentx_preflight_abort_keeps_its_own_error_class(tmp_path, monkeypatch):
+    """An AgentX preflight abort must not be filed as a missing workspace."""
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+        AGENTX_PREFLIGHT_ERROR_CLASS,
+        AGENTX_PREFLIGHT_RETURNCODE,
+    )
+
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+    diagnosis = "AgentX preflight failed: HYPERLOOM_AGENTX is on but aiperf was not found."
+
+    monkeypatch.setattr(gr, "_run_magpie", lambda *_a, **_k: (AGENTX_PREFLIGHT_RETURNCODE, "", diagnosis))
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA")],
+        output_root=tmp_path / "out",
+        keep_going_on_failure=False,
+    )
+    assert len(results) == 1
+    assert results[0].error_class == AGENTX_PREFLIGHT_ERROR_CLASS
+    # The diagnosis itself has to survive too: it names the fix.
+    assert "aiperf was not found" in (results[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_agentx_preflight_abort_abandons_the_rest_of_the_grid(tmp_path, monkeypatch):
+    """The client is missing for the whole grid, not for one variant."""
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+        AGENTX_PREFLIGHT_RETURNCODE,
+    )
+
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+    monkeypatch.setattr(gr, "_run_magpie", lambda *_a, **_k: (AGENTX_PREFLIGHT_RETURNCODE, "", "aiperf was not found"))
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA"), GridVariant("vB"), GridVariant("vC")],
+        output_root=tmp_path / "out",
+        keep_going_on_failure=True,  # would otherwise walk every point
+    )
+    assert [r.status for r in results] == ["failed", "skipped", "skipped"], (
+        "the grid either kept benchmarking after an environment abort, or dropped "
+        "the abandoned points instead of recording why they never ran"
+    )
+    assert [r.name for r in results[1:]] == ["vB", "vC"]
+    assert all(r.error_class == "agentx_preflight" for r in results)
+
+
+@pytest.mark.asyncio
+async def test_agentx_preflight_abort_never_reports_an_empty_error(tmp_path, monkeypatch):
+    """A blank stderr must not become a blank `error`, the way the sibling branch's non-empty fallback already prevents."""
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+        AGENTX_PREFLIGHT_RETURNCODE,
+    )
+
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+    monkeypatch.setattr(gr, "_run_magpie", lambda *_a, **_k: (AGENTX_PREFLIGHT_RETURNCODE, "", "   "))
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA")],
+        output_root=tmp_path / "out",
+        keep_going_on_failure=False,
+    )
+    assert (results[0].error or "").strip(), "an empty diagnosis reached the result"
+
+
+@pytest.mark.asyncio
 async def test_run_grid_invalid_measurement_branch(tmp_path, monkeypatch):
+    monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
     base = tmp_path / "base.yaml"
     _write_base_yaml(base)
 
@@ -323,7 +225,6 @@ async def test_run_grid_invalid_measurement_branch(tmp_path, monkeypatch):
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
     )
     assert results[0].status == "failed"
     assert results[0].error_class in {
@@ -363,7 +264,6 @@ async def test_run_grid_nonzero_rc_with_valid_measurement_fails(tmp_path, monkey
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
     )
     r = results[0]
     assert r.status == "failed"
@@ -372,6 +272,135 @@ async def test_run_grid_nonzero_rc_with_valid_measurement_fails(tmp_path, monkey
     markers = list((tmp_path / "out").rglob("abort_reason.json"))
     assert len(markers) == 1
     assert json.loads(markers[0].read_text())["error_class"] == "magpie_nonzero_after_valid_measurement"
+
+
+def _valid_report_body(completed: int, requested: int) -> str:
+    """A parseable Magpie report for ``completed`` of ``requested`` requests."""
+    return json.dumps(
+        {
+            "success": True,
+            "framework": "sglang",
+            "throughput": {
+                "output_throughput": 1200.0,
+                "request_throughput": 120.0,
+                "completed_requests": completed,
+                "num_prompts": requested,
+                "duration_seconds": 120.0,
+            },
+        }
+    )
+
+
+def _magpie_writing(completed: int, requested: int, rc: int, stderr: str):
+    """A fake ``_run_magpie`` that writes one report and exits ``rc``."""
+
+    def _run(magpie_python, config_path, output_dir, **_k):
+        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "benchmark_report.json").write_text(_valid_report_body(completed, requested))
+        return rc, "", stderr
+
+    return _run
+
+
+_STALE_HANDLE = "benchmarks/sglang_mi355x.sh: error reading input file: Stale file handle"
+
+
+@pytest.mark.asyncio
+async def test_run_grid_keeps_a_measurement_that_served_every_request(tmp_path, monkeypatch):
+    """A wrapper that exits non-zero after serving the whole protocol keeps its measurement.
+
+    The bash wrapper reads its own script off the InferenceX checkout for the
+    whole round, so a mount flap at the tail exits non-zero on a benchmark that
+    already ran to completion. Nothing about that measurement is short.
+
+    The variant carries no ``NUM_PROMPTS`` of its own, which is the shape every
+    caller but conc_sweep uses: the count is read back off the run's own
+    result, not off the variant's env layer.
+    """
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+    monkeypatch.setattr(gr, "_run_magpie", _magpie_writing(192, 192, 2, _STALE_HANDLE))
+
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA", extra_server_args="--foo")],
+        output_root=tmp_path / "out",
+    )
+    r = results[0]
+    assert r.status == "succeeded"
+    assert r.error_class == ""
+    assert r.output_throughput == pytest.approx(1200.0)
+    assert r.completed_requests == 192
+    assert r.returncode == 2
+    assert "nonzero_rc_after_complete_protocol:2" in r.nonfatal_warnings
+    # The cause of the non-zero exit stays on the record, not only in the log.
+    assert "Stale file handle" in (r.error or "")
+    assert list((tmp_path / "out").rglob("abort_reason.json")) == []
+
+
+@pytest.mark.asyncio
+async def test_run_grid_fails_a_measurement_that_served_short(tmp_path, monkeypatch):
+    """A server that died mid-protocol still fails, however parseable its report.
+
+    This is the case the nonzero-rc branch exists for: fewer requests were
+    served than were asked for, so the throughput is not the protocol's.
+    """
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+    monkeypatch.setattr(gr, "_run_magpie", _magpie_writing(120, 192, 1, "server exited 1"))
+
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA", extra_server_args="--foo")],
+        output_root=tmp_path / "out",
+    )
+    r = results[0]
+    assert r.status == "failed"
+    assert r.error_class == "magpie_nonzero_after_valid_measurement"
+    markers = list((tmp_path / "out").rglob("abort_reason.json"))
+    assert len(markers) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_grid_fails_when_the_run_recorded_no_request_count(tmp_path, monkeypatch):
+    """A report with no ``num_prompts`` cannot be judged complete, so rc wins.
+
+    An unpatched InferenceX checkout serves ``max_concurrency`` prompts and may
+    record no requested count at all. That is not evidence of a whole protocol.
+    """
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+
+    def _no_request_count(magpie_python, config_path, output_dir, **_k):
+        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "benchmark_report.json").write_text(
+            json.dumps(
+                {
+                    "success": True,
+                    "framework": "sglang",
+                    "throughput": {
+                        "output_throughput": 1200.0,
+                        "completed_requests": 192,
+                        "duration_seconds": 120.0,
+                    },
+                }
+            )
+        )
+        return 2, "", _STALE_HANDLE
+
+    monkeypatch.setattr(gr, "_run_magpie", _no_request_count)
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA", extra_server_args="--foo")],
+        output_root=tmp_path / "out",
+    )
+    assert results[0].status == "failed"
+    assert results[0].error_class == "magpie_nonzero_after_valid_measurement"
 
 
 @pytest.mark.asyncio
@@ -398,7 +427,6 @@ async def test_server_dead_surfaces_log_excerpt(tmp_path, monkeypatch):
         base_extra_args="",
         grid=[GridVariant("fp8_kv")],
         output_root=out_root,
-        variant_timeout_sec=5,
     )
     r = results[0]
     assert r.status == "failed"

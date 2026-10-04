@@ -3,18 +3,17 @@
 
 """Enablement: make a ``(model, backend)`` combination runnable at all.
 
-Phase-orthogonal by construction. The Coordinator pumps this subsystem on
-every tick regardless of ``state.phase`` (``coordinator.py`` calls
-``_pump_enablement_safely`` from both the tick and run loops), because the
-failure it repairs -- a combination that cannot boot, or boots and misses its
-accuracy floor -- traps the run in PRELUDE, before any phase that could host
-the repair has been entered. It lived inside the FRAMEWORK_AGENT phase handler
-for historical reasons only; a comment on the pump records that housing it in
-the perf pump made it unreachable for exactly the case it exists to fix.
-
-The four collaborators split the lifecycle: :mod:`params` builds the authoring
-specialist's request, :mod:`lane` owns round admission and re-arm,
-:mod:`build` owns the off-loop compiled-build escalation and its outcome
-routing, and :mod:`revalidation` owns the genuine-baseline re-measurement that
-finalises an eval-origin KEEP.
+Exports the pure functions with consumers outside the package. The four
+collaborator classes are withheld: they are bases of ``Coordinator``, not objects
+to instantiate on their own.
 """
+
+from __future__ import annotations
+
+from .mandate import build_mandate, build_search_plan, score_enablement_title
+
+__all__ = [
+    "build_mandate",
+    "build_search_plan",
+    "score_enablement_title",
+]

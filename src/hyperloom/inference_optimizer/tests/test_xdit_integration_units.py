@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for the xDiT (scriptable diffusion) framework integration.
-
-Covers the cross-cutting contracts for xDiT: the framework registry, the
-server-args env resolver, the do-not-set blacklist + compatibility filter, the
-scriptable quality gate, scriptable measurement validity, the per-framework
-YAML resolvers, the explore cold-start grid, the roofline snapshot units and
-their latency sidecar, the TraceLens arch spec, and scriptable trace health.
-"""
+"""Unit coverage for the xDiT (scriptable diffusion) framework integration."""
 
 from __future__ import annotations
 
@@ -42,8 +35,6 @@ class TestFrameworkRegistry:
         assert fr.throughput_unit("vllm") == "tok/s"
 
     def test_registry_capability_fields(self):
-        assert fr.FRAMEWORKS["xdit"].supports_server_reuse is False
-        assert fr.FRAMEWORKS["sglang"].supports_server_reuse is True
         assert fr.FRAMEWORKS["xdit"].repo_url == "https://github.com/xdit-project/xDiT.git"
 
     def test_unknown_falls_back_to_default(self):
@@ -138,24 +129,23 @@ class TestQualityGate:
         assert ag.quality_gate_passed({"lpips": 0.01, "lpips_max": 0.05}, require=True) is True
 
     def test_quality_gate_passed_skipped_reference_established(self, monkeypatch):
-        # The baseline establishing the reference (skipped) must pass even when
-        # required and a reference is configured.
+        # The baseline establishing the reference (skipped) must pass even when required and a reference is
+        # configured.
         monkeypatch.setenv("XDIT_QUALITY_REF", "/tmp/ref.png")
         gate = {"passed": True, "skipped": True, "reason": "reference_established"}
         assert ag.quality_gate_passed(gate, require=True) is True
 
     def test_quality_gate_passed_skipped_fails_closed_when_ref_configured(self, monkeypatch):
-        # A variant that SKIPPED the gate while a reference was configured did
-        # not actually compare -> fail closed (scriptable require=True).
+        # A variant that SKIPPED the gate while a reference was configured did not actually compare -> fail closed
+        # (scriptable require=True).
         monkeypatch.setenv("XDIT_QUALITY_REF", "/tmp/ref.png")
         for reason in ("no_reference_or_image", "reference_missing", "image_libs_unavailable"):
             gate = {"passed": True, "skipped": True, "reason": reason}
             assert ag.quality_gate_passed(gate, require=True) is False, reason
 
     def test_quality_gate_passed_skipped_fails_closed_regardless_of_env(self, monkeypatch):
-        # A comparison is always expected, so a non-established skip is
-        # unverifiable and fails closed even when the process env carries no
-        # XDIT_QUALITY_REF.
+        # A comparison is always expected, so a non-established skip is unverifiable and fails closed even when the
+        # process env carries no XDIT_QUALITY_REF.
         monkeypatch.delenv("XDIT_QUALITY_REF", raising=False)
         gate = {"passed": True, "skipped": True, "reason": "no_reference_or_image"}
         assert ag.quality_gate_passed(gate, require=True) is False
@@ -236,8 +226,8 @@ class TestScriptableMeasurement:
         assert br.is_valid_measurement(m) is False
 
     def test_quality_missing_gate_still_valid(self):
-        # A missing/empty gate stays non-blocking for selection (require=False);
-        # required-gate enforcement happens upstream.
+        # A missing/empty gate stays non-blocking for selection (require=False); required-gate enforcement happens
+        # upstream.
         m = {"workload_kind": "scriptable", "output_throughput": 0.29}
         assert br.is_valid_measurement(m) is True
 
@@ -275,12 +265,63 @@ class TestConfigResolvers:
 
 
 class TestExploreGrid:
-    def test_xdit_grid_non_empty_and_safe(self):
-        grid = ex._default_grid_for_framework("xdit", model_class="dit", conc=1)
-        assert grid, "xdit cold-start grid must be non-empty"
+    @pytest.mark.parametrize(
+        "framework,model_class,hints",
+        [
+            ("xdit", "dit", {}),
+            ("xdit", "moe_mla", {}),
+            ("xdit", "dit", {"conc": 32}),
+            ("xdit", "dit", {"isl": 2048}),
+            ("xdit", "dit", {"osl": 256}),
+            (" XDiT ", "", {"conc": 1, "isl": 2048, "osl": 256}),
+        ],
+    )
+    def test_xdit_grid_content_order_and_safety(self, framework, model_class, hints):
+        expected = [
+            ("xdit_buffer_ops", {"AMDGCN_USE_BUFFER_OPS": "1"}),
+            ("xdit_compile_reduce_overhead", {"XDIT_USE_TORCH_COMPILE": "1"}),
+            ("xdit_no_compile", {"XDIT_USE_TORCH_COMPILE": "0"}),
+            ("xdit_attn_aiter", {"XDIT_ATTENTION_BACKEND": "aiter"}),
+        ]
+        grid = ex._default_grid_for_framework(framework, model_class=model_class, **hints)
+        assert [(v.name, v.extra_envs) for v in grid] == expected
         for v in grid:
-            assert v.name.startswith("xdit_")
+            assert v.extra_server_args == ""
+            assert v.note == v.provenance == "default_grid"
+            assert v.remove_args == v.unset_envs == []
+            assert v.args_mode == "append"
             assert gr.xdit_blacklist_reason(v.extra_envs) is None
+
+    @pytest.mark.parametrize("framework", ["sglang", "vllm", "custom", "unknown", ""])
+    def test_other_frameworks_have_no_default_grid(self, framework):
+        assert ex._default_grid_for_framework(framework, model_class="moe_mla", conc=32, isl=2048, osl=256) == []
+
+    @pytest.mark.parametrize(
+        "model_class,conc,model_variants",
+        [
+            ("dense", 0, []),
+            ("moe_fp8", 32, [("atom_kv_fp8", "--kv_cache_dtype fp8"), ("atom_ep", "--enable-expert-parallel")]),
+            (
+                "moe_mla",
+                32,
+                [
+                    ("atom_ep", "--enable-expert-parallel"),
+                    ("atom_dp_attn", "--enable-dp-attention"),
+                    ("atom_mtp_3", "--method mtp --num-speculative-tokens 3"),
+                    ("atom_mtp_1", "--method mtp --num-speculative-tokens 1"),
+                ],
+            ),
+        ],
+    )
+    def test_atom_grid_keeps_model_and_concurrency_variants(self, model_class, conc, model_variants):
+        expected = [("atom_level_2", "--level 2"), ("atom_prefix_cache", "--enable_prefix_caching"), *model_variants]
+        if conc:
+            expected.append(("atom_cudagraph_bracket", "--cudagraph-capture-sizes [1,2,4,8,16,32]"))
+        grid = ex._default_grid_for_framework(" ATOM ", model_class=model_class, conc=conc, isl=2048, osl=256)
+        assert [(v.name, v.extra_server_args) for v in grid] == expected
+        for v in grid:
+            assert v.extra_envs == {}
+            assert v.note == v.provenance == "default_grid"
 
 
 class TestRegistryRepoUrlConsistency:
@@ -342,24 +383,23 @@ class TestLifecycleScriptableSkip:
 
 
 class TestRooflineSnapshotUnits:
-    """The roofline snapshot table renders the achieved primary metric in the
-    framework-correct unit (serving tok/s vs scriptable per-image ms)."""
+    """The roofline snapshot table renders the achieved primary metric in the framework-correct unit (serving tok/s vs scriptable per-image ms)."""
 
     def test_fmt_tput_serving_tok_s(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         assert rs._fmt_tput(123.0, "vllm") == "123.0 tok/s"
         assert rs._fmt_tput(None, "vllm") == "—"
 
     def test_fmt_tput_scriptable_renders_latency_ms(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         out = rs._fmt_tput(0.15528, "xdit")
         assert out == "6440.0 ms"
         assert "tok/s" not in out
 
     def test_build_snapshot_carries_framework(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.155, framework="xdit"
@@ -367,7 +407,7 @@ class TestRooflineSnapshotUnits:
         assert snap["framework"] == "xdit"
 
     def test_metrics_table_scriptable_achieved_is_ms(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.15528, framework="xdit"
@@ -378,9 +418,8 @@ class TestRooflineSnapshotUnits:
         assert "decode memory-roofline ceiling" not in table
 
     def test_snapshot_carries_latency_siblings_and_within(self):
-        """e2e_mean_ms / roofline_ideal_ms are stored at the tok/s level and
-        drive a unit-agnostic within/gap when no decode ceiling applies."""
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        """e2e_mean_ms / roofline_ideal_ms are stored at the tok/s level and drive a unit-agnostic within/gap when no decode ceiling applies."""
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1,
@@ -400,7 +439,7 @@ class TestRooflineSnapshotUnits:
 
     def test_metrics_table_scriptable_shows_compute_ceiling(self):
         """The compact table surfaces the ms compute-roofline floor + within%."""
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1,
@@ -420,7 +459,7 @@ class TestRooflineSnapshotUnits:
 
     def test_serving_snapshot_latency_siblings_are_none(self):
         """Serving snapshots keep tok/s within/gap and leave ms siblings unset."""
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1,
@@ -436,9 +475,7 @@ class TestRooflineSnapshotUnits:
 
 
 class TestScriptableLatencyRooflineSidecar:
-    """``_scriptable_latency_roofline`` must find the diffusion sidecar even when
-    ``kernel_roofline_path`` is empty (diffusion trace_analyze emits only
-    ``diffusion_roofline.json``, so the run-dir cannot be derived from it)."""
+    """``_scriptable_latency_roofline`` must find the diffusion sidecar even when ``kernel_roofline_path`` is empty (diffusion trace_analyze emits only ``diffusion_roofline.json``, so the run-dir cannot be derived from it)."""
 
     def _make_state(self, tmp_path):
         from hyperloom.orchestrator.state.shared_state import SharedState
@@ -506,16 +543,12 @@ class TestHyperloomArchSpec:
 
         return tab
 
-    def test_build_spec_mi355x(self):
+    def test_build_spec_mi355x_falls_back_to_vendor(self):
         tab = self._tab()
         spec = tab.build_hyperloom_arch_spec("mi355x")
         assert spec is not None
         assert spec["mem_bw_gbps"] == pytest.approx(8000.0)
-        maf = spec["max_achievable_tflops"]
-        assert maf["matrix_bf16"] == pytest.approx(1686.0)
-        assert maf["matrix_fp8"] == pytest.approx(3567.0)
-        assert maf["matrix_fp4"] == pytest.approx(5663.0)
-        assert all(v > 0 for v in maf.values())
+        assert spec["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(2516.6)
 
     def test_build_spec_case_insensitive_and_named(self):
         tab = self._tab()
@@ -529,26 +562,27 @@ class TestHyperloomArchSpec:
 
     def test_write_spec_roundtrip(self, tmp_path):
         tab = self._tab()
-        out = tab.write_hyperloom_arch_spec(tmp_path, "mi355x", lambda _m: None)
+        out = tab.write_hyperloom_arch_spec(tmp_path, "MI300X", lambda _m: None)
         assert out is not None and out.is_file()
 
         data = json.loads(out.read_text())
-        assert data["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(1686.0)
+        assert data["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(708.0)
 
 
 class TestValidateTraceStructureScriptable:
-    """For scriptable (xDiT) traces, the LLM/InferenceX structure checks are
-    skipped; only the zero-ops (repeat=0 empty window) health signal applies."""
+    """For scriptable (xDiT) traces, the LLM/InferenceX structure checks are skipped; only the zero-ops (repeat=0 empty window) health signal applies."""
 
-    def _write_trace(self, trace_dir, *, with_kernels: bool) -> None:
+    def _write_trace(self, trace_dir, *, with_kernels: bool, with_annotations: bool = False) -> None:
         import gzip
 
         if with_kernels:
             # Healthy diffusion trace: cpu_op + kernel, no execute_*/user_annotation.
-            events = [{"name": "cpu_op", "cat": "cpu_op"}, {"name": "some_gemm", "cat": "kernel"}]
+            events = [{"cat": "cpu_op", "name": "aten::mm"}, {"name": "some_gemm", "cat": "kernel"}]
         else:
             # Metadata-only (repeat=0 empty window) trace: no cpu_op / kernel.
             events = [{"name": "process_labels", "cat": "process_labels"}]
+        if with_annotations:
+            events.append({"name": "step[DECODE bs=8]", "cat": "user_annotation"})
         payload = {"traceEvents": events}
         p = trace_dir / "profile.trace.json.gz"
         with gzip.open(p, "wt", encoding="utf-8") as fh:
@@ -578,19 +612,22 @@ class TestValidateTraceStructureScriptable:
 
         self._write_trace(tmp_path, with_kernels=True)
         health = pf._validate_trace_structure(tmp_path, "vllm")
-        # Same trace, serving framework: the LLM checks run and flag the missing
-        # execute_*/user_annotation events.
+        # Same trace, serving framework: the LLM checks run and flag the missing execute_*/user_annotation events.
         assert health["per_kernel_attribution_degraded"] is True
 
-    def test_empty_framework_falls_back_to_session_framework(self, monkeypatch, tmp_path):
-        """An unset framework must not be treated as serving.
+    def test_serving_sees_annotations_recorded_under_cat(self, tmp_path):
+        """The annotation category lives in ``cat``; ``name`` holds the label."""
+        from hyperloom.orchestrator.actions.executors import profile as pf
 
-        Session 20260803T134328Z: the roofline-composite ctx carries no
-        framework, so the scriptable profile leg was validated as serving and
-        reported the two serving-only issues ([1] capture_traces/ missing and
-        [3] no execute_*), each pointing at EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS
-        that a scriptable framework never sets.
-        """
+        self._write_trace(tmp_path, with_kernels=True, with_annotations=True)
+
+        health = pf._validate_trace_structure(tmp_path, "sglang")
+
+        assert health["per_kernel_attribution_degraded"] is False
+        assert not any("[3]" in i for i in health["issues"])
+
+    def test_empty_framework_falls_back_to_session_framework(self, monkeypatch, tmp_path):
+        """An unset framework must not be treated as serving."""
         from hyperloom.orchestrator.actions.executors import profile as pf
 
         self._write_trace(tmp_path, with_kernels=True)

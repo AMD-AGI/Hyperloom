@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Regression tests: a ``site-packages`` MAGPIE_PATH must not reach PYTHONPATH.
-
-Otherwise the main venv's torch shadows an isolated vLLM venv's torch and
-crashes vLLM's C extension; a source-checkout MAGPIE_PATH must still be kept.
-"""
+"""Regression tests: a ``site-packages`` MAGPIE_PATH must not reach PYTHONPATH."""
 
 from __future__ import annotations
 

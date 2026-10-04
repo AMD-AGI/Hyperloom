@@ -1,20 +1,20 @@
 ---
 myst:
     html_meta:
-        "description": "Step-by-step guide to running a Hyperloom optimization. Covers launching from Claude Code, monitoring, resuming, and reading output artifacts."
-        "keywords": "Hyperloom, optimization, how-to, LLM inference, AMD GPU, ROCm, Claude Code, GEAK, TraceLens, session, throughput"
+        "description": "Step-by-step guide to running a Hyperloom optimization. Covers launching from Claude Code or Codex, monitoring, resuming, and reading output artifacts."
+        "keywords": "Hyperloom, optimization, how-to, LLM inference, AMD GPU, ROCm, Claude Code, Codex, GEAK, TraceLens, session, throughput"
 ---
 # Run a Hyperloom optimization
 
 This topic assumes you have already completed installation. If you haven't, follow the [Hyperloom installation instructions](../install/install.md) then return here to launch your first run.
 
-## Launch from Claude Code
+## Launch from Claude Code or Codex
 
-Open the Hyperloom workspace in Claude Code, then paste the following prompt into
-the Claude Code Chat, filling in your workload details:
+Open the Hyperloom workspace in Claude Code or Codex, then paste the following
+prompt into the agent chat, filling in your workload details:
 
 ```{note}
-The prompt includes `install.sh`. This is intentional: Claude Code runs in its own
+The prompt includes `install.sh`. This is intentional: the agent runs in its own
 shell process, which does not inherit the environment you sourced during
 installation. The agent must re-source the env files and re-run `install.sh` in
 its own context before launching the optimizer. Because `install.sh` is
@@ -45,17 +45,17 @@ Before launch, run exactly:
 export REPO_ROOT="$(pwd -P)"
 export USER_DATA_PATH='/path/to/hyperloom-run'
 bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
-source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
+# The optimizer preflight loads the generated runtime environment in process.
 
 Requirements:
 1. Report the session ID, log path, PID, and initial health check result.
-2. Monitor the process every 300s until the optimization is complete or failed.
+2. Read persisted state on requested status checks; report completion or failure. Do not start a watchdog or automatic resume loop.
 ```
 
 | Field | Meaning | How to choose |
 |-------|---------|---------------|
 | `TP` | Tensor-parallel size — number of GPUs the model is sharded across | Must match the number of GPUs in your server node (for example, `8` for a single 8-GPU MI300X node) |
-| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency; the post-run concurrency sweep separately measures a ladder (default `256,128,64,32,16,8,4,2`) |
+| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency. The SWEEP phase separately measures a ladder around it: `256,128,64,32,16,8,4,2` for a synthetic workload, `1,4,8,10,14,20,28` under `HYPERLOOM_AGENTX`, where it runs only with `--enable-conc-sweep`. Override the ladder with `--conc-sweep-concs`. |
 | `ISL` | Input sequence length — tokens in each request's prompt | Match your production workload; `1024` is a common starting point |
 | `OSL` | Output sequence length — tokens generated per response | Match your production workload; `1024` is a common starting point |
 
@@ -73,15 +73,19 @@ for the full prompt field reference (every field maps to a CLI flag defined in
 
 ## Monitor the run
 
-The agent reports a session ID, log path, and PID, then polls until the run
-completes. Under the hood it walks the phase chain
-`PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`; see
-[Hyperloom optimization loop](../conceptual/optimization-loop.md) for what
-happens in each phase.
+The agent reports a session ID, log path, and PID, then reads persisted state
+on requested status checks. Recurring checks may use the hosting platform's
+scheduled invocations; no background supervisor or automatic restart is started.
+Logs are useful evidence, but activity alone does not prove useful progress.
+Under the hood the optimizer walks the phase chain
+`PRELUDE → ENABLEMENT → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`; see
+[Hyperloom optimization loop](../conceptual/optimization-loop.md) for each phase
+and [benchmark deadlines](../reference/environment-variables.md#benchmark-deadlines-and-lifecycle)
+for the independent benchmark and session limits.
 
 ## Resume an interrupted session
 
-Paste this prompt into the Claude Code chat to resume an existing session:
+Paste this prompt into the agent chat to resume an existing session:
 
 ```text
 @hyperloom/inference_optimizer/SKILL.md
@@ -94,7 +98,7 @@ Requirements:
 3. Resolve `$SESSION_DIR` from the launch-info JSON or the `HYPERLOOM_LAUNCH` line, never from the newest timestamp dir.
 4. Before launching, verify `manifest.json` and `state.json` exist.
 5. Report the log path, PID, health check, current phase, cumulative gain, and best config.
-6. Monitor the process every 300s until the optimization is complete or failed.
+6. Read persisted state on requested status checks; report completion or failure. Do not start a watchdog or automatic resume loop.
 ```
 
 ## Output and artifacts

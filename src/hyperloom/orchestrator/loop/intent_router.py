@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Intent routing collaborator for :class:`Coordinator`.
-
-:meth:`IntentRouter.handle_intent` validates an emitted intent through
-``PolicyGate`` and dispatches it to the matching ``_handle_*`` method.
-
-``IntentRouter`` holds a back-reference to its owning ``Coordinator`` and
-delegates every attribute it does not define itself to that coordinator via
-``__getattr__``, so handler bodies keep using ``self.shared_state`` /
-``self.bus`` etc. ``Coordinator`` keeps thin forwarding shims that delegate
-to the router.
-"""
+"""Intent routing collaborator for :class:`Coordinator`."""
 
 from __future__ import annotations
 
@@ -19,18 +9,21 @@ import asyncio
 import hashlib
 import json
 import time
+from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from typing import Any
 
-from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+from hyperloom.common.framework_arm import is_upstream_pr_prescreen, review_row_id, verdict_subject
+from hyperloom.orchestrator.lever import (
+    LEVER_CONFIG,
     patch_lever_kind,
     patch_owner_phase,
 )
+from hyperloom.inference_optimizer.protocol.action_surfaces import REQUEST_KIND_TO_OWNED_ACTION
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .coordinator_helpers import (
     _parse_iso_unix,
-    coerce_needs_gpu,
     collapse_verdict_map,
     collapse_verdicts,
     format_exc_brief,
@@ -40,35 +33,83 @@ from .coordinator_helpers import (
 )
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ..bus.message_bus import Message
+from ..bus.message_bus import Message, TOPIC_ALLOWLIST
 from ..policy.gate import (
-    patch_verdict_subject,
     PolicyDenied,
     PRUNE_BRANCH_SCOPE_FAMILY,
     PRUNE_BRANCH_SCOPE_QUEUED,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
-from ..state.shared_state import inject_stack_base_params
+from ..state.shared_state import (
+    ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
+    ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
+    inject_stack_base_params,
+    is_valid_escalate_hint,
+)
 from ..state.task_registry import IllegalTransition, TaskNotFound
+from hyperloom.inference_optimizer.trace.trajectory_trace import (
+    EVENT_INTENT,
+    EVENT_PROPOSAL,
+    STATUS_CANCELLED,
+    STATUS_COMPLETED,
+    STATUS_QUEUED,
+    record_event,
+    trajectory_scope,
+    trajectory_span,
+)
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
+from ..collaborator import CoordinatorCollaborator
 
-# ``Coordinator`` is intentionally NOT imported (avoids a module-level import
-# cycle with coordinator.py); it is held as a back-reference and the annotation
-# below is a deferred string.
+# Path-like keys surfaced from a kernel handler payload/result so operators can see where a step's artifacts went.
+_LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
+    "trace_input",
+    "trace_dir",
+    "candidates_path",
+    "analysis_md_path",
+    "kernel_candidates",
+    "best_artifact_path",
+    "patch_path",
+    "target_file",
+    "workspace",
+    "workspace_path",
+    "out_dir",
+    "output_dir",
+    "run_dir",
+    "report_path",
+    "json_path",
+    "md_path",
+    "tracelens_agent_report",
+    # TraceLens analysis outputs surfaced by trace_analyze_handler.
+    "trace_report_path",
+    "analysis_report_path",
+    "tracelens_summary_path",
+    "kernel_roofline_path",
+    "cli_log_path",
+)
+
+
+def _lifecycle_paths(payload: Any) -> dict[str, str]:
+    """Extract present, non-empty path-like fields from a kernel handler payload or result dict."""
+    if not isinstance(payload, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key in _LIFECYCLE_PATH_KEYS:
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            out[key] = val
+    return out
+
 
 log = __import__("logging").getLogger(__name__)
 
 
-# IntentType -> the ``Coordinator`` handler method it dispatches to. Replaces the
-# former 12-branch if/elif in :meth:`IntentRouter._handle_intent`; an unknown
-# type falls through to the observation fallback (see the ``else`` branch there).
+# IntentType -> the ``Coordinator`` handler method it dispatches to.
 _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.PROPOSE_ACTION: "_handle_propose_action",
     IntentType.REVIEW_VERDICT: "_handle_review_verdict",
     IntentType.DELEGATE: "_handle_delegate",
     IntentType.REQUEST: "_handle_request",
-    IntentType.RESPONSE: "_handle_response",
     IntentType.EXTEND_LEASE: "_handle_extend_lease",
     IntentType.PRUNE_BRANCH: "_handle_prune_branch",
     IntentType.ESCALATE_STRATEGY_CHANGE: "_handle_escalate_strategy_change",
@@ -78,62 +119,311 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
 }
 
 
-def _is_upstream_pr_candidate(pending: Any) -> bool:
-    """True for an ``integrate_patch`` proposal that pre-screens a PR candidate.
+def _record_config_proposal(router: Any, pending: Any) -> None:
+    """Record one config-arm grid on the framework event, as it is proposed.
 
-    The candidate pre-screen and an authored patch are the same action now;
-    a top-level ``framework_agent_candidate_id`` is what distinguishes the
-    pre-screen, whose approval means "spend a bench on this candidate".
-
-    Args:
-        pending: The pending proposal.
-
-    Returns:
-        True when this proposal is a candidate pre-screen.
+    Recorded at proposal time rather than at approval, so a grid the Critic
+    denies is still on record as a thing the phase pursued and dropped. One row
+    per grid, not per variant: the measured attempts point back at the grid
+    through their ``proposal_ref``.
     """
-    if getattr(pending, "action_name", "") != "integrate_patch":
-        return False
-    return bool((getattr(pending, "payload", None) or {}).get("framework_agent_candidate_id"))
+    if str(getattr(pending, "action_name", "") or "") != "explore":
+        return
+    proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
+    if not proposal_id:
+        return
+    recorder = router.phase_framework.timeline()
+    if recorder is None:
+        return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+        ARM_CONFIG,
+        PRODUCER_ORCHESTRATION,
+        STEP_PROPOSED,
+        producer_for_provenance,
+    )
+
+    params = (getattr(pending, "payload", None) or {}).get("params") or {}
+    grid = [row for row in (params.get("grid") or []) if isinstance(row, dict)]
+    labels = {str(row.get("provenance") or "").strip() for row in grid}
+    if len(labels) == 1:
+        producer, producer_ref = producer_for_provenance(next(iter(labels)))
+    else:
+        # A grid mixing provenances was assembled by the orchestration agent.
+        # Each variant keeps its own label on its attempt, so naming the
+        # assembler here loses nothing.
+        producer, producer_ref = PRODUCER_ORCHESTRATION, ""
+    scopes = {str(row.get("scope") or "").strip() for row in grid if str(row.get("scope") or "").strip()}
+    recorder.record_proposal(
+        proposal_id,
+        arm=ARM_CONFIG,
+        producer=producer,
+        producer_ref=producer_ref,
+        lever_kind=LEVER_CONFIG,
+        scope=scopes.pop() if len(scopes) == 1 else "",
+    )
+    recorder.record_proposal_step(proposal_id, step=STEP_PROPOSED, outcome="submitted")
 
 
-class IntentRouter:
+def _variant_review_rows(
+    payload: Mapping[str, Any] | None,
+    held_by_name: Mapping[str, str] | None,
+) -> list[dict[str, Any]]:
+    """Return one row per named variant, in the order the Critic wrote them.
+
+    A variant the Critic rejected never reaches a bench, so the map is the only
+    record that it was judged at all; a collapsed verdict says nothing about
+    which variants a grid proceeded on.
+    """
+    entries = (payload or {}).get("verdict_map")
+    if not isinstance(entries, Mapping):
+        return []
+    held = held_by_name or {}
+    rows: list[dict[str, Any]] = []
+    for name, entry in entries.items():
+        variant = str(name or "")
+        if not variant:
+            continue
+        fields = entry if isinstance(entry, Mapping) else {}
+        authored = str(fields.get("verdict") or "")
+        effective = str(held.get(variant) or "") or authored
+        rows.append(
+            {
+                "variant_name": variant,
+                "verdict": authored,
+                "effective_verdict": effective,
+                # A hold is visible in the pair, and naming the rule twice
+                # would be a second thing to keep in step with the hold itself.
+                "held_to_rule": str(fields.get("failure_reason_code") or "") if effective != authored else "",
+                "reason": str(fields.get("rationale") or fields.get("reasoning") or ""),
+                "failure_reason_code": str(fields.get("failure_reason_code") or ""),
+            }
+        )
+    return rows
+
+
+def _phase_scope(router: Any) -> tuple[str, int]:
+    """The phase and macro cycle a proposal is being raised in.
+
+    ``("", 0)`` when the stand-in carries no state.
+    """
+    state = getattr(router, "shared_state", None) or getattr(router, "state", None)
+    phase = str(getattr(state, "phase", "") or "")
+    try:
+        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    except (TypeError, ValueError):
+        cycle = 0
+    return phase, cycle
+
+
+def _record_phase_proposal(router: Any, pending: Any) -> None:
+    """Record one proposal against the phase that raised it.
+
+    Every proposal, not only the ones a framework arm claims: this is the row
+    the Critic's ruling is filed on.
+    """
+    proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
+    if not proposal_id:
+        return
+    phase, macro_cycle = _phase_scope(router)
+    if not phase:
+        return
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        payload = getattr(pending, "payload", None) or {}
+        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+        phase_event.record_proposal(
+            proposal_msg_id=proposal_id,
+            action=str(getattr(pending, "action_name", "") or ""),
+            phase=phase,
+            macro_cycle=macro_cycle,
+            from_agent=str(getattr(pending, "from_agent", "") or ""),
+            tick=int(getattr(getattr(router, "shared_state", None), "tick", 0) or 0),
+            predicted_gain_pct=getattr(pending, "predicted_gain_pct", None),
+            candidate_id=payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id"),
+            variant_name=payload.get("variant_name") or params.get("variant_name"),
+        )
+    except Exception:
+        log.debug("phase timeline: proposal row failed for %s", proposal_id, exc_info=True)
+
+
+def _record_phase_proposal_review(
+    pending: Any,
+    *,
+    authored: str,
+    effective: str,
+    reason: str,
+    payload: Mapping[str, Any] | None = None,
+    advisory: Mapping[str, Any] | None = None,
+    variants: list[dict[str, Any]] | None = None,
+) -> None:
+    """File the Critic's ruling on the proposal row the phase event holds.
+
+    Keyed on the bus message id the verdict named, rather than on the subject
+    the framework row is resolved under: the two differ for a proposal
+    carrying a candidate id, and this row is about the proposal itself.
+    """
+    proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
+    if not proposal_id:
+        return
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        fields = payload or {}
+        advice = advisory or {}
+        phase_event.record_proposal_review(
+            proposal_msg_id=proposal_id,
+            verdict=authored or effective,
+            effective_verdict=effective,
+            source=str(fields.get("source") or ""),
+            reasoning=reason,
+            confidence=fields.get("confidence"),
+            failure_reason_code=fields.get("failure_reason_code"),
+            required_evidence=advice.get("required_evidence"),
+            risks=advice.get("risks"),
+            advice_text=advice.get("advice_text"),
+            alternative_action=advice.get("alternative_action"),
+            variants=variants,
+        )
+    except Exception:
+        log.debug("phase timeline: proposal review row failed for %s", proposal_id, exc_info=True)
+
+
+def _record_critic_review(
+    router: Any,
+    pending: Any,
+    *,
+    authored: str,
+    effective: str,
+    reason: str,
+    payload: Mapping[str, Any] | None = None,
+    advisory: Mapping[str, Any] | None = None,
+    variants: list[dict[str, Any]] | None = None,
+) -> None:
+    """Record the Critic's ruling on one proposal, onto the proposal.
+
+    Every action the Critic reviews is recorded, not only the config-arm grid.
+    ``authored`` (what the Critic wrote) and ``effective`` (what the loop acted
+    on) are both kept: a reject held to a formatting rule is mirrored onto state
+    as the reject the Critic wrote. A rejected proposal is settled here, since
+    it never reaches a bench and nothing downstream would otherwise resolve it.
+    """
+    # The framework row below exists only while a framework event is open for
+    # this cycle, so the proposal's own row is what carries a ruling reached in
+    # any other phase.
+    _record_phase_proposal_review(
+        pending,
+        authored=authored,
+        effective=effective,
+        reason=reason,
+        payload=payload,
+        advisory=advisory,
+        variants=variants,
+    )
+
+    proposal_id = review_row_id(pending.payload or {}, fallback_msg_id=pending.proposal_msg_id)
+    if not proposal_id:
+        return
+    recorder = router.phase_framework.timeline()
+    if recorder is None:
+        return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+        DISPOSITION_DROPPED,
+        REVIEWER_CRITIC,
+        REVIEWER_CRITIC_UNAVAILABLE,
+        STEP_REVIEWED,
+    )
+
+    fields = payload or {}
+    grounded = str(fields.get("source") or REVIEWER_CRITIC) == REVIEWER_CRITIC
+    recorder.record_proposal_review(
+        proposal_id,
+        verdict=authored or effective,
+        effective_verdict=effective,
+        held_to_rule=str(fields.get("failure_reason_code") or "") if effective != authored else "",
+        reviewer=REVIEWER_CRITIC if grounded else REVIEWER_CRITIC_UNAVAILABLE,
+        reason=reason,
+        confidence=fields.get("confidence"),
+        failure_reason_code=str(fields.get("failure_reason_code") or ""),
+        advisory=advisory,
+        variants=variants,
+    )
+    recorder.record_proposal_step(
+        proposal_id,
+        step=STEP_REVIEWED,
+        outcome=effective,
+        reason=reason,
+    )
+    if effective == "reject":
+        recorder.settle_proposal(
+            proposal_id,
+            disposition=DISPOSITION_DROPPED,
+            reason=reason or "critic_rejected",
+        )
+
+
+def _record_phase_proposal_outcome(pending: Any, **outcome: Any) -> None:
+    """Record on the proposal row what the loop did with its ruling.
+
+    ``outcome`` carries ``materialized`` / ``denied`` / ``reauthored`` /
+    ``patch_verdict_key``, as the framework row names them.
+    """
+    proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
+    if not proposal_id:
+        return
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        phase_event.record_proposal_outcome(
+            proposal_msg_id=proposal_id,
+            materialized=bool(outcome.get("materialized")),
+            denied=bool(outcome.get("denied")),
+            reauthored=bool(outcome.get("reauthored")),
+            patch_verdict_key=outcome.get("patch_verdict_key"),
+        )
+    except Exception:
+        log.debug("phase timeline: proposal outcome row failed for %s", proposal_id, exc_info=True)
+
+
+def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
+    """Record what the loop did with a ruling, onto the ruling."""
+    _record_phase_proposal_outcome(pending, **outcome)
+
+    proposal_id = review_row_id(pending.payload or {}, fallback_msg_id=pending.proposal_msg_id)
+    if not proposal_id:
+        return
+    recorder = router.phase_framework.timeline()
+    if recorder is None:
+        return
+    recorder.record_proposal_review_outcome(proposal_id, **outcome)
+
+
+class IntentRouter(CoordinatorCollaborator):
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
 
-    def __init__(self, coordinator: Any) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str) -> Any:
-        # Attributes not defined on the router resolve onto the coordinator.
-        return getattr(object.__getattribute__(self, "_coord"), name)
-
     def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
-        """Freeze patch ownership when a specialist task is created.
-
-        Stamps the phase that owns the work, and the lever only where the
-        mandate already names one. A mandate that names neither a PR nor an
-        enablement flag does not know which lever its specialist will move, and
-        a guess written here would outrank the delivery that settles it.
-        """
+        """Freeze patch ownership when a specialist task is created."""
         lever = patch_lever_kind(params)
         if lever:
             params["lever_kind"] = lever
         owner = patch_owner_phase(params)
         if not owner:
+            from ..specialists.profile import MODE_PATCH, resolve_specialist_profile
+
             gap_layer = str(params.get("gap_layer") or "").strip().lower()
             active_phase = str(getattr(self.shared_state, "phase", "") or "").strip().upper()
-            # Layer first, phase last: both lanes share one phase, so the live
-            # phase no longer says which lever a specialist moves. The phase
-            # stays as the fallback when the mandate named neither.
-            #
-            # ``EXPLORE`` below is an owner namespace, not a phase this build
-            # can enter: it is the published KB section name for the
-            # configuration lever, and renaming it would orphan the overlays
-            # every record already stores under that prefix.
+            # Layer first, phase last: both lanes share one phase, so the live phase does not say which lever a
+            # specialist moves.
             if gap_layer == "framework":
                 owner = "FRAMEWORK_AGENT"
             elif gap_layer in {"explore", "perf_explore"} or params.get("domain"):
                 owner = "EXPLORE"
-            elif active_phase in {"FRAMEWORK", "FRAMEWORK_AGENT"}:
+            # A patch-mode dispatch with no layer names no phase of its own, and integrate_patch is
+            # booked to the framework agent, so that is the owner its patch would be attributed to.
+            elif resolve_specialist_profile(params).mode == MODE_PATCH or active_phase in {
+                "FRAMEWORK",
+                "FRAMEWORK_AGENT",
+            }:
                 owner = "FRAMEWORK_AGENT"
         if owner:
             params["source_phase"] = owner
@@ -167,8 +457,8 @@ class IntentRouter:
             "gap_layer",
             "framework_agent_authoring",
             "framework_agent_candidate_id",
-            # The lever the specialist was dispatched against; the patch that
-            # lands is the same lever, so it is copied rather than re-derived.
+            # The lever the specialist was dispatched against; the patch that lands is the same lever, so it is copied
+            # rather than re-derived.
             "lever_kind",
         ):
             value = specialist_params.get(key)
@@ -178,27 +468,28 @@ class IntentRouter:
         return owner
 
     async def _handle_intent(self, source: str, intent: Intent) -> None:
-        """Validate an emitted intent through PolicyGate, then route it.
-
-        Runs the intent through :meth:`PolicyGate.validate_intent`; a
-        :class:`PolicyDenied` is recorded and the intent dropped. Valid intents
-        are dispatched to the matching ``_handle_*`` method by type.
-
-        Args:
-            source (str): The agent that emitted the intent.
-            intent (Intent): The parsed intent to validate and route.
-        """
+        """Validate an emitted intent through PolicyGate, then route it under its trajectory event."""
+        attributes = {"name": intent.type.value, "source": source}
+        action_name = (intent.payload or {}).get("action_name")
+        if isinstance(action_name, str) and action_name:
+            attributes["action_name"] = action_name
         try:
             self.policy.validate_intent(source, intent)
         except PolicyDenied as denied:
+            record_event(EVENT_INTENT, attributes={**attributes, "admitted": False, "denied": str(denied)[:200]})
             await self._record_policy_denied(source, intent, denied)
             return
+        intent_span_id = record_event(EVENT_INTENT, attributes={**attributes, "admitted": True})
+        with trajectory_scope(parent_span_id=intent_span_id):
+            await self._route_intent(source, intent)
 
+    async def _route_intent(self, source: str, intent: Intent) -> None:
+        """Run the handler for an admitted intent; a handler failure is recorded, never raised."""
         try:
             it = intent.type
             handler_name = _INTENT_DISPATCH.get(it)
             if handler_name is not None:
-                await getattr(self._coord, handler_name)(source, intent)
+                await getattr(self, handler_name)(source, intent)
             else:
                 # Unknown / unhandled intent — record for replay.
                 await self._record_observation(
@@ -208,7 +499,7 @@ class IntentRouter:
                 )
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("intent handler for %s raised", source)
             self._record_coordinator_exception(
                 stage="handle_intent",
@@ -226,23 +517,12 @@ class IntentRouter:
                         "error": format_exc_brief(exc, limit=500),
                     },
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("failed to record handle_intent_exception observation")
             return
 
     async def _handle_propose_action(self, source: str, intent: Intent) -> None:
-        """Gate a proposed action and enqueue it for Critic Review.
-
-        Records an advisory observation for pruned families (the proposal still
-        queues), applies the execution-order denial, then publishes a
-        ``proposal`` message and registers a :class:`PendingProposal` so the
-        Critic gate can later return a verdict.
-
-        Args:
-            source (str): The agent proposing the action.
-            intent (Intent): The PROPOSE_ACTION intent; ``payload`` carries
-                ``action_name`` and optional ``params`` / ``predicted_gain_pct``.
-        """
+        """Gate a proposed action and enqueue it for Critic Review."""
         action_name = intent.payload["action_name"]
         # Pruned families are advisory: proposal still queues with an advisory note.
         if self.shared_state.is_pruned(action_name):
@@ -287,10 +567,9 @@ class IntentRouter:
             "*",
             "proposal",
             {**payload, "needs_review": True},
-            priority=1,
         )
         await self.bus.append_and_seq(msg)
-        from .coordinator import PendingProposal
+        from .proposals import PendingProposal
 
         pending = PendingProposal(
             proposal_msg_id=msg.msg_id,
@@ -300,20 +579,22 @@ class IntentRouter:
             payload=payload,
         )
         self.state.pending_proposals[msg.msg_id] = pending
+        record_event(
+            EVENT_PROPOSAL,
+            status=STATUS_QUEUED,
+            span_id=msg.msg_id,
+            attributes={
+                "name": action_name,
+                "action_name": action_name,
+                "from_agent": source,
+                "predicted_gain_pct": pending.predicted_gain_pct,
+            },
+        )
+        _record_phase_proposal(self, pending)
+        _record_config_proposal(self, pending)
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
-        """Apply a Critic ``review_verdict`` to its target proposal.
-
-        A ``verdict_map`` is held per entry, then collapsed on the proceedable
-        subset (``approve`` / ``advise``) so a genuine reject cannot discard
-        siblings that may still run. Those names are passed through as the
-        materialize filter.
-
-        Args:
-            source: The agent (Critic) emitting the verdict.
-            intent: The REVIEW_VERDICT intent; payload carries
-                ``target_proposal_msg_id`` and ``verdict``/``verdict_map``.
-        """
+        """Apply a Critic ``review_verdict`` to its target proposal."""
         target = intent.payload["target_proposal_msg_id"]
         pending = self.state.pending_proposals.get(target)
         verdict_map = intent.payload.get("verdict_map")
@@ -336,6 +617,7 @@ class IntentRouter:
         )
         authored = str(single_verdict or "").strip()
         approved_variant_names: set[str] | None = None
+        held_by_name: dict[str, str] = {}
         if not verdict and isinstance(verdict_map, dict) and verdict_map:
             held_by_name = await self._held_verdict_map(
                 verdict_map,
@@ -348,7 +630,7 @@ class IntentRouter:
                 str((entry or {}).get("verdict") or "").strip() for entry in verdict_map.values()
             )
             self._log_mixed_verdict_map_collapse(target, verdict, held_by_name)
-        await self._coord._handle_single_verdict(
+        await self._handle_single_verdict(
             source=source,
             pending=pending,
             verdict=verdict,
@@ -356,6 +638,8 @@ class IntentRouter:
             reasoning=str(intent.payload.get("reasoning") or ""),
             advisory=serialize_verdict_advisory(intent.payload),
             approved_variant_names=approved_variant_names,
+            payload=intent.payload,
+            variant_verdicts=_variant_review_rows(intent.payload, held_by_name),
         )
 
     async def _held_verdict_map(
@@ -366,17 +650,7 @@ class IntentRouter:
         action_name: str,
         payload: dict[str, Any],
     ) -> dict[str, str]:
-        """Hold each ``verdict_map`` entry to its cited rule.
-
-        Args:
-            verdict_map: Per-variant verdict entries from the Critic payload.
-            target: The target proposal msg_id, for the audit record.
-            action_name: The proposal's action, forwarded to the hold.
-            payload: The full verdict payload; batch-level findings live here.
-
-        Returns:
-            ``{variant_name: held_verdict}`` after any advisory-only downgrade.
-        """
+        """Hold each ``verdict_map`` entry to its cited rule."""
         held_by_name: dict[str, str] = {}
         for name, entry in verdict_map.items():
             held_by_name[str(name)] = await self._record_verdict_hold(
@@ -392,24 +666,15 @@ class IntentRouter:
         verdict: str,
         held_by_name: dict[str, str],
     ) -> None:
-        """Log when a mixed map still proceeds, for traceability.
-
-        Args:
-            target: The target proposal msg_id.
-            verdict: The collapsed summary after the proceedable-subset rule.
-            held_by_name: Per-variant held verdicts.
-        """
-        try:
-            sub_verdicts = list(held_by_name.values())
-            if verdict in ("approve", "advise") and any(sv in ("reject", "needs_review") for sv in sub_verdicts):
-                log.warning(
-                    "review_verdict collapse: target=%s collapsed to %r (sub_verdicts=%r)",
-                    target,
-                    verdict,
-                    sub_verdicts,
-                )
-        except Exception:  # noqa: BLE001 - audit log must never affect flow
-            pass
+        """Log when a mixed map still proceeds, for traceability."""
+        sub_verdicts = list(held_by_name.values())
+        if verdict in ("approve", "advise") and any(sv in ("reject", "needs_review") for sv in sub_verdicts):
+            log.warning(
+                "review_verdict collapse: target=%s collapsed to %r (sub_verdicts=%r)",
+                target,
+                verdict,
+                sub_verdicts,
+            )
 
     async def _record_verdict_hold(
         self,
@@ -418,25 +683,7 @@ class IntentRouter:
         target: str,
         variant: str = "",
     ) -> str:
-        """Return the verdict to act on, recording any hold to a cited rule.
-
-        A rule that declares ``advise`` does so because rejecting on it discards
-        the whole proposal set over a format or strategy hint. Enforcing the
-        declaration means the Critic cannot spend a round's proposals on a rule
-        that never asked for a rejection; the downgrade is recorded so the drift
-        is visible rather than silently corrected.
-
-        Args:
-            held: The ``(verdict, reason_code)`` pair
-                :func:`verdict_held_to_its_rule` returned for a single verdict,
-                or :func:`verdict_map_entry_held_to_its_rule` for one variant's.
-            target: The target proposal msg_id, for the audit record.
-            variant: The ``verdict_map`` key when the verdict is one variant's;
-                empty for a single verdict.
-
-        Returns:
-            The verdict to act on.
-        """
+        """Return the verdict to act on, recording any hold to a cited rule."""
         verdict, downgraded_from_code = held
         if not downgraded_from_code:
             return verdict
@@ -471,29 +718,20 @@ class IntentRouter:
         authored_verdict: str = "",
         advisory: dict[str, Any] | None = None,
         approved_variant_names: set[str] | None = None,
+        payload: Mapping[str, Any] | None = None,
+        variant_verdicts: list[dict[str, Any]] | None = None,
     ) -> None:
         """Apply one collapsed verdict: approve/advise materialise, reject may rearm.
 
-        Args:
-            source: The agent emitting the verdict.
-            pending: The pending proposal the verdict targets.
-            verdict: The collapsed verdict (approve / advise / reject / needs_review).
-            reasoning: Free-text reasoning recorded with the verdict.
-            authored_verdict: The verdict the Critic itself wrote, before any
-                hold to a cited rule. Mirrored onto ``specialist_patch_verdicts``
-                in place of ``verdict``; defaults to ``verdict``.
-            advisory: Pre-serialised advisory fields (``required_evidence`` /
-                ``risks`` / ``advice_text`` / ``alternative_action`` /
-                ``notes`` / ``kb_evidence`` / ``packet_evidence``) to carry on
-                the rebroadcast payload so the full Critic context reaches the
-                orchestration inbox and downstream consumers.
-            approved_variant_names: When a ``verdict_map`` named proceedable
-                variants, restrict an explore grid to those names; ``None``
-                keeps the full proposal.
+        ``verdict`` is one of approve / advise / reject / needs_review.
+        ``authored_verdict`` is what the Critic itself wrote before any hold to
+        a cited rule; it is mirrored onto ``specialist_patch_verdicts`` in place
+        of ``verdict`` and defaults to it. ``approved_variant_names`` restricts
+        an explore grid to the named variants; ``None`` keeps the full proposal.
         """
         pending.decided = True
         pending.verdict = verdict
-        if _is_upstream_pr_candidate(pending):
+        if is_upstream_pr_prescreen(pending.action_name, pending.payload):
             await self._record_observation(
                 "coordinator",
                 "observation",
@@ -517,18 +755,11 @@ class IntentRouter:
                 pending.from_agent,
                 "review_verdict",
                 rebroadcast_payload,
-                priority=0 if verdict == "reject" else 1,
                 in_reply_to=pending.proposal_msg_id,
             )
         )
-        # Mirror specialist / integrate_patch verdicts onto SharedState so
-        # PolicyGate's integrate_patch gate can consult them on the next tick.
-        # What gets mirrored is what the Critic wrote, never what the hold made
-        # of it: ``advise`` is a landing permit there, and holding a reject to a
-        # formatting rule is meant to save the round's ideas from being thrown
-        # away, not to land a patch the Critic refused. A held proposal that
-        # still deserves to land gets there through a fresh Critic verdict,
-        # which overwrites this one.
+        # Mirror specialist / integrate_patch verdicts onto SharedState so PolicyGate's integrate_patch gate can
+        # consult them on the next tick.
         patch_verdict = str(authored_verdict or verdict).strip()
         try:
             pa_params = pending.payload.get("params") or {}
@@ -537,7 +768,7 @@ class IntentRouter:
         sid_candidate = ""
         if pending.action_name == "integrate_patch":
             # A pre-screen carries its candidate id at the top level, not in params.
-            sid_candidate = patch_verdict_subject({**pa_params, **(pending.payload or {})})
+            sid_candidate = verdict_subject({**pa_params, **(pending.payload or {})})
         elif pending.action_name == "specialist":
             # Critic verdict on the specialist proposal counts as the verdict on its patches; task_id is the key.
             sid_candidate = str(pa_params.get("task_id") or "").strip()
@@ -548,11 +779,60 @@ class IntentRouter:
                     patch_verdict,
                 )
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — best-effort mirror
+            except Exception:
                 log.exception(
                     "failed to mirror critic verdict for specialist task=%s",
                     sid_candidate,
                 )
+        _record_critic_review(
+            self,
+            pending,
+            authored=patch_verdict,
+            effective=str(verdict or "").strip(),
+            reason=str(reasoning or ""),
+            payload=payload,
+            advisory=advisory,
+            variants=variant_verdicts,
+        )
+        _record_review_outcome(
+            self,
+            pending,
+            materialized=verdict in ("approve", "advise"),
+            denied=verdict == "reject",
+            reauthored=verdict == "needs_review",
+            patch_verdict_key=sid_candidate if patch_verdict else "",
+        )
+        with trajectory_span(
+            EVENT_PROPOSAL,
+            span_id=pending.proposal_msg_id,
+            attributes={"name": pending.action_name, "verdict": verdict},
+        ) as proposal_span:
+            await self._apply_verdict_outcome(
+                pending,
+                verdict=verdict,
+                reasoning=reasoning,
+                advisory=advisory,
+                approved_variant_names=approved_variant_names,
+                pa_params=pa_params,
+                sid_candidate=sid_candidate,
+            )
+            proposal_span.finish(
+                STATUS_COMPLETED if verdict in ("approve", "advise") else STATUS_CANCELLED,
+                task_id=getattr(pending, "task_id", None),
+            )
+
+    async def _apply_verdict_outcome(
+        self,
+        pending: Any,
+        *,
+        verdict: str,
+        reasoning: str,
+        advisory: dict[str, Any] | None,
+        approved_variant_names: set[str] | None,
+        pa_params: Mapping[str, Any],
+        sid_candidate: str,
+    ) -> None:
+        """Materialise, deny, or send back a proposal according to its collapsed verdict."""
         # Both `approve` and `advise` mean "dispatch may proceed"; treat them
         # identically for materialization.
         if verdict in ("approve", "advise"):
@@ -560,46 +840,25 @@ class IntentRouter:
                 pending,
                 approved_variant_names=approved_variant_names,
             )
-        elif verdict == "reject" and _is_upstream_pr_candidate(pending):
-            # Record the critic_denied row so the candidate pump advances.
-            await self._coord._record_framework_agent_critic_denied(
-                pending,
-                reasoning,
-            )
+        elif verdict == "reject" and is_upstream_pr_prescreen(pending.action_name, pending.payload):
+            await self.phase_framework.record_critic_denial(pending, reasoning)
         elif verdict == "reject" and pending.action_name == "integrate_patch" and bool(pa_params.get("enablement")):
-            # A Critic-rejected ENABLEMENT integrate_patch never reaches the
-            # executor, so the normal integrate-result rearm never fires. Without
-            # this, the stall streak would never advance toward enablement_stalled.
-            # Treat the rejection as a no-progress round.
+            # A Critic-rejected ENABLEMENT integrate_patch never reaches the executor, so the normal integrate-result
+            # rearm never fires.
             try:
-                self._coord._maybe_rearm_enablement(
+                await self._maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
                 )
-            except Exception:  # noqa: BLE001 — accounting must never wedge the loop
+            except Exception:
                 log.exception(
                     "enablement rearm on critic-reject failed for task=%s",
                     sid_candidate,
                 )
         elif verdict == "needs_review":
-            await self._coord._maybe_reauthor_from_critic_feedback(
-                pending,
-                advisory,
-            )
+            await self.phase_framework.maybe_reauthor_from_critic_feedback(pending, advisory)
 
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
-        """Validate and enqueue a delegated action as a TaskRegistry task.
-
-        Records an advisory observation for pruned families (the delegate still
-        proceeds), denies execution-order violations, and materialises the
-        delegated action — including ``explore``, which runs its variants
-        directly with no Critic pre-review — into a task with the appropriate
-        lanes, TTL and warmed params.
-
-        Args:
-            source (str): The agent issuing the delegation.
-            intent (Intent): The DELEGATE intent; ``payload`` carries
-                ``action_name`` and optional ``params``.
-        """
+        """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
         if self.shared_state.is_pruned(action_name):
             await self._record_observation(
@@ -643,9 +902,7 @@ class IntentRouter:
                 )
                 return
         if action_name == "specialist":
-            # Capture proposal ownership at dispatch. Specialist work can finish
-            # after the state machine advances, so completion-time phase is not
-            # a reliable source for a later integrate_patch KEEP.
+            # Capture proposal ownership at dispatch.
             self._stamp_specialist_owner(params)
         # idempotency_key is top-level per schema; strip a nested compat alias.
         nested_idempotency_key = params.pop("idempotency_key", None)
@@ -653,14 +910,12 @@ class IntentRouter:
         if action_name in ("sweep", "explore") and self.shared_state.baseline_config_path:
             params.setdefault("config_path", self.shared_state.baseline_config_path)
         # Delegates skip _materialize_approved_proposal, so seed the same params here.
-        # Both grid actions launch on top of current_best per their action contract.
         if action_name in ("sweep", "explore"):
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if action_name == "explore":
             self._inject_explore_runtime_params(params)
-        # Wave sugar: a specialist delegate carrying params.tasks=[...] fans out
-        # into N standard freeform specialist tasks, each dispatched through the
-        # normal SpecialistRunner + TaskRegistry + lease + reap path.
+        # Wave sugar: a specialist delegate carrying params.tasks=[...] fans out into N standard freeform specialist
+        # tasks, each dispatched through the normal SpecialistRunner + TaskRegistry + lease + reap path.
         if (
             action_name == "specialist"
             and isinstance(
@@ -674,6 +929,24 @@ class IntentRouter:
         # Specialist pre-dispatch warmup via KnowledgePlane.
         if action_name == "specialist":
             await self._warm_specialist_params(params)
+            from ..specialists.runner import specialist_patch_preflight_error
+
+            preflight_error = specialist_patch_preflight_error(
+                params,
+                framework_repo_path=str(getattr(self.shared_state, "framework_repo_path", "") or ""),
+            )
+            if preflight_error:
+                if self.shared_state.add_pruned_family("source_patch"):
+                    self.shared_state.record_action_failure(
+                        action="specialist",
+                        task_id=str(intent.payload.get("idempotency_key") or nested_idempotency_key or ""),
+                        result={"error_class": preflight_error, "error": preflight_error},
+                    )
+                    try:
+                        self.shared_state.save(self.session_dir)
+                    except Exception:
+                        log.exception("delegate specialist: source-patch prune save failed")
+                return
         # Idempotency-key chain: top-level -> nested compat alias -> content-fingerprint auto-key.
         raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
         if not raw_key:
@@ -693,36 +966,19 @@ class IntentRouter:
         for attempt in range(6):
             idempotency_key = str(raw_key) if attempt == 0 else f"{raw_key}-retry{attempt}"
             lanes, ttl = self._registry_lanes_ttl(action_name)
-            # Bench-enabled specialists serialize against the other GPU
-            # benchmark/profile/server work via benchmark_lane (research_lane
-            # alone conflicts with nothing).
             if action_name == "specialist":
-                from ..specialists.profile import resolve_specialist_profile
+                from ..specialists.profile import requires_gpu, specialist_lanes
 
-                if resolve_specialist_profile(params).reserves_benchmark_lane:
-                    lanes = tuple(dict.fromkeys((*lanes, "benchmark_lane")))
-                # Any GPU-holding specialist serializes against serving via
-                # gpu_research_lane. Its lane lease TTL comes from the agent wall
-                # budget (iron law: kill <= gpu_lease TTL <= gpu_research_lane TTL).
-                needs_gpu = coerce_needs_gpu(params.get("needs_gpu", False))
-                if needs_gpu:
-                    lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
-                    try:
-                        # Shared with the GPU-pool lease so the two TTLs never drift.
-                        ttl = self._coord._gpu_lease_ttl_sec(
-                            int(ttl or 0),
-                            params=params,
-                        )
-                    except Exception:  # noqa: BLE001 — fall back to registry ttl
-                        log.exception(
-                            "WS2: failed to re-source gpu_research_lane TTL; using registry default",
-                        )
+                lanes = tuple(specialist_lanes(params, list(lanes)))
+                if requires_gpu(params):
+                    ttl = self._gpu_lease_ttl_sec(int(ttl or 0), params=params)
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind=action_name,
                 params=params,
                 idempotency_key=idempotency_key,
                 requires_lanes=lanes,
                 lease_ttl_sec=ttl,
+                dispatch_class="llm",
             )
             if not was_existing:
                 break
@@ -771,19 +1027,10 @@ class IntentRouter:
 
     @asynccontextmanager
     async def _kernel_step_heartbeat(self, kind: str, started: float):
-        """Keep orchestration's bus timestamp moving through an inline step.
+        """Keep orchestration's bus timestamp moving through an inline step."""
 
-        The task-progress heartbeat cannot cover these: it reads the ``tasks``
-        table, and an inline kernel request never becomes a row.
-
-        Args:
-            kind (str): Request kind, echoed so an operator can tell what the
-                loop is blocked on.
-            started (float): ``time.monotonic()`` at the step's start.
-        """
-
-        # Re-stamped per beat rather than once at the start, so a stamp that
-        # outlives its process expires instead of muting the KERNEL idle guard.
+        # Re-stamped per beat rather than once at the start, so a stamp that outlives its process expires instead of
+        # muting the KERNEL idle guard.
         def _mark_running() -> None:
             self.shared_state.kernel_inline_step_seen_unix = time.time()
 
@@ -815,44 +1062,54 @@ class IntentRouter:
             self.shared_state.kernel_inline_step_seen_unix = 0.0
 
     def _record_request_failure(self, *, kind: str, request_msg_id: str, result: dict[str, Any]) -> None:
-        """Append a failed kernel request to the log the FAILURE RECOVERY prompt block reads.
-
-        Args:
-            kind: The request kind, recorded as the failing action.
-            request_msg_id: The request message id, standing in for a task id.
-            result: The failure envelope carrying ``error_class`` and ``error``.
-        """
+        """Append a failed kernel request to the log the FAILURE RECOVERY prompt block reads."""
         self.shared_state.record_action_failure(action=kind, task_id=request_msg_id, result=result)
         self.shared_state.save(self.session_dir)
 
-    async def _handle_request(self, source: str, intent: Intent) -> None:
-        """Route a REQUEST intent to its programmatic handler.
+    def _record_trace_analyze_on_timeline(
+        self,
+        *,
+        request_msg: Any,
+        source: str,
+        payload: dict[str, Any],
+        result: dict[str, Any],
+        cache_hit: bool,
+    ) -> None:
+        """Mirror a bus-requested analysis onto the visit that was running.
 
-        Applies the execution-order gate, records the request on the bus, and
-        dispatches to the registered handler or auto-rejects with a RESPONSE so
-        the requester never hangs. Every failure is also appended to
-        ``last_action_failures``.
-
-        Args:
-            source (str): The agent issuing the request.
-            intent (Intent): The REQUEST intent; ``payload`` carries
-                ``target_agent`` and ``kind``.
+        An analysis dispatched this way opens no roofline event of its own, so
+        without this the snapshot counter it advanced has nothing on the
+        timeline to account for it.
         """
-        from .coordinator import _lifecycle_paths
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_trace_analyze_request
 
+        record_trace_analyze_request(
+            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            run_id=str(getattr(request_msg, "msg_id", "") or ""),
+            status=str(result.get("status") or ""),
+            result=result,
+            requested_by=source,
+            request_msg_id=str(getattr(request_msg, "msg_id", "") or ""),
+            trace_input=str(payload.get("trace_path") or payload.get("trace_input") or ""),
+            top_k=payload.get("top_k"),
+            snapshot=getattr(self.shared_state, "last_trace_analyze", None),
+            cache_hit=cache_hit,
+        )
+
+    async def _handle_request(self, source: str, intent: Intent) -> None:
+        """Route a REQUEST intent to its programmatic handler."""
         target_agent = intent.payload["target_agent"]
         kind = intent.payload["kind"]
         denied = self._sequence_denial_for_request(target_agent, kind)
         if denied is not None:
             await self._record_policy_denied(source, intent, denied)
             return
-        # Always record the request on the bus for the kernel reactor / replay.
+        # Always record the request on the bus for replay.
         request_msg = Message.new(
             source,
             target_agent,
             "request",
             dict(intent.payload),
-            priority=1,
         )
         await self.bus.append_and_seq(request_msg)
 
@@ -876,7 +1133,6 @@ class IntentRouter:
                             "source": "coordinator_auto_reject",
                         },
                         in_reply_to=request_msg.msg_id,
-                        priority=1,
                     )
                 )
                 self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
@@ -902,30 +1158,20 @@ class IntentRouter:
                             "source": "coordinator_auto_reject",
                         },
                         in_reply_to=request_msg.msg_id,
-                        priority=1,
                     )
                 )
                 self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
                 return
             params = intent.payload.get("params") or {}
             merged_payload = {**intent.payload, **params}
-            # Inject candidates_path from last_trace_analyze when omitted; orchestration value wins.
-            if (
-                kind == "run_optimization"
-                and self.shared_state.last_trace_analyze
-                and not merged_payload.get("candidates_path")
-            ):
-                cached_candidates_path = self.shared_state.last_trace_analyze.get("candidates_path")
-                if cached_candidates_path:
-                    merged_payload["candidates_path"] = cached_candidates_path
             # Roofline data is read from the last_trace_analyze cache rather than auto-injected here.
             cache_hit_source = None
             cached_result = self._cached_kernel_request(kind, merged_payload)
             if cached_result is not None:
                 result = cached_result
                 cache_hit_source = "shared_state_cache"
-                # A cache hit never runs the handler; emit a single END
-                # (detail=cache_hit) so the lifecycle log records the step.
+                # A cache hit never runs the handler; emit a single END (detail=cache_hit) so the lifecycle log
+                # records the step.
                 self._emit_lifecycle(
                     step=kind,
                     status="END",
@@ -949,8 +1195,7 @@ class IntentRouter:
                         "reason": rejected.get("reason"),
                     }
                     cache_hit_source = "shared_state_kernel_rejection"
-                    # A short-circuited integrate never runs the handler;
-                    # emit a lone END recording the rejection.
+                    # A short-circuited integrate never runs the handler; emit a lone END recording the rejection.
                     self._emit_lifecycle(
                         step=kind,
                         status="END",
@@ -964,15 +1209,41 @@ class IntentRouter:
                         if isinstance(cb_tput, (int, float)) and cb_tput > 0:
                             merged_payload["base_tput"] = float(cb_tput)
 
-                    # Streaming-record callback for run_optimization batch: each sub-attempt writes immediately.
+                    # A handler that benchmarks runs under its action's catalogue lanes, so it waits out the
+                    # kernel_agent task instead of sharing the GPUs with it.
+                    action = REQUEST_KIND_TO_OWNED_ACTION.get(kind, kind)
+                    lanes, ttl = self._registry_lanes_ttl(action)
+                    handler_lease = None
+                    if lanes:
+                        handler_lease = await self.locks.try_acquire_many(
+                            lanes,
+                            holder_id=request_msg.msg_id,
+                            task_id=request_msg.msg_id,
+                            action=action,
+                            ttl_sec=ttl or 60,
+                        )
+                        if handler_lease is None:
+                            await self.bus.append_and_seq(
+                                Message.new(
+                                    "kernel_agent",
+                                    source,
+                                    "response",
+                                    {
+                                        "in_reply_to": request_msg.msg_id,
+                                        "kind": f"{kind}_done",
+                                        "status": "deferred",
+                                        "result": {"status": "deferred", "reason": "lanes_busy", "lanes": lanes},
+                                        "source": "lanes_busy",
+                                    },
+                                    in_reply_to=request_msg.msg_id,
+                                )
+                            )
+                            return
+
                     handler_kwargs: dict[str, Any] = {
                         "session_dir": self.session_dir,
                     }
-                    if kind == "run_optimization":
-                        handler_kwargs["record_partial"] = self._record_kernel_opt_partial
-                    # Bracket the programmatic kernel step with START / END
-                    # lifecycle events. ``kind`` is the machine step name;
-                    # the human label is resolved from LIFECYCLE_STEP_LABELS.
+                    # Bracket the programmatic kernel step with START / END lifecycle events.
                     _lc_t0 = time.monotonic()
                     self._emit_lifecycle(
                         step=kind,
@@ -985,7 +1256,7 @@ class IntentRouter:
                                 merged_payload,
                                 **handler_kwargs,
                             )
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         log.exception(
                             "kernel_request_handler[%s] crashed for source=%s",
                             kind,
@@ -996,12 +1267,9 @@ class IntentRouter:
                             "error_class": "handler_exception",
                             "error": repr(exc),
                         }
-                    # A block-FP8 GEMM run may have executed an inline
-                    # Roofline whose refreshed profile fields only live in
-                    # state.json. Merge them before the terminal lifecycle
-                    # event persists the live state over them.
-                    if kind == "run_gemm_tuning":
-                        self._sync_profile_state_after_gemm_roofline(result)
+                    finally:
+                        if handler_lease is not None:
+                            await self.locks.release(handler_lease)
                     _lc_status = "ERROR" if str(result.get("status", "")).lower() in ("failed", "error") else "END"
                     _lc_detail = " ".join(
                         str(p)
@@ -1032,7 +1300,6 @@ class IntentRouter:
                         "source": cache_hit_source or "programmatic_handler",
                     },
                     in_reply_to=request_msg.msg_id,
-                    priority=1,
                 )
             )
             if str(result.get("status", "")).lower() in ("failed", "error"):
@@ -1041,16 +1308,14 @@ class IntentRouter:
             if kind == "trace_analyze" and cache_hit_source is None and result.get("status") in ("ok", "succeeded"):
                 self.shared_state.record_trace_analyze(merged_payload, result)
                 self.shared_state.save(self.session_dir)
-            # Mirror kernel-opt outcomes into SharedState.
-            if kind == "run_optimization":
-                # Batch mode already streamed each sub-result; re-recording would double-count.
-                if not bool(isinstance(result, dict) and result.get("batch_mode")):
-                    self.shared_state.record_kernel_opt(result)
-                self.shared_state.save(self.session_dir)
-                # Auto-enqueue integrate for KEEP'd kernels not yet integrated.
-                await self._auto_enqueue_pending_integrations()
-            if kind == "run_gemm_tuning":
-                await self._handle_gemm_tuning_result(result)
+            if kind == "trace_analyze":
+                self._record_trace_analyze_on_timeline(
+                    request_msg=request_msg,
+                    source=source,
+                    payload=merged_payload,
+                    result=result,
+                    cache_hit=cache_hit_source is not None,
+                )
             if kind == "integrate":
                 if result.get("status") != "skipped":
                     self.shared_state.record_kernel_integrate_result(result)
@@ -1081,54 +1346,12 @@ class IntentRouter:
                         "source": "coordinator_auto_reject",
                     },
                     in_reply_to=request_msg.msg_id,
-                    priority=1,
                 )
             )
             self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
 
-    async def _handle_response(self, source: str, intent: Intent) -> None:
-        """Route a RESPONSE intent back to the original requester.
-
-        Looks up the request message referenced by ``in_reply_to`` to address
-        the response, then publishes it on the bus.
-
-        Args:
-            source (str): The agent emitting the response.
-            intent (Intent): The RESPONSE intent; ``payload`` carries
-                ``in_reply_to``.
-        """
-        in_reply_to = intent.payload["in_reply_to"]
-        # Locate the original requester so we can address the response.
-        original = await self.bus.lookup_by_id(in_reply_to)
-        target = original.from_agent if original else "*"
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                target,
-                "response",
-                dict(intent.payload),
-                in_reply_to=in_reply_to,
-                priority=1,
-            )
-        )
-
     async def _handle_extend_lease(self, source: str, intent: Intent) -> None:
-        """Grant a running task more lease time.
-
-        Refreshes the task's ``lease_ttl_sec``, its lane rows, its GPU rows and
-        the live subprocess wall-clock deadline together, preserving
-        ``kill <= gpu_lease TTL <= gpu_research_lane TTL``.
-
-        ``lease_ttl_sec`` is a *cumulative* budget measured from ``updated_at``
-        (when the task entered ``running``), but lane / GPU rows expire at
-        ``now + ttl``. Feeding the cumulative TTL straight into them would hand
-        back the already-elapsed time, so the refresh uses the remaining budget.
-
-        Args:
-            source (str): The agent requesting the extension.
-            intent (Intent): The EXTEND_LEASE intent; ``payload`` carries
-                ``task_id``, ``extra_sec`` and an optional ``reason``.
-        """
+        """Grant a running task more lease time."""
         task_id = str(intent.payload.get("task_id") or "").strip()
         extra_sec = int(intent.payload.get("extra_sec") or 0)
         try:
@@ -1148,37 +1371,33 @@ class IntentRouter:
         # Remaining budget = cumulative TTL minus the time already spent running.
         running_sec = 0.0
         try:
-            task = await self.tasks.get(task_id)
-            started = _parse_iso_unix(task.updated_at)
-            if started > 0:
-                running_sec = max(0.0, time.time() - started)
-        except Exception:  # noqa: BLE001 — fall back to the full TTL
-            log.exception("extend_lease: could not read running age for task=%s", task_id)
-        # A late extension can arrive after the cumulative task TTL expired but
-        # before the worker/reaper acted on it. It must still buy the full newly
-        # granted increment rather than refreshing leases for only one second.
+            started = _parse_iso_unix((await self.tasks.get(task_id)).updated_at)
+        except TaskNotFound:
+            started = 0.0
+        if started > 0:
+            running_sec = max(0.0, time.time() - started)
+        # A late extension can arrive after the cumulative task TTL expired but before the worker/reaper acted on it.
         remaining_sec = max(1, int(extra_sec), int(new_ttl - running_sec))
         lanes = await self.locks.heartbeat_by_task(task_id, ttl_sec=remaining_sec)
         gpu_error = ""
         try:
             gpus = await self.gpu_specialist_pool.extend(task_id, remaining_sec)
-        except Exception as exc:  # noqa: BLE001 — lane extension already landed
+        except Exception as exc:
             log.exception("extend_lease: GPU lease refresh failed for task=%s", task_id)
             gpus = 0
             gpu_error = repr(exc)[:200]
-        # Push the live subprocess's hard wall-clock kill deadline out too, so
-        # the extension actually buys the specialist more time to run.
+        # Push the live subprocess's hard wall-clock kill deadline out too, so the extension actually buys the
+        # specialist more time to run.
         wall_budget_error = ""
         try:
             from ..specialists.subprocess_ import grant_wall_budget_extension
 
             grant_wall_budget_extension(task_id, extra_sec)
-        except Exception as exc:  # noqa: BLE001 — lease rows already moved
+        except Exception as exc:
             log.exception("extend_lease: wall-budget extension failed for task=%s", task_id)
             wall_budget_error = repr(exc)[:200]
-        # A swallowed GPU or wall-budget failure would leave the lane extended
-        # while the GPU reaper or subprocess wall-clock cap can still interrupt
-        # the work — report the partial extension as degraded.
+        # A swallowed GPU or wall-budget failure would leave the lane extended while the GPU reaper or subprocess
+        # wall-clock cap can still interrupt the work — report the partial extension as degraded.
         await self._record_observation(
             "coordinator",
             "observation",
@@ -1198,18 +1417,7 @@ class IntentRouter:
         )
 
     async def _handle_prune_branch(self, source: str, intent: Intent) -> None:
-        """Prune an action family and cancel its in-flight tasks.
-
-        ``scope="family"`` (the default) adds the family to the persistent
-        pruned set so it stays retired. ``scope="queued"`` only drains the
-        backlog, leaving the family available — the move for an action whose
-        queue outlived its usefulness rather than one that has to stop.
-
-        Args:
-            source (str): The agent issuing the prune.
-            intent (Intent): The PRUNE_BRANCH intent; ``payload`` carries
-                ``family``, optional ``reason`` and optional ``scope``.
-        """
+        """Prune an action family and cancel its in-flight tasks."""
         family = intent.payload["family"]
         reason = str(intent.payload.get("reason") or "prune_branch")
         scope = str(intent.payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
@@ -1220,20 +1428,6 @@ class IntentRouter:
             cancelled = await self._drain_queued_baselines(reason=reason)
         else:
             cancelled = await self.tasks.cancel_family([family], reason=reason)
-        # A pruned explore family can take the GEAK 2b rebench with it; settle the
-        # slot so KERNEL is not held open waiting on a task that will never run.
-        if cancelled:
-            from ..phases.geak_rebench import settle_dangling_geak_pending
-
-            try:
-                if await settle_dangling_geak_pending(
-                    self.tasks,
-                    self.shared_state,
-                    reason=f"prune_branch:{family}",
-                ):
-                    self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — prune must not fail on bookkeeping
-                log.exception("prune_branch: GEAK pending settle failed")
         await self.bus.append_and_seq(
             Message.new(
                 source,
@@ -1250,13 +1444,7 @@ class IntentRouter:
         )
 
     async def _handle_escalate_strategy_change(self, source: str, intent: Intent) -> None:
-        """Process ``escalate_strategy_change``: broadcast strategy_change, act on closed-vocab hints, drop unknown hints.
-
-        Args:
-            source: The agent issuing the escalation.
-            intent: The ESCALATE_STRATEGY_CHANGE intent; ``payload`` may carry a
-                closed-vocab ``next_action_hint``.
-        """
+        """Process ``escalate_strategy_change``: broadcast strategy_change, act on closed-vocab hints, drop unknown hints."""
         payload = dict(intent.payload or {})
         # Always emit the broadcast first.
         await self.bus.append_and_seq(
@@ -1265,42 +1453,16 @@ class IntentRouter:
                 "*",
                 "strategy_change",
                 payload,
-                priority=0,
             )
         )
         from ..phases.machine_state import (
-            ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-            ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
-            ESCALATE_HINT_SKIP_TO_CLOSE,
             PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
             apply_escalate_budget_bump,
-            is_valid_escalate_hint,
         )
 
         hint = str(payload.get("next_action_hint") or "").strip()
         if not hint or not is_valid_escalate_hint(hint):
-            return
-        # Pre-enablement close guard: drop a premature ``skip_to_close`` while
-        # the model is not yet runnable and let the enablement loop continue.
-        if hint == ESCALATE_HINT_SKIP_TO_CLOSE and self.shared_state.enablement_close_guard_active():
-            log.info(
-                "escalate_strategy_change: dropping premature skip_to_close from %s "
-                "(pre-enablement: baseline not established; enablement loop still active)",
-                source,
-            )
-            await self.bus.append_and_seq(
-                Message.new(
-                    "coordinator",
-                    "*",
-                    "observation",
-                    {
-                        "kind": "enablement_skip_to_close_suppressed",
-                        "source": source,
-                        "phase": (self.shared_state.phase or ""),
-                    },
-                )
-            )
             return
         # extend_*_budget mutates phase_budget_pct directly.
         now_ts = datetime.now(timezone.utc).isoformat()
@@ -1327,22 +1489,9 @@ class IntentRouter:
         self.shared_state.save(self.session_dir)
 
     async def _handle_send_message(self, source: str, intent: Intent) -> None:
-        """Publish a free-form message onto the bus.
-
-        Soft-degrades an unknown topic to ``observation`` and routes to the
-        requested recipient (defaulting to broadcast). A ``specialist:<id>``
-        recipient additionally gets the message in its workspace inbox.
-
-        Args:
-            source (str): The sending agent.
-            intent (Intent): The SEND_MESSAGE intent; ``payload`` may carry
-                ``topic`` / ``to`` plus arbitrary message fields.
-        """
+        """Publish a free-form message onto the bus."""
         topic = intent.payload.get("topic", "observation")
-        if (
-            topic
-            not in __import__("hyperloom.orchestrator.bus.message_bus", fromlist=["TOPIC_ALLOWLIST"]).TOPIC_ALLOWLIST
-        ):
+        if topic not in TOPIC_ALLOWLIST:
             # Soft-degrade unknown topic.
             topic = "observation"
         to_agent = intent.payload.get("to") or "*"
@@ -1358,16 +1507,7 @@ class IntentRouter:
             self._deliver_specialist_inbox(source, str(to_agent), intent.payload)
 
     def _deliver_specialist_inbox(self, source: str, to_agent: str, payload: dict[str, Any]) -> None:
-        """Append a message to a running specialist's workspace inbox.
-
-        A specialist reads ``inbox.json`` between turns; the reaper ignores the
-        file, so this steers a live run without ending it.
-
-        Args:
-            source (str): The sending agent.
-            to_agent (str): Recipient of the form ``specialist:<task_id>``.
-            payload (dict[str, Any]): The send_message payload.
-        """
+        """Append a message to a running specialist's workspace inbox."""
         task_id = to_agent[len(SPECIALIST_FROM_AGENT_PREFIX) :].strip()
         if not task_id:
             return
@@ -1393,50 +1533,25 @@ class IntentRouter:
             tmp = inbox.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(existing[-32:], indent=2), encoding="utf-8")
             tmp.replace(inbox)
-        except Exception:  # noqa: BLE001 — steering is best-effort
+        except Exception:
             log.exception("failed to deliver inbox message to %s", to_agent)
 
     async def _handle_alert(self, source: str, intent: Intent) -> None:
-        """Broadcast an alert message, prioritized by severity.
-
-        High-severity alerts are published at priority 0; everything else at
-        priority 1.
-
-        Args:
-            source (str): The alerting agent.
-            intent (Intent): The ALERT intent; ``payload`` may carry
-                ``severity`` plus alert detail.
-        """
-        prio = 0 if intent.payload.get("severity") == "high" else 1
+        """Broadcast an alert message."""
         await self.bus.append_and_seq(
             Message.new(
                 source,
                 "*",
                 "alert",
                 dict(intent.payload),
-                priority=prio,
             )
         )
 
     async def _handle_update_state(self, source: str, intent: Intent) -> None:
-        """Apply agent-requested SharedState changes and report the result.
-
-        Applies the requested changes (core fields disallowed), persists when
-        anything changed, and broadcasts an observation listing the applied vs
-        rejected keys.
-
-        Args:
-            source (str): The agent requesting the state update.
-            intent (Intent): The UPDATE_STATE intent; ``payload`` carries a
-                ``changes`` dict.
-        """
-        # Apply to persistent SharedState (PolicyGate enforces core-field writes).
-        applied = self.shared_state.apply_changes(
-            intent.payload["changes"],
-            allow_core=False,
-        )
-        if applied:
-            self.shared_state.save(self.session_dir)
+        """Apply agent-requested SharedState changes and report the result."""
+        changes = intent.payload["changes"]
+        self.shared_state.apply_agent_update(changes)
+        self.shared_state.save(self.session_dir)
         await self.bus.append_and_seq(
             Message.new(
                 source,
@@ -1444,8 +1559,7 @@ class IntentRouter:
                 "observation",
                 {
                     "kind": "update_state",
-                    "changes": applied,
-                    "rejected": sorted(set(intent.payload["changes"]) - set(applied)),
+                    "changes": dict(changes),
                 },
             )
         )

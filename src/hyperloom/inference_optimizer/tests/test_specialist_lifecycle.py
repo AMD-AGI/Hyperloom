@@ -1,17 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Specialist_done bookkeeping tests.
-
-Exercises ``_record_specialist_result``, the intent-routing path, the
-dispatcher exit hook, round_id idempotence, and the stalled-domain
-hard-trigger's round-counter semantics.
-"""
+"""Specialist_done bookkeeping tests."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -21,6 +17,8 @@ from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
 )
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
+from hyperloom.orchestrator.state.shared_state import SharedState
+from ._dispatch_helpers import pump_until_settled
 
 
 @dataclass
@@ -32,10 +30,11 @@ class _StubTask:
     params: dict[str, Any] = field(default_factory=dict)
 
 
-class _StubSharedState:
-    """SharedState stand-in that records the bookkeeping calls."""
+class _StubSharedState(SharedState):
+    """SharedState that records the bookkeeping calls instead of persisting them."""
 
     def __init__(self):
+        super().__init__()
         self.specialist_rounds: list[dict[str, Any]] = []
         self.last_specialist: dict[str, Any] = {}
         self.saved: int = 0
@@ -79,8 +78,10 @@ class _StubTaskRegistry:
 def coord(tmp_path: Path):
     """Build a Coordinator via ``__new__`` with just enough attributes for specialist lifecycle methods."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
     c = Coordinator.__new__(Coordinator)
+    c.phase_framework = FrameworkPhase(c)
     c.session_dir = tmp_path
     c.shared_state = _StubSharedState()
     c.tasks = _StubTaskRegistry()
@@ -93,14 +94,14 @@ def _done_payload(
     domain: str = "serving_specialist",
     gap: str = "gap.attention.fp8_kv",
     proposals: list | None = None,
-    empty: bool = False,
+    no_proposals: bool = False,
     summary: str = "Specialist found candidate variants",
     confidence: float = 0.7,
 ) -> dict[str, Any]:
     if proposals is None:
         proposals = (
             []
-            if empty
+            if no_proposals
             else [
                 {
                     "variant_name": "max_seqs_512",
@@ -113,9 +114,8 @@ def _done_payload(
         "domain": domain,
         "gap_canonical_id": gap,
         "proposal_set": proposals,
-        "empty": empty or len(proposals) == 0,
         "summary": summary,
-        "reason": "kb_evidence" if not empty else "no_findings",
+        "reason": "no_findings" if not proposals else "kb_evidence",
         "confidence": confidence,
         "new_findings": ["fp8 kv cache stable above bs=128"],
         "residual_questions": [],
@@ -142,18 +142,12 @@ async def test_record_specialist_result_non_empty_proposal_set(coord):
     assert row["task_id"] == "task-1"
     assert row["domain"] == "serving_specialist"
     assert row["gap_canonical_id"] == "gap.attention.fp8_kv"
-    assert row["empty"] is False
     assert row["proposals_total"] == 1
     assert row["round_id"] == "task-1"
     assert state.last_specialist["task_id"] == "task-1"
-    assert state.last_specialist["empty"] is False
     assert state.last_specialist["proposals_total"] == 1
     assert state.last_specialist["domain"] == "serving_specialist"
     assert state.saved == 1
-    coord._record_observation.assert_awaited_once()
-    args, kwargs = coord._record_observation.call_args
-    assert args[1] == "observation"
-    assert args[2]["kind"] == "specialist_done_recorded"
 
 
 @pytest.mark.asyncio
@@ -161,7 +155,7 @@ async def test_record_specialist_result_enqueues_build_request(coord):
     task = _StubTask(task_id="build-spec", params={"enablement": True})
     coord.tasks.register(task)
     coord._maybe_enqueue_specialist_requested_build = AsyncMock()
-    payload = _done_payload(empty=True)
+    payload = _done_payload(no_proposals=True)
     payload["needs_targeted_build"] = {
         "component": "aiter",
         "capability": "deepseek_v4_decode",
@@ -182,11 +176,11 @@ async def test_record_specialist_result_enqueues_build_request(coord):
 
 @pytest.mark.asyncio
 async def test_record_specialist_result_empty_proposal_set(coord):
-    """Empty proposal_set: ledger row stays (empty=True)."""
+    """An empty proposal_set still records a round; proposals_total carries it."""
     task = _StubTask(task_id="task-empty-1", params={})
     coord.tasks.register(task)
 
-    payload = _done_payload(empty=True, domain="kernel_switch_specialist")
+    payload = _done_payload(no_proposals=True, domain="kernel_switch_specialist")
     await coord._record_specialist_result(
         task=task,
         done_payload=payload,
@@ -195,8 +189,8 @@ async def test_record_specialist_result_empty_proposal_set(coord):
 
     state: _StubSharedState = coord.shared_state
     assert len(state.specialist_rounds) == 1
-    assert state.specialist_rounds[0]["empty"] is True
-    assert state.last_specialist["empty"] is True
+    assert state.specialist_rounds[0]["proposals_total"] == 0
+    assert state.last_specialist["proposals_total"] == 0
 
 
 @pytest.mark.asyncio
@@ -210,18 +204,18 @@ async def test_record_specialist_result_idempotent_on_round_id(coord):
 
     await coord._record_specialist_result(
         task=task,
-        done_payload=_done_payload(empty=False),
+        done_payload=_done_payload(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t-resume",
     )
     await coord._record_specialist_result(
         task=task,
-        done_payload=_done_payload(empty=True, proposals=[]),
+        done_payload=_done_payload(proposals=[]),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t-resume",
     )
 
     state: _StubSharedState = coord.shared_state
     assert len(state.specialist_rounds) == 1
-    assert state.specialist_rounds[0]["empty"] is True
+    assert state.specialist_rounds[0]["proposals_total"] == 0
     assert state.specialist_rounds[0]["round_id"] == "round-7"
 
 
@@ -244,7 +238,7 @@ def test_task_id_from_specialist_source_returns_empty_for_bad():
     assert Coordinator._task_id_from_specialist_source("") == ""
     assert (
         Coordinator._task_id_from_specialist_source(
-            "robustness",
+            "unknown",
         )
         == ""
     )
@@ -253,7 +247,7 @@ def test_task_id_from_specialist_source_returns_empty_for_bad():
 # 4. _build_specialist_round_entry — output shape
 @pytest.mark.asyncio
 async def test_build_specialist_round_entry_carries_full_payload(coord):
-    """The entry carries the full field set the breakdown ``specialist_runs[]`` consumer expects."""
+    """The entry carries the full field set the timeline round product expects."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord_obj = Coordinator.__new__(Coordinator)
@@ -282,7 +276,6 @@ async def test_build_specialist_round_entry_carries_full_payload(coord):
         "completed_at",
         "domain",
         "gap_canonical_id",
-        "empty",
         "proposals_total",
         "proposal_set",
         "summary",
@@ -296,7 +289,6 @@ async def test_build_specialist_round_entry_carries_full_payload(coord):
     assert entry["round_id"] == "round-9"
     assert entry["task_id"] == "t-build"
     assert entry["proposals_total"] == 2
-    assert entry["empty"] is False
     assert entry["confidence"] == 0.62
     assert entry["source_phase"] == "KERNEL_AGENT"
 
@@ -375,7 +367,6 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         backends = {
             "orchestration": MockOrchBackend(idle_plan),
             "critic": MockOrchBackend(idle_plan),
-            "robustness": MockOrchBackend(idle_plan),
         }
 
         session_dir = tmp_path / "session"
@@ -415,6 +406,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
             idempotency_key=task.idempotency_key,
         )
         await coord.tick(n=1)
+        await pump_until_settled(coord)
     finally:
         cli_mod.ClaudeBackend = real_claude_cls
 
@@ -424,7 +416,6 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     row = coord.shared_state.specialist_rounds[0]
     assert row["domain"] == "serving_specialist"
     assert row["proposals_total"] == 1
-    assert row["empty"] is False
     assert coord.shared_state.last_specialist.get("domain") == "serving_specialist"
     workspace = session_dir / "runs" / "specialist"
     assert workspace.exists()
@@ -433,15 +424,25 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
 
 # 7. Point 2 — stalled-domain hard-trigger
 @pytest.fixture
-def force_coord(tmp_path: Path):
+def force_coord(tmp_path: Path, monkeypatch):
     """Coordinator stand-in with a real SharedState + mocked _handle_intent."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = SharedState()
     c.shared_state.phase = "FRAMEWORK_AGENT"
+    source_root = tmp_path / "framework"
+    (source_root / ".git").mkdir(parents=True)
+    c.shared_state.framework_repo_path = str(source_root)
+    c.tasks = SimpleNamespace(
+        find_by_idempotency_key=AsyncMock(return_value=None),
+        queued=AsyncMock(return_value=[]),
+        running=AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(SpecialistDispatchCollaborator, "_warm_specialist_params", AsyncMock())
     c._handle_intent = AsyncMock()  # type: ignore[method-assign]
     return c
 
@@ -472,14 +473,12 @@ async def test_force_stalled_domain_dispatches_when_gap_pending(force_coord):
     assert "forced-stalled-framework" in intent.payload["idempotency_key"]
     # Cycle 0 → no cycle suffix.
     assert not intent.payload["idempotency_key"].endswith("-c0")
-    # Counter is zeroed up-front so it can't re-fire next tick.
-    assert state.rounds_since_last_specialist["framework"] == 0
 
 
 @pytest.mark.asyncio
 async def test_force_stalled_idempotency_key_is_cycle_scoped(force_coord):
-    # In a later macro-cycle the forced-specialist key carries the cycle suffix
-    # so it does not dedup-match the prior cycle's task.
+    # In a later macro-cycle the forced-specialist key carries the cycle suffix so it does not dedup-match the prior
+    # cycle's task.
     state = force_coord.shared_state
     state.macro_cycle = 2
     for _ in range(10):
@@ -496,6 +495,90 @@ async def test_force_stalled_idempotency_key_is_cycle_scoped(force_coord):
 
     _, intent = force_coord._handle_intent.call_args.args
     assert intent.payload["idempotency_key"].endswith("-c2")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_state", ["queued", "running", "failed", "succeeded", "cancelled"])
+async def test_force_stalled_domain_does_not_resubmit_existing_round(force_coord, task_state):
+    state = force_coord.shared_state
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    state.upsert_gap(
+        {
+            "canonical_id": "gap.framework.scheduler.s1",
+            "domain_hint": "serving_specialist",
+            "severity": "high",
+        }
+    )
+    force_coord.tasks.find_by_idempotency_key.return_value = SimpleNamespace(state=task_state)
+
+    await force_coord._maybe_force_stalled_domain_specialist()
+
+    force_coord._handle_intent.assert_not_awaited()
+    force_coord.tasks.find_by_idempotency_key.assert_awaited_once_with("forced-stalled-framework-round0")
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_source_patch_without_git_root_is_pruned_once(force_coord):
+    state = force_coord.shared_state
+    state.framework_repo_path = ""
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    state.upsert_gap(
+        {
+            "canonical_id": "gap.framework.scheduler.s1",
+            "domain_hint": "serving_specialist",
+            "severity": "high",
+        }
+    )
+
+    await force_coord._maybe_force_stalled_domain_specialist()
+    await force_coord._maybe_force_stalled_domain_specialist()
+
+    force_coord._handle_intent.assert_not_awaited()
+    assert state.pruned_families == ["source_patch"]
+    failures = [
+        (row["action"], row["task_id"], row["error_class"], row["error_excerpt"]) for row in state.last_action_failures
+    ]
+    assert failures == [
+        (
+            "specialist",
+            "forced-stalled-framework-round0",
+            "no_git_framework_source_root",
+            "no_git_framework_source_root",
+        )
+    ]
+
+
+async def test_force_stalled_skips_a_domain_with_a_specialist_in_flight(force_coord):
+    state = force_coord.shared_state
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    state.upsert_gap(
+        {"canonical_id": "gap.framework.scheduler.s1", "domain_hint": "serving_specialist", "severity": "high"}
+    )
+    force_coord.tasks.running.return_value = [
+        SimpleNamespace(kind="specialist", params={"domain": "serving_specialist"})
+    ]
+
+    await force_coord._maybe_force_stalled_domain_specialist()
+
+    force_coord._handle_intent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_research_specialist_ignores_source_patch_prune(force_coord):
+    state = force_coord.shared_state
+    state.framework_repo_path = ""
+    state.add_pruned_family("source_patch")
+    state.stalled_domains = lambda **_kwargs: ["pr_intelligence"]
+    state.best_gap_for_anchor = lambda _anchor: "gap.framework.discovery.s1"
+
+    await force_coord._maybe_force_stalled_domain_specialist()
+
+    force_coord._handle_intent.assert_awaited_once()
+    _, intent = force_coord._handle_intent.call_args.args
+    assert intent.payload["params"]["domain"] == "candidate_discovery_specialist"
 
 
 @pytest.mark.asyncio

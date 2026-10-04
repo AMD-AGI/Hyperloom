@@ -9,15 +9,17 @@
 # Design: DELEGATE the server phase to the maintained per-framework builtin
 # (vllm_mi300x.sh / sglang_mi300x.sh) via MAGPIE_RUN_PHASE=server, so server
 # boot + torch-profiler enabling stay correct across frameworks and versions
-# (no profiler flags reimplemented here). Then run `aiperf profile` (AgentX
-# weka-trace scenario) as the client, and map its export into the InferenceX
-# result schema. On single node the client owns profiling: InferenceX's
+# (no profiler flags reimplemented here). MAGPIE_RUN_PHASE=client instead reuses
+# a caller-managed server without launching, checking PIDs, or tearing it down.
+# Then run `aiperf profile` (AgentX weka-trace scenario) as the client, and map
+# its export into the InferenceX result schema. The client owns profiling: InferenceX's
 # benchmark_serving.py self-triggers /start_profile, and aiperf does not, so
 # when PROFILE=1 this script self-brackets a /start_profile..stop_profile window
-# around aiperf's steady state (see the PROFILE branch below).
+# after AIPerf reports the measured phase through its progress API.
 #
 # Inputs (from Magpie env): MODEL, TP, PORT, MAX_MODEL_LEN, CONC, RESULT_DIR,
-#   RESULT_FILENAME, PROFILE, EXTRA_VLLM_ARGS, FRAMEWORK, GPU_TYPE/RUNNER_TYPE.
+#   RESULT_FILENAME, PROFILE, EXTRA_VLLM_ARGS, FRAMEWORK, GPU_TYPE/RUNNER_TYPE,
+#   AGENTX_CAPTURE_ID, AGENTX_CAPTURE_STATUS_PATH.
 # AgentX knobs (AGENTX_ prefix; NOT AIPERF_, which aiperf's own settings read):
 #   AGENTX_DATASET / WEKA_LOADER_OVERRIDE (pin the corpus loader),
 #   AGENTX_NUM_ENTRIES (corpus cap; default 393 = all),
@@ -29,10 +31,26 @@
 #     non-submittable -- see the smoke note below),
 #   AGENTX_REALTIME_METRICS (rolling stats block; default true),
 #   AGENTX_DATASET_CONFIG_TIMEOUT (default 1800), AGENTX_LIVE_ASSISTANT,
+#   AGENTX_HTTP_TCP_USER_TIMEOUT (no-TCP-progress bound in ms; default 900000,
+#     matching upstream's long-context recipes -- aiperf's stock 30s aborts
+#     live connections while the server is prefill-bound),
+#   AGENTX_HTTP_KEEP_ALIVE_S (server-side idle timeout in s; default 900 -- the
+#     other half of AGENTX_HTTP_TCP_USER_TIMEOUT. Exported as the framework's
+#     own knob before the server boots; see the keep-alive note below),
 #   AGENTX_MMAP_CACHE_DIR (dataset mmap cache; defaults under $HF_HUB_CACHE),
 #   AGENTX_MAX_CTX (explicit opt-in client-side context cap; NEVER inferred
 #     from $MAX_MODEL_LEN -- see the replay-context note below),
-#   AGENTX_KEEP_SERVER, AGENTX_PROFILE_WARMUP_S, AGENTX_PROFILE_WINDOW_S,
+#   AGENTX_TRACE_FLUSH_TIMEOUT_S (how long to wait after /stop_profile for the
+#     per-rank trace files to finish writing; default 1800. A 200 from
+#     /stop_profile only means the tracer was told to stop -- measured on
+#     GLM-5.3 TP=8, the 5.1 GB set was still being written 546s later),
+#   AGENTX_TRACE_FIRST_FILE_TIMEOUT_S (separate, shorter bound for the case
+#     where NO trace file appears at all -- a failed capture, not a slow one;
+#     default 900, clamped to AGENTX_TRACE_FLUSH_TIMEOUT_S. The first rank file
+#     landed at t+350s on that same GLM-5.3 capture),
+#   AGENTX_KEEP_SERVER, AGENTX_PROFILE_WINDOW_S,
+#   AGENTX_PROFILE_WARMUP_S (deprecated and ignored; phase-gated profiling
+#     replaced the fixed warmup delay),
 #   AGENTX_SERVER_SCRIPT (override builtin name), AIPERF_BIN.
 set -euo pipefail
 
@@ -47,6 +65,32 @@ PORT="${PORT:-8000}"
 # and the mapped result records no concurrency at all, so the mismatch would be
 # invisible afterwards. The switch always projects CONC; if it ever stops, say so.
 : "${CONC:?CONC required (the AgentX switch projects it from the benchmark config)}"
+
+# Match preflight's override -> managed CLI -> PATH order without changing PATH.
+_aiperf_override="${AIPERF_BIN:-}"
+_aiperf_override="${_aiperf_override#"${_aiperf_override%%[![:space:]]*}"}"
+_aiperf_override="${_aiperf_override%"${_aiperf_override##*[![:space:]]}"}"
+AIPERF_CMD=("${_aiperf_override:-aiperf}")
+if [ -z "$_aiperf_override" ]; then
+  _aiperf_state="${HYPERLOOM_STATE_DIR:-}"
+  if [ -z "$_aiperf_state" ]; then
+    _aiperf_home="${HOME:-}"
+    if [ -z "$_aiperf_home" ]; then
+      _aiperf_home="$(env -u __PYVENV_LAUNCHER__ "${PYTHON:-python3}" -I -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+    fi
+    _aiperf_state="${_aiperf_home}/.hyperloom"
+  fi
+  case "$_aiperf_state" in
+    /*) ;;
+    *) log "ERROR: HYPERLOOM_STATE_DIR must be an absolute path: $_aiperf_state"; exit 2 ;;
+  esac
+  _aiperf_managed="${_aiperf_state}/aiperf-venv/bin/aiperf"
+  if [ -f "$_aiperf_managed" ] && [ -x "$_aiperf_managed" ]; then
+    # Only the independent client interpreter is isolated, not server/mapper Python.
+    AIPERF_CMD=(env -u PYTHONHOME -u PYTHONPATH -u PYTHONUSERBASE -u PYTHONPLATLIBDIR -u __PYVENV_LAUNCHER__ "$_aiperf_managed")
+  fi
+fi
+
 RESULT_DIR="${RESULT_DIR:-$(pwd)}"
 RESULT_FILENAME="${RESULT_FILENAME:-inferencex_result}"
 ART="${RESULT_DIR}/aiperf_artifacts"
@@ -55,68 +99,183 @@ ART="${RESULT_DIR}/aiperf_artifacts"
 rm -rf "$ART"
 mkdir -p "$RESULT_DIR" "$ART"
 
-# ── Resolve the per-framework builtin server script ──────────────────────────
-FRAMEWORK="${FRAMEWORK:-}"
-GPU="$(printf '%s' "${GPU_TYPE:-${RUNNER_TYPE:-mi300x}}" | tr '[:upper:]' '[:lower:]')"
-BUILTIN="${AGENTX_SERVER_SCRIPT:-${FRAMEWORK}_${GPU}.sh}"
-# The AgentX switch injects FRAMEWORK from benchmark.framework; a missing value
-# (and no explicit AGENTX_SERVER_SCRIPT) is misconfiguration -- fail loud rather
-# than silently defaulting to a framework and booting the wrong server.
-if [ -z "${AGENTX_SERVER_SCRIPT:-}" ] && [ -z "$FRAMEWORK" ]; then
-  log "ERROR: FRAMEWORK unset and AGENTX_SERVER_SCRIPT not provided; cannot resolve the builtin server script"
-  exit 2
-fi
-if [ ! -f "${BENCH_DIR}/${BUILTIN}" ]; then
-  log "ERROR: builtin server script not found: ${BENCH_DIR}/${BUILTIN}"
-  exit 2
-fi
-
-# ── Server phase: delegate to builtin (correct boot + profiler per framework) ─
-PIDFILE="${RESULT_DIR}/agentx_server.pid"
-rm -f "$PIDFILE"
-SERVER_PID=""  # set after boot; cleanup guards ${SERVER_PID:-} + a port fallback
-
-cleanup() {
-  [ "${AGENTX_KEEP_SERVER:-0}" = "1" ] && return 0
-  if [ -n "${SERVER_PID:-}" ]; then
-    log "tearing down server pid=${SERVER_PID}"
-    kill -TERM "-${SERVER_PID}" 2>/dev/null || kill -TERM "${SERVER_PID}" 2>/dev/null || true
-    # vLLM can ignore/stall on SIGTERM (graceful shutdown hangs after a large
-    # profiler-trace flush), leaking the GPUs. Escalate to SIGKILL if the
-    # process group is still alive after a grace period.
-    _i=0
-    while [ "$_i" -lt 10 ]; do
-      kill -0 "${SERVER_PID}" 2>/dev/null || break
-      sleep 2
-      _i=$((_i + 1))
-    done
-    if kill -0 "${SERVER_PID}" 2>/dev/null; then
-      log "server survived SIGTERM after grace period; sending SIGKILL"
-      kill -KILL "-${SERVER_PID}" 2>/dev/null || kill -KILL "${SERVER_PID}" 2>/dev/null || true
-    fi
+if [ "${MAGPIE_RUN_PHASE:-full}" = "client" ]; then
+  log "client-only mode: reusing caller-managed server on port ${PORT}"
+else
+  # ── Resolve the per-framework builtin server script ──────────────────────────
+  FRAMEWORK="${FRAMEWORK:-}"
+  GPU="$(printf '%s' "${GPU_TYPE:-${RUNNER_TYPE:-mi300x}}" | tr '[:upper:]' '[:lower:]')"
+  BUILTIN="${AGENTX_SERVER_SCRIPT:-${FRAMEWORK}_${GPU}.sh}"
+  # The AgentX switch injects FRAMEWORK from benchmark.framework; a missing value
+  # (and no explicit AGENTX_SERVER_SCRIPT) is misconfiguration -- fail loud rather
+  # than silently defaulting to a framework and booting the wrong server.
+  if [ -z "${AGENTX_SERVER_SCRIPT:-}" ] && [ -z "$FRAMEWORK" ]; then
+    log "ERROR: FRAMEWORK unset and AGENTX_SERVER_SCRIPT not provided; cannot resolve the builtin server script"
+    exit 2
   fi
-  # Belt-and-suspenders: free the port even if the pid was unknown/stale, so a
-  # server that booted without a recorded pid can never leak the GPUs.
-  command -v fuser >/dev/null 2>&1 && fuser -k "${PORT}/tcp" 2>/dev/null || true
-}
-# Install the trap BEFORE booting the server: if the builtin starts the server
-# then returns nonzero, set -e aborts here and the EXIT trap still fires (the
-# port fallback reaps a server booted without a recorded pid) — no leak window.
-trap cleanup EXIT INT TERM
+  if [ ! -f "${BENCH_DIR}/${BUILTIN}" ]; then
+    log "ERROR: builtin server script not found: ${BENCH_DIR}/${BUILTIN}"
+    exit 2
+  fi
 
-log "delegating server boot -> ${BUILTIN} (PROFILE=${PROFILE:-0})"
-MAGPIE_RUN_PHASE=server MAGPIE_SERVER_PID_FILE="$PIDFILE" \
-  PORT="$PORT" RESULT_DIR="$RESULT_DIR" \
-  bash "${BENCH_DIR}/${BUILTIN}"
-SERVER_PID="$(cat "$PIDFILE" 2>/dev/null || true)"
+  # ── Server phase: delegate to builtin (correct boot + profiler per framework) ─
+  PIDFILE="${RESULT_DIR}/agentx_server.pid"
+  rm -f "$PIDFILE"
+  SERVER_PID=""  # set after boot; cleanup guards ${SERVER_PID:-} + a port fallback
 
-# Fail loud if the builtin server phase did not record a pid: proceeding would
-# run a benchmark against a server we cannot reliably tear down.
-if [ -z "${SERVER_PID:-}" ]; then
-  log "ERROR: builtin server phase wrote no pid to ${PIDFILE}; refusing to run (would risk a GPU leak)"
-  exit 3
+  cleanup() {
+    [ "${AGENTX_KEEP_SERVER:-0}" = "1" ] && return 0
+    if [ -n "${SERVER_PID:-}" ]; then
+      log "tearing down server pid=${SERVER_PID}"
+      kill -TERM "-${SERVER_PID}" 2>/dev/null || kill -TERM "${SERVER_PID}" 2>/dev/null || true
+      # vLLM can ignore/stall on SIGTERM (graceful shutdown hangs after a large
+      # profiler-trace flush), leaking the GPUs. Escalate to SIGKILL if the
+      # process group is still alive after a grace period.
+      _i=0
+      while [ "$_i" -lt 10 ]; do
+        kill -0 "${SERVER_PID}" 2>/dev/null || break
+        sleep 2
+        _i=$((_i + 1))
+      done
+      if kill -0 "${SERVER_PID}" 2>/dev/null; then
+        log "server survived SIGTERM after grace period; sending SIGKILL"
+        kill -KILL "-${SERVER_PID}" 2>/dev/null || kill -KILL "${SERVER_PID}" 2>/dev/null || true
+      fi
+    fi
+    # Belt-and-suspenders: free the port even if the pid was unknown/stale, so a
+    # server that booted without a recorded pid can never leak the GPUs.
+    command -v fuser >/dev/null 2>&1 && fuser -k "${PORT}/tcp" 2>/dev/null || true
+  }
+  # Install the trap BEFORE booting the server: if the builtin starts the server
+  # then returns nonzero, set -e aborts here and the EXIT trap still fires (the
+  # port fallback reaps a server booted without a recorded pid) — no leak window.
+  trap cleanup EXIT INT TERM
+
+  # ── Server-side keep-alive: the other half of AGENTX_HTTP_TCP_USER_TIMEOUT ────
+  # AIPerf pins ONE pooled keep-alive connection per agentic session and reuses it
+  # across that session's turns. The inter-turn gap in an agentic replay is a
+  # model think-time, not a client delay, and routinely exceeds a serving
+  # framework's default idle timeout -- vLLM's is 5s (envs.py:
+  # ``VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5``). When the gap crosses it the server
+  # closes the socket exactly as the client reuses it, and aiohttp surfaces
+  # ServerDisconnectedError. AIPerf escalates that to a TERMINAL warmup failure:
+  # "A root AgentX warmup request failed, so profiling was not started" -- against
+  # a completely healthy server, with no error anywhere in the server log.
+  #
+  # Measured here on a conc=16 K3 round: the server logged an orderly
+  # "Application shutdown complete" while warmup sat at 64/177, and the only
+  # symptom was a burst of ServerDisconnectedError on the client. Upstream hit the
+  # same failure (InferenceX #2371 aborted a c4 arm ~15 min in) and fixes it by
+  # raising the SERVER idle timeout to match the client's tolerance.
+  #
+  # The client half already ships above as AIPERF_HTTP_TCP_USER_TIMEOUT (900s);
+  # without this the two disagree by 180x. Exported per framework because the knob
+  # name is framework-specific, and only when the operator has not pinned one.
+  _KEEPALIVE_S="${AGENTX_HTTP_KEEP_ALIVE_S:-900}"
+  # Decide from BUILTIN, not from a concatenation. Matching against
+  # "${FRAMEWORK}${BUILTIN}" glued the two together, so FRAMEWORK=vllm with
+  # BUILTIN=sglang_mi300x.sh formed "vllmsglang_mi300x.sh", hit the *vllm* arm
+  # first, and left SGLang on its 5s default -- while this very line went on to
+  # report 900s. The server then closed the connection mid-warmup and the round
+  # died as "root AgentX warmup request failed", with the log actively denying the
+  # cause. BUILTIN is the script that actually boots, so it is the authority;
+  # FRAMEWORK is only a fallback for a script name that carries no framework, and
+  # a disagreement between them is worth saying out loud rather than resolving
+  # silently in either direction.
+  _ka_target=""
+  case "$BUILTIN" in
+    *vllm*) _ka_target=vllm ;;
+    *sglang*) _ka_target=sglang ;;
+    *)
+      case "${FRAMEWORK:-}" in
+        *vllm*) _ka_target=vllm ;;
+        *sglang*) _ka_target=sglang ;;
+      esac
+      ;;
+  esac
+  case "${FRAMEWORK:-}" in
+    "") ;;
+    *"$_ka_target"*) ;;
+    *)
+      [ -n "$_ka_target" ] && log "WARN FRAMEWORK=${FRAMEWORK} disagrees with the server script ${BUILTIN}; keep-alive follows the script"
+      ;;
+  esac
+  case "$_ka_target" in
+    vllm) export VLLM_HTTP_TIMEOUT_KEEP_ALIVE="${VLLM_HTTP_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
+    sglang) export SGLANG_TIMEOUT_KEEP_ALIVE="${SGLANG_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
+  esac
+  if [ -n "$_ka_target" ]; then
+    log "server keep-alive: ${_ka_target} ${_KEEPALIVE_S}s (client tcp-user-timeout ${AGENTX_HTTP_TCP_USER_TIMEOUT:-900000}ms)"
+  else
+    log "WARN no keep-alive knob for server script ${BUILTIN}; server idle timeout left at its default while the client tolerates ${AGENTX_HTTP_TCP_USER_TIMEOUT:-900000}ms"
+  fi
+
+  log "delegating server boot -> ${BUILTIN} (PROFILE=${PROFILE:-0})"
+  # InferenceX writes inferencex_result.json to $AGENTIC_OUTPUT_DIR and, when
+  # that is unset, to the checkout root ($INFMAX_CONTAINER_WORKSPACE). The
+  # pid-contract exception below only accepts the file from $RESULT_DIR, so an
+  # otherwise finished agentic replay is discarded as "wrote no pid". Point the
+  # default at this run's result dir; an explicit AGENTIC_OUTPUT_DIR still wins.
+  case "$BUILTIN" in
+    */agentic/*)
+      export AGENTIC_OUTPUT_DIR="${AGENTIC_OUTPUT_DIR:-$RESULT_DIR}"
+      ;;
+  esac
+  MAGPIE_RUN_PHASE=server MAGPIE_SERVER_PID_FILE="$PIDFILE" \
+    PORT="$PORT" RESULT_DIR="$RESULT_DIR" \
+    bash "${BENCH_DIR}/${BUILTIN}"
+  SERVER_PID="$(cat "$PIDFILE" 2>/dev/null || true)"
+
+  # Fail loud if the builtin server phase did not record a pid: proceeding would
+  # run a benchmark against a server we cannot reliably tear down.
+  #
+  # An agentic recipe is the exception: it ignores MAGPIE_RUN_PHASE and owns the
+  # whole lifecycle -- boot, replay, aggregate, teardown -- so it returns with
+  # the result already written and no server left to track. Replaying again here
+  # would drive a server that is already gone.
+  if [ -z "${SERVER_PID:-}" ] && [ -f "${RESULT_DIR}/${RESULT_FILENAME}.json" ]; then
+    case "$BUILTIN" in
+      */agentic/*)
+        _AG_RESULT="${RESULT_DIR}/${RESULT_FILENAME}.json"
+        log "agentic recipe ran its own replay; result at ${_AG_RESULT}"
+        # The agentic writer emits only InferenceX's NESTED leaderboard schema,
+        # but Magpie reads FLAT top-level keys, so returning as-is makes a
+        # healthy run read as 0.00 req/s. Derive the flat keys with the same
+        # map_aiperf.py the non-agentic path uses and UNION them in; existing
+        # (nested) keys always win, so the leaderboard schema is untouched.
+        _AG_PJ="$(find "$RESULT_DIR" -name 'profile_export_aiperf.json' -print -quit 2>/dev/null || true)"
+        if [ -n "$_AG_PJ" ]; then
+          _AG_FLAT="$(mktemp)"
+          if python3 "${BENCH_DIR}/map_aiperf.py" "$_AG_PJ" "$_AG_FLAT" >/dev/null 2>&1 \
+             && python3 - "$_AG_RESULT" "$_AG_FLAT" <<'PYMERGE'
+import json, os, sys
+res, flat = sys.argv[1], sys.argv[2]
+with open(res) as f: agentic = json.load(f)
+with open(flat) as f: mapped = json.load(f)
+merged = {**mapped, **agentic}
+assert all(merged[k] == agentic[k] for k in agentic)
+with open(res + ".tmp", "w") as f: json.dump(merged, f, indent=2)
+os.replace(res + ".tmp", res)
+PYMERGE
+          then
+            log "merged flat Magpie metrics into ${_AG_RESULT} (agentic schema preserved)"
+          else
+            log "WARN could not derive flat metrics; Magpie may read 0.00 req/s"
+          fi
+          rm -f "$_AG_FLAT"
+        else
+          log "WARN no profile_export_aiperf.json under ${RESULT_DIR}; Magpie may read 0.00 req/s"
+        fi
+        exit 0
+        ;;
+    esac
+  fi
+  if [ -z "${SERVER_PID:-}" ]; then
+    log "ERROR: builtin server phase wrote no pid to ${PIDFILE}; refusing to run (would risk a GPU leak)"
+    exit 3
+  fi
+  log "server up (pid=${SERVER_PID}) on port ${PORT}"
 fi
-log "server up (pid=${SERVER_PID}) on port ${PORT}"
 
 # ── Resolve served model name (a reused server may expose a different id) ─────
 SERVE_MODEL="$MODEL"
@@ -185,8 +344,50 @@ DURATION="${AGENTX_DURATION:-3600}"
 # period for them to drain before profiling starts. This replaces the old
 # --warmup-duration / --num-warmup-sessions pair, which the scenario does not
 # use and which measured a different thing entirely.
-WARMLANE="${AGENTX_WARMUP_REQUESTS_PER_LANE:-10}"
-WARMGRACE="${AGENTX_WARMUP_GRACE_PERIOD:-1800}"
+CANON_WARMUP_PER_LANE=10
+CANON_WARMUP_GRACE=1800
+WARMLANE="${AGENTX_WARMUP_REQUESTS_PER_LANE:-$CANON_WARMUP_PER_LANE}"
+WARMGRACE="${AGENTX_WARMUP_GRACE_PERIOD:-$CANON_WARMUP_GRACE}"
+
+# Validate every measurement-defining knob BEFORE it reaches a comparison, an
+# arithmetic expansion, or an awk program. Three concrete failures this closes,
+# all of them in knobs the orchestrator forwards verbatim from its own env:
+#
+#   * ``[ "$WARMLANE" -lt N ]`` with a non-integer ("1.5", "0x2") makes ``[``
+#     exit 2. On the left of ``&&`` that status is exempt from ``set -e``, so the
+#     non-canonical guard silently does not fire and an illegal configuration is
+#     stamped submission_valid=true -- exactly the hole the guard exists to plug.
+#   * a non-integer WARMGRACE reaches the ``$(( ))`` in the PROFILE branch and,
+#     under ``set -euo pipefail``, aborts a round that was otherwise complete.
+#   * FRT is interpolated into an awk PROGRAM BODY below. Unvalidated, a value
+#     like ``system("...")`` is executed by awk. Fixed both ways: passed as an
+#     awk -v variable (never as program text) AND rejected here.
+#
+# Fail loud rather than coerce: these values define what was measured, and this
+# file's whole contract is that a deviation can never be mistaken for a
+# leaderboard run. A typo must stop the round, not silently become canonical.
+_require_uint() {  # _require_uint NAME VALUE
+  case "$2" in
+    "" | *[!0-9]*)
+      log "ERROR: $1 must be a non-negative integer, got '$2'"
+      exit 2
+      ;;
+  esac
+}
+_require_decimal() {  # _require_decimal NAME VALUE -- digits with one optional dot
+  case "$2" in
+    "" | *[!0-9.]* | *.*.*)
+      log "ERROR: $1 must be a decimal number, got '$2'"
+      exit 2
+      ;;
+  esac
+}
+_require_uint AGENTX_WARMUP_REQUESTS_PER_LANE "$WARMLANE"
+_require_uint AGENTX_WARMUP_GRACE_PERIOD "$WARMGRACE"
+# DURATION is read above (before these helpers exist) but validated here, since
+# it reaches the same `$(( ))` in the profile-delay clamp and the same numeric
+# `[ ]` comparison in the canonical check below.
+_require_uint AGENTX_DURATION "$DURATION"
 
 # Per-trajectory-tree idle cap. NOT the same thing as the scenario's 10s
 # whole-system cap, and NOT scenario-locked -- upstream passes it explicitly
@@ -210,8 +411,19 @@ done < <(env)
 # Dataset load + reconstruct + mmap runs 4-14 min on the Weka corpus; aiperf's
 # stock 900s Configure-Profiling timeout trips under parallel /tmp contention.
 # aiperf validates SERVICE_PROFILE_CONFIGURE_TIMEOUT >= DATASET_CONFIGURATION_TIMEOUT.
-export AIPERF_DATASET_CONFIGURATION_TIMEOUT="${AGENTX_DATASET_CONFIG_TIMEOUT:-1800}"
-export AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT="${AGENTX_DATASET_CONFIG_TIMEOUT:-1800}"
+DATASET_CONFIG_TIMEOUT="${AGENTX_DATASET_CONFIG_TIMEOUT:-1800}"
+_require_uint AGENTX_DATASET_CONFIG_TIMEOUT "$DATASET_CONFIG_TIMEOUT"
+export AIPERF_DATASET_CONFIGURATION_TIMEOUT="$DATASET_CONFIG_TIMEOUT"
+export AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT="$DATASET_CONFIG_TIMEOUT"
+# TCP_USER_TIMEOUT bounds how long Linux tolerates an established connection
+# making no progress -- and an agentic turn against a long-context model makes
+# no TCP progress for as long as the server is prefill-bound. aiperf's stock
+# 30s therefore aborts otherwise-live connections mid-prefill, which surfaces
+# as a warmup failure with no server-side error to match it. Upstream's
+# Kimi-K3 and DSv4 recipes all export 900000 (15 min) for exactly this, and the
+# scrub above would drop an inherited copy, so it has to be re-stated here or
+# the request timeout is left to a bound two orders of magnitude too small.
+export AIPERF_HTTP_TCP_USER_TIMEOUT="${AGENTX_HTTP_TCP_USER_TIMEOUT:-900000}"
 # Pre-canned assistant replay (recorded responses drive later turns).
 export AIPERF_DATASET_WEKA_LIVE_ASSISTANT_RESPONSES="${AGENTX_LIVE_ASSISTANT:-0}"
 # Headless realtime metrics are opt-in on current aiperf, and the scrub above
@@ -220,13 +432,16 @@ export AIPERF_DATASET_WEKA_LIVE_ASSISTANT_RESPONSES="${AGENTX_LIVE_ASSISTANT:-0}
 # measurement window then emits nothing until it ends, so a run that is merely
 # slow is indistinguishable from one that has wedged. Upstream exports it too.
 export AIPERF_UI_REALTIME_METRICS_ENABLED="${AGENTX_REALTIME_METRICS:-true}"
+
+# aiperf scrapes the engine's /metrics itself, on by default, deriving the URL from --url. Its own default cadence is
+# 333ms, which is far tighter than the KV signal needs and six times what the Hyperloom-side collector settled on;
+# widen it so the round is not paying for readings nobody reads. There is no CLI flag for this, only the env var.
+export AIPERF_SERVER_METRICS_COLLECTION_INTERVAL="${AGENTX_SERVER_METRICS_INTERVAL_S:-2.0}"
 # Content-addressed mmap cache: on a hit this skips loader + tokenizer +
 # composer entirely, turning that 4-14 min into ~0 for every run after the
 # first. Soft default -- never required, so a bare environment still works.
 _mmap_default="${HF_HUB_CACHE:-${HOME:-/tmp}/.cache/huggingface/hub}/aiperf_dataset_mmap"
 export AIPERF_DATASET_MMAP_CACHE_DIR="${AGENTX_MMAP_CACHE_DIR:-$_mmap_default}"
-
-AIPERF="${AIPERF_BIN:-aiperf}"
 
 # Abort the run once the error rate exceeds this ratio. aiperf's own default is
 # None, i.e. the check is DISABLED -- without the flag a run whose requests
@@ -234,7 +449,11 @@ AIPERF="${AIPERF_BIN:-aiperf}"
 # map_aiperf.py carries no error counters. This is the safety net that turns a
 # server/client context mismatch into an honest failure instead of a fabricated
 # win on the surviving short sessions. Matches upstream's 0.10.
-FRT="${AGENTX_FAILED_REQUEST_THRESHOLD:-0.10}"
+# Declared as one value, like CANON_WARMUP_*/WARMLANE below, so the canonical
+# ratio and the default cannot drift apart.
+CANON_FRT=0.10
+FRT="${AGENTX_FAILED_REQUEST_THRESHOLD:-$CANON_FRT}"
+_require_decimal AGENTX_FAILED_REQUEST_THRESHOLD "$FRT"
 
 # ── Non-canonical workloads may run, but may never be submittable ────────────
 # The scenario enforces a 900s duration floor, so a shortened AGENTX_DURATION is
@@ -255,6 +474,16 @@ FRT="${AGENTX_FAILED_REQUEST_THRESHOLD:-0.10}"
 # leaderboard measurement -- by construction rather than by promise.
 CANON_ENTRIES=393
 CANON_DURATION=3600
+# Warmup is measurement-defining and was missing from this list until a measured
+# run exposed the gap: the agentic warmup is what puts the KV/radix cache under
+# realistic pressure before the window opens, so replaying at 1 request/lane
+# instead of 10 measures a materially emptier cache. It carries no scenario
+# marker either -- aiperf has no concept of "how much warmup is enough" -- so a
+# reduced-warmup round came back submission_valid=true and looked publishable.
+# On a 743B model the canonical 10/lane is a ~2h warmup, which is exactly when
+# an operator reaches for this knob, so the hole was reachable in practice.
+# (CANON_WARMUP_PER_LANE/CANON_WARMUP_GRACE are declared above, alongside
+# WARMLANE/WARMGRACE, so the canonical value and the default can't drift apart.)
 # The corpus this model family canonically replays, before any operator pin.
 # CANON_DS is resolved with the corpus above. The family whitelist behind it is
 # a derivation, not a registry -- a model upstream runs on the full corpus but
@@ -274,6 +503,32 @@ NONCANON=()
 [ "$DURATION" != "$CANON_DURATION" ] && NONCANON+=("duration=${DURATION}s(canonical ${CANON_DURATION}s)")
 [ -n "${AGENTX_MAX_CTX:-}" ] && NONCANON+=("client_context_cap=${AGENTX_MAX_CTX}")
 [ "${AGENTX_UNSAFE_OVERRIDE:-false}" = "true" ] && NONCANON+=("unsafe_override_forced")
+# `-lt`, not `!=`: only a *smaller* value under-pressures the cache or risks
+# truncating the drain before it finishes. A larger value is strictly more
+# warmup than canonical -- e.g. an operator raising the grace period so a
+# large model's warmup has room to drain -- and does not change what gets
+# replayed, so it must not be flagged as a deviation.
+[ "$WARMLANE" -lt "$CANON_WARMUP_PER_LANE" ] && \
+  NONCANON+=("warmup_per_lane=${WARMLANE}(canonical ${CANON_WARMUP_PER_LANE})")
+[ "$WARMGRACE" -lt "$CANON_WARMUP_GRACE" ] && \
+  NONCANON+=("warmup_grace=${WARMGRACE}s(canonical ${CANON_WARMUP_GRACE}s)")
+# The abort threshold is measurement-defining for the same reason warmup is:
+# raising it keeps a run alive that upstream's 0.10 would have aborted, and the
+# surviving requests are then mapped as a normal measurement. aiperf stamps no
+# scenario marker for it -- the threshold is the client's own safety net, not
+# something the scenario knows about -- so a loosened round comes back
+# submission_valid=true. Only a *larger* ratio deviates; tightening it below
+# canonical measures a strictly cleaner run. Compared with awk because the
+# ratio is a decimal, which `-lt` cannot handle.
+# -v, never string interpolation: the value is DATA to awk, so it can never be
+# read as program text. Interpolating it made any caller that can set an
+# AGENTX_* env var (the switch forwards them verbatim) able to run arbitrary
+# commands inside the container via ``system("...")`` -- and, because the
+# injected program returned a status of its own, the non-canonical guard below
+# also silently failed to fire.
+if awk -v f="$FRT" -v c="$CANON_FRT" 'BEGIN{exit !(f > c)}' 2>/dev/null; then
+  NONCANON+=("failed_request_threshold=${FRT}(canonical ${CANON_FRT})")
+fi
 
 SMOKE_ARGS=()
 if [ "$DURATION" -lt "$CANON_DURATION" ] || [ "${AGENTX_UNSAFE_OVERRIDE:-false}" = "true" ]; then
@@ -305,8 +560,35 @@ log "aiperf model=${SERVE_MODEL} corpus=${DS} entries=${NENT} conc=${CONC} durat
 #   --model              upstream uses ${SERVED_MODEL_NAME:-$MODEL}; the probed
 #                        /v1/models id is more robust when a server is reused.
 #   --max-context-length omitted (see the replay-context note above).
+AIPERF_PROGRESS_ARGS=()
+AIPERF_PROGRESS_PORT=""
+PHASE_GATE="${BENCH_DIR}/aiperf_phase_gate.py"
+
+# Enable AIPerf's progress API on every round, not just trace-capture ones. It
+# is the only authoritative source of phase timing: `phases.<name>.start_ns` is
+# stamped by aiperf when the phase actually begins, whereas the human-readable
+# log line the KV collector otherwise greps for is written afterwards and read
+# on the next watchdog poll, so warmup traffic lands in the measured window.
+#
+# The endpoint costs nothing when nobody polls it, and the address is published
+# as a file because the reader -- Hyperloom's watchdog -- is a different process
+# that only sees this round's result directory.
+if [ -f "$PHASE_GATE" ]; then
+  if AIPERF_PROGRESS_PORT="$(python3 "$PHASE_GATE" pick-port)"; then
+    AIPERF_PROGRESS_ARGS=(--api-host 127.0.0.1 --api-port "$AIPERF_PROGRESS_PORT")
+    printf '{"url": "http://127.0.0.1:%s", "schema_version": 1}\n' \
+      "$AIPERF_PROGRESS_PORT" > "${ART}/progress_api.json" 2>/dev/null \
+      || log "WARN could not publish the AIPerf progress API address"
+  else
+    AIPERF_PROGRESS_PORT=""
+    log "WARN failed to allocate an AIPerf progress API port; phase timing falls back to log markers"
+  fi
+else
+  log "WARN missing AIPerf phase gate ${PHASE_GATE}; phase timing falls back to log markers"
+fi
+
 run_aiperf() {
-  "$AIPERF" profile \
+  "${AIPERF_CMD[@]}" profile \
     --scenario inferencex-agentx-mvp \
     --url "http://localhost:${PORT}" \
     --endpoint /v1/chat/completions \
@@ -327,8 +609,10 @@ run_aiperf() {
     --stats-interval 30 \
     --slice-duration 1.0 \
     --no-gpu-telemetry \
+    --server-metrics-formats json csv parquet jsonl \
     ${CTX_ARGS[@]+"${CTX_ARGS[@]}"} \
     ${SMOKE_ARGS[@]+"${SMOKE_ARGS[@]}"} \
+    ${AIPERF_PROGRESS_ARGS[@]+"${AIPERF_PROGRESS_ARGS[@]}"} \
     --artifact-dir "$ART" --ui simple
 }
 
@@ -336,22 +620,178 @@ AIPERF_RC=0
 if [ "${PROFILE:-0}" = "1" ]; then
   # Single-node trace capture: aiperf (a generic client) never triggers vLLM's
   # /start_profile the way InferenceX's benchmark_serving.py does, so this script
-  # self-brackets a wall-clock profiling window around aiperf's steady state.
+  # self-brackets a bounded profiling window inside aiperf's measured phase.
   # The profiler is already ENABLED on the server (builtin server phase adds the
   # framework's --profiler-config/env when PROFILE=1); /start_profile begins
   # recording and /stop_profile flushes the trace to torch_profiler_dir for
   # TraceLens. Only fires under PROFILE=1, so measurement rounds pay no cost.
-  # Wall-clock delay measured from aiperf launch, so it has to clear everything
-  # that happens before steady state: corpus load/reconstruct (0 on an mmap cache
-  # hit, minutes on a miss), the per-lane cache warmup, and the warmup drain.
-  # 60s used to be enough when the client replayed a handful of short traces; at
-  # the upstream profile it lands squarely inside setup and captures nothing.
-  PWARM="${AGENTX_PROFILE_WARMUP_S:-2700}"
   PWIN="${AGENTX_PROFILE_WINDOW_S:-20}"
-  log "PROFILE=1: self-bracketing profile window (delay=${PWARM}s window=${PWIN}s)"
+  _require_uint AGENTX_PROFILE_WINDOW_S "$PWIN"
+  : "${AGENTX_CAPTURE_ID:?AGENTX_CAPTURE_ID required for AgentX profiling}"
+  : "${AGENTX_CAPTURE_STATUS_PATH:?AGENTX_CAPTURE_STATUS_PATH required for AgentX profiling}"
+  PHASE_WAIT_TIMEOUT="${AGENTX_PHASE_WAIT_TIMEOUT_S:-$(( DATASET_CONFIG_TIMEOUT + WARMGRACE + DURATION ))}"
+  _require_uint AGENTX_PHASE_WAIT_TIMEOUT_S "$PHASE_WAIT_TIMEOUT"
+  CAPTURE_STATUS_FILE="$AGENTX_CAPTURE_STATUS_PATH"
+  TRACE_CACHE_FILE="$(dirname "$CAPTURE_STATUS_FILE")/trace-validation-cache.json"
+  TRACE_FLUSH_BUDGET="${AGENTX_TRACE_FLUSH_TIMEOUT_S:-1800}"
+  case "$TRACE_FLUSH_BUDGET" in "" | *[!0-9]*) TRACE_FLUSH_BUDGET=1800 ;; esac
+  rm -f "$CAPTURE_STATUS_FILE"
+  PHASE_GATE_FAILURE_REASON="profiling_phase_unavailable"
+  _write_profile_capture_status() {
+    _status="$1"
+    _reason="$2"
+    _phase_start_ns="${3:-0}"
+    _decision="${4:-}"
+    if [ ! -f "$PHASE_GATE" ]; then
+      log "ERROR missing phase gate ${PHASE_GATE}; cannot write trace-capture status"
+      return 0
+    fi
+    if ! python3 "$PHASE_GATE" write-capture-status \
+      --output "$CAPTURE_STATUS_FILE" \
+      --capture-id "$AGENTX_CAPTURE_ID" \
+      --status "$_status" \
+      --reason "$_reason" \
+      --phase-start-ns "$_phase_start_ns" \
+      --requested-window-seconds "$PWIN" \
+      --decision-json "$_decision"; then
+      log "ERROR failed to write trace-capture status via ${PHASE_GATE}"
+    fi
+  }
+  if [ -n "${AGENTX_PROFILE_WARMUP_S:-}" ]; then
+    log "WARN AGENTX_PROFILE_WARMUP_S is ignored: profiling now starts from AIPerf's measured-phase signal"
+  fi
+  # The progress API is brought up for every round further above; capture only
+  # needs to know whether that succeeded, since it cannot gate a window without it.
+  if [ ! -f "$PHASE_GATE" ]; then
+    log "WARN missing AIPerf phase gate ${PHASE_GATE}; the measurement will run without trace capture"
+  elif [ -z "$AIPERF_PROGRESS_PORT" ]; then
+    PHASE_GATE_FAILURE_REASON="api_port_allocation_failed"
+    log "WARN no AIPerf progress API port; the measurement will run without trace capture"
+  fi
+  # A 200 OK from /stop_profile means the tracer was TOLD to stop, not that the
+  # trace is on disk. MEASURED on GLM-5.3 (sglang, TP=8, one 20s window): the
+  # first file appeared 350s after the call returned, all 8 ranks were present
+  # at 391s, and the set was still growing at 546s on its way to 5.1 GB -- the
+  # ranks serialise one after another. ``cleanup`` allows 20s before SIGKILL, so
+  # every previous capture was killed mid-write: 8 files of plausible size that
+  # all fail ``gzip -t``. That is the same corruption seen on a Kimi-K3 capture
+  # and blamed at the time on copying the files too early; it was this.
+  #
+  # Stability only schedules the integrity check: success requires fresh,
+  # fully readable GPU traces for every expected rank, not just a file count.
+  _trace_dirs() {
+    _seen="|"
+    # Configured profiler paths are valid before the server creates them; the
+    # RESULT_DIR fallback is only evidence when that directory already exists.
+    for d in "${SGLANG_TORCH_PROFILER_DIR:-}" "${VLLM_TORCH_PROFILER_DIR:-}"; do
+      [ -n "$d" ] || continue
+      case "$_seen" in *"|${d}|"*) continue ;; esac
+      printf '%s\n' "$d"
+      _seen="${_seen}${d}|"
+    done
+    d="${RESULT_DIR}/torch_trace"
+    if [ -d "$d" ]; then
+      case "$_seen" in *"|${d}|"*) ;; *) printf '%s\n' "$d" ;; esac
+    fi
+  }
+  _trace_command() {
+    local -a _dirs=()
+    local _dir
+    while IFS= read -r _dir; do
+      [ -n "$_dir" ] && _dirs+=(--trace-dir "$_dir")
+    done < <(_trace_dirs)
+    python3 "$PHASE_GATE" "$@" "${_dirs[@]}"
+  }
+  _trace_stat() {  # -> "<current count> <total bytes>"
+    _trace_command trace-stat --snapshot "$TRACE_SNAPSHOT"
+  }
+  _trace_remaining_ns() {
+    printf '%s\n' "$(( TRACE_FLUSH_DEADLINE_NS - $(date +%s%N) ))"
+  }
+  _trace_seconds() {
+    printf '%d.%09d' "$(( $1 / 1000000000 ))" "$(( $1 % 1000000000 ))"
+  }
+  _trace_complete() {
+    local _remaining_ns
+    [ -n "$TRACE_SNAPSHOT" ] || return 1
+    _remaining_ns="$(_trace_remaining_ns)"
+    [ "$_remaining_ns" -gt 0 ] || return 1
+    _trace_command traces-complete --snapshot "$TRACE_SNAPSHOT" --tp "${TP:-0}" \
+      --cache-file "$TRACE_CACHE_FILE" --timeout-seconds "$(_trace_seconds "$_remaining_ns")" || return 1
+    [ "$(_trace_remaining_ns)" -gt 0 ]
+  }
+  _wait_for_trace_flush() {
+    # Nothing was ever pointed at a directory, so there is nothing to flush.
+    # Without this the loop below can never reach its stable-sample condition
+    # (the count stays 0 forever) and burns the whole budget waiting for files
+    # that no profiler was configured to write.
+    if [ -z "$(_trace_dirs)" ]; then
+      log "no profiler output directory is configured; nothing to wait for"
+      return 2
+    fi
+    _want="${TP:-0}"
+    case "$_want" in "" | *[!0-9]*) _want=0 ;; esac
+    _budget="$TRACE_FLUSH_BUDGET"
+    # A separate, much shorter bound for "no file has appeared at all". A
+    # capture that produced zero files is a failed capture (a rejected
+    # /start_profile, a profiler that never armed) -- waiting out the full
+    # flush budget for it buys nothing. The first rank file landed at t+350s on
+    # the GLM-5.3 8-rank measurement, so the default leaves real margin.
+    _first="${AGENTX_TRACE_FIRST_FILE_TIMEOUT_S:-900}"
+    case "$_first" in "" | *[!0-9]*) _first=900 ;; esac
+    [ "$_first" -gt "$_budget" ] && _first="$_budget"
+    log "waiting for the profiler trace to finish writing (expect ${_want:-?} rank files, bound ${_budget}s, first-file bound ${_first}s)"
+    _prev=""; _stable=0; _cnt=0
+    _first_deadline_ns=$(( TRACE_FLUSH_START_NS + _first * 1000000000 ))
+    while :; do
+      _remaining_ns="$(_trace_remaining_ns)"
+      if [ "$_remaining_ns" -gt 0 ]; then
+        _sleep_ns=10000000000
+        [ "$_sleep_ns" -gt "$_remaining_ns" ] && _sleep_ns="$_remaining_ns"
+        if [ "$_cnt" -eq 0 ]; then
+          _first_remaining_ns=$(( _first_deadline_ns - $(date +%s%N) ))
+          [ "$_first_remaining_ns" -lt 0 ] && _first_remaining_ns=0
+          [ "$_sleep_ns" -gt "$_first_remaining_ns" ] && _sleep_ns="$_first_remaining_ns"
+        fi
+        [ "$_sleep_ns" -gt 0 ] && sleep "$(_trace_seconds "$_sleep_ns")"
+      fi
+      _now=$(_trace_stat) || return 4
+      _cnt="${_now%% *}"; _now_ns=$(date +%s%N)
+      if [ "$_cnt" -eq 0 ] && [ "$_now_ns" -ge "$_first_deadline_ns" ]; then
+        log "WARN no trace file appeared within ${_first}s of the trace completion check; treating the capture as empty. Check that /start_profile was accepted and that the profiler output dir is writable. The benchmark measurement remains available, but trace capture will be marked failed."
+        return 3
+      fi
+      [ "$_now_ns" -ge "$TRACE_FLUSH_DEADLINE_NS" ] && break
+      if [ "$_cnt" -gt 0 ] && [ "$_now" = "$_prev" ]; then
+        _stable=$((_stable + 1))
+      else
+        _stable=0
+      fi
+      # Three identical samples AND, when TP is known, one file per rank. The
+      # count check matters: ranks appear one at a time, so a set that is merely
+      # "not growing right now" can still be missing half its ranks.
+      if [ "$_stable" -ge 3 ] && [ "$_want" -gt 0 ] && [ "$_cnt" -ge "$_want" ] && _trace_complete; then
+        _el=$(( ( $(date +%s%N) - TRACE_FLUSH_START_NS ) / 1000000000 ))
+        log "trace flush complete after ${_el}s: ${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB"
+        return 0
+      fi
+      [ "$(_trace_remaining_ns)" -le 0 ] && break
+      _prev="$_now"
+    done
+    log "WARN trace flush did not settle within ${_budget}s (${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB, expected ${_want} ranks). The files are very likely TRUNCATED and will fail gzip -t; raise AGENTX_TRACE_FLUSH_TIMEOUT_S. The benchmark measurement remains available, but trace capture will be marked failed."
+    return 4
+  }
+  log "PROFILE=1: waiting for AIPerf's measured phase before opening a ${PWIN}s profile window"
   run_aiperf & APID=$!
-  sleep "$PWARM"
-  if kill -0 "$APID" 2>/dev/null; then
+  PHASE_START_NS=""
+  if [ -n "$AIPERF_PROGRESS_PORT" ] && PHASE_START_NS="$(
+    python3 "$PHASE_GATE" wait-phase \
+      --api-url "http://127.0.0.1:${AIPERF_PROGRESS_PORT}" \
+      --phase profiling \
+      --pid "$APID" \
+      --timeout-seconds "$PHASE_WAIT_TIMEOUT"
+  )"; then
+    log "AIPerf measured phase started (start_ns=${PHASE_START_NS})"
     # SGLang takes its capture bounds in the /start_profile BODY, not on the
     # serve line. Hyperloom computes them into $PROFILE_EXTRA_BODY, but only
     # InferenceX's own client ever posted it -- a bare POST leaves the capture
@@ -359,23 +799,71 @@ if [ "${PROFILE:-0}" = "1" ]; then
     # until the cgroup OOM-killer takes it out mid-run. Forward the body when
     # there is one; vLLM ignores it (its bounds ride on --profiler-config.*).
     _pbody="${PROFILE_EXTRA_BODY:-}"
+    AUTO_BOUNDED=0
     if [ -n "$_pbody" ] && [ "$_pbody" != "{}" ]; then
       _pstart=(-H "Content-Type: application/json" -d "$_pbody")
       log "start_profile: forwarding capture bounds ${_pbody}"
+      if python3 "$PHASE_GATE" is-auto-bounded --framework "${_ka_target:-${FRAMEWORK:-}}" --body "$_pbody"; then
+        AUTO_BOUNDED=1
+      fi
     else
       _pstart=()
     fi
+    TRACE_SNAPSHOT="$(_trace_command snapshot-traces)" || TRACE_SNAPSHOT=""
     if curl -sf -X POST "${_pstart[@]+"${_pstart[@]}"}" \
          "http://localhost:${PORT}/start_profile" >/dev/null 2>&1; then
       log "start_profile OK"
+      if CAPTURE_RESULT="$(
+        python3 "$PHASE_GATE" wait-capture-stop \
+          --api-url "http://127.0.0.1:${AIPERF_PROGRESS_PORT}" \
+          --phase profiling \
+          --pid "$APID" \
+          --max-window-seconds "$PWIN"
+      )"; then
+        log "profile capture stop decision: ${CAPTURE_RESULT}"
+      else
+        CAPTURE_RESULT='{"stop_reason":"capture_gate_failed"}'
+        log "WARN capture stop gate failed; stopping the profiler immediately"
+      fi
+      STOP_OK=0
+      FLUSH_RC=0
+      # Auto-stop validation and any subsequent flush share one completion budget.
+      TRACE_FLUSH_START_NS=$(date +%s%N)
+      TRACE_FLUSH_DEADLINE_NS=$(( TRACE_FLUSH_START_NS + TRACE_FLUSH_BUDGET * 1000000000 ))
+      # Native num_steps may already have stopped SGLang. Never POST a redundant
+      # stop unless current complete traces cannot prove that auto-stop finished.
+      if [ "$AUTO_BOUNDED" -eq 1 ] && _trace_complete; then
+        STOP_OK=1
+        log "profile auto-completed: current GPU traces cover all expected ranks; skipping stop_profile"
+      else
+        if curl -sf -X POST "http://localhost:${PORT}/stop_profile" >/dev/null 2>&1; then
+          STOP_OK=1
+          log "stop_profile OK"
+        else
+          log "WARN stop_profile failed"
+        fi
+        _wait_for_trace_flush || FLUSH_RC=$?
+      fi
+      if [ "$STOP_OK" -eq 1 ] && [ "$FLUSH_RC" -eq 0 ]; then
+        _write_profile_capture_status "succeeded" "capture_complete" "$PHASE_START_NS" "$CAPTURE_RESULT"
+      elif [ "$STOP_OK" -ne 1 ]; then
+        _write_profile_capture_status "failed" "stop_profile_failed" "$PHASE_START_NS" "$CAPTURE_RESULT"
+      else
+        case "$FLUSH_RC" in
+          2) FLUSH_REASON="profiler_output_unconfigured" ;;
+          3) FLUSH_REASON="trace_files_missing" ;;
+          4) FLUSH_REASON="trace_flush_timeout" ;;
+          *) FLUSH_REASON="trace_flush_failed" ;;
+        esac
+        _write_profile_capture_status "failed" "$FLUSH_REASON" "$PHASE_START_NS" "$CAPTURE_RESULT"
+      fi
     else
       log "WARN start_profile failed (trace may be empty)"
+      _write_profile_capture_status "failed" "start_profile_failed" "$PHASE_START_NS"
     fi
-    sleep "$PWIN"
-    curl -sf -X POST "http://localhost:${PORT}/stop_profile" >/dev/null 2>&1 \
-      && log "stop_profile OK" || log "WARN stop_profile failed"
   else
-    log "WARN aiperf finished before profile window opened; raise AGENTX_NUM_ENTRIES or lower AGENTX_PROFILE_WARMUP_S"
+    log "WARN AIPerf did not expose a measured phase; the measurement will finish without trace capture"
+    _write_profile_capture_status "failed" "$PHASE_GATE_FAILURE_REASON"
   fi
   wait "$APID" || AIPERF_RC=$?
 else

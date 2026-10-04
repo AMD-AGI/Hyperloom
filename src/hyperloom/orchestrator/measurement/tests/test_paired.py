@@ -37,9 +37,7 @@ class TestVerdicts:
         assert not v.candidate_wins
 
     def test_sign_disagreement_is_inconclusive(self):
-        # One pair says the candidate is faster, another says slower. The
-        # machine moved more than the change did; averaging would invent a
-        # winner out of that.
+        # One pair says the candidate is faster, another says slower.
         v = assess_paired([(100.0, 115.0), (100.0, 88.0)])
         assert not v.decisive and v.reason == "sign_disagreement"
         assert not v.candidate_wins
@@ -54,8 +52,7 @@ class TestVerdicts:
 
 class TestMedianNotMean:
     def test_one_disturbed_pair_does_not_carry_the_result(self):
-        # Three pairs agree on ~+4%; a fourth is wrecked by a neighbour landing
-        # on the box. The mean would be dragged far off; the median holds.
+        # Three pairs agree on ~+4%; a fourth is wrecked by a neighbour landing on the box.
         pairs = [(100.0, 104.0), (100.0, 104.5), (100.0, 103.5), (100.0, 160.0)]
         v = assess_paired(pairs)
         assert v.decisive and v.candidate_wins
@@ -65,6 +62,22 @@ class TestMedianNotMean:
         v = assess_paired([(100.0, 110.0), (100.0, 120.0)])
         assert v.deltas_pct == [10.0, 20.0]
         assert v.to_dict()["pairs"] == [[100.0, 110.0], [100.0, 120.0]]
+
+    def test_mutating_exported_evidence_does_not_change_the_verdict(self):
+        v = assess_paired([(100.0, 110.0), (100.0, 120.0)])
+        snapshot = v.to_dict()
+        snapshot["deltas_pct"][0] = -99.0
+        snapshot["pairs"][0][1] = 1.0
+        assert v.deltas_pct == [10.0, 20.0]
+        assert v.pairs == [(100.0, 110.0), (100.0, 120.0)]
+        assert v.to_dict()["deltas_pct"] == [10.0, 20.0]
+        assert v.candidate_wins
+
+    def test_exported_evidence_does_not_follow_later_verdict_list_mutation(self):
+        v = assess_paired([(100.0, 110.0), (100.0, 120.0)])
+        snapshot = v.to_dict()
+        v.deltas_pct.append(30.0)
+        assert snapshot["deltas_pct"] == [10.0, 20.0]
 
 
 class TestBadInput:

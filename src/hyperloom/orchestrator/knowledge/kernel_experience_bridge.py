@@ -31,11 +31,7 @@ class KernelExperienceStatus:
 
 @dataclass
 class KernelExperienceBridge:
-    """Configure KernelForge and collect its already-produced result metadata.
-
-    The bridge intentionally owns no kernel-experience CRUD, ranking, or local
-    knowledge implementation. KernelForge remains the data-plane owner.
-    """
+    """Configure KernelForge and collect its already-produced result metadata."""
 
     config: KnowledgeConfig
     audit_hook: Any = None
@@ -106,11 +102,7 @@ class KernelExperienceBridge:
     def _emit(self, event: dict[str, Any]) -> None:
         if not callable(self.audit_hook):
             return
-        try:
-            self.audit_hook(event)
-        except Exception:
-            # Audit is observational and cannot break a forge attempt.
-            return
+        self.audit_hook(event)
 
 
 __all__ = ["KernelExperienceBridge", "KernelExperienceStatus"]

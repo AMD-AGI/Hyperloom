@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Acceptance tests for the long-run optimization refinements.
-
-Covers the decaying acceptance curve, decaying-gain convergence, the absolute
-per-phase wall-clock cap (incl. the unbounded 14-day ceiling), the FRAMEWORK
-reloop target, and the trailing-window crash-rate emergency stop.
-
-All deterministic + offline.
-"""
+"""Acceptance tests for the long-run optimization refinements."""
 
 from __future__ import annotations
 
@@ -16,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -55,12 +49,18 @@ def _sweep_state(*, macro_cycle, cycle_delta, no_gain_streak):
         cumulative_gain_validated=5.0 + cycle_delta,
         no_gain_cycle_streak=no_gain_streak,
     )
+    st.last_conc_sweep = {"status": "succeeded"}
     return st
+
+
+def _reloop(st):
+    target, _reason, evidence = ps.compute_next_phase(st)
+    return target == ps.PHASE_FRAMEWORK_AGENT, evidence
 
 
 def test_subthreshold_gain_does_not_reset_streak():
     st = _sweep_state(macro_cycle=2, cycle_delta=0.2, no_gain_streak=1)
-    reloop, ev = ps.should_reloop_to_explore(st)
+    reloop, ev = _reloop(st)
     assert ev["min_gain_pct"] == pytest.approx(0.40)
     assert ev["cycle_gained"] is False
     assert ev["no_gain_cycle_streak_effective"] == 2
@@ -69,14 +69,14 @@ def test_subthreshold_gain_does_not_reset_streak():
 
 def test_three_subthreshold_cycles_converge():
     st = _sweep_state(macro_cycle=2, cycle_delta=0.1, no_gain_streak=2)
-    reloop, ev = ps.should_reloop_to_explore(st)
+    reloop, ev = _reloop(st)
     assert reloop is False
     assert ev["reloop_blocked"] == "global_converged"
 
 
 def test_suprathreshold_gain_resets_streak():
     st = _sweep_state(macro_cycle=2, cycle_delta=0.5, no_gain_streak=2)
-    reloop, ev = ps.should_reloop_to_explore(st)
+    reloop, ev = _reloop(st)
     assert ev["cycle_gained"] is True
     assert ev["no_gain_cycle_streak_effective"] == 0
     assert reloop is True
@@ -88,7 +88,7 @@ def test_all_saturated_directions_stop_reloop():
         "kernel_switch_specialist": {"saturated": True},
         "comm_specialist": {"saturated": True},
     }
-    reloop, ev = ps.should_reloop_to_explore(st)
+    reloop, ev = _reloop(st)
     assert reloop is False
     assert ev["reloop_blocked"] == "all_directions_saturated"
 
@@ -96,7 +96,7 @@ def test_all_saturated_directions_stop_reloop():
 def test_saturation_convergence_is_always_enabled():
     st = _sweep_state(macro_cycle=2, cycle_delta=1.0, no_gain_streak=0)
     st.saturated_directions = {"kernel_switch_specialist": {"saturated": True}}
-    reloop, ev = ps.should_reloop_to_explore(st)
+    reloop, ev = _reloop(st)
     assert reloop is False
     assert ev["reloop_blocked"] == "all_directions_saturated"
 
@@ -149,12 +149,11 @@ def test_bounded_explore_does_not_hit_absolute_cap():
     assert ps.exit_normal_optimize(st, now_unix=now) is None
 
 
-# Vocab: renamed reasons are phase-exit only, never terminal stop reasons
-def test_renamed_leverage_reasons_are_phase_exit_not_stop_reason():
-    assert ps.is_valid_phase_exit_reason("optimize_no_more_leverage")
-    assert ps.is_valid_phase_exit_reason("kernel_no_more_leverage")
-    assert not ps.is_valid_stop_reason("no_more_leverage")
-    assert not ps.is_valid_stop_reason("optimize_no_more_leverage")
+# Vocab: the leverage reasons close a phase, they never stop the run
+def test_leverage_reasons_are_not_stop_reasons():
+    assert not is_valid_stop_reason("no_more_leverage")
+    assert not is_valid_stop_reason("optimize_no_more_leverage")
+    assert not is_valid_stop_reason("kernel_no_more_leverage")
 
 
 # Trailing-window crash rate

@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from _bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source  # noqa: E402
+from _bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
 
 
 def _fake_repo(tmp_path: Path) -> Path:
@@ -57,8 +57,7 @@ def test_finds_named_benchmark_and_demotes_multigpu(tmp_path):
 
 
 def test_content_match_finds_test_when_name_lacks_op(tmp_path):
-    # silu_and_mul's benchmark is test_activation.py (name has no 'silu');
-    # content grep must still find it.
+    # silu_and_mul's benchmark is test_activation.py (name has no 'silu'); content grep must still find it.
     repo = _fake_repo(tmp_path)
     src = str(repo / "csrc" / "kernels" / "act.cu")
     files = find_benchmark_files("sgl_kernel::silu_and_mul", src)
@@ -72,3 +71,26 @@ def test_no_source_or_repo_returns_empty(tmp_path):
     lonely.parent.mkdir(parents=True)
     lonely.write_text("// x\n", encoding="utf-8")
     assert find_benchmark_files("aiter::rmsnorm", str(lonely)) == []
+
+
+def test_find_benchmark_files_inserts_double_dash(tmp_path, monkeypatch):
+    repo = _fake_repo(tmp_path)
+    captured: list[list[str]] = []
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+
+    def fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+        return _Proc()
+
+    import _bypass_benchmark_resolver as bbr
+
+    monkeypatch.setattr(bbr.subprocess, "run", fake_run)
+    bbr.find_benchmark_files("aiter::rmsnorm", str(repo / "csrc" / "kernels" / "rmsnorm_quant_kernels.cu"))
+    assert captured
+    cmd = captured[0]
+    assert "--" in cmd
+    dash = cmd.index("--")
+    assert cmd[dash + 1] == "rmsnorm"

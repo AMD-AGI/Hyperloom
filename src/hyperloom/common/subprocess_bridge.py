@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Subprocess JSON bridge primitives (canonical ``subprocess_bridge``).
-
-Single home for the "read a request JSON file / emit a response JSON to
-stdout and optionally a file / raise a typed adapter error" idiom shared by
-the sibling-agent runtime CLIs (critic, robustness, framework) that talk to
-their host (the Coordinator or the SKILL harness) over a subprocess JSON bridge.
-
-Zero first-party imports (stdlib only) so any package may depend on it
-without creating an import cycle.
-"""
+"""Subprocess JSON bridge primitives (canonical ``subprocess_bridge``)."""
 
 from __future__ import annotations
 
@@ -21,44 +12,17 @@ from typing import Any
 
 
 class RuntimeAdapterError(RuntimeError):
-    """Base class for subprocess-bridge runtime adapter errors.
-
-    Raised on contract violations (malformed request, missing
-    configuration, etc.) that the subprocess host should surface as a
-    non-zero exit code rather than an uncaught traceback.
-    """
+    """Base class for subprocess-bridge runtime adapter errors."""
 
 
 def read_json(path: str | Path) -> Any:
-    """Read a UTF-8 JSON file, returning ``None`` for a blank file.
-
-    Raises rather than degrading so a bridge caller exits non-zero; use
-    ``hyperloom.common.jsonio.read_json`` for the tolerant variant.
-
-    Args:
-        path: Path to the JSON file to read.
-
-    Returns:
-        The decoded JSON value, or ``None`` if the file is empty or
-        contains only whitespace.
-    """
+    """Read a UTF-8 JSON file, returning ``None`` for a blank file."""
     text = Path(path).read_text(encoding="utf-8")
     return json.loads(text) if text.strip() else None
 
 
 def emit_json(obj: Any, out: str | None, *, make_parents: bool = False) -> None:
-    """Serialise ``obj`` to JSON, writing to stdout and optionally a file.
-
-    Always writes to stdout; additionally writes to ``out`` when it is a
-    path other than ``"-"``/``None``.
-
-    Args:
-        obj: A JSON-serialisable value.
-        out: Output path, or ``"-"``/``None`` for stdout only.
-        make_parents: When ``True``, create ``Path(out).parent`` (``parents=True,
-            exist_ok=True``) before writing the ``out`` file. Defaults to
-            ``False``, so a missing parent raises ``FileNotFoundError``.
-    """
+    """Serialise ``obj`` to JSON, writing to stdout and optionally a file."""
     serialised = json.dumps(obj, ensure_ascii=False, indent=2)
     if out and out != "-":
         path = Path(out)

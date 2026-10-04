@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ``cli_backends``: per-role backend construction (mock/agent
-choices, kernel selection, validation errors), advisory proposal-scorer
-wiring and robustness option overrides."""
+"""Coverage for ``cli_backends``: per-role backend construction (mock/agent choices, kernel selection, validation errors), advisory proposal-scorer wiring."""
 
 from __future__ import annotations
 
@@ -12,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common import llm_config
 from hyperloom.inference_optimizer.cli import backends as clib
 
 
@@ -30,22 +29,24 @@ def _clear_provider_env(monkeypatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
+def _set_dual_protocol_gateway(monkeypatch) -> None:
+    """One gateway (e.g. DeepSeek) serving both protocols, each side with its own URL and key."""
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-deepseek-key")
+
+
 @pytest.fixture(autouse=True)
 def _stub_backends(monkeypatch):
     """Replace heavy backend classes with lightweight stubs (no SDK / network)."""
     monkeypatch.setattr(clib, "ClaudeBackend", lambda **kw: ("claude", kw))
     monkeypatch.setattr(clib, "CodexBackend", lambda **kw: ("codex", kw))
     monkeypatch.setattr(clib, "MockCriticBackend", lambda: ("mock_critic",))
-    monkeypatch.setattr(clib, "MockRobustnessBackend", lambda: ("mock_rob",))
     monkeypatch.setattr(
         clib,
         "CriticAgentBackend",
         lambda **kw: ("critic_agent", kw),
-    )
-    monkeypatch.setattr(
-        clib,
-        "RobustnessAgentBackend",
-        lambda **kw: ("rob_agent", kw),
     )
 
 
@@ -62,17 +63,19 @@ def _build(**over):
 
 @pytest.fixture(autouse=True)
 def _isolated_provider_env(monkeypatch):
-    """Every case in this module resolves backends from the environment, so the
-    machine running the suite must not be able to change the answer. Applied to
-    all of them, including the ones that assert a default."""
+    """Every case in this module resolves backends from the environment, so the machine running the suite must not be able to change the answer."""
     _clear_provider_env(monkeypatch)
+    # Orchestration selection ranks the installed SDKs after the credential, and which extras the suite happens to
+    # run with is exactly the kind of machine state this fixture exists to hold still.
+    monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: True)
+    monkeypatch.setattr(llm_config, "codex_agent_sdk_installed", lambda: True)
 
 
 def test_build_backends_mock_defaults() -> None:
     b = _build()
     assert b["orchestration"][0] == "claude"
     assert b["critic"] == ("mock_critic",)
-    assert b["robustness"] == ("mock_rob",)
+    assert set(b) == {"orchestration", "critic"}
     assert "kernel_agent" not in b
 
 
@@ -108,8 +111,7 @@ def test_build_backends_anthropic_only_uses_native_critic_agent(monkeypatch) -> 
 
 
 def test_build_backends_anthropic_only_refuses_to_degrade_without_root(monkeypatch) -> None:
-    """Silently swapping the critic for bare tool-use would drop KB priors and
-    session memory with no signal, so a missing root is now an error."""
+    """Silently swapping the critic for bare tool-use would drop KB priors and session memory with no signal, so a missing root is now an error."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
@@ -126,19 +128,19 @@ def test_build_backends_oauth_only_uses_anthropic_critic_protocol(monkeypatch) -
     assert b["critic"][1]["protocol"] == "anthropic"
 
 
-def test_build_backends_forced_anthropic_protocol_wins_over_dual_config(monkeypatch) -> None:
-    """With both sides configured, auto picks openai; the flag must override it."""
+def test_build_backends_forced_openai_protocol_wins_over_dual_config(monkeypatch) -> None:
+    """With both sides configured, auto follows the Claude orchestration; the flag must override it."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     auto = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
-    assert auto["critic"][1]["protocol"] == "openai"
+    assert auto["critic"][1]["protocol"] == "anthropic"
     forced = _build(
         critic_choice="agent",
         critic_agent_root=Path("/tmp/critic"),
-        critic_protocol="anthropic",
+        critic_protocol="openai",
     )
-    assert forced["critic"][1]["protocol"] == "anthropic"
+    assert forced["critic"][1]["protocol"] == "openai"
 
 
 def test_build_backends_forced_protocol_without_credential_fails(monkeypatch) -> None:
@@ -152,24 +154,21 @@ def test_build_backends_forced_protocol_without_credential_fails(monkeypatch) ->
         )
 
 
-def test_build_backends_forced_openai_protocol_accepts_gateway_key(monkeypatch) -> None:
-    """The review client resolves LLM_GATEWAY_KEY, so the flag must accept a
-    gateway-only host instead of rejecting a config that would have run."""
+def test_build_backends_forced_openai_protocol_rejects_a_retired_gateway_key(monkeypatch) -> None:
+    """``LLM_GATEWAY_KEY`` no longer authenticates the review client, so the host counts as uncredentialed."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
     monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-gateway-key")
-    b = _build(
-        critic_choice="agent",
-        critic_agent_root=Path("/tmp/critic"),
-        critic_protocol="openai",
-    )
-    assert b["critic"][1]["protocol"] == "openai"
+    with pytest.raises(ValueError, match="OpenAI-capable credential"):
+        _build(
+            critic_choice="agent",
+            critic_agent_root=Path("/tmp/critic"),
+            critic_protocol="openai",
+        )
 
 
 def test_build_backends_forced_openai_protocol_accepts_an_anthropic_gateway(monkeypatch) -> None:
-    """resolve_openai_client_config derives an OpenAI side from an Anthropic
-    gateway -- one host, two protocols, one token. The gate must ask it rather
-    than re-deriving a shorter key chain, which rejected this working config."""
+    """resolve_openai_client_config derives an OpenAI side from an Anthropic gateway -- one host, two protocols, one token."""
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gw.example.com/anthropic")
     monkeypatch.setenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), "gateway-bearer")
     b = _build(
@@ -183,7 +182,7 @@ def test_build_backends_forced_openai_protocol_accepts_an_anthropic_gateway(monk
 def test_build_backends_forced_openai_protocol_without_any_key_fails(monkeypatch) -> None:
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")), "sk-ant-oat01-fake")
-    with pytest.raises(ValueError, match="LLM_GATEWAY_KEY"):
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
         _build(
             critic_choice="agent",
             critic_agent_root=Path("/tmp/critic"),
@@ -192,8 +191,7 @@ def test_build_backends_forced_openai_protocol_without_any_key_fails(monkeypatch
 
 
 def test_build_backends_forced_anthropic_protocol_accepts_a_subscription_token(monkeypatch) -> None:
-    """The Claude CLI authenticates from the token alone, so the flag must
-    accept it instead of rejecting a config that would have run."""
+    """The Claude CLI authenticates from the token alone, so the flag must accept it instead of rejecting a config that would have run."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-token")
     b = _build(
@@ -204,10 +202,10 @@ def test_build_backends_forced_anthropic_protocol_accepts_a_subscription_token(m
     assert b["critic"][1]["protocol"] == "anthropic"
 
 
-def test_build_backends_forced_openai_protocol_rejects_bare_gateway_key(monkeypatch) -> None:
-    """A gateway key without OPENAI_BASE_URL would be sent to official OpenAI."""
+def test_build_backends_forced_openai_protocol_rejects_a_bare_anthropic_bearer(monkeypatch) -> None:
+    """An Anthropic bearer without a resolvable base URL would be sent to official OpenAI."""
     _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-gateway-key")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "ak-anthropic-key")
     with pytest.raises(ValueError, match="OPENAI_BASE_URL"):
         _build(
             critic_choice="agent",
@@ -228,34 +226,33 @@ def test_build_backends_rejects_unknown_critic_protocol(monkeypatch) -> None:
 
 
 def test_build_backends_dual_protocol_gateway_uses_standard_critic_agent(monkeypatch) -> None:
-    """A dual-protocol gateway (e.g. DeepSeek) is just "both sides configured".
-
-    Once normalized it carries an Anthropic AND an OpenAI endpoint, so it takes
-    the ordinary two-sided path rather than a provider-specific branch.
-    """
+    """A dual-protocol gateway (e.g. DeepSeek) is just \"both sides configured\"."""
     _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-deepseek-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-deepseek-key")
+    _set_dual_protocol_gateway(monkeypatch)
     b = _build(
         critic_choice="agent",
         critic_agent_root=Path("/tmp/critic"),
     )
     assert b["critic"][0] == "critic_agent"
-    # Both sides configured means auto lands on openai; the point of the test is
-    # that the gateway takes that ordinary path, so the protocol is the assertion.
-    assert b["critic"][1]["protocol"] == "openai"
-    assert b["critic"][1]["codex_model"] == "codex-y"
+    # Orchestration runs on Claude here, so auto reviews with the same model over the same protocol rather than with
+    # the other side's model.
+    assert b["critic"][1]["protocol"] == "anthropic"
+    assert b["critic"][1]["claude_model"] == "claude-x"
     assert "codex_client_factory" not in b["critic"][1]
 
 
-def test_backends_have_no_provider_specific_branch() -> None:
-    """The retired DeepSeek branch and its hardcoded client factory are gone.
+def test_build_backends_critic_follows_an_orchestration_on_codex(monkeypatch) -> None:
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+    monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: False)
+    b = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
+    assert b["orchestration"][0] == "codex"
+    assert b["critic"][1]["protocol"] == "openai"
+    assert b["critic"][1]["codex_model"] == "codex-y"
 
-    Names are read off the module rather than asserted absent blindly: a typo
-    in either string would make the old form of this test pass forever.
-    """
+
+def test_backends_have_no_provider_specific_branch() -> None:
+    """The retired DeepSeek branch and its hardcoded client factory are gone."""
     exported = set(vars(clib))
     assert "_deepseek_only" not in exported
     assert "_deepseek_openai_client_factory" not in exported
@@ -266,6 +263,7 @@ def test_backends_have_no_provider_specific_branch() -> None:
 def test_build_backends_openai_only_uses_codex_for_orchestration(monkeypatch) -> None:
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     b = _build(
         critic_choice="agent",
         critic_agent_root=Path("/tmp/critic"),
@@ -275,19 +273,21 @@ def test_build_backends_openai_only_uses_codex_for_orchestration(monkeypatch) ->
     assert "kernel_agent" not in b
 
 
-def test_build_backends_invalid_robustness_choice() -> None:
-    with pytest.raises(ValueError, match="robustness_choice"):
-        _build(robustness_choice="bogus")
+def test_build_backends_dual_config_keeps_claude_for_orchestration(monkeypatch) -> None:
+    """Both sides authenticate and both SDKs import, so the tie goes to Claude."""
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+
+    assert _build()["orchestration"][0] == "claude"
 
 
-def test_build_backends_robustness_agent_requires_root() -> None:
-    with pytest.raises(ValueError, match="robustness_agent_root"):
-        _build(robustness_choice="agent")
+def test_build_backends_dual_config_drops_claude_when_its_sdk_is_absent(monkeypatch) -> None:
+    """Same credentials, so only the importable SDK separates them -- and a ClaudeBackend that cannot import is not an answer."""
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+    monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: False)
 
-
-def test_build_backends_robustness_agent_with_root() -> None:
-    b = _build(robustness_choice="agent", robustness_agent_root=Path("/tmp/rob"))
-    assert b["robustness"][0] == "rob_agent"
+    assert _build()["orchestration"][0] == "codex"
 
 
 def test_proposal_scorer_disabled_by_default(monkeypatch) -> None:
@@ -373,28 +373,3 @@ def test_proposal_scorer_models_without_enable_stays_off(monkeypatch) -> None:
     assert args.proposal_scorer_models == "m1,m2"
     assert args.proposal_scoring is False
     assert clib._build_proposal_scorer(args) is None
-
-
-def test_robustness_options_single_node_minimal() -> None:
-    args = argparse.Namespace(
-        robustness_llm_rca=None,
-        nodes=1,
-        robustness_disable_local_probe=None,
-    )
-    opts = clib._build_robustness_options(args)
-    assert "auto_probe_inference_server" not in opts
-    assert "nodes" not in opts
-
-
-def test_robustness_options_multi_node_defaults() -> None:
-    args = argparse.Namespace(
-        robustness_llm_rca=True,
-        nodes=4,
-        robustness_disable_local_probe=None,
-    )
-    opts = clib._build_robustness_options(args)
-    assert opts["nodes"] == 4
-    assert opts["llm_rca_enabled"] is True
-    assert opts["disable_local_probe"] is True
-    assert opts["auto_probe_inference_server"] is False
-    assert opts["progress_no_levers_min_minutes"] == 60.0

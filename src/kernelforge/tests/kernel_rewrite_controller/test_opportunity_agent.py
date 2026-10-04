@@ -1,0 +1,686 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+import kernelforge.kernel_rewrite_controller.opportunity_agent as opportunity_agent_module
+from kernelforge.agent_backends.base import (
+    AgentCapabilities,
+    AgentProviderError,
+    AgentRunResult,
+    AgentRuntimeConfig,
+)
+from kernelforge.kernel_rewrite_controller import ControllerLayout, read_handoff
+from kernelforge.kernel_rewrite_controller.opportunity_agent import (
+    ANALYSIS_STATUS_COMPLETED,
+    ANALYSIS_STATUS_FAILED,
+    ANALYSIS_STATUS_TIMED_OUT,
+    OpportunityAnalysisAgent,
+    _AnalysisToolGuard,
+    _system_prompt,
+    run_opportunity_analysis,
+)
+from kernelforge.kernel_rewrite_controller.task_publisher import REJECTION_FILENAME
+from kernelforge.knowledge.kernel_identity import (
+    KernelRecipeIdentity,
+    kernel_recipe_canonical_id,
+)
+from kernelforge.tests.kernel_rewrite_controller.conftest import _git
+
+
+def _repo(tmp_path: Path) -> tuple[Path, str]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    (repo / "kernel.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "baseline")
+    return repo, _git(repo, "rev-parse", "HEAD")
+
+
+def _handoff(tmp_path: Path):
+    root = tmp_path / "handoff"
+    root.mkdir()
+    (root / "workload.md").write_text("# Workload\n", encoding="utf-8")
+    (root / "serving-context.md").write_text("# Serving Context\n", encoding="utf-8")
+    (root / "trace-evidence.md").write_text("# Trace Evidence\n", encoding="utf-8")
+    return read_handoff(root)
+
+
+def _write_staged_task(staging_root: Path, repo: Path) -> str:
+    identity = {
+        "producer": "forge-loop",
+        "kernel_name": "kernel",
+        "framework": "standalone",
+        "framework_version": "unknown",
+        "backend": "triton",
+        "gpu": "mi355x",
+    }
+    operator_id = kernel_recipe_canonical_id(KernelRecipeIdentity.from_mapping(identity))
+    task = staging_root / "draft"
+    task.mkdir(parents=True)
+    (task / "driver.py").write_text("print('SNR: 100 dB')\n", encoding="utf-8")
+    (task / "task.json").write_text(
+        json.dumps(
+            {
+                "identity": identity,
+                "base_commit": "",
+                "repo_root": str(repo),
+                "kernel_path": "kernel.py",
+                "operator_name": "kernel",
+                "driver_path": "driver.py",
+                "source_files": ["kernel.py"],
+                "target_functions": ["kernel"],
+                "shape_cases": [],
+                "priority": 0,
+                "reason": "hot operator",
+                "evidence": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return operator_id
+
+
+def _repair_staged_task(draft: Path, repo: Path) -> None:
+    identity = {
+        "producer": "forge-loop",
+        "kernel_name": "kernel",
+        "framework": "standalone",
+        "framework_version": "unknown",
+        "backend": "triton",
+        "gpu": "mi355x",
+    }
+    (draft / REJECTION_FILENAME).unlink(missing_ok=True)
+    (draft / "task.json").write_text(
+        json.dumps(
+            {
+                "identity": identity,
+                "base_commit": "",
+                "repo_root": str(repo.resolve()),
+                "kernel_path": "kernel.py",
+                "operator_name": "kernel",
+                "driver_path": "driver.py",
+                "source_files": ["kernel.py"],
+                "target_functions": ["kernel"],
+                "shape_cases": [],
+                "priority": 0,
+                "reason": "hot operator",
+                "evidence": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+class _Backend:
+    name = "fake"
+    runtime = AgentRuntimeConfig(provider="fake", model="fake")
+    capabilities = AgentCapabilities(writable=True, stop_hooks=True)
+
+    def __init__(
+        self,
+        callback,
+        *,
+        error: Exception | None = None,
+        sleep: float = 0.0,
+        result: AgentRunResult | None = None,
+    ):
+        self.callback = callback
+        self.error = error
+        self.sleep = sleep
+        self.result = result
+        self.spec = None
+
+    async def run(self, spec, usage=None):
+        self.spec = spec
+        self.callback(Path(spec.cwd))
+        if self.sleep:
+            await asyncio.sleep(self.sleep)
+        if self.error is not None:
+            raise self.error
+        return self.result if self.result is not None else AgentRunResult(text="done")
+
+
+class _HooklessResumableBackend(_Backend):
+    capabilities = AgentCapabilities(writable=True, stop_hooks=False, resumable=True)
+
+    def __init__(self, callback, *, on_resume=None, resume_error: Exception | None = None):
+        super().__init__(callback)
+        self.on_resume = on_resume
+        self.resume_error = resume_error
+        self.resumed: list[str] = []
+
+    async def run(self, spec, usage=None):
+        self.spec = spec
+        self.callback(Path(spec.cwd))
+        return AgentRunResult(text="done", end_reason="agent_stopped", session_id="session-1")
+
+    async def resume(self, spec, session_id, feedback, usage=None):
+        self.resumed.append(feedback)
+        if self.resume_error is not None:
+            raise self.resume_error
+        if self.on_resume is not None:
+            self.on_resume(Path(spec.cwd))
+        return AgentRunResult(text="continued", end_reason="agent_stopped", session_id=session_id)
+
+
+class _ResumableBackend(_Backend):
+    capabilities = AgentCapabilities(writable=True, stop_hooks=True, resumable=True)
+
+    def __init__(self, callback, *, first: AgentRunResult):
+        super().__init__(callback)
+        self.first = first
+        self.resumed: list[tuple[str, str]] = []
+
+    async def run(self, spec, usage=None):
+        self.spec = spec
+        self.callback(Path(spec.cwd))
+        return self.first
+
+    async def resume(self, spec, session_id, feedback, usage=None):
+        self.resumed.append((session_id, feedback))
+        return AgentRunResult(text="continued", end_reason="agent_stopped")
+
+
+def test_a_provider_stream_failure_is_not_reported_as_an_answer(tmp_path: Path) -> None:
+    """``no_opportunity`` is a verdict, so a session that measured nothing fails."""
+    layout = ControllerLayout(tmp_path / "output")
+    backend = _Backend(
+        lambda _staging: None,
+        result=AgentRunResult(
+            text="",
+            end_reason="sdk_error",
+            stderr_tail="JSON message exceeded maximum buffer size of 1048576 bytes",
+        ),
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.status == ANALYSIS_STATUS_FAILED
+    assert "maximum buffer size" in result.reason
+    assert result.published_task_count == 0
+
+
+def test_a_resumable_stream_failure_continues_the_same_session(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo, _base_commit = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    monkeypatch.setenv("FORGE_AGENT_API_RETRY_BASE_SEC", "0")
+    backend = _ResumableBackend(
+        lambda staging: _write_staged_task(staging, repo),
+        first=AgentRunResult(text="", end_reason="sdk_error", session_id="session-1"),
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert [session for session, _prompt in backend.resumed] == ["session-1"]
+    assert result.status == ANALYSIS_STATUS_COMPLETED
+    assert result.published_task_count == 1
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input", "expected"),
+    [
+        ("Grep", {"pattern": "moe"}, {"pattern": "moe", "head_limit": 200}),
+        ("Grep", {"pattern": "moe", "head_limit": 5000}, {"pattern": "moe", "head_limit": 200}),
+        ("Read", {"file_path": "/server.log"}, {"file_path": "/server.log", "limit": 2000}),
+    ],
+)
+def test_an_unbounded_investigation_read_is_capped(tool_name, tool_input, expected) -> None:
+    decision = asyncio.run(
+        opportunity_agent_module._cap_investigation_result(
+            {"tool_name": tool_name, "tool_input": tool_input},
+            "",
+            None,
+        )
+    )
+
+    assert decision["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert decision["hookSpecificOutput"]["updatedInput"] == expected
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input"),
+    [
+        ("Grep", {"pattern": "moe", "head_limit": 20}),
+        ("Read", {"file_path": "/kernel.py", "limit": 40}),
+        ("Glob", {"glob_pattern": "**/*.py"}),
+    ],
+)
+def test_an_already_bounded_call_is_left_alone(tool_name, tool_input) -> None:
+    """An untouched call returns ``{}`` so the normal permission flow decides it."""
+    decision = asyncio.run(
+        opportunity_agent_module._cap_investigation_result(
+            {"tool_name": tool_name, "tool_input": tool_input},
+            "",
+            None,
+        )
+    )
+
+    assert decision == {}
+
+
+def test_agent_publishes_complete_tasks_and_pins_repo_head(tmp_path: Path) -> None:
+    repo, base_commit = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    backend = _Backend(lambda staging: _write_staged_task(staging, repo))
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.status == ANALYSIS_STATUS_COMPLETED
+    assert result.published_task_count == 1
+    task_dirs = [path for path in layout.tasks_root.iterdir() if not path.name.startswith(".")]
+    assert len(task_dirs) == 1
+    payload = json.loads((task_dirs[0] / "task.json").read_text(encoding="utf-8"))
+    assert payload["base_commit"] == base_commit
+    assert payload["driver_path"] == "driver.py"
+    assert backend.spec.tool_policy.shell is False
+    assert backend.spec.hooks is not None
+
+
+def test_backend_model_probe_receives_an_existing_agent_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    backend = _Backend(lambda _staging: None)
+    runtime = AgentRuntimeConfig(provider="fake", model="fake")
+    config = SimpleNamespace(
+        max_turns=20,
+        agent_runtime=lambda: runtime,
+    )
+
+    monkeypatch.setattr(
+        opportunity_agent_module.Config,
+        "from_env",
+        lambda **_kwargs: config,
+    )
+    monkeypatch.setattr(
+        opportunity_agent_module,
+        "with_writable_sandbox",
+        lambda selected: selected,
+    )
+
+    def _create_backend(selected_runtime, *, probe_cwd):
+        assert selected_runtime is runtime
+        assert Path(probe_cwd).is_dir()
+        return backend
+
+    monkeypatch.setattr(
+        opportunity_agent_module,
+        "create_registered_backend",
+        _create_backend,
+    )
+
+    result = run_opportunity_analysis(
+        handoff=_handoff(tmp_path),
+        layout=layout,
+        controller_deadline_unix=time.time() + 60,
+    )
+
+    assert result.status == ANALYSIS_STATUS_COMPLETED
+    assert (layout.agent_root / "analysis-result.json").is_file()
+
+
+def test_agent_staging_always_gets_a_private_git_baseline(tmp_path: Path) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+
+    def _assert_git_workspace(staging: Path) -> None:
+        assert _git(staging, "rev-parse", "--show-toplevel") == str(staging.resolve())
+
+    backend = _Backend(_assert_git_workspace)
+    backend.capabilities = AgentCapabilities(
+        writable=True,
+        stop_hooks=True,
+        workspace_guard=True,
+        requires_workspace_cwd=False,
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.status == ANALYSIS_STATUS_COMPLETED
+
+
+def test_agent_prompt_spells_out_nested_identity_and_evidence_list() -> None:
+    prompt = _system_prompt()
+
+    assert '"identity": {' in prompt
+    assert '"producer": "forge-loop"' in prompt
+    assert '"evidence": [{' in prompt
+    assert "inspect it first" in prompt
+    assert "inspect every" in prompt
+    assert "never return no_opportunity solely" in prompt
+    assert "<measured|corroborated|inferred>" in prompt
+    assert "Never invent a GPU-time percentage" in prompt
+    assert "current end-to-end inference workload" in prompt
+    assert "available only as a binary" in prompt
+    assert "largest measured end-to-end GPU-time share" in prompt
+    assert "Derive driver cases from the current workload" in prompt
+    assert "correctness and performance must invoke the same operator" in prompt
+    assert "CUDA/HIP graph replays over preallocated inputs" in prompt
+    assert "Do not place identity fields at the top level" in prompt
+    assert '"gpu": "mi355x"' in prompt
+    assert "registered backend" in prompt
+    assert "one task cannot modify multiple repos" in prompt
+    assert "case_ms: <case> <ms>" in prompt
+    assert "CUDA/HIP graph replays" in prompt
+    assert "driver.py --profile-run" in prompt
+    assert "before investigating secondary candidates" in prompt
+
+
+def test_the_prompt_does_not_talk_a_collective_out_of_being_published() -> None:
+    """Every rule that could read as "skip the comms operator" is answered.
+
+    A collective reaches the analyst looking exactly like the thing the
+    editable-source rule exists to reject: a mangled symbol inside a vendor
+    comms library, split across rows that each understate it, carrying no
+    shapes. Each of those is a true statement about the evidence and a wrong
+    reason to drop the operator, so the prompt has to answer all of them where
+    they are read -- a carve-out further down is read after the decision.
+    """
+    prompt = _system_prompt()
+
+    # The editable-source rule must carry its own exception rather than leave
+    # it to a later rule.
+    editable_rule = prompt.split("2. Publish only operators with editable")[1].split("\n3.")[0]
+    assert "that alone does not disqualify it" in editable_rule
+    assert "which algorithm is chosen" in editable_rule
+
+    # The layer around the kernel is a target in its own right.
+    assert "rewriting that layer is a real optimization, not a workaround" in prompt
+    assert "the dispatch\n   layer that selects and configures it is" in prompt
+
+    # Leading with the skip is what made the exception easy to miss.
+    assert "A communication operator is a first-class target" in prompt
+    assert "Skip a collective only after" in prompt
+
+    # Ranking one prorated row against a fused GEMM is not like-for-like.
+    assert "nccl_summary_total_ms" in prompt
+
+    # Missing shapes are how the evidence arrives, not a defect in it.
+    assert "arrive with no shapes" in prompt
+    assert "is not\n    a reason to skip the candidate" in prompt
+
+
+def test_agent_failure_still_publishes_a_complete_task(tmp_path: Path) -> None:
+    repo, _base_commit = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    backend = _Backend(
+        lambda staging: _write_staged_task(staging, repo),
+        error=RuntimeError("agent crashed"),
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.status == ANALYSIS_STATUS_FAILED
+    assert "agent crashed" in result.reason
+    assert result.published_task_count == 1
+
+
+def test_agent_timeout_keeps_tasks_written_before_cancellation(tmp_path: Path) -> None:
+    repo, _base_commit = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    backend = _Backend(
+        lambda staging: _write_staged_task(staging, repo),
+        sleep=60,
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=1, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.status == ANALYSIS_STATUS_TIMED_OUT
+    assert result.published_task_count == 1
+
+
+def test_incomplete_staging_directory_is_not_published(tmp_path: Path) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+
+    def _incomplete(staging: Path) -> None:
+        task = staging / "draft"
+        task.mkdir(parents=True)
+        (task / "task.json").write_text("{}", encoding="utf-8")
+
+    agent = OpportunityAnalysisAgent(
+        backend=_Backend(_incomplete),
+        timeout_sec=10,
+        max_turns=20,
+    )
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.published_task_count == 0
+    assert not list(layout.tasks_root.glob("*")) if layout.tasks_root.exists() else True
+
+
+def test_analysis_requires_hooks_or_a_resumable_provider() -> None:
+    backend = _Backend(lambda _staging: None)
+    backend.capabilities = AgentCapabilities(writable=True, stop_hooks=False, resumable=False)
+
+    with pytest.raises(ValueError, match="tool hooks or a resumable session"):
+        OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+
+def test_analysis_accepts_a_resumable_hookless_provider() -> None:
+    backend = _Backend(lambda _staging: None)
+    backend.capabilities = AgentCapabilities(writable=True, stop_hooks=False, resumable=True)
+
+    OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+
+def test_write_hook_allows_staging_and_denies_other_paths(tmp_path: Path) -> None:
+    protection = _AnalysisToolGuard(tmp_path / "staging")
+    allowed = asyncio.run(
+        protection._on_pre_write(
+            {"tool_input": {"file_path": "draft/task.json"}},
+            "",
+            None,
+        )
+    )
+    denied = asyncio.run(
+        protection._on_pre_write(
+            {"tool_input": {"file_path": str(tmp_path / "source.py")}},
+            "",
+            None,
+        )
+    )
+
+    assert allowed == {}
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def _refused_draft(staging_root: Path, name: str = "draft") -> Path:
+    draft = staging_root / name
+    draft.mkdir(parents=True)
+    (draft / REJECTION_FILENAME).write_text(
+        json.dumps({"draft": name, "reason": "identity.backend must be registered"}),
+        encoding="utf-8",
+    )
+    return draft
+
+
+def test_the_session_cannot_end_while_a_draft_stands_refused(tmp_path: Path) -> None:
+    """Validation is out of process, so stopping is the agent's last chance to hear."""
+    staging = tmp_path / "staging"
+    _refused_draft(staging)
+    protection = _AnalysisToolGuard(staging)
+
+    blocked = asyncio.run(protection._on_stop({}, "", None))
+
+    assert blocked["decision"] == "block"
+    assert "identity.backend must be registered" in blocked["reason"]
+    assert REJECTION_FILENAME in blocked["reason"]
+
+
+def test_a_session_with_nothing_refused_ends_normally(tmp_path: Path) -> None:
+    protection = _AnalysisToolGuard(tmp_path / "staging")
+
+    assert asyncio.run(protection._on_stop({}, "", None)) == {}
+
+
+def test_stop_denials_are_capped_so_an_unfixable_draft_cannot_eat_the_budget(
+    tmp_path: Path,
+) -> None:
+    staging = tmp_path / "staging"
+    _refused_draft(staging)
+    protection = _AnalysisToolGuard(staging, max_stop_denials=2)
+
+    decisions = [asyncio.run(protection._on_stop({}, "", None)) for _ in range(3)]
+
+    assert [decision.get("decision") for decision in decisions] == ["block", "block", None]
+
+
+def test_the_prompt_names_the_file_refusals_are_written_to() -> None:
+    """The agent can only read the note if the contract tells it the name."""
+    assert REJECTION_FILENAME in _system_prompt()
+
+
+def test_shell_and_subagent_tools_are_explicitly_denied(tmp_path: Path) -> None:
+    protection = _AnalysisToolGuard(tmp_path / "staging")
+    matchers = {hook.matcher for hook in protection.hooks().pre_tool_use}
+
+    denied = asyncio.run(
+        protection._on_pre_disallowed_tool(
+            {"tool_name": "Bash", "tool_input": {"command": "ls"}},
+            "",
+            None,
+        )
+    )
+
+    assert "Bash|Shell|Task.*|Agent" in matchers
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "direct read, search" in denied["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_the_analysis_records_what_it_spent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that publishes nothing still pays, and had been reporting zero."""
+
+    class _SpendingBackend(_Backend):
+        async def run(self, spec, usage=None):
+            self.spec = spec
+            self.callback(Path(spec.cwd))
+            if usage is not None:
+                usage.add_usage(
+                    {"input_tokens": 11, "output_tokens": 22},
+                    total_cost_usd=0.5,
+                )
+            return AgentRunResult(text="", end_reason="agent_stopped")
+
+    layout = ControllerLayout(tmp_path / "output")
+    handoff = _handoff(tmp_path)
+    agent = OpportunityAnalysisAgent(
+        backend=_SpendingBackend(lambda _cwd: None),
+        timeout_sec=30,
+        max_turns=5,
+    )
+
+    outcome = asyncio.run(agent.run(handoff=handoff, layout=layout))
+
+    assert outcome.llm_usage["calls"] == 1
+    assert outcome.llm_usage["input_tokens"] == 11
+    assert outcome.llm_usage["output_tokens"] == 22
+    assert outcome.agent_model == "fake"
+
+
+def _invalid_staged_draft(staging_root: Path) -> None:
+    draft = staging_root / "draft"
+    draft.mkdir(parents=True)
+    (draft / "task.json").write_text("{}", encoding="utf-8")
+    (draft / "driver.py").write_text("print('x')\n", encoding="utf-8")
+
+
+def test_hookless_resume_republication_clears_a_corrected_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The outer Stop loop must republish between resumes, not reuse stale rejection.json."""
+    repo, _commit = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    monkeypatch.setenv("FORGE_AGENT_API_RETRY_BASE_SEC", "0")
+
+    def _fix_on_resume(staging: Path) -> None:
+        _repair_staged_task(staging / "draft", repo)
+
+    backend = _HooklessResumableBackend(
+        lambda staging: _invalid_staged_draft(staging),
+        on_resume=_fix_on_resume,
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=30, max_turns=5)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert len(backend.resumed) == 1
+    assert result.status == ANALYSIS_STATUS_COMPLETED
+    assert result.published_task_count == 1
+
+
+def test_hookless_resume_stops_when_the_analysis_deadline_is_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    monkeypatch.setenv("FORGE_AGENT_API_RETRY_BASE_SEC", "0")
+
+    class _SlowHookless(_HooklessResumableBackend):
+        async def resume(self, spec, session_id, feedback, usage=None):
+            await asyncio.sleep(0.6)
+            return await super().resume(spec, session_id, feedback, usage=usage)
+
+    backend = _SlowHookless(
+        lambda staging: _refused_draft(staging),
+        on_resume=lambda _staging: None,
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=1, max_turns=5)
+
+    started = time.monotonic()
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.5
+    assert result.status == ANALYSIS_STATUS_TIMED_OUT
+    assert len(backend.resumed) <= 2
+
+
+def test_hookless_resume_failure_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    monkeypatch.setenv("FORGE_AGENT_API_RETRY_BASE_SEC", "0")
+    backend = _HooklessResumableBackend(
+        lambda staging: _refused_draft(staging),
+        resume_error=AgentProviderError("resume unavailable"),
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=5)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.status == ANALYSIS_STATUS_FAILED
+    assert "resume unavailable" in result.reason
+    assert len(backend.resumed) == 1
+
+
+def test_an_analysis_that_called_nothing_reports_no_usage(tmp_path: Path) -> None:
+    """``calls == 0`` is "not observed", which is not a claim of zero spend."""
+    layout = ControllerLayout(tmp_path / "output")
+    agent = OpportunityAnalysisAgent(
+        backend=_Backend(lambda _cwd: None),
+        timeout_sec=30,
+        max_turns=5,
+    )
+
+    outcome = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert outcome.llm_usage == {}

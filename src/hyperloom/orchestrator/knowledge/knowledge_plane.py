@@ -6,16 +6,13 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .config import KnowledgeConfig, KnowledgeStoreMode
 from .kernel_experience_bridge import KernelExperienceBridge
 
-from .pr_monitor import (
-    DEFAULT_PR_MONITOR_MCP_URL,
-    PRMonitorClient,
-)
+from .pr_monitor import PRMonitorClient
 
 
 log = logging.getLogger(__name__)
@@ -23,14 +20,10 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class KnowledgePlane:
-    """Single facade for the knowledge sources.
-
-    Lives for one Coordinator run. Tracks whether the PR Monitor MCP is wired
-    so the specialist runner can gate the corresponding tool group.
-    """
+    """Single facade for the knowledge sources."""
 
     pr_monitor: PRMonitorClient | None = None
-    pr_monitor_mcp_url: str = DEFAULT_PR_MONITOR_MCP_URL
+    pr_monitor_mcp_url: str = ""
     recipe_kb: Any = None
     config: KnowledgeConfig | None = None
     kernel_experience: KernelExperienceBridge | None = None
@@ -41,25 +34,20 @@ class KnowledgePlane:
         cls,
         *,
         pr_monitor: PRMonitorClient | None = None,
-        pr_monitor_mcp_url: str = DEFAULT_PR_MONITOR_MCP_URL,
+        pr_monitor_mcp_url: str = "",
         recipe_kb: Any = None,
         config: KnowledgeConfig | None = None,
         kb_disabled: bool = False,
     ) -> "KnowledgePlane":
-        """Construct a plane from injected clients and config.
-
-        Args:
-            pr_monitor (PRMonitorClient | None): Optional PR Monitor client
-                (used only to check ``enabled`` for tool whitelisting).
-            pr_monitor_mcp_url (str): MCP URL advertised to specialists.
-
-        Returns:
-            KnowledgePlane: The constructed facade.
-        """
+        """Construct a plane from injected clients and config."""
         resolved = config or KnowledgeConfig.from_env()
+        resolved = replace(
+            resolved,
+            pr_monitor_enabled=bool(pr_monitor is not None and pr_monitor.enabled),
+        )
         return cls(
             pr_monitor=pr_monitor,
-            pr_monitor_mcp_url=(pr_monitor_mcp_url or DEFAULT_PR_MONITOR_MCP_URL).strip(),
+            pr_monitor_mcp_url=(pr_monitor_mcp_url or "").strip(),
             recipe_kb=recipe_kb,
             config=resolved,
             kernel_experience=(None if kb_disabled else KernelExperienceBridge(resolved)),
@@ -89,22 +77,11 @@ class KnowledgePlane:
 
     @property
     def pr_monitor_enabled(self) -> bool:
-        """Whether the PR Monitor client is wired and enabled.
-
-        Returns:
-            bool: ``True`` when a PR Monitor client is present and enabled.
-        """
+        """Whether the PR Monitor client is wired and enabled."""
         return self.pr_monitor is not None and self.pr_monitor.enabled
 
     def specialist_mcp_url(self) -> str:
-        """MCP URL to advertise in the specialist tool whitelist.
-
-        Returns ``""`` when PR Monitor is disabled so the runner can elide
-        the ``mcp__pr_monitor__*`` tool block.
-
-        Returns:
-            The PR Monitor MCP URL, or ``""`` when PR Monitor is disabled.
-        """
+        """MCP URL to advertise in the specialist tool whitelist."""
         if not self.pr_monitor_enabled:
             return ""
         return self.pr_monitor_mcp_url

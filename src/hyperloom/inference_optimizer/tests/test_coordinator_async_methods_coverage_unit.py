@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for Coordinator async/stateful methods invoked directly against a
-real (mock-backed) Coordinator: SharedState promotion across task kinds, prompt
-composition per agent, advisory blocks, research-scout harvest, the
-orchestration checkpoint guard, strategy-change escalation, specialist
-autosubmit routing and warm-up, and per-task/per-variant fact journaling."""
+"""Coverage for Coordinator async/stateful methods invoked directly against a real (mock-backed) Coordinator: SharedState promotion across task kinds, prompt composition per agent, advisory blocks, research-scout harvest, the orchestration checkpoint guard, strategy-change escalation, specialist autosubmit routing and warm-up, and per-task/per-variant fact journaling."""
 
 from __future__ import annotations
 
@@ -13,7 +9,7 @@ import time
 
 import pytest
 
-from hyperloom.orchestrator.roles.mcp_context_tools import CONTEXT_TOOL_NAMES
+from hyperloom.common.deadline import Deadline
 from hyperloom.orchestrator.roles import (
     Backend,
     MockBackend,
@@ -34,7 +30,7 @@ def _silent_plan() -> ScriptedPlan:
 
 
 def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
 
 
 @pytest.fixture
@@ -63,7 +59,9 @@ async def test_promote_baseline_sets_anchor_and_current_best(coord: Coordinator)
     )
     assert coord.shared_state.baseline_tput == 1000.0
     assert coord.shared_state.baseline_failure_streak == 0
-    assert coord.shared_state.baseline_arg_error_streak == 0
+    # The arg-error streak is not a boot-failure streak and a promotion does not
+    # clear it; nothing counts into it again once an anchor exists.
+    assert coord.shared_state.baseline_arg_error_streak == 1
     assert coord.shared_state.current_best["action"] == "baseline"
     assert coord.shared_state.current_best["tput"] == 1000.0
     assert coord.shared_state.current_best["cold_tput"] == 900.0
@@ -89,12 +87,7 @@ async def test_promote_single_round_baseline_clears_stale_warm_runtime(coord: Co
 
 @pytest.mark.asyncio
 async def test_promote_baseline_carries_the_boot_and_benchmark_split(coord: Coordinator) -> None:
-    """The two figures that let later work be priced on what it will spend.
-
-    The whole round and the part of it that ran after the server was ready; the
-    difference between them is what booting this workload costs, and every
-    variant boots again.
-    """
+    """The two figures that let later work be priced on what it will spend."""
     await coord._promote_to_shared_state(
         "baseline",
         {
@@ -132,13 +125,7 @@ async def test_promote_baseline_clears_a_split_a_later_round_did_not_report(
 async def test_promote_baseline_carries_a_dropped_hot_pass_to_the_session(
     coord: Coordinator,
 ) -> None:
-    """The marker drives a session-level decision, so it has to reach the session.
-
-    PRELUDE routes to CLOSE on it rather than optimizing against a denominator
-    that was never the baseline, and it is cleared by the next baseline that does
-    land a hot figure -- otherwise a session resumed with a fresh clock stays
-    condemned by the earlier leg's shortfall.
-    """
+    """The marker drives a session-level decision, so it has to reach the session."""
     await coord._promote_to_shared_state(
         "baseline",
         {
@@ -163,16 +150,7 @@ async def test_promote_baseline_carries_a_dropped_hot_pass_to_the_session(
 
 
 class TestAHotPassCorrectsAColdAnchor:
-    """The escape from the marker, without which PRELUDE cannot finish.
-
-    A cold anchor holds the phase open until a hot pass replaces it. The rule
-    that keeps a later, lower re-baseline from displacing the anchor would reject
-    that replacement whenever the cold figure reads higher -- which it does
-    whenever the "cold" pass was not really cold, its weights already in page
-    cache and its kernels already compiled by an earlier run. The session would
-    then re-measure whole baseline rounds until the clock killed it, each one
-    landing the very measurement that was supposed to release it.
-    """
+    """The escape from the marker, without which PRELUDE cannot finish."""
 
     @pytest.mark.asyncio
     async def test_a_lower_hot_figure_replaces_a_marked_cold_one(self, coord: Coordinator) -> None:
@@ -198,12 +176,7 @@ class TestAHotPassCorrectsAColdAnchor:
         self,
         coord: Coordinator,
     ) -> None:
-        """Only a hot pass corrects the anchor; another cold one is just noisier.
-
-        Two cold figures are comparable to each other, so the ordinary rule
-        applies and the better one stands. Nothing has been corrected, so the
-        marker stays and the phase stays open.
-        """
+        """Only a hot pass corrects the anchor; another cold one is just noisier."""
         coord.shared_state.baseline_tput = 1000.0
         coord.shared_state.baseline_measure_round_dropped = True
 
@@ -271,12 +244,43 @@ async def test_unpromotable_baseline_fast_arg_errors_stop_after_two(
 
 
 @pytest.mark.asyncio
+async def test_unpromotable_baseline_agentx_preflight_stops_immediately(
+    coord: Coordinator,
+) -> None:
+    """A missing AgentX client is a supply gap, not a code gap."""
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+        AGENTX_PREFLIGHT_ERROR_CLASS,
+    )
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
+
+    task = Task(
+        task_id="baseline-agentx-preflight",
+        kind="baseline",
+        state="running",
+        params={"config_path": "baseline.yaml"},
+        idempotency_key="baseline-agentx-preflight",
+    )
+    result = {
+        "status": "failed",
+        "error_class": AGENTX_PREFLIGHT_ERROR_CLASS,
+        "error": "AgentX preflight failed: HYPERLOOM_AGENTX is on but aiperf was not found.",
+    }
+
+    await coord._handle_unpromotable_result(task, result)
+
+    assert coord.shared_state.stop_reason == AGENTX_PREFLIGHT_STOP_REASON
+    # No launch log is stashed: the FRAMEWORK pump reads a non-blank log as "there is something here to author
+    # against", and there is not.
+    assert not (coord.shared_state.enablement.launch_log or "").strip()
+    # The slow-baseline retry budget is untouched -- retrying cannot help.
+    assert coord.shared_state.baseline_failure_streak == 0
+
+
+@pytest.mark.asyncio
 async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
     coord: Coordinator,
 ) -> None:
-    """Mixed subprocess_nonzero + fast_exit_arg_error failures must still
-    fast-fail once 3 total baseline failures accrue, even though neither
-    per-class streak reaches its own threshold."""
+    """Mixed subprocess_nonzero + fast_exit_arg_error failures must still fast-fail once 3 total baseline failures accrue, even though neither per-class streak reaches its own threshold."""
 
     def _task() -> Task:
         return Task(
@@ -336,6 +340,22 @@ async def test_promote_profile_failed_clears_trace(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
+async def test_promote_profile_does_not_reuse_unready_merged_trace(coord: Coordinator) -> None:
+    coord.shared_state.last_profile_trace = "/tmp/old.trace.json"
+    await coord._promote_to_shared_state(
+        "profile",
+        {
+            "status": "failed",
+            "error_class": "primary_rank_trace_missing",
+            "trace_input_ready": False,
+            "trace_files": ["/tmp/merged.trace.json.gz"],
+        },
+    )
+    assert coord.shared_state.last_profile_status == "failed"
+    assert coord.shared_state.last_profile_trace == ""
+
+
+@pytest.mark.asyncio
 async def test_promote_roofline_succeeded_and_skipped_and_failed(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
     await coord._promote_to_shared_state("roofline", {"status": "succeeded"})
@@ -369,10 +389,9 @@ async def test_promote_explore_with_winner(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.asyncio
 async def test_compose_prompt_orchestration_with_time_budget(coord: Coordinator) -> None:
     coord._run_started_monotonic = time.monotonic() - 60.0
-    coord._run_deadline = time.monotonic() + 600.0
+    coord._run_deadline = Deadline.after(600.0)
     coord.shared_state.max_minutes = 60
     out = await coord._compose_prompt("orchestration")
     assert "SESSION_DIR=" in out
@@ -383,7 +402,7 @@ async def test_compose_prompt_orchestration_with_time_budget(coord: Coordinator)
 @pytest.mark.asyncio
 async def test_compose_prompt_orchestration_deadline_imminent_warning(coord: Coordinator) -> None:
     coord._run_started_monotonic = time.monotonic() - 60.0
-    coord._run_deadline = time.monotonic() + 60.0
+    coord._run_deadline = Deadline.after(60.0)
     coord.shared_state.max_minutes = 60
     coord.shared_state.closing_phase = False
     out = await coord._compose_prompt("orchestration")
@@ -391,13 +410,11 @@ async def test_compose_prompt_orchestration_deadline_imminent_warning(coord: Coo
 
 
 @pytest.mark.asyncio
-async def test_compose_prompt_robustness_and_kernel(coord: Coordinator) -> None:
+async def test_compose_prompt_kernel(coord: Coordinator) -> None:
     coord._run_started_monotonic = time.monotonic() - 60.0
-    coord._run_deadline = time.monotonic() + 600.0
+    coord._run_deadline = Deadline.after(600.0)
     coord.shared_state.max_minutes = 60
-    out_rob = await coord._compose_prompt("robustness")
     out_k = await coord._compose_prompt("kernel_agent")
-    assert "SESSION_DIR=" in out_rob
     assert "SESSION_DIR=" in out_k
 
 
@@ -416,68 +433,16 @@ def test_priors_match_advisory_block_no_variants(coord: Coordinator) -> None:
     assert coord._priors_match_advisory_block() == ""
 
 
-# -- _harvest_research_scout -----------------------------------------------
-@pytest.mark.asyncio
-async def test_harvest_research_scout_empty_and_populated(
-    coord: Coordinator,
-    monkeypatch,
-) -> None:
-    from hyperloom.orchestrator.knowledge import research_hints
-
-    events: list[str] = []
-
-    async def checkpoint(**kwargs):
-        assert kwargs["force"] is True
-        events.append("checkpoint")
-        return False
-
-    def reset():
-        events.append("reset")
-        coord._orchestration_seeded = False
-
-    monkeypatch.setattr(coord, "_maybe_checkpoint_orchestration", checkpoint)
-    monkeypatch.setattr(coord, "_reset_orchestration_conversation", reset)
-
-    await coord._harvest_research_scout({})
-    coord._orchestration_seeded = True
-    await coord._harvest_research_scout(
-        {
-            "new_findings": [
-                {
-                    "what": "enable aiter",
-                    "source": "https://example.test/aiter",
-                    "domain_tags": ["serving"],
-                }
-            ],
-            "proposal_set": [
-                {
-                    "name": "aiter",
-                    "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
-                    "source_evidence": ["https://example.test/aiter"],
-                }
-            ],
-        }
-    )
-    assert research_hints.load_hints(coord.session_dir)[0]["what"] == "enable aiter"
-    assert "https://example.test/aiter" in coord.shared_state.research_scout_seen_pr_ids
-    assert coord._orchestration_seeded is False
-    assert events == ["checkpoint", "reset", "checkpoint", "reset"]
+# -- _harvest_specialist_findings -----------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_harvest_research_scout_does_not_persist_llm_competitor_target(coord: Coordinator) -> None:
-    """LLM-authored competitor numbers must never be persisted as a consumable
-    competitor target.
-
-    Previously the scout could emit ``competitor_target`` numbers that were
-    written to ``competitor_target.json`` and then consumed by the advisory
-    gap block, masquerading as InferenceX-measured data. The scout is now a
-    text-hints-only collector, so no competitor target must be persisted.
-    """
+async def test_harvest_specialist_findings_does_not_persist_llm_competitor_target(coord: Coordinator) -> None:
+    """LLM-authored competitor numbers must never be persisted as a consumable competitor target."""
     from hyperloom.inference_optimizer.session import session_paths
-    from hyperloom.orchestrator.knowledge import research_hints
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
-    await coord._harvest_research_scout(
+    await coord._harvest_specialist_findings(
         {
             "new_findings": [{"what": "try mtp", "source": "https://pr/1"}],
             "competitor_target": {
@@ -492,13 +457,6 @@ async def test_harvest_research_scout_does_not_persist_llm_competitor_target(coo
 
     assert not session_paths.competitor_target_json(coord.session_dir).exists()
     assert research_hints.load_competitor_target(coord.session_dir) is None
-
-
-# -- _maybe_checkpoint_orchestration ---------------------------------------
-@pytest.mark.asyncio
-async def test_maybe_checkpoint_orchestration_non_conversational(coord: Coordinator) -> None:
-    took = await coord._maybe_checkpoint_orchestration(tick=1, phase_changed=False)
-    assert took is False
 
 
 # -- _handle_escalate_strategy_change --------------------------------------
@@ -517,7 +475,7 @@ async def test_escalate_invalid_hint_broadcasts_only(coord: Coordinator) -> None
 
 @pytest.mark.asyncio
 async def test_escalate_extend_explore_budget(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.phases.machine_state import (
+    from hyperloom.orchestrator.state.shared_state import (
         ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
     )
 
@@ -530,7 +488,7 @@ async def test_escalate_extend_explore_budget(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_escalate_extend_kernel_budget(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.phases.machine_state import (
+    from hyperloom.orchestrator.state.shared_state import (
         ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
     )
 
@@ -551,24 +509,10 @@ async def test_escalate_skip_to_kernel_deferred(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
-async def test_escalate_skip_to_close_suppressed_pre_enablement(coord: Coordinator) -> None:
-    """Q2: skip_to_close is dropped while a not-yet-enabled run is still enabling."""
-    coord.shared_state.phase = "PRELUDE"
-    coord.shared_state.baseline_tput = 0.0
-    coord.shared_state.enablement.succeeded = False
-    await coord._handle_escalate_strategy_change(
-        "orchestration",
-        _escalate("skip_to_close"),
-    )
-    assert coord.shared_state.pending_escalate_hint != "skip_to_close"
-
-
-@pytest.mark.asyncio
-async def test_escalate_skip_to_close_allowed_after_enablement(coord: Coordinator) -> None:
-    """skip_to_close is honored once a baseline exists (guard no longer active)."""
+async def test_escalate_skip_to_close_sets_pending_hint(coord: Coordinator) -> None:
+    """skip_to_close reaches pending_escalate_hint (no suppression guard any more)."""
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.baseline_tput = 1234.0
-    coord.shared_state.enablement.succeeded = True
     await coord._handle_escalate_strategy_change(
         "orchestration",
         _escalate("skip_to_close"),
@@ -576,13 +520,13 @@ async def test_escalate_skip_to_close_allowed_after_enablement(coord: Coordinato
     assert coord.shared_state.pending_escalate_hint == "skip_to_close"
 
 
-# -- _maybe_autosubmit_specialist_patches ----------------------------------
+# -- maybe_autosubmit_specialist_patches ----------------------------------
 @pytest.mark.asyncio
 async def test_autosubmit_skipped_when_no_patches(coord: Coordinator) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
 
     task = Task(task_id="spec-1", kind="specialist", state="running", params={}, idempotency_key="k1")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": []},
     )
@@ -593,7 +537,7 @@ async def test_autosubmit_skipped_when_files_missing(coord: Coordinator) -> None
     from hyperloom.orchestrator.state.task_registry import Task
 
     task = Task(task_id="spec-2", kind="specialist", state="running", params={}, idempotency_key="k2")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": ["ghost.py"]},
     )
@@ -624,7 +568,7 @@ async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> 
         idempotency_key="k3",
     )
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -643,10 +587,7 @@ async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> 
 
 @pytest.mark.asyncio
 async def test_autosubmit_creates_proposal_for_artifacts_only(coord: Coordinator) -> None:
-    """A specialist with NO source patch but a non-diff tuned artifact
-    (``artifacts_written`` with a real file in its worktree) is a routable
-    deliverable: autosubmit must create an integrate_patch proposal so the
-    artifact-install channel runs."""
+    """A specialist with NO source patch but a non-diff tuned artifact (``artifacts_written`` with a real file in its worktree) is a routable deliverable: autosubmit must create an integrate_patch proposal so the artifact-install channel runs."""
     from hyperloom.orchestrator.state.task_registry import Task
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
@@ -656,7 +597,7 @@ async def test_autosubmit_creates_proposal_for_artifacts_only(coord: Coordinator
     (art_dir / "tuned_fmoe.csv").write_text("cu_num,token\n304,16\n", encoding="utf-8")
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="ka1")
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": [],
@@ -675,10 +616,7 @@ async def test_autosubmit_creates_proposal_for_artifacts_only(coord: Coordinator
 
 @pytest.mark.asyncio
 async def test_autosubmit_skipped_when_artifact_source_outside_sandbox(coord: Coordinator, tmp_path) -> None:
-    """An ``artifacts_written`` entry whose ``source`` is an ABSOLUTE path
-    OUTSIDE the specialist sandbox must NOT be routable: integrate_patch would
-    reject it as ``source_outside_workspace``, so autosubmit must not create a
-    proposal for it."""
+    """An ``artifacts_written`` entry whose ``source`` is an ABSOLUTE path OUTSIDE the specialist sandbox must NOT be routable: integrate_patch would reject it as ``source_outside_workspace``, so autosubmit must not create a proposal for it."""
     from hyperloom.orchestrator.state.task_registry import Task
 
     outside = tmp_path / "outside.csv"
@@ -691,7 +629,7 @@ async def test_autosubmit_skipped_when_artifact_source_outside_sandbox(coord: Co
         idempotency_key="ka2",
     )
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": [],
@@ -712,10 +650,7 @@ async def test_autosubmit_skipped_when_artifact_source_outside_sandbox(coord: Co
 async def test_autosubmit_skipped_when_artifact_source_relative_escapes_sandbox(
     coord: Coordinator,
 ) -> None:
-    """A RELATIVE artifact ``source`` that escapes the specialist sandbox via
-    ``..`` must NOT be routable, even though it resolves to a real file:
-    integrate_patch rejects it as ``source_outside_workspace``, so autosubmit
-    must not route it."""
+    """A RELATIVE artifact ``source`` that escapes the specialist sandbox via ``..`` must NOT be routable, even though it resolves to a real file: integrate_patch rejects it as ``source_outside_workspace``, so autosubmit must not route it."""
     import os
 
     from hyperloom.orchestrator.state.task_registry import Task
@@ -729,7 +664,7 @@ async def test_autosubmit_skipped_when_artifact_source_relative_escapes_sandbox(
     rel_escape = os.path.relpath(outside, worktree)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="ka3")
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": [],
@@ -742,10 +677,7 @@ async def test_autosubmit_skipped_when_artifact_source_relative_escapes_sandbox(
 
 @pytest.mark.asyncio
 async def test_autosubmit_routes_relative_source_in_workspace_parent(coord: Coordinator) -> None:
-    """A relative artifact ``source`` that climbs out of ``worktree`` via ``..``
-    but lands INSIDE the workspace is still contained, so it MUST remain
-    routable: the sandbox check must not reject a legitimate ``../file`` source
-    that resolves within an allowed base."""
+    """A relative artifact ``source`` that climbs out of ``worktree`` via ``..`` but lands INSIDE the workspace is still contained, so it MUST remain routable: the sandbox check must not reject a legitimate ``../file`` source that resolves within an allowed base."""
     from hyperloom.orchestrator.state.task_registry import Task
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
@@ -755,7 +687,7 @@ async def test_autosubmit_routes_relative_source_in_workspace_parent(coord: Coor
     (spec_root / "tuned.csv").write_text("cu_num\n304\n", encoding="utf-8")
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="ka4")
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": [],
@@ -786,10 +718,8 @@ def test_record_fact_per_task_keep_and_revert(coord: Coordinator) -> None:
 
 
 def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator) -> None:
-    """A reverted integrate_patch reaches the fact hook with kept=True
-    (``status != failed`` is promotable), yet the journal must record REVERT
-    with the REAL measured delta (from delta_pct)."""
-    from hyperloom.orchestrator.state.optimization_journal import (
+    """A reverted integrate_patch reaches the fact hook with kept=True (``status != failed`` is promotable), yet the journal must record REVERT with the REAL measured delta (from delta_pct)."""
+    from hyperloom.inference_optimizer.session.optimization_journal import (
         OUTCOME_REVERT,
     )
     from hyperloom.orchestrator.state.task_registry import Task
@@ -820,7 +750,7 @@ def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator
 
 
 def test_record_fact_kept_integrate_patch_journals_keep(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.state.optimization_journal import OUTCOME_KEEP
+    from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_KEEP
     from hyperloom.orchestrator.state.task_registry import Task
 
     task = Task(
@@ -842,8 +772,7 @@ def test_record_fact_kept_integrate_patch_journals_keep(coord: Coordinator) -> N
 
 
 def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coordinator) -> None:
-    """A reverted integrate_patch stays promotable so it still runs the
-    pending_integrate cleanup in _promote_to_shared_state."""
+    """A reverted integrate_patch stays promotable so it still runs the pending_integrate cleanup in _promote_to_shared_state."""
     assert coord._is_promotable_result("integrate_patch", {"status": "reverted"}) is True
     assert coord._is_promotable_result("integrate_patch", {"status": "failed"}) is False
 
@@ -859,11 +788,7 @@ async def test_compose_prompt_orchestration_gain_objective(coord: Coordinator) -
 
 @pytest.mark.asyncio
 async def test_compose_prompt_renders_the_gap_it_just_computed(coord: Coordinator) -> None:
-    """The first SEED must carry the live gap, not the value left from a prior tick.
-
-    The stale value has to be absent as well as the live one present: the bug was
-    a shared-state dump assembled before the recompute, which renders both.
-    """
+    """The first SEED must carry the live gap, not the value left from a prior tick."""
     coord._current_objective = TargetGainObjective(target_gain_pct=20.0)
     coord.shared_state.cumulative_gain_validated = 5.0
     text = await coord._compose_prompt("orchestration")
@@ -877,67 +802,6 @@ async def test_compose_prompt_time_only_objective_leaves_no_gap(coord: Coordinat
     coord.shared_state.cumulative_gain_validated = 5.0
     await coord._compose_prompt("orchestration")
     assert coord.shared_state.target_gap_pct == 0.0
-
-
-def _pin_conversational_with_context_tools(coord: Coordinator, monkeypatch) -> None:
-    """Pin the delta path AND the mounted pull tools the banner advertises."""
-    monkeypatch.setattr(coord.conversation, "_orchestration_conversational", lambda: True)
-    monkeypatch.setattr(coord.conversation, "_orchestration_context_tools_mounted", lambda: True)
-    coord._orchestration_seeded = True
-
-
-@pytest.mark.asyncio
-async def test_delta_banner_names_every_registered_context_tool(coord: Coordinator, monkeypatch) -> None:
-    _pin_conversational_with_context_tools(coord, monkeypatch)
-    text = await coord._compose_prompt("orchestration")
-    banner_start = text.find("=== Context (pull on demand) ===")
-    assert banner_start != -1, "DELTA banner missing"
-    banner = text[banner_start:]
-    for tool in CONTEXT_TOOL_NAMES:
-        assert tool in banner, f"{tool!r} not in DELTA banner"
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_conversational_delta(coord: Coordinator, monkeypatch) -> None:
-    _pin_conversational_with_context_tools(coord, monkeypatch)
-    out = await coord._compose_prompt("orchestration")
-    assert "Context (pull on demand)" in out
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_delta_without_context_tools_names_none(coord: Coordinator, monkeypatch) -> None:
-    """A backend with no pull tools must not be told to call them."""
-    monkeypatch.setattr(coord.conversation, "_orchestration_conversational", lambda: True)
-    coord._orchestration_seeded = True
-    out = await coord._compose_prompt("orchestration")
-    assert "=== Context (delta turn) ===" in out
-    for tool in CONTEXT_TOOL_NAMES:
-        assert tool not in out
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_conversational_seed_memory(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(coord.conversation, "_orchestration_conversational", lambda: True)
-    coord._orchestration_seeded = False
-    coord._orchestration_seed_memory = "=== recovered memory ==="
-    out = await coord._compose_prompt("orchestration")
-    assert "recovered memory" in out
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_robustness_high_no_progress(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(
-        coord.conversation,
-        "_conversation_progress_signal",
-        lambda: {
-            "ticks_without_progress": 9,
-            "threshold": 5,
-            "severity": "high",
-            "last_progress_tick": 1,
-        },
-    )
-    out = await coord._compose_prompt("robustness")
-    assert "no observable progress" in out
 
 
 # -- _context_analysis_reader ----------------------------------------------
@@ -957,7 +821,7 @@ def test_context_analysis_reader_fallback_path(coord: Coordinator, tmp_path) -> 
 
 # -- advisory blocks enabled paths -----------------------------------------
 def test_target_gap_advisory_enabled(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.knowledge import research_hints as rh
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     monkeypatch.setattr(rh, "load_competitor_target", lambda _sd: {"name": "comp"})
     monkeypatch.setattr(rh, "gap_analysis", lambda *a, **k: {"primary_gap": "throughput"})
@@ -970,8 +834,30 @@ def test_target_gap_advisory_enabled(coord: Coordinator, monkeypatch) -> None:
     assert coord._current_primary_gap() == "throughput"
 
 
+def test_agentx_advisory_and_primary_gap_share_accepted_state(coord: Coordinator, monkeypatch) -> None:
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
+
+    target = {
+        "benchmark_mode": "agentx",
+        "throughput_basis": "total_token_throughput_per_gpu",
+        "per_conc": [
+            {"conc": 4, "tput_per_gpu": 800.0, "e2e_norm_intvty_p90": 20.0, "benchmark_id": "2", "source": "api"}
+        ],
+    }
+    monkeypatch.setattr(rh, "load_competitor_target", lambda _sd: target)
+    state = coord.shared_state
+    state.benchmark_mode = "agentx"
+    state.current_best = {"total_throughput": 800.0, "e2e_norm_intvty_p90": 5.0}
+    state.tp = 2
+    state.conc = 4
+    text = coord._target_gap_advisory_block()
+    assert "total throughput/GPU gap vs target: +50.0%" in text
+    assert "E2E normalized interactivity P90 gap vs target: +75.0%" in text
+    assert coord._current_primary_gap() == "latency"
+
+
 def test_target_gap_advisory_no_target(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.knowledge import research_hints as rh
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     monkeypatch.setattr(rh, "load_competitor_target", lambda _sd: None)
     coord.shared_state.target_advisory_enabled = True

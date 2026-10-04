@@ -1,17 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic working-memory aggregation for FRAMEWORK candidate selection.
-
-``_build_framework_working_memory`` folds the "already tried this session"
-ledger into the shape the selection path reads, capped and most-recent-first.
-"""
+"""Deterministic working-memory aggregation for FRAMEWORK candidate selection."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
 
@@ -32,20 +27,12 @@ class _StateStub:
 
 
 class _MemCoord:
-    _LOCAL_EXPLORE_KIND = FrameworkPhase._LOCAL_EXPLORE_KIND
-    _FRAMEWORK_KEEP_STATUSES = Coordinator._FRAMEWORK_KEEP_STATUSES
-    _FRAMEWORK_TRIED_MEMORY_CAP = Coordinator._FRAMEWORK_TRIED_MEMORY_CAP
-    _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
-    _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys
-    _framework_known_candidate_ids = Coordinator._framework_known_candidate_ids
-    _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
-    _build_framework_working_memory = Coordinator._build_framework_working_memory
-
     def __init__(self) -> None:
         self.shared_state = _StateStub()
+        self.phase_framework = FrameworkPhase(self)
 
 
-def test_build_working_memory_aggregates_tried_excluded_learnings():
+def test_build_working_memory_aggregates_tried():
     coord = _MemCoord()
     st = coord.shared_state
     st.framework_agent_phase_progress = [
@@ -64,7 +51,7 @@ def test_build_working_memory_aggregates_tried_excluded_learnings():
             ],
         },
     ]
-    mem = coord._build_framework_working_memory()
+    mem = coord.phase_framework._build_framework_working_memory()
 
     refs = {t["ref"] for t in mem["tried_and_why"]}
     assert refs == {"PR:723", "PR:1015", "PR:900"}
@@ -72,29 +59,21 @@ def test_build_working_memory_aggregates_tried_excluded_learnings():
     assert revert["status"] == "reverted"
     assert revert["gain_pct"] == 0.0
     assert "baseline" in revert["why"]
-    # excluded_refs = known ids ∪ processed keys.
-    assert {"PR:723", "PR:1015", "PR:900", "PR:2000"} <= set(mem["excluded_refs"])
-    # Learnings come from the denial rows in the progress ledger, which is the
-    # only place a Critic rejection is recorded.
-    assert mem["learnings"] == ["does not address mem-bw bottleneck"]
-    # pending = unprocessed candidate in the latest batch.
-    assert mem["pending"] == ["PR:2000"]
 
 
 def test_build_working_memory_empty_when_no_progress():
     coord = _MemCoord()
-    mem = coord._build_framework_working_memory()
+    mem = coord.phase_framework._build_framework_working_memory()
     assert mem["tried_and_why"] == []
-    assert mem["learnings"] == []
 
 
 def test_build_working_memory_caps_tried_rows():
     coord = _MemCoord()
-    cap = coord._FRAMEWORK_TRIED_MEMORY_CAP
+    cap = FrameworkPhase._FRAMEWORK_TRIED_MEMORY_CAP
     coord.shared_state.framework_agent_phase_progress = [
         {"candidate_id": f"PR:{i}", "status": "reverted"} for i in range(cap + 5)
     ]
-    mem = coord._build_framework_working_memory()
+    mem = coord.phase_framework._build_framework_working_memory()
     assert len(mem["tried_and_why"]) == cap
     # Most-recent kept (last cap entries).
     assert mem["tried_and_why"][-1]["ref"] == f"PR:{cap + 4}"

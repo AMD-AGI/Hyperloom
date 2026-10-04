@@ -40,12 +40,46 @@ quark_root, classify the outcome as `upstream_change_required` (writes
 `outcome_id: upstream_change_required` to `<workspace>/blocked.md`) and stop
 — Python will surface it as Auto-fail.
 
+### 1.1 Hyperloom workspace I/O
+
+Hyperloom pins `cwd` to `<workspace>`. That is a convention, not an OS jail.
+Python only accepts artifacts that resolve inside `<workspace>` after
+`Path.resolve()`. Writes that land outside are discarded by the collector.
+
+**Write** (all tools: Bash, Write, Edit, Quark export):
+
+* Only create or modify files under `<workspace>/`.
+* Do not use `../`, absolute paths outside `<workspace>`, or a symlink
+  whose resolved target is outside `<workspace>`.
+* If the user prompt names an output directory outside `<workspace>`,
+  ignore that location. Write under `<workspace>/` (typical:
+  `<workspace>/quantized_model/`) and put that relative path in the
+  manifest.
+
+**Read**:
+
+* Source model weights, calibration data, eval datasets, and `quark_root`
+  may live outside `<workspace>`. Read them in place.
+* Do not copy `quark_root`. You may copy source `config.json` / tokenizer /
+  aux files into `<quantized_model_dir>` *after* that directory exists
+  inside `<workspace>`.
+
+**Manifest (`run_manifest.yaml`)**:
+
+* `outputs.quantized_model_dir` must resolve to a directory inside
+  `<workspace>`. Prefer a workspace-relative path (`quantized_model`,
+  `out`).
+* An absolute path, `../…`, or a symlink that escapes `<workspace>` is
+  rejected as `quantized_model_dir_outside_workspace`. The classifier
+  treats that as `manifest_artifact_invalid_or_missing` (#12) — Auto-recover
+  by rewriting the manifest to a path under `<workspace>` and re-exporting.
+
 ## 2. Inputs you receive
 
 The Python runner pins this run context into your prompt:
 
-* `workspace` — the only directory you may write to (besides the
-  `quantized_model_dir` that Quark's run_manifest produces).
+* `workspace` — Hyperloom attempt directory. Write artifacts only here;
+  see §1.1. `outputs.quantized_model_dir` must resolve within it.
 * `quark_root` — READ-ONLY. The Quark checkout.
 * `attempt_number` — 1 for the first attempt, ≥2 for retries.
 * `acceptable_eval_gap` — float | "see SKILL.md" sentinel. Resolution
@@ -166,7 +200,7 @@ phase chain after the fix.
 | `intent_parse_failed` (#8) | Re-read user prompt; if missing required field (model path / target dtype / output dir), make a best-effort default and continue. Cap self-correction at 2 tries. |
 | `analysis_artifact_invalid_or_missing` (#10) | Re-invoke `quark-torch-ptq` Step 1. |
 | `plan_artifact_invalid_or_missing` (#11) | Re-invoke `quark-torch-ptq` Step 2. |
-| `manifest_artifact_invalid_or_missing` (#12) | Re-invoke `quark-torch-ptq` Step 3. |
+| `manifest_artifact_invalid_or_missing` (#12) | If `quantized_model_dir` resolved outside `<workspace>`, rewrite it to a relative path under `<workspace>` then re-invoke Step 3 (and re-export if weights were written elsewhere). Otherwise re-invoke `quark-torch-ptq` Step 3. |
 | `must_have_config_missing_or_invalid` (#14) | `cp <source_model>/config.json <quantized_model_dir>/`; if vLLM-required keys (`model_type`, `architectures`) are absent, copy them from source's config. Re-run validator Step 3. |
 | `must_have_tokenizer_missing` (#15) | `cp <source_model>/tokenizer*` to `<quantized_model_dir>/`. Re-run validator Step 1. |
 | `must_validate_config_mismatch` (#17) | Diff config.json source vs quantized after stripping `quantization_config`. Copy the missing/diverged business-field values from source into quantized. Re-run validator Step 3. |
@@ -275,7 +309,8 @@ You may write any of these files; the Python runner reads them:
 Before the SDK session ends, verify every MUST-have is on disk:
 
 * `run_manifest.yaml` parses; `outputs.quantized_model_dir` resolves to an
-  existing directory.
+  existing directory within `<workspace>` (no `../`, no outside absolute
+  path, no escaping symlink). See §1.1.
 * That directory contains `config.json`, at least one `*.safetensors` /
   `*.bin`, and at least one tokenizer file (`tokenizer.json` /
   `tokenizer_config.json` / `tokenizer.model` / `vocab.json`).

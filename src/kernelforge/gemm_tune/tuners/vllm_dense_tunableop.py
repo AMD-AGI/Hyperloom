@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""vLLM Dense GEMM tuner via PyTorch TunableOp (hipBLASLt/rocBLAS kernel selection).
-
-Requires pre-recorded GEMM shapes from PYTORCH_TUNABLEOP_RECORD_UNTUNED=1 or
-explicit --shapes-json / --tunableop-input.
-"""
+"""vLLM Dense GEMM tuner via PyTorch TunableOp (hipBLASLt/rocBLAS kernel selection)."""
 
 from __future__ import annotations
 
@@ -13,6 +9,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 from .base import BaseTuner, TuneResult
 from ..utils import TUNER_ENV_VARS, run_subprocess
@@ -20,14 +17,8 @@ from ..utils import TUNER_ENV_VARS, run_subprocess
 log = logging.getLogger(__name__)
 
 
-# PyTorch's own untuned-record format, read back off an MI355X box rather than
-# inferred: enabling record_untuned and running three bf16 ``a @ b.t()`` matmuls
-# produced, for (M, N, K),
-#
-#   GemmTunableOp_BFloat16_TN,tn_{N}_{M}_{K}_ld_{K}_{K}_{N}
-#
-# e.g. (16, 1536, 7168) -> tn_1536_16_7168_ld_7168_7168_1536. Getting this
-# wrong would not fail loudly; it would tune shapes nobody asked for.
+# PyTorch's own untuned-record format, read back off an MI355X box rather than inferred: enabling record_untuned and
+# running three bf16 ``a @ b.t()`` matmuls produced, for (M, N, K),
 _TUNABLEOP_OP_BY_PRECISION = {
     "bf16": "GemmTunableOp_BFloat16_TN",
     "fp16": "GemmTunableOp_Half_TN",
@@ -35,9 +26,31 @@ _TUNABLEOP_OP_BY_PRECISION = {
     "bfloat16": "GemmTunableOp_BFloat16_TN",
 }
 
-# Demand can list thousands of distinct keys; TunableOp times each one against
-# every hipBLASLt solution, so the whole run would be spent on one tuner.
+# The activation dtype aiter logs per lookup, which the demand parser carries through as ``shape["dtype"]``.
+_TUNABLEOP_OP_BY_DTYPE = {
+    "bfloat16": "GemmTunableOp_BFloat16_TN",
+    "bf16": "GemmTunableOp_BFloat16_TN",
+    "float16": "GemmTunableOp_Half_TN",
+    "half": "GemmTunableOp_Half_TN",
+    "fp16": "GemmTunableOp_Half_TN",
+}
+
+
+def _tunableop_op_for_dtype(raw: Any) -> str | None:
+    """Map a logged torch dtype to a TunableOp record type, or ``None``."""
+    text = str(raw or "").strip().strip("\"'").lower()
+    if not text:
+        return None
+    if text.startswith("torch."):
+        text = text[len("torch.") :]
+    return _TUNABLEOP_OP_BY_DTYPE.get(text)
+
+
+# Demand can list thousands of distinct keys; TunableOp times each one against every hipBLASLt solution, so the whole
+# run would be spent on one tuner.
 _DEMAND_SHAPE_LIMIT = 64
+# How many to *fetch* before the per-shape dtype filter runs.
+_DEMAND_FETCH_LIMIT = _DEMAND_SHAPE_LIMIT * 8
 
 
 def tunableop_untuned_line(m: int, n: int, k: int, op: str) -> str:
@@ -87,11 +100,8 @@ def _generate_candidate_sitecustomize() -> str:
 
 
 def _candidate_pythonpath(site_dir: Path) -> str:
-    # Hyperloom currently starts Forge with the same base environment that is later
-    # used for E2E validation, then applies recommended_env as an override. Capture
-    # and prepend here so candidate sitecustomize is injected without dropping that
-    # base PYTHONPATH. If the consumer-side env model changes, move this prepend to
-    # the consumer so it can merge against the actual target process environment.
+    # Hyperloom currently starts Forge with the same base environment that is later used for E2E validation, then
+    # applies recommended_env as an override.
     site = str(site_dir)
     existing = os.environ.get("PYTHONPATH", "").strip()
     return site if not existing else os.pathsep.join([site, existing])
@@ -222,14 +232,7 @@ class VllmDenseTunableopTuner(BaseTuner):
         return None
 
     def _input_from_demand(self) -> Path | None:
-        """Write an untuned record file from the keys the runtime missed.
-
-        The router counts a demand file as a shape source, which is what lets
-        this tuner run on a model that has no recorded TunableOp trace. It has
-        to be able to consume one too: selecting it on the strength of demand
-        and then failing for want of an input is worse than the honest skip it
-        replaced.
-        """
+        """Write an untuned record file from the keys the runtime missed."""
         path = getattr(self.ctx, "demand_json", None)
         if not path:
             return None
@@ -240,64 +243,69 @@ class VllmDenseTunableopTuner(BaseTuner):
             load_demand,
         )
 
-        try:
-            report = load_demand(path)
-            entry = demand_for_tuner(report, self.name) if report else None
-        except Exception as exc:  # noqa: BLE001 - a bad demand file is not fatal
-            log.warning("%s: could not read demand from %s: %s", self.name, path, exc)
-            return None
+        report = load_demand(path)
+        entry = demand_for_tuner(report, self.name) if report else None
         if report is None:
             return None
 
-        # bucket=False: the padded-M cover that the aiter tuners want is wrong
-        # here. That cover is only reachable because aiter retries a failed
-        # lookup at the padded M; TunableOp keys on the exact shape and has no
-        # such fallback, so a row written at 512 does nothing for a request at
-        # 464. This tuner needs the M values the runtime literally asked for.
-        shapes = demand_shapes(entry, limit=_DEMAND_SHAPE_LIMIT, bucket=False) if entry else []
+        # bucket=False: the padded-M cover that the aiter tuners want is wrong here.
+        shapes = demand_shapes(entry, limit=_DEMAND_FETCH_LIMIT, bucket=False) if entry else []
         if not shapes:
-            # No demand names this tuner, which is the normal case: the runtime
-            # logs lookups against aiter's tables, and TunableOp has no table of
-            # its own to miss. But a dense miss is a dense (M, N, K) either way,
-            # and on a run where aiter is not serving dense, this tuner is the
-            # one that can cover those shapes. Without this the router selects
-            # it off the demand and it then fails for want of an input.
+            # No demand names this tuner, which is the normal case: the runtime logs lookups against aiter's tables,
+            # and TunableOp has no table of its own to miss.
             borrowed: list[dict] = []
             for other in report.get("demands") or []:
                 table = str(other.get("table") or "")
                 if table not in TABLE_KEY_SCHEMA:
                     continue  # MoE and anything else that is not a dense GEMM
-                # bucket=False for the same reason as the direct path above:
-                # borrowing another table's misses does not borrow aiter's
-                # padded-M retry along with them.
-                borrowed.extend(demand_shapes(other, limit=_DEMAND_SHAPE_LIMIT, bucket=False))
+                # bucket=False for the same reason as the direct path above: borrowing another table's misses does not
+                # borrow aiter's padded-M retry along with them.
+                borrowed.extend(demand_shapes(other, limit=_DEMAND_FETCH_LIMIT, bucket=False))
             if borrowed:
                 log.info(
                     "%s: no demand of its own; taking %d dense shape(s) the runtime missed on other dense tables",
                     self.name,
-                    len(borrowed[:_DEMAND_SHAPE_LIMIT]),
+                    len(borrowed[:_DEMAND_FETCH_LIMIT]),
                 )
-            shapes = borrowed[:_DEMAND_SHAPE_LIMIT]
+            shapes = borrowed[:_DEMAND_FETCH_LIMIT]
         if not shapes:
             return None
 
+        # Per-shape dtype first, ctx.precision only as a fallback for shapes the demand parser recorded without one.
         precision = str(getattr(self.ctx, "precision", "") or "bf16").lower()
-        op = _TUNABLEOP_OP_BY_PRECISION.get(precision)
-        if op is None:
-            log.warning(
-                "%s: no TunableOp record type for precision %r, so demand cannot be turned into an input file",
-                self.name,
-                precision,
-            )
-            return None
+        fallback_op = _TUNABLEOP_OP_BY_PRECISION.get(precision)
 
         lines = []
+        unsupported: dict[str, int] = {}
         for shape in shapes:
+            # Budget reached.
+            if len(lines) >= _DEMAND_SHAPE_LIMIT:
+                break
             try:
                 m, n, k = int(shape["M"]), int(shape["N"]), int(shape["K"])
             except (KeyError, TypeError, ValueError):
                 continue
+            # The fallback applies only to shapes the demand parser recorded WITHOUT a dtype.
+            raw_dtype = shape.get("dtype") or shape.get("otype")
+            op = _tunableop_op_for_dtype(raw_dtype)
+            if op is None and not str(raw_dtype or "").strip():
+                op = fallback_op
+            if op is None:
+                label = str(raw_dtype or "").strip() or f"precision={precision}"
+                unsupported[label] = unsupported.get(label, 0) + 1
+                continue
             lines.append(tunableop_untuned_line(m, n, k, op))
+        if unsupported:
+            detail = ", ".join(f"{k} x{v}" for k, v in sorted(unsupported.items()))
+            log.warning(
+                "%s: %d demand shape(s) skipped, no TunableOp record type for %s",
+                self.name,
+                sum(unsupported.values()),
+                detail,
+            )
+            if not lines:
+                # Every shape was an unsupported dtype.
+                self._demand_skip_reason = f"no TunableOp record type for {detail}"
         if not lines:
             return None
 
@@ -317,18 +325,27 @@ class VllmDenseTunableopTuner(BaseTuner):
         if self.ctx.tunableop_input and self.ctx.tunableop_input.is_file():
             return self.ctx.tunableop_input
         if self.ctx.shapes_json and self.ctx.shapes_json.is_file():
-            # For TunableOp, we need the native format, not JSON
-            # If shapes_json is actually a tunableop format file, use it directly
+            # For TunableOp, we need the native format, not JSON If shapes_json is actually a tunableop format file,
+            # use it directly
             return self.ctx.shapes_json
         return self._input_from_demand()
 
+    # Set by _input_from_demand when the demand file parsed fine but carried no shape this tuner has a record type
+    # for.
+    _demand_skip_reason: str = ""
+
     def run(self) -> TuneResult:
         input_file = self._resolve_input()
+        if input_file is None and self._demand_skip_reason:
+            log.info("%s: skipped -- %s", self.name, self._demand_skip_reason)
+            return TuneResult(
+                tuner_name=self.name,
+                status="skipped",
+                error=self._demand_skip_reason,
+                error_class="unsupported_precision",
+            )
         if input_file is None:
-            # Say which sources were offered and why none produced a file. The
-            # bare "No valid input file found" cost a real run: the router had
-            # selected this tuner off a demand file it could not read, and the
-            # log said nothing about which of the three inputs was missing.
+            # Say which sources were offered and why none produced a file.
             offered = {
                 "tunableop_input": str(self.ctx.tunableop_input or ""),
                 "shapes_json": str(self.ctx.shapes_json or ""),
@@ -412,12 +429,8 @@ class VllmDenseTunableopTuner(BaseTuner):
                 "PYTORCH_TUNABLEOP_FILENAME": str(output_file),
             }
 
-        # TunableOp picks the fastest hipBLASLt/rocBLAS solution per shape but
-        # never times the untuned dispatch, so there is no baseline to compare
-        # against and improved_shapes is 0 by construction, not by measurement.
-        # Reporting only "improved 0/N" made completed runs read as "this path
-        # has nothing to gain"; unverified_shapes says what actually happened,
-        # and candidate sends the artifact to E2E where a real number exists.
+        # TunableOp picks the fastest hipBLASLt/rocBLAS solution per shape but never times the untuned dispatch, so
+        # there is no baseline to compare against and this tuner has no micro metrics to report at all.
         return TuneResult(
             tuner_name=self.name,
             status="ok" if tuned_shapes > 0 else "empty_output",
@@ -427,8 +440,5 @@ class VllmDenseTunableopTuner(BaseTuner):
             env_vars=env_vars,
             candidate=tuned_shapes > 0,
             total_shapes=tuned_shapes,
-            improved_shapes=0,
             unverified_shapes=tuned_shapes,
-            best_micro_speedup=1.0,
-            avg_micro_speedup=1.0,
         )

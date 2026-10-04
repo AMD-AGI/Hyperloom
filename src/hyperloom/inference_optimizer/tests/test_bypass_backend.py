@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the bypass benchmark backend + Python engine.
-
-No real GPU/server: server launch, client subprocess, and HTTP readiness are
-all injected/monkeypatched. Verifies backend selection, argv construction, the
-Magpie-compatible report contract, and end-to-end orchestration.
-"""
+"""Tests for the bypass benchmark backend + Python engine."""
 
 from __future__ import annotations
 
@@ -14,6 +9,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
@@ -23,6 +19,30 @@ from hyperloom.orchestrator.actions.executors import bypass_runner
 from hyperloom.orchestrator.actions.executors.benchmark_result import (
     extract_benchmark_measurement,
 )
+
+
+def test_bypass_client_partial_output_reaches_outer_watchdog(tmp_path, monkeypatch):
+    import sys
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
+
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[3]))
+    code = (
+        "import os,pathlib,sys\n"
+        "from hyperloom.orchestrator.actions.executors.bypass_runner import _run_subprocess\n"
+        "(pathlib.Path(sys.argv[1]) / 'server.log').write_text('Application startup complete')\n"
+        "client = 'import os,time\\nfor _ in range(30): os.write(1,b\".\"); time.sleep(.15)'\n"
+        "rc = _run_subprocess([sys.executable,'-c',client],5,pathlib.Path(sys.argv[1]),'client')\n"
+        "sys.stdout.flush(); sys.stderr.flush(); os._exit(rc)\n"
+    )
+    cp = run_with_session_kill(
+        [sys.executable, "-c", code, str(tmp_path)],
+        timeout=10,
+        server_log_path=str(tmp_path / "server.log"),
+        silence_timeout_sec=2.0,
+    )
+    assert cp.returncode == 0
+    assert cp.stdout == "." * 30
+    assert (tmp_path / "client_stdout.log").read_text(encoding="utf-8") == "." * 30
 
 
 def test_bypass_backend_selected(monkeypatch):
@@ -110,11 +130,7 @@ def test_read_log_present_and_missing(tmp_path):
 
 
 def test_run_benchmark_launches_server_with_current_interpreter(tmp_path, monkeypatch):
-    """The sglang server subprocess must use the runner's own interpreter.
-
-    Regression: a PATH ``python3`` in a different venv cannot import sglang, so
-    the runner must pass sys.executable to build_server_command.
-    """
+    """The sglang server subprocess must use the runner's own interpreter."""
     import sys
 
     inferencex = tmp_path / "InferenceX"
@@ -160,6 +176,32 @@ def test_server_command_sglang():
     assert cmd[:3] == ["python3", "-m", "sglang.launch_server"]
     assert "--tensor-parallel-size" in cmd and "2" in cmd
     assert cmd[-2:] == ["--foo", "1"]
+
+
+def test_the_backend_trace_dir_wins_over_the_preflight_placeholder():
+    """EXTRA_VLLM_ARGS carries a trace dir only so the argv preflight accepts the bounds beside it.
+
+    ProfilerConfig refuses ``profiler=torch`` without a ``torch_profiler_dir``, so the probed
+    fragment has to name one; it is a placeholder, and the launcher's own value has to win vLLM's
+    last-wins merge or the trace lands where this backend's discovery never looks.
+    """
+    cmd = bypass_engine.build_server_command(
+        framework="vllm",
+        model="/m",
+        tp=1,
+        port=8888,
+        max_model_len=None,
+        extra_args=[
+            "--profiler-config.profiler",
+            "torch",
+            "--profiler-config.torch_profiler_dir",
+            "/round-dir",
+        ],
+        profile_dir="/ws/torch_trace",
+    )
+
+    dirs = [cmd[i + 1] for i, token in enumerate(cmd) if token == "--profiler-config.torch_profiler_dir"]
+    assert dirs[-1] == "/ws/torch_trace"
 
 
 def test_sglang_atom_server_command_honors_python_exe():
@@ -320,6 +362,7 @@ def test_wait_for_server_ready_polls_until_200():
     ok = bypass_engine.wait_for_server_ready(
         "http://127.0.0.1:8888",
         timeout_s=100.0,
+        server_exited=lambda: False,
         poll_s=0.0,
         probe=probe,
         sleep=lambda _s: None,
@@ -328,12 +371,34 @@ def test_wait_for_server_ready_polls_until_200():
     assert calls["n"] == 3
 
 
+def test_wait_for_server_ready_stops_when_the_server_has_exited():
+    """A server that is gone will never answer, so the wait ends with it."""
+    probes = {"n": 0}
+
+    def probe(_url):
+        probes["n"] += 1
+        return 503
+
+    ok = bypass_engine.wait_for_server_ready(
+        "http://127.0.0.1:8888",
+        timeout_s=3600.0,
+        server_exited=lambda: True,
+        poll_s=0.0,
+        probe=probe,
+        sleep=lambda _s: None,
+    )
+    assert ok is False
+    # Once, not for the hour the timeout would otherwise have run.
+    assert probes["n"] == 1
+
+
 def test_wait_for_server_ready_times_out():
     ticks = iter([0.0, 1.0, 2.0, 3.0, 100.0])
 
     ok = bypass_engine.wait_for_server_ready(
         "http://127.0.0.1:8888",
         timeout_s=5.0,
+        server_exited=lambda: False,
         poll_s=0.0,
         probe=lambda _u: 503,
         sleep=lambda _s: None,
@@ -425,6 +490,7 @@ def test_bypass_run_end_to_end(tmp_path, monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
@@ -530,6 +596,7 @@ def test_bypass_eval_env_passthrough(tmp_path, monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
@@ -582,6 +649,7 @@ def test_bypass_eval_limit_absent_is_none(tmp_path, monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
@@ -590,11 +658,7 @@ def test_bypass_eval_limit_absent_is_none(tmp_path, monkeypatch):
 
 
 def test_vllm_server_command_enables_torch_profiler():
-    """vLLM needs --profiler-config flags to enable the torch profiler.
-
-    Regression: setting only VLLM_TORCH_PROFILER_DIR env is ignored by vLLM
-    (Unknown env var), so /start_profile returns 404 and no trace lands.
-    """
+    """vLLM needs --profiler-config flags to enable the torch profiler."""
     cmd = bypass_engine.build_server_command(
         framework="vllm",
         model="/m",
@@ -739,6 +803,7 @@ def test_client_phase_reuses_healthy_server(tmp_path, monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
     # cleanup=False -> server must NOT be torn down.
     rc = bypass_runner.run_benchmark(
@@ -782,12 +847,12 @@ def test_client_phase_no_server_fails(tmp_path, monkeypatch):
     assert rc == 1
 
 
-def _write_cfg_lifecycle(tmp_path, inferencex, cleanup, pid_dir):
+def _write_cfg_lifecycle(tmp_path, inferencex, cleanup, pid_dir, framework="sglang"):
     import yaml
 
     cfg = {
         "benchmark": {
-            "framework": "sglang",
+            "framework": framework,
             "model": "/models/x",
             "precision": "bf16",
             "runner_type": "mi300x",
@@ -821,16 +886,18 @@ def _fake_client_run(monkeypatch, tput=700.0):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
 
-def test_yaml_lifecycle_first_round_persists(tmp_path, monkeypatch):
+@pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
+def test_yaml_lifecycle_first_round_persists(tmp_path, monkeypatch, framework):
     """server_lifecycle warmup round (cleanup=false, no server yet): start + persist, no teardown."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
-    cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=False, pid_dir=pid_dir)
+    cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=False, pid_dir=pid_dir, framework=framework)
 
     class _FakeServer:
         pid = 5555
@@ -851,22 +918,23 @@ def test_yaml_lifecycle_first_round_persists(tmp_path, monkeypatch):
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")  # phase defaults to all
     assert rc == 0
     assert terminated["n"] == 0  # cleanup=false -> persist
-    assert bypass_engine.lifecycle_pid_file(str(pid_dir), "sglang", 8888).exists()
+    assert bypass_engine.lifecycle_pid_file(str(pid_dir), framework, 8888).exists()
 
 
-def test_yaml_lifecycle_reuse_round_teardown(tmp_path, monkeypatch):
+@pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
+def test_yaml_lifecycle_reuse_round_teardown(tmp_path, monkeypatch, framework):
     """server_lifecycle measure round (cleanup=true, healthy server present): reuse + teardown."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
-    cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=True, pid_dir=pid_dir)
+    cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=True, pid_dir=pid_dir, framework=framework)
 
     # A prior round persisted the server: pid/meta exist alongside a healthy port.
     bypass_engine.write_lifecycle_files(
         pid_dir=str(pid_dir),
-        framework="sglang",
+        framework=framework,
         port=8888,
         pid=4321,
         pgid=4321,
@@ -890,12 +958,7 @@ def test_yaml_lifecycle_reuse_round_teardown(tmp_path, monkeypatch):
 
 
 def test_lifecycle_server_ready_timeout_honored(tmp_path, monkeypatch):
-    """server_lifecycle.server_ready_timeout_s bounds server-boot, not the client.
-
-    wait_for_server_ready must receive the lifecycle server_ready_timeout_s
-    (not benchmark.timeout_seconds), while the client benchmark keeps using
-    timeout_seconds.
-    """
+    """server_lifecycle.server_ready_timeout_s bounds server-boot, not the client."""
     import yaml
 
     inferencex = tmp_path / "InferenceX"
@@ -982,6 +1045,7 @@ def test_remote_multinode_client_no_server(tmp_path, monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
@@ -1062,6 +1126,7 @@ def test_scriptable_run_timeout_writes_stderr_log(tmp_path, monkeypatch):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
     rc, error = bs.run_scriptable(
         framework="xdit",
@@ -1130,12 +1195,7 @@ def test_scriptable_run_end_to_end(tmp_path, monkeypatch):
 
 
 def test_scriptable_profile_passthrough(tmp_path, monkeypatch):
-    """torch_profiler.enabled=true must reach the scriptable script as PROFILE=1.
-
-    The serving path injects PROFILE/profiler-dir env, but the scriptable
-    (xDiT) path previously dropped it, so profiler never engaged. The fake
-    script records the PROFILE env + profiler dir it received.
-    """
+    """torch_profiler.enabled=true must reach the scriptable script as PROFILE=1."""
     import yaml
 
     inferencex = tmp_path / "InferenceX"
@@ -1291,6 +1351,7 @@ def test_num_prompts_warmups_passthrough(tmp_path, monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
     assert captured.get("num_prompts") == "37"
@@ -1343,16 +1404,11 @@ def test_server_env_pins_profiler_dirs_when_profiling(tmp_path):
 
 
 def _eval_client_run(monkeypatch, *, client_rc=0, eval_rc=1):
-    """Fake subprocess.run: client writes result (client_rc), eval returns eval_rc.
-
-    The client is identified by --result-dir plus benchmark_serving.py (writes
-    inferencex_result.json); the lm_eval dep probe/install is a no-op
-    passthrough; anything else is treated as the eval subprocess.
-    """
+    """Fake subprocess.run: client writes result (client_rc), eval returns eval_rc."""
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
-        # _ensure_eval_deps probes/install lm_eval before the eval subprocess;
-        # treat it as already-present so this fake stays focused on client/eval.
+        # _ensure_eval_deps probes/install lm_eval before the eval subprocess; treat it as already-present so this
+        # fake stays focused on client/eval.
         if "import lm_eval" in cmd or ("pip" in cmd and "install" in cmd):
 
             class _Ok:
@@ -1386,15 +1442,11 @@ def _eval_client_run(monkeypatch, *, client_rc=0, eval_rc=1):
         return _E()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
 
 def test_eval_failure_propagates_as_run_failure(tmp_path, monkeypatch):
-    """client succeeds but lm-eval fails: the whole run must fail (no silent 0).
-
-    Magpie's ``run_eval ... || exit $?`` aborts the benchmark on eval failure;
-    bypass must mirror that so baseline's eval-rooted RUN_EVAL=false fallback can
-    detect it. The report must be success=false and carry the eval marker.
-    """
+    """client succeeds but lm-eval fails: the whole run must fail (no silent 0)."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1445,11 +1497,7 @@ def test_eval_success_keeps_run_success(tmp_path, monkeypatch):
 
 
 def test_lifecycle_reuse_without_metadata_fails(tmp_path, monkeypatch):
-    """YAML-lifecycle: /health=200 but no pid/meta files means a foreign/zombie
-    server occupies the port. bypass must NOT silently reuse or re-boot over it;
-    it fails explicitly so the reuse-key mismatch surfaces instead of being
-    papered over.
-    """
+    """YAML-lifecycle: /health=200 but no pid/meta files means a foreign/zombie server occupies the port. bypass must NOT silently reuse or re-boot over it; it fails explicitly so the reuse-key mismatch surfaces instead of being papered over."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1657,6 +1705,7 @@ def test_run_subprocess_timeout_writes_log(tmp_path, monkeypatch):
 
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
     rc = bypass_runner._run_subprocess(["client"], 0.01, tmp_path, "client")
     assert rc == 124
@@ -1687,16 +1736,27 @@ def test_eval_returncode_sentinel_roundtrip_and_invalid(tmp_path):
 
 
 def test_finalize_report_client_failure_without_raw(tmp_path):
-    rc = bypass_runner._finalize_report(
-        workspace=tmp_path,
+    r = bypass_runner._Round(
         framework="sglang",
         model="/models/x",
-        server_log=tmp_path / "server.log",
-        bench_envs={"RUN_EVAL": "false"},
-        start=0.0,
-        rc=9,
+        tp=1,
+        port=8888,
+        max_model_len=None,
         profile=True,
+        profile_dir=str(tmp_path / "torch_trace"),
+        bench_envs={"RUN_EVAL": "false"},
+        server_log=tmp_path / "server.log",
+        base_url="http://127.0.0.1:8888",
+        timeout_s=60.0,
+        server_ready_timeout_s=60.0,
+        inferencex_root=str(tmp_path),
+        conc=4,
+        isl=128,
+        osl=64,
+        rrr=0.5,
+        workspace=tmp_path,
     )
+    rc = r.finalize(0.0, 9)
     assert rc == 9
     rep = json.loads((tmp_path / "benchmark_report.json").read_text(encoding="utf-8"))
     assert rep["success"] is False
@@ -1753,8 +1813,7 @@ def test_tokenize_extra_args_falls_back_on_bad_quoting():
 
 
 def test_server_phase_server_not_ready_terminates_and_fails(tmp_path, monkeypatch):
-    """phase=server: a server that never becomes ready is torn down, no pid/meta
-    is persisted, and the run fails (rc=1)."""
+    """phase=server: a server that never becomes ready is torn down, no pid/meta is persisted, and the run fails (rc=1)."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1782,12 +1841,14 @@ def test_server_phase_server_not_ready_terminates_and_fails(tmp_path, monkeypatc
 
 
 def test_server_phase_build_command_value_error_fails(tmp_path, monkeypatch):
-    """phase=server: build_server_command raising ValueError emits a failing
-    report and returns rc=2 before any server launch."""
+    """phase=server: build_server_command raising ValueError emits a failing report and returns rc=2 before any server launch."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
     cfg_path = _write_cfg(tmp_path, inferencex)
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg["benchmark"]["profiler"] = {"torch_profiler": {"enabled": True}}
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
 
@@ -1795,14 +1856,35 @@ def test_server_phase_build_command_value_error_fails(tmp_path, monkeypatch):
         raise ValueError("bad server args")
 
     monkeypatch.setattr(bypass_engine, "build_server_command", boom)
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda *a: pytest.fail("server launched"))
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out", phase="server", pid_dir=str(pid_dir))
     assert rc == 2
+    (ws,) = (tmp_path / "out").glob("benchmark_sglang_*")
+    rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["errors"] == ["bad server args"]
+    assert rep["profiling_enabled"] is True
+
+
+def test_server_phase_without_pid_dir_reports_the_configured_profiler(tmp_path):
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex)
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg["benchmark"]["profiler"] = {"torch_profiler": {"enabled": True}}
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out", phase="server")
+    assert rc == 2
+    (ws,) = (tmp_path / "out").glob("benchmark_sglang_*")
+    rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["errors"] == ["phase=server requires pid_dir"]
+    assert rep["profiling_enabled"] is True
 
 
 def test_server_phase_pgid_oserror_falls_back_to_pid(tmp_path, monkeypatch):
-    """phase=server: when os.getpgid fails, the pgid falls back to the pid and
-    the server still persists successfully (rc=0)."""
+    """phase=server: when os.getpgid fails, the pgid falls back to the pid and the server still persists successfully (rc=0)."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1830,8 +1912,7 @@ def test_server_phase_pgid_oserror_falls_back_to_pid(tmp_path, monkeypatch):
 
 
 def test_lifecycle_all_boot_server_not_ready_fails(tmp_path, monkeypatch):
-    """YAML lifecycle boot round: a server that never becomes ready is torn down
-    and the round fails (rc=1)."""
+    """YAML lifecycle boot round: a server that never becomes ready is torn down and the round fails (rc=1)."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1859,8 +1940,7 @@ def test_lifecycle_all_boot_server_not_ready_fails(tmp_path, monkeypatch):
 
 
 def test_scriptable_nonzero_rc_without_error_reports_failure(tmp_path, monkeypatch):
-    """scriptable: run_scriptable returns rc!=0 with no error string and no result
-    file -> the report records both failures and the rc propagates."""
+    """scriptable: run_scriptable returns rc!=0 with no error string and no result file -> the report records both failures and the rc propagates."""
     inferencex = tmp_path / "InferenceX"
     inferencex.mkdir()
     cfg = {
@@ -1906,8 +1986,7 @@ def test_lifecycle_all_build_command_value_error_fails(tmp_path, monkeypatch):
 
 
 def test_lifecycle_all_boot_cleanup_tears_down_server(tmp_path, monkeypatch):
-    """YAML lifecycle boot round with cleanup=True: after the client runs the
-    server is terminated AND the lifecycle files are torn down."""
+    """YAML lifecycle boot round with cleanup=True: after the client runs the server is terminated AND the lifecycle files are torn down."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1954,6 +2033,7 @@ def test_ensure_eval_deps_present_skips_install(monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
     bypass_runner._ensure_eval_deps("/opt/venv/bin/python")
 
     assert len(calls) == 1  # probe only
@@ -1961,11 +2041,7 @@ def test_ensure_eval_deps_present_skips_install(monkeypatch):
 
 
 def test_ensure_eval_deps_installs_when_missing(monkeypatch):
-    """lm_eval not importable -> pip install runs with the SAME interpreter.
-
-    Mirrors InferenceX benchmark_lib.sh's runtime shim so bypass-only accuracy
-    runs (Magpie install skipped) do not die on a missing lm_eval.
-    """
+    """lm_eval not importable -> pip install runs with the SAME interpreter."""
     calls = []
     rcs = [1, 0]  # probe fails, pip succeeds
 
@@ -1978,6 +2054,7 @@ def test_ensure_eval_deps_installs_when_missing(monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
     bypass_runner._ensure_eval_deps("/opt/venv/bin/python")
 
     assert len(calls) == 2

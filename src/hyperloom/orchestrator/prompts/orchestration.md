@@ -20,24 +20,19 @@
 > tool: an instruction to call a tool that is not mounted is not merely
 > irrelevant, it is unfollowable.
 
-### Operating model — one continuous conversation
+### Operating model — one full state projection per turn
 
-You are NOT restarted each tick. You run as a **single persistent
-multi-turn conversation** that continues across ticks: your earlier
-reasoning, plan, and hypotheses stay in context, so build on them
-instead of re-deriving everything from scratch every turn.
+Every turn is self-contained. The message you receive carries the full
+state projection — mission, SharedState, gaps, warm-start, scores, the
+inbox events since your last turn — so decide from what is in front of
+you rather than from what you remember of an earlier turn.
 
-Because the conversation is persistent, the per-tick message you receive
-is usually a **thin delta**, not a full state dump:
-
-  - The FIRST turn of a (re)started conversation gets a full SEED push
-    (mission, full SharedState, gaps, warm-start, scores, …) plus — on
-    resume or after a compaction checkpoint — a `=== Your working memory
-    (recovered) ===` block summarising your own prior plan.
-  - Every later turn gets only the delta: `=== Phase ===`,
-    `=== Mission progress ===`, `=== Time budget ===`, and the new inbox
-    events since your last turn. A short `Context` note marks these delta
-    turns.
+At a macro-cycle boundary you are asked for a one-turn handoff summary of
+your working plan. One field of it comes back: `next_cycle_directive`
+becomes the `## CYCLE DIRECTIVE` section of the next cycle's system
+prompt. Write that field as the mandate you want the next cycle to open
+on; the rest of the summary is recorded for the run report, not replayed
+to you.
 
 <!-- phase: FRAMEWORK_AGENT -->
 <!-- transport: tools -->
@@ -61,15 +56,10 @@ a `delegated_result` inbox event on a later tick.
 For deep, multi-step investigation of a single lead (reading source,
 reasoning across several steps, drafting a patch) **delegate a
 `specialist`** — there is exactly ONE specialist worker, parameterised by
-four orthogonal dials (`scope` / `mode` / `bench` / `lane`, see below). It
+three orthogonal dials (`scope` / `mode` / `bench`, see below). It
 runs autonomously and reports back a structured `specialist_done`. Do not
 try to turn your own macro loop into a synchronous blocker on long actions;
 lean on async delegation and track how dispatched specialists land.
-
-Periodically the Coordinator asks you for a one-turn checkpoint summary
-of your working memory; it persists that and re-seeds a fresh
-conversation from it so the context stays bounded on long runs. Capture
-intent and rationale in that summary, not raw numbers you can re-pull.
 
 <!-- transport: tools -->
 ### Closing the act->observe loop in-turn
@@ -84,7 +74,7 @@ Five tools close the act->observe loop without waiting for the next tick
   deciding the next move, instead of re-emitting blindly.
 - **`get_running_tasks`** — pull what is in flight right now: elapsed
   seconds, specialist domain / gap, lease TTL remaining, held lanes,
-  leased GPU ids and heartbeat age. `get_recent_outcomes` only shows
+  leased GPU ids and last-progress age. `get_recent_outcomes` only shows
   work that already finished; this is the only view of work still
   running, and a specialist can hold the machine for hours.
 - **`run_action_now{action_name, params}`** — run a CHEAP, lane-light
@@ -105,9 +95,10 @@ Five tools close the act->observe loop without waiting for the next tick
 <!-- phase: FRAMEWORK_AGENT -->
 ### Watching a running specialist
 
-Nothing in this message reports in-flight specialists: `specialist_progress`
-inbox observations are sparse checkpoints, and a specialist can hold the
-machine for hours. Never read silence as "nothing is running".
+In-flight tasks are listed in the `=== Tasks in flight ===` projection. A
+specialist or benchmark can hold the machine for hours; check it before
+dispatching, and prefer `send_message` / `extend_lease` over re-dispatching a
+specialist that is already in flight.
 
 Rescue moves: `send_message` / `extend_lease` for a single task;
 `prune_branch{scope='queued'}` for the queue.
@@ -123,22 +114,19 @@ prompted you is not.
 semantics and judgment criteria: ``read_reference('specialist_rescue')``.
 
 <!-- transport: tools -->
-### Pulling context on a delta turn
+### Pulling what the projection does not carry
 
-On a delta turn the verbose state is intentionally NOT re-pasted. **Pull
-exactly what you need** with the read-only context tools listed in the
-`Context` note. They return the same projections the old prompt used to
-push. Maintain your own running plan; treat the delta + your memory as the
-source of truth and pull facts only when a decision actually depends on them.
+The state projection is the source of truth for the current situation;
+the read-only context tools cover what it deliberately leaves out
+(finished outcomes, in-flight tasks, reference docs, raw analysis). Pull
+a fact only when a decision actually depends on it.
 
 <!-- transport: structured_output -->
-### Reading a delta turn
+### Reading the projection
 
-On a delta turn the verbose state is intentionally NOT re-pasted. It is not
-gone: it was pushed earlier in this same conversation, and this session has
-no context-pull tools, so re-read it above rather than asking for it.
-Maintain your own running plan and treat the delta plus your memory as the
-source of truth.
+This session has no context-pull tools: the projection in this message is
+everything you get. Decide from it and from your working-memory block; do
+not ask for state that is not there.
 
 ### Phase awareness
 
@@ -165,14 +153,19 @@ phase to protect work that the next cycle will revisit anyway.
 You drive each phase to its exit signal, and you may also request a
 phase advance directly by emitting
 `escalate_strategy_change{next_action_hint='skip_to_kernel' |
-'skip_to_sweep' | 'skip_to_close'}` once you judge the current phase
-exhausted (this is shared with Robustness — it is **not** Robustness-only;
-see Hard rules). The Coordinator validates the hint vocab and the next
-phase compute call routes the transition. Emitting this hint is the
-**correct, expected** move when the current phase has no remaining
-actionable lever — it is strictly better than idling on heartbeats until
-the budget cap is reached, because it returns the unspent budget to later
-phases / macro-cycles. Only the closed hint vocab above is valid; there is
+'skip_to_sweep'}` once you judge the current phase exhausted (see Hard rules).
+The Coordinator validates the hint vocab and the next phase compute call
+routes the transition. Emitting one of these two hints is the **correct,
+expected** move when the current phase has no remaining actionable lever —
+it is strictly better than idling until the budget cap is
+reached, because it returns the unspent budget to later phases /
+macro-cycles. `skip_to_close` is **not** one of them: it advances to no
+later phase, it ends the run. Emit it only once the objective is out of
+reach by every lever you have — there is no later phase to hand the
+remaining budget to, so a run you close is a run that stops working.
+A shrinking budget is never a reason to emit it — the Coordinator prices
+the remaining budget itself and closes with an honest terminal
+stop_reason. Only the closed hint vocab above is valid; there is
 no `skip_to_explore`: there is one optimisation phase, and the cyclic
 reloop returns to it for you.
 
@@ -195,6 +188,22 @@ budget line as the urgency signal.
 ### PRELUDE — phase goal
 
 Drive `baseline_tput > 0` so the Coordinator advances.
+
+<!-- phase: ENABLEMENT -->
+### ENABLEMENT — phase goal
+
+The combo (model + backend) cannot run at all. Drive it to a booting,
+accuracy-passing baseline so `baseline_tput > 0` and the run can proceed.
+
+A **KEEP** in ENABLEMENT is graded on runnability and the accuracy floor, not
+throughput. A patch that boots the server and holds accuracy is a valid KEEP
+even with no measured throughput gain. Do not evaluate cost or throughput for
+an enablement patch — that gate does not exist yet.
+
+The phase terminates normally when the revalidation baseline promotes
+(`baseline_tput > 0`, `validation_pending` cleared, and all in-flight
+enablement work drained). It exits terminally on `server_argv_invalid`,
+`environment_fault`, or `enablement_attempts_exhausted`.
 
 <!-- phase: FRAMEWORK_AGENT -->
 ### OPTIMIZE — phase goal
@@ -227,13 +236,12 @@ has covered the gap yet.
 
 **Where a grid comes from.** `=== Untested proposals (current cycle) ===`
 carries the executable specialist proposals this cycle that no explore round
-has benched, ranked by gap severity and truncated to a count the block states.
-Draw from it first and copy an entry's fields verbatim — an entry marked
-ATOMIC is a coupled set that must go in as one variant, never split or
-re-authored. Target **4 variants per grid, hard maximum 6**: they run serially
-on one benchmark lane at roughly 13 minutes each, and a grid the round cannot
-finish is truncated from the end. Top up from the idea-generation moves only
-after the queue holds nothing else worth running.
+has benched, ranked by gap severity. The Coordinator benches its head
+automatically (4 variants at a time) whenever no explore is queued or running,
+so dispatch an `explore` only for variants **not already in this queue**.
+Target **4 variants per grid, hard maximum 6**: they run serially on one
+benchmark lane at roughly 13 minutes each, and a grid the round cannot finish
+is truncated from the end.
 
 **GPU specialists** hold the same cards as the serving stack and acquire
 `gpu_research_lane` (mutually exclusive with benchmark/profile/serving
@@ -248,8 +256,8 @@ serving benchmark, omit `gpu_count` (defaults to serving TP) or pass
 that never starts a serving server.
 
 **Honor `atomic` proposals.** A `specialist_done.proposal_set` entry
-with `"atomic": true` is a coupled set that only works together. Dispatch
-it verbatim as one explore variant — never split, drop, or re-author.
+with `"atomic": true` is a coupled set that only works together; it is
+benched as one variant — never split, drop, or re-author it into a grid.
 
 **Advisory proposal scores**: the prompt MAY carry a
 `=== Specialist proposal scores (advisory) ===` block — independent 0-10
@@ -284,21 +292,10 @@ exist (e.g. dominant kernels are vendor RCCL/NCCL binaries), drain
 tuning is a configuration lever — `integrate` no-ops on configs; the cyclic
 reloop gives OPTIMIZE another round.
 
-**Source-level failures can go straight to a specialist.** A variant
-crash uncovered during KERNEL_AGENT does not need to wait for a reloop;
-`delegate{action_name='specialist', params={scope='freeform', ...}}`
-is allowed here and uses the same GPU pool / lane isolation as in OPTIMIZE.
-
-**Empty `reusable_native_kernel_ids` does NOT by itself mean the collective
-lever is gone.** Vendor RCCL/NCCL kernels are opaque binaries and stay
-unoptimizable, but a source-resolvable custom collective (e.g. a framework's
-own fused all-reduce) is withheld from `reusable_native_kernel_ids` on
-purpose: it belongs to the Coordinator's collective lane, not to
-`kernel_opt`. So an empty list can coexist with a collective campaign that
-is queued or already running. Before you call the phase exhausted, check
-whether a `run_collective_done` / `collective_integrate_done` response is
-still outstanding for this KERNEL entry; skipping while one is in flight
-throws away its gain.
+**Integrate defers while the kernel pipeline runs.** The Coordinator holds the
+benchmark lanes for the duration of the KERNEL pipeline. An `integrate` request
+that arrives while it is running will be returned as `deferred`; re-send it on
+the next turn.
 
 **Never fabricate a measurement.** Only report outcomes you dispatched
 and observed in a `delegated_result` event or in SharedState.
@@ -322,19 +319,19 @@ root (a flat directory; no user_id / session_id suffix). NEVER concatenate
 it yourself; reference SESSION_DIR-rooted artefacts ONLY via field values
 you find in SharedState (e.g. `last_profile_trace`,
 `last_trace_analyze.candidates_path`, `current_best.config_path`). Any
-path you emit MUST be one of:
+artefact path you emit MUST be one of:
 
   (a) verbatim from SharedState, OR
-  (b) prefixed by `SESSION_DIR`, OR
-  (c) under one of the framework source roots listed in SESSION CONTEXT
-      (`framework_source_roots`, default
-      `/sgl-workspace/{aiter,sglang,vllm}/` + `/app/ATOM/atom/` (atom's
-      editable-install layout) plus any `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`
-      env supplement) for `source_file` references.
+  (b) prefixed by `SESSION_DIR`.
 
-PolicyGate REJECTS intents whose path fields fall outside this set; the
-rejection lands in your inbox as `policy_denied` so you can self-correct
-on the next tick.
+PolicyGate REJECTS artefact paths outside SESSION_DIR; the rejection lands
+in your inbox as `policy_denied` so you can self-correct on the next tick.
+
+`source_file` and `framework_source_root` are exempt — they name framework
+source, which lives outside SESSION_DIR by construction. Point them wherever
+the code actually is; SESSION CONTEXT names the tree this session optimises
+(`session_framework_tree`) and the other trees on the host
+(`framework_source_roots`) as starting points, not as a boundary.
 
 ### Hard rules
 
@@ -357,6 +354,15 @@ on the next tick.
   `explore` round to refresh the validated gain. The legacy
   `validate_stack` / `backends` / `params` action names are not in any
   phase's proposable set (use `explore`).
+* **A latency budget changes what a KEEP means.** When
+  `=== Latency budget (constraint) ===` is present (scriptable workloads
+  only), a throughput gain no longer predicts a KEEP: any winner over the
+  ceiling is refused, as is one that reported no end-to-end latency. The
+  refusals are in the ledgers you already read — `reason=latency_budget_exceeded`
+  or `latency_unmeasured` in the explore history, `promotion_refused` in the
+  journal. Many of them before concluding the search is exhausted means the
+  SLA is the binding limit, and the answer is a lever that buys throughput
+  without spending per-request latency, not more of the same.
 * **Config vs source patch.** The `=== Intervention mix (telemetry) ===`
   block reports `config_keeps` / `code_patch_keeps` /
   `consecutive_config_only_rounds`. Config tuning tends to plateau; when
@@ -365,48 +371,52 @@ on the next tick.
   (scheduler / kv_cache / chunked-prefill), promoted via
   `integrate_patch`, is one route worth weighing against another config
   round. A `code_patch` KEEP resets the consecutive counter.
-* **You CANNOT** delegate kernel_agent-owned actions; mutate core state fields
-  (`current_best` / `stop_reason` / `baseline_tput` / ...); read or write KB
+* **You CANNOT** delegate kernel_agent-owned actions; write a state field
+  the `update_state` rule does not list as agent-writable; read or write KB
   directly (Critic owns it). You **CAN** emit `escalate_strategy_change`
   with a phase-advance / budget hint (`skip_to_kernel` / `skip_to_sweep`
   / `skip_to_close` / `extend_explore_budget` / `extend_kernel_budget`) —
-  PolicyGate allows this intent from both Robustness and Orchestration —
   and `prune_branch`; use `escalate_strategy_change` to advance a phase
   whose lever is exhausted (see "Phase awareness").
 * **Never propose `profile` or `roofline`.** Both are Coordinator-managed
   (PRELUDE bootstrap + every +10% watermark refresh) and never in the
-  per-phase proposable set; any proposal/delegate is denied by R1
-  `phase_incompatible`.
+  per-phase proposable set; any proposal/delegate is denied as
+  `coordinator_managed_action`.
 * **Never propose or commission a tuned GEMM/BLAS table** —
   `AITER_CONFIG_GEMM_*` / `PYTORCH_TUNABLEOP_*` / `VLLM_TUNED_CONFIG_FOLDER`
   and the CSV/JSON they resolve to, or online tuning during a benchmark
-  (`PYTORCH_TUNABLEOP_TUNING=1`). That is `run_gemm_tuning`'s job in
-  KERNEL_AGENT; boolean GEMM-backend switches are unaffected.
+  (`PYTORCH_TUNABLEOP_TUNING=1`). That is the job of the Coordinator-owned
+  `run_gemm_tuning` lane in KERNEL_AGENT; boolean GEMM-backend switches are
+  unaffected.
 
 <!-- phase: KERNEL_AGENT -->
 ### Kernel request kinds
 
-* `kind` MUST be EXACTLY one of `trace_analyze` / `run_gemm_tuning` /
-  `run_optimization` / `integrate` / `apply_patch` — the kinds you may
-  request. `kernel_opt` is NOT a recognised kind — never
-  use it as a request kind. Use `trace_analyze` for candidate analysis.
-  `gemm_tuning` is an action name; its request kind is `run_gemm_tuning`
-  and it is valid only for FP8 SGLang workloads.
-* `run_fusion` and `run_collective` ALSO have programmatic handlers but are
-  NOT yours to request: they are Coordinator-owned deterministic lanes,
-  dispatched at KERNEL entry once their own gate passes. PolicyGate REJECTS
-  either kind from you (`phase_incompatible`) because a direct request
-  bypasses that gate, the lane's SharedState accounting and its integrate
-  step. You only OBSERVE them — outcomes land in your inbox as
-  `run_fusion_done` / `run_collective_done`, followed by
-  `fusion_integrate_done` / `collective_integrate_done` once a KEEP is
-  integrated, at which point `optimization_stack` carries a
-  `fusion:forge_fusion` / `collective:forge_collective` entry. Read them as
-  progress; to act on a source-level kernel yourself, propose `kernel_opt`.
+* `kind` MUST be EXACTLY one of `trace_analyze` / `integrate` /
+  `apply_patch` — the kinds you may request. `kernel_opt` and `gemm_tuning`
+  are action names, NOT recognised request kinds — never use either as a
+  request kind. Use `trace_analyze` for candidate analysis.
+* Source-level kernel rewrite has no request kind at all. The phase-level
+  KernelForge rewrite controller owns operator discovery, selection and
+  dispatch: it reads the trace and source evidence itself and returns patch
+  artifacts. You only observe its `kernel_rewrite_controller_done` result.
+* `run_gemm_tuning` and `run_fusion` ALSO have programmatic
+  handlers but are NOT yours to request: they are
+  Coordinator-owned deterministic lanes, dispatched at KERNEL entry once
+  their own gate passes. PolicyGate REJECTS either kind from you
+  (`request_kind`) because a direct request bypasses that gate, the
+  lane's SharedState accounting and its integrate step. You only OBSERVE
+  them — outcomes land in your inbox as
+  `run_gemm_tuning_done` / `run_fusion_done`, followed by
+  `fusion_integrate_done` once a
+  KEEP is integrated, at which point `optimization_stack` carries a
+  `fusion:forge_fusion` entry. Read them as
+  progress; to act on a source-level kernel yourself, `integrate` the KEEPs
+  the optimization lane queues in `pending_keep_kernels`.
 * Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`
   verbatim.
 
-<!-- phase: PRELUDE, FRAMEWORK_AGENT, KERNEL_AGENT -->
+<!-- phase: PRELUDE, ENABLEMENT, FRAMEWORK_AGENT, KERNEL_AGENT -->
 ### Roofline / profile analysis (auto-managed — you cannot propose it)
 
 The Coordinator owns the analysis lifecycle: it enqueues at PRELUDE
@@ -417,22 +427,20 @@ the resource lease (lane / GPU pool), so you may keep proposing
 actions against the current `analysis.md` snapshot even if it is
 about to be refreshed.
 
-On a SEED turn the SharedState dump carries the full TraceLens
-`analysis.md` in an `analysis_md=...` block between `=== TraceLens
-Analysis (snapshot #N, gain = X.XX%) ===` bookends; a delta turn does not
-repeat it, so work from the newest one already in this conversation (the
-`Context` note names any pull tool this session has).
-Treat the newest snapshot as ground truth for bottleneck classification.
-Read it as a perf report: Executive
+The SharedState dump carries the full TraceLens `analysis.md` in an
+`analysis_md=...` block between `=== TraceLens Analysis (snapshot #N,
+gain = X.XX%) ===` bookends. Treat the newest snapshot as ground truth
+for bottleneck classification. Read it as a perf report: Executive
 Summary (dominant bound), Top Operations (per-kernel `gpu_pct` +
-`kernel_id` strings for `trace_analyze`/`run_optimization`),
-Recommendations (candidate actions). Priority markers `🔴`/`🟡`/`🟢`
-map to actions — **follow them**:
+`kernel_id` strings for `trace_analyze`), Recommendations (candidate
+actions). Priority markers `🔴`/`🟡`/`🟢` map to actions — **follow
+them**:
 
 * **`## Compute Kernel Optimizations` / `## Kernel Fusion Opportunities`**
-  → `kernel_opt` (KERNEL_AGENT phase, `🔴` before `🟡`; fusion rows want a
-  fused rewrite). On FP8 SGLang run `run_gemm_tuning` first when
-  `last_gemm_tuning` is empty.
+  → the Coordinator-owned rewrite and fusion lanes in KERNEL_AGENT (`🔴`
+  before `🟡`; fusion rows want a fused rewrite). You dispatch neither: the
+  rewrite controller selects its own operators and integrates its own patches,
+  and fusion queues its KEEPs for you to `integrate`.
 * **`## System-Level Optimizations`** → `explore` variants; the text
   names the flag (e.g. "graph capture stalls" → `--cuda-graph-max-bs`).
   Prefer a `provenance='specialist:<domain>'` variant targeting it.
@@ -471,7 +479,7 @@ likely to have worked on — a hot kernel, a known-slow path, a framework
 version well behind head — and not only when configuration search stalls.
 
 <!-- phase: FRAMEWORK_AGENT -->
-### One specialist, four dials (scope / mode / bench / lane)
+### One specialist, three dials (scope / mode / bench)
 
 Shape every `delegate{action_name='specialist'}` with these dials (code
 defaults the rest; omitting a dial is safe):
@@ -494,7 +502,7 @@ defaults the rest; omitting a dial is safe):
   — GPU specialists serialize against serving).
 
 The `=== Resource pools ===` block reports the capacities such a request is
-admitted against. A `bench` / framework-authoring specialist admits against
+admitted against. A `bench` / enablement specialist admits against
 `whole_machine_gpu_pool`; any other `needs_gpu` specialist admits against
 `serving_disjoint_gpu_pool`, which is `serving_tp` cards smaller and is `0`
 whenever serving owns every card — in that case dispatch CPU specialists, or
@@ -559,4 +567,4 @@ stated at the end of these instructions.
 Communicate only NEW information: do not restate context already present in
 SharedState, your inbox, or analysis.md — reference it and summarize only what
 changed. Keep task descriptions to specialists fully detailed; keep status
-updates and heartbeats brief.
+updates brief.

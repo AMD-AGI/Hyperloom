@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Critic-driven specialist re-author loop.
-
-A ``needs_review`` verdict carrying non-empty ``required_evidence`` for a
-framework_agent candidate / authoring proposal triggers one re-authoring round,
-seeded with that evidence and dispatched under an idempotency key with a
-``reauthor:{n}`` suffix. ``advise`` proceeds and never re-authors; the
-per-candidate cap is the loop guard.
-"""
+"""Critic-driven specialist re-author loop."""
 
 from __future__ import annotations
 
@@ -21,7 +14,8 @@ from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.loop.coordinator import Coordinator, PendingProposal
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.proposals import PendingProposal
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 
@@ -31,7 +25,7 @@ def _heartbeat() -> Intent:
 
 def _build_backends() -> dict[str, Backend]:
     plan = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {name: MockBackend(plan, name=name) for name in ("orchestration", "critic", "robustness")}
+    return {name: MockBackend(plan, name=name) for name in ("orchestration", "critic")}
 
 
 @pytest.fixture
@@ -124,10 +118,9 @@ async def test_needs_review_with_evidence_reauthors_once(coord: Coordinator) -> 
 
 @pytest.mark.asyncio
 async def test_reauthor_guard_caps_and_suffixes(coord: Coordinator) -> None:
-    """The first 3 needs_review verdicts re-author with incrementing
-    ``reauthor:{n}`` idempotency suffixes; the 4th hits the cap and does not re-author."""
+    """The first 3 needs_review verdicts re-author with incrementing ``reauthor:{n}`` idempotency suffixes; the 4th hits the cap and does not re-author."""
     from types import SimpleNamespace
-    from hyperloom.orchestrator.loop.coordinator import _AUTHORED_LANE_MAX_ATTEMPTS
+    from hyperloom.orchestrator.phases.framework import _AUTHORED_LANE_MAX_ATTEMPTS
 
     created: list[dict[str, Any]] = []
 
@@ -201,8 +194,7 @@ async def test_reauthor_skipped_when_candidate_already_materializing(
 async def test_authoring_integrate_patch_reauthors_and_records_old_task(
     coord: Coordinator,
 ) -> None:
-    """An authored-patch integrate_patch sent back for evidence re-authors via
-    the originating specialist; the observation carries old + new task ids."""
+    """An authored-patch integrate_patch sent back for evidence re-authors via the originating specialist; the observation carries old + new task ids."""
     from types import SimpleNamespace
 
     calls = _record_reauthor_calls(coord)
@@ -234,7 +226,7 @@ async def test_authoring_integrate_patch_reauthors_and_records_old_task(
         payload={"params": {"framework_agent_authoring": True, "specialist_task_id": "spec-old"}},
     )
 
-    await coord._maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))
+    await coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))
 
     assert len(calls) == 1
     assert calls[0]["candidate"]["candidate_id"] == _CANDIDATE["candidate_id"]
@@ -299,7 +291,7 @@ async def test_non_framework_agent_proposal_does_not_reauthor(coord: Coordinator
         payload={"params": {"specialist_task_id": "s-1"}},
     )
 
-    await coord._maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))
+    await coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))
 
     assert calls == []
     assert coord.shared_state.specialist_reauthor_attempts == {}

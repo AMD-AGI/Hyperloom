@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Dense FP8 blockscale+bpreshuffle GEMM tuner for MI355X (gfx950).
-
-Uses the same aiter script as ``a8w8_blockscale``
-(``gemm_a8w8_blockscale_tune.py``) but adds ``--preshuffle`` to select the
-blockscale+bpreshuffle kernel family.  This tuner does NOT use a
-``q_dtype_w`` CSV column (blockscale tuner derives dtype from the hardware),
-so it avoids the FNUZ/OCP dtype mismatch that causes the pertoken
-``a8w8_bpreshuffle`` tuner to fail on gfx950.
-"""
+"""Dense FP8 blockscale+bpreshuffle GEMM tuner for MI355X (gfx950)."""
 
 from __future__ import annotations
 

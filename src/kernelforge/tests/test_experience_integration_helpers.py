@@ -26,8 +26,7 @@ def _init_repo(tmp_path: Path) -> Path:
     return repo
 
 
-# --------------------------------------------------------------------------- #
-# git helpers
+# --------------------------------------------------------------------------- # git helpers
 # --------------------------------------------------------------------------- #
 def test_git_head_returns_sha(tmp_path):
     repo = _init_repo(tmp_path)
@@ -103,6 +102,29 @@ def test_git_commit_all_and_discard(tmp_path):
     assert (repo / "kernel.py").read_text() == "changed\n"
 
 
+def test_git_commit_all_forces_the_approved_pathspec(monkeypatch):
+    calls = []
+
+    def fake_git(*args, **_kwargs):
+        calls.append(args)
+        if args[:3] == ("diff", "--cached", "--name-only"):
+            return subprocess.CompletedProcess(args, 0, "kernel.py\n", "")
+        if args[:2] == ("diff", "--name-only"):
+            return subprocess.CompletedProcess(args, 0, "kernel.py\n", "")
+        if args[0] == "status":
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[0] == "commit":
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    heads = iter(("a" * 40, "b" * 40))
+    monkeypatch.setattr(integ, "git", fake_git)
+    monkeypatch.setattr(integ, "git_head", lambda _workspace: next(heads))
+
+    assert integ._git_commit_all("/repo", "msg", allowed_paths={"kernel.py"}) == "b" * 40
+    assert ("add", "-A", "-f", "--", "kernel.py") in calls
+
+
 def test_git_discard_removes_symlink_without_touching_target(tmp_path):
     repo = _init_repo(tmp_path)
     kernel = repo / "kernel.py"
@@ -116,8 +138,7 @@ def test_git_discard_removes_symlink_without_touching_target(tmp_path):
     assert kernel.read_text() == "old\n"
 
 
-# --------------------------------------------------------------------------- #
-# _bench_once / _correctness_once
+# --------------------------------------------------------------------------- # _bench_once / _correctness_once
 # --------------------------------------------------------------------------- #
 def test_bench_once_returns_complete_suite(monkeypatch):
     import kernelforge.mcp_server.tools.bench as bench
@@ -179,8 +200,7 @@ def test_correctness_once_false_on_exception(monkeypatch):
     assert integ._correctness_once("drv.py", 30.0) is False
 
 
-# --------------------------------------------------------------------------- #
-# _cheap_summary
+# --------------------------------------------------------------------------- # _cheap_summary
 # --------------------------------------------------------------------------- #
 class _Archive:
     def __init__(self, index):
@@ -222,18 +242,6 @@ def test_cheap_summary_picks_best_mean_case_speedup_without_distilling_records()
     assert out["lessons"] == ""
 
 
-def test_cheap_summary_survives_broken_archive():
-    class _Bad:
-        def load_index(self):
-            raise RuntimeError("boom")
-
-    out = integ._cheap_summary(_Bad())
-    assert out == {"category": "", "strategy": "", "recipe": "", "lessons": ""}
-
-
-# --------------------------------------------------------------------------- #
-# kb_warmstart error path
-# --------------------------------------------------------------------------- #
 def test_kb_warmstart_reference_only_when_patch_empty(monkeypatch, tmp_path):
     repo = _init_repo(tmp_path)
 

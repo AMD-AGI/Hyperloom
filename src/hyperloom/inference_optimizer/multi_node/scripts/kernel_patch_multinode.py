@@ -35,12 +35,20 @@ if str(_SCRIPT_DIR) not in sys.path:
 from patch_path_safety import (  # noqa: E402
     atomic_write_bytes,
     assert_backup_dir_allowed,
-    assert_revert_paths_allowed,
-    assert_target_path_allowed,
+    assert_backup_path_allowed,
     finalize_patch_records,
     invalidate_aiter_jit_build,
     restore_aiter_jit_build,
 )
+
+
+def _init_ray() -> None:
+    """Connect to the cluster, shipping this directory so actors import its helpers."""
+    ray.init(
+        ignore_reinit_error=True,
+        log_to_driver=True,
+        runtime_env={"working_dir": str(_SCRIPT_DIR)},
+    )
 
 
 def _log(msg: str) -> None:
@@ -88,14 +96,13 @@ def _apply_remote(
         and compile status.
 
     Raises:
-        ValueError: If ``target_path`` does not exist or resolves outside the
-            framework patch roots, ``backup_dir`` is outside the kernel backup
-            root, ``patch_b64`` is not valid base64, or a ``.py`` target fails
-            to compile (it is auto-reverted first).
+        ValueError: If ``backup_dir`` is outside the kernel backup root,
+            ``patch_b64`` is not valid base64, or a ``.py`` target fails to
+            compile (it is auto-reverted first).
+        FileNotFoundError: If ``target_path`` does not exist on the pod.
     """
     host = socket.gethostname()
     target = Path(target_path)
-    assert_target_path_allowed(target, must_exist=True)
     assert_backup_dir_allowed(Path(backup_dir))
     if not target.is_file():
         raise FileNotFoundError(f"target_path does not exist on pod {host}: {target}")
@@ -157,7 +164,7 @@ def _revert_remote(records: list[dict]) -> dict:
         backup = Path(str(record.get("backup_path") or ""))
         if not backup.is_file():
             raise FileNotFoundError(f"backup missing on {host}: {backup}")
-        assert_revert_paths_allowed(target, backup)
+        assert_backup_path_allowed(backup)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(backup, target)
         restored.append(str(target))
@@ -213,7 +220,7 @@ def _do_apply(args: argparse.Namespace) -> int:
     Returns:
         int: ``0`` if every node applied successfully, otherwise ``1``.
     """
-    ray.init(ignore_reinit_error=True, log_to_driver=True)
+    _init_ray()
     nodes = _alive_nodes()
     _log(f"apply: alive nodes={len(nodes)} target={args.target_path}")
     if not nodes:
@@ -313,7 +320,7 @@ def _do_revert(args: argparse.Namespace) -> int:
         int: ``0`` if every reachable host reverted successfully, otherwise
         ``1`` (including when ``backup_map_json`` is empty).
     """
-    ray.init(ignore_reinit_error=True, log_to_driver=True)
+    _init_ray()
     try:
         records_by_host: dict[str, list[dict]] = json.loads(args.records_json or "{}")
         backup_map: dict[str, str] = json.loads(args.backup_map_json or "{}")
@@ -422,7 +429,7 @@ def _do_finalize(args: argparse.Namespace) -> int:
             + "\n"
         )
         return 1
-    ray.init(ignore_reinit_error=True, log_to_driver=True)
+    _init_ray()
     by_host = {
         str(node.get("NodeManagerHostname") or ""): node["NodeID"]
         for node in _alive_nodes()

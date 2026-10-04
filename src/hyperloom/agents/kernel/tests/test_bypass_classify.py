@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from _bypass_classify import classify_kernel  # noqa: E402
+from _bypass_classify import classify_kernel
 
 
 # (device_kernel_name, expected_category) covering real sglang+aiter kernels.

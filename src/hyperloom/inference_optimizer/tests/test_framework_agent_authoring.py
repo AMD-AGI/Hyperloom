@@ -9,21 +9,16 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.framework import client as _fa_client
-from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
 from hyperloom.orchestrator.state.shared_state import SharedState
 
-from ._optimize_fixtures import FakeCoordinator, optimize_state
+from ._optimize_fixtures import fake_coordinator, optimize_state
 
 
 def _state(*, authoring: bool = True) -> SharedState:
-    """Real ``SharedState`` seeded for the authoring track.
-
-    The local-exploration arm is off: this suite exercises the PR-authoring
-    track, and the arm has dedicated coverage elsewhere.
-    """
+    """Real ``SharedState`` seeded for the authoring track."""
     return optimize_state(
         framework_agent_authoring_enabled=authoring,
         framework_local_explore_enabled=False,
@@ -100,27 +95,8 @@ class _BusStub:
         return list(reversed(messages[-n:]))
 
 
-class _Stub(FakeCoordinator):
-    """The state a FRAMEWORK pump tick reads; the rest resolves for real.
-
-    Only genuine boundaries are doubled here: the task store, the bus, the
-    Critic backend and the discovery call. Every Coordinator method the pump
-    reaches for is served by its real collaborator, so a helper added to the
-    call chain needs no edit in this file.
-    """
-
-    def __init__(self, tmp_path: Path, *, authoring: bool = True) -> None:
-        super().__init__(
-            tmp_path,
-            shared_state=_state(authoring=authoring),
-            tasks=_TasksStub(),
-            bus=_BusStub(),
-            backends={"critic": _ApproveCritic()},
-            state=SimpleNamespace(pending_proposals={}),
-            framework_agent_discover_timeout_sec=0.0,
-            # No GPU pool: authoring degrades to the research-lane-only path.
-            framework_gpu_pool=None,
-        )
+class _Stub(Coordinator):
+    """The state a FRAMEWORK pump tick reads; the rest resolves for real."""
 
     async def _record_observation(self, *_a: Any, **_k: Any) -> None:
         return None
@@ -128,8 +104,20 @@ class _Stub(FakeCoordinator):
     async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
         return None
 
-    def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
-        return [_fa_client.repo_url_for_framework(framework or "sglang")]
+
+def _stub(tmp_path: Path, *, authoring: bool = True) -> _Stub:
+    return fake_coordinator(
+        _Stub,
+        tmp_path,
+        shared_state=_state(authoring=authoring),
+        tasks=_TasksStub(),
+        bus=_BusStub(),
+        backends={"critic": _ApproveCritic()},
+        state=SimpleNamespace(pending_proposals={}),
+        framework_agent_discover_timeout_sec=0.0,
+        # No GPU pool: authoring degrades to the research-lane-only path.
+        framework_gpu_pool=None,
+    )
 
 
 _CANDIDATE = {
@@ -143,39 +131,29 @@ _CANDIDATE = {
 
 
 def _seed_batch(stub: _Stub, *candidates: dict[str, Any]) -> None:
-    """Put a discovered batch in state.
-
-    Discovery is the candidate-discovery specialist's deliverable, landing in
-    ``framework_agent_batches``; the pump reads that. A test that patched
-    ``fa phase-discover`` would be patching a call the pump no longer makes.
-    """
+    """Put a discovered batch in state."""
     stub.shared_state.framework_agent_batches = [{"batch_id": "b1", "candidates": [dict(c) for c in candidates]}]
 
 
 def _pump(stub: _Stub) -> None:
-    asyncio.run(stub._pump_framework_agent_phase())
+    asyncio.run(stub.phase_framework._pump_framework_agent_phase())
 
 
 def _pump_then_materialize(stub: _Stub) -> None:
-    """Run the pump (resolves audit route + submits a candidate proposal) then materialise it.
-
-    The pump submits the candidate carrying its resolved ``audit_step``; an
-    approve verdict materialises it via ``_materialize_framework_agent_candidate``,
-    which performs the apply/author dispatch.
-    """
-    asyncio.run(stub._pump_framework_agent_phase())
+    """Run the pump (resolves audit route + submits a candidate proposal) then materialise it."""
+    asyncio.run(stub.phase_framework._pump_framework_agent_phase())
     pendings = [
         p
         for p in stub.state.pending_proposals.values()
         if getattr(p, "action_name", "") == "integrate_patch" and not getattr(p, "decided", False)
     ]
     for p in pendings:
-        asyncio.run(stub._materialize_framework_agent_candidate(p))
+        asyncio.run(stub.phase_framework.materialize_candidate(p))
         p.decided = True
 
 
 def _materialize(stub: _Stub, *, audit_step: str = "") -> None:
-    from hyperloom.orchestrator.loop.coordinator import PendingProposal
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     pending = PendingProposal(
         proposal_msg_id="m-fpr",
@@ -190,7 +168,7 @@ def _materialize(stub: _Stub, *, audit_step: str = "") -> None:
             "audit_step": audit_step,
         },
     )
-    asyncio.run(stub._materialize_framework_agent_candidate(pending))
+    asyncio.run(stub.phase_framework.materialize_candidate(pending))
 
 
 def test_pump_submits_candidate_proposal(
@@ -199,7 +177,7 @@ def test_pump_submits_candidate_proposal(
 ):
     """The pump submits the candidate as a ``framework_agent`` proposal; no task is created inline."""
 
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path, authoring=True)
     _seed_batch(stub, _CANDIDATE)
 
     _pump(stub)
@@ -214,7 +192,7 @@ def test_materialize_unknown_route_dispatches_both_tracks(
     tmp_path: Path,
 ):
     """An approved candidate with an unknown audit route runs the raw-diff + authoring tracks."""
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path, authoring=True)
 
     _materialize(stub, audit_step="")
 
@@ -238,7 +216,7 @@ def test_materialize_unknown_route_dispatches_both_tracks(
 def test_materialize_authoring_disabled_runs_diff_track_only(
     tmp_path: Path,
 ):
-    stub = _Stub(tmp_path, authoring=False)
+    stub = _stub(tmp_path, authoring=False)
 
     _materialize(stub, audit_step="")
 
@@ -247,12 +225,12 @@ def test_materialize_authoring_disabled_runs_diff_track_only(
 
 
 def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_path: Path):
-    from hyperloom.orchestrator.phases.explore import _forward_integrate_source
+    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
 
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path, authoring=True)
 
     task_id = asyncio.run(
-        stub._enqueue_framework_agent_authoring_specialist(
+        stub.phase_framework._enqueue_framework_agent_authoring_specialist(
             dict(_CANDIDATE),
             {},
             reauthor_attempt=1,
@@ -264,7 +242,7 @@ def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_pa
     assert specialist_task.params["reauthor_attempt"] == 1
     round_entry = stub._build_specialist_round_entry(
         task=specialist_task,
-        done_payload={"proposal_set": [], "empty": True},
+        done_payload={"proposal_set": []},
         source=f"specialist:{task_id}",
     )
     assert round_entry["reauthor_attempt"] == 1
@@ -278,14 +256,13 @@ def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_pa
     [
         ("direct_framework", True, ["integrate_patch"]),
         ("author_via_specialist", True, ["specialist"]),
-        # Author route with the arm off must still land on the raw-diff track:
-        # the alternative is a candidate that is approved and then stranded.
+        # Author route with the arm off must still land on the raw-diff track: the alternative is a candidate that is
+        # approved and then stranded.
         ("author_via_specialist", False, ["integrate_patch"]),
-        # An unlabelled candidate takes the author route: rewriting against
-        # live source is the safe default for one nobody vetted.
+        # An unlabelled candidate takes the author route: rewriting against live source is the safe default for one
+        # nobody vetted.
         ("", True, ["specialist"]),
-        # A route the pump does not recognise runs both tracks rather than
-        # picking one on a guess.
+        # A route the pump does not recognise runs both tracks rather than picking one on a guess.
         ("unrecognised", True, ["integrate_patch", "specialist"]),
     ],
 )
@@ -296,12 +273,8 @@ def test_the_route_the_discovery_specialist_returns_picks_the_track(
     authoring: bool,
     kinds: list[str],
 ):
-    """``candidate["route"]`` is the only input that selects apply-vs-author.
-
-    The pump neither re-audits nor re-ranks -- the route travels from the
-    discovery specialist's batch through the proposal payload to the dispatch.
-    """
-    stub = _Stub(tmp_path, authoring=authoring)
+    """``candidate[\"route\"]`` is the only input that selects apply-vs-author."""
+    stub = _stub(tmp_path, authoring=authoring)
     _seed_batch(stub, dict(_CANDIDATE, route=route))
 
     _pump_then_materialize(stub)
@@ -310,13 +283,13 @@ def test_the_route_the_discovery_specialist_returns_picks_the_track(
 
 
 def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path, authoring=True)
     # One unprocessed candidate so the signal has a valid target.
     _CAND_ID = "https://github.com/ROCm/vllm/pull/999"
     stub.shared_state.framework_agent_batches = [{"batch_id": "b1", "candidates": [{"candidate_id": _CAND_ID}]}]
     stub.shared_state.framework_agent_phase_progress = []
 
-    assert asyncio.run(stub._framework_agent_authoring_inflight()) is False
+    assert asyncio.run(stub.phase_framework._framework_agent_authoring_inflight()) is False
 
     # A running framework-owned specialist for the unprocessed candidate counts.
     stub.tasks._running.append(
@@ -326,12 +299,12 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
             params={"framework_agent_authoring": True, "framework_agent_candidate_id": _CAND_ID},
         )
     )
-    assert asyncio.run(stub._framework_agent_authoring_inflight()) is True
+    assert asyncio.run(stub.phase_framework._framework_agent_authoring_inflight()) is True
     stub.tasks._running.clear()
 
     # A kernel-phase specialist (no framework_agent_authoring) does NOT count.
     stub.tasks._running.append(SimpleNamespace(kind="specialist", task_id="k1", params={}))
-    assert asyncio.run(stub._framework_agent_authoring_inflight()) is False
+    assert asyncio.run(stub.phase_framework._framework_agent_authoring_inflight()) is False
     stub.tasks._running.clear()
 
     # A queued framework-owned integrate_patch for the unprocessed candidate counts.
@@ -342,12 +315,12 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
             params={"framework_agent_authoring": True, "framework_agent_candidate_id": _CAND_ID},
         )
     )
-    assert asyncio.run(stub._framework_agent_authoring_inflight()) is True
+    assert asyncio.run(stub.phase_framework._framework_agent_authoring_inflight()) is True
     stub.tasks._queued.clear()
 
     # A bare kernel integrate_patch task (no framework_agent_authoring) does NOT count.
     stub.tasks._queued.append(SimpleNamespace(kind="integrate_patch", task_id="k2", params={}))
-    assert asyncio.run(stub._framework_agent_authoring_inflight()) is False
+    assert asyncio.run(stub.phase_framework._framework_agent_authoring_inflight()) is False
     stub.tasks._queued.clear()
 
     # A pending framework_agent Critic proposal for the unprocessed candidate counts.
@@ -358,7 +331,7 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
             payload={"framework_agent_candidate_id": _CAND_ID},
         ),
     }
-    assert asyncio.run(stub._framework_agent_authoring_inflight()) is True
+    assert asyncio.run(stub.phase_framework._framework_agent_authoring_inflight()) is True
 
     # A pending framework-owned integrate_patch proposal for the unprocessed candidate counts.
     stub.state.pending_proposals = {
@@ -368,7 +341,7 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
             payload={"params": {"framework_agent_authoring": True, "framework_agent_candidate_id": _CAND_ID}},
         ),
     }
-    assert asyncio.run(stub._framework_agent_authoring_inflight()) is True
+    assert asyncio.run(stub.phase_framework._framework_agent_authoring_inflight()) is True
 
     # A bare (kernel-style) integrate_patch proposal does NOT count.
     stub.state.pending_proposals = {
@@ -378,7 +351,7 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
             payload={"params": {}},
         ),
     }
-    assert asyncio.run(stub._framework_agent_authoring_inflight()) is False
+    assert asyncio.run(stub.phase_framework._framework_agent_authoring_inflight()) is False
 
     # A decided proposal does NOT count even if framework-owned.
     stub.state.pending_proposals = {
@@ -388,16 +361,13 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
             payload={"framework_agent_candidate_id": _CAND_ID},
         ),
     }
-    assert asyncio.run(stub._framework_agent_authoring_inflight()) is False
+    assert asyncio.run(stub.phase_framework._framework_agent_authoring_inflight()) is False
 
 
-def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
+def test_record_authored_outcome_writes_progress(
     tmp_path: Path,
 ):
-    stub = _Stub(tmp_path, authoring=True)
-    stub.shared_state.framework_agent_batches = [
-        {"batch_id": "b1", "max_gain_pct_observed_in_batch": 1.0},
-    ]
+    stub = _stub(tmp_path, authoring=True)
     task = SimpleNamespace(
         task_id="i-1",
         params={
@@ -413,7 +383,7 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
         result={"status": "kept", "delta_pct": 6.5, "output_throughput": 1065.0},
     )
 
-    stub._record_framework_agent_authored_outcome(
+    stub.phase_framework._record_framework_agent_authored_outcome(
         task=task,
         result=result,
     )
@@ -427,16 +397,11 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
     assert row["candidate_id"] == "pr-42"
     assert row["gain_pct"] == pytest.approx(6.5)
     assert row["reauthor_attempt"] == 1
-    assert stub.shared_state.framework_agent_batches[0]["max_gain_pct_observed_in_batch"] == pytest.approx(6.5)
 
 
 def test_record_authored_outcome_records_apply_failed_terminal(tmp_path: Path):
-    """A non-keep terminal status (apply_failed) MUST still be recorded.
-
-    Without a terminal row the FRAMEWORK pump re-selects the same candidate
-    every tick. Only empty/in-progress is skipped.
-    """
-    stub = _Stub(tmp_path, authoring=True)
+    """A non-keep terminal status (apply_failed) MUST still be recorded."""
+    stub = _stub(tmp_path, authoring=True)
     task = SimpleNamespace(
         task_id="i-2",
         params={"framework_agent_authoring": True, "framework_batch_id": "b1"},
@@ -446,7 +411,7 @@ def test_record_authored_outcome_records_apply_failed_terminal(tmp_path: Path):
         result={"status": "apply_failed"},
     )
 
-    stub._record_framework_agent_authored_outcome(
+    stub.phase_framework._record_framework_agent_authored_outcome(
         task=task,
         result=result,
     )
@@ -458,10 +423,10 @@ def test_record_authored_outcome_records_apply_failed_terminal(tmp_path: Path):
 
 
 def test_record_authored_outcome_requires_task_provenance(tmp_path: Path):
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path, authoring=True)
     task = SimpleNamespace(task_id="unrelated", params={"specialist_task_id": "s-other"})
 
-    stub._record_framework_agent_authored_outcome(
+    stub.phase_framework._record_framework_agent_authored_outcome(
         task=task,
         result={"status": "kept", "delta_pct": 1.0},
     )
@@ -470,10 +435,8 @@ def test_record_authored_outcome_requires_task_provenance(tmp_path: Path):
 
 
 def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path: Path):
-    """integrate_patch carries only specialist_task_id; the bridge must map it
-    back to the originating PR-URL candidate so the row matches the select key.
-    """
-    stub = _Stub(tmp_path, authoring=True)
+    """integrate_patch carries only specialist_task_id; the bridge must map it back to the originating PR-URL candidate so the row matches the select key."""
+    stub = _stub(tmp_path, authoring=True)
     stub.shared_state.framework_agent_specialist_candidate_map = {
         "spec-7": "https://github.com/ROCm/aiter/pull/3888",
     }
@@ -490,7 +453,7 @@ def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path:
         result={"status": "reverted", "delta_pct": -0.3},
     )
 
-    stub._record_framework_agent_authored_outcome(
+    stub.phase_framework._record_framework_agent_authored_outcome(
         task=task,
         result=result,
     )
@@ -502,7 +465,7 @@ def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path:
 
 
 def test_record_authored_outcome_replaces_stale_empty_row(tmp_path: Path):
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path, authoring=True)
     stub.shared_state.phase = "FRAMEWORK_AGENT"
     stub.shared_state.framework_agent_phase_progress = [
         {
@@ -520,7 +483,7 @@ def test_record_authored_outcome_replaces_stale_empty_row(tmp_path: Path):
         },
     )
 
-    stub._record_framework_agent_authored_outcome(
+    stub.phase_framework._record_framework_agent_authored_outcome(
         task=task,
         result={"status": "reverted", "delta_pct": -0.2},
     )
@@ -535,7 +498,7 @@ def test_record_authored_outcome_replaces_stale_empty_row(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_enqueue_authoring_stamps_recovery_failed_when_unrecoverable(tmp_path: Path):
     """A terminal specialist with no recoverable outcome stamps a terminal row so the pump cannot re-select it forever."""
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path, authoring=True)
     candidate = {
         "candidate_id": "cand-x",
         "pr_url": "https://github.com/o/r/pull/1",
@@ -555,7 +518,7 @@ async def test_enqueue_authoring_stamps_recovery_failed_when_unrecoverable(tmp_p
     # Empty bus -> recovery finds no delegated_result and returns False.
     stub.bus.messages = []
 
-    tid = await stub._enqueue_framework_agent_authoring_specialist(
+    tid = await stub.phase_framework._enqueue_framework_agent_authoring_specialist(
         candidate,
     )
 
@@ -565,12 +528,12 @@ async def test_enqueue_authoring_stamps_recovery_failed_when_unrecoverable(tmp_p
     assert rows[0]["candidate_id"] == "cand-x"
     assert rows[0]["status"] == "recovery_failed"
     # Candidate is now marked processed so the pump will not re-select it.
-    assert "cand-x" in stub._framework_processed_candidate_keys()
+    assert "cand-x" in stub.phase_framework._framework_processed_candidate_keys()
 
 
 @pytest.mark.asyncio
 async def test_recover_authored_outcome_uses_persisted_integrate_result(tmp_path: Path):
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path, authoring=True)
     stub.shared_state.phase = "FRAMEWORK_AGENT"
     specialist_task = SimpleNamespace(
         task_id="specialist-local-2",
@@ -617,7 +580,7 @@ async def test_recover_authored_outcome_uses_persisted_integrate_result(tmp_path
         ),
     ]
 
-    recovered = await stub._recover_framework_agent_authoring_outcome(
+    recovered = await stub.phase_framework._recover_framework_agent_authoring_outcome(
         specialist_task=specialist_task,
     )
 
@@ -630,7 +593,7 @@ async def test_recover_authored_outcome_uses_persisted_integrate_result(tmp_path
 
 @pytest.mark.asyncio
 async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_path: Path):
-    stub = _Stub(tmp_path, authoring=False)
+    stub = _stub(tmp_path, authoring=False)
     stub.shared_state.phase = "FRAMEWORK_AGENT"
     recorded: list[str] = []
 
@@ -638,11 +601,12 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
         return None
 
     stub._record_intervention_for_task = lambda *_args, **_kwargs: None
-    stub._record_framework_agent_authored_outcome = lambda *, task, result: recorded.append(
+    phase = stub.phase_framework
+    phase._record_framework_agent_authored_outcome = lambda *, task, result: recorded.append(
         str(result.result.get("status") or "")
     )
-    stub._maybe_rearm_authored_lane = lambda *_args, **_kwargs: None
-    stub._drain_apply_fail_retry_pending = _noop_async
+    phase._maybe_rearm_authored_lane = _noop_async
+    phase._drain_apply_fail_retry_pending = _noop_async
     stub._is_promotable_result = lambda *_args, **_kwargs: False
     stub._handle_unpromotable_result = _noop_async
     stub._fact_write_hook = _noop_async
@@ -658,18 +622,15 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
         result={"status": "reverted"},
     )
 
-    await DispatcherCollaborator(stub)._reap_dispatched_task(task, result, None)
+    await stub._reap_dispatched_task(task, result)
 
     assert recorded == ["reverted"]
     assert result.result["reauthor_attempt"] == 1
 
 
 def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
-    """A patch dropped by safety-vetting (empty patches_written) must still stamp
-    a terminal row (gate on patches_written, NOT proposal_set), else the FRAMEWORK
-    pump re-dispatches the candidate forever (livelock).
-    """
-    stub = _Stub(tmp_path, authoring=True)
+    """A patch dropped by safety-vetting (empty patches_written) must still stamp a terminal row (gate on patches_written, NOT proposal_set), else the FRAMEWORK pump re-dispatches the candidate forever (livelock)."""
+    stub = _stub(tmp_path, authoring=True)
     cand = "https://github.com/sgl-project/sglang/pull/28067"
     task = SimpleNamespace(
         task_id="spec-28067",
@@ -681,13 +642,12 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
         },
     )
     done_payload = {
-        "empty": False,
         "patches_written": [],
         "proposal_set": [{"name": "serving-gc-off-critical-path"}],
         "summary": "patch target file absent from framework tree",
     }
 
-    stub._record_framework_agent_authoring_empty_outcome(
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task,
         done_payload=done_payload,
     )
@@ -700,7 +660,7 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
 
 
 def test_empty_outcome_records_after_phase_transition(tmp_path: Path):
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path, authoring=True)
     stub.shared_state.phase = "FRAMEWORK_AGENT"
     task = SimpleNamespace(
         task_id="spec-empty-cross-phase",
@@ -711,7 +671,7 @@ def test_empty_outcome_records_after_phase_transition(tmp_path: Path):
         },
     )
 
-    stub._record_framework_agent_authoring_empty_outcome(
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task,
         done_payload={"patches_written": [], "proposal_set": [], "summary": "No safe change"},
     )
@@ -723,10 +683,8 @@ def test_empty_outcome_records_after_phase_transition(tmp_path: Path):
 
 
 def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
-    """Non-empty patches_written means autosubmit will create an integrate_patch
-    that owns the terminal row; the empty-outcome bridge must NOT also stamp one.
-    """
-    stub = _Stub(tmp_path, authoring=True)
+    """Non-empty patches_written means autosubmit will create an integrate_patch that owns the terminal row; the empty-outcome bridge must NOT also stamp one."""
+    stub = _stub(tmp_path, authoring=True)
     task = SimpleNamespace(
         task_id="spec-x",
         params={
@@ -740,7 +698,7 @@ def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
         "proposal_set": [{"name": "v1"}],
     }
 
-    stub._record_framework_agent_authoring_empty_outcome(
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task,
         done_payload=done_payload,
     )
@@ -750,7 +708,7 @@ def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
 
 def test_config_levers_helper_extracts_from_proposal_set():
     """Proposal args and envs retain separate channels; patches take precedence."""
-    from hyperloom.orchestrator.loop.coordinator import (
+    from hyperloom.orchestrator.phases.framework import (
         _framework_config_levers_from_done,
     )
 
@@ -770,10 +728,20 @@ def test_config_levers_helper_extracts_from_proposal_set():
         "extra_envs": {"VLLM_USE_MTP": "1"},
     }
 
-    # A patch deliverable is NOT a config-only outcome.
-    assert (
-        _framework_config_levers_from_done({"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]}) == {}
-    )
+    # A patch alongside a non-atomic lever, while optimizing: the patch is its own
+    # outcome and the lever is judged on its own, so nothing rides with the patch.
+    patched = {"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]}
+    assert _framework_config_levers_from_done(patched) == {}
+    # The same deliverable in an ENABLEMENT round: the pair is jointly what makes
+    # the model boot, so the lever rides with the patch.
+    coupled = _framework_config_levers_from_done(patched, levers_ride_with_patches=True)
+    assert coupled.get("extra_envs") == {"VLLM_USE_MTP": "1"}
+    # An explicitly atomic lever rides with the patch on either lane.
+    atomic = {
+        "patches_written": ["p.patch"],
+        "proposal_set": [{**done["proposal_set"][0], "atomic": True}],
+    }
+    assert _framework_config_levers_from_done(atomic).get("extra_envs") == {"VLLM_USE_MTP": "1"}
     # No levers → empty.
     assert (
         _framework_config_levers_from_done({"patches_written": [], "proposal_set": [{"name": "research-only"}]}) == {}
@@ -781,10 +749,8 @@ def test_config_levers_helper_extracts_from_proposal_set():
 
 
 def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
-    """A config-lever deliverable (proposal_set with extra_args/extra_envs and no
-    patch) is routed to integrate_patch, so the
-    empty-outcome bridge must NOT stamp an authored_empty row for it."""
-    stub = _Stub(tmp_path, authoring=True)
+    """A config-lever deliverable (proposal_set with extra_args/extra_envs and no patch) is routed to integrate_patch, so the empty-outcome bridge must NOT stamp an authored_empty row for it."""
+    stub = _stub(tmp_path, authoring=True)
     task = SimpleNamespace(
         task_id="spec-cfg",
         params={
@@ -800,7 +766,7 @@ def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
         "summary": "PR maps to a config lever on this build",
     }
 
-    stub._record_framework_agent_authoring_empty_outcome(
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task,
         done_payload=done_payload,
     )
@@ -810,9 +776,9 @@ def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
 
 def test_authoring_specialist_same_framework_no_cross(tmp_path: Path):
     """A non-cross audit must NOT stamp cross-framework params."""
-    stub = _Stub(tmp_path)
+    stub = _stub(tmp_path)
     audit = {"recommended_next_step": "author_via_specialist"}  # no cross_framework layer
-    tid = asyncio.run(stub._enqueue_framework_agent_authoring_specialist(dict(_CANDIDATE), audit))
+    tid = asyncio.run(stub.phase_framework._enqueue_framework_agent_authoring_specialist(dict(_CANDIDATE), audit))
     assert tid
     params = stub.tasks.created[-1]["params"]
     assert "cross_framework" not in params
@@ -820,12 +786,10 @@ def test_authoring_specialist_same_framework_no_cross(tmp_path: Path):
 
 
 def test_empty_outcome_skips_when_artifacts_written_routable(tmp_path: Path):
-    """A non-diff tuned artifact (``artifacts_written`` with a real source file)
-    is a FULL result: autosubmit routes it to ``integrate_patch``, so the
-    empty-outcome bridge must NOT stamp an authored_empty row for it."""
+    """A non-diff tuned artifact (``artifacts_written`` with a real source file) is a FULL result: autosubmit routes it to ``integrate_patch``, so the empty-outcome bridge must NOT stamp an authored_empty row for it."""
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path, authoring=True)
     sid = "spec-art"
     spec_root = runs_dir(tmp_path, "specialist", sid)
     art_dir = spec_root / "worktree" / "artifacts"
@@ -842,7 +806,6 @@ def test_empty_outcome_skips_when_artifacts_written_routable(tmp_path: Path):
         },
     )
     done_payload = {
-        "empty": True,
         "patches_written": [],
         "proposal_set": [],
         "artifacts_written": [
@@ -855,7 +818,7 @@ def test_empty_outcome_skips_when_artifacts_written_routable(tmp_path: Path):
         "summary": "autotuned cu_num=304 fp8 fmoe rows",
     }
 
-    stub._record_framework_agent_authoring_empty_outcome(
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task,
         done_payload=done_payload,
     )
@@ -863,10 +826,11 @@ def test_empty_outcome_skips_when_artifacts_written_routable(tmp_path: Path):
 
 
 def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
-    """``artifacts_written`` present but the source file does NOT exist:
-    autosubmit cannot route it to ``integrate_patch``, so the empty-outcome
-    bridge MUST still stamp a terminal row (else the FRAMEWORK pump livelocks)."""
-    stub = _Stub(tmp_path, authoring=True)
+    """``artifacts_written`` present but the source file does NOT exist: autosubmit cannot route it to
+    ``integrate_patch``, so the empty-outcome bridge MUST still stamp a terminal row (else the FRAMEWORK pump
+    livelocks).
+    """
+    stub = _stub(tmp_path, authoring=True)
     task = SimpleNamespace(
         task_id="spec-art-missing",
         params={
@@ -877,7 +841,6 @@ def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
         },
     )
     done_payload = {
-        "empty": True,
         "patches_written": [],
         "proposal_set": [],
         "artifacts_written": [
@@ -890,7 +853,7 @@ def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
         "summary": "claimed artifact but no file on disk",
     }
 
-    stub._record_framework_agent_authoring_empty_outcome(
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task,
         done_payload=done_payload,
     )
@@ -901,14 +864,12 @@ def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
 
 
 def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Path):
-    """A RELATIVE artifact ``source`` that resolves (via ``..``) to a real file
-    OUTSIDE the specialist sandbox is NOT routable, so the empty-outcome bridge
-    MUST stamp a terminal row."""
+    """A RELATIVE artifact ``source`` that resolves (via ``..``) to a real file OUTSIDE the specialist sandbox is NOT routable, so the empty-outcome bridge MUST stamp a terminal row."""
     import os
 
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path, authoring=True)
     sid = "spec-art-fw-escape"
     worktree = runs_dir(tmp_path, "specialist", sid) / "worktree"
     worktree.mkdir(parents=True, exist_ok=True)
@@ -925,7 +886,6 @@ def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Pa
         },
     )
     done_payload = {
-        "empty": True,
         "patches_written": [],
         "proposal_set": [],
         "artifacts_written": [
@@ -937,7 +897,7 @@ def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Pa
         ],
         "summary": "artifact exists but escapes sandbox via ..",
     }
-    stub._record_framework_agent_authoring_empty_outcome(
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task,
         done_payload=done_payload,
     )
@@ -951,9 +911,9 @@ def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Pa
 async def test_perf_explore_retry_stamps_immutable_explore_owner(
     tmp_path: Path,
 ) -> None:
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path, authoring=True)
 
-    task_id = await stub._enqueue_author_specialist(
+    task_id = await stub.phase_framework._enqueue_author_specialist(
         lane="perf_explore",
         attempt=1,
     )
@@ -962,3 +922,53 @@ async def test_perf_explore_retry_stamps_immutable_explore_owner(
     params = stub.tasks.created[-1]["params"]
     assert params["source_phase"] == "FRAMEWORK_AGENT"
     assert params["gap_layer"] == "perf_explore"
+
+
+# ── Parallel authoring ───────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def parallel_phase(tmp_path, monkeypatch):
+    """A FRAMEWORK phase with five PR candidates, capacity 3, and recorded review submissions."""
+    from hyperloom.orchestrator.phases.framework import FrameworkPhase
+
+    stub = _stub(tmp_path)
+    stub.shared_state.research_lane_capacity = 3
+    _seed_batch(stub, *({"pr_url": f"https://github.com/ex/repo/pull/{i}", "title": f"c{i}"} for i in range(5)))
+    stub.submitted = []
+    stub.discoveries = []
+
+    async def _submit(_self, candidate, *, audit, audit_step):
+        stub.submitted.append(candidate["pr_url"])
+
+    async def _discover(_self, *, reason):
+        stub.discoveries.append(reason)
+        return False
+
+    monkeypatch.setattr(FrameworkPhase, "_submit_framework_agent_candidate_for_review", _submit)
+    monkeypatch.setattr(FrameworkPhase, "_maybe_enqueue_candidate_discovery", _discover)
+    return stub
+
+
+async def test_parallel_authoring_fills_capacity_around_candidates_in_flight(parallel_phase):
+    in_flight = "https://github.com/ex/repo/pull/0"
+    parallel_phase.tasks._running.append(
+        SimpleNamespace(kind="integrate_patch", params={"framework_agent_candidate_id": in_flight})
+    )
+
+    await parallel_phase.phase_framework._pump_framework_agent_phase()
+
+    assert parallel_phase.submitted == ["https://github.com/ex/repo/pull/1", "https://github.com/ex/repo/pull/2"]
+
+
+async def test_discovery_fallback_waits_until_nothing_is_in_flight(parallel_phase):
+    parallel_phase.shared_state.framework_agent_batches = []
+    parallel_phase.tasks._queued.append(
+        SimpleNamespace(kind="specialist", params={"framework_agent_candidate_id": "https://github.com/ex/repo/pull/9"})
+    )
+    await parallel_phase.phase_framework._pump_framework_agent_phase()
+    assert parallel_phase.discoveries == []
+
+    parallel_phase.tasks._queued.clear()
+    await parallel_phase.phase_framework._pump_framework_agent_phase()
+    assert parallel_phase.discoveries == ["candidate_pool_empty"]

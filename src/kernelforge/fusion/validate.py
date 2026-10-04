@@ -18,9 +18,16 @@ Hyperloom's job). The validator this module provides is:
     (b) NUMERICAL PARITY vs the REAL eager op -- compared with the shared SNR
         gate or an rtol fallback, NEVER strict allclose (bf16 + fp32-accum is
         not bit-exact).
-    (c) MICROBENCH speedup -- ``eager_us`` vs ``fused_us``; ``kept`` iff the
-        speedup clears ``target_speedup`` and stays under this module's own
-        absolute plausibility ceiling.
+    (c) MICROBENCH speedup -- ``eager_us`` vs ``fused_us``; the speedup must
+        clear ``target_speedup`` and stay under this module's own absolute
+        plausibility ceiling.
+    (d) LAUNCH COUNT -- ``fused_launches`` must be strictly below
+        ``eager_launches``. Launches are what a fusion buys, and a chain that
+        times faster while adding a scratch-fill or a cast elsewhere has bought
+        nothing; counts the harness could not measure leave this unverified
+        rather than passed.
+
+``kept`` requires (a) through (d).
 
 The GPU/import work lives entirely behind the injectable ``KernelValidationRunner``
 so the orchestration + parity math + ROCm failure-mode classification are unit
@@ -44,7 +51,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Optional, Protocol, Sequence, runtime_checkable
 
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 
@@ -495,280 +502,12 @@ def _installed_package_dir(pkg: str) -> str:
     return str(Path(spec.origin).parent)
 
 
-# A fusion reaches the model by being called. Publishing it onto another module
-# is how that is arranged, so an assignment whose target is an attribute is the
-# thing to check; a plain local assignment is bookkeeping inside the new module.
-def _imported_module_aliases(tree: ast.Module) -> set[str]:
-    """Names in this file that refer to a module rather than a value."""
-    aliases: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                aliases.add(alias.asname or alias.name.split(".")[0])
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            for alias in node.names:
-                # `from pkg import mod as m` -- indistinguishable from importing a
-                # value here, and treating it as a module only widens the check.
-                aliases.add(alias.asname or alias.name)
-    return aliases
-
-
-def _published_attribute_names(source: str) -> set[str]:
-    """Attribute names this file installs onto another MODULE.
-
-    Only onto a module: `self.attn = ...` in an `__init__` is an instance
-    attribute and has nothing to do with publishing a kernel, and counting those
-    buries the real finding under every field the model assigns.
-    """
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return set()
-    modules = _imported_module_aliases(tree)
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            if not isinstance(target, ast.Attribute):
-                continue
-            base = target.value
-            if isinstance(base, ast.Name) and base.id in modules:
-                names.add(target.attr)
-    return names
-
-
-def _top_level_names(source: str) -> set[str]:
-    """Names this module defines at its top level, excluding module metadata."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return set()
-    names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-        elif isinstance(node, ast.Assign):
-            # `short = long_name` is a synonym, not a second entry point. If what
-            # it points at is unreached that name is reported on its own, and
-            # counting the alias too would flag a wired fusion for keeping a
-            # spelling around.
-            if isinstance(node.value, ast.Name):
-                continue
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    names.add(target.id)
-    return {n for n in names if not (n.startswith("__") and n.endswith("__"))}
-
-
-def _reads_by_owner(source: str) -> dict[str, set[str]]:
-    """Names read, keyed by the top-level definition that reads them.
-
-    Module-level reads are keyed by "" -- they run on import, so they count as
-    the framework reaching the name rather than as one new symbol citing another.
-    """
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return {}
-    out: dict[str, set[str]] = {}
-    for node in tree.body:
-        owner = (
-            getattr(node, "name", "") if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else ""
-        )
-        bucket = out.setdefault(owner, set())
-        exported: set[str] = set()
-        for inner in ast.walk(node):
-            if isinstance(inner, ast.Assign):
-                exported |= {t.attr for t in inner.targets if isinstance(t, ast.Attribute)}
-            if isinstance(inner, ast.Attribute) and isinstance(inner.ctx, ast.Load):
-                bucket.add(inner.attr)
-            elif isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Load):
-                bucket.add(inner.id)
-            elif isinstance(inner, ast.Call):
-                # A name as a string is only a lookup inside a call --
-                # `getattr(mod, "op")`. In `__all__ = ["op"]` it is a listing,
-                # and counting it would let a module vouch for its own symbol.
-                bucket |= {
-                    arg.value for arg in inner.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
-                }
-        # `other.op = mine.op` reads `op` on the right, and that read is the
-        # publish itself -- counting it would let a publisher vouch for its own
-        # symbol, which is the exact thing being tested for.
-        bucket -= exported
-    return out
-
-
-def unreached_fusion_symbols(
-    repo_root: str,
-    changed_files: list[str],
-    *,
-    pristine_dir: str = "",
-    _walk=None,
-) -> list[str]:
-    """Fusion symbols that nothing already in the model can reach.
-
-    Every gate the loop has can pass on a kernel that is never called. Compiling
-    proves it imports; parity and the microbench call it from the harness
-    directly; the serving smoke boots a server in which an unreferenced fusion is
-    simply inert. So a kernel can be authored, validated, kept and exported
-    without ever being on the model's execution path.
-
-    Two shapes of that have been seen and both are checked. One publishes the
-    kernel onto another module (`_attn.fused_op = ...`) that never looks the name
-    up. The other adds top-level definitions that nothing calls -- an audit of 27
-    landed fusions found one patch whose every hunk was a module-level insertion,
-    so no pre-existing function body was touched and there was no caller to be
-    had.
-
-    Reachability is transitive: a new definition cited only by another new
-    definition that is itself unreached does not count, or a self-contained
-    island of new code would look wired. Roots are the code that was already
-    there, which the framework calls by construction, plus module-level code,
-    which runs on import.
-
-    Without ``pristine_dir`` the "new definition" half degrades to the modules
-    whose names mark them author-created, since there is no baseline to diff
-    against. The published-attribute half does not need one.
-    """
-    root = Path(repo_root)
-    if not repo_root or not root.is_dir() or not changed_files:
-        return []
-    changed = [Path(f) if Path(f).is_absolute() else root / f for f in changed_files]
-    changed += _authored_modules_beside(changed, root, pristine_dir)
-    changed_set = {str(p) for p in changed}
-
-    published: set[str] = set()
-    introduced: set[str] = set()
-    for path in changed:
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        published |= _published_attribute_names(text)
-        introduced |= _top_level_names(text) - _baseline_names(path, root, pristine_dir)
-
-    candidates = published | introduced
-    if not candidates:
-        return []
-
-    # Who reads what, per owning definition, across the tree.
-    walk = _walk or (lambda: root.rglob("*.py"))
-    reads: list[tuple[str, str, set[str]]] = []
-    for path in walk():
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        if not any(name in text for name in candidates):
-            continue
-        for owner, names in _reads_by_owner(text).items():
-            hit = names & candidates
-            if hit:
-                reads.append((str(path), owner, hit))
-
-    # A definition is a root unless it is itself one of the new symbols.
-    reached: set[str] = set()
-    changing = True
-    while changing:
-        changing = False
-        for path_str, owner, names in reads:
-            owner_is_new = owner and path_str in changed_set and owner in candidates and owner not in reached
-            if owner_is_new:
-                continue
-            new_hits = names - reached
-            if new_hits:
-                reached |= new_hits
-                changing = True
-    # The question is whether the fusion is on the execution path, not whether
-    # every name it introduced is used. A fusion carries helpers the model is not
-    # supposed to call -- the eager reference the parity check compares against
-    # is the clearest case, and reporting it would fail a wired fusion for
-    # shipping the thing that proved it correct. One reached entry point means
-    # the model gets there.
-    if reached:
-        return []
-    return sorted(candidates)
-
-
-def _authored_modules_beside(changed: list[Path], root: Path, pristine_dir: str) -> list[Path]:
-    """Fused-kernel modules the author created next to a file it edited.
-
-    The caller knows the model source it asked for; it does not know what the
-    author put beside it. A fusion whose kernel lives in a new module and is
-    never called from the edited file is dead in exactly the way this checks
-    for, and passing only the edited file cannot see it.
-    """
-    known = {p.resolve() for p in changed}
-    found: list[Path] = []
-    for path in changed:
-        parent = path.parent
-        if not parent.is_dir():
-            continue
-        for sibling in sorted(parent.glob("*.py")):
-            if sibling.resolve() in known:
-                continue
-            name = sibling.name.lower()
-            if "fused" not in name and "fusion" not in name:
-                continue
-            if pristine_dir:
-                with contextlib.suppress(ValueError, OSError):
-                    snap = Path(pristine_dir) / sibling.resolve().relative_to(root.resolve())
-                    if snap.is_file():
-                        continue  # predates this run
-            found.append(sibling)
-            known.add(sibling.resolve())
-    return found
-
-
-def _baseline_names(path: Path, root: Path, pristine_dir: str) -> set[str]:
-    """Top-level names this file had before authoring.
-
-    A file with no snapshot is either author-created -- everything in it is new
-    -- or unknowable, in which case claiming everything is new would report the
-    whole module. Only the first is treated as new, by the same name test the
-    export path uses to decide what belongs to a fusion.
-    """
-    if pristine_dir:
-        with contextlib.suppress(ValueError, OSError):
-            snap = Path(pristine_dir) / path.resolve().relative_to(root.resolve())
-            if snap.is_file():
-                return _top_level_names(snap.read_text(encoding="utf-8", errors="ignore"))
-    name = path.name.lower()
-    if "fused" in name or "fusion" in name:
-        return set()
-    try:
-        return _top_level_names(path.read_text(encoding="utf-8", errors="ignore"))
-    except OSError:
-        return set()
-
-
-# The engine runs in a child process whose name does not contain the launcher's
-# command line, so a pkill written against the launcher leaves it holding the
-# card. Observed on this hardware: 283 of 288 GiB still allocated after the
-# server was "killed".
-_ENGINE_CHILD_PATTERNS = ("VLLM::EngineCore", "EngineCore_", "sglang::scheduler")
-
-
-def _pkill(pattern: str) -> None:
-    """Kill our own processes matching ``pattern``, and no one else's.
-
-    These patterns name an engine, not a run: ``VLLM::EngineCore`` matches every
-    such process on the box. Validation hosts are shared, so an unrestricted
-    pkill here reaps a colleague's serving run as readily as the one this smoke
-    just started. Scope it to the calling user; ``getuid`` is absent off POSIX,
-    where ``pkill`` is not there to be called either.
-    """
-    scope = f"-u {os.getuid()} " if hasattr(os, "getuid") else ""
-    subprocess.run(f"pkill -9 {scope}-f '{pattern}'", shell=True, capture_output=True)
-
-
 def _free_vram_fraction(gpu: str, *, _run=None) -> Optional[float]:
     """Fraction of the target GPU's memory that is free, or None if unknown."""
     run = _run or (lambda cmd: subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60))
     try:
         out = run("rocm-smi --showmemuse").stdout
-    except Exception:  # noqa: BLE001 -- a probe must never end the run
+    except (OSError, subprocess.SubprocessError):
         return None
     used = re.findall(r"\(VRAM%\):\s*(\d+)", out)
     if not used:
@@ -906,12 +645,6 @@ def serving_smoke_verdict(
     server = None
     fh: object = None
     try:
-        _pkill(f"vllm serve.*{port}" if is_vllm else f"sglang.launch_server.*port={port}")
-        # The launcher's children do not carry its command line, so the pattern
-        # above misses them and they keep the card allocated.
-        for child in _ENGINE_CHILD_PATTERNS:
-            _pkill(child)
-        _time.sleep(2)
         try:
             fh = open(slog, "w")
         except OSError:
@@ -1183,12 +916,18 @@ class BenchOutcome:
 
     ``skipped`` marks a benign unavailability (e.g. the Mamba backend cannot init
     on ROCm) — correctness still counts, but the speedup is unverified.
+
+    The launch counts are per decode step, over the whole step rather than the
+    replaced chain. ``None`` means the harness could not count them, which leaves
+    the launch gate unverified rather than passed.
     """
 
     eager_us: Optional[float] = None
     fused_us: Optional[float] = None
     skipped: bool = False
     skip_reason: str = ""
+    eager_launches: Optional[int] = None
+    fused_launches: Optional[int] = None
 
 
 @runtime_checkable
@@ -1270,43 +1009,141 @@ def implausible_speedup_reason(speedup: float) -> str:
     return ""
 
 
+def launch_regression_reason(eager_launches: Optional[int], fused_launches: Optional[int]) -> str:
+    """Why this fusion did not remove launches, or "" when it did.
+
+    The whole lever is launch count, so a candidate that collapses its chain but
+    adds a scratch-fill, a cast or a copy to feed the fused kernel can time
+    faster on the chain and cost more over the decode step. Unknown counts are
+    NOT a regression: the harness may be unable to profile, and failing a correct
+    fusion for that would teach the author to game the number instead of the
+    kernel. :func:`launch_gate_unverified` reports that case separately.
+    """
+    if eager_launches is None or fused_launches is None:
+        return ""
+    eager, fused = int(eager_launches), int(fused_launches)
+    if fused < eager:
+        return ""
+    verdict = "removes no launches" if fused == eager else "ADDS launches"
+    return (
+        f"the fused path {verdict}: {eager} -> {fused} per decode step. Fusion is "
+        f"paid for in launches, not in the timing of the chain alone; find what "
+        f"the fused path launches in addition to the kernel you wrote"
+    )
+
+
+def launch_gate_unverified(eager_launches: Optional[int], fused_launches: Optional[int]) -> bool:
+    """Whether the harness left the launch gate unmeasured."""
+    return eager_launches is None or fused_launches is None
+
+
+def launch_count(value: Any) -> Optional[int]:
+    """One launch count out of harness JSON, or ``None`` when it is not usable.
+
+    A harness that reports a count it did not measure is the failure this guards:
+    anything that is not a non-negative integer reads as "not counted", which
+    leaves the gate unverified instead of silently passing it.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    count = int(value)
+    return count if count >= 0 else None
+
+
 def _tail(text: str, n: int = 400) -> str:
     """Last ``n`` chars of an error blob, single-lined for compact notes."""
     return " ".join((text or "").split())[-n:]
 
 
-def fused_symbol_invocation_evidence(source_file: str) -> tuple[bool, str]:
-    """Whether the framework edit CALLS the fused module, or only imports it.
+def _kernel_match_key(name: str) -> str:
+    """One kernel name reduced to a form two profilers can agree on."""
+    return " ".join(str(name or "").split()).lower()
 
-    A fusion is delivered as two edits: a new fused-kernel module, and a wiring
-    edit that makes the framework's forward path use it. Everything downstream
-    measures only the first. The harness imports the fused entry point and times
-    it against its own eager reference, so a 37x microbench is fully explained by
-    a module that nothing calls; and the serving smoke boots the framework and
-    sends real decodes, which succeed exactly as they did before because the
-    unwired kernel never runs. Both report success for zero end-to-end gain --
-    the failure this module already names elsewhere as "a PASS reported for a
-    kernel that was never loaded, which is worse than a failure".
 
-    This is the missing wiring check, and it is deliberately static: an import
-    bound by a name that appears nowhere else in the file (the ``# noqa: F401``
-    shape an agent produces when it authors the kernel but forgets the call site)
-    cannot execute, whatever the runtime does. Everything else fails OPEN --
-    an unreadable or unparseable source, and equally a source that imports no
-    fused module at all, which is what an INLINE fusion (the fused call written
-    straight into the framework file) legitimately looks like. The gate exists
-    to catch one provable defect, not to demote a KEEP it could not inspect.
+def _same_kernel(expected: str, observed: str) -> bool:
+    """Whether an observed launch is the kernel the trace recorded.
 
-    Returns:
-        ``(True, reason)`` when the fused module is referenced somewhere other
-        than its own import statement, or when the check could not run.
+    Kineto and the in-process profiler render the same symbol slightly
+    differently (a dropped ``void``, a differently spelled template argument), so
+    containment either way counts as a match. The names are long mangled
+    signatures, which makes an accidental containment match unlikely enough that
+    tolerance costs less here than a false mismatch would.
     """
+    want, got = _kernel_match_key(expected), _kernel_match_key(observed)
+    if not want or not got:
+        return False
+    return want == got or want in got or got in want
+
+
+def eager_trace_alignment(
+    observed: Sequence[str],
+    trace_kernels: Optional[dict[str, Any]],
+) -> tuple[Optional[bool], str]:
+    """Whether the harness's eager arm ran the code path the trace recorded.
+
+    Everything the campaign reports -- parity, speedup, both launch counts -- is
+    measured against whatever the eager arm happens to call, and nothing
+    downstream re-checks that choice. A framework that ships two implementations
+    of one chain (a Triton path and a JIT C++ path, say) will happily export
+    plausible names for the dead one, and a harness built against it produces
+    numbers that are internally consistent and describe software nobody runs.
+    Comparing the arm's actual launches against the anchor's recorded
+    neighbourhood is the one cheap check that catches it.
+
+    Returns ``None`` when there is nothing to check -- unanchored discovery
+    records no neighbourhood, and a harness that reports no kernel names leaves
+    the question open rather than answering it "no".
+    """
+    evidence = trace_kernels or {}
+    anchor = str(evidence.get("anchor") or "").strip()
+    if not anchor:
+        return None, "no anchored trace evidence to check the eager arm against"
+    seen = [str(n) for n in (observed or []) if str(n).strip()]
+    if not seen:
+        return None, "harness reported no eager kernel names; alignment unchecked"
+
+    neighbours: list[str] = []
+    for key in ("before", "after"):
+        for name in evidence.get(key) or []:
+            text = str(name).strip()
+            if text and text != anchor and text not in neighbours:
+                neighbours.append(text)
+
+    if not any(_same_kernel(anchor, name) for name in seen):
+        return False, (
+            f"eager arm never launched the anchor kernel ({_tail(anchor, 120)}); "
+            f"it issued {len(seen)} other kernel(s), so it is a different code path"
+        )
+    matched = [n for n in neighbours if any(_same_kernel(n, name) for name in seen)]
+    if neighbours and not matched:
+        return False, (
+            f"eager arm launched the anchor but none of its {len(neighbours)} recorded "
+            "neighbour kernels; it reproduces the anchor in isolation, not the chain"
+        )
+    return True, f"eager arm matched the anchor and {len(matched)}/{len(neighbours)} recorded neighbours"
+
+
+@dataclass(frozen=True)
+class WiringEvidence:
+    """What a static read of the framework edit proved about the fused call site."""
+
+    verdict: str
+    """``"wired"``, ``"not_wired"``, or ``"unchecked"`` when the gate could not judge."""
+
+    reason: str
+
+
+def _file_invocation_evidence(source_file: str) -> tuple[Optional[bool], str]:
+    """One file's verdict: ``True`` wired, ``False`` dead import, ``None`` no evidence."""
     from .emit import _is_fused_module_name
 
+    label = Path(source_file).name
     try:
         tree = ast.parse(Path(source_file).read_text(encoding="utf-8", errors="replace"))
     except (OSError, SyntaxError, ValueError) as exc:
-        return True, f"unchecked ({type(exc).__name__}: {exc})"
+        return None, f"{label} unchecked ({type(exc).__name__}: {exc})"
 
     # Names the wiring edit binds from a fused-kernel module, at any nesting
     # depth: a lazy import inside ``forward`` is a legitimate wiring style.
@@ -1323,8 +1160,8 @@ def fused_symbol_invocation_evidence(source_file: str) -> tuple[bool, str]:
     if not bound:
         # A fusion authored INLINE in the framework file imports nothing, and is
         # wired by construction. Only a bound-but-unused import is provable, so
-        # this branch fails open like the unreadable-source one above.
-        return True, f"unchecked ({Path(source_file).name} imports no fused-kernel module)"
+        # this branch yields no evidence rather than a verdict.
+        return None, f"{label} imports no fused-kernel module"
 
     # An ``import`` statement contributes ast.alias, never ast.Name, so any Name
     # load of a bound identifier is by construction a use outside the import.
@@ -1336,11 +1173,58 @@ def fused_symbol_invocation_evidence(source_file: str) -> tuple[bool, str]:
         }
     )
     if used:
-        return True, f"{Path(source_file).name} references {', '.join(used)}"
+        return True, f"{label} references {', '.join(used)}"
     return False, (
-        f"{Path(source_file).name} imports {', '.join(sorted(bound))} from a fused-kernel "
+        f"{label} imports {', '.join(sorted(bound))} from a fused-kernel "
         f"module and never references it -- the fused kernel is dead code in the served model"
     )
+
+
+def fused_symbol_invocation_evidence(
+    source_file: str,
+    extra_files: Sequence[str] = (),
+) -> WiringEvidence:
+    """Whether the framework edit CALLS the fused module, or only imports it.
+
+    A fusion is delivered as two edits: a new fused-kernel module, and a wiring
+    edit that makes the framework's forward path use it. Everything downstream
+    measures only the first. The harness imports the fused entry point and times
+    it against its own eager reference, so a 37x microbench is fully explained by
+    a module that nothing calls; and the serving smoke boots the framework and
+    sends real decodes, which succeed exactly as they did before because the
+    unwired kernel never runs. Both report success for zero end-to-end gain --
+    the failure this module already names elsewhere as "a PASS reported for a
+    kernel that was never loaded, which is worse than a failure".
+
+    This is the missing wiring check, and it is deliberately static: an import
+    bound by a name that appears nowhere else in the file (the ``# noqa: F401``
+    shape an agent produces when it authors the kernel but forgets the call site)
+    cannot execute, whatever the runtime does. Everything else is ``unchecked``,
+    which does not block a KEEP -- an unreadable or unparseable source, and
+    equally a source that imports no fused module at all, which is what an INLINE
+    fusion (the fused call written straight into the framework file) legitimately
+    looks like. The gate exists to catch one provable defect, not to demote a KEEP
+    it could not inspect, and equally not to claim it inspected one it did not.
+
+    ``extra_files`` are the other files a multi-file fusion edits. The fused module
+    only has to be called from ONE of them, so a single file's dead import is not
+    the fusion's verdict: the check passes as soon as any file references it, and
+    fails only when every file that imports it leaves it unused.
+    """
+    files = [p for p in [source_file, *extra_files] if p]
+    if not files:
+        return WiringEvidence("unchecked", "unchecked (no framework file recorded)")
+
+    dead: list[str] = []
+    silent: list[str] = []
+    for path in files:
+        verdict, reason = _file_invocation_evidence(path)
+        if verdict is True:
+            return WiringEvidence("wired", reason)
+        (dead if verdict is False else silent).append(reason)
+    if dead:
+        return WiringEvidence("not_wired", "; ".join(dead))
+    return WiringEvidence("unchecked", f"unchecked ({'; '.join(silent)})")
 
 
 def validate_recipe(
@@ -1378,6 +1262,7 @@ def validate_recipe(
         kind = "triton JIT" if comp.is_triton else "module import"
         return ValidationResult(
             correctness_passed=False,
+            correctness_measured=False,
             max_abs_err=None,
             rtol=rtol,
             kernel_speedup=None,
@@ -1392,6 +1277,7 @@ def validate_recipe(
     if not samples:
         return ValidationResult(
             correctness_passed=False,
+            correctness_measured=False,
             max_abs_err=None,
             rtol=rtol,
             kernel_speedup=None,
@@ -1454,7 +1340,10 @@ def validate_recipe(
     if bench.eager_us and bench.fused_us and bench.fused_us > 0:
         speedup = bench.eager_us / bench.fused_us
     implausible = implausible_speedup_reason(speedup) if speedup is not None else ""
-    kept = speedup is not None and not implausible and speedup >= target_speedup
+    # ── gate (d): launch count ───────────────────────────────────────────────
+    regression = launch_regression_reason(bench.eager_launches, bench.fused_launches)
+    unverified = launch_gate_unverified(bench.eager_launches, bench.fused_launches)
+    kept = speedup is not None and not implausible and not regression and speedup >= target_speedup
     if speedup is None:
         note = (
             "PARITY OK but microbench produced no timing (eager_us/fused_us "
@@ -1462,10 +1351,22 @@ def validate_recipe(
         )
     elif implausible:
         note = f"PARITY OK but the microbench is not believable: {implausible}"
+    elif regression:
+        note = (
+            f"PARITY OK and {speedup:.3f}x on the chain, but {regression}. "
+            f"LESSON: count the launches of both arms before optimizing the "
+            f"schedule; a faster chain that costs a launch is not a fusion."
+        )
     elif kept:
         note = (
             f"KEPT: parity OK and {speedup:.3f}x >= {target_speedup:.2f}x target "
-            f"(eager={bench.eager_us} us, fused={bench.fused_us} us)."
+            f"(eager={bench.eager_us} us, fused={bench.fused_us} us"
+            + (
+                "; launches UNVERIFIED — the harness reported no count"
+                if unverified
+                else f"; launches {bench.eager_launches} -> {bench.fused_launches}"
+            )
+            + ")."
         )
     else:
         note = (
@@ -1481,6 +1382,8 @@ def validate_recipe(
         fused_us=bench.fused_us,
         kept=kept,
         note=note,
+        eager_launches=bench.eager_launches,
+        fused_launches=bench.fused_launches,
     )
 
 
@@ -1500,6 +1403,8 @@ class HarnessKernelRunner:
         {"compiled": bool, "is_triton": bool, "error": str,
          "parity": [{"snr_db": float|null, "max_abs_err": float|null, "label": str}],
          "eager_us": float|null, "fused_us": float|null,
+         "eager_launches": int|null, "fused_launches": int|null,
+         "eager_kernels": [str], "eager_matches_trace": bool,
          "skipped": bool, "skip_reason": str}
     """
 
@@ -1564,6 +1469,10 @@ class HarnessKernelRunner:
         self._cache = result
         return result
 
+    def report(self, recipe: Recipe) -> dict:
+        """The harness's raw JSON, for gates that read fields beyond the protocol."""
+        return dict(self._load(recipe))
+
     def compile_check(self, recipe: Recipe) -> CompileOutcome:
         d = self._load(recipe)
         return CompileOutcome(
@@ -1594,6 +1503,8 @@ class HarnessKernelRunner:
             fused_us=d.get("fused_us"),
             skipped=bool(d.get("skipped")),
             skip_reason=str(d.get("skip_reason") or ""),
+            eager_launches=launch_count(d.get("eager_launches")),
+            fused_launches=launch_count(d.get("fused_launches")),
         )
 
 

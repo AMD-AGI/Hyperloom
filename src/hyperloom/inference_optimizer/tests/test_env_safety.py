@@ -1,17 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for multi-node SSH env key validation.
-
-``env_safety`` is the last-mile gate on keys that already entered a forward
-dict: it blocks shell/loader injection vectors (``BLOCKED_UNTRUSTED_ENV_NAMES``
-from ``hyperloom.common.env_safety``) and invalid key shapes. Credential
-exclusion happens upstream in ``infera._collect_forward_env`` (prefix whitelist)
-and the platform's pod env (operator ``--extra-env`` only); those keys are never
-placed into the forward dict, so they are not SSH-forwarded to inference pods.
-"""
+"""Unit tests for multi-node SSH env key validation."""
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
@@ -67,24 +61,20 @@ def test_common_env_safety_filters_dotenv_and_kernel_agent_keys_only():
     assert common_env_safety.is_allowed_dotenv_key("HF_TOKEN")
     assert common_env_safety.is_allowed_dotenv_key("HTTPS_PROXY")
     assert common_env_safety.is_allowed_dotenv_key("HYPERLOOM_RUNTIME_DIR")
-    # hyperloom-setup writes the gateway auth headers into .env, so the .env
-    # loader must read them back instead of dropping them as unsupported.
+    # hyperloom-setup writes the gateway auth headers into .env, so the .env loader must read them back instead of
+    # dropping them as unsupported.
     assert common_env_safety.is_allowed_dotenv_key("ANTHROPIC_CUSTOM_HEADERS")
     assert common_env_safety.is_allowed_dotenv_key("OPENAI_CUSTOM_HEADERS")
     assert not common_env_safety.is_allowed_dotenv_key("PYTHONPATH")
     assert not common_env_safety.is_allowed_dotenv_key("BAD-NAME")
 
     assert common_env_safety.is_allowed_kernel_agent_env_key("TRACELENS_ROOT")
-    # install.sh persists the Anthropic header into kernel-agent.env.sh, so the
-    # reader must accept it; the OpenAI one is read on the same terms as the
-    # OpenAI URL and key already are.
+    # install.sh persists the Anthropic header into kernel-agent.env.sh, so the reader must accept it; the OpenAI one
+    # is read on the same terms as the OpenAI URL and key already are.
     assert common_env_safety.is_allowed_kernel_agent_env_key("ANTHROPIC_CUSTOM_HEADERS")
     assert common_env_safety.is_allowed_kernel_agent_env_key("OPENAI_CUSTOM_HEADERS")
     assert common_env_safety.is_allowed_kernel_agent_env_key("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV")
     assert common_env_safety.is_allowed_kernel_agent_env_key("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS")
-    # Dropped keys never reach the kernel-agent child, so an opt-in route switch
-    # is inert until it is listed here.
-    assert common_env_safety.is_allowed_kernel_agent_env_key("HYPERLOOM_FORGE_REWRITE_BY_FLYDSL")
     assert not common_env_safety.is_allowed_kernel_agent_env_key("TRACELENS_TOKEN")
 
     allowed, dropped = common_env_safety.filter_untrusted_env_mapping(
@@ -141,14 +131,13 @@ def test_scrub_benchmark_process_env_removes_control_plane_credentials():
 
 
 def test_variant_env_key_allows_workload_pins_and_blocks_hijacks():
-    # Sweep, conc-sweep and shape-capture grids set these from code, so an
-    # allowlist that dropped them would silently flatten every variant.
+    # Sweep, conc-sweep and shape-capture grids set these from code, so an allowlist that dropped them would silently
+    # flatten every variant.
     for pinned in ("CONC", "ISL", "OSL", "NUM_PROMPTS", "RUN_EVAL", "PORT", "TP", "MAX_MODEL_LEN"):
         assert common_env_safety.is_allowed_variant_env_key(pinned)
     for knob in ("SGLANG_USE_AITER", "VLLM_USE_MTP", "AITER_CONFIG_GEMM_A8W8", "PYTORCH_TUNABLEOP_ENABLED"):
         assert common_env_safety.is_allowed_variant_env_key(knob)
-    # Name-shape matching would read this as a credential; it is the private
-    # model download token and has to survive.
+    # Name-shape matching would read this as a credential; it is the private model download token and has to survive.
     assert common_env_safety.is_allowed_variant_env_key("HF_TOKEN")
 
     for hijack in ("LD_PRELOAD", "PATH", "PYTHONPATH", "BASH_ENV", "LD_AUDIT", "PYTHONSTARTUP"):
@@ -187,6 +176,54 @@ def test_redact_secret_values_masks_assignments_and_bearer_tokens():
     assert "sensitive-value" not in redacted
     assert "sensitive-token" not in redacted
     assert redacted.count("[REDACTED]") == 2
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "Authorization: abcdef1234567890",
+        "authorization: Basic YWJjOmRlZg==",
+        "Authorization: Token abc123def456",
+        "Authorization: AWS4-HMAC-SHA256 Credential=EXAMPLEEXAMPLE",
+        "AUTH_KEY=supersecret",
+        "AUTHORIZATION=supersecretvalue",
+        "X_AUTHORIZATION=supersecretvalue",
+        "PROXY_AUTHORIZATION: abc12345678",
+    ),
+)
+def test_redact_secret_values_masks_authorization_forms(text):
+    """Authorization headers and AUTH assignments are masked."""
+    redacted = common_env_safety.redact_secret_values(text)
+
+    assert redacted.endswith("[REDACTED]")
+
+
+def test_redact_secret_values_preserves_json_around_authorization():
+    """Authorization redaction must stop at the enclosing JSON quote."""
+    text = '{"header": "Authorization: Basic YWJjOmRlZg==", "ok": true}'
+
+    out = common_env_safety.redact_secret_values(text)
+
+    assert json.loads(out) == {"header": "Authorization: Basic [REDACTED]", "ok": True}
+
+
+def test_redact_secret_values_spares_unauthorized_status_text():
+    """AUTH is a suffix, so HTTP Unauthorized text is not an assignment."""
+    text = "401 Unauthorized: invalid API key"
+
+    assert common_env_safety.redact_secret_values(text) == text
+
+
+def test_redact_secret_values_masks_base64_bearer_token():
+    """Bearer token characters include the standard base64 alphabet."""
+    out = common_env_safety.redact_secret_values("Bearer abc+def/ghi=jkl")
+
+    assert out == "Bearer [REDACTED]"
+
+
+def test_redact_secret_values_masks_short_legacy_github_token_shape():
+    """Legacy runner coverage masks gh-prefixed token-shaped values."""
+    assert common_env_safety.redact_secret_values("ghp_abc") == "ghp_[REDACTED]"
 
 
 def test_redact_secret_values_masks_quoted_assignments():
@@ -238,3 +275,45 @@ def test_redact_secret_values_masks_aws_key_and_jwt_shapes():
     assert access_id not in redacted
     assert jwt not in redacted
     assert redacted.count("[REDACTED]") == 2
+
+
+def test_redact_secret_values_masks_custom_headers_assignment():
+    text = "ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: deadbeefsecret"
+    out = common_env_safety.redact_secret_values(text)
+    assert "deadbeefsecret" not in out
+    assert "ANTHROPIC_CUSTOM_HEADERS=" in out
+
+
+def test_redact_secret_values_preserves_json_around_custom_headers():
+    """A custom-header assignment must not consume adjacent JSON fields."""
+    text = '{"a": ["OPENAI_CUSTOM_HEADERS=h"], "b": "run with FOO=1"}'
+
+    out = common_env_safety.redact_secret_values(text)
+
+    assert json.loads(out) == {"a": ["OPENAI_CUSTOM_HEADERS=[REDACTED]"], "b": "run with FOO=1"}
+
+
+def test_redact_secret_values_masks_spaced_custom_header_before_newline():
+    """A custom-header value containing a space is masked on non-final lines."""
+    text = "ANTHROPIC_CUSTOM_HEADERS=x-key: deadbeefsecret\nnext line\n"
+
+    out = common_env_safety.redact_secret_values(text)
+
+    assert "deadbeefsecret" not in out
+    assert out.endswith("next line\n")
+
+
+def test_redact_secret_values_masks_every_custom_header():
+    """Comma-separated custom headers are redacted as one bounded value."""
+    text = "ANTHROPIC_CUSTOM_HEADERS=k1: v1,k2: secret2"
+
+    assert common_env_safety.redact_secret_values(text) == "ANTHROPIC_CUSTOM_HEADERS=[REDACTED]"
+
+
+def test_redact_secret_values_preserves_json_around_ocp_header():
+    """OCP header redaction stops at the enclosing JSON delimiters."""
+    text = '{"h":"Ocp-Apim-Subscription-Key: deadbeefsecret", "ok":true}'
+
+    out = common_env_safety.redact_secret_values(text)
+
+    assert json.loads(out) == {"h": "Ocp-Apim-Subscription-Key: [REDACTED]", "ok": True}

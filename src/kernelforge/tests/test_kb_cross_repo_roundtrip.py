@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A producer's write must be found by a consumer's read of the same kernel.
-
-This is the capstone for cross-repo reuse: the two sides run the real identity
-resolution, differ in workspace layout and kernel path, and must still land on
-one address. Only the store is local; nothing about the identity is mocked.
-
-A miss must therefore mean the kernel really is a different one -- a different
-architecture, a different framework -- and never merely a different checkout.
-"""
+"""A producer's write must be found by a consumer's read of the same kernel."""
 
 from __future__ import annotations
 
@@ -99,8 +91,8 @@ def test_write_and_read_resolve_the_same_address_across_workspaces(tmp_path, kno
     status = _producer_write(tmp_path, knowledge_root)
 
     assert status["written"] is True
-    # Framework-explicit, and the operator drops its ``_kernel`` suffix so a
-    # source symbol and a trace name converge on one address.
+    # Framework-explicit, and the operator drops its ``_kernel`` suffix so a source symbol and a trace name converge
+    # on one address.
     assert status["kernel"].startswith("kernel:forge-loop:fused_moe:vllm:")
     assert status["kernel"].endswith(":triton:mi355x")
 
@@ -113,22 +105,14 @@ def test_write_and_read_resolve_the_same_address_across_workspaces(tmp_path, kno
 
 
 def test_a_different_gpu_model_is_a_real_mismatch(tmp_path, knowledge_root):
-    """Not transferable, so it must not be offered -- and not merely filtered.
-
-    Both models here build for the same target, so an address keyed by the
-    compilation target would hand one card's recipe to the other.
-    """
+    """Not transferable, so it must not be offered -- and not merely filtered."""
     _producer_write(tmp_path, knowledge_root, gpu_type="mi355x")
 
     assert _consumer_read(tmp_path, knowledge_root, gpu_type="mi300x") == []
 
 
 def test_framework_follows_the_defining_file_across_packages(tmp_path, knowledge_root):
-    """The anchor only calls the kernel; the owner is where it is defined.
-
-    Both sides must agree on that, or a vLLM entry point calling an aiter kernel
-    would be filed under one framework and looked up under another.
-    """
+    """The anchor only calls the kernel; the owner is where it is defined."""
     workspace = tmp_path / "shared"
     aiter_file = _write_source(
         workspace,

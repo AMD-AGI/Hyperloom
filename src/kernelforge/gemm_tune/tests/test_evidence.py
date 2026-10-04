@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for serving-log evidence parsing.
-
-Two parsing rules carry most of the weight:
-
-* the wide key group (dtype/otype/bias/scaleAB/bpreshuffle) is **optional** --
-  the bf16 op prints it, the a8w8_blockscale op prints M/N/K only. Requiring it
-  dropped 252 of 440 misses in the first version;
-* zero hit lines means *unknown*, not zero hits -- hit logging is gated behind
-  ``AITER_LOG_TUNED_CONFIG=1`` while miss logging is unconditional. Reading it
-  as zero would REVERT every arm that did not set the flag.
-"""
+"""Tests for serving-log evidence parsing."""
 
 from __future__ import annotations
 
@@ -67,6 +57,29 @@ class TestApplyVerdict:
         rep = ev.parse_log(_BF16_MISS)
         assert rep["apply_verdict"]["verdict"] == "inconclusive_no_hit_logging"
 
+    def test_misses_with_hit_logging_on_is_a_real_zero(self):
+        # A caller that set the flag itself resolves the ambiguity, and the
+        # distinction matters: an op with genuinely zero shipped coverage is the
+        # strongest reason to tune it, while "not recorded" is no reason at all.
+        rep = ev.parse_log(_BF16_MISS, hit_logging=True)
+        av = rep["apply_verdict"]
+        assert av["hit"] == 0 and av["miss"] == 1
+        assert av["verdict"] == "zero_hit"
+
+    def test_hit_logging_unknown_stays_inconclusive(self):
+        rep = ev.parse_log(_BF16_MISS, hit_logging=None)
+        assert rep["apply_verdict"]["verdict"] == "inconclusive_no_hit_logging"
+
+    def test_hit_logging_flag_cannot_manufacture_a_hit(self):
+        rep = ev.parse_log(_BF16_MISS, hit_logging=True)
+        assert rep["apply_verdict"]["hit"] == 0
+        assert rep["apply_verdict"]["hit_ratio"] == 0.0
+
+    def test_hit_logging_flag_is_irrelevant_once_something_hit(self):
+        for flag in (None, True, False):
+            rep = ev.parse_log("\n".join([_HIT, _BF16_MISS]), hit_logging=flag)
+            assert rep["apply_verdict"]["verdict"] == "served"
+
     def test_any_hit_means_served(self):
         rep = ev.parse_log("\n".join([_HIT, _BF16_MISS]))
         av = rep["apply_verdict"]
@@ -100,9 +113,8 @@ class TestDemandAggregation:
 
 class TestMoEDispatch:
     def test_stage_tokens_are_kept_per_stage(self):
-        # A model dispatches different stages at different token counts; a single
-        # "saw 1stage" boolean collapses that away and suppresses tuning for the
-        # range 2stage actually serves.
+        # A model dispatches different stages at different token counts; a single "saw 1stage" boolean collapses that
+        # away and suppresses tuning for the range 2stage actually serves.
         log = "\n".join(
             [
                 "[aiter] [fused_moe] using 1stage default for (304, 1, 4096, 1536, 256, 6)",
@@ -147,18 +159,16 @@ class TestDemandConsumption:
         assert [s["M"] for s in got] == [65536]
 
     def test_shapes_default_to_the_padded_M_a_row_must_be_written_at(self):
-        # aiter reaches a tuned row at the exact M, else at the padded M. 65536
-        # is past the 8192 clamp, so a row for it lives at 8192; writing it at
-        # 65536 produces a table no lookup can reach.
+        # aiter reaches a tuned row at the exact M, else at the padded M. 65536 is past the 8192 clamp, so a row for
+        # it lives at 8192; writing it at 65536 produces a table no lookup can reach.
         entry = ev.demand_for_tuner(self._report(), "sglang_dense_bf16")
         shapes = ev.demand_shapes(entry)
         assert shapes[0]["M"] == 8192
         assert shapes[0]["observed_M"] == [65536]
 
     def test_keys_sharing_a_bucket_cost_one_slot_not_several(self):
-        # The whole point of bucketing: three raw keys in one padded bucket are
-        # served by a single tuned row, so they must not eat three of the budget.
-        # Listed most-requested first, as parse_log emits them.
+        # The whole point of bucketing: three raw keys in one padded bucket are served by a single tuned row, so they
+        # must not eat three of the budget.
         entry = {
             "keys": [
                 {"M": "64", "N": "4096", "K": "4096", "requests": 11},
@@ -170,8 +180,8 @@ class TestDemandConsumption:
         shapes = ev.demand_shapes(entry)
         assert [(s["M"], s["requests"]) for s in shapes] == [(512, 12), (64, 11)]
         assert shapes[0]["observed_M"] == [300, 400, 512]
-        # ...and with one slot, the bucket worth 12 requests wins over the raw
-        # key worth 11, which the raw ordering would have picked first.
+        # ...and with one slot, the bucket worth 12 requests wins over the raw key worth 11, which the raw ordering
+        # would have picked first.
         assert [s["M"] for s in ev.demand_shapes(entry, limit=1)] == [512]
         assert [s["M"] for s in ev.demand_shapes(entry, limit=1, bucket=False)] == [64]
 
@@ -217,3 +227,68 @@ class TestRobustness:
         d = ev.parse_log(line)["demands"][0]
         assert d["table"] == "brand_new.csv"
         assert d["tuner"] is None and d["key_schema"] == ["M", "N", "K"]
+
+
+class TestDeployedTableNamesResolveToTheirOwner:
+    """Resolve deployed and merged table names to their owning tuner."""
+
+    @staticmethod
+    def _miss(table: str) -> str:
+        return f"[aiter] shape is M:512, N:1536, K:7168, not found tuned config in {table}"
+
+    def test_deployed_dense_bf16_is_owned(self):
+        d = ev.parse_log(self._miss("/tmp/aiter_configs/merged_tuned_dense_bf16.csv"))["demands"][0]
+        assert d["table"] == "bf16_tuned_gemm.csv"
+        assert d["tuner"] == "sglang_dense_bf16"
+        assert d["env_var"] == "AITER_CONFIG_GEMM_BF16"
+
+    def test_undeployed_artifact_name_is_owned_too(self):
+        d = ev.parse_log(self._miss("/work/tuned_dense_bf16.csv"))["demands"][0]
+        assert d["table"] == "bf16_tuned_gemm.csv" and d["tuner"] == "sglang_dense_bf16"
+
+    def test_runtime_name_is_unchanged(self):
+        d = ev.parse_log(self._miss("/tmp/aiter_configs/bf16_tuned_gemm.csv"))["demands"][0]
+        assert d["table"] == "bf16_tuned_gemm.csv" and d["tuner"] == "sglang_dense_bf16"
+
+    def test_deployed_and_runtime_names_are_one_demand(self):
+        rep = ev.parse_log(
+            "\n".join(
+                [
+                    self._miss("/tmp/aiter_configs/bf16_tuned_gemm.csv"),
+                    self._miss("/tmp/aiter_configs/merged_tuned_dense_bf16.csv"),
+                ]
+            )
+        )
+        assert len(rep["demands"]) == 1
+        assert rep["demands"][0]["miss_count"] == 2
+
+    def test_key_schema_follows_the_resolved_table(self):
+        # Under the old basename lookup this fell back to bare M,N,K.
+        d = ev.parse_log(self._miss("merged_tuned_dense_bf16.csv"))["demands"][0]
+        assert d["key_schema"] == list(ev.TABLE_KEY_SCHEMA["bf16_tuned_gemm.csv"])
+
+    def test_fmoe_artifact_needs_no_alias(self):
+        d = ev.parse_log(self._miss("/tmp/merged_tuned_fmoe.csv"))["demands"][0]
+        assert d["table"] == "tuned_fmoe.csv" and d["tuner"] == "fmoe_ck"
+
+    def test_genuinely_unknown_table_stays_ownerless(self):
+        d = ev.parse_log(self._miss("/tmp/merged_brand_new.csv"))["demands"][0]
+        assert d["table"] == "brand_new.csv" and d["tuner"] is None
+
+
+class TestCanonicalTableName:
+    def test_every_alias_target_has_an_owner(self):
+        # An alias pointing at a table nobody owns would be worse than none:
+        # it renames the miss and still reports it as a coverage hole.
+        for artifact, table in ev.ARTIFACT_TABLE_ALIASES.items():
+            assert table in ev.TABLE_TO_TUNER, artifact
+
+    def test_every_owned_table_is_its_own_canonical_form(self):
+        for table in ev.TABLE_TO_TUNER:
+            assert ev.canonical_table_name(table) == table
+
+    def test_windows_separators_and_whitespace(self):
+        assert ev.canonical_table_name(r"  C:\aiter\merged_tuned_dense_bf16.csv ") == "bf16_tuned_gemm.csv"
+
+    def test_empty_is_empty_not_a_crash(self):
+        assert ev.canonical_table_name("") == ""

@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Pure-function tests for ``scripts/platform_audit.py``.
-
-The script sits outside ``[tool.coverage.run].source`` because ``scripts/`` is
-not shipped as a package, but its output is consumed as a configuration verdict
--- so the logic that produces that verdict is tested here. Everything covered
-below is hardware-independent; nothing in this module reads real sysfs, loads a
-core, or shells out.
-"""
+"""Pure-function tests for ``scripts/platform_audit.py``."""
 
 from __future__ import annotations
 
@@ -35,14 +28,7 @@ pa = _load()
 
 
 def test_determinism_is_recorded_not_judged():
-    """The one knob this tool cannot read, only infer, must not gate anything.
-
-    Power remains the setting to want (58011 §4.2.2, "maximum performance of any
-    individual system"). But the OS layer infers it from per-core frequency
-    spread, and five consecutive runs on one unchanged EPYC 9575F measured 7.9,
-    21.0, 18.1, 20.9 and 15.1 MHz -- the host's own jitter straddles the
-    threshold. Gating on that flips the exit code on a machine nobody touched.
-    """
+    """The one knob this tool cannot read, only infer, must not gate anything."""
     assert "determinism" not in pa.CHECKED
     assert "determinism" in pa.RECORDED
     row = {r["key"]: r for r in pa.build_rows({"determinism": "performance"})}["determinism"]
@@ -51,12 +37,7 @@ def test_determinism_is_recorded_not_judged():
 
 
 def test_determinism_row_says_it_was_inferred():
-    """A deduction presented like a reading invites a BIOS change on a heuristic.
-
-    A uniformly binned part running Power determinism produces the same low
-    spread as a part running Performance determinism, so the row must carry the
-    caveat rather than look like a setting that was read.
-    """
+    """A deduction presented like a reading invites a BIOS change on a heuristic."""
     assert pa.RECORDED["determinism"].get("inferred") is True
     row = {r["key"]: r for r in pa.build_rows({"determinism": "performance"})}["determinism"]
     assert row["inferred"] is True
@@ -129,12 +110,7 @@ def test_recorded_knobs_never_affect_the_exit_code():
 
 
 def test_quick_and_full_agree_on_the_same_host():
-    """--quick must reach the same verdicts, or it is not a usable gate.
-
-    No judged knob needs load generation any more, so the only thing --quick
-    gives up is a recorded value. A fast run and a full run on one healthy host
-    must therefore return the same exit code.
-    """
+    """--quick must reach the same verdicts, or it is not a usable gate."""
     common = {
         "core_performance_boost": "enabled",
         "cpufreq_governor": "performance",
@@ -226,12 +202,7 @@ def test_sample_cores_degrades_on_small_parts(monkeypatch):
 
 
 def test_os_layer_survives_a_host_with_no_cpu_sysfs(monkeypatch):
-    """ "Never raises" is a promise, and a missing /sys tree is how it breaks.
-
-    A container without /sys/devices/system/cpu is the ordinary case here, not
-    an exotic one: it must degrade to "unknown" rather than throw out of a
-    function every caller treats as total.
-    """
+    """\"Never raises\" is a promise, and a missing /sys tree is how it breaks."""
 
     def _no_such_tree(path):
         raise FileNotFoundError(path)

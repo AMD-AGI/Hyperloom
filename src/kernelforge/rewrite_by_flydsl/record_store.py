@@ -1,33 +1,4 @@
-"""One backend-agnostic Rewrite record layout, on KB Store or on disk.
-
-A rewrite candidate is a record under a producer-owned ``kernel:`` identity: a
-knowledge document describing the port and the ported file itself, kept out of
-the document as byte-exact artifact data. Both backends store exactly that, so a
-run can move between them without the reader learning a second shape. Reads
-first rank metadata, then materialize only the selected candidates as isolated
-bundles::
-
-    <destination>/<session-id>/recipe.json
-    <destination>/<session-id>/files/**
-
-The identity's ``producer`` owns an independent candidate index and champion;
-``backend`` describes the final implementation type. The canonical id carries
-both, so the existing ranking and pointer policy needs no producer special case.
-The KB Store must accept that producer dimension in its canonical schema; until
-it does, remote producer-owned identities remain a live deployment blocker.
-
-The champion is a pointer, not a filter. A correct port that loses to the
-source baseline is still the only thing that saves the next run from redoing
-PORT, so candidates are recorded whether or not they win; only the pointer is
-gated on speedup.
-
-A record's ``speedup`` is what its producer claims, which is not evidence for
-any other run: a claim that no consumer reproduced can be arbitrarily inflated
-and would otherwise win the ranking forever. ``measured_speedup`` is the value
-a consumer measured after actually applying the record, so ranking puts every
-measured candidate ahead of every merely claimed one and a consumer amends the
-record it measured.
-"""
+"""One backend-agnostic Rewrite record layout, on KB Store or on disk."""
 
 from __future__ import annotations
 
@@ -44,13 +15,15 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any, Iterator, Mapping, Protocol
 
+from kernelforge.knowledge.kernel_identity import KernelRecipeIdentity
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - exercised only on non-POSIX hosts
     fcntl = None  # type: ignore[assignment]
 
 from kernelforge.knowledge.remote_exp.kb_store_client import KBStoreClient, KBStoreError
-from kernelforge.durable_io import fsync_directory
+from kernelforge.durable_io import atomic_write_bytes, fsync_directory, fsync_tree_directories
 
 CHAMPION_METRIC = "speedup"
 MEASURED_SPEEDUP_KEY = "measured_speedup"
@@ -72,12 +45,7 @@ class RewriteRecordError(RuntimeError):
 
 @dataclass(frozen=True)
 class RewriteCandidate:
-    """A recorded port, ranked on measured evidence before a bare claim.
-
-    ``speedup`` is what the record's own document claims. ``measured_speedup``
-    is present only once a consumer applied this record and measured it, and it
-    is the value ranking trusts.
-    """
+    """A recorded port, ranked on measured evidence before a bare claim."""
 
     session_id: str
     knowledge: dict[str, Any]
@@ -100,6 +68,15 @@ class RewriteRecordStore(Protocol):
         raise NotImplementedError
 
     def candidates(self, canonical_id: str, *, limit: int) -> list[RewriteCandidate]:
+        raise NotImplementedError
+
+    def search_identities(
+        self,
+        identity: KernelRecipeIdentity,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Discover identities differing only in fuzzy warm-start dimensions."""
         raise NotImplementedError
 
     def materialize(
@@ -162,18 +139,7 @@ def _with_preserved_measurement(
     *,
     recorded: Any,
 ) -> dict[str, Any]:
-    """Carry a consumer's measurement across a replacing write of one record.
-
-    A producer writes its own claim; a consumer that measured the candidate
-    amends the same record with what it actually got, and the ranking then trusts
-    the measurement over the claim. Replacing the record would throw that away
-    and hand the ranking back the claim that lost, so the measured value is
-    carried over unless this write supplies one of its own.
-
-    Ownership stays with the measurer: an unusable recorded value is dropped
-    rather than propagated, because a claim is the one thing a record always has
-    and a measurement is only worth keeping while it is still a measurement.
-    """
+    """Carry a consumer's measurement across a replacing write of one record."""
     payload = dict(knowledge)
     if payload.get(MEASURED_SPEEDUP_KEY) is not None:
         return payload
@@ -218,12 +184,7 @@ def canonical_relpath(canonical_id: str) -> Path:
 
 
 def _ranking_key(candidate: RewriteCandidate) -> tuple[int, float, str]:
-    """Order measured candidates first, then by value, then by identity.
-
-    A claim no consumer reproduced ranks below every measured candidate however
-    large it is; the session id makes the order total so two runs reading the
-    same records select the same candidates.
-    """
+    """Order measured candidates first, then by value, then by identity."""
     return (
         1 if candidate.measured_speedup is None else 0,
         -(candidate.ranked_speedup or 0.0),
@@ -349,14 +310,13 @@ def _write_bytes_synced(path: Path, content: bytes) -> None:
         os.fsync(stream.fileno())
 
 
-def _write_json_synced(path: Path, document: Mapping[str, Any]) -> None:
-    content = json.dumps(
+def _json_bytes(document: Mapping[str, Any]) -> bytes:
+    return json.dumps(
         dict(document),
         ensure_ascii=False,
         indent=2,
         sort_keys=True,
     ).encode("utf-8")
-    _write_bytes_synced(path, content)
 
 
 def _copy_file_synced(source: Path, target: Path) -> None:
@@ -367,13 +327,6 @@ def _copy_file_synced(source: Path, target: Path) -> None:
         shutil.copyfileobj(reader, writer)
         writer.flush()
         os.fsync(writer.fileno())
-
-
-def _fsync_tree_directories(root: Path) -> None:
-    directories = [path for path in root.rglob("*") if path.is_dir()]
-    for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
-        fsync_directory(directory)
-    fsync_directory(root)
 
 
 def _replace_directory(staging: Path, destination: Path) -> None:
@@ -490,6 +443,44 @@ class KBStoreRewriteRecords:
             )
         return _rank(found, limit)
 
+    def search_identities(
+        self,
+        identity: KernelRecipeIdentity,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Search while retaining exact ownership and implementation dimensions."""
+        requested = max(0, int(limit))
+        if requested == 0:
+            return []
+        rows: list[dict[str, Any]] = []
+        offset = 0
+        while len(rows) < requested:
+            page_limit = min(100, requested - len(rows))
+            result = self._client.search_identities(
+                scheme="kernel",
+                match={
+                    "producer": identity.producer,
+                    "kernel_name": identity.kernel_name,
+                    "framework": identity.framework,
+                    "backend": identity.backend,
+                },
+                offset=offset,
+                limit=page_limit,
+            )
+            page = result.get("items")
+            if not isinstance(page, list):
+                raise RewriteRecordError("identity search response has no items list")
+            rows.extend(dict(item) for item in page if isinstance(item, Mapping))
+            next_offset = result.get("next_offset")
+            if next_offset is None or not page:
+                break
+            resolved_offset = int(next_offset)
+            if resolved_offset <= offset:
+                raise RewriteRecordError("identity search pagination did not advance")
+            offset = resolved_offset
+        return rows[:requested]
+
     def materialize(
         self,
         canonical_id: str,
@@ -526,9 +517,7 @@ class KBStoreRewriteRecords:
                         raise RewriteRecordError(f"duplicate session artifact path: {rel_path}")
                     expected.add(rel_path)
 
-                # The upstream SDK lists internally. Pin that call to the
-                # validated snapshot so the download neither repeats the
-                # request nor observes a different set of paths.
+                # The upstream SDK lists internally.
                 original_listing = self._client.list_session_files
 
                 def validated_listing(
@@ -629,11 +618,7 @@ class KBStoreRewriteRecords:
         session_id: str,
         measured_speedup: float,
     ) -> None:
-        """Merge the measured value into the candidate's own session document.
-
-        Merge mode amends the record the producer wrote instead of rewriting it,
-        so the claim, the artifacts and the opaque payload all survive.
-        """
+        """Merge the measured value into the candidate's own session document."""
         self._client.put_knowledge(
             canonical_id,
             {MEASURED_SPEEDUP_KEY: _checked_measured_speedup(measured_speedup)},
@@ -663,6 +648,16 @@ class LocalRewriteRecords:
     @property
     def configured(self) -> bool:
         return True
+
+    def search_identities(
+        self,
+        identity: KernelRecipeIdentity,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Local rewrite records remain exact-only in the first rollout."""
+        del identity, limit
+        return []
 
     def _identity_dir(self, canonical_id: str) -> Path:
         return self._root / canonical_relpath(canonical_id)
@@ -777,13 +772,7 @@ class LocalRewriteRecords:
 
     @staticmethod
     def _recorded_measurement(session_dir: Path) -> Any:
-        """The measured value already on this record, or None when there is none.
-
-        A first write has no record to read, so absence is the ordinary case and
-        never an error. A record that exists but cannot be parsed is treated the
-        same way: the replacing write is what repairs it, and refusing to write
-        would leave the unreadable document in place.
-        """
+        """The measured value already on this record, or None when there is none."""
         document = session_dir / KNOWLEDGE_FILENAME
         if document.is_symlink() or not document.is_file():
             return None
@@ -824,13 +813,13 @@ class LocalRewriteRecords:
                 files_root.mkdir()
                 for rel_path, source in normalized_files.items():
                     _copy_file_synced(source, files_root / rel_path)
-                _write_json_synced(staging / KNOWLEDGE_FILENAME, payload)
+                _write_bytes_synced(staging / KNOWLEDGE_FILENAME, _json_bytes(payload))
                 if _safe_files(files_root) != set(normalized_files):
                     raise RewriteRecordError("staged rewrite artifacts failed validation")
                 loaded = json.loads((staging / KNOWLEDGE_FILENAME).read_text(encoding="utf-8"))
                 if loaded != payload:
                     raise RewriteRecordError("staged rewrite knowledge failed validation")
-                _fsync_tree_directories(staging)
+                fsync_tree_directories(staging)
                 _replace_directory(staging, session_dir)
             finally:
                 if staging.exists():
@@ -856,19 +845,7 @@ class LocalRewriteRecords:
             if not isinstance(knowledge, dict):
                 raise RewriteRecordError("candidate knowledge is not an object")
             knowledge[MEASURED_SPEEDUP_KEY] = measured
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{KNOWLEDGE_FILENAME}.",
-                dir=session_dir,
-            )
-            os.close(descriptor)
-            temporary = Path(temporary_name)
-            temporary.unlink()
-            try:
-                _write_json_synced(temporary, knowledge)
-                os.replace(temporary, document_path)
-                fsync_directory(session_dir)
-            finally:
-                temporary.unlink(missing_ok=True)
+            atomic_write_bytes(document_path, _json_bytes(knowledge))
 
     def champion_speedup(self, canonical_id: str) -> float | None:
         with self._identity_lock(canonical_id, exclusive=False):
@@ -884,29 +861,11 @@ class LocalRewriteRecords:
             "value": float(speedup),
         }
         with self._identity_lock(canonical_id, exclusive=True):
-            identity_dir = self._identity_dir(canonical_id)
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{CHAMPION_FILENAME}.",
-                dir=identity_dir,
-            )
-            os.close(descriptor)
-            temporary = Path(temporary_name)
-            temporary.unlink()
-            try:
-                _write_json_synced(temporary, document)
-                os.replace(temporary, identity_dir / CHAMPION_FILENAME)
-                fsync_directory(identity_dir)
-            finally:
-                temporary.unlink(missing_ok=True)
+            atomic_write_bytes(self._identity_dir(canonical_id) / CHAMPION_FILENAME, _json_bytes(document))
 
 
 def create_rewrite_record_store(config: Any) -> RewriteRecordStore | None:
-    """Pick a backend from the process-wide knowledge configuration.
-
-    Returns ``None`` when remote mode is selected without KB Store
-    credentials, which is the same "recorded nothing, cold start" outcome the
-    rest of the rewrite path already handles.
-    """
+    """Pick a backend from the process-wide knowledge configuration."""
     from kernelforge.knowledge.experience_store import (
         KnowledgeStoreMode,
         knowledge_config_from_runtime,

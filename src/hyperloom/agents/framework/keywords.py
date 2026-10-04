@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Smart keyword extraction from free-form gap descriptions. Pure-Python.
-
-Returns a sorted, deduplicated list of: (1) words matching the curated
-ROCm/LLM technical-term whitelist, (2) simple CamelCase identifiers (e.g.
-``FlashAttention``, ``PagedAttention``; runs of consecutive capitals such as
-``AsyncLLMEngine`` or ``CUDAGraph`` are NOT matched), (3) fallback to the
-first few 3+ letter words.
-"""
+"""Smart keyword extraction from free-form gap descriptions. Pure-Python."""
 
 from __future__ import annotations
 
@@ -93,9 +86,8 @@ _TECHNICAL_TERMS = frozenset(
         "dp",
         "kv_cache_dtype",
         "torch_profiler_dir",
-        # GPU hardware codenames (lowercase; gap is lowercased before lookup),
-        # used for relevance ranking so a gap scopes to matching-vendor PRs.
-        # AMD CDNA accelerators (MI200/300/350 families + gfx IDs + uarch labels):
+        # GPU hardware codenames (lowercase; gap is lowercased before lookup), used for relevance ranking so a gap
+        # scopes to matching-vendor PRs.
         "mi200",
         "mi210",
         "mi250",
@@ -134,17 +126,7 @@ _TECHNICAL_TERMS = frozenset(
 
 
 def extract_keywords(description: str) -> list[str]:
-    """Extract a sorted, deduplicated keyword list from a gap description.
-
-    Whitelist hits first, then CamelCase identifiers; if nothing matched,
-    fall back to the first five 3+ letter words so callers get some signal.
-
-    Args:
-        description: The gap description text to mine.
-
-    Returns:
-        A sorted, deduplicated list of keywords.
-    """
+    """Extract a sorted, deduplicated keyword list from a gap description."""
     tokens = set(re.findall(r"[a-z][a-z0-9_]+", description.lower()))
     keywords = tokens & _TECHNICAL_TERMS
     camel = re.findall(r"[A-Z][a-z]+(?:[A-Z][a-z]+)+", description)
@@ -156,10 +138,8 @@ def extract_keywords(description: str) -> list[str]:
     return sorted(keywords)
 
 
-# Anti-correlation table: when ``gap_keyword`` (key) is in the gap, any
-# anti-set token in a PR title marks the PR as on the wrong axis (model
-# family / GPU vendor / precision regime) and demotes it. Activation is gated
-# on the gap keyword's presence.
+# Anti-correlation table: when ``gap_keyword`` (key) is in the gap, any anti-set token in a PR title marks the PR as
+# on the wrong axis (model family / GPU vendor / precision regime) and demotes it.
 _ANTI_KEYWORDS: dict[str, frozenset[str]] = {
     # Model architecture: dense Transformers vs Mixture-of-Experts.
     "dense": frozenset({"moe", "mega_moe", "deepseek", "mixtral", "expert", "ep"}),
@@ -264,21 +244,7 @@ def score_title_with_anti_signal(
     *,
     anti_penalty: float = 2.0,
 ) -> float:
-    """Rank a PR title by ``max(0, positive - anti_penalty * anti)``.
-
-    ``positive`` = keyword tokens in the title; ``anti`` = title tokens in the
-    anti-set of any active gap keyword (only :data:`_ANTI_KEYWORDS` entries
-    activate). A default ``anti_penalty`` of 2.0 means one anti hit erases two
-    positive hits, so a wrong-axis PR ranks below any single correct-axis hit.
-
-    Args:
-        title: The PR title to score.
-        keywords: Active gap keywords driving positive and anti matches.
-        anti_penalty: Weight applied per anti-signal hit.
-
-    Returns:
-        The clamped score (>= 0.0); callers can drop ``score == 0`` PRs.
-    """
+    """Rank a PR title by ``max(0, positive - anti_penalty * anti)``."""
     if not keywords or not title:
         return 0.0
     title_tokens = set(re.findall(r"[a-z][a-z0-9_]+", title.lower()))

@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Scriptable benchmark output must reach disk while the child runs.
-
-Buffering it in memory until the child exits loses every byte when the runner
-itself is killed — which is exactly when the log is the only forensic evidence.
-"""
+"""Scriptable benchmark output must reach disk while the child runs."""
 
 from __future__ import annotations
 

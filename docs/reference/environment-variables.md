@@ -33,16 +33,18 @@ provider-side combinations and what each one enables.
 | `ANTHROPIC_AUTH_TOKEN` | No       | —    | Claude CLI auth token alias, accepted in place of `ANTHROPIC_API_KEY`. Preflight never fills it; the Ray / e2e / forge-fusion env builders default it from the Anthropic-side key when they hand credentials to a subprocess.                                                                        |
 | `ANTHROPIC`<br>`_CUSTOM_HEADERS` | No | —    | Extra request headers for the Anthropic side, for gateways that authenticate on a header of their own (for example Azure API Management). Newline-delimited `Name: value` as in the Anthropic SDK; a JSON object is accepted too. `${VAR}` references are expanded from the same environment, so a gateway header can reuse `ANTHROPIC_API_KEY` instead of duplicating the secret. |
 | `CLAUDE_CODE`<br>`_OAUTH_TOKEN` | No | — | Claude Max/Pro subscription token from `claude setup-token`. Lowest-priority Anthropic credential: either API-key variable outranks it. On its own it implies `https://api.anthropic.com`. Passed to subprocesses verbatim and never copied into `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `~/.claude/config.json`, which would switch the run to API-credits billing. |
+| `CLAUDE_CODE`<br>`_USE_BEDROCK` | No | — | Route the Claude runtime through AWS Bedrock, which carries the credential itself. Holds the Anthropic side for **agent backend selection only**, so a Bedrock box is not read as unconfigured and redirected to Codex. It names no key, so it does not satisfy `--critic-protocol=anthropic` or the credential preflight, and it never derives an `ANTHROPIC_BASE_URL`. |
+| `CLAUDE_CODE`<br>`_USE_VERTEX` | No | — | Route the Claude runtime through Google Vertex AI. Holds the Anthropic side exactly as `CLAUDE_CODE_USE_BEDROCK` does, with the same limits. |
 | `OPENAI_BASE_URL`      | Conditional | —    | OpenAI-side endpoint. Required together with `OPENAI_API_KEY` to enable Codex. An OpenAI-only configuration drives Orchestration through the Codex backend; Claude and GEAK stay disabled.                                                                        |
 | `OPENAI_API_KEY`       | Conditional | —    | OpenAI-side key. Pairs with `OPENAI_BASE_URL`. Never borrowed from the Anthropic side.                                                                                                                               |
 | `OPENAI`<br>`_CUSTOM_HEADERS` | No | —    | Extra request headers for the OpenAI side. Same shape as `ANTHROPIC_CUSTOM_HEADERS`; set it whenever you set `OPENAI_BASE_URL` against a gateway that authenticates on its own header. |
-| `CLAUDE_MODEL`         | No       | Derived from `ANTHROPIC_BASE_URL` | Orchestration model id on the Anthropic side. Falls back to the endpoint default, then the project-wide `DEFAULT_CLAUDE_MODEL`. `GEAK_CLAUDE_MODEL` and `FORGE_CLAUDE_MODEL` inherit from it.                                                                    |
-| `CODEX_MODEL`          | No       | Derived from `OPENAI_BASE_URL`    | Model id on the OpenAI side, used by the Codex backend. `FORGE_CODEX_MODEL` inherits from it. Model settings are never borrowed across providers.                                                                    |
+| `CLAUDE_MODEL`         | No       | Derived from `ANTHROPIC_BASE_URL` | Orchestration model id on the Anthropic side. Falls back to the endpoint default, then the project-wide `DEFAULT_CLAUDE_MODEL`. `GEAK_CLAUDE_MODEL` inherits from it, and Forge reads it directly for its Claude backend.                                                                    |
+| `CODEX_MODEL`          | No       | Derived from `OPENAI_BASE_URL`    | Model id on the OpenAI side, used by the Codex backend, including Forge running on it. Model settings are never borrowed across providers.                                                                    |
 | `GEAK_API_KEY`         | No       | —    | Internal alias, never derived from either side. GEAK runs on the Anthropic side (`ANTHROPIC_*` + `GEAK_CLAUDE_MODEL`); set this only to point GEAK elsewhere.                                                                                                                              |
 | `GEAK_BASE_URL`        | No       | —    | Internal alias, never derived from either side. Set it only to point GEAK at a different endpoint than the Anthropic side.                                                                                                                          |
 | `GEAK_CLAUDE_MODEL`   | No       | Inherits `CLAUDE_MODEL` | GEAKv4 Claude Code workflow model id.                                                                                                                                                           |
-| `FORGE_CLAUDE_MODEL`  | No       | Inherits `CLAUDE_MODEL` | Forge Claude backend model id (fusion, rewrite, collective). Set when Forge should use a different Claude model than orchestration.                                                                                   |
-| `FORGE_CODEX_MODEL`   | No       | Inherits `CODEX_MODEL`  | Forge Codex backend model id (fusion, rewrite, collective). Set when Forge should use a different Codex model than the OpenAI-side default.                                                                          |
+| `HYPERLOOM`<br>`_REASONING`<br>`_EFFORT` | No | Provider default | Reasoning effort for Hyperloom's own LLM calls, and the effort a Forge campaign runs at unless `FORGE_AGENT_REASONING_EFFORT` names one. One of `low` / `medium` / `high` / `xhigh` / `max`. `low`–`xhigh` are what the Claude CLI and the OpenAI-compatible gateway both accept; `max` is Claude's deepest and is sent as `xhigh` on the OpenAI protocol, which rejects the name. Set it once and every component runs at the depth you asked for. Hyperloom's own calls ignore an unrecognized value; a Forge campaign refuses to start on one. |
+| `FORGE_AGENT`<br>`_REASONING`<br>`_EFFORT` | No | `high` | Forge-only reasoning effort, same five levels. Outranks `HYPERLOOM_REASONING_EFFORT`, and outranks whatever a Forge call site would have chosen — every agent session in a campaign runs at this effort. |
 | `LANGFUSE_HOST`        | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Base URL of your Langfuse deployment (for example, `https://langfuse.<your-domain>`). Used by both the live trace push and the offline `backfill_langfuse` CLI. |
 | `LANGFUSE`<br>`_PUBLIC_KEY`  | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Langfuse project public key (`pk-...`).                                                                                                                  |
 | `LANGFUSE`<br>`_SECRET_KEY`  | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Langfuse project secret key (`sk-...`).                                                                                                                  |
@@ -60,16 +62,15 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `TRACELENS_ROOT`                          | No (installer auto-clones) | `${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}/Tr`<br>`aceLens@<resolved-sha>` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/agents/kernel/scripts/install.sh` clones the public repo into the repo-local cache root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
 | `GEAK_CLAUDE_BIN`                          | No (installer auto-resolves) | First of `$HOME/.local/bin/claude`, `/usr/local/bin/claude`, `$(command -v claude)`; written to `kernel-agent.env.sh` | Pins the Claude Code binary the GEAK SDK path uses, so `claude_agent_sdk` doesn't fall back to its older bundled CLI. Export to force a specific build. |
 | `USER_DATA_PATH`                          | No                   | `/workspace/hyperloom` if `/workspace` is writable, else `<cwd>/session` | Session directory root (logs, runs, mirrors, breakdown). Container images ship a writable `/workspace`; a bare-metal host that has neither falls back to the second form and the CLI logs which root it took.                                                |
-| `HYPERLOOM_`<br>`RUNTIME_DIR`             | No                   | `$USER_DATA_PATH/runtime` (installer)                               | Private writable runtime state. Codex SDK turns create a unique mode-`0700` `CODEX_HOME` here and remove it after the SDK client closes. When unset, Codex uses the first safe declared output root, then a run-local working directory; it never falls back to `/tmp` or a source checkout. |
+| `HYPERLOOM_`<br>`RUNTIME_DIR`             | No                   | `$USER_DATA_PATH/runtime` (installer)                               | Private writable runtime state. Codex SDK turns create a unique mode-`0700` `CODEX_HOME` here and remove it after the SDK client closes. When unset, Codex uses the first safe declared output root, then a run-local working directory; it never falls back to `/tmp` or a source checkout. If launch config points this parent at storage unsuitable for SQLite, set it to a private local directory instead — see [Codex SDK turns stall](troubleshooting.md#codex-sdk-turns-stall-or-tracelens-roofline-times-out). |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_CU`<br>`RRENT_S`<br>`ESSION_DIR` | No (set by CLI) | Set at session boot | Absolute path to the active session directory. Written by the CLI when a session starts and inherited by every benchmark subprocess; session-path resolution prefers it over scanning `USER_DATA_PATH`. Do not set by hand. |
 | `HYPERLOOM_ROOT`                          | No                   | `$HYPER`<br>`LOOM_R`<br>`UNTIME_`<br>`DIR/sou`<br>`rce-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the repo-local cache root (`${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}`), not this path. |
 | `HYPERLOOM`<br>`_CACHE_`<br>`DIR`                          | No                   | `$REPO_ROOT`<br>`/.cache`                      | Writable, repo-local base for auto-cloned open-source deps (TraceLens, Magpie, etc.), cloned per revision as `<name>@<sha>`. Not under `$TMPDIR` so a reaper cannot wipe it mid-run. |
 | `KERNELFORGE`<br>`_PROJECT_`<br>`ROOT`              | No                   | `$USER_DATA_PATH/kernelforge`, else `~/.cache/hyperloom/kernelforge` | Writable root for forge's own state and for resource-tree overrides. Holds the learned knowledge base (`knowledge_base/<backend>/learned/`), the tuning DB, postmortems and `forge_experiments/`. A subtree placed here also **overrides the copy packaged inside `kernelforge`** — a `serving_patches/` or `examples/` directory under this root wins over the shipped one, which is the supported way to try a patch or a task without editing site-packages. Must be writable: it deliberately never resolves to the installed package directory or to the cwd. **This is the replacement for the removed `FORGE_PATH`**, which nothing reads any more — a stale `FORGE_PATH` is still forwarded (the `FORGE_` prefix is on the dotenv allowlist) and then ignored. |
 | `SKIP_FORGE`<br>`_PROFILING`               | No                   | Unset (the extra is installed) | Set to `1` to make `install.sh` skip `pip install -e "$REPO_ROOT[forge-profiling]"`. That extra is rocprof-compute's own dependency set (~20 wheels, including the exact `kaleido==0.2.1` / `astunparse==1.6.2` pins ROCm 7.2.x requires); without it forge's profiler degrades to the lightweight PMC path instead of System Speed-of-Light + roofline. Installed by default on purpose — the previous gate made this a silent skip on every pod. |
+| `ROCPC_VENV`                               | No                   | `/opt/rocprof-compute-venv` | Private venv that rocprof-compute's analyze mode runs in, created by `install.sh` from the tool's own `requirements.txt` so its exact pins cannot displace the serving image's numpy and pandas. `rocpc_profile.py` derives the same path. Without the venv, analyze degrades and profiling still collects. |
 | `MAGPIE_PATH`                              | No                   | Resolved from installed `Magpie` package unless explicitly set                               | Magpie package root for benchmark wrappers and patch inspection.                                                                                                                                            |
-| `INFERENCE_`<br>`OPTIMIZER`<br>`_MODEL_PATH_ROOTS` | No | Built-in model roots such as `/models` and `/shared_nfs` | `os.pathsep`-separated allowlist for absolute model paths restored from `state.json` during a resume. HuggingFace-style repo IDs remain allowed. Set this when production models live outside the built-in roots. |
-| `SESSION_DIR`                             | No (robustness-agent)| Scan known paths                                                   | Path containing `storage/coordinator.db`; the robustness FindingSink writes under `{session_`<br>`dir}/ag`<br>`ents/ro`<br>`bustne`<br>`ss/fin`<br>`dings/`<br>`{sess`<br>`ion_id}.jsonl`.                                       |
-| `INFERENCE_`<br>`OPTIMI`<br>`ZER_SES`<br>`SION_DIR` | No (monitor / multi-node) | Unset                                                   | Explicit session directory for the Robustness Monitor (`tools/robustness_`<br>`monitor.sh.example`), which prefers it over `.session_dir` in the launch-info JSON. Multi-node crash-log collection reads it as a last-resort session root. Point it at one session dir, never at `$USER_DATA_PATH`. |
+| `INFERENCE_`<br>`OPTIMI`<br>`ZER_SES`<br>`SION_DIR` | No (multi-node) | Unset | Last-resort session root for multi-node crash-log collection. Point it at one session dir, never at `$USER_DATA_PATH`. |
 
 ---
 
@@ -82,8 +83,12 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
 - **Model / workload shape:** `--model`, `--model-class`, `--framework`,
   `--framework-version`, `--precision`, `--tp`, `--ep`, `--isl`, `--osl`,
   `--conc`, `--max-model-len`, `--profile-osl`.
-- **Goal / budget:** `--target-gain`, `--max-hours`, `--target-summary`,
-  `--target-tput`, `--compare-against-gpu`.
+- **Goal / budget:** `--target-gain`, `--target-roofline`, `--max-hours`,
+  `--target-summary`, `--target-tput`, `--compare-against-gpu`. The roofline
+  target composes with the others: whichever is met first ends the run.
+  `--max-latency-ms` is a constraint on KEEP rather than a target, and applies
+  to scriptable frameworks (`xdit`, `custom`) only; the CLI refuses it for a
+  serving framework, including on resume.
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
   `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
   Per-pod sizing, the pod image and pod-side env are the provisioning
@@ -96,10 +101,11 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--pd-ib-device`.
 - **Phase toggles:** `--enable-roofline` / `--no-enable-roofline`,
   `--enable-conc-sweep` / `--no-enable-conc-sweep`, `--conc-sweep-concs`,
-  `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
+  `--conc-sweep-total-budget-sec` (whole-sweep budget), `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
   `--no-eval`.
 - **Agent models:** `--claude-model`, `--codex-model`.
-- **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`.
+- **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`,
+  `--extend-hours`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
 
 Run `inference_optimizer optimize --help` for the exhaustive flag list.
@@ -127,7 +133,6 @@ that degraded path.
 | `RUN_EVAL` | `true` | Whether a serving benchmark runs the GSM8K eval. Turning it off removes the per-candidate accuracy signal entirely — accuracy regressions stop being caught. Ignored by scriptable workloads, whose correctness signal is the `quality_gate` in `benchmark_report.json`. |
 | `HYPERLOOM_QUALITY_REF`<br>`HYPERLOOM_QUALITY_REF_WRITE` | Derived under the session dir | The scriptable quality gate's reference artifact: `_WRITE` establishes it on the baseline, the other compares against it on every later candidate. What the artifact holds is the workload's own business — xDiT stores an image, an operator-supplied `custom` workload stores whatever its script compares. Also emitted as `XDIT_QUALITY_REF` / `XDIT_QUALITY_REF_WRITE` for bench scripts written before the rename; either name is read, both are written. |
 | `INFERENCE_OPTIMIZER`<br>`_REQUIRE_KERNEL`<br>`_ACCURACY` | On | Gates the `KEEP` for a kernel patch integrated by the kernel lane. Set to `0` / `false` / `no` / `off` to fall back to a throughput-only `KEEP`. Disable only when the eval lane is known-broken: this gate is what stops a faster-but-wrong kernel from being kept. |
-| `INFERENCE_OPTIMIZER`<br>`_REQUIRE_FRAMEWORK`<br>`_ACCURACY` | On | Same gate for a framework source patch authored by a specialist. Same disable spellings. |
 | `MAGPIE_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
 
 The tolerance is deliberately **not** an env knob: `ACCURACY_THRESHOLD` in
@@ -191,12 +196,9 @@ The following variables control the kernel optimization backend ladder.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `KERNEL_OPT_BACKEND_ORDER`     | Unset (resolves to `geak`)    | Selects the kernel-opt backend. Unset resolves to `geak` (whole-pipeline GEAK owns the KERNEL phase); the bare-metal installer and the Slurm launchers export `${KERNEL_OPT_BACKEND_ORDER:-geak}` on top of that. **Only an exact, case-insensitive `forge` opts into the per-kernel forge backend** (`forge_explicitly_enabled` in `common/env.py`). Despite the historical name, a comma list is not parsed: `forge,geak` silently stays on `geak`, as does any other value, legacy alias, or payload override. |
-| `KERNEL_OPT_MAX_PARALLEL`      | `8` (GPU-adaptive cap)        | Max parallel kernel-opt attempts per request (per-kernel race fan-out). The runtime caps this by visible GPUs and per-attempt GPU reservation when it can detect them.                                                                                                                            |
+| `KERNEL_OPT_BACKEND_ORDER`     | Unset (resolves to `geak`) | Selects the kernel-opt backend. An unset or blank value resolves to `geak` for every framework, ATOM included; no framework overrides it at launch. Bare-metal setup preserves nonempty choices (process env > `.env`) without filling or persisting a backend default. Existing `.env` values, including `geak`, are not automatically migrated; remove that assignment and unset the shell variable to use the shared default. Slurm launchers still export `${KERNEL_OPT_BACKEND_ORDER:-geak}`. **Only an exact, case-insensitive `forge` enables the per-kernel Forge backend** (`forge_explicitly_enabled` in `common/env.py`). Despite the historical name, a comma list is not parsed: `forge,geak` stays on `geak`, as does any other nonblank value, legacy alias, or payload override. |
 | `HYPERLOOM_GEMM_SHAPE_CAPTURE` | `1`                           | Enables automatic runtime GEMM-shape capture for eligible single-node dense vLLM Forge tuning when no explicit shape input is available. Block-FP8 first reuses shapes from the TraceLens-selected steady-state trace of a successful Roofline with exactly matching model, workload, server arguments, environment, and backend controls. Missing or stale evidence triggers the same standard Roofline/ProfileExecutor/TraceLens steady-state pipeline as a fallback. Set to `0` to preserve the no-capture path. |
 | `HYPERLOOM_GEMM_SHAPE_CAPTURE_TIMEOUT_SEC` | `1800`          | Timeout in seconds for the dense vLLM TunableOp recording benchmark. Block-FP8 fallback uses the standard Roofline/ProfileExecutor timeout. Values below `60` are clamped to `60`. |
-| `INFERENCE_OPTIMIZER`<br>`_KERNEL_OPT_MAX_PARTIAL` | Unset           | Cap on how many `PARTIAL` kernel-opt verdicts an action can yield before it short-circuits to `NEEDS_REVIEW`. Useful for keeping budget contained when GEAK is consistently timing out.            |
-| `KERNEL_OPT_BACKEND_BUDGET_MIN` | `90`                         | Wall-clock budget in minutes for one optimization, mirrored by the `kernel_optimization.py` wrapper. The env deliberately wins over the payload `budget_minutes`, which is LLM-authored from a prompt template, so an operator raising the budget is not silently overridden. forge-loop reserves half the window for finalize, so `90` leaves roughly 45 minutes of real iteration. |
 | `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` | `5.0`                     | GPU-time share a reusable hot kernel must clear to be worth a dispatch, in percent. Three readers share it and must agree, or the report explains a skip the dispatcher never made: the batch filter that selects candidates, the phase-advance gate that decides KERNEL still owes work, and the report's unattempted-reason breakdown. It was `10.0` until a 60-layer sparse-MoE decoder showed the assumption behind that number — that hot kernels concentrate — does not hold: nothing but a graph-launch wrapper reached double digits, the largest real operator sat at 9.47%, and the batch dispatcher selected nothing for six hours. Lower it when a trace's rewritable candidates cluster below the default and the operators above them are vendor binaries; a dropped candidate is reported as `below_min_gpu_pct=<value>` rather than as a failed attempt. |
 | `AITER_LOG_TUNED_CONFIG`       | `1` (set for every serving run) | Makes aiter log each tuned-config lookup it *hits*, not only the ones it misses. Two checks have no input without it: the GEMM demand list, which learns the shapes the runtime actually asks for (config-derived shapes covered 0.4% of them), and the apply verdict, which cannot tell "the tuned table was never read" from "it was read and did not help". A scan of 60 production logs found it set in none of them, so it is now injected by default. An operator value wins — set `0` to turn hit logging off, at the cost of both checks going inconclusive. Every miss already prints a line regardless of this setting; hit logging adds roughly one line per lookup that succeeds. |
 | `HYPERLOOM_GEMM_PAIRED_PAIRS`  | `0` (off)                     | How many interleaved baseline/tuned pairs to re-measure before a GEMM tuning KEEP is reported as confirmed. One end-to-end measurement cannot separate a gain from drift on this fleet: three rounds of a single unchanged configuration spanned 58%, and one controlled repeat moved 16%. Each pair costs two extra benchmark rounds. When `0`, the gain is still promoted — it is the best number available — but recorded as an unpaired block comparison rather than presented as a paired one. |
@@ -219,23 +221,59 @@ fusion that already succeeded this session.
 
 ---
 
-## Collective optimization lane
+## KERNEL lane behaviour
 
-The collective lane is Coordinator-owned: it is dispatched directly at KERNEL
-entry, never as an agent request. It requires `TP > 1`, a latest-snapshot
-`Exposed Communication %` of at least 1% as parsed from the TraceLens executive
-summary, a `trace_analyze` snapshot, and a source-resolved custom collective
-candidate (`all_reduce`, `reduce_scatter` or `all_gather`) — vendor RCCL/NCCL
-symbols are opaque binaries and never qualify.
+No variable toggles the behaviours below; `KERNEL_OPT_BACKEND_ORDER` only decides
+which of them apply.
+
+Globally, on every backend including the default `geak`:
+
+- **`kernel_opt` and `gemm_tuning` are no longer model-issued.** Orchestration
+  can neither propose either action nor request `run_optimization` /
+  `run_gemm_tuning` of the kernel agent; both are refused as
+  `phase_incompatible`. The Coordinator dispatches each lane once at KERNEL
+  entry from a lane budget, the way the fusion lane already worked. `integrate` stays proposable, so draining the KEEP queue is still the
+  model's job.
+
+On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
+`geak` backend hands to SWEEP before reaching any of these):
+
+- **Fusion authors one independent sibling patch per confirmed recipe** rather
+  than a single combined patch. `fuse_all_confirmed` is now the explicit opt-in
+  for the combined shape instead of the default.
+- **The fusion lane caps its recipe count** at 3 (`--max-recipes`), funded from
+  its share of the phase. A session with no finite remaining time derives no
+  share and stays uncapped.
+- **GEMM reports carry a per-tuner `candidates[]` list**, so one tuner's table
+  can be kept while another is reverted, instead of `recommended_env` landing
+  all-or-nothing.
+- **The fp8 → bf16 dense GEMM retry runs inside the same gemm call.** The
+  follow-up subprocess Hyperloom used to launch is gone; the bf16 dense pass is
+  selected up front as a fallback tuner and executes only when no earlier tuner
+  produced a candidate, so a winning fp8 run pays nothing for it.
+- **The gemm lane caps how many routed tuners run** (`--max-tuners`), priced on
+  the router's own per-tuner estimates.
+- **Kernel subprocess output is recorded as activity** for diagnostics. Activity
+  does not prove useful progress and does not extend benchmark hard deadlines.
+- **A `status: partial` invocation spec is declined on the rewrite route**
+  rather than admitted because the file exists. A partial spec leaves the
+  producer on its placeholder driver, which burns the whole budget and then
+  exits non-zero.
+
+---
+
+## Collective candidate extraction
+
+Communication operators are optimized by the rewrite controller like any other
+operator. TraceLens still resolves them deterministically: it maps a mangled
+NCCL/RCCL kernel name back to the framework device source that issued it and
+publishes the row in `kernel_candidates.json` with
+`candidate_source: nccl_summary`. Vendor RCCL/NCCL symbols are opaque binaries
+and never resolve to an editable source, so they are never published.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_SKIP_COLLECTIVE`    | Unset (lane enabled)          | Truthy (`1` / `true` / `yes` / `on`) disables the collective lane outright, before any gate is evaluated.                                                                                          |
-| `HYPERLOOM_COLLECTIVE_ONLY`    | Unset                         | Truthy runs ONLY the collective lane at KERNEL entry — GEAK, fusion, and per-kernel `kernel_opt` are all skipped — and hints `skip_to_sweep` once the lane settles. Also the way to reach the lane while `KERNEL_OPT_BACKEND_ORDER` selects `geak`, which otherwise owns the whole phase. Mirrored into the `collective_only_mode` SharedState field. |
-| `HYPERLOOM_COLLECTIVE_KEEP_PCT` | `1.0`                        | E2E `KEEP` threshold in percent for the collective integrate. Must parse as a finite, non-negative float, otherwise the integrate fails loudly rather than defaulting.                             |
 | `HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES` | Unset (disabled) | Truthy allows a source-resolved collective to borrow shapes from the trace's sole all-reduce workload family. The default rejects this inference because those shapes were not observed on that device symbol. |
-| `FORGE_COLLECTIVE_TIMEOUT`     | `14400` (4h)                  | Wrapper timeout in seconds for one forge-collective campaign; a collective iterates over N ranks per benchmark, hence the wide default. A payload `timeout` takes precedence over the env.          |
-| `FORGE_COLLECTIVE_AGENT_TIMEOUT` | Unset (wrapper default)     | Per-agent timeout in seconds, forwarded to forge-collective as `--agent-timeout-sec`. A payload `agent_timeout_sec` takes precedence.                                                              |
 
 ---
 
@@ -244,136 +282,12 @@ symbols are opaque binaries and never qualify.
 A kernel candidate must resolve to a real source file before any backend can
 rewrite it. Resolution runs as a ladder: curated dictionary, then the
 trace-derived launcher frame, then a name grep. All three are deterministic and
-require no configuration. Agent analysis might add the review stage below.
+require no configuration.
 
 Every run writes `kernel_source_resolution.json` next to the candidate report.
 It answers one question per hot kernel — which file defines it, and which tier
 decided that — in a versioned schema (`schema_version`, currently `1.0.0`), so
 consumers and triage read a contract rather than candidate internals.
-
-### Candidate review
-
-One agent session may audit the finished candidate table when
-`--analysis-route agent` is used. The `deterministic` route never runs it, and
-keeps its no-model guarantee by not reaching the stage at all.
-
-The stage is tool-enabled rather than a completion call because the deterministic
-tiers' real failure mode is not coming up empty but coming up confidently wrong,
-and a model ranking paths by keyword off a prompt assembled in advance cannot
-tell the difference — it never sees what a kernel actually *is*.
-
-**What it is handed: paths, not contents.** The raw table, the resolution audit,
-the TraceLens report, the model directory and the framework source roots — as
-locations. The session reads with `Read`, `Grep` and `Glob`, so it opens what the
-evidence leads it to instead of what was guessed to be relevant, and can confirm
-a file defines the kernel it is credited with. A mangled vendor symbol is
-demangled by the host before the session starts and arrives in the table as
-`device_kernel_name_demangled` — that was the one job a shell was granted for,
-so granting one is no longer necessary.
-
-**It cannot write to the code under optimization.** That is the whole guarantee,
-and there is no detection layer behind it. On the Claude backend `Write` is the
-answer channel and is refused outside the run directory; every other tool,
-including any shell, is denied by a default-deny callback, so a tool introduced
-by a later SDK arrives refused rather than pre-authorised — and an SDK that will
-not accept that callback gets no session at all. On the Codex backend the
-containment is the OS sandbox: this stage states `workspace-write` rather than
-inheriting the deployment's mode, so it cannot run under a configured
-`bypass` (see [Codex (OpenAI) agent sandbox](#codex-openai-agent-sandbox)). The
-two are not equivalent — Codex has a shell and its own file tools, confined by
-the sandbox rather than refused per call — and the mode in force is logged,
-because the backend is chosen by credentials rather than by an operator.
-
-**What it costs.** One session per analysis, not one call per candidate. 900
-seconds per attempt and two attempts by default. On the Claude backend each wait
-for the next SDK message is bounded separately, because a stalled gateway would
-otherwise hold the full window (see
-`HYPERLOOM_TRACELENS_STREAM_IDLE_TIMEOUT_SEC` and
-`HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC`, which this stage reuses). The Codex
-entry point is one-shot and exposes no stream to bound, so a stalled Codex review
-costs the full 900 seconds. `--dry-run` skips the stage entirely: it plans, and
-nothing dispatches from the table it publishes.
-
-**Model and backend.** `HYPERLOOM_LLM_SOURCE_MODEL` overrides everything. With
-it unset the backend follows the configured credentials — Anthropic-only selects
-Claude, an OpenAI side selects Codex — and the model comes from `CLAUDE_MODEL`
-or `CODEX_MODEL` respectively. Model settings are never borrowed across
-backends.
-
-<div class="callout warn">
-
-**Authority: proposals, bounded four ways.** The session may revise where a
-kernel lives, supply the operand dims a graph-launched kernel never recorded,
-correct a harness list, and refuse a candidate as not worth a session. It may
-not touch what the trace measured — GPU share, durations, call counts, the keys
-a row is joined by — because the impact ranking and the closing gain figure are
-computed from those.
-
-- A revised path must resolve under a known framework root; symlinks cannot
-  escape it. TraceLens-style `path.py(247): function` answers are split into an
-  openable path plus line and function metadata, and an unverifiable path is
-  rejected with the original left standing. A proposed harness path is held to
-  the same test — existence alone would let a proposal point the measurement at
-  a file outside the traced tree, and a backend runs what that list names.
-- A candidate the active finder already resolved is not overridable: reading the
-  tree cannot beat knowing which symbol the binary exports. Nor is one matched to
-  a vendor operator playbook, whatever tier resolved the path the playbook anchor
-  replaced — its `source_file` points at a task bundle, and pointing it back at
-  framework source would route the candidate to a backend with nothing to
-  rewrite there.
-- A restrictive routability hint is honoured, a permissive one is not —
-  `classify_patchability` stays the only gate that admits a kernel, so a hint
-  cannot talk it into dispatching something the deterministic rules rejected. A
-  refusal carrying no stated reason is dropped as an echo of the input.
-- Operand dims are taken only where the trace recorded none, and carry their own
-  provenance: a session cannot claim `torch_trace` for a dim it derived.
-
-</div>
-
-The stage cannot fail a run. No model configured, a gateway error, a timeout, an
-unparseable reply or an unforeseen fault all leave the deterministic table
-standing and record an error-severity trace-health warning: losing the audit
-costs some candidates, while failing the run costs the hours of benchmarking
-behind the trace.
-
-**Artifacts.** `kernel_candidates.raw.json` is the deterministic table,
-`kernel_candidates.json` the reviewed one, and
-`kernel_candidates_revisions.json` records what changed and why — so a bad
-dispatch can be traced to the stage that caused it. Only the reviewed table is
-resolvable as a backend's candidate source. A completed review also rebuilds
-`kernel_source_resolution.json`, so the artifact a human reads and the table a
-backend is handed cannot name different files for the same kernel.
-
-### Source egress
-
-The session reads the tree on the host rather than being handed a prompt
-assembled from file contents up front, so what leaves is whatever it quotes back
-to the model. It cannot write to that tree — see the tool scope above — so this
-section is about disclosure only. Two boundaries apply to the material the prompt
-does carry.
-
-**The serving command line is never forwarded verbatim.** The stage needs
-backend flags — the same MoE operator dispatches differently under
-`--moe-runner-backend triton` and `aiter` — but `EXTRA_*_ARGS` also carries
-credentials, model paths and user data. It is therefore tokenised, and only
-flags on an explicit allowlist of backend selectors survive. A denied flag
-consumes its value too, so the value cannot reappear as a stray token. Every
-surviving value is dropped unless it is a short selector token. URL userinfo or
-queries, authorization headers, JWTs, control characters, non-finite numbers,
-vendor prefixes such as `sk-`, and long opaque strings are rejected. An
-unbalanced quote discards the whole line rather than risking a partial parse.
-
-**Environment variables** follow the same discipline: an explicit allowlist of
-path-selecting names, with the secret-name pattern applied on top.
-
-**Model config is allowlisted too.** Only fields that select architecture,
-expert layout or kernel format are included. Inside `quantization_config`, only
-explicit quantization selectors survive; arbitrary vendor fields, nested
-metadata and credential-shaped values are dropped.
-
-| Variable | Default | Description |
-|---|---|---|
-| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_MODEL` | Unset | Optional candidate-review model override. With it unset the model comes from `CLAUDE_MODEL` or `CODEX_MODEL`, whichever matches the backend the configured credentials select; there is no cross-backend fallback. |
 
 ---
 
@@ -396,20 +310,17 @@ container prevents it from establishing the sandbox, `workspace-write` and
 `read-only` fail closed before the app-server starts. There is no automatic
 fallback to `bypass`.
 
-`bypass` is a deliberate double opt-in. Set both
-`HYPERLOOM_CODEX_SANDBOX_MODE=bypass` and
-`HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1`; the second variable confirms that an
-external container or sandbox already enforces the required isolation. It does
-not create that boundary. A confirmed bypass maps to Codex full access even
-when no writable roots are declared, because the external sandbox is
-authoritative. Under the contained modes, no writable roots remains
-`read-only`. Unknown modes and incomplete bypass configuration fail
+`bypass` is an explicit operator opt-in. Set
+`HYPERLOOM_CODEX_SANDBOX_MODE=bypass` when an external container or sandbox
+already enforces the required isolation. Hyperloom does not create that
+boundary. A confirmed bypass maps to Codex full access even when no writable
+roots are declared, because the external sandbox is authoritative. Under the
+contained modes, no writable roots remains `read-only`. Unknown modes fail
 immediately.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_`<br>`CODEX_SANDBOX_MODE` | `workspace-write` | `workspace-write` restricts writes to the session directory plus declared output roots; `read-only` forbids writes; `bypass` selects Codex full access only when the external-sandbox confirmation below is also set. |
-| `HYPERLOOM_`<br>`CODEX_EXTERNAL_`<br>`SANDBOX` | Unset | Set exactly to `1` only when an external isolation boundary is already active and `HYPERLOOM_CODEX_SANDBOX_MODE=bypass`. Setting this alone has no effect and never weakens the default sandbox. |
+| `HYPERLOOM_`<br>`CODEX_SANDBOX_MODE` | `workspace-write` | `workspace-write` restricts writes to the session directory plus declared output roots; `read-only` forbids writes; `bypass` selects Codex full access when an external sandbox already enforces isolation. |
 
 ---
 
@@ -422,6 +333,7 @@ multi-node runs or when the Ray backend is disabled.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT` | `4` | Maximum number of GPU specialists that can be simultaneously in-flight (pending Ray scheduling + running) on the single-node Ray path. Ray still serializes execution on the physical GPU(s) using `num_gpus`; this limit caps how many actors can queue behind the current one. Floored at `1`. **Reduce to `1` or `2` when GPU memory or per-process overhead is a concern** (each queued actor holds a Ray worker slot even while it waits). |
+| `INFERENCE_OPTIMIZER_RAY_ROUND_WAIT_SEC` | Unset (the round's own timeout + 3600s) | Wall-clock ceiling on blocking for one Ray round to return. Without it a round Ray never schedules parks the waiting thread forever, leaving its task `running` and its lane lease never released — the 2026-09-21 stall. Set a number of seconds to override; `<= 0` disables the ceiling, which is also what a round with no cap of its own gets. A non-finite value (`nan`, `inf`) is **rejected**, not tolerated, because `nan > 0` is false and would silently switch the ceiling off. On timeout the round is abandoned and its actor is kept alive on purpose, so its GPUs stay reserved rather than being handed back while its server tree may live. |
 | `INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY` | On | When enabled (default), the dispatcher defers admitting new GPU research specialists while a serving benchmark holds the whole-machine `serving_slot`, preventing research work from starving serving. The slot is probed immediately before each specialist is admitted so a serving start that races the dispatch pass is caught. Set to `0`, `false`, `no`, or `off` to disable. |
 
 ---
@@ -611,10 +523,59 @@ to `all`:
 - `off` — neither lane engages, and a baseline that keeps failing terminates the
   run with `stop_reason='baseline_failed'` instead of opening an authoring loop.
 
-The accuracy floor shared by the eval trigger and the enablement KEEP gate is the
-fixed constant `_accuracy_gate.DEFAULT_ENABLEMENT_ACCURACY_FLOOR` (`0.05`). It is
-a collapse guard rather than a quality bar: a score of exactly `0.0` always fails,
-otherwise `score >= floor` passes.
+The eval trigger and the enablement KEEP gate both judge a score against the
+fixed constant `_accuracy_gate.DEFAULT_ENABLEMENT_ACCURACY_FLOOR` (`0.5`):
+`score >= floor` passes, and a score that is not finite or not above zero fails.
+The lanes differ only when a candidate's eval produced no score: an `eval`-lane
+candidate then fails, while a `launch`-lane candidate that serves is kept as
+provisional, with its correctness not verified.
+
+---
+
+## Benchmark deadlines and lifecycle
+
+Each actual benchmark subprocess spawn uses the same finite, positive limits,
+including baseline, explore, sweep, and rebench measurements:
+
+| Variable | Default | Description |
+|---|---|---|
+| `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` | `7800`; under `HYPERLOOM_AGENTIC_BACKEND=mlperf`, sized to the trajectory count (see [MLPerf agentic backend](#mlperf-agentic-backend)) | Hard wall-clock seconds per actual spawn, including server boot and accuracy evaluation. Output cannot extend it. An explicit value always wins. |
+| `INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC` | `600` | Output-silence seconds after real server readiness. Not armed before readiness or for server-less scriptable workloads. |
+
+Session `--max-hours` and cancellation apply independently of benchmark limits.
+Task and lease age do not expire work; admission and phase budgets, ordinary
+release, and dead-PID cleanup remain. Session exhaustion is cooperative, not a
+guarantee that a frozen Coordinator will terminate. There is no out-of-band
+supervision or automatic resume. SIGHUP uses the normal terminal drain; an
+operator may later explicitly use `--resume-from` on the same session.
+Historical stop reasons remain interpretable and are not restart requests.
+
+`PYTHONUNBUFFERED=1` affects Python output only, not shell/native buffering or
+upstream subprocess capture. Active logs do not prove useful progress. The
+Magpie streaming fix is local-only and unpublished; the installed dependency pin
+must not be assumed to include it, and this policy is not evidence of a validated
+end-to-end run.
+
+Profile, KernelForge, GEAK, LLM-call, and SGLang's own watchdog budgets are separate
+from these benchmark limits and retain their existing contracts.
+
+## Reactor budgets
+
+| Variable | Default | Description |
+|---|---|---|
+| `INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC` | `1800` | Total wall-clock limit for each reactor stage, including backend startup, streamed output, retries, backoff, and cleanup. This is independent of backend `*_CALL_TIMEOUT_SEC` settings: for streamed Claude turns those settings bound idle time between SDK messages, and activity resets that idle timer. Reaching this total limit cancels the stage and records a crash; a shorter remaining session bound still ends the stage without recording a crash. |
+
+## TraceLens analysis budgets
+
+On the Claude backend, the TraceLens analysis session bounds each wait for the
+next SDK message: the in-process SDK has no read timeout, so a stalled gateway
+would otherwise hold the session. Both limits measure inactivity, not total
+time. The Codex runner is one-shot and exposes no stream to bound.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_TRACELENS_STREAM_IDLE_TIMEOUT_SEC` | `300` | Seconds to wait for the next SDK message while no tool call is running. Values below `30` are raised to `30`; `0` or a negative value removes the bound. |
+| `HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC` | `3600` | The same bound while a tool call is running, when the SDK is silent by design: a TraceLens report over a large trace can run for many minutes. When unset it is never tighter than the stream bound. Values below `30` are raised to `30`; `0` or a negative value removes the bound while a tool runs. |
 
 ---
 
@@ -624,15 +585,15 @@ The following variables configure framework source discovery and path overrides.
 
 | Variable                                          | Default                                                                | Description                                                                                                                                            |
 |---------------------------------------------------|------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `INFERENCE_`<br>`OPTIMIZER_`<br>`FRAMEWORK_`<br>`SOURCE_ROOTS`      | Union with `/sgl-workspace`<br>`/{aiter,sglang`<br>`,vllm}`                        | Colon-separated list of source roots used by PolicyGate and flag discovery. Populated automatically by `src/hyperloom/inference_optimizer/assets/install.sh`'s `_probe_framework_source_roots` step (using `hyperloom.orchestrator.framework.paths.probe_framework_source_roots_for_env`).   |
+| `INFERENCE_`<br>`OPTIMIZER_`<br>`FRAMEWORK_`<br>`SOURCE_ROOTS`      | Union with `/sgl-workspace`<br>`/{aiter,sglang`<br>`,vllm}`                        | Colon-separated supplement to the search roots returned by `hyperloom.inference_optimizer.framework_paths.resolve_kernel_search_roots`, used for source search and flag discovery. Populated automatically by `src/hyperloom/inference_optimizer/assets/install.sh`'s `_probe_framework_source_roots` step (using `hyperloom.inference_optimizer.framework_paths.probe_framework_source_roots_for_env`).   |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_RESCUE_PATHS`                | Unset                                                                  | Colon-separated list of extra directories the harvest step scans for stray `result.json` files written outside the session dir (InferenceX-native scripts that hardcode `--result-dir`). |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_AITER_JIT_DIR`               | Aiter default                                                          | Override the aiter just-in-time (JIT) cache root. See [Targeted builds (Rung 5)](#targeted-builds-rung-5).  |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_STRICT_PATHS`                | `1` when CLI bootstraps                                                | When `1`, missing path env raises instead of falling back to discovery. Set by the CLI at session start; do not override unless debugging.              |
 | `HYPERLOOM_`<br>`SGLANG_PA`<br>`TCH_EXACT`<br>`_VERSIONS`           | Unset                                                                  | Pin the sglang server-patch step to specific upstream versions; advanced compatibility option.                                                          |
 | `HYPERLOOM_`<br>`ENABLE`<br>`_PATCH`                          | `1`                                                                    | Set to `0` to skip the in-place server patch step (useful when the upstream is already pre-patched).                                                    |
-| `HYPERLOOM_`<br>`SKIP_FRAME`<br>`WORK_CHECK`                  | Unset (check enabled)                                                  | Truthy skips the `optimize` preflight gate that requires the selected serving framework to be importable and a ROCm build. Last resort: when the server runs elsewhere, set `BENCHMARK_BASE_URL` instead, which exempts the check and configures the supported path. The gate already stays out of the way for `xdit`/`custom` (server-less), external multi-node, and any framework `install_baremetal.sh` cannot install (`atom`), where it warns instead of blocking. |
+| `HYPERLOOM_`<br>`SKIP_FRAME`<br>`WORK_CHECK`                  | Unset (check enabled)                                                  | Truthy skips the `optimize` preflight gate that requires the selected serving framework to be importable and a ROCm build. Last resort: when the server runs elsewhere, set `BENCHMARK_BASE_URL` instead, which exempts the check and configures the supported path. The gate already stays out of the way for `xdit`/`custom` (server-less) and external multi-node. |
 | `AITER_REF` | Unset | Optional bare-metal AITER install pin. When unset, the installer selects the newest tag compatible with the installed torch/triton stack. |
-| `INFERENCE_`<br>`OPTIMIZER_`<br>`FRAMEWORK_`<br>`AUDIT_USE_LLM`      | `auto`                                                                 | Controls the FRAMEWORK phase semantic-audit LLM deep-read. `off` keeps the hermetic static verdict only; `on` always runs the evidence-gated LLM refine; `auto` (default) escalates to the LLM only when the static verdict is `unknown` or `confidence < 0.5`. The refine never upgrades to an `already_*` status the static layer did not already back with evidence. |
+| `ATOM_REF` | `fe1099b15ddc52e6873e1932935f722864cdeee0` | Full commit SHA that `--install-framework atom` checks out from `ATOM_REPO` (default `https://github.com/ROCm/ATOM.git`) into `ATOM_ROOT` (default `<deps root>/atom`). The default is the commit `rocm/atom-dev:v0.1.7-rc0` was built from. |
 
 ---
 
@@ -671,32 +632,28 @@ deployments.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `LLM_GATEWAY_KEY`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `OPENAI_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
 | `HYPERLOOM_SPECIALIST_PERMISSION_MODE` | `bypassPermissions` | `--permission-mode` passed to the `claude` CLI for specialist subprocesses. Controls the Claude runtime approval-prompt behaviour only. Codex containment is resolved independently through `HYPERLOOM_CODEX_SANDBOX_MODE`. The default `bypassPermissions` is required for unattended operation; change only in setups where an external interactive approval flow is intended. |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ---
 
-## Critic / Robustness / knowledge base (KB)
+## Critic / knowledge base (KB)
 
-The following variables configure the Critic, Robustness, and knowledge base components.
+The following variables configure the Critic and knowledge base components.
 
 | Variable                              | Default                | Description                                                                                                                          |
 |---------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
 | `KNOWLEDGE_STORE_MODE`                | `local`                | Exclusive Recipe backend: `local` or `remote`. Ambient KB Store or GBrain credentials do not select remote mode. |
 | `KNOWLEDGE_LOCAL_ROOT`                | `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` | Local Recipe/KG root. It is not used for Recipe data in remote mode. |
 | `HYPERLOOM_`<br>`LOCAL_KB_ROOT`       | Unset                  | Deprecated explicit local Recipe root compatibility input, overridden by `--local-kb-root`; explicit use skips automatic legacy migration. |
-| `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework-agent KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The only supported override: the `fa` reader and the orchestrator's writeback both resolve through it, so it moves both halves at once. The withdrawn `FRAMEWORK_AGENT_KB_DIR` is ignored with a warning naming the resolved root. On first start-up an existing partition under the legacy `$USER_DATA_PATH/kb` is copied across once; a copy that fails warns and leaves the phase to cold-start. |
-| `KB_STORE_URL`                        | Unset                  | KB Store endpoint. Required when `KNOWLEDGE_STORE_MODE=remote`; remote Recipe mode selects the current Recipe View, replays its Config column, ordered Patch column overlays, and Kernel column, then writes one final session at CLOSE. |
+| `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The orchestrator's KB reader and writeback both resolve through it. The withdrawn `FRAMEWORK_AGENT_KB_DIR` is ignored with a warning naming the resolved root. On first start-up an existing partition under the legacy `$USER_DATA_PATH/kb` is copied across once; a copy that fails warns and leaves the phase to cold-start. |
+| `KB_STORE_URL`                        | Local Recipe mode: `https://global.primus-safe.amd.com/knowledge-base`; remote mode: unset | Unified KB Service endpoint. Local Recipe mode uses the default only for co-hosted PR Monitor access; IR-3 disables PR Monitor without disabling local Recipe storage when the endpoint is unreachable. Remote Recipe mode requires an explicit value, selects the current Recipe View, replays its Config, Patch, and Kernel columns, then writes one final session at CLOSE. PR Monitor is available at `${KB_STORE_URL}/pr-monitor/v1` (REST/IR-3/Framework/KernelForge) and `${KB_STORE_URL}/pr-monitor/mcp/` (specialist MCP). |
 | `KB_STORE_TOKEN`                      | Unset                  | KB Store bearer token. Required when `KNOWLEDGE_STORE_MODE=remote`; transport failures during the final write are non-fatal. |
 | `KB_DRAFT_DIR`                        | Runtime-generated      | Internal remote-mode handoff where each Recipe column (`config`, `patch`, `kernel`) stages its knowledge and files before CLOSE merges them. Hyperloom creates and exports it; operators must not set it. A Recipe cannot be built without it. |
 | `KB_WARM_START_DIR`                   | Runtime-generated      | Internal remote-mode handoff pointing agents at the downloaded `recipe.json + files/` selected Recipe View. Hyperloom creates and exports it; operators must not set it. |
-| `GBRAIN_BASE_URL`                     | Unset                  | Optional GBrain endpoint for Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
-| `GBRAIN_TOKEN`                        | Unset                  | Optional GBrain bearer token for Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
 | `CRITIC_AGENT_ROOT`                   | Derived from `REPO_ROOT` | Override location of the critic-agent runtime.                                                                                    |
 | `CRITIC_AGENT_`<br>`MAX_COMPLETION_TOKENS` | `32000`           | Output-token cap for one critic review call. A reply cut off at the cap is retried once at twice this value and then fails the turn, so the cap is a ceiling rather than a budget: unused headroom is never billed, while a truncated reply bills the whole call and yields nothing. Lower it for a model whose own output limit is smaller. A non-positive or unparseable value logs a warning and falls back to the default. |
-| `ROBUSTNESS_AGENT_ROOT`               | Derived from `REPO_ROOT` | Override location of the robustness-agent runtime.                                                                                |
-| `ROBUSTNESS_LLM_RCA_DISABLED`         | Unset                  | Set to `1` to forcibly disable the LLM root cause analysis (RCA) engine even when credentials are present.                                                 |
 
 ---
 
@@ -717,10 +674,10 @@ package to populate `session_breakdown.json` for downstream consumers.
 Primary switch (default **off**) for live Langfuse trace push.
 
 - **SDK install**: when this flag is on, `src/hyperloom/inference_optimizer/assets/install.sh` auto-installs the optional `langfuse` SDK on demand and skips it entirely when off — no separate `pip install '...[trace]'` is required.
-- **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills out-of-process children (geak, forge, robustness, specialist) and KEEP/REVERT decision Scores.
+- **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills out-of-process children (geak, forge, specialist) and KEEP/REVERT decision Scores.
 - **Local ledger**: `reports/trace/*.jsonl` is always written regardless of this flag. If the SDK is unavailable, live push degrades to a no-op.
 - **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per Primus-Claw session.
-- **Span layout**: `trace → phase span (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
+- **Span layout**: `trace → phase span (PRELUDE/ENABLEMENT/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
 - **Recipe-KB spans**: under the `recipe_kb` agent span, local reads/writes and remote KB Store publish attempts are recorded from `runtime/recipe_snapshot/.audit.jsonl`. Read spans use `kb:recipe_snapshot:<method>`; write spans use `kb:recipe_write:<generator>`, where the generator distinguishes normal `close` from `t4_fallback`. Remote rows report `written`, `skipped`, or `error` without recording credentials or payload bodies.
 - **Receipt**: every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting:
   - Whether push was enabled (or the `disabled_reason`)
@@ -804,7 +761,7 @@ env var controls it; it is always present (zeroed on pre-trace sessions).
 * `by_component`: per-agent breakdown (orchestration / kernel / critic /
   specialist / proposal_scorer / geak / forge / …), each with the same
   convenience totals.
-* `by_phase`: per-phase breakdown (PRELUDE / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / CLOSE).
+* `by_phase`: per-phase breakdown (PRELUDE / ENABLEMENT / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / CLOSE).
 * `attribution`: `attributed_to_decisions` vs `unattributed` split plus
   `attributed_calls_pct`. Only calls that carry a `task_id` / `dyn_id` joining
   to a KEEP/REVERT or dynamic_action decision (for example, specialist subprocess
@@ -860,6 +817,116 @@ are tasks. Supporting another gateway means adding a preset in
 
 ---
 
+## AgentX performance metric
+
+Grading defaults to output throughput alone. On an agentic replay that is the
+wrong objective: the canonical corpus averages ~114k prompt tokens against ~810
+output tokens per request, so output-only grading optimises about 1% of the
+token budget, and a variant can lift decode tok/s while degrading user-perceived
+latency with no visible cost.
+
+`HYPERLOOM_AGENTX=1` adopts the 2-D grading shape InferenceX uses. Upstream
+sweeps a concurrency ladder, keeps TTFT / ITL / TPOT percentiles separately, and
+publishes a **Pareto frontier** with E2E normalised interactivity as the x-axis
+and token throughput per chip as the y-axis. It never collapses the axes into one
+weighted number, and it has **no fixed interactivity target** — interactivity is
+a frontier coordinate, not a constraint, so a point that trades interactivity for
+throughput moves along the frontier rather than violating a rule.
+
+Hyperloom's local KEEP rule (fixed concurrency, no ladder) approximates the
+per-concurrency arm selection maintainers apply before submitting:
+
+- **KEEP** — E2E normalised interactivity P50 (median) gain ≥ 3%, **and** the P90
+  slow tail and output throughput each no worse than the noise band, **and** the
+  pair is comparable: benchmark windows within 5% of each other and no more failed
+  requests than the anchor.
+- **REVERT** — anything short of all of that.
+
+The median bar is the fixed `AGENTX_KEEP_P50_THRESHOLD_PCT` (3%), not
+`keep_threshold_pct`: it is a property of the objective rather than of how far
+into the session a round lands, so the decaying session threshold does not apply
+to it. Total token throughput no longer participates in the verdict — on this
+corpus it is almost entirely prefill, so it cannot see an output collapse.
+
+Hyperloom reads `e2e_norm_intvty_p90` from the accepted `current_best` for both
+grading and advisory comparison. This is aiperf's summary **P10** of the
+per-request rate `OSL / E2EL_s`, representing the slow tail for a
+`LARGER_IS_BETTER` metric. Comparison does not recompute request-level metrics.
+The external reference uses `1 / P90(E2EL_s / OSL)`; finite-sample linear
+interpolation means the estimators need not be numerically identical.
+The comparison is advisory and does not change KEEP/REVERT.
+
+TTFT is included in E2EL, unlike per-user `1/ITL`; on a ~114k-prompt replay TTFT
+is most of what a user waits for so grading on `1/ITL` would miss it.
+
+Default-on for AgentX runs, explicit opt-in via `HYPERLOOM_PERF_METRIC=intvty_v1`
+otherwise. Either AgentX signal turns it on: the ambient `HYPERLOOM_AGENTX=1`, or
+`benchmark_mode=agentx` stamped at seed — so a round in a subprocess that never
+inherited the env var still grades on the agentic axis. Serving frameworks only;
+scriptable frameworks (xDiT, custom) keep output-throughput grading.
+
+| Variable                       | Default                       | Description                                                                                                                                                                                       |
+|--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` under `HYPERLOOM_AGENTX=1`, else output tput | `intvty_v1` grades E2E normalised interactivity P50 (median) as the primary objective, with the P90 slow tail and output throughput each held as a guard. Reported in the final summary as `grading mode`. |
+| `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to the guards. A candidate whose slow tail or output throughput sits within this band of the anchor is not considered worse on that axis; the median has its own fixed bar and is not subject to the band. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value raises `EnvValueError` naming the variable, rather than grading against a band nobody chose. |
+| `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` | Unset (fail closed) | Truthy accepts a measurement whose submission verdict is absent or undetermined (`submission_valid=None`). A measurement the scenario explicitly judged invalid (`submission_valid=False`) is always rejected regardless of this flag. Applies to every measurement the run accepts (baseline, explore, kernel, sweep), not only the baseline — an unverified measurement makes every gain derived from it unverifiable. |
+| `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Initial server-boot budget written by the persistent-server lifecycle configuration helper. Actual benchmark launches synchronize this field to `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`; this variable is not an additional benchmark deadline or a way to extend one. Non-benchmark lifecycle callers that do not perform that synchronization retain their own boot budget. |
+
+### MLPerf agentic backend
+
+`HYPERLOOM_AGENTIC_BACKEND=mlperf` (with `HYPERLOOM_AGENTX=1`) keeps Magpie's
+server lifecycle and swaps the AgentX client for the MLCommons
+`inference-endpoint` harness (`utility/run_agentic.sh`), replaying
+`agentic_combined_v6` trajectories instead of aiperf Weka traces. The backend is
+recorded at seed; resuming a session under the other backend is refused.
+
+The harness publishes no per-request OSL/E2EL series, so MLPerf sessions grade
+on **output throughput** (`HYPERLOOM_PERF_METRIC` is not honoured here) and gate
+every KEEP on the harness's inline accuracy (`scores.json` `score`) against the
+baseline's smoke score, within the usual accuracy tolerance. A round with
+unscored turns, or over the 10% error-rate ceiling, fails that gate. A baseline
+without a fully scored inline accuracy stops the session
+(`baseline_accuracy_failed`), so the gate is never left without a reference.
+
+Search runs the 150-trajectory smoke set. The canonical 613-trajectory
+submission is not run by Hyperloom: run `run_agentic.sh full` and upstream
+`check_compliance.py` on the published recipe.
+
+The AgentX switch pins `PORT=30000`, `MLPERF_AGENTIC_MODEL=kimi-k3` and
+`--served-model-name kimi-k3`, and settles `MLPERF_AGENTIC_FLOW`,
+`AGENTIC_NUM_TRAJECTORIES` and `AGENTIC_CONCURRENCY` (from the round's `CONC`)
+into the recipe. The client refuses to start if port 30000 is already
+answering, checks that the listener belongs to the server it booted, and checks
+`/v1/models` lists `kimi-k3`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_AGENTIC_BACKEND` | `aiperf` | `mlperf` selects the MLPerf agentic client. Any other value is aiperf. |
+| `MLPERF_ENDPOINTS_DIR` | `/opt/mlperf-endpoints` | Checkout of `mlcommons/endpoints` holding `utility/run_agentic.sh`. Checked at preflight. |
+| `AGENTIC_DATASET_PATH` | — (required) | Path to `agentic_combined_v6.jsonl`. Checked at preflight; its stem is recorded as the corpus. |
+| `MLPERF_TOKENIZER_DIR` | — (required) | Kimi-K3 fast-tokenizer directory the harness counts tokens with. Checked at preflight. |
+| `MLPERF_AGENTIC_FLOW` | `smoke_test` | `run_agentic.sh` flow: `smoke_test` (150 trajectories) or `full` (613). |
+| `AGENTIC_NUM_TRAJECTORIES` | Derived from the flow | Overrides the trajectory count. Sizes the benchmark timeout. |
+| `MLPERF_AGENTIC_HARDWARE` | `mi355x` | Hardware key passed to `run_agentic.sh`. |
+
+Preflight also refuses a non-SGLang framework and a model path that is not
+Kimi. With `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` unset, the benchmark cap
+defaults to `trajectories × 26 s × 2 + 1800 s` (26 s per trajectory measured on
+8×MI355X at concurrency 16, doubled for a cold first round, plus boot), and never
+below the stock 7800 s: about 9600 s for smoke and 33,700 s for `full`.
+
+AgentX profiling starts when AIPerf reports its measured phase. The legacy
+`AGENTX_PROFILE_WARMUP_S` delay is ignored. `AGENTX_PROFILE_WINDOW_S` controls
+the capture window and defaults to 20 seconds; phase waiting is bounded by the
+materialized benchmark timeout. Capture lifecycle status is
+written to a per-invocation `capture-status.json`; the adjacent
+`trace-manifest.json` records the selected primary and per-rank traces.
+Benchmark measurement success and trace-capture success are reported
+independently. AgentX multi-node profiling is currently rejected because its
+legacy fixed-delay capture is not aligned with the AIPerf phase signal.
+
+---
+
 ## Phase tuning
 
 | Variable | Required | Default | Description |
@@ -875,6 +942,12 @@ internal-only — do not set them by hand:
 
 * `HYPERLOOM_KERNEL_AGENT_ROOT`: internal CLI-only handoff to the
   kernel subprocess (Python constant `_KERNEL_AGENT_ROOT_ENV`).
+* `HYPERLOOM_HOST_PROBE`, `HYPERLOOM_HOST_PROBE_DEEP`,
+  `HYPERLOOM_HOST_PROBE_DIR`, `HYPERLOOM_HOST_PROBE_ROOTS` (and the
+  `..._MAX_SITES` / `..._ARG_SAMPLES` caps): the same for the host-stall
+  evidence probe, armed by the profile leg that collects the evidence. The deep
+  tier inflates host time by design, so setting it by hand distorts any trace
+  collected alongside it.
 * Any `_INFERENCE_OPTIMIZER_*_INTERNAL_*` symbol: internal toggles for
   the test suite.
 

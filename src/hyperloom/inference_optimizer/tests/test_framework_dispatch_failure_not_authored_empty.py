@@ -1,30 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A specialist that never ran is not a specialist that found nothing.
-
-The FRAMEWORK plateau counts every terminal non-KEEP row, which is right for
-real outcomes: a batch of dead candidates should trip the plateau rather than
-grind on. It is wrong for a specialist the dispatcher never got to run — that
-row is an infrastructure failure, not a search result, and counting it lets a
-transient fault spend the whole session budget.
-
-That is not hypothetical. A gate rule cancelled 13 of 20 specialists in a 24h
-session; each was stamped ``author_empty``, five in a row tripped the plateau,
-and the run reached ``global_converged`` after 1h42m having done no work.
-"""
+"""A specialist that never ran is not a specialist that found nothing."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
 
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH
 from hyperloom.orchestrator.phases.machine_state import (
-    framework_agent_consecutive_no_keep,
+    _lever_attempts,
+    _trailing_no_keep,
 )
-
-from .test_framework_agent_authoring import _Stub
+from .test_framework_agent_authoring import _stub
 
 
 def _task(cand: str) -> SimpleNamespace:
@@ -48,10 +37,10 @@ _GATE_ERROR = (
 
 def test_dispatch_failure_is_not_recorded_as_authored_empty(tmp_path: Path):
     """A run that failed before delivering must not claim the specialist authored nothing."""
-    stub = _Stub(tmp_path, authoring=True)
 
-    Coordinator._record_framework_agent_authoring_empty_outcome(  # type: ignore[arg-type]
-        stub,
+    stub = _stub(tmp_path, authoring=True)
+
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=_task("local_explore:0"),
         done_payload={},
         run_error=_GATE_ERROR,
@@ -66,13 +55,12 @@ def test_dispatch_failure_is_not_recorded_as_authored_empty(tmp_path: Path):
 
 def test_genuine_empty_deliverable_is_still_authored_empty(tmp_path: Path):
     """A specialist that ran and found nothing keeps its existing status."""
-    stub = _Stub(tmp_path, authoring=True)
 
-    Coordinator._record_framework_agent_authoring_empty_outcome(  # type: ignore[arg-type]
-        stub,
+    stub = _stub(tmp_path, authoring=True)
+
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=_task("local_explore:1"),
         done_payload={
-            "empty": True,
             "patches_written": [],
             "proposal_set": [],
             "summary": "no host-side redundancy left in the rollout loop",
@@ -85,10 +73,10 @@ def test_genuine_empty_deliverable_is_still_authored_empty(tmp_path: Path):
 
 def test_recovery_path_also_separates_a_failed_run(tmp_path: Path):
     """The bus-replay path sees the error on the envelope, not in the result."""
-    stub = _Stub(tmp_path, authoring=True)
 
-    Coordinator._record_framework_agent_authoring_empty_outcome(  # type: ignore[arg-type]
-        stub,
+    stub = _stub(tmp_path, authoring=True)
+
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=_task("local_explore:2"),
         # What a replayed delegated_result carries: no specialist_done at all.
         done_payload={},
@@ -98,51 +86,29 @@ def test_recovery_path_also_separates_a_failed_run(tmp_path: Path):
     assert stub.shared_state.framework_agent_phase_progress[0]["status"] == "dispatch_failed"
 
 
-def test_dispatch_failures_do_not_trip_the_plateau():
-    """The streak walks past infrastructure rows instead of counting them."""
-    state = SimpleNamespace(
-        framework_agent_phase_progress=[
-            {"status": "dispatch_failed", "kept": False},
-            {"status": "dispatch_failed", "kept": False},
-            {"status": "dispatch_failed", "kept": False},
-            {"status": "dispatch_failed", "kept": False},
-            {"status": "dispatch_failed", "kept": False},
-        ]
+def test_dispatch_failure_leaves_no_attempt_for_the_plateau_to_count(tmp_path: Path):
+    """The dispatch row settles on the progress ledger; the plateau reads attempts, and finds none."""
+
+    stub = _stub(tmp_path, authoring=True)
+
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
+        task=_task("local_explore:3"),
+        done_payload={},
+        run_error=_GATE_ERROR,
     )
-    assert framework_agent_consecutive_no_keep(state) == 0
+
+    assert stub.shared_state.framework_agent_phase_progress[0]["status"] == "dispatch_failed"
+    assert _lever_attempts(stub.shared_state, LEVER_SOURCE_PATCH) == []
 
 
 def test_real_outcomes_still_trip_the_plateau():
     """The behaviour the plateau exists for is unchanged."""
     state = SimpleNamespace(
-        framework_agent_phase_progress=[
-            {"status": "author_empty", "kept": False},
-            {"status": "reverted", "kept": False},
-            {"status": "not_applicable", "kept": False},
-        ]
+        macro_cycle=0,
+        attempts=[
+            {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "REVERT", "adopted": False},
+            {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "REVERT", "adopted": False},
+            {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "REVERT", "adopted": False},
+        ],
     )
-    assert framework_agent_consecutive_no_keep(state) == 3
-
-
-def test_dispatch_failures_do_not_mask_real_outcomes():
-    """Skipped rows are transparent: real no-KEEPs on either side still add up."""
-    state = SimpleNamespace(
-        framework_agent_phase_progress=[
-            {"status": "author_empty", "kept": False},
-            {"status": "dispatch_failed", "kept": False},
-            {"status": "reverted", "kept": False},
-        ]
-    )
-    assert framework_agent_consecutive_no_keep(state) == 2
-
-
-def test_a_keep_still_breaks_the_streak_through_a_dispatch_failure():
-    """A KEEP behind an infrastructure row must still reset the streak."""
-    state = SimpleNamespace(
-        framework_agent_phase_progress=[
-            {"status": "kept", "kept": True},
-            {"status": "dispatch_failed", "kept": False},
-            {"status": "author_empty", "kept": False},
-        ]
-    )
-    assert framework_agent_consecutive_no_keep(state) == 1
+    assert _trailing_no_keep(_lever_attempts(state, LEVER_SOURCE_PATCH)) == 3

@@ -49,9 +49,7 @@ def file_reader(refs_dir):
     return ContextProvider(shared_state=None, reference_reader=_read)
 
 
-# ---------------------------------------------------------------------------
 # Reference directory contract
-# ---------------------------------------------------------------------------
 
 
 def test_all_reference_files_have_when_tag(refs_dir):
@@ -86,19 +84,17 @@ def test_empty_refs_dir_produces_no_section(tmp_path):
     assert _section_reference_index(references_dir=tmp_path, phase="") == []
 
 
-# ---------------------------------------------------------------------------
 # Phase filtering
-# ---------------------------------------------------------------------------
 
 
-def test_specialist_rescue_only_in_explore_and_framework(refs_dir):
-    """specialist_rescue is phase-tagged EXPLORE,FRAMEWORK_AGENT; other phases hide it."""
+def test_specialist_rescue_only_in_framework(refs_dir):
+    """specialist_rescue is phase-tagged FRAMEWORK_AGENT; other phases hide it."""
     rescue_path = refs_dir / "specialist_rescue.md"
     if not rescue_path.exists():
         pytest.skip("specialist_rescue.md not present")
     for phase in _ps.PHASE_NAMES:
         index = "\n".join(_section_reference_index(references_dir=refs_dir, phase=phase))
-        if phase in ("EXPLORE", "FRAMEWORK_AGENT"):
+        if phase == "FRAMEWORK_AGENT":
             assert "specialist_rescue" in index, f"specialist_rescue missing from index in {phase}"
         else:
             assert "specialist_rescue" not in index, f"specialist_rescue leaked into index in {phase}"
@@ -113,9 +109,7 @@ def test_failure_recovery_present_in_every_phase(refs_dir):
         assert "failure_recovery" in index, f"failure_recovery missing from index in {phase}"
 
 
-# ---------------------------------------------------------------------------
 # Orchestration prompt integration
-# ---------------------------------------------------------------------------
 
 
 def test_reference_index_present_in_prompt(registry, refs_dir):
@@ -136,9 +130,7 @@ def test_reference_index_present_in_prompt(registry, refs_dir):
         assert "## 8. ON-DEMAND REFERENCE INDEX" in text, f"reference index missing from {phase} prompt"
 
 
-# ---------------------------------------------------------------------------
 # read_reference tool
-# ---------------------------------------------------------------------------
 
 
 def test_read_reference_in_context_tool_names():

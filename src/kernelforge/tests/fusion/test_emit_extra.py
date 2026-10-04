@@ -50,8 +50,7 @@ def test_is_fused_module_name_excludes_lookalikes():
 
 
 def test_export_nongit_patch_is_git_apply_compatible(tmp_path):
-    """The difflib-generated patch must apply cleanly with `git apply` (what
-    Hyperloom uses at integrate)."""
+    """The difflib-generated patch must apply cleanly with `git apply` (what Hyperloom uses at integrate)."""
     repo, src, out = _nongit_pkg(tmp_path)
     pristine_text = src.read_text()
     src.write_text(
@@ -72,8 +71,7 @@ def test_export_nongit_patch_is_git_apply_compatible(tmp_path):
 
 
 def test_export_nongit_sets_repo_root(tmp_path):
-    """The manifest must carry the repo_root the patch paths are relative to, so
-    Hyperloom applies against the SAME root (site-packages, not a git toplevel)."""
+    """The manifest must carry the repo_root the patch paths are relative to, so Hyperloom applies against the SAME root (site-packages, not a git toplevel)."""
     repo, src, out = _nongit_pkg(tmp_path)
     src.write_text("FUSED = 1\ndef forward(x):\n    return x\n", encoding="utf-8")
     arts = export_artifacts(str(repo), str(src), out, pristine_dir=str(out / ".pristine"))
@@ -83,8 +81,7 @@ def test_export_nongit_sets_repo_root(tmp_path):
 
 
 def test_snapshot_returns_empty_when_main_source_fails(tmp_path, monkeypatch):
-    """#8: if the MAIN source snapshot fails, return "" so export does not treat the
-    edited source as a brand-new file."""
+    """#8: if the MAIN source snapshot fails, return "" so export does not treat the edited source as a brand-new file."""
     from kernelforge.fusion import command as cli
 
     repo, src, out = _nongit_pkg(tmp_path)
@@ -120,12 +117,7 @@ def _nongit_pkg(tmp_path):
 
 
 def test_export_nongit_uses_pristine_snapshot(tmp_path):
-    """Repro: a non-git framework (pip install) must STILL produce a patch.
-
-    git diff is empty in a non-git dir, so the KEPT fusion previously shipped
-    patch=null and integrate skipped it. With a pre-authoring pristine snapshot the
-    edit is captured as a unified diff.
-    """
+    """Repro: a non-git framework (pip install) must STILL produce a patch."""
     repo, src, out = _nongit_pkg(tmp_path)
     # author edits the source in place (env-gated fusion)
     src.write_text(
@@ -149,8 +141,7 @@ def test_export_nongit_without_snapshot_returns_empty(tmp_path):
 
 
 def test_export_nongit_ignores_unchanged_preexisting_fused_sibling(tmp_path):
-    """A pre-existing framework file matching *fusion*/*_fused* (snapshotted, unchanged)
-    must NOT be emitted as a new file nor deleted by restore."""
+    """A pre-existing framework file matching *fusion*/*_fused* (snapshotted, unchanged) must NOT be emitted as a new file nor deleted by restore."""
     repo, src, out = _nongit_pkg(tmp_path)
     sibling = repo / "models" / "other_fusion.py"
     sibling_text = "PRE_EXISTING = 1\n"
@@ -242,6 +233,33 @@ def test_restore_removes_untracked_and_prunes_dirs(tmp_path):
     assert not (repo / "a").exists()
 
 
+def test_export_nongit_honors_custom_patch_name(tmp_path):
+    """A per-sibling ``patch_name`` writes ``out/<patch_name>`` and NOT the legacy ``fusion.patch``, so N keepers exported into one dir do not clobber each other."""
+    repo, src, out = _nongit_pkg(tmp_path)
+    src.write_text("FUSED = 1\ndef forward(x):\n    return x\n", encoding="utf-8")
+    arts = export_artifacts(str(repo), str(src), out, pristine_dir=str(out / ".pristine"), patch_name="fusion_0.patch")
+    assert arts.patch == str(out / "fusion_0.patch")
+    assert (out / "fusion_0.patch").is_file()
+    assert not (out / "fusion.patch").exists()
+
+
+def test_export_nongit_two_siblings_do_not_overwrite(tmp_path):
+    """Exporting two recipes into the same out dir under distinct names keeps both patch files intact (the multi-patch nomination invariant)."""
+    repo, src, out = _nongit_pkg(tmp_path)
+    # sibling 0 edits the main source
+    src.write_text("A = 1\ndef forward(x):\n    return x\n", encoding="utf-8")
+    a0 = export_artifacts(str(repo), str(src), out, pristine_dir=str(out / ".pristine"), patch_name="fusion_0.patch")
+    text0 = (out / "fusion_0.patch").read_text()
+    # sibling 1 makes a different edit to the same source; exported under a new name
+    src.write_text("B = 2\ndef forward(x):\n    return x\n", encoding="utf-8")
+    a1 = export_artifacts(str(repo), str(src), out, pristine_dir=str(out / ".pristine"), patch_name="fusion_1.patch")
+    assert a0.patch != a1.patch
+    # sibling 0's file is untouched by sibling 1's export
+    assert (out / "fusion_0.patch").read_text() == text0
+    assert "+A = 1" in (out / "fusion_0.patch").read_text()
+    assert "+B = 2" in (out / "fusion_1.patch").read_text()
+
+
 def test_restore_checks_out_tracked_file(tmp_path):
     repo = tmp_path / "r"
     repo.mkdir()
@@ -259,3 +277,77 @@ def test_restore_checks_out_tracked_file(tmp_path):
     arts = FusionArtifacts(changes=[{"path": "wired.py"}], patch="/tmp/x.patch")
     restore_exported_changes(str(repo), arts)
     assert f.read_text() == "original\n"  # tracked file checked out
+
+
+def test_export_nongit_scopes_to_this_recipes_fused_module(tmp_path):
+    """Regression: a sibling's leftover module must NOT ride along in this patch."""
+    repo, src, out = _nongit_pkg(tmp_path)
+    models = repo / "models"
+    earlier_sibling = models / "qwen3_fused_recipe_one.py"
+    earlier_sibling.write_text("def fused_one(): return 1\n", encoding="utf-8")  # not in the snapshot
+    mine = models / "qwen3_fused_recipe_two.py"
+    mine.write_text("def fused_two(): return 2\n", encoding="utf-8")
+    src.write_text("FUSED_TWO = 1\ndef forward(x):\n    return x\n", encoding="utf-8")
+
+    arts = export_artifacts(
+        str(repo),
+        str(src),
+        out,
+        pristine_dir=str(out / ".pristine"),
+        patch_name="fusion_two.patch",
+        fused_module=str(mine),
+    )
+
+    paths = {c["path"] for c in arts.changes}
+    assert paths == {"models/qwen3.py", "models/qwen3_fused_recipe_two.py"}
+    patch_text = (out / "fusion_two.patch").read_text()
+    assert "qwen3_fused_recipe_one" not in patch_text, "another recipe's module leaked into this sibling's patch"
+
+
+def test_export_nongit_without_fused_module_still_discovers_by_name(tmp_path):
+    """Salvage / compile-pass callers have no recipe in hand, so the name-based discovery has to stay for them."""
+    repo, src, out = _nongit_pkg(tmp_path)
+    new_mod = repo / "models" / "qwen3_fused_kernel.py"
+    new_mod.write_text("def fused(): return 1\n", encoding="utf-8")
+    arts = export_artifacts(str(repo), str(src), out, pristine_dir=str(out / ".pristine"))
+    assert any(c["path"] == "models/qwen3_fused_kernel.py" for c in arts.changes)
+
+
+def test_export_nongit_named_fused_module_absent_is_not_an_error(tmp_path):
+    """A recipe that wired the source without authoring a module still exports."""
+    repo, src, out = _nongit_pkg(tmp_path)
+    src.write_text("WIRED = 1\ndef forward(x):\n    return x\n", encoding="utf-8")
+    arts = export_artifacts(
+        str(repo),
+        str(src),
+        out,
+        pristine_dir=str(out / ".pristine"),
+        fused_module=str(repo / "models" / "never_written.py"),
+    )
+    assert [c["path"] for c in arts.changes] == ["models/qwen3.py"]
+
+
+def test_export_git_scopes_untracked_modules_to_this_recipe(tmp_path):
+    """Same scoping on the git route: only this recipe's untracked module is added."""
+    repo = tmp_path / "r"
+    (repo / "models").mkdir(parents=True)
+    src = repo / "models" / "qwen3.py"
+    src.write_text("def forward(x):\n    return x\n", encoding="utf-8")
+    _init_repo(repo)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "src"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (repo / "models" / "qwen3_fused_recipe_one.py").write_text("one\n", encoding="utf-8")
+    mine = repo / "models" / "qwen3_fused_recipe_two.py"
+    mine.write_text("two\n", encoding="utf-8")
+    src.write_text("FUSED_TWO = 1\ndef forward(x):\n    return x\n", encoding="utf-8")
+
+    arts = export_artifacts(str(repo), str(src), tmp_path / "out", fused_module=str(mine))
+
+    paths = {c["path"] for c in arts.changes}
+    assert "models/qwen3_fused_recipe_two.py" in paths
+    assert "models/qwen3_fused_recipe_one.py" not in paths

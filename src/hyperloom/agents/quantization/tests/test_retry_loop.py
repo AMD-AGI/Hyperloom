@@ -1,9 +1,4 @@
-"""Tests for `quantize_via_prompt` — retry orchestration.
-
-The runner SDK call is stubbed via the `runner_fn` injection seam so these
-tests stay pure-Python. Each stub configures the workspace state before
-returning an AttemptResult, mirroring what SKILL.md would have left behind.
-"""
+"""Tests for `quantize_via_prompt` — retry orchestration."""
 
 from __future__ import annotations
 
@@ -23,8 +18,7 @@ from hyperloom.agents.quantization.driver.retry import (
 from hyperloom.agents.quantization.driver.runner import AttemptResult
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# helpers
+# ───────────────────────────────────────────────────────────────────────────── helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -63,8 +57,7 @@ def quark_root(tmp_path: Path) -> Path:
     return qr
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# bootstrap — quark_root resolution
+# ───────────────────────────────────────────────────────────────────────────── bootstrap — quark_root resolution
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -101,8 +94,7 @@ async def test_quark_root_nonexistent_dir_fast_path(tmp_path):
     assert result.assessment.final == OutcomeId.quark_root_missing
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# happy path — single clean attempt
+# ───────────────────────────────────────────────────────────────────────────── happy path — single clean attempt
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -130,8 +122,7 @@ async def test_single_clean_attempt_returns_success(tmp_path, quark_root, build_
     assert len(runner.calls) == 1
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# retry hypothesis gate
+# ───────────────────────────────────────────────────────────────────────────── retry hypothesis gate
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -267,8 +258,7 @@ async def test_max_requantize_attempts_zero_no_retry(tmp_path, quark_root, build
     assert any("max_attempts_exhausted" in n for n in result.assessment.notes)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# auto_fail stops immediately
+# ───────────────────────────────────────────────────────────────────────────── auto_fail stops immediately
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -297,9 +287,8 @@ async def test_auto_fail_stops_immediately(tmp_path, quark_root, build_workspace
     assert any("auto_fail" in n for n in result.assessment.notes)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# eval_gap_exceeded with operator acceptance
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── eval_gap_exceeded with operator
+# acceptance ─────────────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -377,9 +366,8 @@ async def test_eval_gap_exceeded_rejected_stays_partial(tmp_path, quark_root, bu
     assert result.status == "partial"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# auto_recover surfaces as partial (Python doesn't loop on it)
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── auto_recover surfaces as partial
+# (Python doesn't loop on it) ─────────────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -410,8 +398,7 @@ async def test_auto_recover_surfaced_does_not_retry(tmp_path, quark_root, build_
     assert any("auto_recover_unresolved" in n for n in result.assessment.notes)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# _resolve_interactive
+# ───────────────────────────────────────────────────────────────────────────── _resolve_interactive
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -435,8 +422,7 @@ def test_resolve_interactive_auto_no_tty(monkeypatch):
     assert _resolve_interactive(None) is False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# _decide_next_step unit table
+# ───────────────────────────────────────────────────────────────────────────── _decide_next_step unit table
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -548,8 +534,7 @@ def test_decide_next_step_eval_gap_accepted_promotes(tmp_path, monkeypatch):
     assert d.promote_to == OutcomeId.eval_gap_accepted
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# QuantSkillRunResult shape
+# ───────────────────────────────────────────────────────────────────────────── QuantSkillRunResult shape
 # ─────────────────────────────────────────────────────────────────────────────
 
 

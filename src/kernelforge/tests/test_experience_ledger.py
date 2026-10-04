@@ -1,9 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the per-run experience ledger (loop/experience.py).
-
-Covers signature extraction, objective constraint distillation/dedup/cap,
-prompt rendering, and best-effort disk flush. Filesystem via tmp_path."""
+"""Unit tests for the per-run experience ledger (loop/experience.py)."""
 
 from __future__ import annotations
 

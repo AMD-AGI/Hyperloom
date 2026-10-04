@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared action-surface constants and the action catalogue.
-
-Keep ownership, transport, and prompt-visibility classifications here so
-PolicyGate, prompt rendering, and CLI wiring do not grow separate
-action-name lists.
-
-:data:`ACTION_CATALOGUE` models only the fields production code reads:
-
-* ``requires_lanes`` / ``lease_ttl_sec`` -- dispatch gate and GPU lease TTL
-* ``side_effects`` -- stamped onto the dispatched task
-* ``pipeline_phase`` -- runs-workspace ownership plus prompt grouping
-* ``verdict_class`` -- selects the Critic prompt rule set
-* the rest -- rendered into the Orchestration prompt catalogue
-"""
+"""Shared action-surface constants and the action catalogue."""
 
 from __future__ import annotations
 
@@ -26,19 +13,15 @@ from types import MappingProxyType
 # Actions owned by the Kernel role; requested via request{target_agent="kernel_agent"}.
 KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
     {
-        "kernel_opt",
         "integrate",
         "gemm_tuning",
     }
 )
 
 
-# Kernel-owned action name -> the request ``kind`` its handler is registered
-# under in ``request_handlers.KERNEL_REQUEST_HANDLERS``. The two differ, so the
-# prompt must advertise the kind.
+# Kernel-owned action name -> the request ``kind`` that names it.
 KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
     {
-        "kernel_opt": "run_optimization",
         "gemm_tuning": "run_gemm_tuning",
         "integrate": "integrate",
     }
@@ -47,19 +30,16 @@ KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
 assert set(KERNEL_ACTION_REQUEST_KINDS) == KERNEL_AGENT_OWNED_ACTIONS
 
 
-# Request-kind aliases that route to a kernel-owned handler. apply_patch is
-# an alias of integrate (both dispatch to integrate_handler); PolicyGate
-# resolves the alias to its canonical owned action so the phase-action gate
-# applies identically.
+# Request-kind aliases that route to a kernel-owned handler. apply_patch is an alias of integrate (both dispatch to
+# integrate_handler); PolicyGate resolves the alias to its canonical owned action so the phase-action gate applies
+# identically.
 KERNEL_REQUEST_KIND_ALIASES: dict[str, str] = {
     "apply_patch": "integrate",
 }
 
 
-# Request ``kind`` -> the kernel-owned action it gates as, derived from the two
-# tables above so a new kind cannot fall out of sync with the catalogue.
-# ``trace_analyze`` is absent by design: it owns no action and no phase, and
-# mapping it onto one would deny it everywhere.
+# Request ``kind`` -> the kernel-owned action it gates as, derived from the two tables above so a new kind cannot fall
+# out of sync with the catalogue.
 REQUEST_KIND_TO_OWNED_ACTION: Mapping[str, str] = MappingProxyType(
     {
         **{kind: action for action, kind in KERNEL_ACTION_REQUEST_KINDS.items()},
@@ -68,16 +48,27 @@ REQUEST_KIND_TO_OWNED_ACTION: Mapping[str, str] = MappingProxyType(
 )
 
 
-# Request kinds the Coordinator dispatches itself at KERNEL entry; PolicyGate
-# rejects them from an LLM, which would bypass the lane's gate and accounting.
-# Unlike ``COORDINATOR_INTERNAL_ACTIONS`` these are request kinds, not actions:
-# they have no executor and no prompt entry.
+# Registered kernel lanes the Coordinator dispatches itself, at KERNEL entry and once their own gate passes.
 COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
     {
         "run_fusion",
-        "run_collective",
+        # Dispatched once at phase entry from a lane budget.
+        "run_gemm_tuning",
     }
 )
+
+
+# Request kinds an LLM may address to the kernel agent.
+LLM_REQUESTABLE_KERNEL_REQUEST_KINDS: frozenset[str] = (
+    frozenset(KERNEL_ACTION_REQUEST_KINDS.values())
+    | {
+        "trace_analyze",
+        "apply_patch",
+    }
+) - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
+
+# The two sets answer the same question and must never both claim a kind.
+assert not (LLM_REQUESTABLE_KERNEL_REQUEST_KINDS & COORDINATOR_OWNED_KERNEL_REQUEST_KINDS)
 
 
 # Coordinator-managed actions that agents should not directly propose.
@@ -87,12 +78,10 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
         "roofline",
         "profile",
         "replay_warm_recipe",
-        # Off-loop compiled-component builds; dispatched by the Coordinator,
-        # never by an LLM agent.  Not in ACTION_CATALOGUE to avoid pulling the
-        # kind into PHASE_LLM_PROPOSABLE_ACTIONS or _RUNS_ACTIONS (which would
-        # create a runs/ workspace and collide with the enablement/builds/
-        # attempt-root contract).
+        # Off-loop compiled-component builds; dispatched by the Coordinator, never by an LLM agent.
         "targeted_build",
+        # The KERNEL_AGENT phase's whole pipeline, enqueued once at phase entry.
+        "kernel_agent",
     }
 )
 
@@ -100,17 +89,7 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
 COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = INTERNAL_ONLY_ACTION_NAMES
 
 
-# Robustness-only actions (driven via its action-ladder); Orchestration must
-# ALERT instead. ``recover`` walks SIGTERM/SIGKILL against server owners.
-ROBUSTNESS_DELEGATE_ONLY_ACTIONS: frozenset[str] = frozenset(
-    {
-        "recover",
-    }
-)
-
-
 # Actions rendered in the Orchestration prompt for full kernel-enabled runs.
-# Prompt visibility only; phase_state and PolicyGate decide legality per tick.
 FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "target_analysis",
     "baseline",
@@ -118,23 +97,19 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "explore",
     "specialist",
     "integrate_patch",
-    "sweep",
-    "kernel_opt",
     "integrate",
     "gemm_tuning",
     "report",
 )
 
 
-# Prompt-visible actions for --no-kernel runs. Kernel-owned request actions
-# and analysis actions that only feed kernel optimization stay hidden.
+# Prompt-visible actions for --no-kernel runs.
 NO_KERNEL_AGENT_ENABLED_ACTIONS: tuple[str, ...] = (
     "target_analysis",
     "baseline",
     "explore",
     "specialist",
     "integrate_patch",
-    "sweep",
     "report",
 )
 
@@ -187,7 +162,8 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             side_effects=("launches_server", "writes_results"),
             description=(
                 "Post-sweep concurrency comparison: benchmark baseline vs current_best across a CONC ladder. "
-                "On by default; opt out via --no-enable-conc-sweep; bounded by --conc-sweep-total-budget-sec "
+                "On by default, off under AgentX; force with --enable-conc-sweep / --no-enable-conc-sweep; "
+                "bounded by --conc-sweep-total-budget-sec "
                 "(default 2.5h)."
             ),
         ),
@@ -260,21 +236,24 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
                 "the enablement launch-only build probe and framework-agent authoring lanes."
             ),
         ),
-        "kernel_opt": ActionMetadata(
-            name="kernel_opt",
+        # typical_runtime_min is a floor, not the expected wall clock: the task runs until the KERNEL phase budget
+        # ends it, so the time-budget gate admits it whenever one benchmark round still fits.
+        "kernel_agent": ActionMetadata(
+            name="kernel_agent",
             family="deep_kernel",
             pipeline_phase="deep",
             verdict_class="exploration",
-            expected_gain_pct=(5.0, 25.0),
-            accuracy_risk=0.1,
-            crash_risk=0.2,
-            typical_runtime_min=60.0,
-            lease_ttl_sec=7200,
+            expected_gain_pct=(0.0, 30.0),
+            accuracy_risk=0.05,
+            crash_risk=0.05,
+            typical_runtime_min=1.0,
+            lease_ttl_sec=21600,
             requires_lanes=("server_lifecycle", "workspace_mutation", "benchmark_lane"),
-            side_effects=("workspace_write", "server_restart", "launches_server"),
+            side_effects=("workspace_write", "server_restart", "writes_config"),
             description=(
-                "REQUEST kernel: parallel-submit kernel optimization candidates for one reusable native kernel id "
-                "picked from the latest profile."
+                "Coordinator-internal: the KERNEL_AGENT phase's work as one lane-holding task. Runs the GEAK e2e "
+                "delegation or the Forge pipeline (GEMM tuning, fusion, kernel rewrite controller) per "
+                "kernel_optimizer, so no other benchmark shares the GPUs while it runs."
             ),
         ),
         "profile": ActionMetadata(
@@ -292,22 +271,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             description=(
                 "Coordinator-internal: lightweight roofline alternative — torch_profiler trace only, no analysis.md. "
                 "Enqueued when ``--no-enable-roofline``; LLM-proposed delegate is denied."
-            ),
-        ),
-        "recover": ActionMetadata(
-            name="recover",
-            family="resilience",
-            pipeline_phase="support",
-            verdict_class="exploration",
-            expected_gain_pct=(0.0, 0.0),
-            accuracy_risk=0.0,
-            crash_risk=0.1,
-            typical_runtime_min=5.0,
-            lease_ttl_sec=1200,
-            requires_lanes=("server_lifecycle", "workspace_mutation"),
-            side_effects=("workspace_write", "server_restart", "reads_checkpoint"),
-            description=(
-                "Restore the workspace from the last good checkpoint and relaunch the server after a crash or REVERT."
             ),
         ),
         "replay_warm_recipe": ActionMetadata(
@@ -358,7 +321,7 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             side_effects=("reads_server", "writes_results"),
             description=(
                 "Composite action: runs profile + trace_analyze atomically to produce a fresh TraceLens analysis.md "
-                "snapshot. Required prerequisite for explore / kernel_opt."
+                "snapshot. Required prerequisite for explore."
             ),
         ),
         "session_breakdown": ActionMetadata(
@@ -394,23 +357,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
                 "worktree patches, emits one specialist_done intent."
             ),
         ),
-        "sweep": ActionMetadata(
-            name="sweep",
-            family="shallow",
-            pipeline_phase="explore",
-            verdict_class="exploration",
-            expected_gain_pct=(3.0, 10.0),
-            accuracy_risk=0.0,
-            crash_risk=0.05,
-            typical_runtime_min=15.0,
-            lease_ttl_sec=7200,
-            requires_lanes=("server_lifecycle", "benchmark_lane"),
-            side_effects=("launches_server", "writes_results"),
-            description=(
-                "Workload sweep over (CONC,ISL,OSL) on top of current best to validate gains beyond smoke workload. "
-                'Override via params.conc_values=[int,...] and params.isl_osl_configs=["<ISL>:<OSL>",...].'
-            ),
-        ),
         "target_analysis": ActionMetadata(
             name="target_analysis",
             family="prep",
@@ -436,13 +382,13 @@ __all__ = [
     "ACTION_CATALOGUE",
     "ActionMetadata",
     "COORDINATOR_INTERNAL_ACTIONS",
-    "COORDINATOR_OWNED_KERNEL_REQUEST_KINDS",
     "FULL_ENABLED_ACTIONS",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_ACTION_REQUEST_KINDS",
+    "COORDINATOR_OWNED_KERNEL_REQUEST_KINDS",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "KERNEL_REQUEST_KIND_ALIASES",
+    "LLM_REQUESTABLE_KERNEL_REQUEST_KINDS",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
     "REQUEST_KIND_TO_OWNED_ACTION",
-    "ROBUSTNESS_DELEGATE_ONLY_ACTIONS",
 ]

@@ -1,0 +1,928 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Coverage for the SBD V6 ``baseline`` event."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
+    PRODUCER,
+    ROUND_ACCURACY,
+    ROUND_MEASURE,
+    ROUND_SINGLE,
+    ROUND_WARMUP,
+    RUN_AFTER_EVAL_FAILURE,
+    RUN_INITIAL,
+    assemble_baseline_action,
+    baseline_event_id,
+    make_baseline_recorder,
+    record_action_decision,
+)
+from hyperloom.inference_optimizer.breakdown.recorder import baseline_event
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import baseline_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EVENT_STATUS_INTERRUPTED
+from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
+from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+from hyperloom.inference_optimizer.session.session_binding import session_scope
+from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+
+@pytest.fixture(autouse=True)
+def _bound_session(tmp_path):
+    """Bind the session the way startup does, so no call below takes a path."""
+    with session_scope(tmp_path):
+        yield tmp_path
+
+
+def _events(session_dir: Path) -> list[dict[str, Any]]:
+    return [event for event in read_timeline_events(session_dir) if event.get("type") == "baseline"]
+
+
+def _actions(session_dir: Path, index: int = 0) -> list[dict[str, Any]]:
+    return _events(session_dir)[index]["ext"]["actions"]
+
+
+def _recorder(
+    *,
+    task_id: str = "t-1",
+    task_kind: str = "baseline",
+    reason: str = "",
+    phase: str = "prelude",
+    macro_cycle: int = 0,
+    establishes_quality_ref: bool = True,
+    params: dict[str, Any] | None = None,
+):
+    """Build a recorder the way a dispatched baseline gets one."""
+    recorder = make_baseline_recorder(
+        make_sink(baseline_event_id(phase, macro_cycle), producer=PRODUCER),
+        task_id=task_id,
+        task_kind=task_kind,
+        reason=reason,
+        framework="sglang",
+        establishes_quality_ref=establishes_quality_ref,
+        params=params or {"config_path": "/cfg.yaml", "output_dir": "/w", "timeout_sec": 7800},
+    )
+    assert recorder is not None
+    return recorder
+
+
+def _measured(**overrides: Any) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "succeeded",
+        "output_throughput": 15630.28,
+        "ttft_mean_ms": 138.89,
+        "e2el_mean_ms": 4185.47,
+        "tpot_mean_ms": 12.5,
+        "report_path": "/w/measure_round/benchmark_report.json",
+        "workspace": "/w/measure_round/benchmark_sglang_1",
+        "materialized_config": "/w/baseline.with_envs.yaml",
+        "subprocess_runtime_sec": 241.0,
+        "post_ready_runtime_sec": 120.0,
+        "run_eval_disabled": False,
+    }
+    result.update(overrides)
+    return result
+
+
+def _failed(**overrides: Any) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "failed",
+        "error_class": "server_init_dead",
+        "error": "server engine/worker init failed; see server.log",
+        "returncode": 250,
+    }
+    result.update(overrides)
+    return result
+
+
+def test_the_measurement_states_the_unit_its_throughput_is_in(tmp_path: Path) -> None:
+    recorder = _recorder()
+    recorder.finish(_measured())
+
+    measurement = _actions(tmp_path)[0]["measurement"]
+    assert measurement["throughput_tok_s_per_gpu"] == 15630.28
+    assert measurement["throughput_unit"] == "tok/s"
+
+
+def test_an_image_framework_reports_its_own_throughput_unit(tmp_path: Path) -> None:
+    recorder = make_baseline_recorder(
+        make_sink(baseline_event_id("prelude", 0), producer=PRODUCER),
+        task_id="t-1",
+        framework="xdit",
+    )
+    assert recorder is not None
+    recorder.finish(_measured())
+
+    assert _actions(tmp_path)[0]["measurement"]["throughput_unit"] == "img/s"
+
+
+def test_the_write_backs_verdict_reaches_the_action_it_ruled_on(tmp_path: Path) -> None:
+    recorder = _recorder()
+    recorder.finish(_measured())
+
+    assert _actions(tmp_path)[0]["decision"] == ""
+
+    record_action_decision(phase="prelude", macro_cycle=0, task_id="t-1", decision="promoted")
+
+    assert _actions(tmp_path)[0]["decision"] == "promoted"
+    assert _actions(tmp_path)[0]["status"] == "succeeded"
+
+
+def test_a_verdict_for_an_action_this_event_never_had_is_dropped(tmp_path: Path) -> None:
+    recorder = _recorder()
+    recorder.finish(_measured())
+
+    record_action_decision(phase="sweep", macro_cycle=4, task_id="t-1", decision="promoted")
+    record_action_decision(phase="prelude", macro_cycle=0, task_id="t-99", decision="promoted")
+
+    assert [event["id"] for event in _events(tmp_path)] == ["prelude:0:baseline"]
+    assert [action["task_id"] for action in _actions(tmp_path)] == ["t-1"]
+
+
+def test_the_event_is_on_the_timeline_before_the_measurement_finishes(tmp_path: Path) -> None:
+    _recorder()
+
+    events = _events(tmp_path)
+    assert len(events) == 1
+    assert events[0]["status"] == "running"
+    assert events[0]["id"] == "prelude:0:baseline"
+    assert events[0]["start_time"]
+
+
+def test_the_window_starts_when_the_action_started_not_when_it_ended(tmp_path: Path) -> None:
+    recorder = _recorder()
+    opened = _events(tmp_path)[0]["start_time"]
+    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    recorder.record_round(
+        run_index=index,
+        label=ROUND_SINGLE,
+        started_at="2026-09-02T15:07:09+00:00",
+        duration_sec=242.0,
+        timeout_sec=7800,
+        result=_measured(),
+    )
+    recorder.end_run(run_index=index, result=_measured())
+    recorder.finish(_measured())
+
+    # The closing write reuses the opening write's start, so the window the timeline publishes begins where the action
+    # began.
+    event = _events(tmp_path)[0]
+    assert event["start_time"] == opened
+    assert event["end_time"] >= event["start_time"]
+    action = _actions(tmp_path)[0]
+    assert action["start_time"] == opened
+    # Each round carries the window it ran in, taken when it started rather than read back off a completion stamp.
+    round_row = action["runs"][0]["rounds"][0]
+    assert round_row["start_time"] == "2026-09-02T15:07:09+00:00"
+    assert round_row["duration_sec"] == pytest.approx(242.0)
+    assert round_row["timeout_sec"] == 7800
+
+
+def test_a_measured_baseline_closes_succeeded_with_its_numbers(tmp_path: Path) -> None:
+    recorder = _recorder()
+    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    recorder.record_round(
+        run_index=index,
+        label=ROUND_SINGLE,
+        started_at="2026-09-02T15:07:09+00:00",
+        duration_sec=242.0,
+        result=_measured(),
+    )
+    recorder.end_run(run_index=index, result=_measured())
+    recorder.finish(_measured())
+
+    event = _events(tmp_path)[0]
+    assert event["status"] == "succeeded"
+    action = _actions(tmp_path)[0]
+    assert action["status"] == "succeeded"
+    # Named as the V5 section named it, which is what a consumer selects on.
+    assert action["measurement"]["throughput_tok_s_per_gpu"] == pytest.approx(15630.28)
+    assert action["measurement"]["ttft_mean_ms"] == pytest.approx(138.89)
+    assert action["measurement"]["benchmark_report_path"].endswith("benchmark_report.json")
+    assert action["timing"]["subprocess_runtime_sec"] == pytest.approx(241.0)
+    assert action["request"]["establishes_quality_ref"] is True
+    assert action["failure"] is None
+    assert action["eval_failure"] is None
+
+
+def test_the_discarded_warmup_is_recorded_beside_the_pass_that_counted(tmp_path: Path) -> None:
+    recorder = _recorder()
+    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    recorder.record_round(
+        run_index=index,
+        label=ROUND_WARMUP,
+        started_at="2026-09-02T15:07:09+00:00",
+        duration_sec=180.0,
+        result=_measured(output_throughput=9000.0),
+    )
+    recorder.record_round(
+        run_index=index,
+        label=ROUND_MEASURE,
+        started_at="2026-09-02T15:10:31+00:00",
+        duration_sec=40.0,
+        result=_measured(),
+    )
+    recorder.end_run(run_index=index, result=_measured(warmup_round_tput=9000.0))
+    recorder.finish(_measured(warmup_round_tput=9000.0))
+
+    rounds = _actions(tmp_path)[0]["runs"][0]["rounds"]
+    assert [row["label"] for row in rounds] == [ROUND_WARMUP, ROUND_MEASURE]
+    assert rounds[0]["measurement"]["throughput_tok_s_per_gpu"] == pytest.approx(9000.0)
+    assert rounds[1]["measurement"]["throughput_tok_s_per_gpu"] == pytest.approx(15630.28)
+    assert _actions(tmp_path)[0]["warmup_round_tput"] == pytest.approx(9000.0)
+
+
+def test_rounds_that_start_in_the_same_second_keep_the_order_they_ran_in(tmp_path: Path) -> None:
+    recorder = _recorder()
+    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    same_second = "2026-09-02T15:07:09+00:00"
+    for label in (ROUND_WARMUP, ROUND_MEASURE, ROUND_ACCURACY):
+        recorder.record_round(
+            run_index=index,
+            label=label,
+            started_at=same_second,
+            duration_sec=0.4,
+            result=_measured(),
+        )
+    recorder.end_run(run_index=index, result=_measured())
+    recorder.finish(_measured())
+
+    rounds = _actions(tmp_path)[0]["runs"][0]["rounds"]
+    assert [row["label"] for row in rounds] == [ROUND_WARMUP, ROUND_MEASURE, ROUND_ACCURACY]
+    # The ordinal that fixed the order is recording-side bookkeeping and does not reach the wire; the array's own
+    # order carries it.
+    assert all("ordinal" not in row for row in rounds)
+
+
+def test_each_pass_keeps_its_own_rounds_and_says_why_it_ran(tmp_path: Path) -> None:
+    recorder = _recorder()
+    first = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    recorder.record_round(
+        run_index=first,
+        label=ROUND_SINGLE,
+        started_at="2026-09-02T15:07:09+00:00",
+        duration_sec=30.0,
+        result=_failed(error_class="subprocess_nonzero"),
+    )
+    recorder.end_run(run_index=first, result=_failed(error_class="subprocess_nonzero"))
+    second = recorder.begin_run(attempt_reason=RUN_AFTER_EVAL_FAILURE)
+    recorder.record_round(
+        run_index=second,
+        label=ROUND_SINGLE,
+        started_at="2026-09-02T15:09:09+00:00",
+        duration_sec=240.0,
+        result=_measured(),
+    )
+    recorder.end_run(run_index=second, result=_measured())
+    recorder.finish(_measured())
+
+    runs = _actions(tmp_path)[0]["runs"]
+    assert [row["run_index"] for row in runs] == [1, 2]
+    assert [row["attempt_reason"] for row in runs] == [RUN_INITIAL, RUN_AFTER_EVAL_FAILURE]
+    assert [row["status"] for row in runs] == ["failed", "succeeded"]
+    assert runs[0]["rounds"][0]["failure"]["error_class"] == "subprocess_nonzero"
+    assert runs[1]["rounds"][0]["failure"] is None
+    # A run that failed and was recovered from does not make the action failed.
+    assert _events(tmp_path)[0]["status"] == "succeeded"
+
+
+def test_a_pass_refused_before_it_booted_still_leaves_a_row(tmp_path: Path) -> None:
+    recorder = _recorder()
+    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    refused = _failed(error_class="session_time_exhausted", error="the run's clock refused the round")
+    recorder.end_run(run_index=index, result=refused)
+    recorder.finish(refused)
+
+    action = _actions(tmp_path)[0]
+    assert action["status"] == "skipped"
+    assert _events(tmp_path)[0]["status"] == "skipped"
+    assert action["runs"][0]["rounds"] == []
+    assert action["runs"][0]["error_class"] == "session_time_exhausted"
+
+
+def test_a_baseline_standing_on_its_cold_warmup_closes_degraded(tmp_path: Path) -> None:
+    recorder = _recorder()
+    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    recorder.record_round(
+        run_index=index,
+        label=ROUND_WARMUP,
+        started_at="2026-09-02T15:07:09+00:00",
+        duration_sec=180.0,
+        result=_measured(output_throughput=9000.0),
+    )
+    cold = _measured(
+        output_throughput=9000.0,
+        measure_round_dropped={"reason": "measure_round_reaped_by_the_run"},
+    )
+    recorder.end_run(run_index=index, result=cold)
+    recorder.finish(cold)
+
+    assert _events(tmp_path)[0]["status"] == "degraded"
+    action = _actions(tmp_path)[0]
+    assert action["status"] == "degraded"
+    assert action["cold_anchor"]["reason"] == "measure_round_reaped_by_the_run"
+
+
+def test_a_failed_baseline_names_the_class_it_failed_with(tmp_path: Path) -> None:
+    recorder = _recorder()
+    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    recorder.record_round(
+        run_index=index,
+        label=ROUND_SINGLE,
+        started_at="2026-09-02T15:07:09+00:00",
+        duration_sec=30.0,
+        result=_failed(),
+    )
+    recorder.end_run(run_index=index, result=_failed())
+    recorder.finish(_failed())
+
+    event = _events(tmp_path)[0]
+    assert event["status"] == "failed"
+    failure = _actions(tmp_path)[0]["failure"]
+    assert failure["error_class"] == "server_init_dead"
+    assert failure["returncode"] == 250
+    assert _actions(tmp_path)[0]["measurement"]["throughput_tok_s_per_gpu"] is None
+
+
+def test_an_executor_that_raised_is_not_left_running(tmp_path: Path) -> None:
+    recorder = _recorder()
+    recorder.finish_crashed(RuntimeError("boom"))
+
+    event = _events(tmp_path)[0]
+    assert event["status"] == "failed"
+    failure = _actions(tmp_path)[0]["failure"]
+    assert failure["error_class"] == "RuntimeError"
+    assert "boom" in failure["message"]
+
+
+def test_closing_twice_keeps_the_first_verdict(tmp_path: Path) -> None:
+    recorder = _recorder()
+    recorder.finish(_measured())
+    recorder.finish_crashed(RuntimeError("late"))
+
+    assert _events(tmp_path)[0]["status"] == "succeeded"
+
+
+def test_two_baselines_in_one_cycle_are_one_event_with_two_actions(tmp_path: Path) -> None:
+    first = _recorder(task_id="t-1")
+    first.finish(_failed())
+    second = _recorder(task_id="t-2")
+    second.finish(_measured())
+
+    events = _events(tmp_path)
+    assert len(events) == 1
+    actions = events[0]["ext"]["actions"]
+    assert [action["task_id"] for action in actions] == ["t-1", "t-2"]
+    # The event takes the worst of them, so the failure the retry recovered from cannot be read off the event as
+    # though it had not happened.
+    assert events[0]["status"] == "failed"
+
+
+def test_a_late_action_does_not_re_date_the_event_it_joined(tmp_path: Path, monkeypatch) -> None:
+    """The timeline orders events by ``start_time``, and an event holds a whole phase and cycle.
+
+    A PRELUDE baseline fails, the enablement lane works for half an hour, and its revalidation
+    lands in the same event. Dating the event from that last action would file the whole thing
+    after the lane that was triggered by its first.
+    """
+    stamps = iter(
+        [
+            "2026-09-02T15:00:00+00:00",
+            "2026-09-02T15:01:00+00:00",
+            "2026-09-02T15:40:00+00:00",
+            "2026-09-02T15:41:00+00:00",
+        ]
+    )
+    monkeypatch.setattr(baseline_event, "_now_iso", lambda: next(stamps))
+
+    _recorder(task_id="t-1").finish(_failed())
+    _recorder(task_id="t-2").finish(_measured())
+
+    event = _events(tmp_path)[0]
+    assert event["start_time"] == "2026-09-02T15:00:00+00:00"
+    assert event["end_time"] == "2026-09-02T15:41:00+00:00"
+    # And the republish path, which a write-back decision takes, agrees with the close path.
+    record_action_decision(phase="prelude", macro_cycle=0, task_id="t-2", decision="promoted")
+    republished = _events(tmp_path)[0]
+    assert republished["start_time"] == event["start_time"]
+    assert republished["end_time"] == event["end_time"]
+
+
+def test_a_success_is_not_erased_by_a_sibling_that_was_skipped(tmp_path: Path) -> None:
+    measured = _recorder(task_id="t-1")
+    measured.finish(_measured())
+    refused = _recorder(task_id="t-2")
+    refused.finish(_failed(error_class="session_time_exhausted"))
+
+    assert _events(tmp_path)[0]["status"] == "succeeded"
+
+
+def test_baselines_in_different_cycles_are_different_events(tmp_path: Path) -> None:
+    _recorder(task_id="t-1", phase="prelude", macro_cycle=0).finish(_measured())
+    _recorder(task_id="t-2", phase="explore", macro_cycle=1).finish(_measured())
+
+    assert sorted(event["id"] for event in _events(tmp_path)) == [
+        "explore:1:baseline",
+        "prelude:0:baseline",
+    ]
+
+
+def test_one_action_can_be_assembled_on_its_own(tmp_path: Path) -> None:
+    _recorder(task_id="t-1").finish(_measured())
+    _recorder(task_id="t-2").finish(_failed())
+
+    action = assemble_baseline_action(baseline_event_parts(), event="prelude:0:baseline", task_id="t-2")
+    assert action is not None
+    assert action["status"] == "failed"
+    assert assemble_baseline_action(baseline_event_parts(), event="prelude:0:baseline", task_id="t-9") is None
+
+
+def test_a_killed_session_leaves_an_interrupted_event_with_its_rows(tmp_path: Path) -> None:
+    recorder = _recorder()
+    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    recorder.record_round(
+        run_index=index,
+        label=ROUND_WARMUP,
+        started_at="2026-09-02T15:07:09+00:00",
+        duration_sec=180.0,
+        result=_measured(output_throughput=9000.0),
+    )
+
+    assert finalize_events(tmp_path) == ["prelude:0:baseline"]
+
+    event = _events(tmp_path)[0]
+    assert event["status"] == EVENT_STATUS_INTERRUPTED
+    action = event["ext"]["actions"][0]
+    # The action was never closed, so it is still running inside an event that says nothing judged it.
+    assert action["status"] == "running"
+    assert action["in_flight_run_index"] == 1
+    assert action["runs"][0]["rounds"][0]["label"] == ROUND_WARMUP
+
+
+def test_assembling_the_same_rows_twice_gives_the_same_event(tmp_path: Path) -> None:
+    recorder = _recorder()
+    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    for label in (ROUND_WARMUP, ROUND_MEASURE):
+        recorder.record_round(
+            run_index=index,
+            label=label,
+            started_at="2026-09-02T15:07:09+00:00",
+            duration_sec=1.0,
+            result=_measured(),
+        )
+    recorder.end_run(run_index=index, result=_measured())
+    recorder.finish(_measured())
+
+    parts = baseline_event_parts()
+    once = assemble_baseline_action(parts, event="prelude:0:baseline", task_id="t-1")
+    twice = assemble_baseline_action(parts, event="prelude:0:baseline", task_id="t-1")
+    assert once == twice
+
+
+def test_no_sink_declines_rather_than_guessing_an_event(tmp_path: Path) -> None:
+    assert make_baseline_recorder(None, task_id="t-1") is None
+    assert _events(tmp_path) == []
+
+
+# the executor wiring
+def _executor_ctx(tmp_path: Path, **params: Any):
+    """Build the context a dispatched baseline arrives with."""
+    return SimpleNamespace(
+        task=SimpleNamespace(task_id="t-exec", kind="baseline", params=params),
+        lease=None,
+        extra={"shared_state": SimpleNamespace(phase="PRELUDE", macro_cycle=0, framework="sglang")},
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_executor_records_the_rounds_it_actually_ran(tmp_path: Path) -> None:
+    executor = object.__new__(BaselineExecutor)
+    executor.shared_state = None
+
+    async def _run_once(ctx, *, recorder=None, run_index=0, **_kwargs):
+        for label in (ROUND_WARMUP, ROUND_MEASURE):
+            await executor._run_reported_round(
+                label=label,
+                config_path=Path("/cfg.yaml"),
+                output_dir=tmp_path / label,
+                recorder=recorder,
+                run_index=run_index,
+                timeout_sec=7800,
+            )
+        return _measured()
+
+    async def _benchmark(**_kwargs):
+        return _measured()
+
+    executor._run_once = _run_once  # type: ignore[method-assign]
+    executor._run_single_benchmark = _benchmark  # type: ignore[method-assign]
+    executor._maybe_stop_on_missing_baseline_accuracy = lambda *_a: None  # type: ignore[method-assign]
+    executor._is_moe_runner_rooted_failure = lambda _r: False  # type: ignore[method-assign]
+    executor._resolve_shared_state = lambda state=None: state  # type: ignore[method-assign]
+
+    result = await executor(_executor_ctx(tmp_path, config_path="/cfg.yaml"))
+
+    assert result["status"] == "succeeded"
+    events = _events(tmp_path)
+    assert len(events) == 1
+    assert events[0]["id"] == "prelude:0:baseline"
+    assert events[0]["status"] == "succeeded"
+    action = events[0]["ext"]["actions"][0]
+    assert action["task_id"] == "t-exec"
+    assert action["request"]["task_kind"] == "baseline"
+    assert [row["label"] for row in action["runs"][0]["rounds"]] == [ROUND_WARMUP, ROUND_MEASURE]
+    assert action["runs"][0]["attempt_reason"] == RUN_INITIAL
+
+
+@pytest.mark.asyncio
+async def test_an_inner_step_measurement_records_into_the_event_that_asked_for_it(tmp_path: Path) -> None:
+    """A sub-step leaves no event of its own, and its facts land in its host instead of nowhere."""
+    host = kernel_event_id(0)
+    executor = object.__new__(BaselineExecutor)
+    executor.shared_state = None
+
+    async def _run_once(_ctx, *, recorder=None, run_index=0, **_kwargs):
+        assert recorder is not None
+        assert recorder.event_id == host
+        return _measured()
+
+    executor._run_once = _run_once  # type: ignore[method-assign]
+    executor._maybe_stop_on_missing_baseline_accuracy = lambda *_a: None  # type: ignore[method-assign]
+    executor._is_moe_runner_rooted_failure = lambda _r: False  # type: ignore[method-assign]
+    executor._resolve_shared_state = lambda state=None: state  # type: ignore[method-assign]
+
+    await executor(_executor_ctx(tmp_path, **{INLINE_EVENT_PARAM: host}))
+
+    # The guest opens and closes nothing: the host owns the shell, and here there is no host to open one.
+    assert read_timeline_events(tmp_path) == []
+    action = assemble_baseline_action(baseline_event_parts(host), event=host, task_id="t-exec")
+    assert action is not None
+    assert action["status"] == "succeeded"
+    assert action["measurement"]["throughput_tok_s_per_gpu"] == pytest.approx(15630.28)
+
+
+@pytest.mark.asyncio
+async def test_an_executor_raise_closes_the_event_it_opened(tmp_path: Path) -> None:
+    executor = object.__new__(BaselineExecutor)
+    executor.shared_state = None
+
+    async def _run_once(_ctx, *, recorder=None, run_index=0, **_kwargs):
+        raise FileNotFoundError("baseline config not found")
+
+    executor._run_once = _run_once  # type: ignore[method-assign]
+    executor._resolve_shared_state = lambda state=None: state  # type: ignore[method-assign]
+
+    with pytest.raises(FileNotFoundError):
+        await executor(_executor_ctx(tmp_path))
+
+    event = _events(tmp_path)[0]
+    assert event["status"] == "failed"
+    action = event["ext"]["actions"][0]
+    assert action["failure"]["error_class"] == "FileNotFoundError"
+    # The pass that raised is closed too, rather than left reading "running".
+    assert action["runs"][0]["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# where the latency came from
+# ---------------------------------------------------------------------------
+def test_the_measurement_says_where_its_latency_came_from(tmp_path: Path) -> None:
+    recorder = _recorder()
+    measured = _measured(ttft_e2el_source="rescued_raw_result", tpot_source="derived_from_e2el_ttft")
+    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    recorder.record_round(
+        run_index=index,
+        label=ROUND_MEASURE,
+        started_at="2026-09-02T15:07:09+00:00",
+        duration_sec=1.0,
+        result=measured,
+    )
+    recorder.end_run(run_index=index, result=measured)
+    recorder.finish(measured)
+
+    action = _actions(tmp_path)[0]
+    assert action["measurement"]["ttft_e2el_source"] == "rescued_raw_result"
+    # Separate from the pair: TPOT is the one latency figure that can be
+    # computed rather than measured.
+    assert action["measurement"]["tpot_source"] == "derived_from_e2el_ttft"
+    # On the round too, because the discarded warmup's provenance can differ
+    # from the adopted pass's.
+    assert action["runs"][0]["rounds"][0]["measurement"]["ttft_e2el_source"] == "rescued_raw_result"
+
+
+def test_the_extraction_labels_the_report_it_read_the_latency_out_of() -> None:
+    from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
+
+    measurement = extract_benchmark_measurement(
+        {
+            "success": True,
+            "throughput": {"output_throughput": 15630.28, "completed_requests": 64},
+            "latency": {"ttft": {"mean_ms": 138.89}, "e2el": {"mean_ms": 4185.47}, "tpot": {"mean_ms": 12.5}},
+        }
+    )
+
+    assert measurement["ttft_e2el_source"] == "benchmark_report"
+    assert measurement["tpot_source"] == "benchmark_report"
+
+
+def test_a_computed_tpot_is_not_reported_as_a_measured_one() -> None:
+    from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
+
+    measurement = extract_benchmark_measurement(
+        {
+            "success": True,
+            "osl": 512,
+            "throughput": {"output_throughput": 15630.28, "completed_requests": 64},
+            "latency": {"ttft": {"mean_ms": 138.89}, "e2el": {"mean_ms": 4185.47}},
+        }
+    )
+
+    assert measurement["tpot_mean_ms"] is not None
+    assert measurement["tpot_source"] == "derived_from_e2el_ttft"
+    # The pair it was computed from still reports its own source.
+    assert measurement["ttft_e2el_source"] == "benchmark_report"
+
+
+def test_a_measurement_with_no_latency_at_all_says_so() -> None:
+    from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
+
+    measurement = extract_benchmark_measurement({"success": True, "throughput": {"output_throughput": 1.0}})
+
+    assert measurement["ttft_e2el_source"] == "unavailable"
+    assert measurement["tpot_source"] == "unavailable"
+
+
+# ---------------------------------------------------------------------------
+# what the server was launched under
+# ---------------------------------------------------------------------------
+def _evidence(**overrides: Any) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "requested_server_args": "--attention-backend aiter",
+        "observed_server_launch_flags": "python -m sglang.launch_server --attention-backend aiter --tp 8",
+        "observed_server_identity": {},
+        "recipe_digest": "sha256:abc",
+        "actual_server_log_path": "/w/measure_round/server.log",
+        "warm_reuse": {"reused_ready_server": False, "provenance": "fresh_or_unobserved"},
+    }
+    evidence.update(overrides)
+    return evidence
+
+
+def test_the_launch_reports_the_args_it_resolved(tmp_path: Path) -> None:
+    recorder = _recorder()
+    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    recorder.record_invocation(
+        run_index=index,
+        framework_args="--attention-backend aiter",
+        extra_envs={"RUN_EVAL": "false"},
+        config_path="/w/baseline.with_envs.yaml",
+        framework="sglang",
+        model_path="/models/llama",
+        args_mode="append",
+    )
+    recorder.end_run(run_index=index, result=_measured())
+    recorder.finish(_measured())
+
+    action = _actions(tmp_path)[0]
+    assert action["invocation"]["framework_args"] == "--attention-backend aiter"
+    assert action["invocation"]["framework_args_source"] == "launch_extra_server_args"
+    assert action["invocation"]["extra_envs"] == {"RUN_EVAL": "false"}
+    assert action["invocation"]["config_path"] == "/w/baseline.with_envs.yaml"
+    assert action["invocation"]["model_path"] == "/models/llama"
+    # Recorded on the pass as well, which is what decided them.
+    assert action["runs"][0]["invocation"]["framework_args"] == "--attention-backend aiter"
+
+
+def test_an_empty_arg_string_is_an_answer_rather_than_a_gap(tmp_path: Path) -> None:
+    recorder = _recorder()
+    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    recorder.record_invocation(run_index=index, framework_args="", config_path="/w/baseline.yaml")
+    recorder.finish(_measured())
+
+    invocation = _actions(tmp_path)[0]["invocation"]
+    assert invocation["framework_args"] == ""
+    assert invocation["framework_args_source"] == "launch_extra_server_args"
+
+
+def test_the_observed_flags_do_not_overwrite_what_was_requested(tmp_path: Path) -> None:
+    recorder = _recorder()
+    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    recorder.record_invocation(run_index=index, framework_args="--attention-backend aiter")
+    recorder.end_run(run_index=index, result=_measured())
+    recorder.finish(_measured(launch_evidence=_evidence(), server_log_path="/w/measure_round/server.log"))
+
+    invocation = _actions(tmp_path)[0]["invocation"]
+    assert invocation["framework_args"] == "--attention-backend aiter"
+    assert invocation["framework_args_source"] == "launch_extra_server_args"
+    assert invocation["observed_server_launch_flags"].endswith("--tp 8")
+    assert invocation["server_log_path"] == "/w/measure_round/server.log"
+    assert invocation["warm_reuse"]["provenance"] == "fresh_or_unobserved"
+
+
+def test_an_action_that_never_launched_says_the_args_are_unavailable(tmp_path: Path) -> None:
+    recorder = _recorder()
+    recorder.finish(_failed(error_class="bad_param"))
+
+    invocation = _actions(tmp_path)[0]["invocation"]
+    assert invocation["framework_args"] == ""
+    assert invocation["framework_args_source"] == "unavailable"
+
+
+def test_only_observed_flags_are_reported_as_the_weaker_answer(tmp_path: Path) -> None:
+    recorder = _recorder()
+    recorder.finish(_measured(launch_evidence=_evidence()))
+
+    invocation = _actions(tmp_path)[0]["invocation"]
+    assert invocation["framework_args_source"] == "observed_server_launch_flags"
+    assert invocation["framework_args"].endswith("--tp 8")
+
+
+def test_a_retry_that_changed_the_args_records_both_launches(tmp_path: Path) -> None:
+    recorder = _recorder()
+    first = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    recorder.record_invocation(run_index=first, framework_args="--moe-runner-backend triton")
+    recorder.end_run(run_index=first, result=_failed())
+    second = recorder.begin_run(attempt_reason=RUN_AFTER_EVAL_FAILURE)
+    recorder.record_invocation(run_index=second, framework_args="")
+    recorder.end_run(run_index=second, result=_measured())
+    recorder.finish(_measured())
+
+    runs = _actions(tmp_path)[0]["runs"]
+    assert [run["invocation"]["framework_args"] for run in runs] == ["--moe-runner-backend triton", ""]
+    # The action carries the launch its adopted measurement was taken under.
+    assert _actions(tmp_path)[0]["invocation"]["framework_args"] == ""
+
+
+# ---------------------------------------------------------------------------
+# the failure counters
+# ---------------------------------------------------------------------------
+def test_the_action_says_how_many_baselines_had_already_failed(tmp_path: Path) -> None:
+    recorder = make_baseline_recorder(
+        make_sink(baseline_event_id("prelude", 0), producer=PRODUCER),
+        task_id="t-1",
+        task_kind="baseline",
+        framework="sglang",
+        params={"config_path": "/cfg.yaml"},
+        failure_streak_before=3,
+        total_failures_before=5,
+    )
+    assert recorder is not None
+    recorder.finish(_measured())
+
+    request = _actions(tmp_path)[0]["request"]
+    assert request["failure_streak_before"] == 3
+    assert request["total_failures_before"] == 5
+
+
+@pytest.mark.asyncio
+async def test_the_executor_reads_the_counters_off_the_session(tmp_path: Path) -> None:
+    executor = object.__new__(BaselineExecutor)
+    executor.shared_state = None
+
+    async def _run_once(_ctx, *, recorder=None, run_index=0, **_kwargs):
+        return _measured()
+
+    executor._run_once = _run_once  # type: ignore[method-assign]
+    executor._maybe_stop_on_missing_baseline_accuracy = lambda *_a: None  # type: ignore[method-assign]
+    executor._is_moe_runner_rooted_failure = lambda _r: False  # type: ignore[method-assign]
+    executor._resolve_shared_state = lambda state=None: state  # type: ignore[method-assign]
+
+    ctx = _executor_ctx(tmp_path, config_path="/cfg.yaml")
+    ctx.extra["shared_state"].baseline_failure_streak = 2
+    ctx.extra["shared_state"].baseline_total_failures = 4
+    await executor(ctx)
+
+    request = _actions(tmp_path)[0]["request"]
+    assert request["failure_streak_before"] == 2
+    assert request["total_failures_before"] == 4
+
+
+@pytest.mark.asyncio
+async def test_a_profile_run_opens_no_baseline_event(tmp_path: Path) -> None:
+    from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
+
+    executor = ProfileExecutor(magpie_python="python", session_dir=tmp_path)
+    recorders: list[Any] = []
+
+    async def _run_once(_ctx, *, recorder=None, run_index=0, **_kwargs):
+        recorders.append(recorder)
+        return _measured()
+
+    executor._run_once = _run_once  # type: ignore[method-assign]
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(task_id="rf-1-profile", kind="profile", params={"reason": "roofline"}),
+        lease=None,
+        extra={
+            "session_dir": str(tmp_path),
+            "shared_state": SimpleNamespace(phase="PRELUDE", macro_cycle=0, framework="sglang"),
+        },
+    )
+    await executor(ctx)
+
+    assert recorders == [None]
+    assert _events(tmp_path) == []
+
+
+def _eval_failed(**overrides: Any) -> dict[str, Any]:
+    result = _measured(
+        baseline_eval_failed=True,
+        baseline_eval_failure_kind="accuracy_below_floor",
+        baseline_eval_observed_accuracy=0.12,
+        baseline_eval_accuracy_floor=0.5,
+        baseline_eval_evidence="lm-eval scored 0.12 on gsm8k",
+        baseline_eval_contract_fingerprint="abc123def456",
+        accuracy=0.12,
+        accuracy_task="gsm8k",
+        accuracy_metric="exact_match,strict-match",
+        accuracy_source="eval_results",
+    )
+    result.update(overrides)
+    return result
+
+
+def test_an_eval_rooted_failure_projects_a_rich_eval_failure_block(tmp_path: Path) -> None:
+    recorder = _recorder()
+    recorder.finish(_eval_failed())
+
+    action = _actions(tmp_path)[0]
+    assert action["status"] == "failed"
+    assert _events(tmp_path)[0]["status"] == "failed"
+    assert action["failure"]["error_class"] == "accuracy_below_floor"
+    assert "0.12" in action["failure"]["message"]
+    eval_failure = action["eval_failure"]
+    assert eval_failure["kind"] == "accuracy_below_floor"
+    assert eval_failure["observed_accuracy"] == pytest.approx(0.12)
+    assert eval_failure["accuracy_floor"] == pytest.approx(0.5)
+    assert eval_failure["contract_fingerprint"] == "abc123def456"
+    assert eval_failure["accuracy_task"] == "gsm8k"
+    assert eval_failure["accuracy_metric"] == "exact_match,strict-match"
+    anchoring = _events(tmp_path)[0]["ext"]["anchoring_eval"]
+    assert anchoring["status"] == "failed"
+    assert anchoring["kind"] == "accuracy_below_floor"
+    assert anchoring["task_id"] == "t-1"
+
+
+def test_a_missing_accuracy_stop_without_enablement_stamps_is_still_recorded(tmp_path: Path) -> None:
+    recorder = _recorder()
+    recorder.finish(
+        _measured(
+            accuracy=None,
+            accuracy_source="eval_unavailable",
+            nonfatal_warnings=["eval_failed_no_fallback_baseline_requires_accuracy"],
+        )
+    )
+
+    action = _actions(tmp_path)[0]
+    assert action["status"] == "failed"
+    assert action["eval_failure"]["kind"] == "accuracy_unavailable"
+    assert action["eval_failure"]["observed_accuracy"] is None
+    assert action["failure"]["error_class"] == "accuracy_unavailable"
+    assert _events(tmp_path)[0]["ext"]["anchoring_eval"]["status"] == "failed"
+
+
+def test_an_eval_failure_carries_accuracy_stage_when_present(tmp_path: Path) -> None:
+    recorder = _recorder()
+    recorder.finish(
+        _eval_failed(
+            accuracy_stage={
+                "status": "failed",
+                "error_class": "subprocess_nonzero",
+                "workspace": "/w/accuracy_round",
+            }
+        )
+    )
+
+    stage = _actions(tmp_path)[0]["eval_failure"]["accuracy_stage"]
+    assert stage["status"] == "failed"
+    assert stage["error_class"] == "subprocess_nonzero"
+    assert stage["workspace"] == "/w/accuracy_round"
+
+
+def test_a_succeeded_baseline_projects_anchoring_eval_on_the_event(tmp_path: Path) -> None:
+    recorder = _recorder()
+    recorder.finish(_measured(accuracy=0.88, accuracy_task="gsm8k", accuracy_metric="exact_match,strict-match"))
+
+    anchoring = _events(tmp_path)[0]["ext"]["anchoring_eval"]
+    assert anchoring["status"] == "succeeded"
+    assert anchoring["accuracy"] == pytest.approx(0.88)
+    assert anchoring["task"] == "gsm8k"
+    assert anchoring["task_id"] == "t-1"
+
+
+def test_an_unreadable_spool_on_finish_does_not_raise(tmp_path: Path, monkeypatch) -> None:
+    """The executor calls ``finish`` with no catch; a spool OSError must not escape."""
+    recorder = _recorder()
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.recorder.assembler.event_parts",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("spool down")),
+    )
+    recorder.finish(_measured())

@@ -1,10 +1,4 @@
-"""In-process MCP server exposing read-only ``context`` tools.
-
-The agent pulls context via these tools, each re-exposing an existing
-``SharedState.to_*_summary`` projection. Unlike ``emit_intent``, these handlers
-return the real data as the tool result. ``build_context_tools_server`` accepts
-factory overrides for tests.
-"""
+"""In-process MCP server exposing read-only ``context`` tools."""
 
 from __future__ import annotations
 
@@ -12,7 +6,7 @@ import importlib
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 log = logging.getLogger(__name__)
 
@@ -21,25 +15,13 @@ MCP_SERVER_NAME = "inference_optimizer_context"
 
 
 def _qualified(tool_name: str) -> str:
-    """Return the fully-qualified MCP tool name.
-
-    Args:
-        tool_name: Bare tool name.
-
-    Returns:
-        The name prefixed with ``mcp__<server>__``.
-    """
+    """Return the fully-qualified MCP tool name."""
     return f"mcp__{MCP_SERVER_NAME}__{tool_name}"
 
 
 @dataclass
 class ContextProvider:
-    """Read-only accessor over live session context for the pull tools.
-
-    Bound by the Coordinator to its live ``SharedState``; every method
-    returns a plain string and is defensive (a projection failure returns a
-    short error string rather than crashing the reactor turn).
-    """
+    """Read-only accessor over live session context for the pull tools."""
 
     shared_state: Any
     # Optional callables for context outside SharedState; ``None`` => absent.
@@ -49,86 +31,45 @@ class ContextProvider:
     recent_outcomes_reader: Callable[[int], str] | None = None
     running_tasks_reader: Callable[[], str] | None = None
     # Whitelisted lane-light action runner; ``None`` => unavailable.
-    action_runner: Callable[[str, dict[str, Any]], str] | None = None
+    action_runner: Callable[[str, dict[str, Any]], Awaitable[str]] | None = None
     # On-demand reference documents directory; ``None`` => unavailable.
     reference_reader: Callable[[str], str] | None = None
 
     def _safe(self, fn: Callable[[], str], label: str) -> str:
-        """Invoke a projection callable, never letting it crash the reactor.
-
-        Args:
-            fn: Zero-argument projection returning a summary string.
-            label: Short name used in log and fallback messages.
-
-        Returns:
-            The projection output, or a short error/empty marker string when
-            ``fn`` raises or returns nothing usable.
-        """
+        """Invoke a projection callable, never letting it crash the reactor."""
         try:
             out = fn()
-        except Exception as exc:  # noqa: BLE001 — never crash a pull
+        except Exception as exc:
             log.exception("context tool %s failed", label)
             return f"(context tool {label} unavailable: {exc!r})"
         return out if isinstance(out, str) and out else f"({label}: empty)"
 
     def mission_status(self) -> str:
-        """Return the mission-status summary projection.
-
-        Returns:
-            The mission-status summary string.
-        """
+        """Return the mission-status summary projection."""
         return self._safe(self.shared_state.to_mission_summary, "mission_status")
 
     def shared_state_summary(self) -> str:
-        """Return the prompt-oriented shared-state summary projection.
-
-        Returns:
-            The prompt-oriented shared-state summary string.
-        """
+        """Return the prompt-oriented shared-state summary projection."""
         return self._safe(self.shared_state.to_prompt_summary, "shared_state")
 
     def gaps(self) -> str:
-        """Return the open-gaps summary projection.
-
-        Returns:
-            The open-gaps summary string.
-        """
+        """Return the open-gaps summary projection."""
         return self._safe(lambda: self.shared_state.to_gaps_summary(max_attempts=5), "gaps")
 
     def warm_start(self) -> str:
-        """Return the warm-start summary projection.
-
-        Returns:
-            The warm-start summary string.
-        """
+        """Return the warm-start summary projection."""
         return self._safe(self.shared_state.to_warm_start_summary, "warm_start")
 
     def proposal_scores(self) -> str:
-        """Return the proposal-scores summary projection.
-
-        Returns:
-            The proposal-scores summary string.
-        """
+        """Return the proposal-scores summary projection."""
         return self._safe(self.shared_state.to_proposal_scores_summary, "proposal_scores")
 
     def intervention_mix(self) -> str:
-        """Return the intervention-mix summary projection.
-
-        Returns:
-            The intervention-mix summary string.
-        """
+        """Return the intervention-mix summary projection."""
         return self._safe(self.shared_state.to_intervention_mix_summary, "intervention_mix")
 
     def why_denied(self, top_k: int = 6) -> str:
-        """Return a summary of recent policy denials.
-
-        Args:
-            top_k: Maximum number of denial entries to include.
-
-        Returns:
-            The denial summary from the denial reader when wired, otherwise the
-            shared-state policy-denial projection.
-        """
+        """Return a summary of recent policy denials."""
         if self.denial_reader is not None:
             return self._safe(lambda: self.denial_reader(top_k), "why_denied")
         return self._safe(
@@ -137,74 +78,43 @@ class ContextProvider:
         )
 
     def analysis_md(self) -> str:
-        """Return the current ``analysis.md`` contents.
-
-        Returns:
-            The analysis text, or a not-wired marker when no reader is bound.
-        """
+        """Return the current ``analysis.md`` contents."""
         if self.analysis_reader is None:
             return "(analysis.md reader not wired)"
         return self._safe(self.analysis_reader, "analysis_md")
 
     def inbox(self, since_seq: int = 0) -> str:
-        """Return inbox messages newer than a sequence number.
-
-        Args:
-            since_seq: Only messages with a sequence greater than this are
-                returned.
-
-        Returns:
-            The inbox text, or a not-wired marker when no reader is bound.
-        """
+        """Return inbox messages newer than a sequence number."""
         if self.inbox_reader is None:
             return "(inbox reader not wired)"
         return self._safe(lambda: self.inbox_reader(since_seq), "inbox")
 
     def recent_outcomes(self, top_k: int = 8) -> str:
-        """Return a summary of recent action outcomes.
-
-        Args:
-            top_k: Maximum number of recent outcomes to include.
-
-        Returns:
-            The outcomes summary, or a not-wired marker when no reader is bound.
-        """
+        """Return a summary of recent action outcomes."""
         if self.recent_outcomes_reader is None:
             return "(recent outcomes reader not wired)"
         return self._safe(lambda: self.recent_outcomes_reader(top_k), "recent_outcomes")
 
     def running_tasks(self) -> str:
-        """Return the in-flight task set with the resources each one holds.
-
-        Returns:
-            The running-task summary, or a not-wired marker when no reader is
-            bound.
-        """
+        """Return the in-flight task set with the resources each one holds."""
         if self.running_tasks_reader is None:
             return "(running tasks reader not wired)"
         return self._safe(self.running_tasks_reader, "running_tasks")
 
-    def run_action_now(
+    async def run_action_now(
         self,
         action_name: str = "",
         params: dict[str, Any] | None = None,
     ) -> str:
-        """Run a whitelisted lane-light action inline.
-
-        Args:
-            action_name: Name of the action to run.
-            params: Optional action parameters.
-
-        Returns:
-            The action result string, or a not-wired marker when no action
-            runner is bound.
-        """
+        """Await a whitelisted lane-light action without occupying a worker."""
         if self.action_runner is None:
             return "(run_action_now not wired)"
-        return self._safe(
-            lambda: self.action_runner(action_name, dict(params or {})),
-            "run_action_now",
-        )
+        try:
+            out = await self.action_runner(action_name, dict(params or {}))
+        except Exception as exc:
+            log.exception("context tool %s failed", "run_action_now")
+            return f"(context tool run_action_now unavailable: {exc!r})"
+        return out if isinstance(out, str) and out else "(run_action_now: empty)"
 
     def read_reference(self, name: str = "") -> str:
         """Return the full text of a named on-demand reference document."""
@@ -213,14 +123,7 @@ class ContextProvider:
         return self._safe(lambda: self.reference_reader(name), "read_reference")
 
     def get_failure(self, failure_id: str = "") -> str:
-        """Return one failure evidence packet as JSON.
-
-        Args:
-            failure_id: The stable failure id to look up.
-
-        Returns:
-            The JSON-encoded packet, or a not-found marker.
-        """
+        """Return one failure evidence packet as JSON."""
         fid = str(failure_id or "").strip()
         if not fid:
             return "(get_failure: failure_id is required)"
@@ -228,23 +131,15 @@ class ContextProvider:
         def _read() -> str:
             fe = self.shared_state.find_failure(fid)
             if fe is None:
-                # Evicted from the in-memory cap, or never existed; the mirror
-                # under reports/failures/ answers both cases.
+                # Evicted from the in-memory cap, or never existed; the mirror under reports/failures/ answers both
+                # cases.
                 return f"(get_failure: {fid!r} not in memory; Read $SESSION_DIR/reports/failures/{fid}.json)"
             return json.dumps(fe, default=str, indent=2)
 
         return self._safe(_read, "get_failure")
 
     def get_variant_failures(self, task_id: str = "", top_k: int = 10) -> str:
-        """Return recent failure evidence packets, newest first.
-
-        Args:
-            task_id: When non-empty, restricts the result to that task.
-            top_k: Maximum number of entries to return.
-
-        Returns:
-            One JSON object per line.
-        """
+        """Return recent failure evidence packets, newest first."""
         k = max(1, min(top_k, 50))
 
         def _read() -> str:
@@ -447,16 +342,7 @@ CONTEXT_TOOL_QUALIFIED_NAMES: tuple[str, ...] = tuple(_qualified(n) for n in CON
 
 
 def _resolve_sdk(sdk_module: Any | None) -> Any | None:
-    """Resolve the Claude Agent SDK module.
-
-    Args:
-        sdk_module: Explicit module to use (for tests), or ``None`` to import
-            the real SDK.
-
-    Returns:
-        The provided or imported SDK module, or ``None`` when it is not
-        installed.
-    """
+    """Resolve the Claude Agent SDK module."""
     if sdk_module is not None:
         return sdk_module
     try:
@@ -469,27 +355,10 @@ def _make_handler(
     provider: ContextProvider,
     method_name: str,
 ) -> Callable[[dict[str, Any]], Any]:
-    """Build an async MCP handler returning the provider method's string.
-
-    Args:
-        provider: The bound context provider.
-        method_name: Name of the provider method the handler invokes.
-
-    Returns:
-        An async MCP handler that wraps the provider method's output in an
-        MCP tool result dict.
-    """
+    """Build an async MCP handler returning the provider method's string."""
 
     async def _handler(args: dict[str, Any]) -> dict[str, Any]:
-        """Invoke the bound provider method and wrap its string result.
-
-        Args:
-            args: Tool call arguments; recognized keys (``top_k``,
-                ``since_seq``, ``action_name``, ``params``) are forwarded.
-
-        Returns:
-            An MCP tool result dict carrying the provider method's output.
-        """
+        """Invoke the bound provider method and wrap its string result."""
         method = getattr(provider, method_name)
         kwargs: dict[str, Any] = {}
         if isinstance(args, dict):
@@ -508,8 +377,11 @@ def _make_handler(
             if "task_id" in args:
                 kwargs["task_id"] = str(args["task_id"])
         try:
-            text = method(**kwargs)
-        except Exception as exc:  # noqa: BLE001 — never crash a pull
+            if method_name == "run_action_now":
+                text = await method(**kwargs)
+            else:
+                text = method(**kwargs)
+        except Exception as exc:
             log.exception("context tool handler %s raised", method_name)
             return {
                 "content": [{"type": "text", "text": f"error: {exc!r}"}],
@@ -535,22 +407,7 @@ def build_context_tools_server(
     tool_factory: Callable[..., Any] | None = None,
     server_factory: Callable[..., Any] | None = None,
 ) -> Any | None:
-    """Build the in-process MCP server exposing the read-only context tools.
-
-    Returns the SDK ``McpSdkServerConfig`` for
-    :class:`ClaudeAgentOptions.mcp_servers`, or ``None`` if the SDK lacks
-    in-process MCP helpers (handled gracefully by the caller).
-
-    Args:
-        provider: The context provider backing every tool handler.
-        sdk_module: Explicit SDK module (for tests), or ``None`` to import it.
-        tool_factory: Override for the SDK ``tool`` decorator factory.
-        server_factory: Override for the SDK ``create_sdk_mcp_server`` factory.
-
-    Returns:
-        The SDK ``McpSdkServerConfig``, or ``None`` when the SDK lacks
-        in-process MCP helpers.
-    """
+    """Build the in-process MCP server exposing the read-only context tools."""
     sdk = _resolve_sdk(sdk_module)
     if tool_factory is None:
         tool_factory = getattr(sdk, "tool", None) if sdk is not None else None

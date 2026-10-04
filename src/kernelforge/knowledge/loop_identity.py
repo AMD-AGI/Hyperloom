@@ -1,23 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Resolve the ``kernel:`` identity a forge-loop run files its experience under.
-
-Read and write must agree on every dimension or a warm start resolves to an
-address no prior run ever wrote to, so both sides call this one function rather
-than each deriving the identity themselves.
-
-The GPU is part of the address rather than a filter applied after reading: a
-solution validated on one card is not a candidate for another, and fetching it
-only to discard it costs a round trip. It is addressed by hardware model
-(``mi355x``) rather than compilation target (``gfx950``) because one target
-spans several cards whose memory bandwidth and cache sizes differ, and a recipe
-tuned against one of them is not a recommendation for the rest; the target is
-kept alongside the metrics, where it describes how the solution was built rather
-than where it applies. ``framework_version`` joins the address for a related
-reason -- a framework upgrade can rewrite the very source a solution was
-authored against.
-"""
+"""Resolve the ``kernel:`` identity a forge-loop run files its experience under."""
 
 from __future__ import annotations
 
@@ -58,20 +42,9 @@ def resolve_loop_identity(
     operator_name: str = "",
     producer: str = "",
 ) -> tuple[KernelRecipeIdentity, str, str]:
-    """Return ``(identity, concrete_op, framework)`` for this run.
-
-    ``concrete_op`` and the resolved framework come back alongside the identity
-    because the callers need them for dtype extraction and the implementation
-    signature, and resolving them twice risks the two answers drifting apart.
-
-    ``producer`` defaults to the loop's own. A pipeline driving the loop as a
-    subprocess overrides it so its records land in an index of their own.
-    """
-    # Imported here rather than at module scope: reaching the store's identity
-    # helpers initializes its package, which imports this package's reader back,
-    # and a top-level import would close that cycle. Both sides of the store
-    # must fold a value into a dimension identically or they address different
-    # records, so these come from the store rather than from a second copy.
+    """Return ``(identity, concrete_op, framework)`` for this run."""
+    # Imported here rather than at module scope: reaching the store's identity helpers initializes its package, which
+    # imports this package's reader back, and a top-level import would close that cycle.
     from kernelforge.rewrite_by_flydsl.identity import (
         UNKNOWN_SEGMENT,
         framework_version,
@@ -95,8 +68,8 @@ def resolve_loop_identity(
         gpu=segment(gpu_type, fallback=UNKNOWN_SEGMENT),
         framework=segment(resolved_framework, fallback=UNKNOWN_SEGMENT),
         framework_version=framework_version(resolved_framework),
-        # A run whose kernel backend names no language still has to populate the
-        # dimension: an empty one would not render as an address at all.
+        # A run whose kernel backend names no language still has to populate the dimension: an empty one would not
+        # render as an address at all.
         backend=segment(backend, fallback=UNKNOWN_SEGMENT),
     )
     return identity, concrete_op, resolved_framework

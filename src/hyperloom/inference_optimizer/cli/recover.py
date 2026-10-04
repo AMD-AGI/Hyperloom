@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Offline ``recover-session`` subcommand.
-
-Inspects a crashed session dir, rebuilds ``session_breakdown.json`` from the
-recorder fragments, and flushes / reconciles Langfuse.
-"""
+"""Offline report recovery and explicit task-cleanup confirmation."""
 
 from __future__ import annotations
 
@@ -20,24 +16,9 @@ log = logging.getLogger(__name__)
 
 
 def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
-    """Inspect on-disk artifacts to judge whether a session finished cleanly.
+    """Inspect on-disk artifacts to judge whether a session finished cleanly."""
 
-    Pure read of state.json / session_breakdown.json / langfuse_receipt.json.
-    Returns flags used by :func:`_run_recover_session` to decide whether the
-    session still needs a (re)build + Langfuse push.
-
-    Args:
-        session_dir (Path): The session directory to inspect.
-
-    Returns:
-        dict[str, Any]: A status mapping with ``close_done``,
-            ``breakdown_exists``, ``breakdown_recorded``, ``counts_final``,
-            and ``looks_complete``, which requires ``close_done``,
-            ``breakdown_recorded`` and ``breakdown_exists`` together so a
-            breakdown recorded before going missing is still rebuilt.
-    """
-
-    from ..breakdown import BREAKDOWN_FILENAME
+    from ..session.session_paths import BREAKDOWN_FILENAME
 
     state_path = session_dir / "state.json"
     close_done = False
@@ -50,7 +31,7 @@ def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
 
     breakdown_exists = (session_dir / BREAKDOWN_FILENAME).exists()
 
-    from hyperloom.orchestrator.trace.langfuse_emitter import read_receipt
+    from ..trace.langfuse_emitter import read_receipt
 
     receipt = read_receipt(session_dir) or {}
     counts = receipt.get("counts") or {}
@@ -67,26 +48,35 @@ def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
 
 
 def _run_recover_session(args: argparse.Namespace) -> int:
-    """Offline recovery for a session that exited abnormally.
-
-    Rebuilds ``session_breakdown.json`` from the crash-time recorder fragments
-    (the merge step), reconciles + flushes Langfuse, splices the post-flush
-    receipt into the breakdown, and attaches the full breakdown JSON to the
-    session's trace. Idempotent across processes (guarded by the persisted
-    Langfuse receipt), so re-running is safe.
-
-    Args:
-        args (argparse.Namespace): The parsed CLI namespace (reads
-            ``session_dir``, ``force``, and ``backfill_trace``).
-
-    Returns:
-        int: The process exit code (``0`` on success, ``2`` when the session
-            dir is missing, ``1`` on breakdown rebuild failure).
-    """
+    """Offline recovery for a session that exited abnormally."""
     session_dir = args.session_dir.resolve()
     if not session_dir.is_dir():
         print(f"ERROR: session dir not found: {session_dir}", file=sys.stderr)
         return 2
+
+    task_id = getattr(args, "confirm_stopped", None)
+    reason = getattr(args, "confirmation_reason", None)
+    if task_id is not None or reason is not None:
+        if not task_id or not task_id.strip() or not reason or not reason.strip():
+            print(
+                "ERROR: --confirm-stopped and a nonempty --confirmation-reason are required together.", file=sys.stderr
+            )
+            return 2
+        if getattr(args, "force", False) or getattr(args, "backfill_trace", False):
+            print("ERROR: cleanup confirmation cannot be combined with --force or --backfill-trace.", file=sys.stderr)
+            return 2
+        from ..session.resume_guard import CleanupConfirmationError, confirm_task_stopped
+
+        try:
+            result = confirm_task_stopped(session_dir, task_id=task_id, reason=reason)
+        except CleanupConfirmationError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        print(
+            f"cleanup confirmation: task={ascii(task_id[:80])} status={result['status']} "
+            f"released_leases={result['released_leases']} released_gpu_leases={result['released_gpu_leases']}"
+        )
+        return 0
 
     status = _session_recovery_status(session_dir)
     print(
@@ -106,14 +96,14 @@ def _run_recover_session(args: argparse.Namespace) -> int:
 
         breakdown_path = write_breakdown_json(session_dir)
         print(f"  rebuilt breakdown : {breakdown_path}")
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("recover-session: breakdown rebuild failed")
         return 1
 
     # 2) Reconcile + flush Langfuse, splice the final receipt, attach the SBD.
     try:
         from ..breakdown import patch_breakdown_langfuse
-        from hyperloom.orchestrator.trace.langfuse_emitter import (
+        from ..trace.langfuse_emitter import (
             flush_session,
             record_session_breakdown,
         )
@@ -122,7 +112,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         patch_breakdown_langfuse(session_dir)
         record_session_breakdown(session_dir)
         print("  langfuse          : flushed + breakdown attached")
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("recover-session: langfuse push failed (non-fatal)")
 
     # 3) Optional full generation replay (off by default).
@@ -132,7 +122,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
 
             rc = ingest(build_plan(session_dir))
             print(f"  trace backfill    : rc={rc}")
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("recover-session: trace backfill failed (non-fatal)")
 
     # 4) Re-package the artifact bundle so /workspace carries the recovered SBD.
@@ -142,7 +132,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         pkg_path = package_session_artifacts(session_dir)
         if pkg_path is not None:
             print(f"  artifact package  : {pkg_path}")
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("recover-session: artifact package failed (non-fatal)")
 
     return 0

@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic verification of the dual-path measurement driver contract.
-
-A rewrite driver must compare the source against the FlyDSL candidate on the
-same cases, time the source alone under ``--ref-bench-mode``, and time the
-candidate alone under ``--bench-mode``. An ordinary forge-loop driver has
-neither bench mode, and since drivers conventionally ignore unknown arguments
-it answers a bench request by silently running its correctness path — a
-mismatch that, unchecked, only surfaces after PORT has spent its budget.
-
-This module is the one place the driver is executed and the one place its
-output is read, so every stage sees the same timing, case ids, and correctness
-verdict, and every rejection names a failure class rather than an opaque error.
-"""
+"""Deterministic verification of the dual-path measurement driver contract."""
 
 from __future__ import annotations
 
@@ -35,6 +23,7 @@ REF_MODE_UNSUPPORTED = "ref_mode_unsupported"
 REF_MODE_FAILED = "ref_mode_failed"
 REF_MODE_TIMEOUT = "ref_mode_timeout"
 REF_TIMING_UNPARSEABLE = "ref_timing_unparseable"
+REF_CASE_TIMINGS_MISSING = "ref_case_timings_missing"
 CANDIDATE_MODE_UNSUPPORTED = "candidate_mode_unsupported"
 CANDIDATE_MODE_FAILED = "candidate_mode_failed"
 CANDIDATE_MODE_TIMEOUT = "candidate_mode_timeout"
@@ -46,8 +35,7 @@ CASE_COVERAGE_MISMATCH = "case_coverage_mismatch"
 REF_BENCH_FLAG = "--ref-bench-mode"
 BENCH_FLAG = "--bench-mode"
 
-# The canonical aggregate timing key. ``mean_ms`` predates it and is still read,
-# but a driver emitting it is reported so the spelling can be migrated.
+# The canonical aggregate timing key.
 CANONICAL_TIMING_METRIC = "median_ms"
 DEPRECATED_TIMING_METRIC = "mean_ms"
 
@@ -94,6 +82,7 @@ class DriverReading:
     timing_ms: float | None = None
     timing_metric: str = ""
     case_ids: tuple[str, ...] = ()
+    case_ms: dict[str, float] = field(default_factory=dict)
     snr_db: float | None = None
     allclose: bool | None = None
 
@@ -116,6 +105,7 @@ class PreflightReport:
     timing_ms: float | None = None
     timing_metric: str = ""
     case_ids: tuple[str, ...] = ()
+    case_ms: dict[str, float] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -139,9 +129,13 @@ def read_driver_output(text: str) -> DriverReading:
             reading.timing_metric = metric
 
     case_ids: list[str] = []
-    for case_id, _ms in _CASE_MS_RE.findall(text or ""):
+    for case_id, raw in _CASE_MS_RE.findall(text or ""):
         if case_id not in case_ids:
             case_ids.append(case_id)
+        try:
+            reading.case_ms[case_id] = float(raw)
+        except ValueError:
+            continue
     for case_id in _CASE_COMMENT_RE.findall(text or ""):
         if case_id not in case_ids:
             case_ids.append(case_id)
@@ -177,13 +171,7 @@ def _terminate(proc: subprocess.Popen) -> None:
 
 
 def export_driver_environment(spec: RewriteSpec) -> None:
-    """Publish the producer-owned variables to every driver forge launches.
-
-    The correctness suite and the nested loop's own bench and test tools spawn
-    the driver with the ambient environment, so exporting once here is what
-    makes the contract hold for those invocations too, not only the ones this
-    module runs directly.
-    """
+    """Publish the producer-owned variables to every driver forge launches."""
     os.environ.update(
         protocol.driver_environment(
             source_kernel=spec.source_kernel,
@@ -238,13 +226,7 @@ def run_driver(
 
 
 def check_driver_independence(spec: RewriteSpec, driver_path: str) -> PreflightReport:
-    """Reject a driver or candidate layout that cannot gate anything.
-
-    The driver must be a file of its own: one that is the source kernel, the
-    generated candidate, or a produced forge artifact would be judging itself. A
-    candidate path equal to the source is the same defect one level down — the
-    port would overwrite the kernel it is measured against.
-    """
+    """Reject a driver or candidate layout that cannot gate anything."""
     driver = Path(driver_path)
     if not driver.is_file():
         return _failed(DRIVER_MISSING, f"measurement driver not found: {driver_path}")
@@ -269,9 +251,8 @@ def check_driver_independence(spec: RewriteSpec, driver_path: str) -> PreflightR
             f"the FlyDSL candidate would overwrite the source kernel it is compared against: {candidate}",
         )
 
-    # Python resolves the driver's own directory before anything the producer
-    # exports, so a same-named module there would be imported instead of the
-    # candidate — typically a kernel left behind by an earlier run.
+    # Python resolves the driver's own directory before anything the producer exports, so a same-named module there
+    # would be imported instead of the candidate — typically a kernel left behind by an earlier run.
     for directory in (resolved_driver.parent, Path(spec.workspace).resolve()):
         if directory == candidate.parent:
             continue
@@ -291,6 +272,7 @@ def _timing_report(reading: DriverReading) -> PreflightReport:
         timing_ms=reading.timing_ms,
         timing_metric=reading.timing_metric,
         case_ids=reading.case_ids,
+        case_ms=dict(reading.case_ms),
     )
     if reading.timing_metric == DEPRECATED_TIMING_METRIC:
         report.warnings.append(
@@ -308,11 +290,7 @@ def preflight_reference(
     iters: int = 30,
     timeout_sec: int,
 ) -> PreflightReport:
-    """Prove the source path is measurable before any PORT budget is spent.
-
-    The returned timing is the speedup baseline, so the contract check and the
-    baseline measurement are one driver invocation rather than two.
-    """
+    """Prove the source path is measurable before any PORT budget is spent."""
     run = run_driver(
         spec,
         driver_path,
@@ -339,8 +317,8 @@ def preflight_reference(
 
     reading = read_driver_output(run.output)
     if not reading.has_timing:
-        # A driver that ignores the flag runs its correctness path instead, which
-        # is a missing mode rather than a broken timing report.
+        # A driver that ignores the flag runs its correctness path instead, which is a missing mode rather than a
+        # broken timing report.
         if reading.has_correctness_verdict:
             return _failed(
                 REF_MODE_UNSUPPORTED,
@@ -349,6 +327,17 @@ def preflight_reference(
         return _failed(
             REF_TIMING_UNPARSEABLE,
             f"the driver reported no {CANONICAL_TIMING_METRIC} in {REF_BENCH_FLAG}: {run.tail}",
+        )
+    # Every speedup this run publishes is an equal-weight mean over per-case ratios, so the source side of that ratio
+    # is a required output of the reference mode, not a nicety. Without it the run can still time the source in
+    # aggregate and would go on to publish a number measured against something else entirely, so it is refused here,
+    # before any budget is spent.
+    if not reading.case_ms:
+        return _failed(
+            REF_CASE_TIMINGS_MISSING,
+            f"the driver timed the source in {REF_BENCH_FLAG} but printed no "
+            f"'case_ms: <case_id> <ms>' line, and the per-case times are what "
+            f"every reported speedup divides by: {run.tail}",
         )
     return _timing_report(reading)
 
@@ -359,13 +348,7 @@ def probe_candidate_arguments(
     *,
     timeout_sec: int,
 ) -> PreflightReport:
-    """Check the candidate mode while the candidate is still an unbuilt stub.
-
-    The driver must recognize ``--bench-mode`` here but must not produce a
-    timing: the seeded skeleton cannot run, so a successful measurement proves
-    the driver never reaches the candidate and is timing the source on both
-    paths, which would make every later speedup meaningless.
-    """
+    """Check the candidate mode while the candidate is still an unbuilt stub."""
     run = run_driver(
         spec,
         driver_path,
@@ -401,16 +384,7 @@ def check_case_coverage(
     reference_case_ids: tuple[str, ...],
     candidate_case_ids: tuple[str, ...],
 ) -> PreflightReport:
-    """Require both benchmark paths to report the same cases.
-
-    The cases the driver reports while running are the authority on coverage;
-    the task's shapes are agent context. Timing different case sets on the two
-    paths turns the reported speedup into a comparison between different work.
-
-    A reference reporting no cases carries no coverage claim, so it passes. A
-    candidate reporting none is the mismatch this gate exists to catch: treating it
-    as "nothing to compare" publishes a smaller workload's timing as a speedup.
-    """
+    """Require both benchmark paths to report the same cases."""
     if not reference_case_ids:
         return PreflightReport(ok=True, case_ids=candidate_case_ids)
     missing = sorted(set(reference_case_ids) - set(candidate_case_ids))

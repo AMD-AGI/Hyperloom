@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Understand the Hyperloom optimization loop: runtime contracts, phase order (PRELUDE through CLOSE), orchestration model, feedback loops, and session artifacts."
-        "keywords": "Hyperloom, optimization loop, PRELUDE, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate, enablement, targeted build, escalation ladder, runnable gate"
+        "keywords": "Hyperloom, optimization loop, PRELUDE, ENABLEMENT, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate, enablement, targeted build, escalation ladder, runnable gate"
 ---
 # Hyperloom optimization loop
 
@@ -13,7 +13,7 @@ PolicyGate, and session artifacts are the source of truth. This optimization
 loop runs alongside the agentic kernel optimizer.
 
 ```{image} ../images/Hyperloom_optimization_loop.png
-:alt: Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_AGENT while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.
+:alt: Hyperloom's control plane delegates kernel optimization to GEAK's execution plane through handoff, result, and kernel-journey artifacts. The current phase order and write-path contracts are described below.
 :class: hl-lightbox-trigger
 ```
 
@@ -56,7 +56,7 @@ must be able to:
 - Create or resume a session directory,
 - Write `manifest.json`, `state.json`, `storage/coordinator.db`, action
   run workspaces, reports, and `session_breakdown.json`,
-- Route intents through the Orchestration, Critic, and Robustness LLM roles,
+- Route intents through the Orchestration and Critic LLM roles,
   and dispatch kernel work to programmatic Python handlers,
 - Produce a final report and a dashboard-consumable breakdown.
 
@@ -68,7 +68,7 @@ observable session artifacts and subprocess JSON bridges are.
 The Coordinator advances through the live phase chain:
 
 ```text
-PRELUDE -> FRAMEWORK_AGENT -> KERNEL_AGENT -> SWEEP -> CLOSE
+PRELUDE -> ENABLEMENT -> FRAMEWORK_AGENT -> KERNEL_AGENT -> SWEEP -> CLOSE
 ```
 
 Cyclic macro-cycling is always enabled. After SWEEP, the Coordinator can
@@ -81,20 +81,30 @@ accounting: short bounded runs keep charge-back phase budgeting, while long /
 unbounded runs use the fixed per-cycle budget window.
 
 Whether another cycle is feasible is surfaced as `cycle_reloop_feasible` in
-the ``=== Phase ===`` block for the four middle phases.
+the ``=== Phase ===`` block for the five middle phases.
 
 `machine_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
 actions can run in each phase. Coordinator-owned actions such as
 analysis refreshes and close sequencing might be enqueued internally even
 when the LLM is not allowed to propose them.
 
+Every phase transition is a GPU barrier: the Coordinator stops every running
+action and drops queued work the next phase does not allow, and commits the
+transition only once no task is left running. Each phase therefore starts on
+quiet GPUs, and its entry hook runs on the transition itself.
+
 ## PRELUDE
 
 PRELUDE establishes the session baseline:
 
-1. `target_analysis` writes the target comparison artifact. If no
-   external target GPU is configured, it writes a no-target marker rather
-   than pretending target data exists.
+1. `target_analysis` writes the reference summary and source-backed
+   `competitor_target.json`. With no external GPU configured, it writes a
+   no-target marker and clears the competitor target. Advisory and final-report
+   comparisons read the same target file; missing targets remain unavailable.
+   AgentX uses accepted `current_best` metrics, normalized by `state.tp` and
+   matched at `state.conc`, without rereading benchmark artifacts.
+   `--no-target-advisory` disables prompt hints, not the final comparison.
+   External references never change Objective, scoring, or KEEP/REVERT.
 2. `baseline` measures the starting throughput and records the benchmark
    invocation needed to reproduce it.
 3. `roofline` or `profile` captures the first performance analysis.
@@ -104,32 +114,23 @@ PRELUDE establishes the session baseline:
 `model_class` is supplied by the launcher or derived once from model
 metadata at boot. There is no separate live `classify` action.
 
-## FRAMEWORK_AGENT — the optimisation phase
+## ENABLEMENT
 
-One phase, two levers worked in parallel:
+ENABLEMENT is entered when a baseline fails and enablement is admitted
+(`--enablement` is not `off` and the run is not multi-node). It is skipped
+entirely on runs where the baseline boots on the first attempt.
 
-- **Configuration** — the `explore` action runs server-argument and
-  environment grids through the canonical `explore_search` ledger. Nothing on
-  disk changes, so a revert is a non-composition.
-- **Source and upstream** — `integrate_patch` lands every patch, and
-  `patch_source` says where the diff came from: `specialist_authored` for one
-  a specialist wrote, `upstream_pr` for a diff fetched from an upstream PR
-  that a `candidate_discovery_specialist` found, ranked and judged. Both
-  serialise on the `workspace_mutation` lane: one landing at a time,
-  independent of how fast proposals arrive.
+Admission is controlled by `--enablement {off,launch,eval,all}`,
+defaulting to `all`. `launch` admits the boot-failure lane, `eval` the
+accuracy-failure lane, `all` both. With `off`, a baseline that keeps failing
+terminates with `stop_reason='baseline_failed'` rather than opening an
+authoring loop.
 
-`specialist` serves both levers — investigation, patch authoring, and
-candidate discovery are all dispatches of the one specialist action.
-
-The phase advances to KERNEL_AGENT only when **both** levers are dry
-(`optimize_no_more_leverage`). Either arm going quiet raises
-`switch_bottleneck` so the next macro-cycle steers off this bottleneck,
-without abandoning the lever that is still paying. It also exits when its
-phase budget is spent, and at the absolute phase cap.
-
-After each KEEP the runtime revalidates the full stack end to end, so the
-reported `cumulative_gain_validated` always comes from a measurement taken
-with every accepted change applied.
+A KEEP in ENABLEMENT is graded on runnability and the accuracy floor, not
+throughput. The phase exits normally when `baseline_tput > 0`, the
+revalidation window is closed, and all in-flight enablement work is drained.
+It exits terminally on `server_argv_invalid`, `environment_fault`, or
+`enablement_attempts_exhausted` (eight consecutive failed rounds).
 
 ### Enablement escalation ladder
 
@@ -148,13 +149,13 @@ upstream (whether the capability already exists and in which version/PR). That
 picks the entry rung. **Climb (as needed):** start at the lowest plausible rung
 and go up only when the current rung cannot make it boot; after each cleared
 boot failure, re-diagnose the new (deeper) failure and pick a rung again
-(serial enablement — progress is stacked). A model whose architecture is
+(serial enablement — each round's fix is cumulative). A model whose architecture is
 already supported but merely un-wired needs only the cheap top rungs; a
 genuinely-new architecture climbs higher.
 
 The full rendered methodology (the advisory "ladder book") is the canonical
 text, built by `build_enablement_ladder_book` in
-`hyperloom.agents.framework.enablement_ops` and injected into the enablement
+`hyperloom.orchestrator.enablement.mandate` and injected into the enablement
 authoring specialist's prompt. The rungs, in increasing complexity:
 
 0. **Rung 0 — diagnose / capability-gap localization.** Read-only:
@@ -164,18 +165,22 @@ authoring specialist's prompt. The rungs, in increasing complexity:
 1. **Rung 1 — serve-flag / config wire-up.** The architecture is supported and
    only a serve flag / env / tokenizer-mode / trivial registration alias is
    missing. No new code or dependencies.
-2. **Rung 2 — in-tree source patch.** A unified diff against the installed
-   source tree: register the arch, a small forward/config/tokenizer bridge, or
-   backport a merged PR. Pure Python, no compile.
+2. **Rung 2 — in-tree source patch.** A unified diff against the source tree
+   the server imports: register the arch, a small forward/config/tokenizer
+   bridge, or backport a merged PR. Pure Python, no compile.
 3. **Rung 3 — attempt-scoped runtime.** Acquire a runtime (a published
    wheel, an editable checkout at a ref, or a local source tree) into an
    isolated per-attempt venv. That venv is activated only through the
    per-variant YAML benchmark envs; the Coordinator never mutates its own
-   process environment to point at an attempt runtime.
+   process environment to point at an attempt runtime. While one is active,
+   the source tree the server imports is that runtime's own — the editable
+   checkout, or the venv's site-packages — so Rung 2 and Rung 4 patches land
+   there. A kept runtime is re-provisioned for every later round, whatever
+   that round's failure.
 4. **Rung 4 — source localization.** Localize a merged-PR or vendored
-   closure into the source tree. A change that touches compiled or
-   build-backend files cannot be satisfied by a plain source edit, so it
-   defers to Rung 5.
+   closure into the source tree the server imports. A change that touches
+   compiled or build-backend files cannot be satisfied by a plain source
+   edit, so it defers to Rung 5.
 5. **Rung 5 — off-loop compiled build.** Perform a compiled-component build
    (AITER kernels, sgl-kernel, or vLLM-from-source). Builds run *off* the
    coordinator tick loop on a dedicated single-slot build lane: each build
@@ -184,6 +189,39 @@ authoring specialist's prompt. The rungs, in increasing complexity:
    Rung 5 can be disabled with the `HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD`
    environment variable (see
    [Targeted builds (Rung 5)](../reference/environment-variables.md#targeted-builds-rung-5)).
+
+### Latency budget (constraint on KEEP)
+
+`--max-latency-ms` sets a ceiling on mean end-to-end latency, for **scriptable
+workloads only** (`xdit`, `custom`); the CLI refuses it for a serving framework.
+A scriptable workload grades on output throughput alone, and it is the only
+kind compute partitioning places work for, so it is where a throughput-only
+gate can buy throughput with per-request latency. An AgentX serving session
+already refuses that trade on interactivity.
+
+It is a constraint rather than an objective: it does not decide when the run
+stops, only which winners are admissible, so it composes with whichever
+`--target-*` is in use. It rides the same verdict the gain gates decide — a
+candidate that would otherwise KEEP and breaks the ceiling is a REVERT, with a
+`veto_reason` (`latency_budget_exceeded` or `latency_unmeasured`). A candidate
+that did not gain carries no veto, so the ledger names the gate that refused
+it. Every KEEP decision a scriptable session reaches reads that verdict —
+explore, a framework source patch, and a kernel integration — so a lane
+reverts its own over-budget change rather than leaving it on disk.
+
+The constraint exists because a throughput-only comparison does not merely
+tolerate a latency-for-throughput trade, it selects for the worst one on
+offer: facing a lever that raises aggregate throughput *by* making each stream
+slower, the largest regression is where the most throughput is.
+
+It fails closed. A candidate that reported no end-to-end latency is refused,
+since a constraint nobody measured is not one anybody satisfied — which is why
+every lane copies `e2el_mean_ms` onto the dict it promotes. It fails closed at
+the boundary too: if the baseline itself exceeds the ceiling, or reported no
+end-to-end latency, the run stops with `baseline_over_latency_budget` rather
+than spending its whole budget refusing every candidate to learn what was
+knowable at launch. Off by default, leaving KEEP behaviour unchanged when
+unset.
 
 ### Runnable gate (earned KEEP)
 
@@ -219,6 +257,33 @@ breakdown's `installed_versions` map (`source_pr_url`); see the
   so a crash or resume reclaims the running build or cleans up the orphaned
   one rather than leaking it.
 
+## FRAMEWORK_AGENT — the optimisation phase
+
+One phase, two levers worked in parallel:
+
+- **Configuration** — the `explore` action runs server-argument and
+  environment grids through the canonical `explore_search` ledger. Nothing on
+  disk changes, so a revert is a non-composition.
+- **Source and upstream** — `integrate_patch` lands every patch, and
+  `patch_source` says where the diff came from: `specialist_authored` for one
+  a specialist wrote, `upstream_pr` for a diff fetched from an upstream PR
+  that a `candidate_discovery_specialist` found, ranked and judged. Both
+  serialise on the `workspace_mutation` lane: one landing at a time,
+  independent of how fast proposals arrive.
+
+`specialist` serves both levers — investigation, patch authoring, and
+candidate discovery are all dispatches of the one specialist action.
+
+The phase advances to KERNEL_AGENT only when **both** levers are dry
+(`optimize_no_more_leverage`). Either arm going quiet raises
+`switch_bottleneck` so the next macro-cycle steers off this bottleneck,
+without abandoning the lever that is still paying. It also exits when its
+phase budget is spent, and at the absolute phase cap.
+
+After each KEEP the runtime revalidates the full stack end to end, so the
+reported `cumulative_gain_validated` always comes from a measurement taken
+with every accepted change applied.
+
 ## KERNEL_AGENT
 
 The `KERNEL_AGENT` phase is the bridge to kernel-agent work. Orchestration might
@@ -228,21 +293,21 @@ gates.
 What the phase actually does depends on the kernel backend, and the branches
 look very different from Orchestration's side:
 
-- **Default (`geak`)**: entering the phase hands it to a single
-  Coordinator-owned whole-pipeline GEAK e2e run, which then sets the
+- **Default (`geak`)**: entering the phase enqueues one Coordinator-owned
+  `kernel_agent` task, which holds `server_lifecycle`, `workspace_mutation` and
+  `benchmark_lane` for the whole pipeline. Under GEAK it runs a single
+  whole-pipeline GEAK e2e run, which then sets the
   `skip_to_sweep` escalate hint. When the run produces no win, `exit_normal_kernel`
   honours the hint immediately and the phase closes without Orchestration ever
   taking a turn in it.
-- **On a GEAK win**, the Coordinator enqueues a same-harness revalidation
-  rebench and marks `geak_pending.status = "awaiting_rebench"` with the task id.
-  `kernel_work_pending` then reports `True`, and `exit_normal_kernel` refuses the
-  `skip_to_sweep` handoff while work is pending — so KERNEL stays open, and
-  Orchestration does tick until the rebench lands (or the revalidation turns out
-  to be unavailable, which drops the pending slot and lets the exit through).
+- **On a GEAK win**, the same `kernel_agent` task re-measures the candidate on
+  the orchestrator's own harness under the lanes it already holds, and writes
+  the headline from that measurement before it returns. KERNEL leaves once the
+  task settles, or when its phase budget runs out.
 - **Forge (`KERNEL_OPT_BACKEND_ORDER=forge`)**: the phase runs the deterministic
-  KERNEL-entry ladder — GEMM tuning, the fusion and collective lanes, then
-  per-kernel `kernel_opt` — and Orchestration drives the remaining kernel work
-  through the request channel.
+  KERNEL-entry ladder — GEMM tuning, then the fusion lane, then the kernel
+  rewrite controller, which selects its own operators and publishes patches
+  Hyperloom re-measures end to end.
 
 See [Kernel optimization execution path](../reference/kernel-execution-path.md) for the
 entry-hook branch order.
@@ -250,16 +315,13 @@ entry-hook branch order.
 The phase allowlist (`machine_state.PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`)
 admits these actions:
 
-- `kernel_opt`
 - `integrate`
-- `gemm_tuning`
-- `specialist`
 - `roofline`
 - `profile`
-- `recover`
+- `kernel_agent` (Coordinator-internal; the phase's whole pipeline as one task)
 
 Within the kernel-agent request channel, the handler dispatches request kinds
-such as `trace_analyze`, `run_optimization`, and `run_gemm_tuning`
+such as `trace_analyze` and `integrate`
 (`request_handlers.py`); these are handler kinds, not phase actions.
 
 Kernel-owned results are recorded separately from non-kernel action
@@ -269,13 +331,18 @@ be attempted or explicitly rejected before report can close the run.
 
 ## SWEEP
 
-SWEEP checks whether the optimized stack still wins across workload
-frontiers. The normal sweep action explores concurrency and ISL/OSL
-points; `conc_sweep` can run a post-sweep concurrency ladder when
-enabled.
+SWEEP measures the optimized stack against the baseline across a
+concurrency ladder, one arm each, and produces the throughput-vs-
+interactivity curve. The ladder is sized for the workload: powers of two
+down from 256 for a synthetic run, `1,4,8,10,14,20,28` for an agentic one,
+where a request carries orders of magnitude more prompt and the same card
+saturates far lower. Override either with `--conc-sweep-concs`. Under
+AgentX the sweep is off unless `--enable-conc-sweep` is passed, since each
+rung is a 3600 s window and the session grades at a fixed CONC; SWEEP then
+records a disabled skip.
 
-Sweep results update `last_sweep` / `last_conc_sweep` and feed the final
-report and breakdown.
+Results update `last_conc_sweep` and feed the final report and breakdown.
+The phase exits on `sweep_done` (or `sweep_failed`).
 
 ## CLOSE
 
@@ -290,40 +357,40 @@ The close path must be idempotent because sessions can end through a
 normal phase transition, a wall-clock deadline, an operator interrupt, or
 a resumed run.
 
-## Orchestration conversation model
+## Orchestration prompt model
 
-The Orchestration role runs as a single persistent multi-turn
-conversation that continues across ticks, rather than a fresh
-stateless call each tick. The agent's plan and reasoning live in the
-conversation, so reasoning continuity is preserved between ticks.
+Every Orchestration turn is stateless: the Coordinator composes one
+unconditional full state projection (mission, `SharedState`, gaps,
+warm-start, scores, and the inbox events since the last turn), so the
+turn never depends on what an earlier turn happened to remember.
 
-- **Delta prompts**: The first turn of a (re)started conversation gets a
-  full state seed; later turns get only a delta (current phase, mission
-  progress, time budget, and new inbox events). The agent pulls anything
-  else it needs on demand using read-only context tools
-  (`get_shared_state`, `get_gaps`, `get_warm_start`,
-  `get_proposal_scores`, `get_intervention_mix`, `why_denied`,
-  `show_analysis_md`, `get_inbox`) instead of receiving a full state
-  dump every tick.
-- **Checkpoint / compaction**: Periodically (phase boundaries and a
-  tick/time/size cadence) the Coordinator asks the agent to summarize its
-  working memory, persists it to `state.json`
-  (`orchestration_memory`), then resets and re-seeds the conversation
-  from that compacted memory so context stays bounded on long runs.
-- **Resume**: On resume the conversation is rebuilt from
+- **Working memory**: At each macro-cycle boundary the Coordinator asks
+  the agent for a one-turn handoff summary and persists it to
+  `state.json` (`orchestration_memory`). Later projections paste it back,
+  and it feeds `next_cycle_directive`; when the agent produces nothing
+  usable, a deterministic fallback directive is derived from state.
+- **Context tools**: A read-only MCP surface lets the agent pull what the
+  projection leaves out — finished outcomes (`get_recent_outcomes`),
+  in-flight work (`get_running_tasks`), failure packets (`get_failure` /
+  `get_variant_failures`), reference docs (`read_reference`), the raw
+  `analysis.md` (`show_analysis_md`), denial history (`why_denied`) — plus
+  `run_action_now` for a whitelist of cheap synchronous actions.
+  Transports without MCP tools get the projection only.
+- **Resume**: On resume the projection is rebuilt from
   `orchestration_memory` plus the authoritative `SharedState` facts —
   not by replaying a non-deterministic transcript.
-- **Write path unchanged**: All write actions still flow through
-  `emit_intent` → the Coordinator's intent handler, so Critic review,
-  the accuracy gate, Robustness escalation, and PolicyGate's real
-  invariants (path sandbox, resource leases, phase ordering, data
-  dependencies, single-writer rules) apply exactly as before. Only the
-  compensatory anti-amnesia guards (for example, the baseline same-fingerprint
-  self-loop deny) were removed, since a conversational agent remembers
-  its own prior attempts. Robustness additionally surfaces a
-  conversation no-progress signal as an external circuit-breaker.
+- **Write path**: All write actions flow through `emit_intent` → the
+  Coordinator's intent handler, so Critic review, the accuracy gate,
+  and PolicyGate's invariants (path sandbox,
+  resource leases, phase ordering, data dependencies, single-writer
+  rules) apply to every turn. Repetition is checked against state — the
+  tested-variant ledger and the action-failure log — not against agent
+  recall.
 
-The other two roles (Critic, Robustness) remain reactive and stateless per tick.
+Critic is likewise reactive and stateless per tick. Runtime RCA and automatic
+supervision are not roles in this loop. Stopped sessions require an explicit
+operator `--resume-from` decision; `recover-session` only reconstructs artifacts
+offline.
 
 ## Feedback loops
 
@@ -333,8 +400,6 @@ The loop adapts through facts, not through retired score tables:
   action attempts, kernel attempts, framework-agent progress, and warnings.
 - `RecipeKB` records durable lessons and pitfalls for future sessions.
 - Critic verdicts gate risky patches and framework candidates.
-- Robustness watches stalls, crashes, config-only loops, specialist
-  storms, and recovery signals.
 - PolicyGate blocks retired actions, wrong-phase actions, unsafe paths,
   and invalid envelopes before they mutate runtime state.
 

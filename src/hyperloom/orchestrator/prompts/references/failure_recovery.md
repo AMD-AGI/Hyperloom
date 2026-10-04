@@ -1,5 +1,5 @@
 <!-- when: an action just failed and you are about to re-propose it -->
-<!-- phase: PRELUDE, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, CLOSE -->
+<!-- phase: PRELUDE, ENABLEMENT, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, CLOSE -->
 # Failure recovery surfaces
 
 Consult these SharedState surfaces in order before re-proposing:
@@ -69,16 +69,14 @@ measurement, NOT a failure — do not retry it.
   outside the workspace and outside the configured leak destinations.
   Override `params.benchmark_script` to a script that respects
   `$RESULT_DIR` (Coordinator already exports `RESULT_DIR=<workspace>` by
-  default), or set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` via `update_state`
-  so the next attempt salvages the leak.
+  default).
 * **RULE F3 — repeated `error_class='subprocess_nonzero'` on `baseline`
-  ⇒ stop retrying baseline.** Heartbeat with `body_md='blocked: subprocess
-  repeatedly nonzero baseline'` and let Robustness intervene, whose
-  escalation policy needs that heartbeat to fire its RCA. Explore variants
+  ⇒ stop retrying baseline.** `send_message` with `body_md='blocked: subprocess
+  repeatedly nonzero baseline'`. Explore variants
   may be re-proposed; read the failure log first.
 * **RULE F4 — `policy_denial_streak` is a pure fact, not a lock.** The
-  `why_denied` context tool (and the `Recent policy denials` block on a
-  seed turn) shows repeated (action, rule) collisions. The system no
+  `why_denied` context tool (and the `Recent policy denials` block in the
+  state projection) shows repeated (action, rule) collisions. The system no
   longer reacts to the streak — there is NO auto-prune at streak≥5 and
   NO `policy_loop` stop at streak≥10; the run continues until the
   wall-clock deadline or another stop_reason fires. So the streak is

@@ -16,7 +16,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import _bypass_report as report  # noqa: E402
+import _bypass_report as report
+from _kernel_partition import partition_kernels
+from TraceLens.TraceUtils.kernel_source import ResolveResult, SourceLocation
+
+
+def _verdict(source_file="", *, patchable=True, method="symbol_index", line=None, reason=""):
+    """Stub a TraceLens ``ResolveResult`` for ``report.resolve_source_verdict``.
+
+    The bypass path now reads source resolution straight off TraceLens' struct, so
+    tests inject the verdict here rather than the old ``(source_file, method)`` tuple.
+    """
+    loc = SourceLocation(source_file=source_file, line=line) if source_file else None
+    return ResolveResult(location=loc, patchable=patchable, method=method, reason=reason)
 
 
 def _analyze(kernels):
@@ -76,8 +88,8 @@ def _one(cand_kernel):
 
 
 def test_shape_provenance_torch_trace_wins():
-    # A kernel with its own cpu_op Input Dims resolves to torch_trace even when
-    # backfill/launch-grid data is also present (waterfall priority).
+    # A kernel with its own cpu_op Input Dims resolves to torch_trace even when backfill/launch-grid data is also
+    # present (waterfall priority).
     c = _one(
         {
             "name": "_score_kernel",
@@ -96,8 +108,8 @@ def test_shape_provenance_torch_trace_wins():
 
 
 def test_shape_provenance_capture_backfill():
-    # No own cpu_op shape, but the same-name kernel resolved a shape at capture
-    # time: inherit it, tagged capture_backfill.
+    # No own cpu_op shape, but the same-name kernel resolved a shape at capture time: inherit it, tagged
+    # capture_backfill.
     c = _one(
         {
             "name": "aiter::add_rmsnorm_quant_kernel",
@@ -173,8 +185,8 @@ def test_shape_provenance_unresolved_when_no_signal():
 
 
 def test_shape_dispatchable_flag_by_provenance():
-    # torch_trace / capture_backfill are dispatch-grade; launch_grid / tile_name
-    # are geometry-only and must be flagged not dispatchable.
+    # torch_trace / capture_backfill are dispatch-grade; launch_grid / tile_name are geometry-only and must be flagged
+    # not dispatchable.
     torch = _one(
         {
             "name": "k",
@@ -201,9 +213,9 @@ def test_shape_dispatchable_flag_by_provenance():
 
 
 def test_geometry_only_source_marked_not_dispatchable(monkeypatch):
-    # A reusable kernel with a resolved source but only launch-grid geometry is
-    # visible but not auto-dispatchable: skip_reason must say so.
-    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("/opt/aiter/csrc/k.cu", "op_to_source"))
+    # A reusable kernel with a resolved source but only launch-grid geometry is visible but not auto-dispatchable:
+    # skip_reason must say so.
+    monkeypatch.setattr(report, "resolve_source_verdict", lambda *a, **k: _verdict("/opt/aiter/csrc/k.cu"))
     c = _one(
         {
             "name": "_combine_kernel",
@@ -220,9 +232,43 @@ def test_geometry_only_source_marked_not_dispatchable(monkeypatch):
     assert "not dispatchable" in c["skip_reason"]
 
 
+def test_site_a_partition_skips_reusable_source_resolved_but_non_dispatchable(monkeypatch):
+    # Driven through the real build_candidates, whose routability is the strict predicate: reusable + resolved source
+    # + a dispatch-grade shape.
+    monkeypatch.setattr(report, "resolve_source_verdict", lambda *a, **k: _verdict("/opt/aiter/csrc/k.cu"))
+    cands = report.build_candidates(
+        _analyze(
+            [
+                {
+                    "name": "_combine_kernel",
+                    "op_name": "aiter::combine",
+                    "gpu_time_us": 100.0,
+                    "count": 1,
+                    "launch_grid": [17, 7, 1],
+                    "launch_block": [256, 1, 1],
+                }
+            ]
+        ),
+        framework="sglang",
+        target_platform="MI300X",
+    )
+    hot = cands["hot_kernels"][0]
+    # Precondition: the kernel really is reusable + source-resolved + NOT dispatchable -- i.e. it is routable under
+    # the coarse (site B) predicate.
+    assert hot["reusable_native_kernel"] is True
+    assert hot["source_file"] == "/opt/aiter/csrc/k.cu"
+    assert hot["shape_dispatchable"] is False
+    # ...yet the STRICT site-A predicate keeps it out of routable and in skipped.
+    routable_ids = {c["kernel_id"] for c in cands["routable_kernels"]}
+    skipped_ids = {c["kernel_id"] for c in cands["skipped_kernels"]}
+    assert hot["kernel_id"] in skipped_ids
+    assert hot["kernel_id"] not in routable_ids
+    assert cands["routable_kernels"] == []
+
+
 def test_workload_roofline_uses_capture_backfill_shape():
-    # A graph-replay kernel with no own cpu_op dims but a same-name capture-time
-    # backfill shape must still contribute an analytical roofline to the totals.
+    # A graph-replay kernel with no own cpu_op dims but a same-name capture-time backfill shape must still contribute
+    # an analytical roofline to the totals.
     kernels = [
         {
             "name": "add_rmsnorm_kernel",
@@ -241,8 +287,7 @@ def test_workload_roofline_uses_capture_backfill_shape():
 
 
 def test_build_workload_roofline_totals_covers_all_kernels():
-    # 20 kernels > any top-k cap: the workload totals must sum every device
-    # kernel, not just the top-k candidate list.
+    # 20 kernels > any top-k cap: the workload totals must sum every device kernel, not just the top-k candidate list.
     kernels = [
         {"name": "aten::mm", "op_name": "aten::mm", "gpu_time_us": float(100 - i), "count": 1} for i in range(20)
     ]
@@ -260,8 +305,8 @@ def test_build_workload_roofline_totals_covers_all_kernels():
 
 
 def test_build_workload_roofline_totals_splits_compute_and_memory():
-    # With real shapes the workload totals must populate the attainment-weighted
-    # sigma_ideal AND the compute/memory split (not all no_perf_model).
+    # With real shapes the workload totals must populate the attainment-weighted sigma_ideal AND the compute/memory
+    # split (not all no_perf_model).
     kernels = [
         {
             "name": "Cijk_Alik_Bljk_HHS",
@@ -290,8 +335,7 @@ def test_build_workload_roofline_totals_splits_compute_and_memory():
 
 
 def test_build_candidates_exposes_routable_subset():
-    # hot_kernels stays the full ranked set; the reusable dispatch subset is
-    # exposed separately as routable_kernels.
+    # hot_kernels stays the full ranked set; the reusable dispatch subset is exposed separately as routable_kernels.
     cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     hot = cands["hot_kernels"]
     routable = cands["routable_kernels"]
@@ -302,14 +346,11 @@ def test_build_candidates_exposes_routable_subset():
 
 
 def test_build_candidates_partition_covers_reusable_without_source(monkeypatch):
-    # A reusable kernel whose source is unresolved is not dispatchable, so it must
-    # land on the ``skipped_kernels`` side of the partition, never in neither
-    # bucket. Force source resolution to fail so the reusable SDPA kernel is
-    # guaranteed source-less regardless of the live active-finder index:
-    # neutralize every tier (Triton .py, active finder). Repo-scan
-    # (resolve_by_kernel_name) finds nothing in tests.
-    monkeypatch.setattr(report, "resolve_triton_py", lambda *a, **k: ("", None, "unresolved"))
-    monkeypatch.setattr(report, "resolve_source", lambda *a, **k: ("", "unresolved"))
+    # A reusable kernel whose source is unresolved is not dispatchable, so it must land on the ``skipped_kernels``
+    # side of the partition, never in neither bucket.
+    monkeypatch.setattr(
+        report, "resolve_source_verdict", lambda *a, **k: _verdict("", patchable=False, method="unresolved")
+    )
     cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     hot_ids = {c["kernel_id"] for c in cands["hot_kernels"]}
     routable_ids = {c["kernel_id"] for c in cands["routable_kernels"]}
@@ -328,11 +369,62 @@ def test_build_candidates_partition_covers_reusable_without_source(monkeypatch):
     assert len(cands["hot_kernels"]) == len(cands["routable_kernels"]) + len(cands["skipped_kernels"])
 
 
+def test_partition_kernels_is_the_exact_complement():
+    # The unified partition helper: ``skipped`` is always the kernel_id complement of ``routable``, so the two lists
+    # cover the input with no overlap regardless of the predicate handed in.
+    hot = [
+        {"kernel_id": "k1", "reusable_native_kernel": True},
+        {"kernel_id": "k2", "reusable_native_kernel": False},
+        {"kernel_id": "k3", "reusable_native_kernel": True},
+    ]
+    routable, skipped = partition_kernels(hot, lambda c: c.get("reusable_native_kernel") is True)
+    assert [c["kernel_id"] for c in routable] == ["k1", "k3"]
+    assert [c["kernel_id"] for c in skipped] == ["k2"]
+    routable_ids = {c["kernel_id"] for c in routable}
+    skipped_ids = {c["kernel_id"] for c in skipped}
+    hot_ids = {c["kernel_id"] for c in hot}
+    assert routable_ids | skipped_ids == hot_ids
+    assert routable_ids & skipped_ids == set()
+    assert len(routable) + len(skipped) == len(hot)
+
+
+def test_partition_kernels_honours_the_callers_predicate():
+    # The two live producers pass DIFFERENT routability predicates and must get DIFFERENT partitions from the same
+    # helper -- the strict dispatch predicate (site A) versus the coarse reusability predicate (site B).
+    hot = [
+        {"kernel_id": "k1", "reusable_native_kernel": True, "source_file": "/r/k1.py", "shape_dispatchable": True},
+        {"kernel_id": "k2", "reusable_native_kernel": True, "source_file": "", "shape_dispatchable": False},
+    ]
+    strict = lambda c: bool(  # noqa: E731 - inline predicate mirrors site A
+        c.get("reusable_native_kernel") and c.get("source_file") and c.get("shape_dispatchable")
+    )
+    coarse = lambda c: c.get("reusable_native_kernel") is True  # noqa: E731 - mirrors site B
+
+    strict_routable, strict_skipped = partition_kernels(hot, strict)
+    coarse_routable, coarse_skipped = partition_kernels(hot, coarse)
+
+    assert [c["kernel_id"] for c in strict_routable] == ["k1"]
+    assert [c["kernel_id"] for c in strict_skipped] == ["k2"]
+    # k2 is reusable, so the coarse predicate keeps it routable.
+    assert [c["kernel_id"] for c in coarse_routable] == ["k1", "k2"]
+    assert coarse_skipped == []
+
+
+def test_partition_kernels_drops_non_dict_rows_and_still_partitions():
+    # A non-dict row is skipped entirely (matches the isinstance guards at the live sites); every dict row lands in
+    # exactly one bucket by its own predicate value, so the partition holds even without a kernel_id.
+    hot = [{"kernel_id": "k1", "reusable_native_kernel": True}, "not-a-dict", {"reusable_native_kernel": True}]
+    routable, skipped = partition_kernels(hot, lambda c: c.get("reusable_native_kernel") is True)
+    assert routable == [{"kernel_id": "k1", "reusable_native_kernel": True}, {"reusable_native_kernel": True}]
+    assert skipped == []
+    # The non-dict row appears in neither bucket -- it is not a kernel.
+    assert len(routable) + len(skipped) == 2
+
+
 def test_build_summary_counts(monkeypatch):
-    # summary.json mirrors kernel_candidates.json's routable/skipped partition:
-    # tasks == routable, skipped == the rest. Resolve the reusable SDPA kernel's
-    # source so it is a task; the non-reusable GEMM stays skipped.
-    monkeypatch.setattr(report, "resolve_source", lambda *a, **k: ("/src/paged_attn.py", "op_to_source"))
+    # summary.json mirrors kernel_candidates.json's routable/skipped partition: tasks == routable, skipped == the
+    # rest.
+    monkeypatch.setattr(report, "resolve_source_verdict", lambda *a, **k: _verdict("/src/paged_attn.py"))
     cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     summ = report.build_summary(cands, framework="vllm", target_platform="MI300X", generated_at="2026-01-01T00:00:00")
     assert summ["task_count"] == 1
@@ -385,8 +477,8 @@ def test_build_kernel_roofline_shape():
 
 
 def test_build_candidates_fills_analytical_roofline_incl_vendor():
-    # A vendor GEMM (Cijk_, non-reusable) with captured shapes gets an analytical
-    # bound purely from shapes + measured time, not the "—" placeholder.
+    # A vendor GEMM (Cijk_, non-reusable) with captured shapes gets an analytical bound purely from shapes + measured
+    # time, not the "—" placeholder.
     kernels = [
         {
             "name": "Cijk_Alik_Bljk_HHS",
@@ -541,9 +633,7 @@ def test_summary_csv_parseable():
 
 
 def test_roofline_rows_flag_placeholder_not_measured():
-    # The bypass roofline is analytical, not a hardware measurement. Mark it
-    # ``roofline_measured=False`` so record_trace_analyze / the LLM don't
-    # mistake the "—" bound for a real measured roofline.
+    # The bypass roofline is analytical, not a hardware measurement.
     cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     kr = report.build_kernel_roofline(cands, analysis_md_path="/x/a.md", kernel_candidates_path="/x/kc.json")
     assert kr["kernels"]
@@ -635,13 +725,13 @@ def test_render_empty_kernels_is_valid():
 # ── source resolution + shape population ─────────────────────────────────────
 
 
-def test_source_file_from_trace_kernel_file_wins(monkeypatch):
-    # A repo Triton kernel_file from the trace resolves source_file directly and
-    # must take priority over the op_to_source dictionary (never consulted here).
-    def _boom(*a, **k):  # pragma: no cover - must not be called
-        raise AssertionError("resolve_source must not run when trace kernel_file hits")
+def test_source_file_from_trace_kernel_file(monkeypatch):
+    # A Triton kernel forwards its trace kernel_file to the resolver, which pins the source; bypass reads the verdict
+    # off the ResolveResult it hands back.
+    def _spy(symbol, *, kernel_file="", op_name="", library=""):
+        return _verdict(kernel_file, method="trace_kernel_file")
 
-    monkeypatch.setattr(report, "resolve_source", _boom)
+    monkeypatch.setattr(report, "resolve_source_verdict", _spy)
     kernels = [
         {
             "name": "triton_silu",
@@ -664,10 +754,9 @@ def test_source_file_from_trace_kernel_file_wins(monkeypatch):
 
 
 def test_routable_candidate_carries_shapes_for_dispatch():
-    # Dispatch reads candidate["shapes"] to pin the harness to the serving dims,
-    # so a routable candidate whose trace DID record them must expose them in
-    # the downstream contract form rather than leaving the backend to recover
-    # dims that were measured all along.
+    # Dispatch reads candidate["shapes"] to pin the harness to the serving dims, so a routable candidate whose trace
+    # DID record them must expose them in the downstream contract form rather than leaving the backend to recover dims
+    # that were measured all along.
     kernels = [
         {
             "name": "triton_silu",
@@ -693,9 +782,8 @@ def test_routable_candidate_carries_shapes_for_dispatch():
 
 
 def test_trace_shape_entries_contract_format():
-    # Kineto Input Dims + Input type -> downstream contract string:
-    # multi-operand <br>-joined "(dims) dtype", 1-D keeps trailing comma,
-    # scalar/empty operand dropped, call_count stamped.
+    # Kineto Input Dims + Input type -> downstream contract string: multi-operand <br>-joined "(dims) dtype", 1-D
+    # keeps trailing comma, scalar/empty operand dropped, call_count stamped.
     out = report._trace_shape_entries([[4, 1024], [1024], []], ["c10::BFloat16", "float", "int"], 5)
     assert out == [{"call_num": 5, "shape": "(4,1024) bf16<br>(1024,) fp32"}]
     # unmapped dtype -> bare shape (no suffix).
@@ -706,9 +794,8 @@ def test_trace_shape_entries_contract_format():
 
 
 def test_unresolved_shape_candidate_has_empty_shapes():
-    # A kernel with no captured dims stays shape-less: "shapes" is an empty list
-    # (present, not absent) and the provenance says why, so the dispatch can
-    # tell "no dims were recorded" from "these are the dims".
+    # A kernel with no captured dims stays shape-less: "shapes" is an empty list (present, not absent) and the
+    # provenance says why, so the dispatch can tell "no dims were recorded" from "these are the dims".
     kernels = [{"name": "mystery_kernel", "op_name": "aten::mystery", "gpu_time_us": 100.0, "count": 1}]
     cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
     assert cand.get("shapes") == []
@@ -716,16 +803,18 @@ def test_unresolved_shape_candidate_has_empty_shapes():
     assert cand["shape_provenance"] == "unresolved"
 
 
-def test_source_file_from_op_to_source_when_no_kernel_file(monkeypatch):
-    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("/opt/aiter/csrc/act.cu", "op_to_source"))
+def test_source_file_from_symbol_resolution(monkeypatch):
+    monkeypatch.setattr(report, "resolve_source_verdict", lambda *a, **k: _verdict("/opt/aiter/csrc/act.cu"))
     kernels = [{"name": "act_kernel", "op_name": "_C::silu_and_mul", "gpu_time_us": 100.0, "count": 1}]
     cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
     assert cand["source_file"] == "/opt/aiter/csrc/act.cu"
-    assert cand["source_resolution_method"] == "op_to_source"
+    assert cand["source_resolution_method"] == "symbol_index"
 
 
-def test_source_unresolved_when_both_miss(monkeypatch):
-    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("", "unresolved"))
+def test_source_unresolved_when_resolver_misses(monkeypatch):
+    monkeypatch.setattr(
+        report, "resolve_source_verdict", lambda *a, **k: _verdict("", patchable=False, method="unresolved")
+    )
     kernels = [{"name": "mystery_kernel", "op_name": "aten::mystery", "gpu_time_us": 100.0, "count": 1}]
     cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
     assert cand["source_file"] == ""
@@ -733,23 +822,6 @@ def test_source_unresolved_when_both_miss(monkeypatch):
     # no shapes -> input_shapes empty + unresolved provenance
     assert cand["input_shapes"] == []
     assert cand["shape_provenance"] == "unresolved"
-
-
-def test_inductor_kernel_file_rejected_falls_through(monkeypatch):
-    # A /tmp inductor kernel_file is not editable; must fall through to lookup.
-    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("", "unresolved"))
-    kernels = [
-        {
-            "name": "triton_poi_fused",
-            "op_name": "aten::add",
-            "gpu_time_us": 100.0,
-            "count": 1,
-            "op_kernel_file": "/tmp/torchinductor_root/cabc.py",
-        }
-    ]
-    cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
-    assert cand["source_file"] == ""
-    assert cand["source_resolution_method"] == "unresolved"
 
 
 # ── task_groups ──────────────────────────────────────────────────────────────
@@ -841,12 +913,16 @@ def test_task_groups_ordered_by_aggregate_time():
 
 
 def test_render_surfaces_source_dispatchability_and_task_groups(monkeypatch):
-    # One candidate resolves a source, one does not -> report must reflect the
-    # real dispatchable split, show the source line, and render a Task Groups table.
+    # One candidate resolves a source, one does not -> report must reflect the real dispatchable split, show the
+    # source line, and render a Task Groups table.
     monkeypatch.setattr(
         report,
-        "resolve_source",
-        lambda op, **k: ("/opt/aiter/csrc/act.cu", "op_to_source") if op == "aiter::act" else ("", "unresolved"),
+        "resolve_source_verdict",
+        lambda symbol, **k: (
+            _verdict("/opt/aiter/csrc/act.cu")
+            if "act" in symbol
+            else _verdict("", patchable=False, method="unresolved")
+        ),
     )
     kernels = [
         {"name": "aiter_act_kernel", "op_name": "aiter::act", "gpu_time_us": 300.0, "count": 3},
@@ -864,7 +940,7 @@ def test_render_surfaces_source_dispatchability_and_task_groups(monkeypatch):
     # dispatchable split line present
     assert "rewritable candidate(s) are auto-dispatchable" in md
     # resolved source surfaced with method
-    assert "/opt/aiter/csrc/act.cu" in md and "via op_to_source" in md
+    assert "/opt/aiter/csrc/act.cu" in md and "via symbol_index" in md
     # unresolved reusable candidate flagged as not auto-dispatchable
     assert "not auto-dispatchable" in md.lower()
     # Task Groups section rendered (act.cu group exists)
@@ -872,7 +948,7 @@ def test_render_surfaces_source_dispatchability_and_task_groups(monkeypatch):
 
 
 def test_source_type_from_resolved_source(monkeypatch):
-    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("/x/k.cu", "op_to_source"))
+    monkeypatch.setattr(report, "resolve_source_verdict", lambda *a, **k: _verdict("/x/k.cu"))
     kernels = [{"name": "aten::x", "op_name": "aten::x", "gpu_time_us": 100.0, "count": 1}]
     cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
     assert cand["source_type"] == "hip_cpp"  # from .cu extension, not op-name heuristic
@@ -933,15 +1009,15 @@ def test_pseudo_op_flydsl_sets_deterministic_implementation_contract():
 
 
 def test_build_candidates_discovers_benchmark_files_when_enabled(tmp_path, monkeypatch):
-    # discover_benchmarks populates benchmark_files/kernel_repo on a routable
-    # candidate (seeds the rocprof roofline enrichment); off by default.
+    # discover_benchmarks populates benchmark_files/kernel_repo on a routable candidate (seeds the rocprof roofline
+    # enrichment); off by default.
     repo = tmp_path / "aiter"
     (repo / "op_tests").mkdir(parents=True)
     (repo / "csrc").mkdir(parents=True)
     src = repo / "csrc" / "foo_kernel.cu"
     src.write_text("// foo_op\n", encoding="utf-8")
     (repo / "op_tests" / "test_foo.py").write_text("def test():\n    foo_op(x)\n", encoding="utf-8")
-    monkeypatch.setattr(report, "resolve_source", lambda op, **k: (str(src), "op_to_source"))
+    monkeypatch.setattr(report, "resolve_source_verdict", lambda *a, **k: _verdict(str(src)))
     base = [{"name": "triton_foo_kernel", "op_name": "aiter::foo_op", "gpu_time_us": 100.0, "count": 1}]
 
     on = report.build_candidates(
@@ -959,7 +1035,7 @@ def test_build_candidates_discovers_benchmark_files_when_enabled(tmp_path, monke
 
 def test_build_candidates_attaches_task_group_and_summary_counts(monkeypatch):
     # Two shapes of one logical operator resolve to one grouped optimization task.
-    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("/opt/aiter/csrc/quant.cu", "op_to_source"))
+    monkeypatch.setattr(report, "resolve_source_verdict", lambda *a, **k: _verdict("/opt/aiter/csrc/quant.cu"))
     kernels = [
         {
             "name": "aiter::quant_kernel_shape_a",
@@ -991,37 +1067,83 @@ def test_build_candidates_attaches_task_group_and_summary_counts(monkeypatch):
     assert "rows" not in entry
 
 
-def test_finder_non_patchable_verdict_blocks_repo_scan(monkeypatch):
-    """A finder non_patchable verdict is authoritative: the repo-scan tier must
-    not override it with a coincidental kernel-name hit."""
-    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("", "non_patchable"))
-    scanned: list[str] = []
-
-    def _spy_repo_scan(name):
-        scanned.append(name)
-        return "/repo/should_not_be_used.cu", "repo_scan"
-
-    monkeypatch.setattr(report, "resolve_by_kernel_name", _spy_repo_scan)
-    kernels = [{"name": "ck_gemm_kernel", "op_name": "aiter::gemm", "gpu_time_us": 100.0, "count": 1}]
-    cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
-    # The repo-scan tier is never consulted, and its path is not adopted.
-    assert scanned == []
-    assert cand["source_file"] == ""
-    assert cand["source_resolution_method"] == "non_patchable"
-    # The verdict is carried as structured audit fields (distinguishable from a
-    # plain "not found" miss).
+def test_non_patchable_with_source_is_not_routable(monkeypatch):
+    """#1057: a non-patchable kernel now carries a dispatcher source, so ``op_to_source_patchable`` -- not source
+    presence -- gates routing; the row is skipped WITH its source, never routed."""
+    monkeypatch.setattr(
+        report,
+        "resolve_source_verdict",
+        lambda *a, **k: _verdict(
+            "/repo/dispatcher.cu",
+            patchable=False,
+            method="gate_non_patchable",
+            reason="Composable Kernel template instantiation",
+        ),
+    )
+    # A ck_tile kernel classifies reusable by name but TraceLens rules it non-patchable.
+    kernels = [
+        {
+            "name": "ck_tile_gemm_kernel",
+            "op_name": "aiter::gemm",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_shapes": [[4096, 4096], [4096, 4096]],
+            "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+        }
+    ]
+    cands = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")
+    cand = cands["hot_kernels"][0]
+    # The resolver verdict is read straight off the ResolveResult.
+    assert cand["source_file"] == "/repo/dispatcher.cu"
+    assert cand["source_resolution_method"] == "gate_non_patchable"
     assert cand["op_to_source_patchable"] is False
     assert cand["op_to_source_status"] == "non_rewritable"
-    assert "non-patchable" in cand["op_to_source_reason"]
+    # Reusable-by-name + resolved source + dispatch-grade shape, yet the patchable gate keeps it out of routable.
+    assert cand["reusable_native_kernel"] is True
+    assert cand["shape_dispatchable"] is True
+    assert cands["routable_kernels"] == []
+    assert cand["kernel_id"] in {c["kernel_id"] for c in cands["skipped_kernels"]}
+    assert "non-patchable" in cand["skip_reason"]
 
 
-def test_repo_scan_still_runs_on_a_genuine_finder_miss(monkeypatch):
-    """A plain unresolved finder result still falls through to the repo scan."""
-    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("", "unresolved"))
-    monkeypatch.setattr(report, "resolve_by_kernel_name", lambda name: ("/repo/found.cu", "repo_scan"))
-    kernels = [{"name": "mystery_kernel", "op_name": "aiter::mystery", "gpu_time_us": 100.0, "count": 1}]
-    cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
-    assert cand["source_file"] == "/repo/found.cu"
-    assert cand["source_resolution_method"] == "repo_scan"
-    # A repo-scan hit is not a finder verdict, so no op_to_source_* stamping.
-    assert "op_to_source_patchable" not in cand
+def test_identity_route_stamped_on_every_row():
+    """The orchestrator integration layer reads ``identity_route`` per row for all kernel types."""
+    cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
+    assert cands["hot_kernels"]
+    assert all(c["identity_route"] == "bypass" for c in cands["hot_kernels"])
+
+
+def test_bypass_emits_through_the_shared_document_builder():
+    """Bypass builds the same four-key document shape (and split) both routes converge on."""
+    cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
+    # The shared builder assembles exactly the header + four top-level lists; the split is the exact complement.
+    assert set(cands) == {
+        "source",
+        "framework",
+        "target_platform",
+        "aggregation_scope",
+        "hot_kernels",
+        "routable_kernels",
+        "skipped_kernels",
+        "task_groups",
+    }
+    hot_ids = {c["kernel_id"] for c in cands["hot_kernels"]}
+    routable_ids = {c["kernel_id"] for c in cands["routable_kernels"]}
+    skipped_ids = {c["kernel_id"] for c in cands["skipped_kernels"]}
+    assert routable_ids | skipped_ids == hot_ids
+    assert routable_ids & skipped_ids == set()
+
+
+def test_bypass_ranking_is_roi_not_impact_score():
+    """Bypass ranks by its own gpu_pct*headroom ROI; it never carries compute's Σ impact_score key."""
+    hot = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")[
+        "hot_kernels"
+    ]
+    assert hot
+    for c in hot:
+        assert "optimization_priority" in c and "priority_rank" in c
+        # The compute path's per-member impact_score is not a bypass field -- the two rankings stay distinct.
+        assert "impact_score" not in c
+    # priority_rank is the descending order of the bypass ROI key.
+    ranked = sorted(hot, key=lambda c: c["optimization_priority"], reverse=True)
+    assert [c["priority_rank"] for c in ranked] == sorted(c["priority_rank"] for c in hot)

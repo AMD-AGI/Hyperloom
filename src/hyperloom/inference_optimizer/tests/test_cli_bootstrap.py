@@ -14,7 +14,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common.coerce import to_unix
 from hyperloom.inference_optimizer.cli import bootstrap as cb
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -47,9 +46,6 @@ def _args(**overrides):
         plateau_kernel_revert_streak=3,
         plateau_kernel_keep_gain=2.5,
         plateau_kernel_lookback=5,
-        explore_overtime_kill_ratio="bad",
-        explore_variant_timeout_sec="bad",
-        explore_variant_timeout_safety_margin="bad",
         enable_roofline=False,
         no_framework_agent=True,
         research_scout=False,
@@ -59,18 +55,18 @@ def _args(**overrides):
         enable_conc_sweep=True,
         conc_sweep_concs="1, bad, 4,,8",
         conc_sweep_total_budget_sec=120,
-        conc_sweep_timeout_sec=30,
         reference_script="",
     )
     base.update(overrides)
     return argparse.Namespace(**base)
 
 
-def _state_with_stamp(*, elapsed_h: float, remaining_h: float) -> SharedState:
+def _spent_state(*, elapsed_h: float, remaining_h: float) -> SharedState:
+    """A session that has charged ``elapsed_h`` and has ``remaining_h`` left."""
     now = time.time()
     start = datetime.fromtimestamp(now - elapsed_h * 3600.0, tz=timezone.utc).isoformat()
     state = SharedState(session_id="s", start_ts=start, max_minutes=int((elapsed_h + remaining_h) * 60))
-    state.deadline_unix = now + remaining_h * 3600.0
+    state.elapsed_charged_sec = elapsed_h * 3600.0
     return state
 
 
@@ -96,17 +92,13 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
-        lambda _args: (
-            "--block-size 64",
-            {"ENV_A": "1"},
-            "Kimi-K2.6",
-            "/recipes/kimi.sh",
-        ),
+        lambda _args: ("--block-size 64", {"ENV_A": "1"}, "Kimi-K2.6", "/recipes/kimi.sh", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
     state = cb._seed_shared_state(tmp_path, _args(), session_id="session-1")
@@ -130,14 +122,10 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert state.gpu_specialist_capacity == 8
     assert state.plateau_overrides["explore_keep_gain_pct"] == 1.5
     assert state.plateau_overrides["kernel_keep_gain_pct"] == 2.5
-    assert state.explore_overtime_kill_ratio == 2.0
-    assert state.explore_variant_timeout_sec_override == 0
-    assert state.explore_variant_timeout_safety_margin == 0.5
     # One switch for the one phase.
     assert state.framework_agent_phase_enabled is False
     assert state.conc_sweep_concs == [1, 4, 8]
     assert state.conc_sweep_total_budget_sec == 120
-    assert state.conc_sweep_variant_timeout_sec == 30
     assert state.reference_server_args == "--block-size 64"
     assert json.loads((tmp_path / "state.json").read_text())["session_id"] == "session-1"
 
@@ -152,10 +140,11 @@ def test_seed_shared_state_records_custom_workload_paths(
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "", {}))
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 1)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
 
     state = cb._seed_shared_state(tmp_path, _args(framework="custom"), session_id="s-custom")
@@ -168,10 +157,11 @@ def _neutralize_seed_io(monkeypatch):
     """Stub the model/recipe reads so a seed can be asserted on one field."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "", {}))
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 1)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
 
 
@@ -179,13 +169,7 @@ def test_seed_records_the_launch_verdict_for_the_partition_shape(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """The verdict carries provenance the published env cannot express.
-
-    ``published_shape()`` reads back mode, count, CU and streams, but nothing
-    that says the CU count was probed from the device rather than derived from
-    the board table. Re-reading the env therefore reported a fresh launch's
-    probed count as a table guess, which is the one thing the section is for.
-    """
+    """The verdict carries provenance the published env cannot express."""
     _neutralize_seed_io(monkeypatch)
     monkeypatch.setattr(cb, "published_shape", lambda: {"mode": "CPX", "cu_per_partition": 32})
 
@@ -206,18 +190,18 @@ def test_seed_falls_back_to_the_published_shape_when_handed_no_verdict(
     assert state.compute_partition == {"mode": "DPX"}
 
 
-def test_seed_shared_state_exact_forge_records_native_kernel_optimizer(
+def test_seed_shared_state_exact_forge_records_the_forge_kernel_optimizer(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "", {}))
 
     state = cb._seed_shared_state(tmp_path, _args(), session_id="session-forge")
 
-    assert state.kernel_optimizer == "native"
+    assert state.kernel_optimizer == "forge"
 
 
 def test_seed_shared_state_loads_model_arch_from_session_dir(
@@ -242,12 +226,13 @@ def test_seed_shared_state_loads_model_arch_from_session_dir(
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
-        lambda _args: ("", {}, "", ""),
+        lambda _args: ("", {}, "", "", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 1)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
 
     state = cb._seed_shared_state(session_dir, _args(model="/models/Model-A"), session_id="session-arch")
@@ -260,20 +245,21 @@ def test_seed_shared_state_preserves_quantized_model_identity(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Regression: after the quantize prelude pins ``args.model_display_name``,
-    ``SharedState.model_name`` must use it rather than the collapsed
-    ``<...>/quantized`` path basename."""
+    """Regression: after the quantize prelude pins ``args.model_display_name``, ``SharedState.model_name`` must use it
+    rather than the collapsed ``<...>/quantized`` path basename.
+    """
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
-        lambda _args: ("", {}, "", ""),
+        lambda _args: ("", {}, "", "", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
     quant_dir = tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized"
@@ -292,19 +278,19 @@ def test_seed_shared_state_falls_back_to_path_basename(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Without a pinned display name (the common, non-quantized path) the model
-    name is still the plain model-path basename."""
+    """Without a pinned display name (the common, non-quantized path) the model name is still the plain model-path basename."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
-        lambda _args: ("", {}, "", ""),
+        lambda _args: ("", {}, "", "", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
     state = cb._seed_shared_state(
@@ -316,8 +302,7 @@ def test_seed_shared_state_falls_back_to_path_basename(
 
 
 def test_manifest_preserves_quantized_model_identity(tmp_path: Path) -> None:
-    """Regression: ``manifest.json`` ``model_name`` must honor the pinned
-    display name from the quantize prelude, not the collapsed path basename."""
+    """Regression: ``manifest.json`` ``model_name`` must honor the pinned display name from the quantize prelude, not the collapsed path basename."""
     from hyperloom.inference_optimizer.session import manifest as m
 
     quant_dir = tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized"
@@ -347,52 +332,6 @@ def test_resolve_model_display_name_helper() -> None:
     assert cb.resolve_model_display_name(empty_override) == "Foo"
 
 
-def test_auto_kernel_opt_defaults_to_dispatching() -> None:
-    """Neither spelling passed: the entry dispatches on its own."""
-    unset = SimpleNamespace(auto_kernel_opt=None, continue_kernel_after_gemm=None)
-    assert cb.resolve_auto_kernel_opt(unset) is True
-    # A caller that predates both dests must not crash on the lookup.
-    assert cb.resolve_auto_kernel_opt(SimpleNamespace()) is True
-
-
-def test_auto_kernel_opt_honours_the_current_flag() -> None:
-    """``--no-auto-kernel-opt`` alone opts out."""
-    opted_out = SimpleNamespace(auto_kernel_opt=False, continue_kernel_after_gemm=None)
-    assert cb.resolve_auto_kernel_opt(opted_out) is False
-
-
-def test_deprecated_gemm_spelling_still_opts_out_and_warns() -> None:
-    """The old flag keeps working, because dropping it would silently opt back in."""
-    legacy = SimpleNamespace(auto_kernel_opt=None, continue_kernel_after_gemm=False)
-    with pytest.warns(DeprecationWarning, match="--auto-kernel-opt"):
-        assert cb.resolve_auto_kernel_opt(legacy) is False
-
-
-def test_current_flag_outranks_the_deprecated_spelling() -> None:
-    """Both passed and disagreeing: the current flag decides."""
-    both = SimpleNamespace(auto_kernel_opt=True, continue_kernel_after_gemm=False)
-    with pytest.warns(DeprecationWarning):
-        assert cb.resolve_auto_kernel_opt(both) is True
-
-
-def test_seed_shared_state_records_the_auto_kernel_opt_optout(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    """The resolved switch lands on the field the KERNEL phase reads."""
-    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
-    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
-
-    state = cb._seed_shared_state(
-        tmp_path,
-        _args(auto_kernel_opt=False),
-        session_id="session-auto-kernel-opt",
-    )
-
-    assert state.auto_kernel_opt_enabled is False
-
-
 def test_target_summary_and_conc_sweep_parser(caplog) -> None:
     assert ">= 12.5%" in cb._default_target_summary(
         _args(model="/m/foo", target_gain=12.5, target_tput=None, max_hours=4)
@@ -403,7 +342,7 @@ def test_target_summary_and_conc_sweep_parser(caplog) -> None:
     assert "no target" in cb._default_target_summary(
         _args(model="/m/foo", target_gain=None, target_tput=None, max_hours=4)
     )
-    assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs="")) == [
+    assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs=""), "synthetic") == [
         256,
         128,
         64,
@@ -413,7 +352,7 @@ def test_target_summary_and_conc_sweep_parser(caplog) -> None:
         4,
         2,
     ]
-    assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs="bad,")) == [
+    assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs="bad,"), "synthetic") == [
         256,
         128,
         64,
@@ -467,7 +406,7 @@ def test_read_failure_summary_and_final_summary_output(tmp_path: Path, capsys) -
     cb._print_final_summary(
         SharedState(session_id="s2", model_name="m2", baseline_tput=0.0),
         "done",
-        None,
+        tmp_path,
     )
     assert "never validated" in capsys.readouterr().out
 
@@ -476,7 +415,7 @@ def test_resolve_reference_recipe_branches_and_final_summary(tmp_path: Path, mon
     import pytest
     from hyperloom.inference_optimizer import reference_script
 
-    assert cb._resolve_reference_recipe(_args(reference_script="")) == ("", {}, "", "")
+    assert cb._resolve_reference_recipe(_args(reference_script="")) == ("", {}, "", "", {})
 
     monkeypatch.setattr(
         reference_script,
@@ -492,6 +431,7 @@ def test_resolve_reference_recipe_branches_and_final_summary(tmp_path: Path, mon
         {"A": "1"},
         "kimi",
         "usable.sh",
+        {},
     )
 
     # Unreadable path raises SystemExit(2) instead of falling back to discovery.
@@ -507,7 +447,7 @@ def test_resolve_reference_recipe_branches_and_final_summary(tmp_path: Path, mon
     cb._print_final_summary(
         SharedState(session_id="s2", model_name="m2", baseline_tput=0.0),
         "done",
-        None,
+        tmp_path,
     )
     assert "never validated" in capsys.readouterr().out
 
@@ -517,11 +457,11 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     monkeypatch,
     capsys,
 ) -> None:
-    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "robustness": ""})
+    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "critic": ""})
     assert (tmp_path / "agents" / "orch" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "hello"
-    assert (tmp_path / "agents" / "robustness" / "system_prompt.snapshot.md").read_text(
+    assert (tmp_path / "agents" / "critic" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "(empty)"
 
@@ -532,81 +472,86 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     assert "Session layout under" in out
     assert "manifest.json" in out
 
-    monkeypatch.setenv("HYPERLOOM_SESSION_DIR", str(tmp_path))
-    assert cb._resolve_session_dir_for_summary(None) == tmp_path
-    monkeypatch.setenv("HYPERLOOM_SESSION_DIR", str(tmp_path / "missing"))
-    assert cb._resolve_session_dir_for_summary(None) is None
 
+def test_a_resume_clears_the_previous_leg_terminal_without_touching_the_budget() -> None:
+    """A new leg drops the last leg's ending; what the session spent is untouched."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", crash_count=4, max_minutes=180)
+    state.set_stop_reason("time_exhausted")
+    state.closing_phase = True
+    state.closing_report_task_id = "r-1"
+    state.elapsed_charged_sec = 120 * 60.0
+    state.teardown_timings_sec = {"close_backends": 0.2, "total": 0.2}
 
-def test_a_clean_stop_resume_records_where_the_new_leg_began() -> None:
-    """start_ts stays the budget anchor, so the resume timestamp is the only leg boundary."""
-    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", crash_count=1)
-    state.deadline_unix = 1_700_000_000.0
-    state.teardown_timings_sec = {"total": 1.5}
-
-    cb._begin_resume_leg(state, reanchor_budget=False)
+    cb._begin_resume_leg(state)
 
     assert state.start_ts == "2026-08-01T00:00:00+00:00"
     assert state.resumed_ts > state.start_ts
-    assert state.crash_count == 1
-    assert state.deadline_unix == 1_700_000_000.0
-    assert state.teardown_timings_sec == {"total": 1.5}
-
-
-def test_clean_stop_resume_notes_follow_the_stamp_not_a_larger_cli_budget() -> None:
-    """Raising --max-hours on a clean-stop resume must not be reported as time left."""
-    state = _state_with_stamp(elapsed_h=2.0, remaining_h=1.0)
-    lines = cb._clean_stop_resume_budget_lines(state, max_hours=8.0)
-    text = "\n".join(lines)
-    match = re.search(r"budget: ([0-9.]+)h elapsed, ([0-9.]+)h left on the persisted stamp", text)
-    assert match is not None
-    assert abs(float(match.group(1)) - 2.0) < 0.05
-    assert abs(float(match.group(2)) - 1.0) < 0.05
-    assert "this invocation's --max-hours 8.00 does not extend or shrink that stamp" in text
-    assert "raise --max-hours or start a fresh session" not in text
-
-
-def test_clean_stop_resume_notes_do_not_tell_the_operator_to_raise_max_hours() -> None:
-    state = _state_with_stamp(elapsed_h=3.5, remaining_h=-0.5)
-    lines = cb._clean_stop_resume_budget_lines(state, max_hours=8.0)
-    text = "\n".join(lines)
-    match = re.search(r"budget: ([0-9.]+)h elapsed, ([0-9.]+)h left on the persisted stamp", text)
-    assert match is not None
-    assert abs(float(match.group(1)) - 3.5) < 0.05
-    assert abs(float(match.group(2)) - 0.0) < 0.05
-    assert "WARNING: the stamped deadline is already spent" in text
-    assert "start a fresh session" in text
-    assert "does not extend the stamp" in text
-    assert "raise --max-hours or start a fresh session" not in text
-
-
-def test_clean_stop_resume_notes_omit_the_cli_mismatch_when_hours_match_the_stamp() -> None:
-    state = _state_with_stamp(elapsed_h=1.0, remaining_h=2.0)
-    lines = cb._clean_stop_resume_budget_lines(state, max_hours=3.0)
-    text = "\n".join(lines)
-    assert "does not extend or shrink that stamp" not in text
-    assert "WARNING:" not in text
-
-
-def test_a_resume_after_a_stop_re_anchors_the_budget_on_the_new_leg() -> None:
-    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", crash_count=4)
-    state.set_stop_reason("time_exhausted")
-    state.closing_phase = True
-    state.deadline_unix = 1_700_000_000.0
-    state.teardown_timings_sec = {"close_backends": 0.2, "total": 0.2}
-
-    cb._begin_resume_leg(state, reanchor_budget=True)
-
-    assert state.start_ts == state.resumed_ts
     assert state.stop_reason == ""
     assert state.stop_ts == ""
     assert state.closing_phase is False
+    assert state.closing_report_task_id == ""
     assert state.crash_count == 0
-    assert state.deadline_unix == 0.0
     assert state.teardown_timings_sec == {}
-    stamped = state.stamp_deadline_unix(budget_minutes=60)
-    start = to_unix(state.start_ts)
-    assert abs(stamped - (start + 3600.0)) < 2.0
+    # The budget survives the boundary; only an operator extend can move it.
+    assert state.elapsed_charged_sec == 120 * 60.0
+    assert state.remaining_minutes() == pytest.approx(60.0, abs=1.0)
+
+
+def test_a_resume_lets_the_new_leg_run_its_own_close_sequence() -> None:
+    """A leg closed by a signal keeps its non-CLOSE phase; the next leg must still close for itself."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", phase="SWEEP")
+    state.set_stop_reason("signal")
+    state.close_sequence_done = True
+
+    cb._begin_resume_leg(state)
+
+    assert state.phase == "SWEEP"
+    assert state.close_sequence_done is False
+
+
+def test_a_killed_leg_and_a_stopped_leg_resume_with_the_same_budget() -> None:
+    """No branch may read how a leg ended, because a killed leg records nothing."""
+    killed = SharedState(session_id="killed", start_ts="2026-08-01T00:00:00+00:00", max_minutes=180)
+    stopped = SharedState(session_id="stopped", start_ts="2026-08-01T00:00:00+00:00", max_minutes=180)
+    for state in (killed, stopped):
+        state.elapsed_charged_sec = 120 * 60.0
+    stopped.set_stop_reason("time_exhausted")
+    killed.crash_count = 9
+
+    for state in (killed, stopped):
+        cb._begin_resume_leg(state)
+
+    assert killed.elapsed_charged_sec == stopped.elapsed_charged_sec
+    assert killed.remaining_minutes() == pytest.approx(stopped.remaining_minutes(), abs=1.0)
+
+
+def test_resume_notes_report_the_budget_the_leg_actually_has() -> None:
+    state = _spent_state(elapsed_h=2.0, remaining_h=1.0)
+    text = "\n".join(cb._resume_budget_lines(state, extend_hours=0.0))
+    assert "2.00h charged to this session across every leg so far" in text
+    assert re.search(r"budget: 3\.00h total, 1\.0\dh left", text)
+    assert "WARNING" not in text
+
+
+def test_resume_notes_on_a_spent_budget_point_at_the_operator_extend() -> None:
+    state = _spent_state(elapsed_h=3.5, remaining_h=-0.5)
+    text = "\n".join(cb._resume_budget_lines(state, extend_hours=0.0))
+    assert "WARNING: the budget is spent" in text
+    assert "--extend-hours" in text
+
+
+def test_resume_notes_record_an_extension_that_was_granted() -> None:
+    state = _spent_state(elapsed_h=3.0, remaining_h=0.0)
+    state.extend_budget_minutes(60.0, reason="--extend-hours")
+    text = "\n".join(cb._resume_budget_lines(state, extend_hours=1.0))
+    assert "--extend-hours added 1.00h to the session budget" in text
+    assert "WARNING" not in text
+
+
+def test_resume_notes_on_an_unbounded_session_report_no_budget() -> None:
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    text = "\n".join(cb._resume_budget_lines(state, extend_hours=0.0))
+    assert "budget: unbounded" in text
 
 
 def test_a_resume_banks_what_the_stopped_leg_spent_in_its_phase() -> None:
@@ -619,9 +564,23 @@ def test_a_resume_banks_what_the_stopped_leg_spent_in_its_phase() -> None:
     # Pin where the leg ended so the banked segment is a checkable number.
     state.stop_ts = "2026-08-01T00:30:00+00:00"
 
-    cb._begin_resume_leg(state, reanchor_budget=True)
+    cb._begin_resume_leg(state)
 
     assert state.phase_elapsed_totals["PRELUDE"] == 1800.0
+    assert state.stop_ts == ""
+
+
+def test_a_resume_banks_a_resumable_legs_own_boundary() -> None:
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    state.phase = "PRELUDE"
+    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
+    state.phase_started_unix = 1785_542_400.0
+    state.leg_ended_ts = "2026-08-01T00:30:00+00:00"
+
+    cb._begin_resume_leg(state)
+
+    assert state.phase_elapsed_totals == {"PRELUDE": 1800.0}
+    assert state.leg_ended_ts == ""
     assert state.stop_ts == ""
 
 
@@ -633,13 +592,13 @@ def test_a_second_resume_banks_only_the_leg_that_just_stopped() -> None:
     state.phase_started_unix = 1785_542_400.0
     state.set_stop_reason("time_exhausted")
     state.stop_ts = "2026-08-01T00:30:00+00:00"
-    cb._begin_resume_leg(state, reanchor_budget=True)
+    cb._begin_resume_leg(state)
 
     # A second leg picked up a day later and ran an hour, still in PRELUDE.
     state.resumed_ts = "2026-08-02T00:00:00+00:00"
     state.set_stop_reason("time_exhausted")
     state.stop_ts = "2026-08-02T01:00:00+00:00"
-    cb._begin_resume_leg(state, reanchor_budget=True)
+    cb._begin_resume_leg(state)
 
     assert state.phase_elapsed_totals["PRELUDE"] == 1800.0 + 3600.0
 
@@ -654,7 +613,7 @@ def test_a_resume_does_not_bank_a_stop_stamped_after_the_present() -> None:
     state.set_stop_reason("time_exhausted")
     state.stop_ts = datetime.fromtimestamp(started + 10 * 86400.0, tz=timezone.utc).isoformat()
 
-    cb._begin_resume_leg(state, reanchor_budget=True)
+    cb._begin_resume_leg(state)
 
     assert 60.0 <= state.phase_elapsed_totals["PRELUDE"] < 120.0
 
@@ -666,7 +625,7 @@ def test_a_resume_with_no_recorded_stop_leaves_the_segment_unbanked() -> None:
     state.phase_started_ts = "2026-08-01T00:00:00+00:00"
     state.phase_started_unix = 1785_542_400.0
 
-    cb._begin_resume_leg(state, reanchor_budget=False)
+    cb._begin_resume_leg(state)
 
     assert state.phase_elapsed_totals == {}
 
@@ -689,36 +648,12 @@ def test_reconcile_crash_count_updates_state_and_final_json(tmp_path: Path) -> N
     assert patched["other"] is True
 
 
-def test_kernel_opt_summary_line_prints_totals(tmp_path: Path, monkeypatch, capsys) -> None:
-    from hyperloom.orchestrator.kernel import attempt_summary as kernel_attempt_summary
-
-    monkeypatch.setenv("HYPERLOOM_SESSION_DIR", str(tmp_path))
-    reports = tmp_path / "reports"
-    reports.mkdir()
-    (reports / "kernel_optimization_summary.json").write_text("{}", encoding="utf-8")
-
-    def _summary(_state, _session_dir):
-        return {
-            "totals": {"attempted": 3, "integrated": 1, "rejected": 1, "unattempted": 2},
-            "top_takeaways": ["headline", "root cause"],
-        }
-
-    monkeypatch.setattr(kernel_attempt_summary, "build_kernel_optimization_summary", _summary)
-
-    cb._print_kernel_opt_summary_line(SharedState(session_id="s"))
-
-    out = capsys.readouterr().out
-    assert "3 attempted" in out
-    assert "root cause" in out
-    assert "kernel_optimization_summary.json" in out
-
-
 def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
     import pytest
     from hyperloom.inference_optimizer import reference_script
 
     args = _args(model="/models/kimi", reference_script="")
-    assert cb._resolve_reference_recipe(args) == ("", {}, "", "")
+    assert cb._resolve_reference_recipe(args) == ("", {}, "", "", {})
 
     monkeypatch.setattr(
         reference_script,
@@ -734,6 +669,7 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
         {"A": "1"},
         "kimi",
         "usable.sh",
+        {},
     )
 
     # Unreadable path → SystemExit(2), no discovery fallback.

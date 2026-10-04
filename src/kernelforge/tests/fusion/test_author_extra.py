@@ -28,6 +28,12 @@ from kernelforge.fusion.author import (
 from kernelforge.fusion.llm_failure import AGENT_SAFETY_REJECTION_ATTR
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_backoff(monkeypatch):
+    """The author's retry backoff is real seconds; no test should spend them."""
+    monkeypatch.setattr(author.time, "sleep", lambda _seconds: None)
+
+
 def _recipe(flag: str = "FUSED"):
     return {
         "pattern": "residual_add_rmsnorm",
@@ -233,12 +239,7 @@ def _provider_safety_error(message, *, rejection):
 
 
 def test_registered_author_retries_a_provider_safety_class_raised_for_io(tmp_path):
-    """The provider raises its safety class for I/O too, and that is weather.
-
-    ``Could not snapshot`` says the guard could not read a file, not that the
-    session touched one. Classifying it by class name abandoned the recipe on the
-    first attempt for a condition the next attempt would very likely not see.
-    """
+    """The provider raises its safety class for I/O too, and that is weather."""
     repo, target, _non_target = _author_repo(tmp_path)
 
     rc = run_author(
@@ -258,13 +259,7 @@ def test_registered_author_retries_a_provider_safety_class_raised_for_io(tmp_pat
 
 
 def test_registered_author_reports_a_timeout_a_failed_rollback_wrapped(tmp_path):
-    """A hiccuping restore on the way out of a timeout is still a timeout.
-
-    The backend rolls back while unwinding an expired clock, and a rollback that
-    itself fails replaces the timeout with its own exception. Reading only the
-    outermost error called that a deterministic rejection and abandoned the
-    recipe over a session that had merely run out of time.
-    """
+    """A hiccuping restore on the way out of a timeout is still a timeout."""
     repo, target, _non_target = _author_repo(tmp_path)
 
     class Backend:
@@ -273,8 +268,8 @@ def test_registered_author_reports_a_timeout_a_failed_rollback_wrapped(tmp_path)
         runtime = AgentRuntimeConfig(provider="codex", model="gpt-test")
 
         async def run(self, spec, usage=None):
-            # Raised from the handler, exactly as the backend's rollback is, so the
-            # expired clock survives only in __context__.
+            # Raised from the handler, exactly as the backend's rollback is, so the expired clock survives only in
+            # __context__.
             try:
                 raise TimeoutError("Codex timed out after 3600s")
             except TimeoutError:
@@ -296,11 +291,7 @@ def test_registered_author_reports_a_timeout_a_failed_rollback_wrapped(tmp_path)
 
 
 def test_registered_author_retries_a_locked_git_index_before_the_run(tmp_path):
-    """``index.lock`` is held for milliseconds by any other git command.
-
-    Reporting it as a workspace-safety rejection made the textbook retryable
-    condition fatal: the loop abandoned the recipe without authoring anything.
-    """
+    """``index.lock`` is held for milliseconds by any other git command."""
     repo, target, _non_target = _author_repo(tmp_path)
     (repo / ".git" / "index.lock").write_text("", encoding="utf-8")
 
@@ -341,12 +332,7 @@ def test_registered_author_retries_a_git_index_locked_during_restoration(tmp_pat
 def test_registered_author_rejects_a_nominated_module_directory_that_is_absent(
     tmp_path,
 ):
-    """An empty inventory is the most permissive scope there is.
-
-    Every name reads as absent in it, so failing open turned a mis-nominated
-    directory into the one place the author could create anything -- and the
-    prompt then advertised that absent path.
-    """
+    """An empty inventory is the most permissive scope there is."""
     repo, target, _non_target = _author_repo(tmp_path)
 
     log_path = tmp_path / "author-absent-module-dir.log"
@@ -366,12 +352,7 @@ def test_registered_author_rejects_a_nominated_module_directory_that_is_absent(
 def test_registered_author_names_the_run_failure_beside_a_workspace_rejection(
     tmp_path,
 ):
-    """A rejected turn that also ran out of clock must report both.
-
-    ``enforce()`` is judged before the run error is examined and returns from
-    there, so the operator saw the violation and no sign the session never
-    finished -- with ``result`` unset, the log had no agent text either.
-    """
+    """A rejected turn that also ran out of clock must report both."""
     repo, target, non_target = _author_repo(tmp_path)
 
     class Backend:
@@ -399,12 +380,7 @@ def test_registered_author_names_the_run_failure_beside_a_workspace_rejection(
 
 
 def test_registered_author_rejects_a_permitted_new_module_that_was_staged(tmp_path):
-    """Staging a permitted creation drops it out of the exported patch.
-
-    Export reaches an untracked new module through ``git diff --no-index``, so an
-    indexed one silently disappears from the handoff. The prompt states the rule;
-    nothing pinned that the guard enforces it.
-    """
+    """Staging a permitted creation drops it out of the exported patch."""
     repo, target, _non_target = _author_repo(tmp_path)
     created = repo / "qwen3_fused_ops.py"
 
@@ -569,15 +545,7 @@ def test_registered_author_preserves_allowed_target_changes(tmp_path):
 
 
 def test_registered_author_may_write_the_staged_harness(tmp_path):
-    """Let the author write the harness the pipeline staged inside the worktree.
-
-    ``_author_harness_target`` puts the validation harness under
-    ``<repo>/.forge_fusion/`` because the author sandbox is workspace-write and
-    cannot reach outside the tree, so writing there is what the directory exists
-    for. The guard counted it as an out-of-scope creation, restored it and
-    returned a safety verdict -- discarding a wired 1.81x fusion, and doing so
-    identically on every retry.
-    """
+    """Let the author write the harness the pipeline staged inside the worktree."""
     repo, target, _non_target = _author_repo(tmp_path)
     staged = repo / ".forge_fusion" / "kernel_harness_5a45e46212fc.py"
 
@@ -600,13 +568,7 @@ def test_registered_author_may_write_the_staged_harness(tmp_path):
 
 
 def test_edit_hook_is_no_stricter_than_the_guard_on_staging(tmp_path):
-    """Keep the PreToolUse hook exactly as permissive as the transaction.
-
-    The hook consults the guard's own predicate precisely so it can never block
-    a path the transaction would keep. If only ``enforce`` learns about the
-    staging directory, Edit/Write stay denied there and the author can get its
-    harness written only through Bash.
-    """
+    """Keep the PreToolUse hook exactly as permissive as the transaction."""
     repo, target, _non_target = _author_repo(tmp_path)
     models = repo / "models"
     models.mkdir()
@@ -932,9 +894,8 @@ def test_registered_author_hook_and_prompt_match_the_permitted_scope(tmp_path):
     assert rc == 0
     spec = captured["spec"]
     assert spec.allow_dirty_baseline is True
-    # Every fragment the guard's predicate matches on has to be in the prompt, or
-    # adding one to emit leaves the author obeying the previous rule and being
-    # rejected for it.
+    # Every fragment the guard's predicate matches on has to be in the prompt, or adding one to emit leaves the author
+    # obeying the previous rule and being rejected for it.
     for fragment in (*emit._FUSED_MODULE_MARKERS, *emit._FUSED_MODULE_PREFIXES):
         assert fragment in spec.system_prompt, fragment
     hook = spec.hooks.pre_tool_use[0].callback
@@ -1185,14 +1146,7 @@ def test_registered_author_fails_closed_when_git_head_changes(tmp_path):
 
 
 def test_capture_path_state_reports_io_failures_as_transient(tmp_path, monkeypatch):
-    """A stat that failed says nothing about what the author did.
-
-    ``AuthorSafetyError`` carries a verdict about the worktree's CONTENT, which
-    the guard reaches identically on the next attempt, so the loop abandons the
-    recipe on one. Reading the worktree is not that: an NFS blip while snapshotting
-    is weather, and marking it a verdict throws away a recipe a retry would have
-    finished. The Git-command and index-lock paths beside these already say so.
-    """
+    """A stat that failed says nothing about what the author did."""
     path = tmp_path / "kernel.py"
     path.write_text("VALUE = 1\n", encoding="utf-8")
 
@@ -1242,12 +1196,7 @@ def test_capture_path_state_reports_an_unreadable_symlink_as_transient(tmp_path,
 
 
 def test_module_directory_inventory_reports_io_failures_as_transient(tmp_path, monkeypatch):
-    """Inventorying the creatable-module directory is bookkeeping too.
-
-    A missing directory stays a verdict -- it is the same on every attempt and
-    would otherwise advertise a scope the author cannot write into -- but a
-    listdir that failed for any other reason is not.
-    """
+    """Inventorying the creatable-module directory is bookkeeping too."""
     repo = tmp_path / "repo"
     (repo / "models").mkdir(parents=True)
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -1269,16 +1218,7 @@ def test_module_directory_inventory_reports_io_failures_as_transient(tmp_path, m
 
 
 def test_declared_harness_target_survives_the_default_name_globs(tmp_path):
-    """A target the caller allowlisted must not be reclaimed by ``*harness*.py``.
-
-    The harness-author turn's whole deliverable is one
-    ``.forge_fusion/kernel_harness_<digest>.py``, declared as its sole
-    ``target_files`` entry (``command.py::_author_baseline_harness``). The
-    default measurement globs match it by name, and the shadow repo keeps the
-    staging directory Git-ignored, so before the exemption the guard rejected the
-    file the agent had just been told to write -- ``forge-fuse --author`` died
-    with ``protected ignored files changed`` on every real run.
-    """
+    """A target the caller allowlisted must not be reclaimed by ``*harness*.py``."""
     import subprocess
 
     from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
@@ -1321,7 +1261,138 @@ def test_declared_harness_target_survives_the_default_name_globs(tmp_path):
     assert run([staging]).verify() == []
 
     staging.unlink()
-    # Undeclared, and the name protection is back on: the implementer turn, whose
-    # targets are framework sources, still may not touch the harness.
+    # Undeclared, and the name protection is back on: the implementer turn, whose targets are framework sources, still
+    # may not touch the harness.
     with pytest.raises(WorkspaceSafetyError, match="protected"):
         run([repo / "kernel.py"]).verify()
+
+
+def _counting_backend(*outcomes):
+    """A backend that plays one scripted outcome per attempt, counting the calls."""
+
+    class Backend:
+        name = "claude"
+        capabilities = AgentCapabilities()
+        runtime = AgentRuntimeConfig(provider="claude", model="claude-test")
+        calls = 0
+
+        async def run(self, spec, usage=None):
+            outcome = outcomes[min(Backend.calls, len(outcomes) - 1)]
+            Backend.calls += 1
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+    return Backend
+
+
+def _author_with(tmp_path, backend_cls, **kwargs):
+    repo, target, _non_target = _author_repo(tmp_path)
+    kwargs.setdefault("timeout_s", 1)
+    rc = run_author(
+        "P",
+        workdir=str(repo),
+        log_path=str(tmp_path / "author.log"),
+        backend=backend_cls(),
+        target_files=[str(target)],
+        **kwargs,
+    )
+    return rc, backend_cls.calls
+
+
+def test_a_stalled_transport_is_retried(tmp_path):
+    """The lane costs hours and the author costs minutes, so one more call is worth it."""
+    backend = _counting_backend(
+        RuntimeError("API Error: Response stalled mid-stream"),
+        AgentRunResult(text="AUTHORING_RESULT: ok", end_reason="agent_stopped"),
+    )
+
+    rc, calls = _author_with(tmp_path, backend)
+
+    assert rc == 0
+    assert calls == 2
+
+
+def test_a_stalled_transport_is_retried_on_a_real_attempt_budget(tmp_path):
+    """The gate is checked against what the next attempt costs, so its own cost cannot close it."""
+    backend = _counting_backend(
+        RuntimeError("API Error: Response stalled mid-stream"),
+        AgentRunResult(text="AUTHORING_RESULT: ok", end_reason="agent_stopped"),
+    )
+
+    # _agent_timeout_sec's default, which is four times llm_failure's generic retry deadline.
+    rc, calls = _author_with(tmp_path, backend, timeout_s=7200)
+
+    assert rc == 0
+    assert calls == 2
+
+
+def test_an_operator_deadline_that_cannot_hold_another_attempt_stops_the_retry(tmp_path, monkeypatch):
+    """A deadline the operator set is still enforced against the next attempt's cost."""
+    monkeypatch.setenv("FORGE_LLM_RETRY_DEADLINE_SEC", "60")
+    backend = _counting_backend(
+        RuntimeError("API Error: Response stalled mid-stream"),
+        AgentRunResult(text="AUTHORING_RESULT: ok", end_reason="agent_stopped"),
+    )
+
+    rc, calls = _author_with(tmp_path, backend, timeout_s=7200)
+
+    assert rc == AUTHOR_RC_FAILED
+    assert calls == 1
+
+
+def test_a_stalled_transport_is_not_retried_forever(tmp_path):
+    """Past the attempt ceiling the upstream is down, not flaky."""
+    backend = _counting_backend(RuntimeError("API Error: Response stalled mid-stream"))
+
+    rc, calls = _author_with(tmp_path, backend)
+
+    assert rc == AUTHOR_RC_FAILED
+    assert calls == 2
+
+
+def test_a_provider_safety_stop_is_never_retried(tmp_path):
+    """Retrying a safety verdict is the anti-pattern the resume allowlist already refuses."""
+
+    class ProviderSafetyError(RuntimeError):
+        def __init__(self, message):
+            super().__init__(message)
+            setattr(self, AGENT_SAFETY_REJECTION_ATTR, True)
+
+    # _with_run_error appends the transport error to a safety verdict, so this is the shape that
+    # a marker-matching classifier reads back as retryable.
+    backend = _counting_backend(ProviderSafetyError("stopped; the agent run also failed: connection error"))
+
+    rc, calls = _author_with(tmp_path, backend)
+
+    assert rc == AUTHOR_RC_SAFETY
+    assert calls == 1
+
+
+def test_a_timeout_is_never_retried(tmp_path):
+    """The attempt just spent the whole per-attempt budget; another would spend it again."""
+    backend = _counting_backend(TimeoutError("Request timed out after 7200s"))
+
+    rc, calls = _author_with(tmp_path, backend)
+
+    assert rc == AUTHOR_RC_TIMEOUT
+    assert calls == 1
+
+
+def test_a_task_level_refusal_is_not_retried(tmp_path):
+    """A model that will not write a conforming harness answers the same way every time."""
+    backend = _counting_backend(AgentRunResult(text="I cannot benchmark these in isolation", end_reason="turn_cap"))
+
+    rc, calls = _author_with(tmp_path, backend)
+
+    assert rc == AUTHOR_RC_FAILED
+    assert calls == 1
+
+
+def test_a_first_attempt_that_works_is_not_retried(tmp_path):
+    backend = _counting_backend(AgentRunResult(text="AUTHORING_RESULT: ok", end_reason="agent_stopped"))
+
+    rc, calls = _author_with(tmp_path, backend)
+
+    assert rc == 0
+    assert calls == 1

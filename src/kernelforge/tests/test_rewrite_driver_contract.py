@@ -1,9 +1,4 @@
-"""Hermetic tests for the dual-path measurement driver contract preflight.
-
-Every case here runs a real driver subprocess written by the test, so what is
-verified is what a task author's driver would actually be judged on — no GPU,
-no LLM, no mocking of the contract's own parsing.
-"""
+"""Hermetic tests for the dual-path measurement driver contract preflight."""
 
 from __future__ import annotations
 
@@ -16,8 +11,8 @@ import pytest
 from kernelforge.rewrite_by_flydsl import driver_contract
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 
-# A driver that satisfies the whole contract: it distinguishes both bench modes
-# and only reaches the candidate when the ported kernel is importable.
+# A driver that satisfies the whole contract: it distinguishes both bench modes and only reaches the candidate when
+# the ported kernel is importable.
 _CONFORMING_DRIVER = """\
 import argparse
 import sys
@@ -95,6 +90,14 @@ def test_case_ids_come_from_both_reporting_conventions():
     assert reading.case_ids == ("shape_b", "shape_a")
 
 
+def test_per_case_timings_are_kept_not_just_their_ids():
+    """The scored metric divides case by case, so the ids alone cannot produce it."""
+    reading = driver_contract.read_driver_output("case_ms: m_1 0.5\ncase_ms: m_4096 80.0\nmean_ms: 40.25\n")
+
+    assert reading.case_ms == {"m_1": 0.5, "m_4096": 80.0}
+    assert reading.case_ids == ("m_1", "m_4096")
+
+
 def test_correctness_verdicts_are_read_from_either_metric():
     assert driver_contract.read_driver_output("SNR: 45.2 dB").snr_db == 45.2
     assert driver_contract.read_driver_output("allclose: True").allclose is True
@@ -144,8 +147,8 @@ def test_an_independent_driver_passes(tmp_path):
 
 
 def test_a_module_shadowing_the_candidate_is_rejected(tmp_path):
-    # The candidate moved into its attempt directory, but a kernel left at the
-    # workspace root by an earlier run would still win the import.
+    # The candidate moved into its attempt directory, but a kernel left at the workspace root by an earlier run would
+    # still win the import.
     spec, driver = _spec(tmp_path)
     attempt = tmp_path / ".forge_rewrite" / "20260101-000000-abcdef12"
     attempt.mkdir(parents=True)
@@ -231,12 +234,25 @@ def test_a_hanging_driver_is_stopped_and_named(tmp_path):
 
 
 def test_the_deprecated_timing_key_is_accepted_with_a_warning(tmp_path):
-    spec, driver = _spec(tmp_path, driver_body="print('mean_ms: 3.0')\n")
+    spec, driver = _spec(
+        tmp_path,
+        driver_body="print('case_ms: only_case 3.0')\nprint('mean_ms: 3.0')\n",
+    )
     report = driver_contract.preflight_reference(spec, driver, timeout_sec=60)
 
     assert report.ok is True
     assert report.timing_ms == 3.0
     assert "median_ms" in report.warnings[0]
+
+
+def test_a_reference_mode_without_per_case_timings_is_refused(tmp_path):
+    """The source side of every published ratio; an aggregate alone cannot stand in for it."""
+    spec, driver = _spec(tmp_path, driver_body="print('median_ms: 3.0')\n")
+    report = driver_contract.preflight_reference(spec, driver, timeout_sec=60)
+
+    assert report.ok is False
+    assert report.failure_class == driver_contract.REF_CASE_TIMINGS_MISSING
+    assert "case_ms" in report.detail
 
 
 # ── candidate probe before porting ───────────────────────────────────────────
@@ -250,8 +266,8 @@ def test_the_candidate_probe_accepts_a_driver_that_cannot_run_the_stub(tmp_path)
 
 
 def test_a_driver_that_never_reaches_the_candidate_is_caught(tmp_path):
-    # Times the source in both directions: bench mode never imports the kernel,
-    # so it reports a timing even though nothing has been ported.
+    # Times the source in both directions: bench mode never imports the kernel, so it reports a timing even though
+    # nothing has been ported.
     spec, driver = _spec(
         tmp_path,
         driver_body=(
@@ -347,10 +363,7 @@ def test_coverage_is_not_enforced_when_the_reference_reports_no_cases():
 
 
 def test_a_candidate_that_reports_no_cases_fails_coverage():
-    # The reference named a case the candidate never accounted for. Passing this
-    # would let the aggregate timing of a smaller workload be published as a
-    # speedup, and a driver that simply never prints the per-case metric on its
-    # candidate path is the likeliest way to get here.
+    # The reference named a case the candidate never accounted for.
     report = driver_contract.check_case_coverage(("a",), ())
 
     assert report.ok is False
@@ -386,8 +399,8 @@ def test_the_producer_environment_reaches_drivers_forge_does_not_launch(
     tmp_path,
     monkeypatch,
 ):
-    # The correctness suite and the nested loop spawn the driver with the
-    # ambient environment, so the contract has to be exported to it.
+    # The correctness suite and the nested loop spawn the driver with the ambient environment, so the contract has to
+    # be exported to it.
     monkeypatch.delenv("KERNELFORGE_REWRITE_LOGICAL_OP", raising=False)
     monkeypatch.delenv("KERNELFORGE_REWRITE_BUILDER_SYMBOL", raising=False)
     monkeypatch.delenv("KERNELFORGE_REWRITE_CANDIDATE_KERNEL", raising=False)

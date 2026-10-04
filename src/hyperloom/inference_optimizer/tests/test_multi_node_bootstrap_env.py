@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Multi-node bootstrap.sh credential-minimization coverage.
-
-bootstrap.sh renders ``/etc/profile.d/hyperloom-env.sh`` with the framework
-venv PATH only. Credential-bearing env (``*_API_KEY`` / ``*_BASE_URL`` /
-``*_CUSTOM_HEADERS`` — the latter carry subscription keys) must NOT be written
-into that world-readable (0644) file; later Ray Dashboard REST jobs inherit
-them from the head-pod container env instead.
-"""
+"""Multi-node bootstrap.sh credential-minimization coverage."""
 
 from __future__ import annotations
 

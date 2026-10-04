@@ -5,31 +5,50 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as phase_state
+from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.gate import (
-    CORE_STATE_FIELDS,
-    PolicyDenied,
     PolicyGate,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
+def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
+    return {"status": "no_opportunity", "patch_count": 0, "task_count": 0, "output_dir": str(kwargs["output_dir"])}
+
+
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
+    from hyperloom.orchestrator.actions.executors import _kernel_agent_tool
+    from hyperloom.orchestrator.kernel import controller_submit
+
+    real_tool_path = _kernel_agent_tool._kernel_agent_tool_path
+
+    def _tool_path_without_geak_runner(tool_name: str) -> Path:
+        if tool_name == "backends/geak_runner.py":
+            raise FileNotFoundError(tool_name)
+        return real_tool_path(tool_name)
+
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(_kernel_agent_tool, "_kernel_agent_tool_path", _tool_path_without_geak_runner)
+    monkeypatch.setattr(controller_submit, "run_controller_subprocess", _no_controller_run)
     return make_session_dir()
 
 
 def test_phase_names_are_monotonic():
     assert phase_state.PHASE_NAMES == (
         "PRELUDE",
+        "ENABLEMENT",
         "FRAMEWORK_AGENT",
         "KERNEL_AGENT",
         "SWEEP",
@@ -41,116 +60,26 @@ def test_phase_names_are_monotonic():
 
 
 def test_allowed_actions_disjoint_phases():
-    # recover is in every phase; kernel_agent-owned actions only in KERNEL (Inv-2.1).
+    # Kernel-agent-owned actions only run in KERNEL (Inv-2.1).
     for phase in phase_state.PHASE_NAMES:
         allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase]
-        assert "recover" in allowed
+        assert "recover" not in allowed
     assert "baseline" in phase_state.PHASE_ALLOWED_ACTIONS["PRELUDE"]
     assert "baseline" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
-    assert "kernel_opt" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
-    assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
-    assert "gemm_tuning" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
-    assert "gemm_tuning" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
-    assert "sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
-    assert "sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
-    assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]
-
-
-def test_is_action_allowed_in_phase_handles_unknowns():
-    assert phase_state.is_action_allowed_in_phase("baseline", "PRELUDE")
-    assert not phase_state.is_action_allowed_in_phase("baseline", "FRAMEWORK_AGENT")
-    # Unknown phase → deny by default.
-    assert not phase_state.is_action_allowed_in_phase("baseline", "UNKNOWN")
-    assert not phase_state.is_action_allowed_in_phase("baseline", "")
-    # Empty action name → deny.
-    assert not phase_state.is_action_allowed_in_phase("", "PRELUDE")
-
-
-def test_llm_proposable_set_drops_coordinator_internal_actions():
-    from hyperloom.inference_optimizer.protocol.action_surfaces import (
-        COORDINATOR_INTERNAL_ACTIONS,
-        ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
-    )
-
-    # Proposable = allowlist minus Coordinator-internal and robustness-delegate-only actions.
+    # ENABLEMENT carries baseline so the Coordinator's revalidation survives the
+    # phase sweep, but reserves it so no agent can propose one.
+    assert "baseline" in phase_state.PHASE_ALLOWED_ACTIONS["ENABLEMENT"]
+    assert "baseline" not in phase_state.allowed_actions_for("ENABLEMENT")
+    assert "baseline" in phase_state.allowed_actions_for("PRELUDE")
+    # kernel_opt and gemm_tuning are Coordinator-owned: dispatched once at KERNEL entry from a lane budget, so they
+    # are proposable in no phase at all.
+    assert "integrate" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
     for phase in phase_state.PHASE_NAMES:
-        allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase]
-        proposable = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS[phase]
-        assert proposable == (allowed - COORDINATOR_INTERNAL_ACTIONS - ROBUSTNESS_DELEGATE_ONLY_ACTIONS)
-        assert proposable.isdisjoint(COORDINATOR_INTERNAL_ACTIONS)
-        # recover stays phase-allowed but is never LLM-proposable.
-        assert "recover" in allowed
-        assert "recover" not in proposable
-    # The advertised analysis / framework names are never proposable.
-    # The merged phase proposes both arms' levers and neither arm's analysis.
-    optimize = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["FRAMEWORK_AGENT"]
-    assert "roofline" not in optimize
-    assert "profile" not in optimize
-    assert "framework" not in optimize
-    assert {"explore", "integrate_patch", "specialist"} <= optimize
-    framework = optimize
-    assert "specialist" in phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["KERNEL_AGENT"]
-    assert "specialist" not in phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["SWEEP"]
-    assert "specialist" not in phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["CLOSE"]
-
-
-def test_is_action_llm_proposable_in_phase_handles_unknowns():
-    assert phase_state.is_action_llm_proposable_in_phase("baseline", "PRELUDE")
-    assert phase_state.is_action_llm_proposable_in_phase("explore", "FRAMEWORK_AGENT")
-    # roofline lives in the allowlist but is never LLM-proposable.
-    assert phase_state.is_action_allowed_in_phase("roofline", "FRAMEWORK_AGENT")
-    assert not phase_state.is_action_llm_proposable_in_phase("roofline", "FRAMEWORK_AGENT")
-    assert not phase_state.is_action_llm_proposable_in_phase("framework_agent", "FRAMEWORK_AGENT")
-    # Unknown phase / empty action → deny by default.
-    assert not phase_state.is_action_llm_proposable_in_phase("baseline", "UNKNOWN")
-    assert not phase_state.is_action_llm_proposable_in_phase("", "PRELUDE")
-    # llm_proposable_actions_for is sorted and excludes internal names.
-    explore = phase_state.llm_proposable_actions_for("EXPLORE")
-    assert explore == tuple(sorted(explore))
-    assert "roofline" not in explore and "profile" not in explore
-
-
-def test_every_reason_an_exit_rule_can_return_is_in_the_vocabulary():
-    """The closed vocabulary must actually close over what the rules emit.
-
-    Restating the frozenset here would only assert that a copy matches its
-    original. What matters is that no exit rule can hand PolicyGate a reason it
-    will then reject, stranding the transition.
-    """
-    import itertools
-
-    rules = (
-        phase_state.exit_normal_prelude,
-        phase_state.exit_normal_optimize,
-        phase_state.exit_normal_kernel,
-        phase_state.exit_normal_sweep,
-    )
-    # A spread of states wide enough to reach each rule's branches.
-    states = [
-        SharedState(),
-        SharedState(baseline_tput=1234.5),
-        SharedState(baseline_tput=1234.5, framework_agent_phase_done=True),
-        SharedState(baseline_tput=1234.5, phase_budget_pct={p: 0.01 for p in phase_state.PHASE_NAMES}),
-    ]
-    seen = set()
-    for rule, state in itertools.product(rules, states):
-        try:
-            out = rule(state)
-        except TypeError:
-            continue  # rule needs kwargs this sweep does not supply
-        if out is None:
-            continue
-        reason = out[0]
-        seen.add(reason)
-        assert phase_state.is_valid_phase_exit_reason(reason), reason
-    assert seen, "no exit rule fired; this guard would pass vacuously"
-
-
-def test_phase_exit_reason_vocabulary_is_closed():
-    assert not phase_state.is_valid_phase_exit_reason("totally_invented")
-    assert not phase_state.is_valid_phase_exit_reason("")
-    # Stripped before comparison, so a stray newline in a history row still matches.
-    assert phase_state.is_valid_phase_exit_reason("  prelude_done \n")
+        assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS[phase]
+        assert "gemm_tuning" not in phase_state.PHASE_ALLOWED_ACTIONS[phase]
+    assert "conc_sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
+    assert "conc_sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
+    assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]
 
 
 def test_stop_reason_vocab_includes_v06_and_v08():
@@ -158,19 +87,14 @@ def test_stop_reason_vocab_includes_v06_and_v08():
         "target_reached",
         "time_exhausted",
         "max_ticks",
-        "policy_loop",
         "baseline_failed",
         "emergency",
         "coordinator_exception",
-        "crash_threshold_exceeded",
-        "user_stop_requested",
-        "recipe_kb_drain_failed",
-        "plateau_explore",
-        "conc_sweep_failed",
+        "sweep_failed",
         "baseline_arg_error",
     ):
-        assert phase_state.is_valid_stop_reason(reason), reason
-    assert not phase_state.is_valid_stop_reason("totally_invented")
+        assert is_valid_stop_reason(reason), reason
+    assert not is_valid_stop_reason("totally_invented")
 
 
 def test_set_stop_reason_keeps_baseline_arg_error(tmp_path):
@@ -263,14 +187,7 @@ def test_prelude_refuses_an_arm_that_would_eat_the_optimization_reserve():
 
 
 def test_a_resumed_prelude_is_not_charged_for_what_the_earlier_leg_spent():
-    """Banked phase spend and the session clock answer to different origins.
-
-    A resume that reanchors the budget restarts the session clock while the
-    phase ledger keeps every second the earlier leg banked. A bound read off
-    the ledger therefore declared preparation overspent on a session that had
-    its whole budget ahead of it, and the measured half of the baseline was
-    refused on every resumed run. Only the clock decides.
-    """
+    """Banked phase spend and the session clock answer to different origins."""
     state = _prelude_state(spent_sec=10_000.0, usable_sec=10_000.0)
     affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=2706.0)
     assert affordable is True
@@ -293,7 +210,8 @@ def test_time_exhausted_during_prelude_finally_has_a_producer():
     next_phase, reason, evidence = out
     assert (next_phase, reason) == ("CLOSE", "time_exhausted_during_prelude")
     assert evidence["terminal"] is True
-    assert phase_state.is_valid_stop_reason(reason)
+    assert is_valid_stop_reason(reason)
+    assert phase_state.replay_next_phase(evidence["predicate_inputs"]) == out
 
 
 def test_a_landed_baseline_outranks_the_exhausted_clock():
@@ -318,12 +236,8 @@ def test_prelude_exit_states_whether_one_optimization_round_still_fits():
     assert evidence["fits_one_optimization_round"] is False
 
 
-# The workload the cold-anchor cases below are priced against: a 900s cold round
-# whose last 550s was the benchmark, so the boot took 350s, and a 400s hot pass.
-# One further measured variant therefore costs 750s -- its own boot and a
-# benchmark on a populated JIT cache -- while a double-run round costs the whole
-# measured cold pass plus a second benchmark, 1300s. Together they are what a
-# session must afford before measuring another baseline is worth doing.
+# The workload the cold-anchor cases below are priced against: a 900s cold round whose last 550s was the benchmark, so
+# the boot took 350s, and a 400s hot pass.
 _COLD_ANCHOR_WORKLOAD = {
     "baseline_tput": 1074.7,
     "baseline_runtime_sec": 900.0,
@@ -335,16 +249,7 @@ _RETRY_COST_SEC = 1300.0 + 750.0
 
 
 class TestAColdAnchorIsNotAFinishedPrelude:
-    """What happens to a session whose baseline could only keep its cold figure.
-
-    The figure exists, so every rule that asks only whether a baseline landed
-    reads preparation as done. It is not: the number carries the boot, the first
-    request's compile and the graph capture, so every variant measured against it
-    reads as an improvement over a baseline that was never the baseline.
-
-    Two outcomes are correct and the budget picks between them -- measure another
-    baseline, or stop and say why -- and neither is "optimize against it".
-    """
+    """What happens to a session whose baseline could only keep its cold figure."""
 
     def test_a_dropped_hot_pass_does_not_finish_the_phase(self):
         state = _prelude_state(
@@ -374,18 +279,10 @@ class TestAColdAnchorIsNotAFinishedPrelude:
         assert evidence["terminal"] is True
         assert evidence["baseline_anchor"] == "cold"
         assert evidence["retry_round_sec"] == pytest.approx(1300.0)
-        assert phase_state.is_valid_stop_reason(reason)
-        assert phase_state.is_valid_phase_exit_reason(reason)
+        assert is_valid_stop_reason(reason)
 
     def test_a_session_resumed_with_a_fresh_clock_measures_another_baseline(self):
-        """The marker outlives the shortfall, so it must not decide on its own.
-
-        A resume reanchors the session clock while the marker from the earlier leg
-        persists. Closing on the marker would end every resumed run before it
-        began, and no later baseline could clear the marker because none would
-        run. So the phase stays open with nothing to advance it but a new
-        baseline.
-        """
+        """The marker outlives the shortfall, so it must not decide on its own."""
         state = _prelude_state(
             **_COLD_ANCHOR_WORKLOAD,
             baseline_measure_round_dropped=True,
@@ -396,12 +293,7 @@ class TestAColdAnchorIsNotAFinishedPrelude:
         assert phase_state.compute_next_phase(state, kernel_enabled=True) is None
 
     def test_a_single_round_baseline_is_not_mistaken_for_a_dropped_one(self):
-        """A cold figure by configuration is consistent with what follows it.
-
-        A session that never asked for a hot pass measures everything the same
-        way, so its comparisons hold. Only a pass that was *dropped* leaves a
-        denominator out of step with the numerators.
-        """
+        """A cold figure by configuration is consistent with what follows it."""
         state = _prelude_state(
             baseline_tput=1074.7,
             baseline_runtime_sec=900.0,
@@ -456,8 +348,8 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
         stop_reason="",
         pending_escalate_hint="skip_to_kernel",
         explore_search={},
-        # At least one specialist round this cycle, required for skip_to_kernel
-        # to fire at all (see test_exit_normal_optimize_skip_to_kernel_*).
+        # At least one specialist round this cycle, required for skip_to_kernel to fire at all (see
+        # test_exit_normal_optimize_skip_to_kernel_*).
         specialist_rounds=[{"proposals_total": 1, "proposals_kept": 0}],
         optimization_stack=[{"action": "explore"}],
     )
@@ -470,12 +362,7 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
 
 
 def test_exit_normal_optimize_skip_to_kernel_requires_a_tested_round():
-    """A skip_to_kernel hint must not end EXPLORE with zero validated work.
-
-    Reproduces the cumulative_gain_validated=0.00% session: the hint arrived
-    before EXPLORE ever dispatched a specialist round this cycle, and must not
-    be honored until one actually has.
-    """
+    """A skip_to_kernel hint must not end EXPLORE with zero validated work."""
     state = SimpleNamespace(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=1_000_000.0,
@@ -529,6 +416,83 @@ def test_compute_next_phase_terminal_overrides_phase():
     assert out[2].get("terminal") is True
 
 
+class TestAMetTargetDoesNotOutrankTheGuards:
+    """The forward jump to SWEEP runs after the terminal checks, never before."""
+
+    def _state(self, phase: str, **kw) -> SimpleNamespace:
+        base = dict(
+            phase=phase,
+            phase_started_unix=0.0,
+            max_minutes=0,
+            phase_budget_pct={},
+            stop_reason="",
+            closing_phase=False,
+            target_reached_at="2026-09-04T00:00:00+00:00",
+            params_no_promote_streak=0,
+            explore_search={},
+            optimization_stack=[],
+        )
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_a_coordinator_stop_reason_still_wins(self):
+        out = phase_state.compute_next_phase(
+            self._state(phase_state.PHASE_KERNEL_AGENT, stop_reason="baseline_failed"),
+            kernel_enabled=True,
+        )
+        assert out is not None
+        assert out[0] == phase_state.PHASE_CLOSE and out[1] == "baseline_failed"
+
+    def test_the_closing_phase_still_wins(self):
+        out = phase_state.compute_next_phase(
+            self._state(phase_state.PHASE_KERNEL_AGENT, closing_phase=True),
+            kernel_enabled=True,
+        )
+        assert out is not None
+        assert out[0] == phase_state.PHASE_CLOSE and out[1] == "time_exhausted"
+
+    def test_prelude_keeps_its_own_guards(self):
+        """A baseline PRELUDE has not accepted is not one SWEEP can measure."""
+        out = phase_state.compute_next_phase(self._state(phase_state.PHASE_PRELUDE), kernel_enabled=True)
+        assert out is None or out[0] != phase_state.PHASE_SWEEP
+
+    def test_a_later_phase_does_jump(self):
+        out = phase_state.compute_next_phase(self._state(phase_state.PHASE_KERNEL_AGENT), kernel_enabled=True)
+        assert out is not None
+        assert out[0] == phase_state.PHASE_SWEEP and out[1] == "target_reached"
+        assert out[2].get("terminal") is not True
+
+
+def test_a_met_target_renames_a_budget_limited_sweep_exit():
+    """``sweep_budget_exhausted`` is outside STOP_REASON_VOCAB, so CLOSE would recover it as ``time_exhausted`` -- a met target reported as a timeout."""
+    state = SimpleNamespace(
+        phase=phase_state.PHASE_SWEEP,
+        phase_started_unix=1.0,
+        max_minutes=60,
+        deadline_unix=2.0,
+        phase_budget_pct={phase_state.PHASE_SWEEP: 0.0001},
+        stop_reason="",
+        closing_phase=False,
+        target_reached_at="2026-09-04T00:00:00+00:00",
+        last_conc_sweep={},
+        params_no_promote_streak=0,
+        explore_search={},
+        optimization_stack=[],
+        macro_cycle=0,
+        saturated_directions={},
+        cumulative_gain_validated=0.0,
+        gain_at_cycle_start=0.0,
+        no_gain_cycle_streak=0,
+    )
+    raw = phase_state.exit_normal_sweep(state)
+    assert raw is not None and raw[0] in ("sweep_budget_exhausted", "sweep_budget_cap")
+
+    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    assert out is not None
+    assert out[0] == phase_state.PHASE_CLOSE and out[1] == "target_reached"
+    assert out[2].get("terminal") is True
+
+
 def test_shared_state_phase_fields_default_to_empty():
     s = SharedState()
     assert s.phase == ""
@@ -540,7 +504,8 @@ def test_shared_state_phase_fields_default_to_empty():
 
 def test_record_phase_transition_writes_row_and_updates_phase():
     s = SharedState()
-    row = s.record_phase_transition(
+    row = phase_state.record_phase_transition(
+        s,
         to_phase="PRELUDE",
         reason="phase_entered",
         evidence={"trigger": "fresh_session"},
@@ -553,7 +518,8 @@ def test_record_phase_transition_writes_row_and_updates_phase():
     assert s.phase_history == [row]
     assert row["from_phase"] == "" and row["to_phase"] == "PRELUDE"
     # History is append-only.
-    row2 = s.record_phase_transition(
+    row2 = phase_state.record_phase_transition(
+        s,
         to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="prelude_done",
         evidence={"baseline_tput": 100.0},
@@ -568,31 +534,34 @@ def test_record_phase_transition_writes_row_and_updates_phase():
 
 def test_explore_elapsed_accumulates_completed_and_live_segments():
     s = SharedState()
-    s.record_phase_transition(
+    phase_state.record_phase_transition(
+        s,
         to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="phase_entered",
         evidence={},
         ts="2026-05-19T00:00:00+00:00",
         ts_unix=100.0,
     )
-    s.record_phase_transition(
+    phase_state.record_phase_transition(
+        s,
         to_phase="KERNEL_AGENT",
         reason="optimize_no_more_leverage",
         evidence={},
         ts="2026-05-19T00:02:00+00:00",
         ts_unix=220.0,
     )
-    assert s.explore_elapsed_accum_s == 120.0
-    assert phase_state.explore_elapsed_seconds(s, now_unix=300.0) == 120.0
+    assert s.phase_elapsed_totals[phase_state.PHASE_FRAMEWORK_AGENT] == 120.0
+    assert phase_state.phase_cumulative_seconds(s, phase=phase_state.PHASE_FRAMEWORK_AGENT, now_unix=300.0) == 120.0
 
-    s.record_phase_transition(
+    phase_state.record_phase_transition(
+        s,
         to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="sweep_reloop",
         evidence={},
         ts="2026-05-19T00:03:00+00:00",
         ts_unix=280.0,
     )
-    assert phase_state.explore_elapsed_seconds(s, now_unix=310.0) == 150.0
+    assert phase_state.phase_cumulative_seconds(s, phase=phase_state.PHASE_FRAMEWORK_AGENT, now_unix=310.0) == 150.0
 
 
 def test_langfuse_status_includes_explore_runtime_and_kb_hit():
@@ -600,7 +569,7 @@ def test_langfuse_status_includes_explore_runtime_and_kb_hit():
     s.start_ts = "2026-05-19T00:00:00+00:00"
     s.phase = phase_state.PHASE_FRAMEWORK_AGENT
     s.phase_started_unix = 100.0
-    s.explore_elapsed_accum_s = 120.0
+    s.phase_elapsed_totals = {phase_state.PHASE_FRAMEWORK_AGENT: 120.0}
     s.warm_start_context = {"status": "hit"}
 
     summary = s._langfuse_status_summary()
@@ -611,106 +580,16 @@ def test_langfuse_status_includes_explore_runtime_and_kb_hit():
     assert "session_elapsed_s" in summary
 
 
-def test_legacy_resume_keeps_explore_runtime_unknown():
-    raw = SharedState().to_dict()
-    raw.pop("explore_elapsed_accum_s")
-    raw.update(
-        {
-            "start_ts": "2026-05-19T00:00:00+00:00",
-            "phase": "EXPLORE",
-            "phase_started_unix": 100.0,
-        }
-    )
-
-    s = SharedState.from_dict(raw)
-    assert s.explore_elapsed_accum_s is None
-    assert phase_state.explore_elapsed_seconds(s, now_unix=220.0) is None
-
-    summary = s._langfuse_status_summary()
-    assert "session_elapsed_s" in summary
-    assert "explore_elapsed_s" not in summary
-    assert "explore_ratio" not in summary
-
-    s.record_phase_transition(
-        to_phase="KERNEL_AGENT",
-        reason="optimize_no_more_leverage",
-        evidence={},
-        ts="2026-05-19T00:02:00+00:00",
-        ts_unix=220.0,
-    )
-    assert s.explore_elapsed_accum_s is None
-
-
-def test_core_state_fields_includes_phase_fields():
-    for f in (
-        "phase",
-        "phase_started_ts",
-        "phase_started_unix",
-        "phase_history",
-        "phase_budget_pct",
-        "explore_elapsed_accum_s",
-    ):
-        assert f in CORE_STATE_FIELDS, f
-
-
 def _make_role_registry():
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
     return default_role_registry()
 
 
-def test_policy_gate_phase_strict_denies_kernel_in_prelude():
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase="PRELUDE",
-        reason="phase_entered",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
-    )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=True,
-    )
-    # ``explore`` is an EXPLORE-phase action; proposing it in PRELUDE is
-    # phase-incompatible.
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "explore", "predicted_gain_pct": 1.0},
-    )
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", intent)
-    assert excinfo.value.rule == "phase_incompatible"
-    assert "PRELUDE" in (excinfo.value.hint or "")
-
-
-def test_policy_gate_phase_warn_mode_does_not_raise():
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase="PRELUDE",
-        reason="phase_entered",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
-    )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=False,
-    )
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "explore", "predicted_gain_pct": 1.0},
-    )
-    # warn-mode just bumps the audit counter, no raise.
-    gate.validate_intent("orchestration", intent)
-    assert state.policy_denial_streak.get("explore:phase_incompatible", 0) >= 1
-
-
 def test_policy_gate_phase_strict_allows_in_phase_action():
     state = SharedState()
-    state.record_phase_transition(
+    phase_state.record_phase_transition(
+        state,
         to_phase="PRELUDE",
         reason="phase_entered",
         evidence={},
@@ -720,7 +599,6 @@ def test_policy_gate_phase_strict_allows_in_phase_action():
     gate = PolicyGate(
         role_registry=_make_role_registry(),
         shared_state=state,
-        strict_phase=True,
     )
     intent = Intent(
         type=IntentType.PROPOSE_ACTION,
@@ -729,208 +607,11 @@ def test_policy_gate_phase_strict_allows_in_phase_action():
     gate.validate_intent("orchestration", intent)  # no exception
 
 
-def test_policy_gate_phase_strict_blocks_explore_action_in_prelude():
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase="PRELUDE",
-        reason="phase_entered",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
-    )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=True,
-    )
-    # ``sweep`` is proposable only in SWEEP, so proposing it in PRELUDE
-    # lands on R1 phase_incompatible.
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "sweep", "predicted_gain_pct": 1.0},
-    )
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", intent)
-    assert excinfo.value.rule == "phase_incompatible"
-
-
-def test_policy_gate_denies_kernel_request_in_explore():
-    """A kernel_agent-owned REQUEST in EXPLORE is denied by R1."""
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
-        reason="prelude_done",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
-    )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=True,
-    )
-    intent = Intent(
-        type=IntentType.REQUEST,
-        payload={
-            "target_agent": "kernel_agent",
-            "kind": "run_optimization",
-            "params": {},
-        },
-    )
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", intent)
-    assert excinfo.value.rule == "phase_incompatible"
-
-
-def test_policy_gate_gates_apply_patch_alias_like_integrate():
-    # apply_patch is a REQUEST-kind alias of integrate and must be phase-gated
-    # identically. In EXPLORE, a kernel-owned integrate REQUEST is denied by
-    # R1; the alias must be denied with the same rule.
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
-        reason="prelude_done",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
-    )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=True,
-    )
-
-    def _rule_for(kind):
-        intent = Intent(
-            type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": kind, "params": {}},
-        )
-        with pytest.raises(PolicyDenied) as excinfo:
-            gate.validate_intent("orchestration", intent)
-        return excinfo.value.rule
-
-    assert _rule_for("integrate") == "phase_incompatible"
-    assert _rule_for("apply_patch") == "phase_incompatible"
-
-
-def test_policy_gate_phase_matrix_over_every_kernel_request_kind():
-    """Every wire kind that maps to an owned action gates on that action.
-
-    The prompt mandates the wire kind (``run_optimization``), while
-    ``PHASE_ALLOWED_ACTIONS`` is keyed by the action name (``kernel_opt``), so
-    this walks the real handler table rather than a hand-written list.
-    """
-    from hyperloom.inference_optimizer.protocol.action_surfaces import (
-        REQUEST_KIND_TO_OWNED_ACTION,
-    )
-
-    for kind, action in REQUEST_KIND_TO_OWNED_ACTION.items():
-        for phase in phase_state.PHASE_NAMES:
-            state = SharedState()
-            state.record_phase_transition(
-                to_phase=phase,
-                reason="phase_entered",
-                evidence={},
-                ts="2026-05-19T00:00:00+00:00",
-                ts_unix=1.0,
-            )
-            gate = PolicyGate(
-                role_registry=_make_role_registry(),
-                shared_state=state,
-                strict_phase=True,
-            )
-            intent = Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel_agent",
-                    "kind": kind,
-                    "params": {},
-                },
-            )
-            allowed = action in phase_state.PHASE_ALLOWED_ACTIONS[phase]
-            if allowed:
-                gate.validate_intent("orchestration", intent)
-            else:
-                with pytest.raises(PolicyDenied) as excinfo:
-                    gate.validate_intent("orchestration", intent)
-                assert excinfo.value.rule == "phase_incompatible", (kind, phase)
-
-
-def test_every_kernel_request_kind_is_gated_or_explicitly_exempt():
-    """A new handler kind cannot arrive silently ungated."""
-    from hyperloom.inference_optimizer.protocol.action_surfaces import (
-        COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
-        REQUEST_KIND_TO_OWNED_ACTION,
-    )
-    from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
-
-    # trace_analyze has no owning action and no phase membership, so there is
-    # nothing to gate it against; it is refreshed on demand from any phase.
-    exempt = {"trace_analyze"}
-    ungated = (
-        set(KERNEL_REQUEST_HANDLERS)
-        - set(REQUEST_KIND_TO_OWNED_ACTION)
-        - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
-        - exempt
-    )
-    assert ungated == set(), f"request kinds reach no phase gate: {sorted(ungated)}"
-
-
-def test_policy_gate_does_not_widen_kernel_for_explore_propose():
-    """KERNEL does not accept explore proposals."""
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase="KERNEL_AGENT",
-        reason="plateau_explore",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
-    )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=True,
-    )
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "explore", "predicted_gain_pct": 1.0},
-    )
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", intent)
-    assert excinfo.value.rule == "phase_incompatible"
-
-
-def test_policy_gate_sweep_rejects_explore_lever():
-    """SWEEP rejects the explore lever under R1."""
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase="SWEEP",
-        reason="plateau_kernel",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
-    )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=True,
-    )
-    # ``explore`` is not in the SWEEP proposable set, so R1 rejects it.
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "explore", "predicted_gain_pct": 1.0},
-    )
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", intent)
-    assert excinfo.value.rule == "phase_incompatible"
-
-
 @pytest.fixture
 def coordinator_with_mocks(session_dir):
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockRobustnessBackend,
         ScriptedPlan,
     )
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -945,7 +626,6 @@ def coordinator_with_mocks(session_dir):
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
     return Coordinator(session_dir, backends=backends)
 
@@ -962,12 +642,7 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
 
 
 def test_a_session_recorded_at_an_unknown_phase_refuses_to_resume(coordinator_with_mocks):
-    """A phase this build does not have was written by a build whose machine differed.
-
-    Treating it as a fresh start re-runs PRELUDE on top of a session that
-    already has a baseline, a KEPT stack and hours of measurement, and the
-    numbers of the two builds end up in one report.
-    """
+    """A phase this build does not have was written by a build whose machine differed."""
     c = coordinator_with_mocks
     c.shared_state.phase = "EXPLORE"
 
@@ -1007,10 +682,10 @@ async def test_coordinator_phase_idempotent_within_same_tick(
 ):
     c = coordinator_with_mocks
     try:
-        c.shared_state.framework_agent_phase_enabled = False
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.save(session_dir)
         await c.tick(1)
+        assert c.shared_state.phase == phase_state.PHASE_FRAMEWORK_AGENT
         first_history = list(c.shared_state.phase_history)
         # No state change → no new transition.
         await c.tick(1)
@@ -1019,49 +694,67 @@ async def test_coordinator_phase_idempotent_within_same_tick(
         await c.stop()
 
 
-def test_collect_phase_segments_groups_actions_by_window():
-    from hyperloom.inference_optimizer.breakdown.collectors import collect_phase_segments
-
-    state = {
-        "phase_history": [
-            {
-                "from_phase": "",
-                "to_phase": "PRELUDE",
-                "reason": "phase_entered",
-                "evidence": {"trigger": "fresh_session"},
-                "ts": "2026-05-19T00:00:00+00:00",
-                "ts_unix": 1.0,
-            },
-            {
-                "from_phase": "PRELUDE",
-                "to_phase": "EXPLORE",
-                "reason": "prelude_done",
-                "evidence": {"baseline_tput": 100.0},
-                "ts": "2026-05-19T00:05:00+00:00",
-                "ts_unix": 301.0,
-            },
-        ],
-    }
-    timeline = [
-        {"ts": "2026-05-19T00:01:00+00:00", "action": "baseline"},
-        {"ts": "2026-05-19T00:10:00+00:00", "action": "params"},
-    ]
-    segments = collect_phase_segments(state, timeline, warnings=[])
-    assert len(segments) == 2
-    prelude, explore = segments
-    assert prelude["phase"] == "PRELUDE"
-    assert prelude["exit_reason"] == "prelude_done"
-    assert prelude["elapsed_seconds"] == 300.0
-    assert len(prelude["actions"]) == 1
-    assert prelude["actions"][0]["action"] == "baseline"
-    assert explore["phase"] == "EXPLORE"
-    assert explore["exit_reason"] == ""  # currently active segment
-    assert explore["elapsed_seconds"] is None  # no exit_unix yet
-    assert explore["actions"][0]["action"] == "params"
+# ENABLEMENT phase predicate tests
 
 
-def test_collect_phase_segments_empty_when_history_missing():
-    from hyperloom.inference_optimizer.breakdown.collectors import collect_phase_segments
+def _enablement_state(phase, *, tput=0.0, streak=1, validation_pending=False):
+    """A state the enablement entry and exit branches read."""
+    return SimpleNamespace(
+        phase=phase,
+        stop_reason="",
+        closing_phase=False,
+        baseline_tput=tput,
+        baseline_failure_streak=streak,
+        enablement=SimpleNamespace(validation_pending=validation_pending),
+    )
 
-    assert collect_phase_segments({}, [], warnings=[]) == []
-    assert collect_phase_segments({"phase_history": []}, [], warnings=[]) == []
+
+def test_prelude_enters_enablement_on_a_baseline_failure_streak():
+    """A failed baseline routes PRELUDE to ENABLEMENT when the lane is admitted."""
+    state = _enablement_state("PRELUDE")
+    phase, reason, _ = phase_state.compute_next_phase(state, enablement_enabled=True)
+    assert phase == phase_state.PHASE_ENABLEMENT
+    assert reason == "enablement_entered"
+
+
+def test_prelude_skips_enablement_when_the_lane_is_not_admitted():
+    """An unadmitted lane leaves PRELUDE waiting for a baseline rather than entering the phase."""
+    state = _enablement_state("PRELUDE")
+    assert phase_state.compute_next_phase(state, enablement_enabled=False) is None
+
+
+def test_enablement_exits_once_the_baseline_lands_and_work_drains():
+    """All three conjuncts satisfied is the only way out through the normal exit."""
+    state = _enablement_state("ENABLEMENT", tput=1000.0)
+    out = phase_state.compute_next_phase(state, enablement_enabled=True)
+    assert out is not None
+    phase, reason, evidence = out
+    assert phase != phase_state.PHASE_ENABLEMENT
+    assert reason == "enablement_done"
+    assert phase_state.replay_next_phase(evidence["predicate_inputs"]) == out
+
+
+def test_enablement_holds_while_work_is_in_flight():
+    """A build outliving its round must not let a later phase reopen validation."""
+    state = _enablement_state("ENABLEMENT", tput=1000.0)
+    assert phase_state.compute_next_phase(state, enablement_enabled=True, enablement_in_flight=True) is None
+    inputs = phase_state.workflow_predicate_inputs(state, enablement_enabled=True, enablement_in_flight=True)
+    assert phase_state.replay_next_phase(inputs) is None
+
+
+def test_enablement_holds_while_revalidation_is_pending():
+    """An eval-origin KEEP owes a genuine baseline before the run counts as enabled."""
+    state = _enablement_state("ENABLEMENT", tput=1000.0, validation_pending=True)
+    assert phase_state.compute_next_phase(state, enablement_enabled=True) is None
+
+
+def test_replay_recomputes_from_primitive_baseline_facts():
+    state = _prelude_state(baseline_tput=100.0, usable_sec=1000.0)
+    out = phase_state.compute_next_phase(state)
+    assert out is not None
+    inputs = deepcopy(out[2]["predicate_inputs"])
+
+    assert "matched" not in inputs["baseline"]
+    inputs["baseline"]["tput"] = 0.0
+
+    assert phase_state.replay_next_phase(inputs) is None

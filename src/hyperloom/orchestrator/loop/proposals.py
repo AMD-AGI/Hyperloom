@@ -1,14 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator main loop and runtime protocol manager."""
+"""PendingProposal and the Critic-approved path: materializing an approved proposal into a dispatched task, and writing its KEEP into the recipe KB."""
 
 from __future__ import annotations
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
-from hyperloom.inference_optimizer.breakdown.agent_ownership import (
-    patch_owner_phase,
-)
+from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
@@ -20,14 +19,26 @@ from ..state.task_registry import TERMINAL_STATES
 if TYPE_CHECKING:
     from ..state.task_registry import Task
 
-from .coordinator import (
-    PendingProposal,
-)
 import logging as _logging
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
 _MAX_IDEMPOTENCY_ATTEMPTS: int = 6
+
+
+@dataclass
+class PendingProposal:
+    """A propose_action intent waiting for Critic Review."""
+
+    proposal_msg_id: str
+    from_agent: str
+    action_name: str
+    predicted_gain_pct: float
+    payload: dict[str, Any]
+    decided: bool = False
+    verdict: str | None = None  # approve / reject / redirect / advise / needs_review
+    task_id: str | None = None
 
 
 def apply_critic_grid_filter(
@@ -36,19 +47,7 @@ def apply_critic_grid_filter(
     original_grid: list[Any],
     approved_variant_names: set[str] | None,
 ) -> bool:
-    """Restrict ``params['grid']`` to Critic-approved variant names.
-
-    ``None`` leaves the grid untouched. Non-dict slots cannot carry a name:
-    they pass through only when there is no filter.
-
-    Args:
-        params: Task params mutated in place; must already hold ``grid``.
-        original_grid: The proposer's grid, used for the filter audit count.
-        approved_variant_names: Names that may run; ``None`` keeps the full grid.
-
-    Returns:
-        ``False`` when a filter was set and no variant survived; ``True`` otherwise.
-    """
+    """Restrict ``params['grid']`` to Critic-approved variant names."""
     stamped_grid: list[Any] = []
     for variant in original_grid:
         if not isinstance(variant, dict):
@@ -67,6 +66,84 @@ def apply_critic_grid_filter(
     return bool(stamped_grid)
 
 
+def _framework_recorder(coll: Any, pending: Any) -> Any:
+    """The framework recorder to write one config-arm proposal's step onto.
+
+    ``None`` whenever the step is not a config-arm one to record: another
+    action, or a phase whose event is not open.
+    """
+    if str(getattr(pending, "action_name", "") or "") != "explore":
+        return None
+    if not str(getattr(pending, "proposal_msg_id", "") or ""):
+        return None
+    return coll.phase_framework.timeline()
+
+
+def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
+    """Name the task a proposal became, on the proposal's own row.
+
+    This is what joins the two halves of one decision: the proposal row says
+    what was asked for and what the Critic said about it, the dispatch row
+    beside it on the same phase event says what was run. Without the task id
+    they sit on one event with nothing connecting them, and the join has to be
+    rebuilt from a sidecar map at export.
+    """
+    if not proposal_msg_id or not task_id:
+        return
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        phase_event.record_proposal_outcome(
+            proposal_msg_id=str(proposal_msg_id),
+            materialized=True,
+            task_id=str(task_id),
+        )
+    except Exception:
+        log.debug("phase timeline: proposal task link failed for %s", proposal_msg_id, exc_info=True)
+
+
+def _record_config_routed(coll: Any, pending: Any, *, task_id: str) -> None:
+    """Record that one config-arm grid reached a bench.
+
+    ``task_id`` is the task it became, which its attempts also carry.
+    """
+    recorder = _framework_recorder(coll, pending)
+    if recorder is None:
+        return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import STEP_ROUTED
+
+    recorder.record_proposal_step(
+        pending.proposal_msg_id,
+        step=STEP_ROUTED,
+        outcome="materialized",
+        reason=str(task_id or ""),
+    )
+
+
+def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
+    """Settle one config-arm grid that never reached a bench.
+
+    The empty-grid case is the one that most needs saying: the Critic approved
+    the proposal and then named no variant that survived the filter, so the
+    arm spent a review and benched nothing. Without a settled row that reads
+    as a proposal still under way.
+    """
+    recorder = _framework_recorder(coll, pending)
+    if recorder is None:
+        return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+        DISPOSITION_DROPPED,
+        STEP_DROPPED,
+    )
+
+    recorder.record_proposal_step(pending.proposal_msg_id, step=STEP_DROPPED, reason=reason)
+    recorder.settle_proposal(
+        pending.proposal_msg_id,
+        disposition=DISPOSITION_DROPPED,
+        reason=reason,
+    )
+
+
 def _extra_server_args(payload: Mapping[str, Any]) -> str:
     """Read canonical ``extra_server_args`` from a payload."""
     value = payload.get("extra_server_args")
@@ -79,21 +156,13 @@ def _extra_server_args(payload: Mapping[str, Any]) -> str:
     return str(value)
 
 
-class ProposalsCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+class ProposalsCollaborator(CoordinatorCollaborator):
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
+    _local_recipe_cache: tuple[int, dict[str, Any]] | None
 
     def _workload_canonical_id(self) -> str:
-        """Return the workload's canonical seven-dimension Recipe identity.
-
-        Returns:
-            The canonical Recipe id used by warm-start and writeback.
-        """
+        """Return the workload's canonical seven-dimension Recipe identity."""
         ss = self.shared_state
         workload = ss.model_name or "unknown_model"
         hw = self._kb_hardware_slug()
@@ -104,6 +173,8 @@ class ProposalsCollaborator:
         precision = str(getattr(ss, "precision", "") or "")
         model_type = str(getattr(ss, "model_type", "") or "")
         architectures = getattr(ss, "model_architectures", None) or []
+        from hyperloom.common.perf_metric import agentx_active
+
         return recipe_canonical_id(
             model=workload,
             hardware=hw,
@@ -112,13 +183,11 @@ class ProposalsCollaborator:
             precision=precision,
             model_type=model_type,
             architectures=architectures,
+            scheme=("agentx" if agentx_active(benchmark_mode=getattr(ss, "benchmark_mode", "")) else "inference"),
         )
 
     def _read_local_recipe_row(self) -> dict[str, Any]:
-        """Load the selected store's exact authority row for writes.
-
-        Cached per tick to avoid repeated I/O during multi-variant KEEP batches.
-        """
+        """Load the selected store's exact authority row for writes."""
         if self.recipe_kb is None:
             return {}
         tick = int(getattr(self.shared_state, "tick", 0) or 0)
@@ -132,9 +201,9 @@ class ProposalsCollaborator:
                 )
                 or {}
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - the recipe store may be remote
             row = {}
-        self._coord._local_recipe_cache = (tick, row)
+        self._local_recipe_cache = (tick, row)
         return row
 
     @staticmethod
@@ -211,38 +280,15 @@ class ProposalsCollaborator:
         recipe_overrides: dict[str, Any] | None = None,
         provenance_details: dict[str, Any] | None = None,
     ) -> None:
-        """Read-modify-write helper for the recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Best-effort; lesson/pitfall appended without dedup.
-
-        Args:
-            append_lesson: Optional lesson dict appended to the recipe.
-            append_pitfall: Optional pitfall dict appended to the recipe.
-            recipe_overrides: Optional recipe field overrides merged in (unset
-                fields preserved).
-            provenance_details: Optional provenance metadata recorded with the
-                amendment.
-        """
+        """Read-modify-write helper for the recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Best-effort; lesson/pitfall appended without dedup."""
         config = getattr(getattr(self, "knowledge_plane", None), "config", None)
         if getattr(getattr(config, "mode", None), "value", None) == "remote" or self.recipe_kb is None:
             return
-        # See agentx_kb_write_blocked for why; this is one of three sinks.
-        from hyperloom.orchestrator.actions.executors._workload_envs import (
-            agentx_kb_write_blocked,
-        )
+        from hyperloom.common.perf_metric import agentx_active
 
-        if agentx_kb_write_blocked(self.shared_state):
-            log.info(
-                "_kb_amend_recipe: skipped (AgentX). The recipe KB has no mode or "
-                "workload dimension, so an agentic-replay throughput would overwrite "
-                "a synthetic best_throughput and be tagged isl/osl=%s/%s.",
-                getattr(self.shared_state, "isl", "?"),
-                getattr(self.shared_state, "osl", "?"),
-            )
+        if agentx_active(benchmark_mode=getattr(self.shared_state, "benchmark_mode", "")):
             return
-        try:
-            cid = self._workload_canonical_id()
-        except Exception:  # noqa: BLE001
-            log.exception("_kb_amend_recipe: cid derivation failed")
-            return
+        cid = self._workload_canonical_id()
 
         ss = self.shared_state
         framework = str(getattr(ss, "framework", "") or "")
@@ -360,69 +406,31 @@ class ProposalsCollaborator:
         }
         try:
             self.recipe_kb.put_recipe(**put_kwargs)
-            self._coord._local_recipe_cache = None
-        except Exception:  # noqa: BLE001
+            self._local_recipe_cache = None
+        except Exception:
             log.exception(
                 "_kb_amend_recipe: put_recipe failed for cid=%s",
                 cid,
             )
 
     def _inject_explore_runtime_params(self, params: dict) -> None:
-        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides.
-
-        Args:
-            params: The explore-task params dict mutated in place; existing keys
-                are preserved (``setdefault``).
-        """
+        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides."""
         br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
         if br > 0:
             params.setdefault("baseline_runtime_sec", br)
         baseline_accuracy = float(getattr(self.shared_state, "baseline_accuracy", 0.0) or 0.0)
         if baseline_accuracy > 0:
             params.setdefault("accuracy_baseline", baseline_accuracy)
-        # Warm measure-round anchor for the decision-round overtime kill.
+        # Warm measure-round anchor for admission costing.
         bwr = float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0)
         if bwr > 0:
             params.setdefault("baseline_warm_runtime_sec", bwr)
-        kill_ratio = float(
-            getattr(
-                self.shared_state,
-                "explore_overtime_kill_ratio",
-                0.0,
-            )
-            or 0.0
-        )
-        if kill_ratio > 0:
-            params.setdefault("explore_overtime_kill_ratio", kill_ratio)
-        variant_timeout_override = int(
-            getattr(
-                self.shared_state,
-                "explore_variant_timeout_sec_override",
-                0,
-            )
-            or 0
-        )
-        if variant_timeout_override > 0:
-            params.setdefault("variant_timeout_sec", variant_timeout_override)
-        safety_margin_override = float(
-            getattr(
-                self.shared_state,
-                "explore_variant_timeout_safety_margin",
-                -1.0,
-            )
-        )
-        if safety_margin_override >= 0:
-            params.setdefault(
-                "variant_timeout_safety_margin",
-                safety_margin_override,
-            )
-        # Thread the persisted explore_search ledger so the executor seeds its
-        # tested history; it is evidence only, not an eligibility gate.
-        es = getattr(self.shared_state, "explore_search", None)
-        if isinstance(es, dict) and es.get("tested"):
-            params.setdefault("explore_search", es)
         keep = _phase_state.resolve_keep_threshold(self.shared_state)
         params.setdefault("keep_threshold_pct", keep)
+        # The round-id seed: the executor holds no cross-round state, so the round
+        # it labels itself with has to come from the durable cursor.
+        cursor = int((getattr(self.shared_state, "explore_search", None) or {}).get("cursor") or 0)
+        params.setdefault("explore_search_cursor", cursor)
 
     async def _materialize_approved_proposal(
         self,
@@ -430,19 +438,9 @@ class ProposalsCollaborator:
         *,
         approved_variant_names: set[str] | None = None,
     ) -> None:
-        """Promote an approved proposal into a TaskRegistry entry. Stack-aware actions get current_best's anchor and the base config it was measured on; approved_variant_names filters the explore grid (None keeps full).
-
-        Args:
-            pending: The approved proposal to materialise into a task.
-            approved_variant_names: When set, restricts an explore grid to these
-                Critic-approved variant names; ``None`` keeps the full grid.
-        """
-        # An upstream-PR candidate pre-screen is an ``integrate_patch`` proposal
-        # carrying a candidate id at the top level (rather than params). It has
-        # its own materializer because approval means "spend a bench on this
-        # candidate", and the task params are built from the candidate row.
-        if pending.action_name == "integrate_patch" and (pending.payload or {}).get("framework_agent_candidate_id"):
-            await self._materialize_framework_agent_candidate(pending)
+        """Promote an approved proposal into a TaskRegistry entry. Stack-aware actions get current_best's anchor and the base config it was measured on; approved_variant_names filters the explore grid (None keeps full)."""
+        if is_upstream_pr_prescreen(pending.action_name, pending.payload):
+            await self.phase_framework.materialize_candidate(pending)
             return
         params = dict(pending.payload.get("params") or {})
         # Carry the proposer's predicted gain onto the task for predicted-vs-realized calibration.
@@ -470,6 +468,7 @@ class ProposalsCollaborator:
                         "from_agent": pending.from_agent,
                     },
                 )
+                _record_config_dropped(self, pending, reason="critic_filter_empty_grid")
                 return
         if pending.action_name == "profile":
             # Stamp the server config that produced this trace.
@@ -482,51 +481,22 @@ class ProposalsCollaborator:
             self._inject_explore_runtime_params(params)
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if pending.action_name == "integrate_patch":
-            owner = patch_owner_phase(params)
-            if not owner:
-                specialist_task_id = str(params.get("specialist_task_id") or "")
-                self.state.pending_proposals.pop(
-                    pending.proposal_msg_id,
-                    None,
-                )
-                if specialist_task_id:
-                    self.shared_state.record_specialist_patch_verdict(
-                        specialist_task_id,
-                        "owner_missing",
-                    )
-                    try:
-                        self.shared_state.save(self.session_dir)
-                    except Exception:  # noqa: BLE001
-                        log.exception(
-                            "failed to persist terminal owner-missing verdict for specialist=%s",
-                            specialist_task_id,
-                        )
-                await self._record_observation(
-                    "coordinator",
-                    "observation",
-                    {
-                        "kind": "proposal_materialize_skipped",
-                        "reason": "integrate_patch_owner_missing",
-                        "proposal_msg_id": pending.proposal_msg_id,
-                        "action_name": pending.action_name,
-                        "from_agent": pending.from_agent,
-                        "specialist_task_id": specialist_task_id,
-                    },
-                )
-                return
-            params["source_phase"] = owner
+            # ``source_phase`` is stamped where the specialist is created and carried from there; a
+            # second derivation here would be a second decision, and could write an empty owner.
             params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(self.shared_state))
-            # Seed the patched-eval server with the same base args/config every
-            # other eval server uses, else it launches on bare framework defaults
-            # and crashes at startup regardless of the patch.
+            # Seed the patched-eval server with the same base args/config every other eval server uses, else it
+            # launches on bare framework defaults and crashes at startup regardless of the patch.
             inject_stack_base_params(params, self.shared_state, anchor=True)
             if self.shared_state.baseline_config_path:
                 params.setdefault("config_path", self.shared_state.baseline_config_path)
         lanes, ttl = self._registry_lanes_ttl(pending.action_name)
-        # Content-addressed so a batch of proposals that would launch identical
-        # work collapses to one task; a terminated twin still gets a fresh key so
-        # a legitimate retry after failure is never locked out.
+        # Content-addressed so a batch of proposals that would launch identical work collapses to one task; a
+        # terminated twin still gets a fresh key so a legitimate retry after failure is never locked out.
         raw_key = approved_proposal_idempotency_key(pending.action_name, params)
+        # Preserve the authoritative config-proposal join on the materialized task. Keep this out of the
+        # content-addressed idempotency key above so two proposals for identical grids still collapse to one task.
+        if pending.action_name == "explore" and pending.proposal_msg_id:
+            params["proposal_msg_id"] = str(pending.proposal_msg_id)
         task = None
         was_existing = False
         for attempt in range(_MAX_IDEMPOTENCY_ATTEMPTS):
@@ -537,6 +507,7 @@ class ProposalsCollaborator:
                 idempotency_key=idempotency_key,
                 requires_lanes=lanes,
                 lease_ttl_sec=ttl,
+                dispatch_class="llm",
             )
             if not was_existing:
                 break
@@ -570,6 +541,8 @@ class ProposalsCollaborator:
                 },
             )
             return
+        # The round the authoring specialist opened runs on under this task id.
+        await self._handoff_enablement_round(task)
         # proposal_msg_id is the resume contract for the deferred queue (see replay_for_resume).
         await self.bus.append_and_seq(
             Message.new(
@@ -587,28 +560,27 @@ class ProposalsCollaborator:
         )
         # Trace attribution: record proposal_msg_id -> task_id for the decision-trace collector.
         self._record_proposal_task_map(pending.proposal_msg_id, task.task_id)
+        pending.task_id = task.task_id
+        _record_proposal_materialized(pending.proposal_msg_id, task.task_id)
+        _record_config_routed(self, pending, task_id=task.task_id)
 
     def _record_proposal_task_map(self, proposal_msg_id: str, task_id: str) -> None:
-        """Append one ``{proposal_msg_id -> task_id}`` row to the trace map.
-
-        Lets the collector recover which decision a Critic review served. No-op
-        on empty ids; OSError swallowed so a trace write never breaks the loop.
-        """
+        """Append one ``{proposal_msg_id -> task_id}`` row to the trace map."""
         if not proposal_msg_id or not task_id:
             return
         try:
-            from ..trace.llm_trace import _now_iso
+            from hyperloom.common.timeutil import now_iso
             from hyperloom.common.io import append_jsonl
             from hyperloom.inference_optimizer.session.session_paths import proposal_task_map_path
 
             path = proposal_task_map_path(self.session_dir)
             row = {
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 "proposal_msg_id": str(proposal_msg_id),
                 "task_id": str(task_id),
             }
             append_jsonl(path, row, make_parents=True, sort_keys=True)
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:
             log.debug(
                 "full-trace: proposal_task_map append failed for msg_id=%s task_id=%s",
                 proposal_msg_id,

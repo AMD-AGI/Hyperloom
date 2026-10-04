@@ -1,26 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Read the best prior solutions from the KB Store.
-
-Used by the forge-loop's warm-start: before optimization begins, look up what
-past runs recorded under this kernel's five-tuple, ranked on measured evidence
-ahead of unverified claims. The GPU is part of the address, so every candidate
-returned was recorded on the machine's own architecture and there is nothing to
-filter afterwards. Only an exact implementation signature is eligible for the
-downstream auto-apply gate; every mismatch remains reference.
-
-Identity comes from the SAME resolver the write side uses
-(:mod:`kernelforge.knowledge.loop_identity`), so a read reliably resolves to
-the address a prior run wrote to. Best-effort: missing config, a transport
-error, or an empty store all yield no candidates and the loop cold-starts.
-"""
+"""Read the best prior solutions from the KB Store."""
 
 from __future__ import annotations
 
 import contextlib
 import logging
-import os
 import re
 import shutil
 import tempfile
@@ -83,37 +69,21 @@ def _set_read_status(
 
 @contextlib.contextmanager
 def _candidate_destination(workspace: str) -> Iterator[Path]:
-    """Where the SDK may drop this read's candidates.
-
-    Inside the caller's workspace when there is one, so a run that misapplied a
-    candidate can still be inspected after it ends. Without a workspace the
-    kernel may well live in site-packages, and materializing a patch into a
-    framework install is not something a read should ever do, so an anonymous
-    temporary directory takes its place.
-
-    The directory is never created here: the SDK creates it per candidate, so a
-    cold identity leaves nothing behind.
-    """
+    """Where the SDK may drop this read's candidates."""
     root = str(workspace or "").strip()
     if not root:
         with tempfile.TemporaryDirectory(prefix="forge-loop-kb-") as temporary:
             yield Path(temporary)
         return
     destination = Path(root) / _CANDIDATE_REL
-    # One generation at a time. Bundles are a cache of what this read selected,
-    # so an earlier read's leftovers must not sit beside them looking current.
+    # One generation at a time.
     with contextlib.suppress(OSError):
         shutil.rmtree(destination)
     yield destination
 
 
 def _bundle_patch(bundle: _CandidateBundle) -> str:
-    """Read one materialized candidate's diff off disk, ``""`` when absent.
-
-    Read as bytes: a text handle folds ``\\r\\n`` to ``\\n``, and a patch whose
-    newlines no longer match its source is one ``git apply`` will refuse while
-    still looking like a valid diff.
-    """
+    """Read one materialized candidate's diff off disk, ``\"\"`` when absent."""
     path = Path(bundle.files_dir) / PATCH_ARTIFACT
     if not path.is_file() or path.is_symlink():
         return ""
@@ -135,19 +105,7 @@ def read_best_solution(
     workspace: str = "",
     operator_name: str = "",
 ) -> dict[str, Any] | None:
-    """Return the best prior solution for this operator on this GPU, or None.
-
-    The returned dict carries everything the warm-start needs::
-
-        {
-          "kernel_slug": str, "session_id": str, "solution_slug": str,
-          "speedup": float, "measured_speedup": float | None,
-          "patch_content": str, "strategy": str, "recipe": str,
-          "lessons": str, "metric": dict,
-        }
-
-    Never raises - returns None on any failure so the loop cold-starts.
-    """
+    """Return the best prior solution for this operator on this GPU, or None."""
     try:
         return _read_best_solution_impl(
             config=config,
@@ -179,17 +137,7 @@ def read_top_solutions(
     operator_name: str = "",
     read_status: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return up to ``top_k`` prior solutions for this operator.
-
-    Candidates recorded for this GPU are ranked on measured evidence first and
-    on the claimed speedup only when no consumer has measured them. Each dict
-    has the same shape as ``read_best_solution`` plus reference metadata. Never
-    raises: returns ``[]`` on any failure so the loop cold-starts. Adoption is
-    gated downstream by implementation identity, apply, correctness, and
-    performance checks.
-    When supplied, ``read_status`` receives stable ``read_reason`` and
-    ``read_error`` fields without changing the list return API.
-    """
+    """Return up to ``top_k`` prior solutions for this operator."""
     _set_read_status(read_status, "read_error")
     try:
         return _read_top_solutions_impl(
@@ -206,13 +154,9 @@ def read_top_solutions(
             read_status=read_status,
         )
     except Exception as exc:  # noqa: BLE001 - warm-start read must never break a run
-        error = sanitize_read_error(
-            exc,
-            secrets=(
-                str(getattr(config, "gbrain_token", "") or ""),
-                os.environ.get("GBRAIN_TOKEN", ""),
-            ),
-        )
+        from kernelforge.rewrite_by_flydsl.agent_kb import kb_store_secrets
+
+        error = sanitize_read_error(exc, secrets=kb_store_secrets(config))
         log.warning("experience top-k read failed (cold start): %s", error)
         _set_read_status(
             read_status,
@@ -294,17 +238,15 @@ def _read_top_solutions_impl(
     operator_name="",
     read_status=None,
 ):
-    # Must be the same dimension the write side addresses by, or the read
-    # resolves to an address no run ever wrote to and every start looks cold.
+    # Must be the same dimension the write side addresses by, or the read resolves to an address no run ever wrote to
+    # and every start looks cold.
     gpu_type = str(getattr(config, "gpu_type", "") or "").strip()
     if not gpu_type:
         log.info("experience read skipped: GPU hardware model is required")
         _set_read_status(read_status, "missing_gpu_type")
         return []
 
-    # Identity MUST match the write side exactly, or a read resolves to an
-    # address no prior write reached. Both sides call one resolver so the two
-    # cannot drift apart.
+    # Identity MUST match the write side exactly, or a read resolves to an address no prior write reached.
     from kernelforge.knowledge.loop_identity import resolve_loop_identity
 
     identity, _concrete_op, framework = resolve_loop_identity(
@@ -319,9 +261,8 @@ def _read_top_solutions_impl(
         producer=getattr(config, "producer", ""),
     )
 
-    # Imported here rather than at module scope: the facade's identity module
-    # imports the sink this module also imports, so a top-level import would
-    # close a cycle.
+    # Imported here rather than at module scope: the facade's identity module imports the sink this module also
+    # imports, so a top-level import would close a cycle.
     from kernelforge.rewrite_by_flydsl.agent_kb import KernelRecipeKB
 
     kb = KernelRecipeKB.open_identity(identity, config)
@@ -345,22 +286,45 @@ def _read_top_solutions_impl(
     )
     log.info("experience read: identity=%s", kb.canonical_id)
 
-    # Materialize the Top-N and read them back off disk: that is the SDK's
-    # normal consumer path, it downloads each selected session once under its
-    # integrity checks, and it leaves the candidates where a person debugging
-    # the run can look at them. The GPU and the producer are part of the
-    # address, so nothing returned here needs filtering out.
-    #
-    # The patch is read inside the block because a workspace-less caller gets a
-    # temporary destination that disappears on the way out.
+    # Materialize the Top-N and read them back off disk: that is the SDK's normal consumer path, it downloads each
+    # selected session once under its integrity checks, and it leaves the candidates where a person debugging the run
+    # can look at them.
     with _candidate_destination(workspace) as destination:
         candidates = kb.read_top_n(destination, limit=top_k)
         if kb.reason:
-            # The facade swallows transport failures into ``reason``; surface it
-            # as a read error so a cold start is not mistaken for an empty store.
+            # The facade swallows transport failures into ``reason``; surface it as a read error so a cold start is
+            # not mistaken for an empty store.
             log.warning("experience read failed (cold start): %s", kb.reason)
             _set_read_status(read_status, "read_error", kb.reason)
             return []
+        selected_kb = kb
+        match_tier = "exact"
+        if not candidates:
+            fallback_ids = kb.fallback_canonical_ids()
+            if kb.reason:
+                log.warning("experience fuzzy identity search failed: %s", kb.reason)
+                _set_read_status(read_status, "read_error", kb.reason)
+                return []
+            for fallback_id in fallback_ids:
+                donor_kb = KernelRecipeKB.open_canonical_id(fallback_id, config)
+                candidates = donor_kb.read_top_n(destination, limit=top_k)
+                if donor_kb.reason:
+                    log.warning(
+                        "experience fuzzy candidate read failed for %s: %s",
+                        fallback_id,
+                        donor_kb.reason,
+                    )
+                    _set_read_status(read_status, "read_error", donor_kb.reason)
+                    return []
+                if candidates:
+                    selected_kb = donor_kb
+                    match_tier = "fuzzy"
+                    log.info(
+                        "experience fuzzy identity match: requested=%s selected=%s",
+                        kb.canonical_id,
+                        fallback_id,
+                    )
+                    break
         if not candidates:
             log.info("experience read: no prior record for %s", kb.canonical_id)
             _set_read_status(read_status, "no_prior_record")
@@ -368,7 +332,7 @@ def _read_top_solutions_impl(
 
         out: list[dict[str, Any]] = [
             _build_solution_dict(
-                canonical_id=kb.canonical_id,
+                canonical_id=selected_kb.canonical_id,
                 prior=bundle,
                 patch=_bundle_patch(bundle),
                 consumer_signature=consumer_signature,
@@ -377,6 +341,10 @@ def _read_top_solutions_impl(
             )
             for bundle in candidates
         ]
+        if read_status is not None and match_tier != "exact":
+            read_status["match_tier"] = match_tier
+            read_status["requested_canonical_id"] = kb.canonical_id
+            read_status["selected_canonical_id"] = selected_kb.canonical_id
     if not out:
         log.info("experience read: no usable record for %s", kb.canonical_id)
         _set_read_status(read_status, "no_prior_record")

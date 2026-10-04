@@ -1,29 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Softmax kernel builder using the @flyc.kernel API — the file forge-loop edits.
-
-softmax(x)_i = exp(x_i - max(x)) / sum(exp(x - max(x)))
-
-Uses exp2(x * log2e) for fast exponentiation.
-Register-buffers the entire row across three passes: max, exp+sum, normalize.
-
-Two paths:
-  - Fast path (N % tile_cols == 0): buffer_load/store vectorised access.
-  - Generic path (arbitrary N): scalar copy_atom_call with masking.
-
-forge-loop contract (do NOT break these — the driver relies on them):
-  * Keep the public builder ``build_softmax_module(M, N, dtype_str)``; it returns
-    a ``launch_fn`` and stays specialised per (M, N, dtype).
-  * The returned ``launch_fn(A, C, m_in, stream=...)`` MUST accept a ``stream``
-    kwarg and launch the kernel on THAT stream. The driver passes the active
-    (CUDA-graph capture) stream through it; a kernel that ignores the stream and
-    launches on the default stream is NOT captured and silently mis-benchmarks.
-  * Stay in FlyDSL — do not rewrite in HIP/CUDA/Triton.
-
-The baseline below uses the scalar generic path (the vectorised fast path is
-gated off), which is correct but leaves obvious headroom for the loop to explore.
-"""
+"""Softmax kernel builder using the @flyc.kernel API — the file forge-loop edits."""
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -149,9 +127,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             c0_idx = fx.Index(0)
             return SmemPtr.load(s_red_buffer, [c0_idx])
 
-        # ==================================================================
         # Fast path: N is a multiple of tile_cols
-        # ==================================================================
         if const_expr(False and N >= tile_cols and N % tile_cols == 0):
             from flydsl.expr import math as fmath
 
@@ -223,9 +199,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 _store_vec(out_e, c_div, out_idx)
 
         else:
-            # ==============================================================
             # Generic path: scalar for arbitrary N
-            # ==============================================================
             elem_dtype = Numeric.from_ir_type(elem_type)
 
             A_buf = fx.rocdl.make_buffer_tensor(A)

@@ -10,10 +10,10 @@ from unittest.mock import patch
 
 import pytest
 
-# kernel.conc_sweep and actions.executors.conc_sweep import each other; this
-# resolves only once executors is already in sys.modules.
+# kernel.conc_sweep and actions.executors.conc_sweep import each other; this resolves only once executors is already
+# in sys.modules.
 from hyperloom.orchestrator.kernel.conc_sweep import _build_roofline_ceiling
-from hyperloom.orchestrator.kernel.roofline_ceiling import ModelMeta
+from hyperloom.inference_optimizer.roofline_ceiling import ModelMeta
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 _LOAD_META_PATH = "hyperloom.orchestrator.kernel.conc_sweep.load_model_meta"
@@ -61,6 +61,7 @@ def _qwen3_30b_a3b_meta() -> ModelMeta:
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
         weight_dtype_bytes=dtype_bytes,
+        expert_weight_dtype_bytes=dtype_bytes,
         active_weight_bytes=active_weight_bytes,
         num_experts=num_experts,
         experts_per_tok=experts_per_tok,
@@ -190,6 +191,7 @@ def test_dense_fallback_no_moe_fields() -> None:
         num_kv_heads=8,
         head_dim=128,
         weight_dtype_bytes=2.0,
+        expert_weight_dtype_bytes=2.0,
         active_weight_bytes=0,
         num_experts=0,
         experts_per_tok=0,

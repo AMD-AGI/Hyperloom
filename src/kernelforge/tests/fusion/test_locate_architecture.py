@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Source resolution must follow ``architectures``, not the model_type filename.
-
-Every model family added after the filename convention broke down is covered
-here: an implementation named after another family, a multimodal wrapper that
-delegates to a decoder in a sibling file, and a per-vendor fork.
-"""
+"""Source resolution must follow ``architectures``, not the model_type filename."""
 
 from __future__ import annotations
 
@@ -142,11 +137,7 @@ def test_unknown_framework_returns_empty(tmp_path: Path) -> None:
 def test_a_pinned_root_outranks_the_installed_vllm_the_registry_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The registry answers for the importable vLLM, not the pinned one.
-
-    The author stage patches ``--framework-root``, so resolving outside it hands
-    the campaign a file no patch of it can reach.
-    """
+    """The registry answers for the importable vLLM, not the pinned one."""
     models = _models_dir(tmp_path)
     (models / "qwen3.py").write_text(DECODER.format(prefix="Qwen3"), encoding="utf-8")
     model_path = _model_dir(tmp_path, model_type="qwen3", architectures=["Qwen3ForCausalLM"])

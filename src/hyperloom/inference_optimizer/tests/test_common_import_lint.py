@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Import-lint guard for ``hyperloom.common``.
-
-``hyperloom.common`` is the zero-dependency shared library: it may import only
-the stdlib (plus ``httpx``) and must NEVER import a first-party package. This
-test statically parses every module under ``hyperloom.common`` and fails if a
-forbidden import creeps in.
-"""
+"""Import-lint guard for ``hyperloom.common``."""
 
 from __future__ import annotations
 

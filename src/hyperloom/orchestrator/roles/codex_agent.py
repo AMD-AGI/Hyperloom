@@ -23,9 +23,15 @@ from hyperloom.inference_optimizer.protocol.intent import (
     validate_envelope,
 )
 
-from ..trace.llm_trace import new_call_id
-from .agent_role import DEFAULT_CODEX_MODEL
-from .base import BackendError, BackendTurnResult, LLMCallFailed, parse_call_timeout_env, safe_int
+from hyperloom.inference_optimizer.trace.llm_trace import new_call_id
+from hyperloom.common.llm_config import DEFAULT_CODEX_MODEL
+from .base import (
+    BackendError,
+    BackendTurnResult,
+    LLMCallFailed,
+    parse_call_timeout_env,
+    safe_int,
+)
 
 
 _BARE_INTENTS_RE = re.compile(r'(\{.*?"intents".*\})', re.DOTALL)
@@ -43,7 +49,6 @@ your final response as exactly one JSON object:
         "gap_canonical_id": "...",
         "domain": "...",
         "proposal_set": [],
-        "empty": true,
         "summary": "..."
       }
     }
@@ -95,20 +100,7 @@ class CodexAgentBackend:
         disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
-        """Run one agentic Codex turn and parse its structured intent envelope.
-
-        Args:
-            prompt: The composed turn prompt; sent as the user turn.
-            system_prompt: Sent as thread developer instructions alongside the
-                specialist output contract.
-            disallowed_tools: Unused. Codex containment is the sandbox preset;
-                the Claude tool names have no counterpart here.
-            max_turns: Unused. The SDK owns the agent loop within one turn.
-
-        Returns:
-            BackendTurnResult: The validated intents plus raw reply text and
-            model/usage metadata.
-        """
+        """Run one agentic Codex turn and parse its structured intent envelope."""
         try:
             resolved_sandbox = resolve_codex_sandbox_mode(
                 sandbox_mode=self.sandbox_mode,

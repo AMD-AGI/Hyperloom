@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared stdlib-only helpers for the standalone kernel-agent tools.
-
-Deduplicates run-status / log / JSON helpers and small source heuristics
-copied across kernel_optimization.py, tracelens_analysis.py, and siblings.
-"""
+"""Shared stdlib-only helpers for the standalone kernel-agent tools."""
 
 from __future__ import annotations
 
@@ -31,12 +27,7 @@ def atomic_write_json(
     ensure_ascii: bool = True,
     trailing_newline: bool = True,
 ) -> None:
-    """Write JSON to ``path`` via a temp file then rename, creating parents.
-
-    The temp file is opened UTF-8 explicitly, like every other writer here: with
-    ``ensure_ascii=False`` callers the payload carries non-ASCII, which a
-    locale-derived default encoding cannot always represent.
-    """
+    """Write JSON to ``path`` via a temp file then rename, creating parents."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False, encoding="utf-8") as tmp:
         json.dump(data, tmp, indent=indent, sort_keys=sort_keys, ensure_ascii=ensure_ascii)
@@ -67,12 +58,7 @@ def append_jsonl(path: Path, row: Any, *, sort_keys: bool = True, ensure_ascii: 
 
 
 def read_json(path: str | Path | None, default: Any = None, *, require_dict: bool = False) -> Any:
-    """Parse JSON from ``path``; return ``default`` on missing/malformed input.
-
-    Kernel-local, stdlib-only mirror of ``common.jsonio.read_json`` tolerant
-    mode: a falsy path, an ``OSError`` / ``JSONDecodeError``, or — under
-    ``require_dict`` — a non-object payload all yield ``default``.
-    """
+    """Parse JSON from ``path``; return ``default`` on missing/malformed input."""
     if not path:
         return default
     try:
@@ -132,11 +118,7 @@ def safe_float(
 
 
 def extract_last_json(text: str) -> dict[str, Any] | None:
-    """Return the last top-level JSON object embedded in ``text``.
-
-    The scanner respects quoted strings and escapes, so braces inside JSON
-    string values do not disturb depth tracking.
-    """
+    """Return the last top-level JSON object embedded in ``text``."""
     if not text:
         return None
     start: int | None = None
@@ -174,11 +156,7 @@ def extract_last_json(text: str) -> dict[str, Any] | None:
 
 
 def truthy(val: Any) -> bool:
-    """Interpret common truthy spellings from JSON or env strings.
-
-    A real ``bool`` is returned as-is; any other value is stringified,
-    stripped, lower-cased, and matched against ``1/true/yes/on``.
-    """
+    """Interpret common truthy spellings from JSON or env strings."""
     if isinstance(val, bool):
         return val
     return str(val).strip().lower() in ("1", "true", "yes", "on")
@@ -188,11 +166,7 @@ _COMPILED_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", "
 
 
 def source_text_looks_complete(text: str, suffix: str) -> bool:
-    """Heuristically decide whether ``text`` is a complete source file.
-
-    Python must compile and carry a top-level marker; compiled sources must
-    carry a C/C++/HIP marker. Fenced text is rejected.
-    """
+    """Heuristically decide whether ``text`` is a complete source file."""
     stripped = text.strip()
     if not stripped or "```" in stripped:
         return False

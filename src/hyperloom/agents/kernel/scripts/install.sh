@@ -156,12 +156,8 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
-# TraceLens v1.0 integration: head of
-# release/hyperloom_integration_v1.0. The optional internal extension tracks
-# the matching release/hyperloom_integration_v1.0 branch of
-# AMD-AGI/TraceLens-internal, but Hyperloom keeps no pin/URL for it — the
-# operator supplies it via TRACELENS_INTERNAL_ROOT.
-TRACELENS_REF="a59a9c165bb64c7c416fd7cf79149803d552e43c"
+# TraceLens SHA.
+TRACELENS_REF="b79f9065af079e1adbd42c0454e2b64bd3674fdd"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip
@@ -176,6 +172,11 @@ _canonicalize_path() {
   local p="${1:-}"
   [ -z "$p" ] && return 0
   readlink -f -- "$p" 2>/dev/null || printf '%s' "${p%/}"
+}
+_is_git_checkout_root() {
+  local root="$1" top
+  top="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$top" ] && [ "$(_canonicalize_path "$top")" = "$(_canonicalize_path "$root")" ]
 }
 # Mirror Path.home() (posixpath.expanduser) so paths written here land where the
 # Python readers look: a *present* HOME wins even when empty, else the uid's passwd entry.
@@ -319,6 +320,16 @@ fi
 # internal naming changed — no upstream GEAK branch was renamed.
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 GEAK_REF="${GEAK_REF:-main}"
+_geak_root_is_operator_override=""
+if [ -n "${GEAK_ROOT:-}" ]; then
+  # Re-exported GEAK@* cache paths remain installer-managed across reruns.
+  _geak_root_canonical="$(_canonicalize_path "${GEAK_ROOT}")"
+  _geak_cache_root="$(_canonicalize_path "${_open_source_root}")"
+  if [ "$(dirname "${_geak_root_canonical}")" != "${_geak_cache_root}" ] \
+     || [[ "$(basename "${_geak_root_canonical}")" != GEAK@* ]]; then
+    _geak_root_is_operator_override=1
+  fi
+fi
 # GEAK_REF defaults to a branch (`main`), so resolving it to a SHA hits the
 # network (git ls-remote). Only do that when GEAK_ROOT was not overridden -- an
 # operator-pinned root must not pay for (or fail on) a network round-trip.
@@ -697,16 +708,88 @@ ensure_moreutils() {
   command -v ts >/dev/null 2>&1 || warn "ts still missing after apt-get install moreutils"
 }
 
+_RAY_VERSION_WAS_SET="${RAY_VERSION+x}"
+_RAY_CLI_CLICK_MAX_VERSION_WAS_SET="${RAY_CLI_CLICK_MAX_VERSION+x}"
 RAY_VERSION="${RAY_VERSION:-2.44.1}"
 # Ray 2.44.1's CLI currently fails during import with click >= 8.3.0.
 RAY_CLI_CLICK_MAX_VERSION="${RAY_CLI_CLICK_MAX_VERSION:-8.3.0}"
 RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
 CLICK_INSTALL_SPEC="click<${RAY_CLI_CLICK_MAX_VERSION}"
 
+# The default Ray pin predates newer CPython ABIs (no cp314 wheels before
+# 2.55.0), so on such interpreters the exact pin cannot resolve at all. Print
+# the lowest published version that does ship a wheel here, or nothing when
+# the pin itself is installable. Only consulted for the built-in default; an
+# operator-supplied RAY_VERSION is always honoured as-is.
+lowest_ray_version_for_interpreter() {
+  local pinned="$1"
+  RAY_PINNED_VERSION="$pinned" python3 - <<'PY' 2>/dev/null
+import os
+import re
+import subprocess
+import sys
+
+pinned = os.environ["RAY_PINNED_VERSION"]
+
+
+def as_tuple(version):
+    parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
+    parts.extend([0] * (3 - len(parts)))
+    return tuple(parts[:3])
+
+
+try:
+    out = subprocess.run(
+        [sys.executable, "-m", "pip", "index", "versions", "ray"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    ).stdout
+except Exception:
+    raise SystemExit(0)
+
+match = re.search(r"Available versions:\s*(.+)", out)
+if not match:
+    raise SystemExit(0)
+# pip filters this list by the running interpreter, so anything listed has a
+# usable wheel here.
+available = [v.strip() for v in match.group(1).split(",") if v.strip()]
+if pinned in available:
+    raise SystemExit(0)
+newer = sorted((v for v in available if as_tuple(v) >= as_tuple(pinned)), key=as_tuple)
+if newer:
+    print(newer[0])
+PY
+}
+
+# Relax the pin only when the default is genuinely uninstallable on this
+# interpreter, and say so loudly: the kernel-agent runtime version is part of
+# what a release gate certifies.
+resolve_ray_version() {
+  [ -n "$_RAY_VERSION_WAS_SET" ] && return 0
+  local resolved
+  resolved="$(lowest_ray_version_for_interpreter "$RAY_VERSION")"
+  [ -n "$resolved" ] || return 0
+  warn "ray ${RAY_VERSION} has no wheel for this interpreter ($(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)); using ray ${resolved} instead"
+  RAY_VERSION="$resolved"
+  RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
+  # The click ceiling exists for 2.44.1's CLI import bug; past that version it
+  # would pin click below what the newer Ray itself ships against.
+  if [ -z "$_RAY_CLI_CLICK_MAX_VERSION_WAS_SET" ]; then
+    RAY_CLI_CLICK_MAX_VERSION=""
+    CLICK_INSTALL_SPEC=""
+  fi
+}
+
 ensure_ray() {
-  log "ensuring ${RAY_INSTALL_SPEC} and ${CLICK_INSTALL_SPEC}"
+  resolve_ray_version
+  log "ensuring ${RAY_INSTALL_SPEC}${CLICK_INSTALL_SPEC:+ and ${CLICK_INSTALL_SPEC}}"
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$CLICK_INSTALL_SPEC" "$RAY_INSTALL_SPEC"
+    if [ -n "$CLICK_INSTALL_SPEC" ]; then
+      run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$CLICK_INSTALL_SPEC" "$RAY_INSTALL_SPEC"
+    else
+      run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_INSTALL_SPEC"
+    fi
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
     RAY_VERSION="$RAY_VERSION" RAY_CLI_CLICK_MAX_VERSION="$RAY_CLI_CLICK_MAX_VERSION" python3 - <<'PY'
@@ -728,7 +811,7 @@ def _version_tuple(version: str) -> tuple[int, int, int]:
 if ray.__version__ != RAY_VERSION:
     raise SystemExit(f"ray version mismatch: {ray.__version__} != {RAY_VERSION}")
 click_version = md.version("click")
-if _version_tuple(click_version) >= _version_tuple(RAY_CLI_CLICK_MAX_VERSION):
+if RAY_CLI_CLICK_MAX_VERSION and _version_tuple(click_version) >= _version_tuple(RAY_CLI_CLICK_MAX_VERSION):
     raise SystemExit(f"click version incompatible with Ray CLI: {click_version} >= {RAY_CLI_CLICK_MAX_VERSION}")
 try:
     from ray.scripts.scripts import main as _ray_cli_main  # noqa: F401
@@ -895,6 +978,7 @@ PY
 _pip_install_editable() {
   local root="$1"
   local label="$2"
+  local extras="${3:-}"
   if [ ! -d "$root" ]; then
     if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
       warn "${label} checkout not found: ${root}"
@@ -912,8 +996,10 @@ _pip_install_editable() {
   fi
   log "ensuring ${label} editable install from ${root}"
   if [ "$CHECK_ONLY" -eq 0 ]; then
+    local spec="."
+    [ -n "$extras" ] && spec=".[${extras}]"
     # Do not use bash -lc: login profiles reset PATH (drops venv) and break pip.
-    run sh -c "cd '$root' && python3 -m pip install -q --no-cache-dir --break-system-packages -e ."
+    run sh -c "cd '$root' && python3 -m pip install -q --no-cache-dir --break-system-packages -e '$spec'"
   fi
   return 0
 }
@@ -1042,7 +1128,7 @@ ensure_tracelens() {
       die "TraceLens root not found: $TRACELENS_ROOT"
     fi
   fi
-  _pip_install_editable "$TRACELENS_ROOT" "TraceLens (public)" || {
+  _pip_install_editable "$TRACELENS_ROOT" "TraceLens (public)" "kernel_source" || {
     [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ] || die "install AMD-AGI/TraceLens at TRACELENS_ROOT=${TRACELENS_ROOT}"
   }
 
@@ -1059,17 +1145,10 @@ ensure_tracelens() {
     export TRACELENS_ROOT
     return 0
   fi
-  # Read-only source guard. When
-  # $TRACELENS_INTERNAL_ROOT is on a read-only mount (the WekaFS default), pip
-  # install -e fails because it must write *.egg-info into the source
-  # tree, and at runtime tools/tracelens_analysis.py re-runs the same
-  # editable install in a subprocess on every trace_analyze request,
-  # producing a tight failure loop. Detecting unwritable source up front
-  # and mirroring to $TRACELENS_MIRROR_DIR lets both
-  # the install-time and the runtime pip install land on a writable
-  # filesystem. write_env_file() emits the resulting TRACELENS_INTERNAL_ROOT into
-  # the pod-local kernel-agent env so subsequent CLI subprocesses inherit
-  # the mirror.
+  # Editable installation needs writable source for package metadata. Mirror
+  # read-only checkouts before the install-time pip call; runtime analysis only
+  # checks dependencies. write_env_file() preserves the mirror path for later
+  # CLI subprocesses.
   if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     if ! ( : > "$TRACELENS_INTERNAL_ROOT/.hl_write_test" ) 2>/dev/null; then
       log "TraceLens-internal root not writable ($TRACELENS_INTERNAL_ROOT); mirroring to $TRACELENS_MIRROR_DIR"
@@ -1287,10 +1366,20 @@ write_env_file() {
 # interface/run_e2e.py runner, then pip-install the GEAK package + claude_agent_sdk.
 ensure_geak() {
   log "ensuring e2e optimizer geak (GEAK@${GEAK_REF}, formerly PerfSkills)"
-  if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    mkdir -p "${GEAK_ROOT}"
-  fi
-  if [ ! -d "${GEAK_ROOT}/.git" ]; then
+  if [ -n "${_geak_root_is_operator_override:-}" ]; then
+    if ! _is_git_checkout_root "${GEAK_ROOT}"; then
+      if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
+        warn "operator-supplied GEAK_ROOT is not a git checkout: ${GEAK_ROOT}"
+      else
+        die "operator-supplied GEAK_ROOT is not a git checkout: ${GEAK_ROOT}"
+      fi
+    else
+      log "using operator-supplied GEAK checkout unchanged: ${GEAK_ROOT}"
+    fi
+  elif [ ! -d "${GEAK_ROOT}/.git" ]; then
+    if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
+      mkdir -p "${GEAK_ROOT}"
+    fi
     if [[ "$GEAK_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
       run git init -q "${GEAK_ROOT}"
       run git -C "${GEAK_ROOT}" remote add origin "$GEAK_REPO"
@@ -1332,45 +1421,85 @@ ensure_geak() {
   fi
 }
 
-# The forge backend drives the `claude` CLI inside its autonomous loop
-# (see forge_submit._apply_kernel_backend_env), so it needs Node/npm, the claude npm
-# CLI, and ~/.claude auth.
+# Node/npm, the claude npm CLI and ~/.claude auth back every kernel backend --
+# GEAK drives the same CLI through GEAK_CLAUDE_BIN -- so the CLI is ensured
+# regardless of which backend KERNEL_OPT_BACKEND_ORDER selects. Only a Claude
+# runtime is additionally validated, since FORGE_AGENT_CLI may name another tool.
 ensure_forge_claude_cli() {
-  log "ensuring claude CLI for the forge backend"
-  if [ "$CHECK_ONLY" -eq 1 ]; then
-    command -v claude >/dev/null 2>&1 || warn "claude CLI missing; forge backend will fail to drive its kernel_backend"
-    return 0
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would install Node.js/npm + @anthropic-ai/claude-code and write ~/.claude/config.json"
-    return 0
-  fi
-  # Node.js 20 from NodeSource when npm is absent (claude CLI is an npm package).
-  if ! command -v npm >/dev/null 2>&1; then
-    if ! command -v apt-get >/dev/null 2>&1; then
-      warn "npm missing and apt-get unavailable; install Node.js 20 manually for the forge claude CLI"
+  local _forge_cli_action _forge_check="$CHECK_ONLY"
+  while :; do
+    _forge_cli_action="$(python3 - "$_forge_check" "$DRY_RUN" <<'PY'
+import os
+import shutil
+import sys
+from pathlib import Path
+
+from hyperloom.common.env import env_str
+from kernelforge.agent_backends.claude import ClaudeBackend, resolve_claude_cli
+
+
+def claude_runtime():
+    """Return Forge's runtime when it executes Claude, else None.
+
+    An unnamed provider is not this installer's failure to report: the default
+    CLI is still ensured, and the backend raises when the session starts.
+    """
+    from kernelforge.config import Config
+
+    try:
+        runtime = Config.from_env().agent_runtime()
+    except ValueError:
+        return None
+    return runtime if runtime.provider == "claude" else None
+
+
+if sys.argv[2] == "1":
+    print("dry-run")
+else:
+    # FORGE_AGENT_CLI names whichever provider Forge runs, so only a Claude
+    # runtime is validated; every backend still gets the default CLI, which
+    # GEAK drives through GEAK_CLAUDE_BIN.
+    runtime = claude_runtime()
+    explicit = runtime.executable if runtime is not None else ""
+    selected = resolve_claude_cli(explicit)
+    missing = selected == "claude" and shutil.which(selected) is None and not Path(selected).exists()
+    install = sys.argv[1] == "0" and not explicit and (missing or env_str("HYPERLOOM_CLAUDE_CODE_VERSION"))
+    if not install and runtime is not None:
+        ClaudeBackend.validate_runtime(runtime)
+    print("install" if install else "ready")
+PY
+)" || {
+      # --check-only reports on the box; it must not fail the installer over it.
+      [ "$CHECK_ONLY" -eq 0 ] || { warn "claude CLI missing or unusable; the kernel backends will fail to drive it"; return 0; }
+      die "Forge Claude CLI validation failed"
+    }
+    case "$_forge_cli_action" in
+      dry-run) log "would ensure the Claude CLI and write ~/.claude/config.json"; return 0 ;;
+      ready) break ;;
+    esac
+    # Node.js 20 from NodeSource when npm is absent (claude CLI is an npm package).
+    if ! command -v npm >/dev/null 2>&1; then
+      if ! command -v apt-get >/dev/null 2>&1; then
+        warn "npm missing and apt-get unavailable; install Node.js 20 manually for the forge claude CLI"
+        return 0
+      fi
+      command -v curl >/dev/null 2>&1 || { apt-get update >/dev/null; apt-get -y install ca-certificates curl gnupg >/dev/null; }
+      log "installing Node.js 20 from NodeSource"
+      local ns_script="/tmp/nodesource_setup_20.x"
+      if curl -fsSL "https://deb.nodesource.com/setup_20.x" -o "$ns_script" \
+         && echo "2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be  ${ns_script}" | sha256sum -c - >/dev/null 2>&1 \
+         && bash "$ns_script" >/dev/null 2>&1; then
+        apt-get -y install nodejs >/dev/null || { warn "nodejs install failed; forge claude CLI unavailable"; return 0; }
+      else
+        warn "NodeSource setup failed; forge claude CLI unavailable"
+        return 0
+      fi
+    fi
+    if ! command -v npm >/dev/null 2>&1; then
+      warn "npm still missing; forge claude CLI unavailable"
       return 0
     fi
-    command -v curl >/dev/null 2>&1 || { apt-get update >/dev/null; apt-get -y install ca-certificates curl gnupg >/dev/null; }
-    log "installing Node.js 20 from NodeSource"
-    local ns_script="/tmp/nodesource_setup_20.x"
-    if curl -fsSL "https://deb.nodesource.com/setup_20.x" -o "$ns_script" \
-       && echo "2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be  ${ns_script}" | sha256sum -c - >/dev/null 2>&1 \
-       && bash "$ns_script" >/dev/null 2>&1; then
-      apt-get -y install nodejs >/dev/null || warn "nodejs install failed; forge claude CLI unavailable"
-    else
-      warn "NodeSource setup failed; forge claude CLI unavailable"
-      return 0
-    fi
-  fi
-  # Claude Code CLI install. $HYPERLOOM_CLAUDE_CODE_VERSION pins a specific npm
-  # version and FORCE-reinstalls it (overriding one already baked into the base
-  # image) — needed because newer claude-code releases reject models the gateway
-  # still serves (e.g. retired Opus 4). When unset, keep the legacy behaviour:
-  # install the latest only when the CLI is absent.
-  if command -v npm >/dev/null 2>&1; then
-    # A global install needs a writable prefix. Off root /usr/local is not one,
-    # and `run` has no failure path, so this would abort the whole installer.
+    # A version pin reinstalls the default CLI, never an explicit FORGE_AGENT_CLI.
     local _npm_prefix="/usr/local" _npm_home
     if [ ! -w /usr/local/lib ]; then
       _npm_home="$(_home_dir || true)"
@@ -1378,18 +1507,15 @@ ensure_forge_claude_cli() {
         warn "no writable npm prefix (/usr/local and HOME both unavailable); forge claude CLI unavailable"
         return 0
       fi
-      # ~/.local/bin is where the CLI probe in write_env_file already looks.
       _npm_prefix="${_npm_home}/.local"
       mkdir -p "${_npm_prefix}/lib" "${_npm_prefix}/bin"
     fi
-    if [ -n "${HYPERLOOM_CLAUDE_CODE_VERSION:-}" ]; then
-      run npm config set prefix "${_npm_prefix}"
-      run npm install -g "@anthropic-ai/claude-code@${HYPERLOOM_CLAUDE_CODE_VERSION}"
-    elif ! command -v claude >/dev/null 2>&1; then
-      run npm config set prefix "${_npm_prefix}"
-      run npm install -g @anthropic-ai/claude-code
-    fi
-  fi
+    run npm config set prefix "${_npm_prefix}"
+    run npm install -g "@anthropic-ai/claude-code${HYPERLOOM_CLAUDE_CODE_VERSION:+@${HYPERLOOM_CLAUDE_CODE_VERSION}}"
+    export PATH="${_npm_prefix}/bin:$PATH"
+    _forge_check=1
+  done
+  [ "$CHECK_ONLY" -eq 0 ] || return 0
   # ~/.claude authenticates the Claude Code CLI for Anthropic-compatible flows.
   # Its readers resolve Path.home(), so ~ must come from _home_dir here too.
   local _claude_key="${_ANTHROPIC_KEY_VAL:-}"
@@ -1447,7 +1573,7 @@ PY
       warn "${tool} not found (TraceLens server patcher will fail-soft without it)"
     fi
   done
-  if [ -d "${GEAK_ROOT}/.git" ]; then
+  if _is_git_checkout_root "${GEAK_ROOT}"; then
     log "e2e optimizer geak ref: $(git -C "${GEAK_ROOT}" describe --tags --always 2>/dev/null || echo unknown)"
   else
     warn "e2e optimizer geak checkout missing at ${GEAK_ROOT}"

@@ -1,21 +1,4 @@
-"""The Claude backend must honour ``AgentRunSpec.timeout_sec``.
-
-The SDK stream is an unbounded ``async for``: the model keeps the turn until it
-answers, hits its turn cap, or the transport fails. Nothing here bounds the wall
-clock, so a session that neither answers nor caps runs until something outside
-kills it -- the exact gap that let long implementer sessions burn the campaign's
-clock (the turn cap fired 2.2% of the time and could not bound time at all).
-
-These tests are GPU-free and SDK-free: ``query`` is a fake async generator that
-either hangs past the deadline or completes normally, and the subprocess reaper
-is replaced with a recorder so no real ``/proc`` scan runs. They pin the
-contract the resume/orchestrator layers depend on: a session that outlives its
-budget is stopped, its handle preserved, its leftovers reaped, and its end
-reason reported as the terminal ``timeout`` -- not the retryable ``sdk_error``.
-
-That the reaper itself works is a separate question, answered against real
-processes in ``tests/test_process_reaping.py``.
-"""
+"""The Claude backend must honour ``AgentRunSpec.timeout_sec``."""
 
 from __future__ import annotations
 
@@ -97,13 +80,7 @@ def _hanging_backend(messages, captured):
 
 
 def _run_bounded(coro, *, guard_sec=5.0):
-    """Run ``coro`` under an outer guard that trips only if nothing bounds it.
-
-    Before the backend honours its own deadline the fake stream hangs forever,
-    so this guard is what turns "the bug is present" into a clean failure rather
-    than a wedged worker. Once the deadline is honoured the coroutine returns
-    well inside the guard and the guard never fires.
-    """
+    """Run ``coro`` under an outer guard that trips only if nothing bounds it."""
 
     async def _guarded():
         return await asyncio.wait_for(coro, timeout=guard_sec)
@@ -135,8 +112,8 @@ def test_timeout_after_session_id_returns_a_resumable_terminal_result(monkeypatc
     assert result.session_id == "sess-timeout"
     assert "partial work" in result.text
     assert "timed out" in result.stderr_tail.lower()
-    # The CLI's GPU-holding leftovers must be reaped from the session's cwd, or
-    # they corrupt the canonical measurement that follows.
+    # The CLI's GPU-holding leftovers must be reaped from the session's cwd, or they corrupt the canonical measurement
+    # that follows.
     assert reaped == [_guarded_workspace()]
     # A reap that cleared the workspace leaves nothing for the loop to act on.
     assert result.workspace_contention == ""
@@ -145,13 +122,7 @@ def test_timeout_after_session_id_returns_a_resumable_terminal_result(monkeypatc
 def test_a_workspace_the_reaper_could_not_clear_is_reported_on_the_result(
     monkeypatch,
 ):
-    """The reaper is best effort; the measurement that follows it is not.
-
-    A leftover that survived SIGKILL, or one that belongs to someone else and is
-    therefore not ours to kill, is still holding the device. The backend is the
-    only place that knows, and the loop is the only place that can decline to
-    benchmark, so the finding has to travel on the result.
-    """
+    """The reaper is best effort; the measurement that follows it is not."""
 
     async def _contended_reap(cwd):
         return ReapReport(directory=cwd, unkillable=(4321,), holding_device=(4321,))
@@ -197,6 +168,61 @@ def test_timeout_before_any_session_id_is_raised(monkeypatch):
 
     with pytest.raises(Exception) as excinfo:
         _run_bounded(backend.run(_spec()))
-    # Nothing was established, so there is no handle to resume; the failure
-    # precedes the session and must unwind like the pre-init stream error does.
+    # Nothing was established, so there is no handle to resume; the failure precedes the session and must unwind like
+    # the pre-init stream error does.
     assert "timed out" in str(excinfo.value).lower()
+
+
+# The 3.10 stand-in for ``asyncio.timeout``.
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_backport_stops_a_body_that_outlives_its_delay() -> None:
+    """The whole point: a session past its budget is cancelled, not awaited."""
+    deadline = claude_mod._DeadlineBackport(0.01)
+
+    with pytest.raises(asyncio.TimeoutError):
+        async with deadline:
+            await asyncio.sleep(30)
+
+    assert deadline.expired()
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_backport_leaves_a_body_that_finishes_in_time_alone() -> None:
+    """Finishing early is not a timeout, and the timer must not outlive the block."""
+    deadline = claude_mod._DeadlineBackport(30)
+
+    async with deadline:
+        await asyncio.sleep(0)
+
+    assert not deadline.expired()
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_backport_without_a_delay_bounds_nothing() -> None:
+    """``asyncio.timeout(None)`` applies no bound, and the stand-in matches it."""
+    deadline = claude_mod._DeadlineBackport(None)
+
+    async with deadline:
+        await asyncio.sleep(0.02)
+
+    assert not deadline.expired()
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_backport_does_not_disguise_someone_elses_cancellation() -> None:
+    """Only our own deadline becomes a TimeoutError; an outside cancel stays one."""
+    deadline = claude_mod._DeadlineBackport(30)
+
+    with pytest.raises(asyncio.CancelledError):
+        async with deadline:
+            raise asyncio.CancelledError
+
+    assert not deadline.expired()
+
+
+def test_the_session_deadline_is_the_backport_below_311(monkeypatch) -> None:
+    """Which bound a session gets is decided by the interpreter, not the caller."""
+    monkeypatch.setattr(claude_mod.sys, "version_info", (3, 10, 12))
+    assert isinstance(claude_mod._session_deadline(30), claude_mod._DeadlineBackport)

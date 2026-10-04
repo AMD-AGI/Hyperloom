@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+from hyperloom.inference_optimizer import roofline_snapshot as rs
 
 
 _EXEC_MD = """\

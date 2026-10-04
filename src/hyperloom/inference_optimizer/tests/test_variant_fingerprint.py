@@ -5,21 +5,7 @@
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.actions.executors._grid_runner import (
-    GridVariant,
-    VariantResult,
-    variant_fingerprint,
-)
-from hyperloom.orchestrator.actions.executors._canonical_fingerprint import canonical_fingerprint
-
-
-def test_fingerprint_ignores_name() -> None:
-    a = canonical_fingerprint("--block-size 128", {"NCCL_ALGO": "Ring"})
-    b = canonical_fingerprint("--block-size 128", {"NCCL_ALGO": "Ring"})
-    assert a == b
-    va = GridVariant("A", "--block-size 128", {"NCCL_ALGO": "Ring"})
-    vb = GridVariant("totally_different_name", "--block-size 128", {"NCCL_ALGO": "Ring"})
-    assert va.fingerprint == vb.fingerprint == a
+from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
 
 def test_fingerprint_args_order_independent() -> None:
@@ -62,26 +48,17 @@ def test_fingerprint_empty_inputs_stable() -> None:
 
 
 def test_fingerprint_includes_removal_controls_without_changing_legacy() -> None:
-    legacy = variant_fingerprint("", {})
-    explicit_append = variant_fingerprint("", {}, args_mode="append")
-    remove_flag = variant_fingerprint("", {}, remove_args=["--enable-prefix-caching"])
-    unset_env = variant_fingerprint("", {}, unset_envs=["SGLANG_ENABLE_FOO"])
-    replace_mode = variant_fingerprint("--max-num-seqs 256", {}, args_mode="replace")
-    append_mode = variant_fingerprint("--max-num-seqs 256", {}, args_mode="append")
+    legacy = canonical_fingerprint("", {})
+    explicit_append = canonical_fingerprint("", {}, args_mode="append")
+    remove_flag = canonical_fingerprint("", {}, remove_args=["--enable-prefix-caching"])
+    unset_env = canonical_fingerprint("", {}, unset_envs=["SGLANG_ENABLE_FOO"])
+    replace_mode = canonical_fingerprint("--max-num-seqs 256", {}, args_mode="replace")
+    append_mode = canonical_fingerprint("--max-num-seqs 256", {}, args_mode="append")
 
     assert explicit_append == legacy
     assert remove_flag != legacy
     assert unset_env != legacy
     assert replace_mode != append_mode
-
-
-def test_grid_variant_fingerprint_carries_removal_controls() -> None:
-    a = GridVariant("without_cache", remove_args=["--enable-prefix-caching"])
-    b = GridVariant("identity")
-    c = GridVariant("without_cache_rename", remove_args=["--enable-prefix-caching"])
-
-    assert a.fingerprint != b.fingerprint
-    assert a.fingerprint == c.fingerprint
 
 
 def test_fingerprint_unbalanced_quotes_does_not_crash() -> None:
@@ -92,13 +69,7 @@ def test_fingerprint_unbalanced_quotes_does_not_crash() -> None:
 
 
 def test_fingerprint_value_swap_differs() -> None:
-    """Swapping values across different flags must produce distinct fingerprints.
-
-    The flat-token sort bug caused --max-num-seqs 128 --max-model-len 4096 to
-    collide with --max-num-seqs 4096 --max-model-len 128 because both produce
-    the same sorted token list. Pair-aware hashing preserves the flag->value
-    binding.
-    """
+    """Swapping values across different flags must produce distinct fingerprints."""
     fp_a = canonical_fingerprint("--max-num-seqs 128 --max-model-len 4096", {})
     fp_b = canonical_fingerprint("--max-num-seqs 4096 --max-model-len 128", {})
     assert fp_a != fp_b
@@ -115,35 +86,8 @@ def test_fingerprint_last_wins_for_repeated_flag() -> None:
     assert fp_repeat == fp_last
 
 
-def test_variant_result_fingerprint_matches_grid_variant() -> None:
-    args = "--block-size 128 --foo bar"
-    envs = {"NCCL_ALGO": "Ring", "TP": "8"}
-    gv = GridVariant("g", args, envs)
-    vr = VariantResult(
-        name="g",
-        extra_server_args=args,
-        extra_envs=envs,
-        status="succeeded",
-    )
-    assert gv.fingerprint == vr.fingerprint
-    assert gv.fingerprint == canonical_fingerprint(args, envs)
-
-
-def test_variant_result_to_dict_carries_fingerprint() -> None:
-    vr = VariantResult(
-        name="g",
-        extra_server_args="--block-size 128",
-        extra_envs={"A": "1"},
-        status="succeeded",
-    )
-    d = vr.to_dict()
-    assert d["fingerprint"] == vr.fingerprint
-    assert len(d["fingerprint"]) == 16
-
-
 def test_shared_state_normalizes_explore_search_tested() -> None:
-    """SharedState.from_dict shapes the ``explore_search`` ledger with
-    defensive defaults and preserves fingerprint-keyed ``tested``."""
+    """SharedState.from_dict shapes the ``explore_search`` ledger with defensive defaults and preserves fingerprint-keyed ``tested``."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     fp_a = canonical_fingerprint("--A", {})
@@ -166,7 +110,6 @@ def test_shared_state_normalizes_explore_search_tested() -> None:
     assert es["accepted"] == []
     assert es["rejected"] == []
     assert "winners_history" in es
-    assert "synergy_attempted" in es
 
 
 def test_fingerprint_single_dash_flag_differs_from_missing_value() -> None:

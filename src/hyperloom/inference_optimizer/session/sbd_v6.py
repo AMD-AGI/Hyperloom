@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from argparse import Namespace
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,42 @@ from .session_paths import (
 SCHEMA_VERSION_V6 = "hyperloom.session_breakdown.v6.0"
 _PENDING_INSTALL_ATTR = "_sbd_v6_install_event"
 _STORAGE_SEQUENCE_KEY = "__sbd_v6_timeline_sequence"
-_EVENT_TYPES = ("install", "model_gate")
+# ``roofline``, ``kernel`` and ``baseline`` all recur within one session -- one
+# event per phase and macro cycle that dispatched the work. Their sub-steps are
+# nested in ``ext`` rather than emitted as sibling events, because none of them
+# is dispatchable on its own: roofline's profile / analysis are atomic halves of
+# one action, a kernel event's lanes only exist inside a phase entry, and a
+# baseline's rounds only exist inside a measurement.
+#
+# ``warm_replay`` recurs on the same terms, and its gate rows nest for the same
+# reason: a gate is a step inside the replay's own arc, not something the
+# coordinator can dispatch.
+#
+# ``framework_agent`` nests the most: its runs, proposals and attempts are all
+# dispatched, but only within the phase entry that owns them, and the reason to
+# read them is the chain they form. Emitted as sibling events they would be the
+# session's most numerous type and the chain would have to be rebuilt from
+# cross-references.
+#
+# ``phase`` is the one event that is about the run rather than about work: it is
+# the span every other event's id is scoped by. Its ``actions`` rows are
+# deliberately thin, naming the stage event that holds each dispatch's detail
+# rather than restating it, so the phase answers "when, and what was ordered
+# here" without becoming a second copy of the stage events.
+_EVENT_TYPES = (
+    "install",
+    "model_gate",
+    "roofline",
+    "kernel",
+    "baseline",
+    "conc_sweep",
+    "enablement",
+    "phase",
+    "stack",
+    "warm_start",
+    "warm_replay",
+    "framework_agent",
+)
 _EVENT_FILE_RE = re.compile(r"^(?P<sequence>\d+)-(?P<event_type>[a-z0-9_]+)\.json$")
 
 
@@ -73,7 +109,7 @@ def _read_event_file(
 ) -> dict[str, Any] | None:
     try:
         event = read_json(path, require_dict=True, strict=True)
-    except Exception as exc:
+    except ValueError as exc:
         if warnings is not None:
             warnings.append(f"timeline.{event_type}: failed to parse {path}: {exc!r}")
         return None
@@ -84,7 +120,30 @@ def _read_event_file(
     return _public_event(event)
 
 
-def write_timeline_event(session_dir: Path | str, event: dict[str, Any]) -> Path:
+def timeline_sequence(event: Mapping[str, Any]) -> int | None:
+    """Return the storage sequence stamped on ``event``, if it has one."""
+    raw = event.get(_STORAGE_SEQUENCE_KEY, event.get("timeline_sequence"))
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def set_timeline_sequence(event: dict[str, Any], sequence: int) -> None:
+    """Stamp ``sequence`` onto ``event`` so writing it updates that entry."""
+    event[_STORAGE_SEQUENCE_KEY] = int(sequence)
+
+
+def write_timeline_event(event: dict[str, Any]) -> Path:
+    """Persist one event into the bound session."""
+    from .session_binding import bound_session
+
+    return write_timeline_event_at(bound_session(), event)
+
+
+def write_timeline_event_at(session_dir: Path | str, event: dict[str, Any]) -> Path:
     """Persist one event without replacing an earlier run of the same stage."""
     event_type = _validate_event_type(str(event.get("type") or "").strip())
     history = _history_files(session_dir)
@@ -231,7 +290,7 @@ def persist_pending_install_event(args: Namespace | None, session_dir: Path | st
     event = pending_install_event(args)
     if event is None:
         return None
-    return write_timeline_event(session_dir, event)
+    return write_timeline_event_at(session_dir, event)
 
 
 __all__ = [
@@ -244,5 +303,8 @@ __all__ = [
     "read_timeline_events",
     "record_write_warning",
     "set_pending_install_event",
+    "set_timeline_sequence",
+    "timeline_sequence",
     "write_timeline_event",
+    "write_timeline_event_at",
 ]

@@ -1,18 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Vectorized, predicated, target-neutral 2D elementwise add (C = A + B).
-
-This example is **target-neutral**: it uses only the backend-agnostic ``flydsl.expr`` API, so it
-supports on any backend.
-
-Highlights:
-  1. **float4 vectorization** via ``UniversalCopy128b`` -- each copy atom moves 128 bits
-     (4 x f32) along the contiguous (N) axis, so every thread loads/stores one ``float4``.
-  2. **Predicated OOB masking**: the (M, N) shape need not be a multiple of the block tile,
-     so border blocks have threads whose float4 lies past the tensor. A per-atom boolean
-     predicate (``coord < (M, N)``) gates each copy, so a load/store never touches OOB memory.
-"""
+"""Vectorized, predicated, target-neutral 2D elementwise add (C = A + B)."""
 
 import torch
 

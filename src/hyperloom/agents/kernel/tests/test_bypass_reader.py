@@ -5,12 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for the bypass streaming Kineto reader (_bypass_trace_reader).
-
-Builds a tiny hand-authored Kineto trace so the streaming parser, correlation
-attribution, timeline union math, and annotation-window extraction are all
-covered deterministically.
-"""
+"""Unit tests for the bypass streaming Kineto reader (_bypass_trace_reader)."""
 
 from __future__ import annotations
 
@@ -22,13 +17,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import _bypass_trace_reader as reader  # noqa: E402
+import _bypass_trace_reader as reader
 
-# A minimal but representative trace:
-#  - one attributed GEMM kernel (Cijk, corr 5 -> aten::mm)
-#  - one cudagraph-replay-style unlinked SDPA kernel (corr 999, no runtime)
-#  - one device memcpy
-#  - one ProfilerStep annotation window
+# A minimal but representative trace: - one attributed GEMM kernel (Cijk, corr 5 -> aten::mm) - one
+# cudagraph-replay-style unlinked SDPA kernel (corr 999, no runtime) - one device memcpy - one ProfilerStep annotation
+# window
 _TRACE_EVENTS = [
     {"cat": "cpu_op", "name": "aten::mm", "args": {"External id": 100}},
     {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 5, "External id": 100}},
@@ -61,6 +54,42 @@ def test_analyze_basic_aggregates(tmp_path):
     assert kernels["paged_attention_v1"]["gpu_pct"] == 60.0
     assert kernels["Cijk_Alik_Bljk_HHS"]["gpu_pct"] == 40.0
     assert kernels["paged_attention_v1"]["count"] == 1
+
+
+def test_long_kernel_names_are_not_merged_before_display_truncation(tmp_path):
+    """Kernel aggregation retains distinguishing suffixes beyond 256 chars."""
+    prefix = "templated_kernel_" + "x" * 300
+    events = [
+        {"cat": "kernel", "ph": "X", "name": prefix + "_a", "ts": 0, "dur": 10, "args": {}},
+        {"cat": "kernel", "ph": "X", "name": prefix + "_b", "ts": 20, "dur": 20, "args": {}},
+    ]
+    tf = tmp_path / "long-names.trace.json"
+    tf.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
+
+    out = reader.analyze_trace(tf, top_k=0)
+
+    assert len(out["kernels"]) == 2
+    assert sorted(row["gpu_time_us"] for row in out["kernels"]) == [10.0, 20.0]
+    assert all(len(row["name"]) == reader._MAX_EVENT_NAME_CHARS for row in out["kernels"])
+
+
+def test_gpu_event_cap_returns_truncated_analysis(tmp_path, monkeypatch):
+    """An oversized trace returns the retained prefix instead of failing."""
+    events = [
+        {"cat": "kernel", "ph": "X", "name": "kernel_0", "ts": 0, "dur": 1, "args": {}},
+        {"cat": "kernel", "ph": "X", "name": "kernel_1", "ts": 10, "dur": 1, "args": {}},
+        {"cat": "kernel", "ph": "X", "name": "kernel_2", "ts": 20, "dur": 1, "args": {}},
+    ]
+    tf = tmp_path / "capped.trace.json"
+    tf.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
+    monkeypatch.setattr(reader, "_MAX_BUFFERED_GPU_EVENTS", 2)
+
+    out = reader.analyze_trace(tf, top_k=0)
+
+    assert out["status"] == "ok"
+    assert out["truncated"] is True
+    assert out["truncation_reason"] == "gpu_events"
+    assert out["attribution"]["kernel_count"] == 2
 
 
 def test_correlation_attribution(tmp_path):
@@ -233,6 +262,27 @@ def test_resolve_trace_file_prefers_merged(tmp_path):
     assert resolved is not None and resolved.name == "merged-all.trace.json.gz"
 
 
+def test_agentx_directory_prefers_rank0_over_merged(tmp_path):
+    d = tmp_path / "torch_trace"
+    d.mkdir()
+    rank0 = _write_trace(d / "900-TP-0-DECODE.trace.json.gz")
+    _write_trace(d / "900-TP-1-DECODE.trace.json.gz")
+    _write_trace(d / "merged-all.trace.json.gz")
+    assert reader.resolve_trace_file(d, require_single_rank=True) == rank0
+
+
+def test_agentx_directory_refuses_merged_only_input(tmp_path):
+    d = tmp_path / "torch_trace"
+    d.mkdir()
+    _write_trace(d / "merged-all.trace.json.gz")
+    assert reader.resolve_trace_file(d, require_single_rank=True) is None
+
+
+def test_agentx_explicit_merged_file_is_rejected(tmp_path):
+    merged = _write_trace(tmp_path / "merged-all.trace.json.gz")
+    assert reader.resolve_trace_file(merged, require_single_rank=True) is None
+
+
 def test_analyze_reports_rank_provenance(tmp_path):
     d = tmp_path / "torch_trace"
     _write_ranked(d, 0)
@@ -255,8 +305,8 @@ def test_single_file_rank_provenance_is_none(tmp_path):
 
 
 def _write_capture_fragment(capture_dir: Path, batch_size: int, rank: int = 0) -> Path:
-    # A sparse sglang CUDA-graph capture shard: rank-tagged filename but only a
-    # couple of device kernels (the real workload is not captured here).
+    # A sparse sglang CUDA-graph capture shard: rank-tagged filename but only a couple of device kernels (the real
+    # workload is not captured here).
     capture_dir.mkdir(parents=True, exist_ok=True)
     events = [
         {"cat": "kernel", "ph": "X", "name": "graph_capture_marker", "ts": 0, "dur": 1, "args": {"correlation": 1}},
@@ -268,8 +318,7 @@ def _write_capture_fragment(capture_dir: Path, batch_size: int, rank: int = 0) -
 
 
 def _write_main_tp_trace(d: Path, name: str = "1783387979.6664605-TP-0.trace.json.gz") -> Path:
-    # The content-rich main sglang profiler trace; not rank-tagged (``-TP-0``
-    # does not match the rank regex).
+    # The content-rich main sglang profiler trace, tagged with TP rank 0.
     d.mkdir(parents=True, exist_ok=True)
     p = d / name
     with gzip.open(p, "wb") as f:
@@ -278,8 +327,7 @@ def _write_main_tp_trace(d: Path, name: str = "1783387979.6664605-TP-0.trace.jso
 
 
 def test_resolve_trace_file_ignores_sglang_capture_fragments(tmp_path):
-    # The rank-tagged capture shards must not hijack selection away from the
-    # non-rank-tagged content-rich main trace.
+    # The rank-tagged capture shards must not hijack selection away from the non-rank-tagged content-rich main trace.
     d = tmp_path / "torch_trace"
     main = _write_main_tp_trace(d)
     cap = d / "capture_traces"
@@ -290,8 +338,8 @@ def test_resolve_trace_file_ignores_sglang_capture_fragments(tmp_path):
 
 
 def test_capture_fragment_dir_selects_main_trace_content(tmp_path):
-    # End-to-end via analyze_trace: the selected trace yields the main trace's
-    # real kernels, not the 1-kernel capture shard.
+    # End-to-end via analyze_trace: the selected trace yields the main trace's real kernels, not the 1-kernel capture
+    # shard.
     d = tmp_path / "torch_trace"
     _write_main_tp_trace(d)
     cap = d / "capture_traces"
@@ -301,7 +349,7 @@ def test_capture_fragment_dir_selects_main_trace_content(tmp_path):
     assert out["status"] == "ok"
     assert {k["name"] for k in out["kernels"]} == {"Cijk_Alik_Bljk_HHS", "paged_attention_v1"}
     assert out["rank_count"] == 1
-    assert out["analyzed_rank"] is None
+    assert out["analyzed_rank"] == 0
 
 
 def test_resolve_trace_file_falls_back_when_only_capture_fragments(tmp_path):
@@ -314,8 +362,8 @@ def test_resolve_trace_file_falls_back_when_only_capture_fragments(tmp_path):
 
 
 def test_bs_named_fragment_without_subdir_is_deprioritized(tmp_path):
-    # Even without the capture_traces/ subdir, the ``bs_<n>_rank<n>`` filename
-    # marks a capture shard; a top-level main trace still wins.
+    # Even without the capture_traces/ subdir, the ``bs_<n>_rank<n>`` filename marks a capture shard; a top-level main
+    # trace still wins.
     d = tmp_path / "torch_trace"
     main = _write_main_tp_trace(d)
     _write_capture_fragment(d, 256)  # writes bs_256_rank0.json.gz at top level
@@ -324,10 +372,8 @@ def test_bs_named_fragment_without_subdir_is_deprioritized(tmp_path):
 
 
 def test_unpatched_sglang_capture_dir_is_deprioritized(tmp_path):
-    # Both routes now share one classifier, so the bypass reader also knows the
-    # SGLang-without-profiler-patch layout: a ``graph_capture_profile/`` holding
-    # ``cuda_graph_capture-*``. The reader's own copy of the rule only knew
-    # ``bs_<n>_rank<n>`` / ``capture_traces/`` and took the sidecar as a trace.
+    # Both routes now share one classifier, so the bypass reader also knows the SGLang-without-profiler-patch layout:
+    # a ``graph_capture_profile/`` holding ``cuda_graph_capture-*``.
     d = tmp_path / "torch_trace"
     main = _write_main_tp_trace(d)
     cap_dir = d / "graph_capture_profile"
@@ -341,8 +387,8 @@ def test_unpatched_sglang_capture_dir_is_deprioritized(tmp_path):
 
 
 def test_capture_traces_detection_is_relative_to_trace_root(tmp_path):
-    # An unrelated ancestor dir named ``capture_traces`` above the trace root must
-    # not flag the main trace; only a genuine subdir within the root marks shards.
+    # An unrelated ancestor dir named ``capture_traces`` above the trace root must not flag the main trace; only a
+    # genuine subdir within the root marks shards.
     root = tmp_path / "capture_traces" / "torch_trace"
     main = _write_main_tp_trace(root, name="rank_0.trace.json.gz")
     _write_capture_fragment(root / "capture_traces", 512)  # genuine sub-shard
@@ -351,8 +397,8 @@ def test_capture_traces_detection_is_relative_to_trace_root(tmp_path):
 
 
 def test_uppercase_capture_dir_with_generic_shard_name(tmp_path):
-    # A generic-named larger shard under an uppercase ``Capture_Traces/`` dir is
-    # excluded, so a smaller top-level main trace wins.
+    # A generic-named larger shard under an uppercase ``Capture_Traces/`` dir is excluded, so a smaller top-level main
+    # trace wins.
     d = tmp_path / "torch_trace"
     main = _write_main_tp_trace(d)
     cap = d / "Capture_Traces"
@@ -365,8 +411,8 @@ def test_uppercase_capture_dir_with_generic_shard_name(tmp_path):
 
 
 def test_rank_count_ignores_multi_rank_capture_shards(tmp_path):
-    # Multi-GPU capture emits bs_*_rank0 and bs_*_rank1 shards; their rank tags
-    # must not be counted as real per-rank workload traces.
+    # Multi-GPU capture emits bs_*_rank0 and bs_*_rank1 shards; their rank tags must not be counted as real per-rank
+    # workload traces.
     d = tmp_path / "torch_trace"
     _write_main_tp_trace(d)
     cap = d / "capture_traces"
@@ -378,8 +424,7 @@ def test_rank_count_ignores_multi_rank_capture_shards(tmp_path):
 
 
 def test_selected_capture_fragment_flag(tmp_path):
-    # Only capture shards -> analyze marks selected_capture_fragment; a normal
-    # main trace does not.
+    # Only capture shards -> analyze marks selected_capture_fragment; a normal main trace does not.
     only_shards = tmp_path / "torch_trace_shards"
     _write_capture_fragment(only_shards / "capture_traces", 512)
     out = reader.analyze_trace(only_shards, top_k=0)
@@ -392,8 +437,8 @@ def test_selected_capture_fragment_flag(tmp_path):
 
 
 def test_multi_rank_main_traces_survive_capture_shard_filter(tmp_path):
-    # Genuine top-level per-rank main traces coexisting with sglang capture shards
-    # must still resolve to rank_0 (shards filtered out, then lowest-rank policy).
+    # Genuine top-level per-rank main traces coexisting with sglang capture shards must still resolve to rank_0
+    # (shards filtered out, then lowest-rank policy).
     d = tmp_path / "torch_trace"
     _write_ranked(d, 0)
     _write_ranked(d, 1, extra_events=20)
@@ -424,8 +469,8 @@ def test_full_trace_scope_is_default(tmp_path):
 
 # ── steady-state windowing ───────────────────────────────────────────────────
 
-# Three ProfilerStep windows: #1 is warm-up (dropped); a warm-up GEMM sits in
-# #1, the steady attention kernel sits in #3 (the selected representative step).
+# Three ProfilerStep windows: #1 is warm-up (dropped); a warm-up GEMM sits in #1, the steady attention kernel sits in
+# #3 (the selected representative step).
 _STEADY_EVENTS = [
     {"cat": "gpu_user_annotation", "ph": "X", "name": "ProfilerStep#1", "ts": 0, "dur": 100},
     {"cat": "gpu_user_annotation", "ph": "X", "name": "ProfilerStep#2", "ts": 100, "dur": 100},
@@ -456,8 +501,7 @@ def test_select_steady_window_drops_warmup_and_picks_representative():
 
 
 def test_select_steady_window_high_count_loop_not_masked_by_spurious_step():
-    # A single spurious "step"-named annotation must not mask a real high-count
-    # loop.
+    # A single spurious "step"-named annotation must not mask a real high-count loop.
     windows = [{"name": "optimizer_step", "ts": 0.0, "dur": 5.0}] + [
         {"name": "graph_call", "ts": float(100 + i * 100), "dur": 100.0} for i in range(5)
     ]
@@ -513,8 +557,8 @@ def test_analyze_steady_state_filters_to_window(tmp_path):
     assert tl["busy_pct"] == 30.0
 
 
-# A single step whose kernel overhangs the window end: busy must clip to the
-# window (no busy_pct > 100%), while GPU-time share uses the full kernel cost.
+# A single step whose kernel overhangs the window end: busy must clip to the window (no busy_pct > 100%), while
+# GPU-time share uses the full kernel cost.
 _OVERHANG_EVENTS = [
     {"cat": "gpu_user_annotation", "ph": "X", "name": "ProfilerStep#1", "ts": 0, "dur": 100},
     {"cat": "gpu_user_annotation", "ph": "X", "name": "ProfilerStep#2", "ts": 100, "dur": 100},
@@ -551,8 +595,8 @@ def test_steady_state_falls_back_to_full_when_no_windows(tmp_path):
 
 
 def test_non_kineto_json_yields_no_kernels(tmp_path):
-    # Valid JSON without a traceEvents array: the reader must not crash and
-    # must report an ok, empty result (the tool turns this into a warning).
+    # Valid JSON without a traceEvents array: the reader must not crash and must report an ok, empty result (the tool
+    # turns this into a warning).
     tf = tmp_path / "notrace.json"
     tf.write_bytes(json.dumps({"foo": "bar", "schemaVersion": 1}).encode("utf-8"))
     out = reader.analyze_trace(tf, top_k=0)
@@ -573,9 +617,7 @@ def test_empty_trace_events_array(tmp_path):
 
 
 def test_truncated_trace_recovers_complete_events(tmp_path):
-    # Emulate a profiler that died mid-write: a complete first kernel followed
-    # by a cut-off second object. The streaming reader must yield the complete
-    # event(s) and stop cleanly at the truncation instead of raising.
+    # Emulate a profiler that died mid-write: a complete first kernel followed by a cut-off second object.
     good = {
         "cat": "kernel",
         "ph": "X",
@@ -668,6 +710,24 @@ def test_complete_malformed_object_resyncs_to_later_event():
     assert "malformed after 0 event(s)" in errors[0]
 
 
+def test_brace_inside_a_string_split_across_chunks_is_not_an_object_end():
+    """A refill must resume mid-string rather than close on a quoted brace."""
+    good = {"cat": "kernel", "name": "a}b", "ts": 1}
+    payload = json.dumps({"traceEvents": [good]}).encode("utf-8")
+    errors: list[str] = []
+    assert list(reader.stream_events(io.BytesIO(payload), bufsize=payload.index(b"a}b") + 1, errors=errors)) == [good]
+    assert errors == []
+
+
+def test_unterminated_string_at_eof_reports_truncation_not_corruption():
+    """An object cut off inside a string is truncated, not malformed."""
+    payload = b'{"traceEvents": [{"cat": "kernel", "name": "abc'
+    errors: list[str] = []
+    assert list(reader.stream_events(io.BytesIO(payload), bufsize=8, errors=errors)) == []
+    assert len(errors) == 1
+    assert "truncated after 0 event(s)" in errors[0]
+
+
 def test_trace_prefix_growth_is_bounded(monkeypatch):
     """A missing late traceEvents key must not grow the prefix indefinitely."""
     monkeypatch.setattr(reader, "_MAX_TRACE_PREFIX_CHARS", 32)
@@ -730,8 +790,8 @@ def test_malformed_events_missing_fields_do_not_crash(tmp_path):
 
 
 def test_reader_extracts_shapes_and_triton_kernel_file(tmp_path):
-    # cpu_op carries Input Dims / Input type + Triton kernel_file; the reader
-    # must attach the majority op's meta onto the hot-kernel row.
+    # cpu_op carries Input Dims / Input type + Triton kernel_file; the reader must attach the majority op's meta onto
+    # the hot-kernel row.
     events = [
         {
             "cat": "cpu_op",
@@ -797,11 +857,7 @@ def test_stream_overlap_absent_on_consistent_trace(tmp_path):
 
 
 def test_stream_overlap_detects_impossible_duration(tmp_path):
-    """An event overrunning its successor on a serial stream is corrupt.
-
-    The corrupt event also extends the stream's span, so a sum-vs-span ratio
-    would read ~1.0 here; the pairwise check still catches it.
-    """
+    """An event overrunning its successor on a serial stream is corrupt."""
     events = [
         _gpu("k_a", 1000, 100),
         _gpu("corrupt_kernel", 1100, 20_000),  # ends 21100, next starts 1200
@@ -825,11 +881,7 @@ def test_stream_overlap_detects_impossible_duration(tmp_path):
 
 
 def test_stream_overlap_not_triggered_by_concurrent_streams(tmp_path):
-    """Two genuinely concurrent streams must not be mistaken for corruption.
-
-    Pooling every device event would make the summed duration twice the wall
-    span here, which is exactly the false positive the per-stream check avoids.
-    """
+    """Two genuinely concurrent streams must not be mistaken for corruption."""
     events = []
     for i in range(5):
         events.append(_gpu(f"s1_{i}", 1000 + i * 100, 100, pid=1, tid=1))
@@ -873,13 +925,7 @@ def _spread(n: int, dur: float, stride: float, prefix: str = "k") -> list[tuple[
 
 
 def test_threshold_uses_summed_device_time_not_span():
-    """A lone corrupt duration must not hide behind the span it inflates.
-
-    1000 kernels spread over 60 s with one duration written as 2 s: the corrupt
-    event is 95% of the summed device time but only ~3% of the wall span, so a
-    span-denominator threshold reported nothing -- the same blind spot the
-    pairwise detector exists to avoid, moved into the threshold.
-    """
+    """A lone corrupt duration must not hide behind the span it inflates."""
     evs = _spread(1000, 100.0, 60_000_000 / 1000)
     evs[500] = (evs[500][0], evs[500][0] + 2_000_000.0, "corrupt_2s")
     device_us = sum(e - s for s, e, _ in evs)
@@ -896,11 +942,7 @@ def test_threshold_uses_summed_device_time_not_span():
 
 
 def test_dense_jitter_is_not_escalated():
-    """Many sub-millisecond overruns are profiler jitter, not corruption.
-
-    Accumulates well past the 5% share while the worst single overrun is 4 us;
-    telling the user to recapture the trace here is a false alarm.
-    """
+    """Many sub-millisecond overruns are profiler jitter, not corruption."""
     evs = _spread(20_000, 10.0, 6.0)  # each overruns the next by 4 us
     assert reader._stream_overlap_health({(1, 1): list(evs)}) == {}
 
@@ -926,3 +968,15 @@ def test_severity_grades_with_share_of_device_time():
     out_severe = reader._stream_overlap_health({(1, 1): list(severe)})
     assert out_severe and out_severe["severity"] == "warning"
     assert out_severe["excess_share"] >= 0.25
+
+
+def test_analyze_trace_caps_annotation_buffers(tmp_path, monkeypatch):
+    monkeypatch.setattr(reader, "_MAX_ANNOTATION_WINDOWS", 2)
+    events = [{"cat": "gpu_user_annotation", "ph": "X", "name": f"step{i}", "ts": i, "dur": 1} for i in range(5)]
+    path = tmp_path / "cap.trace.json"
+    path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
+    out = reader.analyze_trace(path, top_k=0)
+    assert out["status"] == "ok"
+    assert out["truncated"] is True
+    assert out["truncation_reason"] == "annotation_windows"
+    assert len(out["annotation_windows"]) == 2

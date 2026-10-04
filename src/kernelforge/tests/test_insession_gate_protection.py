@@ -1,5 +1,7 @@
 import asyncio
 import hashlib
+import shutil
+import subprocess
 from pathlib import Path
 
 import kernelforge.loop.insession_gate as gate_module
@@ -20,6 +22,14 @@ def _gate(tmp_path: Path) -> tuple[InSessionGate, Path]:
     (scripts / "task_runner.py").write_text("print('runner')\n")
     kernel = source / "kernel.cu"
     kernel.write_text("__global__ void kernel() {}\n")
+    # The gate diffs the session's edits against HEAD, so its workspace is a repo that has one.
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
 
     gate = InSessionGate(
         driver_script=str(workspace / "forge_driver.py"),
@@ -85,15 +95,7 @@ def test_bash_allows_tmp_outputs_but_blocks_protected_writes(tmp_path: Path):
 
 
 def test_bash_blocks_a_write_hidden_behind_a_wrapper_option(tmp_path: Path):
-    """The verb that acts is what a rule has to be matched against.
-
-    Reaching it means stepping over leading assignments and wrappers, and doing
-    that by counting words needs the option grammar of every wrapper: ``env -u
-    FOO`` and ``timeout --signal=KILL 60`` each take an argument that is not
-    itself an option, so counting landed on ``FOO`` and ``60`` and let the write
-    through. ``env`` was also named in the docstring as a wrapper and missing
-    from the set that lists them.
-    """
+    """The verb that acts is what a rule has to be matched against."""
     gate, _workspace = _gate(tmp_path)
 
     assert gate._bash_may_modify_protected("env FOO=bar tee forge_driver.py")
@@ -103,11 +105,7 @@ def test_bash_blocks_a_write_hidden_behind_a_wrapper_option(tmp_path: Path):
 
 
 def test_bash_still_allows_running_the_driver_under_a_wrapper(tmp_path: Path):
-    """Reading every word of a wrapped command as a verb must not deny the run.
-
-    Running the driver under ``timeout`` is the ordinary way a session measures
-    itself, so the extra verb positions may not turn its own name into a write.
-    """
+    """Reading every word of a wrapped command as a verb must not deny the run."""
     gate, _workspace = _gate(tmp_path)
 
     assert not gate._bash_may_modify_protected("timeout 300 python3 forge_driver.py --warmup 3 --bench-mode")
@@ -253,9 +251,8 @@ def test_safe_stop_runs_canonical_validation_and_converges(
     tmp_path: Path,
     monkeypatch,
 ):
-    # Harness intact: the gate runs its canonical correctness+bench self-check and,
-    # on a correct + faster candidate, ALLOWS the stop as a real convergence
-    # (best_ms=1.0 in the helper; 0.5ms beats it by > noise floor).
+    # Harness intact: the gate runs its canonical correctness+bench self-check and, on a correct + faster candidate,
+    # ALLOWS the stop as a real convergence (best_ms=1.0 in the helper; 0.5ms beats it by > noise floor).
     gate, _workspace = _gate(tmp_path)
 
     async def _corr(**_kwargs):
@@ -290,6 +287,67 @@ def test_safe_stop_runs_canonical_validation_and_converges(
     assert gate.end_reason == "converged"
     assert gate.passed is True
     assert gate.last_wall_ms == 0.5
+
+
+def test_a_workspace_git_failure_ends_the_session_as_a_rebuild_failure(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """The session's end reason is the ledger's account of why it stopped, and a broken git is not a gate fault."""
+    gate, workspace = _gate(tmp_path)
+    # What the gate sees when git cannot answer what this session changed.
+    shutil.rmtree(workspace / ".git")
+    validation_calls: list[int] = []
+
+    async def unexpected_validation(**_kwargs):
+        validation_calls.append(1)
+        return {"passed": True}
+
+    monkeypatch.setattr(gate_module, "test_correctness", unexpected_validation)
+
+    result = asyncio.run(gate._on_stop({}, None, None))
+
+    assert result == {}
+    assert gate.end_reason == "jit_rebuild_unavailable"
+    # Nothing was timed against a binary the rebuild could not be asserted for.
+    assert validation_calls == []
+    assert gate.passed is False
+    # The verdict the outer loop reads is the one the orchestrator recomputes after every session, not whatever the
+    # gate left behind mid-flight.
+    assert gate.finalize_integrity() == ""
+    assert gate.integrity_violation is False
+    assert gate.integrity_verdict == "clean"
+
+
+def test_an_unreadable_declared_source_ends_the_session_as_a_rebuild_failure(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A workspace file the loop cannot read is the same class of fault as a workspace git that cannot answer."""
+    gate, workspace = _gate(tmp_path)
+    kernel = (workspace / "aiter" / "csrc" / "kernel.cu").resolve()
+    monkeypatch.setenv("FORGE_AITER_CACHE_ROOT", str(tmp_path / "cache"))
+    readable = Path.read_bytes
+
+    def refuse(self, *args, **kwargs):
+        if self.resolve() == kernel:
+            raise PermissionError(f"cannot read {self}")
+        return readable(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+    validation_calls: list[int] = []
+
+    async def unexpected_validation(**_kwargs):
+        validation_calls.append(1)
+        return {"passed": True}
+
+    monkeypatch.setattr(gate_module, "test_correctness", unexpected_validation)
+
+    result = asyncio.run(gate._on_stop({}, None, None))
+
+    assert result == {}
+    assert gate.end_reason == "jit_rebuild_unavailable"
+    assert validation_calls == []
 
 
 def test_snapshot_covers_driver_and_glob_only_harness(tmp_path: Path):
@@ -426,16 +484,7 @@ def test_restore_protected_files_restores_nested_and_removes_added(
 
 
 def test_driver_outside_the_workspace_does_not_move_the_measured_root(tmp_path: Path):
-    """The declared workspace wins over the driver's own directory.
-
-    ``forge-fuse`` writes its driver into the run's ``--output-dir``, which sits
-    outside the framework tree and is not a repository. Inferring the root from
-    the driver put ``git diff HEAD -- .`` in a non-repo directory, where git
-    switches to its implicit ``--no-index`` mode, reads ``HEAD`` as a filename
-    and exits 1 with ``Could not access 'HEAD'`` -- so the stop-time fingerprint
-    raised on every session -- and pointed the protected-file inventory at a
-    directory containing none of the protected files.
-    """
+    """The declared workspace wins over the driver's own directory."""
     import subprocess
 
     workspace = tmp_path / "ws"
@@ -472,10 +521,9 @@ def test_driver_outside_the_workspace_does_not_move_the_measured_root(tmp_path: 
     assert gate.workspace_root == workspace.resolve()
     # The whole point: this is what raised GitError in production.
     assert isinstance(gate._candidate_diff_sha256(), str)
-    # And the harness next to the kernel is protected again -- matched relative
-    # to the tree the agent actually edits.
+    # And the harness next to the kernel is protected again -- matched relative to the tree the agent actually edits.
     assert gate._is_protected("config.yaml")
 
-    # Without a declared workspace the driver's directory is still the fallback,
-    # which is correct for every task that keeps its driver inside the tree.
+    # Without a declared workspace the driver's directory is still the fallback, which is correct for every task that
+    # keeps its driver inside the tree.
     assert build().workspace_root == outside.resolve()

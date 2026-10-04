@@ -1,24 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What the runtime asked for that no tuner can serve.
-
-The trigger for writing a tuner is "aiter ships no script **and** forge has no
-implementation", and until now nothing measured whether that ever happens. The
-skip reasons that would answer it are prose, spread across the router, and never
-collected -- so the question was settled by argument instead of by the fleet.
-
-This turns it into a record: one entry per demanded table that ended with no
-tuner able to write it, carrying the reason and enough of the key schema to say
-what a tuner would have to produce. Running it over a campaign's demand files is
-what says whether a generated tuner has a real target, and it is also the input
-:mod:`.mandate` needs if one does.
-
-Note what is deliberately *not* a gap: a table whose tuner exists but was skipped
-for a reason of its own -- an unsupported dtype on this architecture, a missing
-shape source, a kernel that cannot serve this checkpoint. Those are answers, not
-absences, and a generated tuner would not change any of them.
-"""
+"""What the runtime asked for that no tuner can serve."""
 
 from __future__ import annotations
 
@@ -28,13 +11,15 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# Reasons a tuner did not run that say nothing about coverage. A generated tuner
-# is not the answer to any of them: the capability exists, this run could not use
-# it. Matched case-insensitively as substrings of the router's skip reason.
+# Reasons a tuner did not run that say nothing about coverage.
 _NOT_A_COVERAGE_GAP = (
     "already at peak performance",
     "not supported",
     "unavailable on",
+    # The fp4/gfx942 skip words it this way, and it is the strongest form of
+    # "not our problem" there is: aiter ships no fp4 kernel for this card, so
+    # there is nothing for any tuner, generated or not, to select between.
+    "unsupported on",
     "no gemm shapes available",
     "requires --tunableop-input",
     "is not moe",
@@ -44,15 +29,16 @@ _NOT_A_COVERAGE_GAP = (
 )
 
 
-# Why a demanded table went untuned. Only the first is an argument for writing a
-# tuner; the other two are arguments for fixing something that already exists,
-# and treating them alike would manufacture demand for the third tier. A real
-# production log made the distinction immediately: a vLLM run missed 122 bf16
-# keys with `sglang_dense_bf16` -- the tuner that owns that very table -- simply
-# not selected by the framework branch. Nothing about that calls for a new tuner.
-KIND_NO_TUNER = "no_tuner"  # nothing implements this: the Tier-3 case
+# Why demand went untuned; ``not_selected`` is a routing bug, not generation work.
+KIND_NO_TUNER = "no_tuner"  # nothing implements this at all
 KIND_SKIPPED = "skipped"  # a tuner exists and declined, for a reason
+KIND_EMPTY = "empty"  # a tuner exists, ran, and produced nothing landable
 KIND_NOT_SELECTED = "not_selected"  # a tuner exists and routing did not pick it
+
+# The kinds a generated tuner is a legitimate answer to. ``skipped`` is in here
+# only because the reasons that are *not* a gap have already been filtered out
+# by ``_is_coverage_gap`` before a gap of that kind is ever built.
+_WARRANTS = frozenset({KIND_NO_TUNER, KIND_SKIPPED, KIND_EMPTY})
 
 
 @dataclass
@@ -72,8 +58,8 @@ class CoverageGap:
 
     @property
     def warrants_generated_tuner(self) -> bool:
-        """Only an absent capability does. A routing miss is a routing bug."""
-        return self.kind == KIND_NO_TUNER
+        """Return whether Tier3 can help rather than fixing tuner selection."""
+        return self.kind in _WARRANTS
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,21 +81,38 @@ def _is_coverage_gap(skip_reason: str) -> bool:
     return not any(marker in low for marker in _NOT_A_COVERAGE_GAP)
 
 
+def _gap(entry: dict[str, Any], table: str, tuner: str | None, *, kind: str, reason: str) -> CoverageGap:
+    return CoverageGap(
+        table=table,
+        tuner=tuner,
+        env_var=entry.get("env_var"),
+        key_schema=list(entry.get("key_schema") or []),
+        logged_fields=list(entry.get("logged_fields") or []),
+        miss_count=int(entry.get("miss_count") or 0),
+        distinct_keys=int(entry.get("distinct_keys") or 0),
+        reason=reason,
+        kind=kind,
+    )
+
+
+def _landed(results: list[Any] | None) -> set[str] | None:
+    """Return tuners with landable candidates, or ``None`` before execution.
+
+    Candidate artifacts and env vars, not status alone, define landability.
+    """
+    if results is None:
+        return None
+    from ..candidates import per_tuner_candidates
+
+    return {c.tuner for c in per_tuner_candidates(results)}
+
+
 def coverage_gaps(
     demand_report: dict[str, Any] | None,
     tuner_specs: list[Any],
+    results: list[Any] | None = None,
 ) -> list[CoverageGap]:
-    """Demanded tables that no selected tuner will write.
-
-    Args:
-        demand_report: A parsed serving log (``evidence.parse_log``). Without one
-            there is no demand, and therefore nothing to be missing.
-        tuner_specs: What the router chose, including the skipped ones -- a
-            skipped tuner still tells us the capability exists.
-
-    Returns:
-        One entry per uncovered table, most-demanded first.
-    """
+    """Return demanded tables lacking selected or successfully landed owners."""
     demands = (demand_report or {}).get("demands") or []
     if not demands:
         return []
@@ -120,12 +123,24 @@ def coverage_gaps(
         for s in tuner_specs
         if not getattr(s, "should_run", True)
     }
+    landed = _landed(results)
 
     gaps: list[CoverageGap] = []
     for entry in demands:
         tuner = entry.get("tuner")
         table = str(entry.get("table") or "")
         if tuner and tuner in will_run:
+            if landed is None or tuner in landed:
+                continue
+            gaps.append(
+                _gap(
+                    entry,
+                    table,
+                    tuner,
+                    kind=KIND_EMPTY,
+                    reason=f"{tuner} ran and produced nothing landable for {table}",
+                )
+            )
             continue
         if tuner is None:
             kind = KIND_NO_TUNER
@@ -138,19 +153,7 @@ def coverage_gaps(
         else:
             kind = KIND_NOT_SELECTED
             reason = f"{tuner} owns {table} but was not selected for this run"
-        gaps.append(
-            CoverageGap(
-                table=table,
-                tuner=tuner,
-                env_var=entry.get("env_var"),
-                key_schema=list(entry.get("key_schema") or []),
-                logged_fields=list(entry.get("logged_fields") or []),
-                miss_count=int(entry.get("miss_count") or 0),
-                distinct_keys=int(entry.get("distinct_keys") or 0),
-                reason=reason,
-                kind=kind,
-            )
-        )
+        gaps.append(_gap(entry, table, tuner, kind=kind, reason=reason))
 
     gaps.sort(key=lambda g: -g.miss_count)
     for gap in gaps:

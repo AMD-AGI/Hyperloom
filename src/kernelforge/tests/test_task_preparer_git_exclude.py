@@ -1,12 +1,4 @@
-"""Regression test for task preparation's pristine staging (review #2).
-
-The prepass stages newly-authored task scaffolding into pristine with
-``git add -A`` so IterationLoop captures it in the base SHA. But ``-A`` would
-also sweep in ``forge_experiments/`` -- the campaign's own run state, candidate
-CSVs and ``workspace.lock`` -- which must never enter the pristine commit. The
-fix uses the pathspec ``-- . :(exclude)forge_experiments``; this test pins that
-behaviour against a real git repo.
-"""
+"""Regression test for task preparation's pristine staging (review #2)."""
 
 from __future__ import annotations
 
@@ -66,8 +58,7 @@ def test_prepass_add_excludes_forge_experiments(tmp_path):
 
 
 def test_plain_add_all_would_have_included_forge_experiments(tmp_path):
-    """Guard: proves the exclusion is load-bearing -- a plain ``add -A`` DOES
-    stage forge_experiments, so the pathspec is what prevents the leak."""
+    """Guard: proves the exclusion is load-bearing -- a plain ``add -A`` DOES stage forge_experiments, so the pathspec is what prevents the leak."""
     repo = tmp_path / "ws"
     repo.mkdir()
     _init_repo(repo)

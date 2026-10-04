@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared low-level git subprocess primitives for framework / integrate_patch.
-
-``_run_git`` → ``(ok, stdout, stderr)``; ``_run_git_cp`` → the raw
-CompletedProcess (or None on spawn/timeout) for callers that must inspect
-returncode. Both carry a ``safe.directory`` exception for the target checkout.
-"""
+"""Shared low-level git subprocess primitives for framework / integrate_patch."""
 
 from __future__ import annotations
 
@@ -15,7 +10,7 @@ from pathlib import Path
 
 from hyperloom.common.git_safety import safe_directory_args
 
-__all__ = ["_run_git", "_run_git_cp"]
+__all__ = ["_git_head_sha", "_run_git", "_run_git_cp"]
 
 
 def _run_git(args: list[str], *, timeout: float = 120.0) -> tuple[bool, str, str]:
@@ -40,13 +35,9 @@ def _run_git_cp(
     *,
     timeout: float = 120.0,
     cwd: str | Path | None = None,
-    input: str | None = None,  # noqa: A002 - mirrors subprocess.run's keyword
+    input: str | None = None,
 ) -> subprocess.CompletedProcess | None:
-    """Run ``git <args>`` returning the raw CompletedProcess, or None on spawn/timeout.
-
-    ``cwd`` locates the checkout for callers that do not pass ``-C``; ``input``
-    feeds a patch on stdin.
-    """
+    """Run ``git <args>`` returning the raw CompletedProcess, or None on spawn/timeout."""
     try:
         return subprocess.run(
             ["git", *safe_directory_args(args, cwd=cwd)],
@@ -59,3 +50,11 @@ def _run_git_cp(
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
+
+
+def _git_head_sha(root: str | Path) -> str:
+    """Return ``root``'s HEAD commit, or ``""`` when the read failed (spawn failure, timeout, non-zero exit)."""
+    cp = _run_git_cp(["-C", str(root), "rev-parse", "HEAD"], timeout=30.0)
+    if cp is None or cp.returncode != 0:
+        return ""
+    return (cp.stdout or "").strip()

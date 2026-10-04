@@ -1,9 +1,4 @@
-"""Structural contracts for the two kernel backend prompt assembly paths.
-
-Locks XML tag boundaries (<knowledge>, <skill>, <workspace>, <coordination>),
-per Coordination Rules fingerprints, and full rendered-prompt sha256
-snapshots so that any refactor that silently changes prompt output is caught.
-"""
+"""Structural contracts for the two kernel backend prompt assembly paths."""
 
 from __future__ import annotations
 
@@ -18,13 +13,14 @@ import kernelforge.kernel_backends as _kernel_backends_pkg
 from kernelforge.config import Config
 from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
+from kernelforge.loop.scoring import canonical_gate_prompt, runs_task_suite_acceptance
 
 
 _GPU = "gfx950"
 _KB_SENTINEL = "KB_SENTINEL_VALUE"
 
-# Directory of the kernel backends package as actually loaded, so a prompt that
-# embeds a tool path does not make hashes depend on the checkout location.
+# Directory of the kernel backends package as actually loaded, so a prompt that embeds a tool path does not make
+# hashes depend on the checkout location.
 _KERNEL_BACKENDS_ABS = os.path.abspath(os.path.dirname(_kernel_backends_pkg.__file__))
 
 
@@ -66,18 +62,71 @@ def forge_loop_prompts(monkeypatch):
 # The intellikit backend's removal moved only aiter's hash: its prompt listed
 # `languages/asm/` in the language-folder routing, and that folder went with the
 # backend (diffed: one line changed, nothing else).
+# The token-efficiency pass moved aiter/ck/hip/triton and nothing else. Two
+# edits, both diffed line by line against the previous rendering: the four
+# prompts stopped naming `build`/`test`/`bench`/`pmc`/`registers` as tools --
+# this loop has Bash and the driver, those tools do not exist, and the framing
+# paragraph in orchestrator/agent.py used to spend a sentence per session
+# translating the names back into shell -- and triton's Gluon-escalation section
+# deferred its mechanics to the two cards it already routes to, keeping the
+# trigger, the ownership claim and the route resident (see
+# test_gluon_backend.py::TestTritonEscalationHint, which pins exactly those).
 # Each time the rendered prompts were diffed line by line against their previous
 # rendering; for the card renames every changed line was a card name and nothing
 # else moved. See test_rename_completeness.py for the tree-wide check.
+# The acceptance-gate correction moved all nine, the only re-snapshot so far
+# that had to: the loop stopped running the task's declared suite for every
+# backend but assembly, and each prompt still described the removed step.
+# Diffed line by line. The eight non-assembly prompts swapped the nine-line
+# task-config paragraph for the seven-line driver one; assembly kept its
+# paragraph less the warm-start clause, which no path performs any more; the
+# five agent-facing sentences that repeated the claim outside the shared
+# paragraph were corrected (aiter/ck/hip/triton step 4, flydsl step 4, ck's
+# iron rule, fusion's stop condition, gluon's smaller-shape trap); "GATE" as a
+# name for the performance target became "performance target" in ck/hip/
+# hipblaslt, since the word now has a defined meaning beside it; and hipblaslt
+# gained the paragraph it had never rendered despite three stop conditions
+# resting on it.
+# Keeping sweep knobs out of the deliverable moved the eight source backends and
+# left assembly byte-identical, which is the expected shape: the two edits are
+# both in the shared prompt_utils.py preamble, and assembly renders neither
+# card. Diffed line by line against main: the changed content is one identical
+# block in all eight (same md5 over the diff bodies). The edit-surface bullet
+# gained the converse it had always implied but never said (reaching someone
+# else's environment constant is in scope, authoring a new read in the
+# deliverable is not), and the sweep bullet replaced "KEEP the knobs ... strip
+# at submission" with a collapse to the selected literals before the
+# implementer ends its turn.
+# The null-fused-timing rule moved fusion's hash alone: the harness contract now
+# says a fused time may be omitted only alongside "skipped": true, and that the
+# driver anchors the pristine run on the eager time instead of failing it.
+# Diffed line by line -- six added lines and one rewrapped, nothing else moved.
+# The launch-count gate moved fusion alone, in four places of the one rendering
+# (diffed line by line, nothing else changed): rule 3 gained the NET-count
+# requirement, the harness contract gained a counting step plus the two
+# `*_launches` JSON fields and the rule that gates on them, the baseline-run note
+# says the gate is exempt there, and the ATTEMPT template reports both counts.
+# The contract text reaches this prompt through prompt_utils, so a future edit to
+# harness_contract.py will move this hash without fusion/prompts.py changing.
+# The eager-arm provenance gate moved fusion alone again, all of it inside the
+# harness contract (diffed line by line): steps 1-3 now require the eager arm to be
+# traced from the real forward pass, proved against the recorded kernels with the
+# profiler, and the fused arm to be one call to the authored entry point; the JSON
+# object gained `eager_kernels`/`eager_matches_trace` and the rule that reads them;
+# the remaining steps are the same text renumbered 6-8.
 _SHA256_FORGE_LOOP: dict[str, str] = {
-    "aiter": "67005fca12b430faff552dbf2ed432fc8d2c84836a746ad819f8b9a2633ca33b",
-    "ck": "ec949d82a4226152c4a4e288a8109c3d51eabc23cf0739ed2acd925408a88c01",
-    "flydsl": "59115fbf5dd6c4cd22dc0c547d7a95c9992b64b6ac3f8f5f8a88853f03055937",
-    "fusion": "d158dc07a0d00e0b36c5bc6d5e20d2f207285517829f5b96131b582ee4df3d3d",
-    "gluon": "f127190e0da7240c7b05a6951d7f046cc88c7ce145383daf483d69ad8f4123cd",
-    "hip": "43261f32b4877c306f60ab62a9a87d4deff8dd6906e88b9380e7aca21487896e",
-    "hipblaslt": "1ccbabae411cb958862fe9bf3cfbe5b1b9406467af18fa689e3bba1ccd2d646b",
-    "triton": "7c682cdc1debbcd42deacce2b6f18e5b694f00fc7c527e772708b436d926a2d3",
+    "aiter": "1c933e6bdb8f3000ee9bfbb2a83c4931c9a164cd26ec7776e6e2ff33d682f1b5",
+    "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
+    "ck": "8425aa52e7a9d7681bf75d471617b3a1aa2ce0cf10766f8530ef3025001e0d60",
+    "flydsl": "e9ae6e3f09150964bdff2c74177a923dffd05b96591f8f99cafb11717beeeeca",
+    # The group-axis rule moved fusion alone: harness contract step 4 now forbids
+    # substituting gqa_groups / num_attention_heads for n_local_groups on DSv4 wo_a
+    # paths, and reminds authors that H and G are often unequal.
+    "fusion": "5e0e61ccc6c483411dbb10e6381187ca16373bf9d1156873f9f1abc099f7bf5f",
+    "gluon": "45a2cfcd349304581f1ea1cb1d489b7ff326fe7276ac35834840b17d5a6e8c06",
+    "hip": "b423e67f7e17cb20c6edd8166df665f5dfeed31a9bb7abe22dba10a33e6d0f25",
+    "hipblaslt": "b6318a771e02c382658b3a8ddb844343d3528b1b91ca1d8c60febf84afdfc1ae",
+    "triton": "e73f10c4a2bc4fbe59da1e619605401b8f4c602bf0b4480d956584162473c650",
 }
 
 
@@ -90,6 +139,55 @@ class TestRenderedPromptSnapshots:
             assert got == _SHA256_FORGE_LOOP[backend], (
                 f"{backend}: forge-loop prompt changed (got {got!r}, expected {_SHA256_FORGE_LOOP[backend]!r})"
             )
+
+
+class TestAcceptanceGateMatchesTheLoop:
+    """Every prompt states the gate the loop will actually apply to that backend.
+
+    The description and the loop's Step 7 were two copies of one fact, and they
+    drifted: the step became assembly's alone while all eight other prompts kept
+    telling their agent that forge runs the task's `compile_command` and
+    `correctness_command` on every candidate. An agent optimizes against the
+    criterion it is given, so that is not a stale sentence -- it points the
+    implementer at a verdict no longer formed and at a diagnostic never
+    produced. Both sides now read ``runs_task_suite_acceptance``.
+    """
+
+    def test_each_prompt_carries_the_gate_its_backend_is_judged_by(self, forge_loop_prompts):
+        for backend, prompt in forge_loop_prompts.items():
+            assert canonical_gate_prompt(backend) in prompt, (
+                f"{backend}: prompt does not state the acceptance gate the loop applies to it"
+            )
+
+    def test_only_a_task_suite_backend_claims_forge_runs_the_task_config(self, forge_loop_prompts):
+        for backend, prompt in forge_loop_prompts.items():
+            claims = "`correctness_command`" in prompt
+            assert claims is runs_task_suite_acceptance(backend), (
+                f"{backend}: prompt {'claims' if claims else 'omits'} the task-config gate while the loop "
+                f"{'runs' if runs_task_suite_acceptance(backend) else 'does not run'} it"
+            )
+
+
+class TestNoInventedTools:
+    """No backend prompt may name a tool the forge loop does not hand a session.
+
+    The implementer gets Bash and the measurement driver. It has never had
+    `build`, `test`, `bench`, `pmc` or `registers` tools, but four of these
+    prompts instructed it to use them, and ``make_agent_fn`` compensated with a
+    sentence -- carried in the cached prefix of every session, of every campaign
+    -- explaining that those five names meant shell commands. A prompt that
+    names the mechanism needs no such correction, so the correction is gone and
+    this is what keeps it gone. `Read`, `Edit`, `Grep`, `Glob`, `Bash` and `Task`
+    are real, hence the allowlist rather than a ban on the word "tool".
+    """
+
+    _INVENTED = ("`build` tool", "`test` tool", "`bench` tool", "`pmc` tool", "`registers` tool")
+
+    def test_no_backend_prompt_names_an_invented_tool(self, forge_loop_prompts):
+        for backend, prompt in forge_loop_prompts.items():
+            collapsed = " ".join(prompt.split())
+            for name in self._INVENTED:
+                assert name not in collapsed, f"{backend}: prompt names the nonexistent {name}"
 
 
 class TestForgeLoopPath:
@@ -126,57 +224,67 @@ _LOOP_FORM_CARD = "lever_loop_form.md"
 
 
 class TestEditSurfaceAndSweepContract:
-    """The sweep contract is shared, always resident, and no longer self-erasing.
+    """The sweep contract is shared, always resident, and no longer self-erasing."""
 
-    Two campaigns lost their largest available win on a kernel backend whose prompt never
-    mentioned sweeps at all, because the contract lived only in the Triton
-    prompt. It now lives in a ``common_methodology/`` card that every kernel backend
-    receives, with an always-resident pointer in each prompt (the knowledge tree
-    is Read-on-demand, so a card nobody opens teaches nothing).
-    """
+    @pytest.fixture()
+    def source_loop_prompts(self, forge_loop_prompts):
+        # Assembly edits one .s behind a fixed launcher, without Python sweep knobs.
+        return {name: prompt for name, prompt in forge_loop_prompts.items() if name != "assembly"}
 
-    def test_every_kernel_backend_points_at_the_sweep_card(self, forge_loop_prompts):
-        for backend, prompt in forge_loop_prompts.items():
+    def test_assembly_has_a_fixed_edit_surface(self, forge_loop_prompts):
+        prompt = forge_loop_prompts["assembly"]
+        assert "Only the task's declared .s file is editable" in prompt
+        assert "Python launcher, binding manifest, driver, ABI and specialization are frozen" in prompt
+        assert "There is no LLM PORT phase and no handwritten replacement seed" in prompt
+        assert "FLOOR, not a ceiling" not in prompt
+        assert "FORGE_SWEEP_" not in prompt
+
+    def test_every_kernel_backend_points_at_the_sweep_card(self, source_loop_prompts):
+        for backend, prompt in source_loop_prompts.items():
             assert _SWEEP_CARD in prompt, f"{backend}: prompt does not name the shared sweep card"
             assert "FORGE_SWEEP_" in prompt, f"{backend}: prompt does not carry the sweep-knob contract"
             assert "sweep_const" in prompt, f"{backend}: prompt does not carry the sweep echo contract"
 
-    def test_every_kernel_backend_points_at_the_edit_surface_card(self, forge_loop_prompts):
-        for backend, prompt in forge_loop_prompts.items():
+    def test_every_kernel_backend_points_at_the_edit_surface_card(self, source_loop_prompts):
+        for backend, prompt in source_loop_prompts.items():
             assert _EDIT_SURFACE_CARD in prompt, f"{backend}: prompt does not name the edit-surface card"
             assert "editable_sources" in prompt, f"{backend}: prompt never names the editable source list"
             assert "os.environ" in prompt, f"{backend}: prompt does not state the os.environ converse"
-            # The declared list is a floor: `agent.py` tells repository tasks
-            # that any tracked non-protected implementation file is editable,
-            # so a prompt presenting the list as the boundary contradicts the
-            # rest of its own assembly -- in the direction that lost the
-            # campaigns.
+            # The declared list is a floor: `agent.py` tells repository tasks that any tracked non-protected
+            # implementation file is editable, so a prompt presenting the list as the boundary contradicts the rest of
+            # its own assembly -- in the direction that lost the campaigns.
             assert "FLOOR, not a ceiling" in prompt, f"{backend}: prompt presents the editable list as a ceiling"
 
-    def test_every_kernel_backend_carries_the_boolean_parse_warning(self, forge_loop_prompts):
-        """A knob that cannot be turned off is the sweep bug the echo cannot catch.
-
-        The echo prints the string the host sent, not the value the source made
-        of it, so `bool("0")` returning True makes the OFF point time the ON
-        kernel and still come back confirmed.
-        """
-        for backend, prompt in forge_loop_prompts.items():
+    def test_every_kernel_backend_carries_the_boolean_parse_warning(self, source_loop_prompts):
+        """A knob that cannot be turned off is the sweep bug the echo cannot catch."""
+        for backend, prompt in source_loop_prompts.items():
             assert 'bool("0")' in prompt, (
                 f"{backend}: prompt does not warn that a bool-cast swept string is always True"
             )
 
-    def test_no_kernel_backend_tells_the_implementer_to_collapse_the_knobs(self, forge_loop_prompts):
-        """A knob deleted mid-campaign is an axis no later session re-opens."""
-        for backend, prompt in forge_loop_prompts.items():
-            lowered = prompt.lower()
-            assert "collapse the knobs back" not in lowered, (
-                f"{backend}: prompt still tells the implementer to delete its own sweep knobs"
+    def test_every_kernel_backend_keeps_sweep_plumbing_out_of_what_it_submits(self, source_loop_prompts):
+        """Sweep knobs last one turn; the kernel that ships carries the literal they picked.
+
+        The prompt used to say the opposite -- keep the knobs in the source for the whole search, strip them at
+        submission if anyone asks. Nobody asked, so every campaign delivered its scaffolding: sixty environment reads
+        and three hundred echo lines in one shipped kernel, indistinguishable to a reader from live configuration.
+        The collapse is now the implementer's own last edit of every turn. It stays in place rather than on a copy:
+        only the rewrite driver can be pointed at another kernel file, so for every other backend a copy is a file no
+        sweep point runs.
+        """
+        for backend, prompt in source_loop_prompts.items():
+            lowered = " ".join(prompt.lower().split())
+            assert "keep the knobs" not in lowered, (
+                f"{backend}: prompt still tells the implementer to ship its own sweep knobs"
             )
-            assert "dead weight in the delivered kernel" not in lowered, (
-                f"{backend}: prompt still calls a shipped sweep knob dead weight"
+            assert "before you end the turn" in lowered, (
+                f"{backend}: prompt does not make removing the knobs part of the implementer's own turn"
             )
-            assert "keep the knobs" in lowered, (
-                f"{backend}: prompt does not tell the implementer to keep the sweep knobs through the search"
+            assert "with the literal it selected" in lowered, (
+                f"{backend}: prompt does not say the submitted kernel carries the literal, not the read"
+            )
+            assert "kernelforge_rewrite_candidate_kernel" not in lowered, (
+                f"{backend}: the shared prompt prescribes a candidate path only the rewrite driver has"
             )
 
     def test_sweep_contract_is_not_owned_by_one_kernel_backend(self):
@@ -194,16 +302,16 @@ class TestEditSurfaceAndSweepContract:
 
 
 class TestSharedCardsAreReachable:
-    """The new cards must be reachable through the real knowledge index.
-
-    ``build_forge_knowledge`` loads ``common_methodology/INDEX.md`` whole, so a
-    card that is not registered there is invisible to every kernel backend no matter what
-    the prompt says.
-    """
+    """The new cards must be reachable through the real knowledge index."""
 
     @pytest.fixture()
     def knowledge_block(self) -> str:
-        config = Config(gpu_target=_GPU)
+        # Maps inlined on purpose: what is under test here is the *content* of
+        # the INDEX maps -- whether they register the cards at all. Deferral
+        # (the default) does not touch those files, it only replaces the inlined
+        # copy with a pointer to them, so the registration is asserted against
+        # the inlined form and the pointer path is covered separately below.
+        config = Config(gpu_target=_GPU, defer_knowledge_maps=False)
         return build_single_kernel_backend_prompt(config, "flydsl")
 
     def test_cards_exist_on_disk(self):
@@ -218,16 +326,9 @@ class TestSharedCardsAreReachable:
             )
 
     def test_loop_form_card_reaches_a_triton_kernel_context(self):
-        """The loop-form rule must land in a Triton kernel's context specifically.
-
-        It is registered twice on purpose: once in ``common_methodology/INDEX.md``
-        (every kernel backend) and once in ``languages/triton/INDEX.md``, because the
-        recognition signature -- a ``while`` bounded by a ``tl.load`` -- is Triton
-        syntax and a Triton author routes through the language map, not the
-        methodology one.
-        """
+        """The loop-form rule must land in a Triton kernel's context specifically."""
         prompt = build_single_kernel_backend_prompt(
-            Config(gpu_target=_GPU),
+            Config(gpu_target=_GPU, defer_knowledge_maps=False),
             "triton",
             task_type="image_kernel",
             source_paths=["vllm/attention/ops/triton_sparse_attn_prefill.py"],
@@ -237,18 +338,36 @@ class TestSharedCardsAreReachable:
             "expected the card in both the common_methodology and languages/triton maps"
         )
 
+    def test_the_default_prompt_still_reaches_the_cards_through_the_pointers(self):
+        """Under the default the maps are pointers, so reachability is a chain.
+
+        Nothing is inlined, so the guarantee the two tests above make about the
+        assembled prompt has to be re-made one link further out: the prompt must
+        name the INDEX of each pillar that registers a card, and that INDEX --
+        the file an agent is told to ``Read`` -- must actually register it.
+        """
+        root = Path(Config(gpu_target=_GPU).local_knowledge_dir)
+        prompt = build_single_kernel_backend_prompt(
+            Config(gpu_target=_GPU),
+            "triton",
+            task_type="image_kernel",
+            source_paths=["vllm/attention/ops/triton_sparse_attn_prefill.py"],
+        )
+        assert _LOOP_FORM_CARD not in prompt, "the default must not inline the maps"
+
+        for pillar, cards in (
+            ("common_methodology", (_SWEEP_CARD, _EDIT_SURFACE_CARD, _LOOP_FORM_CARD)),
+            ("languages/triton", (_LOOP_FORM_CARD,)),
+        ):
+            index = root / pillar / "INDEX.md"
+            assert str(index) in prompt, f"the prompt never points at {pillar}/INDEX.md"
+            registered = index.read_text()
+            for card in cards:
+                assert card in registered, f"{card} is not registered in {pillar}/INDEX.md"
+
 
 class TestDocumentedSweepHelper:
-    """The helper the card shows must round-trip a boolean knob.
-
-    Every kernel backend now receives this card, so whatever it shows is what eight
-    backends will paste into a kernel. ``type(default)(value)`` is ``bool(value)``
-    for a boolean default, and ``bool("0")`` and ``bool("false")`` are both True:
-    the OFF point then benchmarks the ON configuration, while the echo -- which
-    reports the string the host sent, never the value the source computed --
-    marks the point confirmed. The sweep closes a live axis it never varied,
-    through the one contract that exists to prevent exactly that.
-    """
+    """The helper the card shows must round-trip a boolean knob."""
 
     @pytest.fixture()
     def sweep_const(self):
@@ -256,7 +375,7 @@ class TestDocumentedSweepHelper:
         blocks = re.findall(r"```python\n(.*?)```", card.read_text(encoding="utf-8"), re.DOTALL)
         assert len(blocks) == 1, f"{_SWEEP_CARD}: expected exactly one python block to lock, found {len(blocks)}"
         namespace: dict = {"os": os}
-        exec(compile(blocks[0], str(card), "exec"), namespace)  # noqa: S102
+        exec(compile(blocks[0], str(card), "exec"), namespace)
         assert "_sweep_const" in namespace, f"{_SWEEP_CARD}: the documented block no longer defines _sweep_const"
         return namespace["_sweep_const"]
 

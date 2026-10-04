@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for orchestrator/supervisor.py pure logic (no LLM/subprocess).
-
-Covers the prompt builder's three file-access modes and interaction persistence.
-Provider dispatch is covered through the shared registry in
-``test_supervisor_backend.py``."""
+"""Unit tests for orchestrator/supervisor.py pure logic (no LLM/subprocess)."""
 
 from __future__ import annotations
 
@@ -126,6 +122,7 @@ def test_injected_ruling_gets_fallback_audit_artifact(tmp_path):
     assert latest.read_text() == reply
 
 
-def test_persist_interaction_swallows_errors():
-    # A bogus workspace path must not raise (best-effort persistence).
-    _persist_interaction("\x00bad", 1, "r", "s", "u", "reply", backend="codex", model="m")
+def test_persist_interaction_survives_an_unwritable_workspace(tmp_path):
+    workspace = tmp_path / "not_a_dir"
+    workspace.write_text("")
+    _persist_interaction(str(workspace), 1, "r", "s", "u", "reply", backend="codex", model="m")

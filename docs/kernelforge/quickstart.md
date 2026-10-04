@@ -11,11 +11,11 @@ This guide walks through a complete kernel development workflow — from install
 | rocprofv3 | (included with ROCm) | `rocprofv3 --version` |
 | GPU | MI300X / MI355X | `rocm-smi --showproductname` |
 | Claude auth | API key, subscription token, **or** Claude Code Max | `echo $ANTHROPIC_API_KEY` / `echo $CLAUDE_CODE_OAUTH_TOKEN` **or** `claude --version` |
+| Codex auth (instead of Claude) | OpenAI-side key and endpoint | `echo $OPENAI_API_KEY` / `echo $OPENAI_BASE_URL` |
 
-**Billing choice.** `kernelforge forge-loop` drives its agent sessions through `claude-agent-sdk.query()`, which spawns the `claude` CLI as a subprocess, so whatever that CLI authenticates with is what gets billed. A `claude` logged in with Claude Code Max bills against your Max subscription and needs **no `ANTHROPIC_API_KEY`**. Where a login cannot persist — a container, CI — `CLAUDE_CODE_OAUTH_TOKEN` reaches the same subscription. Set `ANTHROPIC_API_KEY` only if you want API-credit billing instead; the CLI reads it ahead of the subscription token, so setting both bills the key.
+**Billing choice.** `kernelforge forge-loop` drives its agent sessions through `claude-agent-sdk.query()`, which spawns the `claude` CLI as a subprocess, so whatever that CLI authenticates with is what gets billed. A `claude` logged in with Claude Code Max bills against your Max subscription and needs **no `ANTHROPIC_API_KEY`**. Where a login cannot persist — a container, CI — `CLAUDE_CODE_OAUTH_TOKEN` reaches the same subscription. Set `ANTHROPIC_API_KEY` only if you want API-credit billing instead; the CLI reads it ahead of the subscription token, so setting both bills the key. To run on Codex instead, pass `--agent-backend codex` or configure only the OpenAI side (`OPENAI_BASE_URL` + `OPENAI_API_KEY`); sessions then run through the Codex SDK, billed to that key, with `CODEX_MODEL` as the model.
 
 Optional but recommended:
-- [RTK](https://github.com/rtk-ai/rtk) for 60-90% token savings: `cargo install rtk`
 - AITER repo cloned at `/work/aiter-amd` (or wherever your kernel workspace is)
 
 ## Step 1: Install
@@ -83,11 +83,8 @@ export ANTHROPIC_BASE_URL=https://your-gateway.example/api/v1/llm-proxy
 export ANTHROPIC_AUTH_TOKEN=...
 ```
 
-Fusion discovery runs through the agent harness, so it uses whichever line the
-selected provider reads — the Anthropic one above for a Claude model. Callers
-that use `default_llm_fn` directly instead of the CLI get a plain completion,
-and that path speaks whichever protocol is configured: the OpenAI line when both
-halves are set, otherwise the Anthropic one natively.
+Fusion discovery runs through the registered agent harness, so it uses whichever
+line the selected provider reads — the Anthropic one above for a Claude model.
 
 The Codex supervisor speaks the OpenAI-compatible protocol, which is a separate
 line. Set it only if you use it. Both halves are required here — KernelForge
@@ -226,24 +223,19 @@ The result file:
 
 ## Step 5: Learn from the experiment
 
-When a campaign finishes it runs its own postmortem — pitfalls from regressions, optimizations from improvements — and reports what it kept:
+Every iteration is appended to the run's experience ledger in the workspace, so
+the agent carries what it already tried into the next round instead of
+rediscovering it:
 
 ```
-  Lessons learned: 3
-  Transfer rules discovered: 1
+forge_experiments/forge_experience.md    # what the agent reads back
+forge_experiments/experience.jsonl       # the machine-readable record
 ```
 
-The lesson documents land under the backend's `learned/` directory in the writable
-knowledge base — `$KERNELFORGE_PROJECT_ROOT/knowledge_base`, defaulting to
-`~/.cache/hyperloom/kernelforge/knowledge_base` — and the (config, performance)
-pairs go to the tuning database:
-
-```
-knowledge_base/triton/learned/optimization_BLOCK_N_256.md
-knowledge_base/triton/learned/methodology_Plateau_at_0480_ms.md
-```
-
-Next time a campaign runs on a similar kernel, these lessons are automatically injected into the agent's prompt.
+When a run ends, its best solution and the measurements behind it are published
+to the knowledge base through the experience store. A later run on a similar
+kernel reads those records back (`read_best_solution` / `read_top_solutions`)
+and warm-starts from them rather than from a blank prompt.
 
 ## Step 6: Optimize your own kernel
 
@@ -342,15 +334,6 @@ python driver.py --warmup 10 --iters 200 --bench-mode   # wall_ms: 0.081920 per 
 The full contract — every mode, every line, and the rules for multi-rank and self-managed-stream tasks — is in [`src/kernelforge/data/examples/README.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/kernelforge/data/examples/README.md).
 
 ## Troubleshooting
-
-### `rtk --version` reports nothing
-
-RTK is optional but saves 60-90% of tokens; it is used transparently whenever it is on PATH. Install it:
-```bash
-cargo install rtk
-# or
-pip install rtk
-```
 
 ### Agent doesn't find kernel source files
 

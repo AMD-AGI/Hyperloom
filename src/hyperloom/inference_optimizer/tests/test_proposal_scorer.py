@@ -22,6 +22,7 @@ from hyperloom.orchestrator.scoring.proposal_scorer import (
     _prepare_scoring_proposals,
 )
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
+from hyperloom.inference_optimizer.tests.test_specialist_lifecycle import _StubSharedState
 from hyperloom.inference_optimizer.session.session_paths import (
     conversations_path,
     llm_calls_path,
@@ -166,8 +167,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 @pytest.mark.asyncio
 async def test_scoring_call_writes_full_conversation_trace(tmp_path: Path):
-    """With ``session_dir`` set, each scoring call records both a token row
-    (component=proposal_scorer) and a full prompt/reply conversation row."""
+    """With ``session_dir`` set, each scoring call records both a token row (component=proposal_scorer) and a full prompt/reply conversation row."""
     session_dir = tmp_path / "SESSION"
     session_dir.mkdir()
     client = _FakeClient(
@@ -203,13 +203,7 @@ async def test_scoring_call_writes_full_conversation_trace(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_failed_scoring_call_writes_an_error_row(tmp_path: Path):
-    """A model whose call blows up must still land in the ledger.
-
-    ``score()`` folds per-model exceptions into an ``errors`` map via
-    ``gather(return_exceptions=True)``, so without a row written inside
-    ``_score_one_model`` the failure never reaches the ledger or Langfuse — and
-    which model failed is the only thing that survives the fold.
-    """
+    """A model whose call blows up must still land in the ledger."""
     session_dir = tmp_path / "SESSION"
     session_dir.mkdir()
 
@@ -339,32 +333,12 @@ class _StubTask:
     params: dict[str, Any] = field(default_factory=dict)
 
 
-class _StubSharedState:
-    def __init__(self):
-        self.specialist_rounds: list[dict[str, Any]] = []
-        self.last_specialist: dict[str, Any] = {}
-        self.saved: int = 0
-
-    def record_specialist_round(self, entry: dict[str, Any]) -> None:
-        round_id = str(entry.get("round_id") or "").strip()
-        if round_id:
-            for i, prev in enumerate(self.specialist_rounds):
-                if str(prev.get("round_id") or "") == round_id:
-                    self.specialist_rounds[i] = dict(entry)
-                    return
-        self.specialist_rounds.append(dict(entry))
-
-    def update_last_specialist(self, snapshot) -> None:
-        self.last_specialist = dict(snapshot)
-
-    def save(self, _sd) -> None:
-        self.saved += 1
-
-
 def _coord(tmp_path: Path, scorer):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
     c = Coordinator.__new__(Coordinator)
+    c.phase_framework = FrameworkPhase(c)
     c.session_dir = tmp_path
     c.shared_state = _StubSharedState()
     c._proposal_scorer = scorer
@@ -377,7 +351,6 @@ def _done():
         "domain": "serving_specialist",
         "gap_canonical_id": "gap.framework.cuda_graph.session-1",
         "proposal_set": list(_PROPOSALS),
-        "empty": False,
         "summary": "explored",
         "reason": "kb_evidence",
         "confidence": 0.7,
@@ -418,29 +391,11 @@ async def test_coordinator_no_scorer_no_key(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_scorer_exception_still_records(tmp_path):
-    class _BoomScorer:
-        async def score(self, **_kw):
-            raise RuntimeError("scorer blew up")
-
-    c = _coord(tmp_path, _BoomScorer())
-    task = _StubTask(task_id="t1", params={})
-    await c._record_specialist_result(
-        task=task,
-        done_payload=_done(),
-        source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
-    )
-    assert len(c.shared_state.specialist_rounds) == 1
-    assert "ensemble_scores" not in c.shared_state.specialist_rounds[0]
-
-
-@pytest.mark.asyncio
 async def test_coordinator_empty_proposals_not_scored(tmp_path):
     scorer = _make_scorer({"m1": _scores_json(("proposal_0", 1.0, "y"))})
     c = _coord(tmp_path, scorer)
     payload = _done()
     payload["proposal_set"] = []
-    payload["empty"] = True
     task = _StubTask(task_id="t1", params={})
     await c._record_specialist_result(
         task=task,
@@ -587,8 +542,7 @@ async def test_resume_idempotent_on_round_id(tmp_path):
 
 
 class _ScriptedStream:
-    """Async iterator yielding caller-supplied chunks; with ``stall`` set it hangs
-    forever after them, emulating a proxy that opens the stream then stalls mid-body."""
+    """Async iterator yielding caller-supplied chunks; with ``stall`` set it hangs forever after them, emulating a proxy that opens the stream then stalls mid-body."""
 
     def __init__(self, chunks: list[Any], *, stall: bool = False):
         self._chunks = chunks

@@ -1,25 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Value coercion primitives (canonical ``to_float`` / ``to_int`` / ``to_str_list`` / ...).
-
-Single home for the "best-effort coerce a value to a number, tolerate dirty
-input, reject ``bool``, fall back to a default" idiom.
-
-Standardised semantics (one clean contract, no per-call flags):
-
-* ``bool`` is always treated as dirty input and coerced to *default* -- never
-  ``float(True) == 1.0``, since a stray boolean becoming ``1.0`` / ``0`` is
-  almost always a latent bug.
-* Non-finite values (``nan``, ``inf``, ``-inf``) are treated as dirty input
-  and coerced to *default* -- a non-finite number silently treated as a real
-  measurement produces wrong comparisons and gate decisions downstream.
-* ``None`` and any non-convertible value coerce to *default* (default ``None``).
-* String inputs are ``str(...).strip()``-normalised before parsing.
-
-Zero first-party imports (stdlib only) so any package may depend on it without
-creating an import cycle.
-"""
+"""Value coercion primitives (canonical ``to_float`` / ``to_int`` / ``to_str_list`` / ...)."""
 
 from __future__ import annotations
 
@@ -31,17 +13,7 @@ _T = TypeVar("_T")
 
 
 def to_float(value: Any, default: _T | None = None) -> float | _T | None:
-    """Coerce *value* to a finite ``float``, rejecting ``bool``, ``None``, and
-    non-finite values (``nan`` / ``inf``).
-
-    Args:
-        value: The value to coerce.
-        default: Returned when *value* is a ``bool``, ``None``, non-finite, or
-            not convertible to ``float`` (default ``None``).
-
-    Returns:
-        The parsed finite ``float``, or *default*.
-    """
+    """Coerce *value* to a finite ``float``, rejecting ``bool``, ``None``, and non-finite values (``nan`` / ``inf``)."""
     if value is None or isinstance(value, bool):
         return default
     try:
@@ -52,18 +24,7 @@ def to_float(value: Any, default: _T | None = None) -> float | _T | None:
 
 
 def to_int(value: Any, default: _T | None = None) -> int | _T | None:
-    """Coerce *value* to ``int``, rejecting ``bool``, ``None``, and non-finite floats.
-
-    String inputs are stripped before parsing (base-10, no float truncation).
-
-    Args:
-        value: The value to coerce.
-        default: Returned when *value* is a ``bool``, ``None``, non-finite, or
-            not convertible to ``int`` (default ``None``).
-
-    Returns:
-        The parsed ``int``, or *default*.
-    """
+    """Coerce *value* to ``int``, rejecting ``bool``, ``None``, and non-finite floats."""
     if value is None or isinstance(value, bool):
         return default
     if isinstance(value, float) and not math.isfinite(value):
@@ -75,15 +36,7 @@ def to_int(value: Any, default: _T | None = None) -> int | _T | None:
 
 
 def first_float(*values: Any, default: _T | None = None) -> float | _T | None:
-    """Return the first value that :func:`to_float`-parses, else *default*.
-
-    Args:
-        *values: Candidate values, tried in order.
-        default: Returned when no candidate parses (default ``None``).
-
-    Returns:
-        The first successfully parsed ``float``, or *default*.
-    """
+    """Return the first value that :func:`to_float`-parses, else *default*."""
     for value in values:
         parsed = to_float(value)
         if parsed is not None:
@@ -92,15 +45,7 @@ def first_float(*values: Any, default: _T | None = None) -> float | _T | None:
 
 
 def first_int(*values: Any, default: _T | None = None) -> int | _T | None:
-    """Return the first value that :func:`to_int`-parses, else *default*.
-
-    Args:
-        *values: Candidate values, tried in order.
-        default: Returned when no candidate parses (default ``None``).
-
-    Returns:
-        The first successfully parsed ``int``, or *default*.
-    """
+    """Return the first value that :func:`to_int`-parses, else *default*."""
     for value in values:
         parsed = to_int(value)
         if parsed is not None:
@@ -109,19 +54,7 @@ def first_int(*values: Any, default: _T | None = None) -> int | _T | None:
 
 
 def optional_positive_int(value: Any, default: _T | None = None) -> int | _T | None:
-    """Coerce *value* to a strictly positive ``int``, else *default*.
-
-    Combines :func:`to_int` with a ``> 0`` guard: non-integer, ``bool``,
-    ``None``, or non-positive inputs all collapse to *default*.
-
-    Args:
-        value: Candidate value (int, numeric string, or absent).
-        default: Returned when *value* is unset, non-integer, or ``<= 0``
-            (default ``None``).
-
-    Returns:
-        The positive ``int``, or *default*.
-    """
+    """Coerce *value* to a strictly positive ``int``, else *default*."""
     parsed = to_int(value)
     if parsed is None or parsed <= 0:
         return default
@@ -129,25 +62,7 @@ def optional_positive_int(value: Any, default: _T | None = None) -> int | _T | N
 
 
 def to_unix(value: Any, default: _T | None = None) -> float | _T | None:
-    """Coerce a timestamp *value* to unix seconds, rejecting ``bool``.
-
-    Accepts numeric epoch seconds or an ISO-8601 string (``Z`` suffix
-    tolerated). String parsing is ISO-first: an ISO-8601 timestamp is parsed to
-    its epoch, falling back to a bare ``float`` cast for numeric strings.
-
-    A timestamp with no offset is read as UTC, matching
-    :func:`hyperloom.common.timeutil.iso_z`: every producer here writes UTC,
-    and letting the host's ``TZ`` decide would place the same string at
-    different instants for the two readers of it.
-
-    Args:
-        value: The raw timestamp value.
-        default: Returned when *value* cannot be interpreted as a timestamp
-            (default ``None``).
-
-    Returns:
-        Unix seconds as ``float``, or *default*.
-    """
+    """Coerce a timestamp *value* to unix seconds, rejecting ``bool``."""
     if value is None or isinstance(value, bool):
         return default
     if isinstance(value, (int, float)):
@@ -168,16 +83,7 @@ def to_unix(value: Any, default: _T | None = None) -> float | _T | None:
 
 
 def to_str_list(value: Any) -> list[str]:
-    """Coerce *value* into a list of non-empty, stripped strings.
-
-    Args:
-        value: A string, list/tuple/set, other scalar, or ``None``.
-
-    Returns:
-        ``None`` -> ``[]``; a string -> ``[stripped]`` (dropped when blank); a
-        list/tuple/set -> each element ``str``-ified, stripped, kept only when
-        non-empty; any other scalar -> ``[stripped]`` when non-empty.
-    """
+    """Coerce *value* into a list of non-empty, stripped strings."""
     if value is None:
         return []
     if isinstance(value, str):

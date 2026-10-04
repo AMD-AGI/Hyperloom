@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the ``framework_rewrite_specialist`` domain and its dispatch.
-
-Three things are pinned here:
-
-* the domain exists in the catalogue and resolves to the ``framework`` KB anchor,
-  so PolicyGate's anchor whitelist accepts a dispatch to it;
-* the prompt carries the rewrite-pattern taxonomy and the switch-manifest
-  contract as a *prior*, without naming any specific function — that split is
-  what makes the capability transfer to another model or framework instead of
-  being a one-off reproduction;
-* the FRAMEWORK phase routes to it by framework *kind*, so a scriptable
-  iterative pipeline is not dispatched to a serving domain whose hot path
-  (scheduler, batching, KV-cache admission) does not exist there.
-"""
+"""Unit tests for the ``framework_rewrite_specialist`` domain and its dispatch."""
 
 from __future__ import annotations
 
@@ -24,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.phases.framework import FrameworkPhase
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     _DOMAIN_FOCUS_TEMPLATES,
@@ -40,9 +28,7 @@ from hyperloom.orchestrator.specialists.domains import (
 DOMAIN_KEY = "framework_rewrite_specialist"
 
 
-# --------------------------------------------------------------------------
 # catalogue
-# --------------------------------------------------------------------------
 
 
 def test_domain_is_in_the_catalogue():
@@ -68,20 +54,11 @@ def test_domain_description_separates_it_from_the_serving_domain():
     assert "serving_specialist" in text
 
 
-# --------------------------------------------------------------------------
 # prompt
-# --------------------------------------------------------------------------
 
 
 def _focus_text(framework: str = "custom") -> str:
-    """Render the domain focus block as one string.
-
-    Args:
-        framework: Framework name carried into the prompt.
-
-    Returns:
-        The rendered focus block.
-    """
+    """Render the domain focus block as one string."""
     inputs = SpecialistPromptInputs(task_id="t-1", domain=get_domain(DOMAIN_KEY), framework=framework)
     return "\n".join(_focus_framework_rewrite_specialist(inputs))
 
@@ -119,13 +96,7 @@ def test_prompt_explains_why_the_default_off_switch_is_enforced():
 
 
 def test_prompt_warns_about_allocator_address_reuse():
-    """The pinning requirement is the difference between a cache and a silent bug.
-
-    Under a caching allocator a freed tensor's address is handed to the next
-    allocation, so a cache keyed on ``data_ptr`` alone returns a previous
-    computation for a brand-new tensor — a wrong-answer bug a throughput
-    benchmark accepts happily.
-    """
+    """The pinning requirement is the difference between a cache and a silent bug."""
     text = _focus_text()
     assert "caching" in text and "allocator" in text
     assert "Pin the source tensors" in text
@@ -156,12 +127,7 @@ def test_prompt_names_the_active_framework():
 
 
 def test_prompt_names_no_specific_function():
-    """The prior is the pattern vocabulary, not a list of answers.
-
-    Seeding specific landing points would reproduce one known result and teach
-    the system nothing transferable; the whole value of the taxonomy is that it
-    applies to a pipeline nobody has looked at yet.
-    """
+    """The prior is the pattern vocabulary, not a list of answers."""
     text = _focus_text()
     for leaked_answer in (
         "all_gather_object",
@@ -173,9 +139,7 @@ def test_prompt_names_no_specific_function():
         assert leaked_answer not in text
 
 
-# --------------------------------------------------------------------------
 # reference document
-# --------------------------------------------------------------------------
 
 
 def _reference_path() -> Path:
@@ -206,9 +170,7 @@ def test_reference_document_covers_every_category_id():
         assert category in text
 
 
-# --------------------------------------------------------------------------
 # phase routing
-# --------------------------------------------------------------------------
 
 
 class _State:
@@ -220,32 +182,23 @@ class _State:
         self.last_framework_rewrite_evidence_status = status
 
 
-class _Phase:
-    """Bind the two FrameworkPhase helpers under test to a stub state."""
+def _phase(framework: str, evidence: str = "", status: str = "") -> FrameworkPhase:
+    """A FrameworkPhase whose Coordinator carries only the state the domain router reads."""
+    from types import SimpleNamespace
 
-    def __init__(self, framework: str, evidence: str = "", status: str = "") -> None:
-        from hyperloom.orchestrator.phases.framework import FrameworkPhase
-
-        self.shared_state = _State(framework, evidence, status)
-        self._authoring_specialist_domain = FrameworkPhase._authoring_specialist_domain.__get__(self)
-        self._render_rewrite_evidence_for_prompt = FrameworkPhase._render_rewrite_evidence_for_prompt.__get__(self)
-        self._rewrite_evidence_absence_note = FrameworkPhase._rewrite_evidence_absence_note.__get__(self)
+    return FrameworkPhase(SimpleNamespace(shared_state=_State(framework, evidence, status)))
 
 
 def test_a_measured_negative_reads_as_a_measured_negative():
     """The probe ran and found nothing: the specialist may trust the silence."""
-    note = _Phase("custom", status="no_candidates")._rewrite_evidence_absence_note()
+    note = _phase("custom", status="no_candidates")._rewrite_evidence_absence_note()
     assert "found no rewrite candidates" in note
     assert "measured negative" in note
 
 
 def test_a_broken_probe_does_not_read_as_a_clean_loop():
-    """The failure must be named, or an absent instrument looks like a result.
-
-    This is the whole point of carrying a status: both cases render as an empty
-    evidence block, and only one of them means there is nothing left to find.
-    """
-    note = _Phase("custom", status="aggregation_failed: boom")._rewrite_evidence_absence_note()
+    """The failure must be named, or an absent instrument looks like a result."""
+    note = _phase("custom", status="aggregation_failed: boom")._rewrite_evidence_absence_note()
     assert "aggregation_failed: boom" in note
     assert "broken instrument" in note
     assert "NOT a measured negative" in note
@@ -253,21 +206,16 @@ def test_a_broken_probe_does_not_read_as_a_clean_loop():
 
 def test_no_profile_yet_is_neither_of_those():
     """Before any profile lands the honest answer is 'not yet', not a verdict."""
-    note = _Phase("custom")._rewrite_evidence_absence_note()
+    note = _phase("custom")._rewrite_evidence_absence_note()
     assert "has been collected yet" in note
     assert "measured negative" not in note
 
 
 def test_evidence_that_exists_but_will_not_render_says_so(tmp_path):
-    """A document on disk that this prompt cannot show is not an absence either.
-
-    Status is 'ok' and a path is on record, so neither the failure branch nor
-    the 'nothing yet' branch is honest: the evidence exists and the specialist
-    must not read the empty block as a verdict on the source.
-    """
+    """A document on disk that this prompt cannot show is not an absence either."""
     recorded = tmp_path / "evidence.json"
     recorded.write_text("{}", encoding="utf-8")
-    note = _Phase("custom", evidence=str(recorded), status="ok")._rewrite_evidence_absence_note()
+    note = _phase("custom", evidence=str(recorded), status="ok")._rewrite_evidence_absence_note()
     assert "could not be rendered" in note
     assert "has been collected yet" not in note
 
@@ -275,19 +223,19 @@ def test_evidence_that_exists_but_will_not_render_says_so(tmp_path):
 @pytest.mark.parametrize("framework", ["custom", "xdit"])
 def test_scriptable_frameworks_route_to_the_rewrite_domain(framework):
     """A server-less iterative pipeline gets the rewrite domain."""
-    assert _Phase(framework)._authoring_specialist_domain() == DOMAIN_KEY
+    assert _phase(framework)._authoring_specialist_domain() == DOMAIN_KEY
 
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
 def test_serving_frameworks_keep_the_serving_domain(framework):
     """Routing is additive: the serving path is untouched."""
-    assert _Phase(framework)._authoring_specialist_domain() == "serving_specialist"
+    assert _phase(framework)._authoring_specialist_domain() == "serving_specialist"
 
 
 @pytest.mark.parametrize("framework", ["", "  ", "something-unregistered"])
 def test_unknown_framework_falls_back_to_serving(framework):
     """An unresolvable framework keeps the historical default rather than guessing."""
-    assert _Phase(framework)._authoring_specialist_domain() == "serving_specialist"
+    assert _phase(framework)._authoring_specialist_domain() == "serving_specialist"
 
 
 def test_evidence_block_renders_from_the_recorded_path(tmp_path):
@@ -321,7 +269,7 @@ def test_evidence_block_renders_from_the_recorded_path(tmp_path):
     path = tmp_path / ev.EVIDENCE_FILENAME
     path.write_text(json.dumps(document), encoding="utf-8")
 
-    text = _Phase("custom", str(path))._render_rewrite_evidence_for_prompt()
+    text = _phase("custom", str(path))._render_rewrite_evidence_for_prompt()
     assert "HOST-SIDE REWRITE EVIDENCE" in text
     assert ev.CATEGORY_HOST_ROUND_TRIP in text
     assert "comm.py:60:exchange" in text
@@ -329,19 +277,17 @@ def test_evidence_block_renders_from_the_recorded_path(tmp_path):
 
 def test_evidence_block_is_empty_without_a_recorded_path():
     """The arm can run before any profile has landed; that is not an error."""
-    assert _Phase("custom")._render_rewrite_evidence_for_prompt() == ""
+    assert _phase("custom")._render_rewrite_evidence_for_prompt() == ""
 
 
 def test_evidence_block_tolerates_an_unreadable_path(tmp_path):
     """A stale or corrupt path degrades to no block rather than wedging the pump."""
     broken = tmp_path / "broken.json"
     broken.write_text("{not json", encoding="utf-8")
-    assert _Phase("custom", str(broken))._render_rewrite_evidence_for_prompt() == ""
+    assert _phase("custom", str(broken))._render_rewrite_evidence_for_prompt() == ""
 
 
-# --------------------------------------------------------------------------
 # dispatch payload
-# --------------------------------------------------------------------------
 
 
 class _Tasks:
@@ -350,7 +296,7 @@ class _Tasks:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
 
-    async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+    async def create_or_return_existing(self, **kwargs: Any):
         """Record the dispatch and return a fresh-task sentinel."""
         self.created.append(kwargs)
         from types import SimpleNamespace
@@ -359,65 +305,30 @@ class _Tasks:
 
 
 class _DispatchStub:
-    """Drive ``_enqueue_framework_agent_local_explore_specialist`` in isolation."""
+    """The Coordinator side of a local-explore dispatch, with lanes and warm-start stubbed out."""
 
     def __init__(self, tmp_path: Path, framework: str, evidence: str = "") -> None:
-        from hyperloom.orchestrator.phases.framework import FrameworkPhase
+        from hyperloom.orchestrator.state.shared_state import SharedState
 
         self.session_dir = tmp_path
         self.tasks = _Tasks()
-        self.shared_state = _State(framework, evidence)
-        self.shared_state.framework_agent_phase_progress = []
-        self.shared_state.framework_agent_specialist_candidate_map = {}
-        self.shared_state.save = lambda _dir: None
-        for name in (
-            "_authoring_specialist_domain",
-            "_render_rewrite_evidence_for_prompt",
-            "_rewrite_evidence_absence_note",
-            "_enqueue_framework_agent_local_explore_specialist",
-            "_next_local_explore_candidate_id",
-        ):
-            setattr(self, name, getattr(FrameworkPhase, name).__get__(self))
-        # A staticmethod on the real class; binding it would pass ``self`` as the
-        # candidate row.
-        self._framework_candidate_key = FrameworkPhase._framework_candidate_key
+        self.shared_state = SharedState(framework=framework, last_framework_rewrite_evidence=evidence)
 
     def _cycle_idem_suffix(self) -> str:
         """Macro-cycle 0, as the Coordinator would report it."""
         return ""
 
-    def _render_framework_memory_for_prompt(self, _memory) -> str:  # noqa: ANN001
-        """Suppress the working-memory block; not under test here."""
-        return ""
-
-    def _build_framework_working_memory(self) -> dict:
-        """Suppress the working-memory block; not under test here."""
-        return {}
-
-    def _framework_gpu_params(self) -> dict:
-        """Provide no GPU params; not under test here."""
-        return {}
-
-    def _framework_authoring_lanes_ttl(self, _params, *, base_ttl_sec: int) -> tuple[list[str], int]:  # noqa: ANN001
+    def _framework_authoring_lanes_ttl(self, _params, *, base_ttl_sec: int) -> tuple[list[str], int]:
         """Provide fixed lanes/TTL; lane accounting is not under test here."""
         return [], base_ttl_sec
 
-    async def _warm_specialist_params(self, _params) -> None:  # noqa: ANN001
+    async def _warm_specialist_params(self, _params) -> None:
         """Skip warm-start enrichment; not under test here."""
         return None
 
 
 def _dispatch(tmp_path: Path, framework: str, evidence: str = "") -> dict[str, Any]:
-    """Dispatch a local-explore specialist and return the task params.
-
-    Args:
-        tmp_path: Session directory.
-        framework: Session framework.
-        evidence: Recorded rewrite-evidence path.
-
-    Returns:
-        The params of the created specialist task.
-    """
+    """Dispatch a local-explore specialist and return the task params."""
     import asyncio
 
     stub = _DispatchStub(tmp_path, framework, evidence)
@@ -428,19 +339,13 @@ def _dispatch(tmp_path: Path, framework: str, evidence: str = "") -> dict[str, A
         "gap_description": "improve throughput",
         "gap_canonical_id": "local_explore",
     }
-    asyncio.run(stub._enqueue_framework_agent_local_explore_specialist(candidate))
+    asyncio.run(FrameworkPhase(stub)._enqueue_framework_agent_local_explore_specialist(candidate))
     assert stub.tasks.created, "no specialist was dispatched"
     return stub.tasks.created[0]["params"]
 
 
 def _dispatched_prompt(tmp_path: Path, framework: str, evidence: str = "") -> str:
-    """Render what the specialist actually reads for a local-explore dispatch.
-
-    Asserting on the rendered prompt rather than on one param keeps these
-    invariants pinned wherever the text is carried from: static guidance lives
-    in the domain focus (system prompt), measured evidence rides in ``notes``
-    (user prompt), and the specialist reads both.
-    """
+    """Render what the specialist actually reads for a local-explore dispatch."""
     params = _dispatch(tmp_path, framework, evidence)
     system, user = build_specialist_prompts(
         SpecialistPromptInputs(
@@ -456,11 +361,7 @@ def _dispatched_prompt(tmp_path: Path, framework: str, evidence: str = "") -> st
 
 
 def test_scriptable_dispatch_demands_a_switch_manifest(tmp_path):
-    """The scriptable arm's mandate is a patch *plus* a manifest, not either/or.
-
-    Making the manifest optional would leave the whole attribution and
-    composition mechanism dependent on an LLM choosing to opt into it.
-    """
+    """The scriptable arm's mandate is a patch *plus* a manifest, not either/or."""
     assert _dispatch(tmp_path, "custom")["domain"] == DOMAIN_KEY
     prompt = _dispatched_prompt(tmp_path, "custom")
     assert "framework_switches" in prompt
@@ -524,9 +425,7 @@ def test_scriptable_dispatch_without_evidence_says_how_to_look(tmp_path):
     assert "can change across iterations" in notes
 
 
-# --------------------------------------------------------------------------
 # scriptable source-root registration
-# --------------------------------------------------------------------------
 
 
 def test_publishing_never_overrides_an_operator_value(monkeypatch, tmp_path):
@@ -561,12 +460,7 @@ def test_publishing_ignores_blank_input(monkeypatch):
 
 
 def test_frameworks_reference_documents_the_rewrite_path():
-    """The launch reference has to explain the switch contract and its enforcement.
-
-    An operator reading only this file needs to know that rewrites are default-off,
-    that parity is checked, and why an unprofitable bundle is kept rather than
-    reverted — otherwise ``kept_inert`` looks like a bug.
-    """
+    """The launch reference has to explain the switch contract and its enforcement."""
     from hyperloom.inference_optimizer.session.paths import asset_root
 
     text = (asset_root() / "references" / "frameworks.md").read_text(encoding="utf-8")

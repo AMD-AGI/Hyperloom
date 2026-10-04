@@ -52,14 +52,11 @@ __all__ = [
     "ensure",
 ]
 
-# Never installable from a framework manifest. Upstream requirements routinely
-# pin these (HY-World-2.0 pins torch==2.7.1); honouring that on a ROCm pod
-# swaps the vendor torch for a CUDA wheel and silently kills GPU access for
-# every framework sharing the venv.
+# Never installable from a framework manifest.
 CORE_PACKAGES = frozenset({"torch", "torchvision", "torchaudio", "triton", "numpy"})
 
-# A '#' only starts a comment at line start or after whitespace, so a VCS spec
-# such as git+https://host/repo.git#egg=name survives intact.
+# A '#' only starts a comment at line start or after whitespace, so a VCS spec such as
+# git+https://host/repo.git#egg=name survives intact.
 _COMMENT_RE = re.compile(r"(?:^|\s)#.*$")
 _VERSION_SPEC_RE = re.compile(r"[<>=!~;\[]")
 _MODULE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
@@ -148,15 +145,7 @@ def _package_base(spec: str) -> str:
 
 
 def parse_manifest(text: str) -> tuple[list[Requirement], list[str], list[str]]:
-    """Parse manifest text.
-
-    Returns:
-        ``(requirements, refused, invalid)`` -- ``refused`` names load-bearing
-        packages that were dropped, ``invalid`` holds entries whose import name
-        could not be derived (a URL/VCS spec must declare one explicitly, or
-        the probe would never resolve and the package would reinstall on every
-        run).
-    """
+    """Parse manifest text."""
     requirements: list[Requirement] = []
     refused: list[str] = []
     invalid: list[str] = []
@@ -215,29 +204,7 @@ def ensure(
     dry_run: bool = False,
     root: Path | None = None,
 ) -> Outcome:
-    """Install whatever ``framework``'s manifest declares and is not present.
-
-    Packages install one at a time so a source build that fails cannot strand
-    the wheels behind it. The load-bearing core is pinned through a constraints
-    file for every install, and a post-install tripwire aborts if the ROCm
-    torch was replaced anyway.
-
-    Args:
-        framework: Framework name; missing/unknown means no manifest, no-op.
-        python_exe: Interpreter to probe and install into. Defaults to the
-            current interpreter.
-        pip_extra: Extra ``pip install`` arguments (e.g. system-packages flags).
-        check_only: Report what would be installed, install nothing.
-        dry_run: Same as ``check_only``; kept for installer flag parity.
-        root: Manifest directory override, for tests.
-
-    Returns:
-        An :class:`Outcome` describing the actions taken.
-
-    Raises:
-        TorchClobberedError: The install swapped the ROCm torch for another
-            build; the shared venv is compromised and callers must abort.
-    """
+    """Install whatever ``framework``'s manifest declares and is not present."""
     key = _framework_key(framework)
     outcome = Outcome(framework=key)
     if not key:
@@ -339,8 +306,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--framework", default=os.environ.get("FRAMEWORK", ""))
     parser.add_argument("--python", dest="python_exe", default=sys.executable)
-    # One flag per occurrence, attached with =: a pip flag starts with a dash,
-    # which argparse never consumes as the value of a variadic option.
+    # One flag per occurrence, attached with =: a pip flag starts with a dash, which argparse never consumes as the
+    # value of a variadic option.
     parser.add_argument("--pip-extra", action="append", default=None, metavar="FLAG")
     parser.add_argument("--check-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -359,8 +326,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{args.prefix}: FATAL {exc}", file=sys.stderr)
         return 2
     report(outcome, prefix=args.prefix)
-    # Unresolved packages stay fail-soft: the installer should not abort a whole
-    # pod setup over one optional build, and the warning is already printed.
+    # Unresolved packages stay fail-soft: the installer should not abort a whole pod setup over one optional build,
+    # and the warning is already printed.
     return 0
 
 

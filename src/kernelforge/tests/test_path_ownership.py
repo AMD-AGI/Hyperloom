@@ -15,9 +15,7 @@ from kernelforge.loop.path_ownership import (
     runtime_gitignore_globs,
 )
 
-# Directory names and suffixes a framework package uses for source. Dropping any
-# of them from a scratch copy leaves an install that cannot be imported, and the
-# copy shadows the real one, so there is nothing to fall back to.
+# Directory names and suffixes a framework package uses for source.
 IMPORTABLE_DIRECTORY_NAMES = ("jit", "dist", "ops", "kernels")
 
 

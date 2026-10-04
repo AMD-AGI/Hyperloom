@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
 from typing import Any
 
 from kernelforge.knowledge.pr_monitor_client import (
@@ -18,6 +17,13 @@ from kernelforge.knowledge.pr_monitor_client import (
 )
 from kernelforge.knowledge.pr_monitor_search import discover
 from kernelforge.knowledge.pr_query_context import PRQueryContext
+from kernelforge.mcp_server import stdio_transport
+
+#: Re-exported so the two servers stay one import away from the shared wire
+#: format; both spellings name the same objects.
+InvalidParamsError = stdio_transport.InvalidParamsError
+_write_message = stdio_transport.write_message
+_write_error = stdio_transport.write_error
 
 SERVER_NAME = "kernelforge-pr-monitor"
 # Agents see these as mcp__pr_monitor__<name>.
@@ -26,10 +32,6 @@ TOOL_NAMES = ("pr_find_references", "pr_get_reference", "pr_get_file_patch")
 # One file's diff can be enormous; cap what enters the agent's context.
 MAX_PATCH_BYTES = 20_000
 MAX_FILES_LISTED = 40
-
-
-class InvalidParamsError(ValueError):
-    """Invalid agent-supplied MCP tool arguments."""
 
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
@@ -270,84 +272,18 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
 
 async def _dispatch(method: str, params: dict[str, Any]) -> dict[str, Any]:
     """Dispatch one supported MCP request and return its result object."""
-    if method == "initialize":
-        return {
-            "protocolVersion": params.get("protocolVersion") or "2024-11-05",
-            "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": SERVER_NAME, "version": "0.1.0"},
-        }
-    if method == "ping":
-        return {}
-    if method == "tools/list":
-        return {"tools": TOOL_DEFINITIONS}
-    if method == "tools/call":
-        # Not ``or {}``: a falsy-but-wrong value such as [] would coerce to an
-        # empty object and slip past the type check below.
-        arguments = params.get("arguments")
-        if arguments is None:
-            arguments = {}
-        if not isinstance(arguments, dict):
-            raise InvalidParamsError("tools/call arguments must be an object")
-        return await handle_tool_call(str(params.get("name") or ""), arguments)
-    if method in {"resources/list", "prompts/list"}:
-        return {"resources": []} if method == "resources/list" else {"prompts": []}
-    if method in {"logging/setLevel", "shutdown"}:
-        return {}
-    raise NotImplementedError(f"unsupported MCP method: {method}")
-
-
-def _write_message(payload: dict[str, Any]) -> None:
-    """Write one newline-delimited JSON-RPC message to stdout."""
-    sys.stdout.write(json.dumps(payload, separators=(",", ":"), default=str) + "\n")
-    sys.stdout.flush()
-
-
-def _write_error(request_id: Any, code: int, message: str) -> None:
-    """Write one JSON-RPC error response."""
-    _write_message(
-        {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": {"code": code, "message": message},
-        }
+    return await stdio_transport.dispatch_envelope(
+        method,
+        params,
+        server_name=SERVER_NAME,
+        tool_definitions=TOOL_DEFINITIONS,
+        handle_tool_call=handle_tool_call,
     )
 
 
 async def _serve() -> None:
     """Serve JSON-RPC requests until stdin closes or an exit notification arrives."""
-    while True:
-        raw = await asyncio.to_thread(sys.stdin.buffer.readline)
-        if not raw:
-            return
-        try:
-            message = json.loads(raw.decode())
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            _write_error(None, -32700, "Parse error")
-            continue
-        if not isinstance(message, dict):
-            _write_error(None, -32600, "Invalid Request")
-            continue
-        method = str(message.get("method") or "")
-        request_id = message.get("id")
-        if method == "exit":
-            return
-        if request_id is None:
-            continue
-        params = message.get("params")
-        if params is None:
-            params = {}
-        if not isinstance(params, dict):
-            _write_error(request_id, -32602, "params must be an object")
-            continue
-        try:
-            result = await _dispatch(method, params)
-            _write_message({"jsonrpc": "2.0", "id": request_id, "result": result})
-        except NotImplementedError as exc:
-            _write_error(request_id, -32601, str(exc))
-        except InvalidParamsError as exc:
-            _write_error(request_id, -32602, str(exc))
-        except Exception as exc:  # noqa: BLE001 - convert failures to JSON-RPC
-            _write_error(request_id, -32603, f"{type(exc).__name__}: {exc}")
+    await stdio_transport.serve(_dispatch)
 
 
 def main() -> None:

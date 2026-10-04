@@ -118,12 +118,7 @@ def _prorated_totals(
     total_time_ms: float,
     total_count: int,
 ) -> "OrderedDict[str, tuple[float, int, int]]":
-    """Prorate summary totals by sampled kernel duration.
-
-    Returns:
-        Kernel name -> ``(duration_us, call_count, stream)``, ordered by
-        descending sampled duration.
-    """
+    """Prorate summary totals by sampled kernel duration."""
     if (
         isinstance(total_time_ms, bool)
         or not isinstance(total_time_ms, (int, float))
@@ -251,15 +246,13 @@ def extract_collective_candidates(
                 "bound_type": "communication",
                 "tracelens_category": "collective",
                 "tracelens_pitem_rank": 0,
-                # Both feed the invocation spec that forge-loop's task preparer
-                # reads to author run_candidate; the device source is the only
-                # launcher a summary row can attribute.
+                # Feeds the invocation spec that forge-loop's task preparer reads to author run_candidate; the
+                # device source is the only launcher a summary row can attribute.
                 "kernel_path": source_file,
-                "tracelens_launcher_path": source_file,
                 "source_file": source_file,
                 "source_line": source_line,
                 "source_function": source_function,
-                "source_resolution_method": "nccl_summary_symbol_lookup",
+                "source_resolution_method": "symbol_index",
                 "shapes": [],
                 "input_shapes": [],
                 "library": "",

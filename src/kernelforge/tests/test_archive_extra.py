@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Extra unit tests for the candidate archive (loop/archive.py).
-
-Complements test_archive_crash.py by covering the score helper, robust
-read paths, and the prompt-digest layers (table capping, curated diffs,
-truncation). Filesystem via tmp_path; no LLM / GPU."""
+"""Extra unit tests for the candidate archive (loop/archive.py)."""
 
 from __future__ import annotations
 
@@ -90,10 +86,8 @@ def test_load_index_missing_is_empty(tmp_path):
 
 
 def test_read_index_file_skips_malformed_lines(tmp_path):
-    # Under the resume design, candidate directories are the canonical source and
-    # load_index() reconciles the on-disk index against them (orphaned index
-    # entries without a complete dir are dropped). The malformed-line tolerance
-    # now lives in the raw index reader, which skips non-JSON and blank lines.
+    # Under the resume design, candidate directories are the canonical source and load_index() reconciles the on-disk
+    # index against them (orphaned index entries without a complete dir are dropped).
     archive = CandidateArchive(str(tmp_path))
     archive.index_path.write_text('{"iter": 1}\nnot-json\n\n{"iter": 2}\n')
     entries = archive._read_index_file()
@@ -233,16 +227,16 @@ def test_select_for_diffs_prioritizes_keep_near_recent(tmp_path):
 
 
 def test_unusable_root_degrades_instead_of_raising(tmp_path):
-    # A file where forge_experiments/ should be: the archive must never take the
-    # forge-loop down with it — it degrades, reports why, and reads as empty.
+    # A file where forge_experiments/ should be: the archive must never take the forge-loop down with it — it
+    # degrades, reports why, and reads as empty.
     (tmp_path / "forge_experiments").write_text("not a directory\n")
 
     archive = CandidateArchive(str(tmp_path))
 
     assert archive.degraded is True
     assert any("create" in err for err in archive.persistence_errors)
-    # The change signature must still be computable (both components unknown),
-    # otherwise every cache check would raise on a degraded archive.
+    # The change signature must still be computable (both components unknown), otherwise every cache check would raise
+    # on a degraded archive.
     assert archive._fs_signature() == (None, None)
     assert archive.load_index() == []
     assert archive.max_iteration() == 0
@@ -328,8 +322,8 @@ def test_unreadable_metadata_is_preserved_and_reported(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "read_text", transient_read)
 
-    # "unavailable" is not "corrupt": load_meta must give up empty-handed and
-    # leave the candidate directory exactly where it is.
+    # "unavailable" is not "corrupt": load_meta must give up empty-handed and leave the candidate directory exactly
+    # where it is.
     assert archive.load_meta(1) == {}
     assert archive._iter_dir(1).is_dir()
     assert list(archive.root.glob(".iter_001.incomplete-*")) == []
@@ -386,8 +380,8 @@ def test_unreadable_index_does_not_clobber_it(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "read_text", unreadable_index)
     archive._invalidate_cache()
 
-    # meta.json is authoritative, so callers still get the full view; the index
-    # we could not read must be left untouched rather than rewritten blind.
+    # meta.json is authoritative, so callers still get the full view; the index we could not read must be left
+    # untouched rather than rewritten blind.
     assert [entry["iter"] for entry in archive.load_index()] == [1, 2]
     assert archive.degraded is True
     monkeypatch.undo()
@@ -409,8 +403,8 @@ def test_unscannable_root_preserves_existing_index_entries(tmp_path, monkeypatch
     monkeypatch.setattr(Path, "iterdir", unlistable)
     archive._invalidate_cache()
 
-    # Nothing could be verified against meta.json, so every recorded line is
-    # kept: an unscannable root must never look like "no attempts yet".
+    # Nothing could be verified against meta.json, so every recorded line is kept: an unscannable root must never look
+    # like "no attempts yet".
     assert [entry["iter"] for entry in archive.load_index()] == [1, 2]
     assert archive.max_iteration() == 2
     assert archive.degraded is True
@@ -444,8 +438,8 @@ def test_cache_add_entry_leaves_a_cold_cache_cold(tmp_path):
 
     archive._cache_add_entry({"iter": 9, "decision": "KEEP", "dir": "iter_009"})
 
-    # Folding into a cold cache must not conjure a one-entry cache out of thin
-    # air — the next read has to reconcile from disk, which knows nothing of 9.
+    # Folding into a cold cache must not conjure a one-entry cache out of thin air — the next read has to reconcile
+    # from disk, which knows nothing of 9.
     assert archive._index_cache is None
     assert [entry["iter"] for entry in archive.load_index()] == [1]
 
@@ -482,8 +476,8 @@ def test_record_aborts_when_collision_cannot_be_quarantined(tmp_path, monkeypatc
         archive.record(CandidateRecord(iteration=1, decision="KEEP", kept=True, kernel_source="replacement kernel\n"))
         is None
     )
-    # Rather than write over ground it could not clear, record backs off and the
-    # unreadable partial stays put for inspection.
+    # Rather than write over ground it could not clear, record backs off and the unreadable partial stays put for
+    # inspection.
     assert (partial / "kernel.py").read_text() == "partial kernel\n"
     assert archive.degraded is True
     assert list(archive.root.glob(".iter_001.tmp-*")) == []

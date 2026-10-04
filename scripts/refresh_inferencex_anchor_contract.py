@@ -33,19 +33,15 @@ from pathlib import Path
 # The package is used from a source checkout here, not an installed wheel.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from hyperloom.inference_optimizer.cli.preflight import _INFERENCEX_REF_DEFAULT  # noqa: E402
-from hyperloom.inference_optimizer.tests.test_inferencex_anchor_contract import (  # noqa: E402
+from hyperloom.inference_optimizer.cli.preflight import _INFERENCEX_REF_DEFAULT
+from hyperloom.inference_optimizer.tests.test_inferencex_anchor_contract import (
     CONTRACT_PATH,
     build_record,
 )
 
 
 def main() -> int:
-    """Refresh the anchor contract record.
-
-    Returns:
-        ``0`` on success, ``1`` when upstream could not be verified.
-    """
+    """Refresh the anchor contract record."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--ref",

@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Warm-replay BORROWED config-donor trustworthiness gate.
-
-Covers the donor acceptance gate that prevents cross-model warm-replay from
-borrowing configs that are evidence-free (zero validated gain), cross/unknown
-architecture, or workload-shape incompatible — the empirical root causes of
-neutral/negative warm-replay gains.
-"""
+"""Warm-replay BORROWED config-donor trustworthiness gate."""
 
 from __future__ import annotations
 
@@ -96,7 +90,7 @@ class _StubKB:
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self._rows = rows
 
-    def search(self, *, label_match: dict[str, Any], limit: int = 10) -> list[dict[str, Any]]:  # noqa: ARG002
+    def search(self, *, label_match: dict[str, Any], limit: int = 10) -> list[dict[str, Any]]:
         return list(self._rows)
 
 
@@ -111,7 +105,7 @@ class _BatchKB:
         *,
         label_match: dict[str, Any],
         limit: int = 100,
-    ) -> list[dict[str, Any]]:  # noqa: ARG002
+    ) -> list[dict[str, Any]]:
         return self._batches.pop(0) if self._batches else []
 
 

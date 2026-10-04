@@ -5,21 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Device-kernel-name classification for the bypass analysis backend.
-
-A compact kernel-name taxonomy; the primary categorization signal for the bypass
-route because it has full coverage even when Kineto op-correlation is broken by
-cudagraph/torch.compile replay.
-
-Two outputs per kernel name:
-  * ``category``: coarse perf category aligned with the labels downstream and
-    the golden reports use (SDPA / GEMM / Normalization / Convolution /
-    Quantization / KVCacheStore / Elementwise / MemCpy / MoE / Others).
-  * ``reusable``: whether the kernel is a rewritable native-source kernel
-    (True) versus a vendor precompiled binary or an unresolved kernel (False),
-    plus a ``skip_reason`` for the False case. Mirrors the golden
-    ``summary.json`` routed-vs-skipped semantics.
-"""
+"""Device-kernel-name classification for the bypass analysis backend."""
 
 from __future__ import annotations
 
@@ -30,8 +16,7 @@ from typing import NamedTuple
 _RULES: list[tuple[re.Pattern, str, int]] = [
     # MemCpy (highest; also detected via Kineto cat).
     (re.compile(r"(?i)memcpy|memset"), "MemCpy", 30),
-    # Communication / collective (before generic GEMM/Elementwise/reduce). Match
-    # on the substring present inside mangled device names (e.g. aiter all-reduce).
+    # Communication / collective (before generic GEMM/Elementwise/reduce).
     (
         re.compile(
             r"(?i)cross_device_reduce|outplace_all_reduce|all_reduce|allreduce|"
@@ -69,8 +54,7 @@ _RULES: list[tuple[re.Pattern, str, int]] = [
     # DiT adaptive layernorm (adaLN / modulate) — before generic norm.
     (re.compile(r"(?i)fusedlnmodulate|ada_?ln|modulate|scale_shift"), "Normalization", 19),
     (re.compile(r"(?i)add_rmsnorm|fused.*mean.*rsqrt|rsqrt.*mean"), "Normalization", 18),
-    # Convolution. Require a conv context for miopen/cudnn (they also emit
-    # norm/pooling kernels that must not be mislabeled as Convolution).
+    # Convolution.
     (re.compile(r"(?i)conv2d|conv_2d|conv_fwd|conv_bwd|convolution|miopen.*conv|cudnn.*conv"), "Convolution", 16),
     # Rotary embedding -> elementwise family.
     (re.compile(r"(?i)rotary|\brope\b"), "Elementwise", 18),
@@ -122,10 +106,7 @@ _REUSABLE_RE = re.compile(
 )
 
 
-# Launching-op-name -> category fallback, consulted only on the ``Others``
-# fallthrough. ORDER IS PRIORITY: ``_classify_by_op`` returns the FIRST matching
-# row, so rows MUST stay ordered most-specific-first. Norm keeps only explicit
-# ``*_norm`` names so a bare ``\bnorm\b`` does not mis-map ``aten::norm``.
+# Launching-op-name -> category fallback, consulted only on the ``Others`` fallthrough.
 _OP_RULES: list[tuple[re.Pattern, str]] = [
     (
         re.compile(
@@ -159,23 +140,12 @@ _OP_RULES: list[tuple[re.Pattern, str]] = [
 ]
 
 
-# High-level primitives that vendor libraries lower onto a Tensile GEMM device
-# kernel. When the device name is GEMM but the launching op is one of these, the
-# op name overrides so the roofline uses the right FLOP model.
+# High-level primitives that vendor libraries lower onto a Tensile GEMM device kernel.
 _GEMM_LOWERED_OPS = frozenset({"Convolution", "SDPA"})
 
 
 def _classify_by_op(op_name: str) -> str:
-    """Return a category from a launching op name, or ``""`` on no match.
-
-    Returns the FIRST matching :data:`_OP_RULES` row.
-
-    Args:
-        op_name: Resolved launching op name (e.g. ``aten::miopen_convolution``).
-
-    Returns:
-        The matched category, or ``""`` when no op rule applies.
-    """
+    """Return a category from a launching op name, or ``\"\"`` on no match."""
     n = op_name or ""
     for pat, cat in _OP_RULES:
         if pat.search(n):
@@ -192,20 +162,7 @@ class KernelClass(NamedTuple):
 
 
 def classify_kernel(name: str, *, gpu_cat: str = "", op_name: str = "") -> KernelClass:
-    """Classify a device-kernel name into a category + reusability verdict.
-
-    Args:
-        name: The device (GPU) kernel name from the trace.
-        gpu_cat: The Kineto ``cat`` of the event (``gpu_memcpy`` / ``gpu_memset``
-            force the ``MemCpy`` category regardless of name).
-        op_name: Optional launching op name (from Kineto correlation). Used only
-            as a category fallback when the device name is unclassifiable
-            (``Others``); the reusability verdict stays device-name based.
-
-    Returns:
-        A :class:`KernelClass` with category, reusable flag, and a skip_reason
-        (empty when reusable).
-    """
+    """Classify a device-kernel name into a category + reusability verdict."""
     if gpu_cat in ("gpu_memcpy", "gpu_memset"):
         return KernelClass("MemCpy", False, "device memcpy/memset (not a rewritable kernel)")
     n = name or ""
@@ -215,8 +172,8 @@ def classify_kernel(name: str, *, gpu_cat: str = "", op_name: str = "") -> Kerne
         if prio > best_prio and pat.search(n):
             category, best_prio = cat, prio
 
-    # Op-name signal: fallback when the device name is ``Others``, and a
-    # Convolution/SDPA op overrides a GEMM device classification.
+    # Op-name signal: fallback when the device name is ``Others``, and a Convolution/SDPA op overrides a GEMM device
+    # classification.
     if op_name:
         op_cat = _classify_by_op(op_name)
         if category == "Others":

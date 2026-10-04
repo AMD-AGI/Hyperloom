@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the single-optimizer session lock.
-
-The lock guarantees that a second ``optimize`` / ``--resume-from`` attaching to the
-same ``session_dir`` cannot run, so a misfiring robustness monitor can never
-spawn a duplicate optimizer that corrupts the shared leases / ``state.json``.
-"""
+"""Tests for the single-optimizer session lock."""
 
 from __future__ import annotations
 
@@ -67,10 +62,7 @@ def test_pod_history_path_under_runtime(tmp_path):
 
 
 def test_acquire_appends_pod_history(tmp_path):
-    """Each acquisition appends one ledger line, so the owner chain survives.
-
-    ``optimizer.lock`` is truncated by every acquirer, so a session whose sandbox
-    is rebuilt mid-run would otherwise keep no record of the earlier pods."""
+    """Each acquisition appends one ledger line, so the owner chain survives."""
     first = SessionLock(tmp_path)
     first.acquire()
     first.release()
@@ -88,10 +80,7 @@ def test_acquire_appends_pod_history(tmp_path):
 
 
 def test_pod_history_failure_does_not_break_acquire(tmp_path):
-    """The ledger is observational: a write failure must not fail the acquire.
-
-    The ledger path is pre-created as a directory so the append raises
-    ``IsADirectoryError``; the lock must still be acquired and readable."""
+    """The ledger is observational: a write failure must not fail the acquire."""
     ledger = session_paths.pod_history_path(tmp_path)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.mkdir()
@@ -133,11 +122,7 @@ def test_context_manager_releases(tmp_path):
 
 
 def test_pid_fallback_rejects_live_owner(tmp_path, monkeypatch):
-    """Without fcntl, a lock owned by a *different* live pid is still refused.
-
-    Exercises the non-POSIX fallback path using a separate live child process
-    as owner.
-    """
+    """Without fcntl, a lock owned by a *different* live pid is still refused."""
     monkeypatch.setattr(session_lock, "fcntl", None)
     live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:

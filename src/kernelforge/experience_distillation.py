@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a run remembers from its own failures.
-
-Both ledgers -- the loop's per-iteration one and forge-fuse's per-attempt one --
-turn an error blob into a single informative line, match that line against a
-table of known failure modes, and carry the resulting constraints into the next
-prompt. Only the rules, the wording and the entry shape differ, so those stay
-with each ledger and the mechanism lives here.
-"""
+"""What a run remembers from its own failures."""
 
 from __future__ import annotations
 

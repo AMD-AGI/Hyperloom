@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Ray cluster lifecycle helpers for kernel-agent backends.
-
-Conventions:
-- Prefer connecting to an existing cluster (RAY_ADDRESS=auto by default).
-- Only `ray start --head` when no cluster is reachable.
-- Never set HIP_VISIBLE_DEVICES / ROCR_VISIBLE_DEVICES on the driver and never
-  forward them via runtime_env: Ray sets them on workers itself.
-"""
+"""Ray cluster lifecycle helpers for kernel-agent backends."""
 
 from __future__ import annotations
 
@@ -17,69 +10,56 @@ import os
 import resource
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Optional, Tuple
 
-# Minimum soft RLIMIT_NOFILE the Ray raylet needs to stay up. Override via
-# RAY_MIN_NOFILE.
+# Minimum soft RLIMIT_NOFILE the Ray raylet needs to stay up.
 DEFAULT_MIN_NOFILE = 65536
 DEFAULT_RAY_STATUS_TIMEOUT_SEC = 5.0
 DEFAULT_RAY_STOP_TIMEOUT_SEC = 30.0
+#: Wall-clock bound on the ``ray.init`` connect handshake. Registration with the
+#: raylet has no timeout of its own, so a raylet that accepts the socket and then
+#: never replies blocks the caller forever. Observed: a coordinator sat in this
+#: call for 44 minutes, holding tick 1, until the container was torn down.
+DEFAULT_RAY_INIT_TIMEOUT_SEC = 300.0
 
-# Custom Ray resource declared on the single-node head so serving-family work
-# (serving / benchmark / profile / gpu_research) can hold a whole-machine
-# ``serving_slot`` as the authoritative physical mutex.
-# Capacity 1 => at most one serving-family task holds the node
-# at a time; GPU specialists request ``num_gpus`` only (serving-disjoint) and do
-# not take the slot. Declared here (rather than only in the orchestrator) so
-# whichever caller starts the local head first — kernel-agent or orchestrator —
-# declares it; a tiny unused resource is harmless to GEAK. Only single-node
-# local heads are affected: multi-node connects to an external cluster and this
-# ``ray start`` path is skipped.
+# Tail of a failed `ray start` carried in the exception, bounding its length.
+_RAY_START_OUTPUT_TAIL_CHARS = 1500
+
+# Custom Ray resource declared on the single-node head so serving-family work (serving / benchmark / profile /
+# gpu_research) can hold a whole-machine ``serving_slot`` as the authoritative physical mutex.
 RAY_SERVING_SLOT = "serving_slot"
 _HEAD_CUSTOM_RESOURCES = {RAY_SERVING_SLOT: 1}
 
 
-def _resources_start_args() -> list[str]:
-    """Return the ``ray start`` argv for the head node's custom resources.
+#: Held for the whole life of a ``ray.init`` attempt and released by the thread that
+#: made it -- including an abandoned one, on whatever schedule it finishes. Only one
+#: connect may be outstanding in this process at a time, because ``ray.init`` is
+#: process-global and uncancellable: a second attempt overlapping an abandoned first
+#: is how a late connect lands between the new attempt's shutdown and its own init
+#: and hands it the OLD cluster, silently, through ``ignore_reinit_error=True`` --
+#: which is precisely what the version-mismatch retry exists to escape.
+_INIT_GATE = threading.Semaphore(1)
 
-    Returns:
-        ``["--resources", "<json>"]`` declaring :data:`_HEAD_CUSTOM_RESOURCES`.
-    """
+#: Set when an attempt timed out, so the next one clears a session its runner may
+#: have created. Read only after the gate is held, i.e. after that runner is done.
+_STALE_CONNECT_POSSIBLE = threading.Event()
+
+
+def _resources_start_args() -> list[str]:
+    """Return the ``ray start`` argv for the head node's custom resources."""
     return ["--resources", json.dumps(_HEAD_CUSTOM_RESOURCES)]
 
 
-# --- Local-head port isolation (spur host-network co-location) ---------------
-# Many optimizer sessions can be co-scheduled on ONE compute node (SLURM packs
-# sub-node ``--gpus`` requests), and spur runs the container on the host network
-# stack (the bridge has no egress). Only the HOST NETWORK is shared between
-# co-located containers: each keeps a PRIVATE filesystem (no ``/tmp`` bind mount)
-# and a PRIVATE PID namespace (no ``--pid=host``). So the ONLY thing that
-# collides is Ray's FIXED default host ports (GCS 6379, dashboard 8265, client
-# 10001): the later head connects to the earlier head's GCS over 127.0.0.1:6379
-# and aborts with a session-name mismatch (``node._write_cluster_info_to_kv``),
-# hanging the kernel agent and failing every serving-lease "cluster ensure".
-#
-# Fix: bind each head to FREE, probed ports instead of the fixed defaults. No
-# cross-process coordination is needed -- Ray records the chosen GCS address in
-# the container-private ``/tmp/ray/ray_current_cluster``, so the serving lease's
-# later ``ensure()`` discovers it via ``ray status`` / ``ray.init(address=
-# "auto")`` without knowing the port. We deliberately do NOT pass ``--temp-dir``
-# (that reintroduces Ray issue #55244, where ``address="auto"`` still looks in
-# the default ``/tmp/ray`` rather than the custom dir); the default dir is
-# already container-private here. ``HL_RAY_HEAD_PORT`` pins the GCS port for
-# operators/debugging.
+# --- Local-head port isolation (spur host-network co-location) --------------- Many optimizer sessions can be
+# co-scheduled on ONE compute node (SLURM packs sub-node ``--gpus`` requests), and spur runs the container on the host
+# network stack (the bridge has no egress).
 _HL_RAY_HEAD_PORT_ENV = "HL_RAY_HEAD_PORT"
 
 
 def _free_tcp_port() -> int:
-    """Reserve and return a currently-free loopback TCP port.
-
-    Binds an ephemeral socket, reads the OS-assigned port, and releases it.
-    There is an inherent (tiny) TOCTOU window before ``ray start`` rebinds it;
-    on a host-network node with per-session ports this is far less likely than
-    the guaranteed 6379 collision it replaces.
-    """
+    """Reserve and return a currently-free loopback TCP port."""
     import socket
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -88,13 +68,7 @@ def _free_tcp_port() -> int:
 
 
 def _isolated_head_port_args() -> Tuple[int, list[str]]:
-    """Return ``(gcs_port, extra_start_args)`` bound to FREE probed ports.
-
-    Isolates the GCS / dashboard / Ray-client ports so co-located sessions never
-    share Ray's fixed defaults. ``HL_RAY_HEAD_PORT`` pins the GCS port when it is
-    a valid TCP port; dashboard and client are still probed to avoid their own
-    collisions.
-    """
+    """Return ``(gcs_port, extra_start_args)`` bound to FREE probed ports."""
     override = os.environ.get(_HL_RAY_HEAD_PORT_ENV, "").strip()
     port = int(override) if override.isdigit() else 0
     gcs_port = port if 1 <= port <= 65535 else _free_tcp_port()
@@ -105,21 +79,12 @@ def _isolated_head_port_args() -> Tuple[int, list[str]]:
 
 
 def _fd_limit_warn(msg: str) -> None:
-    """Emit an fd-limit warning to stderr with a stable prefix.
-
-    Args:
-        msg: The warning message body.
-    """
+    """Emit an fd-limit warning to stderr with a stable prefix."""
     print(f"[kernel-agent WARN] {msg}", file=sys.stderr)
 
 
 def _min_nofile_target() -> int:
-    """Return the target soft RLIMIT_NOFILE value.
-
-    Returns:
-        The positive integer from ``RAY_MIN_NOFILE`` when set, otherwise
-        ``DEFAULT_MIN_NOFILE``.
-    """
+    """Return the target soft RLIMIT_NOFILE value."""
     raw = os.environ.get("RAY_MIN_NOFILE", "").strip()
     if raw.isdigit() and int(raw) > 0:
         return int(raw)
@@ -148,27 +113,16 @@ def _ray_stop_timeout_sec() -> float:
     return _positive_float_env("HYPERLOOM_RAY_STOP_TIMEOUT_SEC", DEFAULT_RAY_STOP_TIMEOUT_SEC)
 
 
+def _ray_init_timeout_sec() -> float:
+    """Return the ``ray.init`` connect timeout in seconds."""
+    return _positive_float_env("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", DEFAULT_RAY_INIT_TIMEOUT_SEC)
+
+
 def ensure_fd_limit(
     min_soft: Optional[int] = None,
     log_path: Optional[Path] = None,
 ) -> Tuple[int, int]:
-    """Raise this process's RLIMIT_NOFILE soft limit before Ray starts.
-
-    The child ``ray start`` process inherits this process's limits, so the
-    raylet's open-files ceiling is whatever we set here. We raise the soft
-    limit to ``min(min_soft, hard)``. Raising the soft limit up to the hard
-    cap needs no privileges; lifting the hard cap does (CAP_SYS_RESOURCE),
-    so when the hard cap is itself below ``min_soft`` we raise soft as high
-    as allowed and warn — only ``docker run --ulimit nofile=...`` at
-    container launch can lift the hard cap in an unprivileged container.
-
-    Args:
-        min_soft: Target soft limit; defaults to the configured target.
-        log_path: Optional path to append a lifecycle log line.
-
-    Returns:
-        The ``(soft, hard)`` limit in effect after the call.
-    """
+    """Raise this process's RLIMIT_NOFILE soft limit before Ray starts."""
     if min_soft is None:
         min_soft = _min_nofile_target()
     inf = resource.RLIM_INFINITY
@@ -207,15 +161,7 @@ def ensure_fd_limit(
 
 
 def ray_status_ok() -> bool:
-    """Check whether a Ray cluster is currently reachable.
-
-    Runs ``ray status`` with output suppressed and inspects the exit
-    code.
-
-    Returns:
-        bool: True if ``ray status`` exits 0 (a cluster is reachable),
-            False otherwise.
-    """
+    """Check whether a Ray cluster is currently reachable."""
     try:
         proc = subprocess.run(
             ["ray", "status"],
@@ -247,16 +193,17 @@ def _stop_ray_force(log_path: Optional[Path] = None, *, reason: str = "") -> Non
         pass
 
 
+def _ray_start_evidence(log_path: Optional[Path], captured: str) -> str:
+    """Name the log sink, or carry the output itself when there is no sink."""
+    if log_path is not None:
+        return f"see {log_path}"
+    if captured:
+        return f"ray start output: {captured[-_RAY_START_OUTPUT_TAIL_CHARS:]}"
+    return "ray start produced no output"
+
+
 def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] = None) -> None:
-    """Ensure a Ray cluster is reachable, starting a head node if needed.
-
-    Args:
-        num_gpus: Optional GPU count to pass to ``ray start --head``.
-        log_path: Optional path to append ``ray start`` output.
-
-    Raises:
-        RuntimeError: If starting the Ray head node fails.
-    """
+    """Ensure a Ray cluster is reachable, starting a head node if needed."""
     if ray_status_ok():
         return
     _stop_ray_force(log_path=log_path, reason="Clearing stale Ray discovery state before starting a local head")
@@ -269,6 +216,7 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
     cmd.extend(iso_args)
     # serving_slot: whole-machine mutex so serving-family tasks serialise GPU access.
     cmd.extend(_resources_start_args())
+    captured = ""
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as log:
@@ -276,22 +224,19 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
             proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
             log.write(f"\n[ray_start_exit_code] {proc.returncode}\n")
     else:
-        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
+        # Without a log sink to name, this output is the only evidence a failure leaves.
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        captured = f"{proc.stdout or ''}{proc.stderr or ''}".strip()
     if proc.returncode != 0:
-        raise RuntimeError(f"failed to start Ray; see {log_path}")
+        raise RuntimeError(f"failed to start Ray (rc={proc.returncode}); {_ray_start_evidence(log_path, captured)}")
     if not ray_status_ok():
-        raise RuntimeError(f"ray start exited 0 but cluster is not reachable; see {log_path}")
+        raise RuntimeError(
+            f"ray start exited 0 but cluster is not reachable; {_ray_start_evidence(log_path, captured)}"
+        )
 
 
 def _is_ray_version_mismatch(text: str) -> bool:
-    """Detect Ray's version-mismatch banner in captured output.
-
-    Args:
-        text: The captured error or output text.
-
-    Returns:
-        ``True`` if the text contains the stable version-mismatch banner.
-    """
+    """Detect Ray's version-mismatch banner in captured output."""
     return "version mismatch" in (text or "").lower()
 
 
@@ -299,19 +244,7 @@ def force_restart_local_cluster(
     num_gpus: Optional[int] = None,
     log_path: Optional[Path] = None,
 ) -> None:
-    """Tear down any reachable Ray cluster and start a fresh local head.
-
-    The fresh head runs under this interpreter, recovering from a
-    stale/foreign cluster whose version mismatch otherwise mislabels as a
-    "compile failed" REVERT; this also clears raylet zombies.
-
-    Args:
-        num_gpus: Optional GPU count for the fresh head node.
-        log_path: Optional path to append restart output.
-
-    Raises:
-        RuntimeError: If the fresh head node fails to start.
-    """
+    """Tear down any reachable Ray cluster and start a fresh local head."""
     ensure_fd_limit(log_path=log_path)
     _stop_ray_force(log_path=log_path, reason="Stopping foreign cluster before version-mismatch recovery")
     gcs_port, iso_args = _isolated_head_port_args()
@@ -348,39 +281,25 @@ SAFE_ENV_KEYS = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
-    # Gateway auth headers travel with their endpoint, so a worker that gets the
-    # URL and key but not the header is rejected by a header-authenticated
-    # gateway (an AMD APIM subscription key, for one).
+    # Gateway auth headers travel with their endpoint, so a worker that gets the URL and key but not the header is
+    # rejected by a header-authenticated gateway (an AMD APIM subscription key, for one).
     "ANTHROPIC_CUSTOM_HEADERS",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_CUSTOM_HEADERS",
-    "AMD_API_KEY",
-    "AMD_LLM_API_KEY",
-    "LLM_GATEWAY_KEY",
-    "LLM_API_KEY",
     "LLM_API_BASE",
-    "LLM_PROXY_API_KEY",
-    "LLM_PROXY_BASE_URL",
-    # GEAK LLM connection (e2e runner reads these).
+    # Operator overrides that point GEAK at an endpoint other than the one preflight resolved; never derived here.
     "GEAK_API_KEY",
     "GEAK_BASE_URL",
-    # GEAK/Forge harness contract: patched candidate dir the generated harness
-    # prepends to sys.path.
-    "GEAK_WORK_DIR",
-    # e2e optimizer runner path + repo root so a Ray worker can locate
-    # interface/run_e2e.py and the e2e_workflow/ checkout.
+    # e2e optimizer runner path + repo root so a Ray worker can locate interface/run_e2e.py and the e2e_workflow/
+    # checkout.
     "GEAK_ROOT",
     "GEAK_E2E_RUNNER",
     "GEAK_CLAUDE_EFFORT",
     "GEAK_CLAUDE_MODEL",
-    # Forge-fusion model overrides (mirrors GEAK_CLAUDE_MODEL for each backend).
-    "FORGE_CLAUDE_MODEL",
-    "FORGE_CODEX_MODEL",
     "GEAK_E2E_TIMEOUT_S",
-    # Scoring/profiler/run knobs read by GEAK itself; stripped at the Ray
-    # boundary without this allowlist entry.
+    # Scoring/profiler/run knobs read by GEAK itself; stripped at the Ray boundary without this allowlist entry.
     "GEAK_SCORE_TARGET",
     "GEAK_SKIP_PROFILE",
     "GEAK_MAX_BENCHMARK_SHAPES",
@@ -389,30 +308,10 @@ SAFE_ENV_KEYS = (
 
 
 def safe_runtime_env() -> dict:
-    """Build a Ray ``runtime_env`` from the allowlisted environment keys.
-
-    Copies only the keys in :data:`SAFE_ENV_KEYS` from the current
-    environment, then fills sensible fallbacks (e.g. deriving the
-    per-provider API keys and base URLs from ``OPENAI_API_KEY`` /
-    ``ANTHROPIC_API_KEY`` / ``OPENAI_BASE_URL``). GPU-visibility variables are
-    deliberately excluded so Ray manages device assignment itself.
-
-    Returns:
-        dict: A ``{"env_vars": {...}}`` mapping suitable for passing as
-            Ray's ``runtime_env``.
-    """
+    """Build a Ray ``runtime_env`` from the allowlisted environment keys."""
     env = {k: os.environ[k] for k in SAFE_ENV_KEYS if k in os.environ}
-    # Each side's aliases come from that side's own credentials. GEAK_API_KEY /
-    # GEAK_BASE_URL are never derived: GEAK runs on the Anthropic side via
-    # GEAK_CLAUDE_MODEL + ANTHROPIC_*, so an OpenAI-side value could not start it.
-    # They are forwarded verbatim when an operator sets them.
-    openai_key = env.get("OPENAI_API_KEY")
-    if openai_key:
-        env.setdefault("LLM_API_KEY", openai_key)
-        env.setdefault("AMD_LLM_API_KEY", openai_key)
-        env.setdefault("LLM_GATEWAY_KEY", openai_key)
-    # CLAUDE_CODE_OAUTH_TOKEN is forwarded verbatim, never mirrored into these:
-    # either key var switches the Claude CLI out of subscription mode.
+    # CLAUDE_CODE_OAUTH_TOKEN is forwarded verbatim, never mirrored into these: either key var switches the Claude CLI
+    # out of subscription mode.
     anthropic_key = env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN")
     if anthropic_key:
         env.setdefault("ANTHROPIC_API_KEY", anthropic_key)
@@ -420,44 +319,124 @@ def safe_runtime_env() -> dict:
     openai_url = env.get("OPENAI_BASE_URL")
     if openai_url:
         env.setdefault("LLM_API_BASE", openai_url)
-    if "AMD_LLM_API_KEY" not in env and "AMD_API_KEY" in env:
-        env["AMD_LLM_API_KEY"] = env["AMD_API_KEY"]
     return {"env_vars": env}
 
 
 def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = None):
-    """Initialize ray while suppressing the connect banner on stdout.
-
-    On a "Version mismatch" RuntimeError (foreign cluster under a different
-    Python/Ray), tear the foreign cluster down, bring up a fresh local head
-    under this interpreter, and retry once against that head — ``RAY_ADDRESS``
-    still names the foreign cluster and would reproduce the mismatch.
-
-    Args:
-        num_gpus: Optional GPU count forwarded to a restart, if needed.
-        log_path: Optional path to audit Ray lifecycle actions.
-    """
+    """Initialize ray while suppressing the connect banner on stdout."""
     import contextlib
     import io
     import ray
 
     runtime_env = safe_runtime_env()
 
+    def _connect(address: str) -> None:
+        """Call ``ray.init`` with standard options.
+
+        Deliberately does NOT redirect stdout. ``sys.stdout`` is process-global and
+        this runs on a thread the caller abandons on timeout, so a redirection held
+        here would never be unwound -- every later write, from every thread, would
+        vanish into a buffer nobody reads. The caller suppresses the banner instead,
+        around a join it always completes.
+        """
+        ray.init(
+            address=address,
+            ignore_reinit_error=True,
+            log_to_driver=False,
+            logging_level="error",
+            runtime_env=runtime_env,
+        )
+
     def _init(address: str) -> None:
-        """Call ``ray.init`` with stdout suppressed and standard options."""
+        """Connect under a wall-clock bound.
+
+        ``ray.init`` takes no timeout: the driver registers with the raylet over a
+        socket and waits for a reply that a wedged raylet never sends, so the call
+        blocks indefinitely with nothing to observe -- no child process, no log, no
+        failure. A daemon thread makes that state reportable. The call itself cannot
+        be cancelled, so the thread is abandoned rather than joined; it cannot keep
+        the interpreter alive. What it could do is finish late and leave this
+        process connected after the caller was told the cluster is unusable, so an
+        abandoned runner shuts the session back down on its way out.
+        """
+        timeout = _ray_init_timeout_sec()
+        # Wait out any abandoned runner rather than racing it. It releases the
+        # gate when it finishes, so by the time this attempt holds it, every
+        # connect that could still land has landed and the cleanup below is
+        # deterministic. A runner that never returns leaves this reporting an
+        # unusable cluster, which is what it is, instead of a second connect
+        # interleaved with the first.
+        if not _INIT_GATE.acquire(timeout=timeout):
+            raise TimeoutError(
+                f"a previous ray.init(address={address!r}) is still outstanding after "
+                f"{timeout:g}s; the raylet never answered it and this process cannot "
+                "safely start a second connect while it is unresolved."
+            )
+        if _STALE_CONNECT_POSSIBLE.is_set():
+            # A previous attempt timed out and its runner has since finished; it
+            # may have connected. Clear what it left before taking the process.
+            _STALE_CONNECT_POSSIBLE.clear()
+            with contextlib.suppress(RuntimeError, OSError):
+                ray.shutdown()
+        outcome: dict[str, BaseException] = {}
+        # One lock decides, for a connect that lands near the deadline, whether
+        # the caller got it or the runner has to undo it. Checking a flag and
+        # setting it on separate threads leaves the interleaving where the
+        # runner reads "not abandoned", returns, and the caller then declares
+        # abandonment -- the process connected and nobody responsible for it.
+        verdict_lock = threading.Lock()
+        verdict: dict[str, bool] = {"done": False, "landed": False, "abandoned": False}
+
+        def _runner() -> None:
+            try:
+                _connect(address)
+                landed = True
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+                outcome["error"] = exc
+                landed = False
+            with verdict_lock:
+                verdict["done"] = True
+                verdict["landed"] = landed
+                if landed and verdict["abandoned"]:
+                    # The caller gave up before this returned, so a session may
+                    # exist that nobody asked for. Recorded under the lock and
+                    # therefore BEFORE the gate is released: the next attempt
+                    # cannot start and find the marker missing.
+                    _STALE_CONNECT_POSSIBLE.set()
+            # Released last, and by this thread rather than the caller: the
+            # caller may already have given up, and no second connect may start
+            # while this one is unresolved.
+            _INIT_GATE.release()
+
+        thread = threading.Thread(target=_runner, name="ray-init", daemon=True)
+        # The banner suppression is held here, across a join that always returns, so
+        # stdout is restored whether the connect succeeded, failed or was abandoned.
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            ray.init(
-                address=address,
-                ignore_reinit_error=True,
-                log_to_driver=False,
-                logging_level="error",
-                runtime_env=runtime_env,
+            thread.start()
+            thread.join(timeout)
+        with verdict_lock:
+            # ``done`` rather than ``thread.is_alive()``: a runner that returned
+            # a microsecond ago is still alive to that check and has already
+            # connected. Claimed under the same lock the runner reports through,
+            # so exactly one of the two sides owns the outcome.
+            timed_out = not verdict["done"]
+            if timed_out:
+                verdict["abandoned"] = True
+                _STALE_CONNECT_POSSIBLE.set()
+        if timed_out:
+            raise TimeoutError(
+                f"ray.init(address={address!r}) did not complete within {timeout:g}s; "
+                "the raylet accepted the connection but never finished registration. "
+                "Raise HYPERLOOM_RAY_INIT_TIMEOUT_SEC if the cluster is merely slow to start."
             )
+        error = outcome.get("error")
+        if error is not None:
+            raise error
 
     try:
         _init(os.environ.get("RAY_ADDRESS", "auto"))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         if not _is_ray_version_mismatch(str(exc)):
             raise
         # Foreign cluster: replace with a local head, then retry exactly once.

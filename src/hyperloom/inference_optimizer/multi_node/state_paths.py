@@ -14,19 +14,7 @@ _RUNTIME_REL = Path("runtime") / "multi_node_state.json"
 
 
 def resolve_state_file() -> Path:
-    """Return the multi-node CLI state file path for the current process.
-
-    Resolution order:
-    1. ``$MULTI_NODE_STATE_FILE`` when set.
-    2. ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json``.
-
-    Returns:
-        Path: The resolved state file location.
-
-    Raises:
-        RuntimeError: When neither ``$MULTI_NODE_STATE_FILE`` nor
-            ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` is set.
-    """
+    """Return the multi-node CLI state file path for the current process."""
     explicit = os.environ.get("MULTI_NODE_STATE_FILE", "").strip()
     if explicit:
         return Path(explicit)
@@ -40,14 +28,7 @@ def resolve_state_file() -> Path:
 
 
 def state_file_safe_to_read(path: Path) -> bool:
-    """Return True when ``path`` is owned by the current uid and not group/world-writable.
-
-    Args:
-        path: Candidate state file path.
-
-    Returns:
-        bool: True when the file passes ownership and permission checks.
-    """
+    """Return True when ``path`` is owned by the current uid and not group/world-writable."""
     try:
         st = path.stat()
     except OSError:
@@ -60,11 +41,7 @@ def state_file_safe_to_read(path: Path) -> bool:
 
 
 def _ensure_runtime_dir(runtime_dir: Path) -> None:
-    """Create the runtime directory with owner-only access.
-
-    Args:
-        runtime_dir: Parent directory for the state file and SSH keys.
-    """
+    """Create the runtime directory with owner-only access."""
     runtime_dir.mkdir(parents=True, exist_ok=True)
     try:
         runtime_dir.chmod(0o700)
@@ -73,14 +50,7 @@ def _ensure_runtime_dir(runtime_dir: Path) -> None:
 
 
 def bind_state_file_to_session(session_dir: Path) -> Path:
-    """Pin ``$MULTI_NODE_STATE_FILE`` under ``session_dir``.
-
-    Args:
-        session_dir: Active optimizer session directory.
-
-    Returns:
-        Path: The bound session-scoped state file path.
-    """
+    """Pin ``$MULTI_NODE_STATE_FILE`` under ``session_dir``."""
     target = session_dir / _RUNTIME_REL
     _ensure_runtime_dir(target.parent)
     os.environ["MULTI_NODE_STATE_FILE"] = str(target)

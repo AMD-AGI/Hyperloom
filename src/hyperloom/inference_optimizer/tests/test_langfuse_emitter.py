@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Live-Langfuse emitter coverage (the opt-in second trace sink).
-
-The local jsonl ledger is always written; this module's emitter mirrors
-in-process calls into Langfuse only when three gates pass
-(HYPERLOOM_LANGFUSE_ENABLE + LANGFUSE_* creds + importable SDK). These tests
-pin:
-
-* default OFF -> emitter is a no-op, builds no client;
-* all gates on (with a fake SDK) -> token + conversation rows pair into one
-  Generation with correctly mapped usage and input/output text;
-* session-end flush emits unpaired halves, backfills the recipe-KB /
-  specialist-intel audit spans, and turns decision_trace rows into Scores;
-* every send is best-effort: a client that raises never propagates.
-"""
+"""Live-Langfuse emitter coverage (the opt-in second trace sink)."""
 
 from __future__ import annotations
 
@@ -25,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.trace import langfuse_mapping as lfmap
-from hyperloom.orchestrator.trace import langfuse_emitter as lfe
+from hyperloom.inference_optimizer.trace import langfuse_mapping as lfmap
+from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
 
 class _FakeObservation:
@@ -208,8 +195,8 @@ def test_all_gates_pass_enables(tmp_path, monkeypatch):
 
 
 def test_enabling_seeds_default_flush_interval(tmp_path, monkeypatch):
-    # With no pinned flush cadence, building the client tightens the SDK
-    # auto-flush interval so a killed run still lands its latest observations.
+    # With no pinned flush cadence, building the client tightens the SDK auto-flush interval so a killed run still
+    # lands its latest observations.
     _enable_env(monkeypatch)
     monkeypatch.delenv("LANGFUSE_FLUSH_INTERVAL", raising=False)
     monkeypatch.delenv("LANGFUSE_FLUSH_AT", raising=False)
@@ -300,6 +287,7 @@ def test_redact_env_keeps_names_redacts_secret_values():
     snap = lfmap.redact_env(
         {
             "PATH": "/usr/bin",
+            "ROCM_PATH": "/opt/rocm/bin:/usr/local/auth:/usr/bin",
             "HF_TOKEN": "hf_xxx",
             "AWS_SECRET_ACCESS_KEY": "abc",
             "DB_PASSWORD": "pw",
@@ -307,10 +295,27 @@ def test_redact_env_keeps_names_redacts_secret_values():
         }
     )
     assert snap["PATH"] == "/usr/bin"
+    assert snap["ROCM_PATH"] == "/opt/rocm/bin:/usr/local/auth:/usr/bin"
     assert snap["PLAIN"] == "value"
     assert snap["HF_TOKEN"] == "***redacted***"
     assert snap["AWS_SECRET_ACCESS_KEY"] == "***redacted***"
     assert snap["DB_PASSWORD"] == "***redacted***"
+
+
+def test_redact_env_redacts_custom_headers_and_value_shaped_secrets():
+    snap = lfmap.redact_env(
+        {
+            "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: deadbeefsecret",
+            "OPENAI_CUSTOM_HEADERS": "Authorization: Bearer abcdefghijklmnop",
+            "HARMLESS": "ok",
+            "GATEWAY_HDR": "Ocp-Apim-Subscription-Key: anothersecretvalue",
+        }
+    )
+    assert snap["ANTHROPIC_CUSTOM_HEADERS"] == "***redacted***"
+    assert snap["OPENAI_CUSTOM_HEADERS"] == "***redacted***"
+    assert snap["HARMLESS"] == "ok"
+    assert snap["GATEWAY_HDR"] == "Ocp-Apim-Subscription-Key: [REDACTED]"
+    assert "anothersecretvalue" not in snap["GATEWAY_HDR"]
 
 
 def test_session_start_is_idempotent(tmp_path, monkeypatch):
@@ -389,11 +394,7 @@ def test_token_and_conversation_pair_into_one_generation(tmp_path, monkeypatch):
 
 
 def test_failed_call_emits_immediately_with_error_level(tmp_path, monkeypatch):
-    """A failure has no response half, so it must not wait for a pair.
-
-    Buffering it would hide the failure until session end and let ``pair_key``
-    (status-blind) marry it to a neighbouring successful call.
-    """
+    """A failure has no response half, so it must not wait for a pair."""
     _enable_env(monkeypatch)
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
@@ -494,6 +495,7 @@ def test_call_id_pairs_across_a_second_boundary(tmp_path, monkeypatch):
 
     assert len(client.generations) == 1
     assert em._counts["generations_paired"] == 1
+    assert client.generations[0].kwargs["metadata"]["call_id"] == "c-1"
 
 
 def test_distinct_call_ids_in_one_second_do_not_cross_pair(tmp_path, monkeypatch):
@@ -657,12 +659,7 @@ def test_ext_shard_send_failure_is_retried_without_duplicates(tmp_path, monkeypa
 
 
 def test_new_emitter_resumes_the_ext_shard_cursor(tmp_path, monkeypatch):
-    """Across processes the durable unit is the row, not the step.
-
-    A restart must not re-push rows a previous process already sent, but must
-    still pick up rows that shard grew afterwards — which is what a resumed
-    session produces.
-    """
+    """Across processes the durable unit is the row, not the step."""
     _enable_env(monkeypatch)
     sd = _seed_trace_dir(tmp_path)
     shard = sd / "reports" / "trace" / "ext" / "forge-1.jsonl"
@@ -703,8 +700,8 @@ def test_one_shot_push_is_claimed_across_processes(tmp_path, monkeypatch):
     lfe.LangfuseEmitter(sd).record_session_start()
     assert first.span_named("session_start") is not None
 
-    # Mimic the race: the second process read the receipt before the first wrote
-    # it, so only the claim can stop the duplicate.
+    # Mimic the race: the second process read the receipt before the first wrote it, so only the claim can stop the
+    # duplicate.
     (sd / "reports" / "trace" / "langfuse_receipt.json").unlink()
     second = _FakeClient()
     _install_fake_sdk(monkeypatch, second)
@@ -729,8 +726,7 @@ def test_read_receipt_ignores_a_corrupted_payload(tmp_path, monkeypatch):
     tampered["counts"]["generations_sent"] = 999
     path.write_text(json.dumps(tampered, indent=2, sort_keys=True), encoding="utf-8")
 
-    # The stamped hash no longer matches, so the receipt is not trusted for the
-    # one-shot push decisions that read it.
+    # The stamped hash no longer matches, so the receipt is not trusted for the one-shot push decisions that read it.
     assert lfe.read_receipt(sd) is None
 
 
@@ -851,8 +847,7 @@ def test_record_session_breakdown_is_idempotent(tmp_path, monkeypatch):
 
 
 def test_record_session_breakdown_cross_process_idempotent(tmp_path, monkeypatch):
-    # A second, fresh emitter skips re-attaching because the persisted receipt
-    # records breakdown_recorded=1.
+    # A second, fresh emitter skips re-attaching because the persisted receipt records breakdown_recorded=1.
     _enable_env(monkeypatch)
     client1 = _FakeClient()
     _install_fake_sdk(monkeypatch, client1)
@@ -934,8 +929,7 @@ def test_flush_backfills_ext_shards(tmp_path, monkeypatch):
 
 
 def test_flush_session_is_idempotent_no_duplicate_reemit(tmp_path, monkeypatch):
-    """A second flush_session() must NOT re-scan leftovers / decision_trace and
-    re-emit (would duplicate Generations/Scores)."""
+    """A second flush_session() must NOT re-scan leftovers / decision_trace and re-emit (would duplicate Generations/Scores)."""
     _enable_env(monkeypatch)
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
@@ -1004,8 +998,7 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
     em.record_conversation(_conv_row(phase="KERNEL_AGENT", component="kernel_agent", role="kernel_agent"))
     em.flush_session()
 
-    # Each decision opens an optimization_step:<operation_kind> span whose
-    # scores attach to it.
+    # Each decision opens an optimization_step:<operation_kind> span whose scores attach to it.
     kernel_step = client.span_named("optimization_step:kernel_opt")
     param_step = client.span_named("optimization_step:param")
     assert kernel_step is not None
@@ -1619,9 +1612,7 @@ def test_disabled_flush_still_writes_receipt(tmp_path, monkeypatch):
 
 
 def test_pair_key_distinguishes_same_second_burst():
-    """Two calls in the same (component, tick, role) and same UTC second but
-    different turns must NOT collide (otherwise a token row pairs with the wrong
-    conversation row in a burst)."""
+    """Two calls in the same (component, tick, role) and same UTC second but different turns must NOT collide (otherwise a token row pairs with the wrong conversation row in a burst)."""
     base = {
         "component": "specialist",
         "tick": 3,
@@ -1636,8 +1627,9 @@ def test_pair_key_distinguishes_same_second_burst():
 
 
 def test_pair_key_matches_token_and_text_halves_of_one_call():
-    """The two streams of the SAME logical call (a few ms apart) still pair:
-    identical identity fields + same UTC second => equal key."""
+    """The two streams of the SAME logical call (a few ms apart) still pair: identical identity fields + same UTC
+    second => equal key.
+    """
     token = {
         "component": "critic",
         "tick": 5,
@@ -1652,8 +1644,7 @@ def test_pair_key_matches_token_and_text_halves_of_one_call():
 
 
 def test_pair_key_distinguishes_concurrent_models_same_second():
-    """Concurrent models land in the same UTC second with identical keys except
-    model -> must not collide (usage of model A pairing with model B's text)."""
+    """Concurrent models land in the same UTC second with identical keys except model -> must not collide (usage of model A pairing with model B's text)."""
     base = {
         "component": "proposal_scorer",
         "tick": None,
@@ -1669,8 +1660,7 @@ def test_pair_key_distinguishes_concurrent_models_same_second():
 
 
 def test_pair_key_scorer_token_and_text_pair_when_roles_match():
-    """The scorer's token row and conversation row must share role+model so
-    their pair_key matches."""
+    """The scorer's token row and conversation row must share role+model so their pair_key matches."""
     token = {
         "component": "proposal_scorer",
         "role": "proposal_scorer",
@@ -1682,8 +1672,7 @@ def test_pair_key_scorer_token_and_text_pair_when_roles_match():
 
 
 def test_pair_key_degrades_when_turn_absent():
-    """Rows without turn/task_id/dyn_id still produce a stable key rather than
-    raising."""
+    """Rows without turn/task_id/dyn_id still produce a stable key rather than raising."""
     row = {"component": "forge", "tick": 1, "role": None, "ts": "2026-06-11T10:00:00Z"}
     k = lfmap.pair_key(row)
     assert lfmap.pair_key(dict(row)) == k

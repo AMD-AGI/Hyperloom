@@ -26,20 +26,9 @@ objective progress.
 The CLI starts a Python Coordinator that coordinates:
 
 - Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, Kernel requests, `report`).
-- Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `run_gemm_tuning`, `run_optimization`, `integrate`, and related request kinds directly to Python handlers without an LLM turn. The `run_fusion` and `run_collective` lanes share that handler table but are Coordinator-owned: they run at KERNEL entry behind their own gate and PolicyGate rejects an agent request for either.
+- Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `integrate`, and related request kinds directly to Python handlers without an LLM turn. The `run_gemm_tuning` and `run_fusion` lanes are Coordinator-owned: they run inside the `kernel_agent` task at KERNEL entry and PolicyGate rejects an agent request for either.
 - Critic: proposal review (default `--critic-agent`; see
   [Critic Backend Selection](#critic-backend-selection) for modes).
-- Robustness: default `--robustness-agent` — drives the
-  `hyperloom.agents.robustness` subprocess runtime for health monitoring, RCA, and scheduling-police
-  intents. `--robustness-mock` for offline / smoke tests.
-  - **Multi-node auto-downgrade (`--nodes >= 2`)**: the agent backend's
-    `LocalProbeSource` targets sandbox-local resources only (ray status,
-    inference server, GPU, FD, disk, shm). On multi-node every
-    such resource lives in a separate pod (head / worker / RayJob), so each
-    probe surfaces as a HIGH false positive that floods the bus. The CLI
-    auto-downgrades to `--robustness-mock` (heartbeat only) and prints a
-    WARNING; pass `--robustness-mock` explicitly to suppress it. See
-    `src/hyperloom/inference_optimizer/multi_node/SKILL.md` (Robustness limitation in multi-node mode).
 
 State lives under a **session directory** (per optimization run).
 The **workspace root** is ``$USER_DATA_PATH`` (default
@@ -60,11 +49,11 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
         ├── manifest.json
         ├── state.json
         ├── storage/coordinator.db
-        ├── agents/{orchestration,kernel,critic,robustness}/
+        ├── agents/{orchestration,kernel,critic}/
         ├── runs/{baseline,profile,roofline,explore,sweep,...}/<task_id>/
         ├── kernel-agent/runs/<session_id>/
         ├── kernel-agent-workspace/<kernel_id>/
-        ├── optimizer_runs/               # per-session launcher logs / PID / monitor
+        ├── optimizer_runs/               # per-session launcher logs / PID
         ├── reports/
         └── …
 ```
@@ -83,8 +72,8 @@ session path example::
 
 `session/paths.py` is the single authority for Hyperloom paths. The launching
 agent does not need to recreate that logic in shell; it only needs to run
-`install.sh`, source the generated `runtime/kernel-agent.env.sh`, and read
-the session dir printed by the CLI.
+`install.sh` and read the session dir printed by the CLI. CLI preflight loads
+the generated `runtime/kernel-agent.env.sh` in-process.
 
 | Concept | Env / helper | Meaning |
 |---|---|---|
@@ -104,7 +93,9 @@ the mirrors by hand.
 ``manifest.json`` / ``state.json`` / ``coordinator.db`` from the
 **session dir**. For monitoring after launch, learn the session dir from
 the **launch-info JSON** written by ``--launch-info-file`` (``jq -r
-.session_dir <file>``) or, equivalently, from the single
+.session_dir <file>``, or the ``read_json`` python3 one-liner used in the
+health check below — ``jq`` is not installed on every node) or,
+equivalently, from the single
 ``HYPERLOOM_LAUNCH key=value …`` sentinel line the CLI prints to stdout
 (``session_dir=…``). Those are the authoritative, machine-readable
 sources. Never guess by walking ``$USER_DATA_PATH/<model_basename>/`` for
@@ -132,11 +123,15 @@ TraceLens is required by `_server_patcher`),
 (GEAK cross-session memory). Each is overridable via its own env if
 you want a fully self-contained session.
 
-Paths emitted by agents must resolve under the **session dir** — PolicyGate
-enforces this (with a framework-source allowlist for `source_file`:
-`/sgl-workspace/{aiter,sglang,vllm}/` plus any paths in
-`$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` — colon-separated, unioned
-with defaults; auto-probed by `src/hyperloom/inference_optimizer/assets/install.sh`).
+Artefact paths emitted by agents must resolve under the **session dir**;
+PolicyGate enforces that. `source_file` and `framework_source_root` are exempt —
+they name framework source, which lives outside the session dir by construction,
+and where a patch may land is decided when `integrate_patch` applies it.
+`hyperloom.inference_optimizer.framework_paths.resolve_framework_tree` names the tree a
+session optimises and `resolve_kernel_search_roots` the trees worth searching;
+`$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` (colon-separated) supplements the
+latter and is auto-probed by
+`src/hyperloom/inference_optimizer/assets/install.sh`.
 
 Always prefer `manifest.json` / `state.json` / `coordinator.db` under the
 **session dir** over guessing from terminal logs.
@@ -182,14 +177,16 @@ run it anyway and ask the user.
 processes in *other* containers; the host namespace is the superset (#1314).
 
 ```bash
+set -e
 export REPO_ROOT="${REPO_ROOT:-$(pwd -P)}"
-# .env fills gaps only — same pattern as the launch block below.
-_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
-if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
-eval "$_dotenv_prev"
-unset _dotenv_prev
-export USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
-export RUN_DIR="${USER_DATA_PATH}/optimizer_runs"
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
+export USER_DATA_PATH
+export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 
 # Prior launch handles from canonical artifacts (no last_launch.env — never written)
 LATEST_PID_FILE="$(ls -t "$RUN_DIR"/run_*.pid 2>/dev/null | head -1 || true)"
@@ -212,9 +209,14 @@ echo "prior_pid_live=${PRIOR_PID_LIVE}"
 echo "prior_launch_info=${LATEST_LAUNCH_INFO:-none}"
 echo "prior_session=${PRIOR_SESSION:-none}"
 
-# Foreign processes — host-level pgrep (patterns match preflight_optimizer.py)
+# Foreign processes — host-level pgrep (patterns match preflight_optimizer.py).
+# Both framework spellings are needed: Magpie launches `vllm serve`, and vLLM
+# then renames its own processes to VLLM::APIServer / VLLM::EngineCore /
+# VLLM::Worker_TP<n>, which no `vllm\.entrypoints` scan can see. An orphan that
+# is still loading weights also holds no VRAM yet, so the VRAM check below does
+# not cover for a missed process match.
 pgrep -af 'hyperloom\.inference_optimizer\.cli.*optimize' || true
-pgrep -af 'sglang\.launch_server|vllm\.entrypoints|Magpie' || true
+pgrep -af 'sglang\.launch_server|sglang::|vllm\.entrypoints|vllm serve|VLLM::|Magpie' || true
 
 # VRAM — stdlib-only rocm-smi parse (must run on docker host; no hyperloom import)
 python3 - <<'PY'
@@ -315,26 +317,30 @@ Never kill processes or stop containers without explicit user approval.
 
 ### IR-2 — install.sh MUST succeed before every launch
 
-Run `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"` and
-source the regenerated
+Run `bash "$INSTALL_SH"` using the workspace's wheel/source entrypoint resolved
+in [Step 1](#step-1--install-one-time-per-pod--venv-rebuild). CLI preflight reads
+the regenerated
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}`
-in the **same shell** that will spawn `python -m hyperloom.inference_optimizer.cli optimize`.
-Skipping install strikes silently *after* `baseline` succeeds: missing
-TraceLens/GEAK → `trace_analyze` / `kernel_opt` fail; no live
-Ray head → `kernel_opt` tasks hang; missing `kernel-agent.env.sh` →
-first kernel-opt gateway call returns `401`. `install.sh --check-only` is a
-*diagnostic*, never a substitute.
+in-process; the launch shell must not source it. Skipping install can leave
+TraceLens/GEAK unavailable or Ray unprepared. A missing runtime env fails
+preflight before optimization. `install.sh --check-only` is a *diagnostic*,
+never a substitute.
 
 **Resume carve-out.** `... optimize --resume-from` may skip install only when
 ALL hold: (1) `install.sh` exited 0 earlier in the *same shell*; (2)
-`kernel-agent.env.sh` is still sourced; (3) `manifest.json` exists under the
-session dir passed to `--resume-from`.
+`kernel-agent.env.sh` remains available under the same workspace root; (3)
+`manifest.json` exists under the session dir passed to `--resume-from`.
 Any failure → treat as fresh launch and re-run `install.sh`.
 
 > The in-loop equivalent is `_preflight()` steps 1–12 (drift repair, not
 > a substitute for this outer gate).
 
 ### IR-3 — PR Monitor reachability (in-loop, soft degrade)
+
+The PR Monitor endpoint is co-hosted by KB Store. Hyperloom derives
+`${KB_STORE_URL}/pr-monitor/v1/healthz` for this probe and
+`${KB_STORE_URL}/pr-monitor/mcp/` for specialist tools; there are no separate
+PR endpoint flags or Cortex endpoint variable.
 
 `_preflight()` invokes:
 
@@ -390,8 +396,9 @@ brief:
   phase stays open on the other lever. **Both arms dry advances the phase**
   via `optimize_no_more_leverage`. A KERNEL_AGENT plateau stays advisory. The
   LLM may also emit
-  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
-  when it judges further effort unproductive.
+  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'}` when it judges
+  further effort unproductive. `skip_to_close` is not a phase advance: it abandons
+  the remaining budget and is reserved for genuine early abandonment.
 
 ### FRAMEWORK_AGENT phase — the optimisation phase
 
@@ -465,20 +472,28 @@ Both are idempotent; do not replicate them inside chat.
 The common single-gateway setup uses `OPENAI_API_KEY` and `OPENAI_BASE_URL`.
 Split-gateway deployments may provide provider-specific `ANTHROPIC_*` /
 `OPENAI_*` credentials instead. Shell-exported values win; `$REPO_ROOT/.env`
-is loaded only to fill missing values. `install.sh` and the CLI preflight
-enforce this internally; the launch recipes below enforce it by re-exporting a
-snapshot of the caller's environment after sourcing `.env`, so a path variable
-such as `USER_DATA_PATH` left in `.env` can never redirect a run to another
-workspace. Never plain `set -a; . .env` — that inverts the precedence.
-After Step 1, source the generated `kernel-agent.env.sh` in the same shell.
+is loaded only to fill missing or empty values. The recipes and `install.sh`
+use `assets/runtime_env.sh` without executing dotenv contents. Docker mode
+excludes dotenv-provided `PYTHON`, `VIRTUAL_ENV`, and
+`INFERENCE_OPTIMIZER_FORCE_PYTHON`; explicit shell selections remain intact.
+A readonly `USER_DATA_PATH` is not reassigned; reconcile a conflict with the
+setup-selected workspace root before continuing. CLI preflight loads generated
+`kernel-agent.env.sh` in-process, not through shell `source`.
 
 
 ### Step 1 — Install (one-time per pod / venv rebuild)
 
 ```bash
-export REPO_ROOT="$(pwd -P)"   # repo root containing src/hyperloom/ + .env
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
-. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"   # pod-local runtime env
+set -e
+export REPO_ROOT="$(pwd -P)"   # workspace containing .env and a wheel or source install
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
+export USER_DATA_PATH
+bash "$INSTALL_SH"
 ```
 
 `src/hyperloom/inference_optimizer/assets/install.sh` is the only install entrypoint for
@@ -508,15 +523,15 @@ of `src/hyperloom/inference_optimizer/assets/install.sh`):
 
 | Component | Provided by |
 |---|---|
-| `ray==2.44.1` + `click<8.3.0` | pip |
+| `ray==2.44.1` + `click<8.3.0`, or the lowest published version above it that has a wheel for this interpreter (then without the `click` ceiling, which only guards 2.44.1's CLI); `RAY_VERSION` is honoured verbatim | pip |
 | TraceLens public (editable install) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_ROOT`; skills, patches, CLI, analysis orchestrator) |
 | TraceLens-internal (editable install, **optional**) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_INTERNAL_ROOT` only when set; mirrors read-only checkout to `${HYPERLOOM_ROOT}/TraceLens-internal`; rehydration module). Unset => open-source-only. |
 | GEAKv4 Claude Code workflow checkout + SDK deps | `ensure_geak` |
 
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}` is
 regenerated by `install.sh` and contains gateway URLs, auth aliases,
-GEAK runtime variables, and InferenceX path. Source it (don't try to derive these by
-hand). Generated env/config state is written to the pod-local runtime directory,
+GEAK runtime variables, and InferenceX path. CLI preflight reads it; do not derive
+these by hand or source it in the launch shell. Generated env/config state is written to the pod-local runtime directory,
 not back into a shared WekaFS source checkout.
 
 ### Tool source fields (prompt → env, sandbox-only)
@@ -635,13 +650,15 @@ and the operator's stated value is lost:
 | Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | Input seq length | `--isl` | Pass the prompt's ISL. Default `1024` when omitted. |
 | Output seq length | `--osl` | Pass the prompt's OSL. Default `1024` when omitted. |
-| Concurrency | `--conc` | Pass the prompt's CONC (max in-flight requests). Default `64`. Use `--conc-sweep-concs` for a ladder. |
+| Concurrency | `--conc` | Pass the prompt's CONC (max in-flight requests). Default `64`. SWEEP measures a ladder around it (under AgentX only with `--enable-conc-sweep`); `--conc-sweep-concs` overrides the workload's default ladder. |
 | Tensor parallel | `--tp` | Pass the prompt's TP. Default `1`. |
 | Expert parallel | `--ep` | Pass the prompt's EP for MoE. Default `1`. |
 | Precision | `--precision` | Match the checkpoint (`bf16` default / `fp8` / ...). Keep consistent with `--quantize`. |
 | Budget | `--max-hours` | Pass the prompt's time budget. Default `2.0`. |
+| Latency SLA | `--max-latency-ms` | **Scriptable frameworks only** (`xdit`, `custom`); refused for serving, where AgentX already grades interactivity. Pass any stated ceiling on per-request latency ("must stay under 250 ms", "interactive workload"). A **constraint, not a target**: it composes with `--target-*` rather than competing, and refuses any KEEP whose mean end-to-end latency exceeds it — including one that reported no latency at all. Off when omitted, which does not lose a preference but does remove the SLA from the search. |
 | Max model len | `--max-model-len` | Optional; auto-derived from ISL+OSL+headroom when omitted. |
-| External reference GPU | `--compare-against-gpu` | Coordinator *always* hard-gates `target_analysis` to run first so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
+| External reference GPU | `--compare-against-gpu` | `target_analysis` writes `target_analysis/target_baseline.json` for query/status metadata and `competitor_target.json` for both advisory and final-report comparisons. Without a target GPU it writes `reason="no_target_gpu_configured"` and clears the competitor target. AgentX reads accepted `current_best.total_throughput / state.tp` and `current_best.e2e_norm_intvty_p90` at `state.conc`; it does not reread raw results or recipes. Missing targets or axes remain unavailable. This is a cross-system advisory, not proof of identical measurement estimators or deployment, and never changes Objective or KEEP/REVERT. |
+| Target advisory | `--no-target-advisory` | Disable external-target hints in prompts without disabling final-report comparison. `primary_gap` uses the existing latency/throughput categories; the interactivity axis is displayed as interactivity. |
 | Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Never runs on a resume. |
 | Env pins | `--extra-env NAME=VALUE` | Repeatable; forward **every** one verbatim as its own flag (do not drop any or fold into the `Environment:` block). The CLI persists them in `state.json` and serializes them into `$INFERENCE_OPTIMIZER_EXTRA_ENV`; a dropped pin is lost silently — e.g. a missing `SGLANG_USE_AITER=0` leaves the explore aiter-MoE filter blind. A `--resume-from` re-exports the persisted set, so re-pass them only to change the set. |
 
@@ -715,8 +732,7 @@ export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
-. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
+bash "$INSTALL_SH"
 "$PYTHON" -m hyperloom.inference_optimizer.cli --help
 ```
 
@@ -745,6 +761,14 @@ or `curl /v1/models` — `_preflight()` owns these. See `docs/reference/kernel-e
 for the kernel dispatch and artifact layout.
 
 ### Recovery
+
+SIGHUP follows the ordinary terminal drain path, like other supported stop
+signals. There is no automatic supervision or restart. After inspecting the
+failure and confirming that the old process is gone, explicitly resume the same
+session with `--resume-from "$SESSION_DIR"` when appropriate. Historical stop
+reasons remain readable; they are not instructions to restart automatically.
+`recover-session` remains an offline artifact-reconstruction tool, not a runtime
+recovery action.
 
 If the CLI exits with `Claude SDK exit code 1` or `Primus.00009 token not present`,
 the gateway rejected the request. Check that `OPENAI_BASE_URL` / `OPENAI_API_KEY`
@@ -856,8 +880,10 @@ failure MUST change at least one of `params.benchmark_script` /
 `params.result_dir` / `params.extra_server_args` / `params.extra_envs`
 (prompt RULE F1 — LLM-side judgement, not a PolicyGate deny); a proposal
 repeating a recent failing params fingerprint is dropped as a duplicate.
-Three consecutive baseline failures with no enablement engaged stop the run
-with `stop_reason='baseline_failed'` and route PRELUDE to CLOSE.
+With enablement admitted (`--enablement all/launch/eval`), the first baseline
+failure routes PRELUDE into the ENABLEMENT phase, which authors patches until
+the combo boots. With `--enablement off`, three consecutive failures stop the
+run with `stop_reason='baseline_failed'`.
 
 Operator server flags have one supported CLI entry point:
 `optimize --server-args "<framework serve flags>"`. The CLI exports this as
@@ -866,7 +892,7 @@ Operator server flags have one supported CLI entry point:
 profile, explore, and sweep. Explicit `--max-model-len` / `$MAX_MODEL_LEN`
 wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
-Use `--conc-sweep-concs` for the explicit sweep ladder.
+Use `--conc-sweep-concs` to override the ladder SWEEP measures (`256,128,64,32,16,8,4,2` synthetic, `1,4,8,10,14,20,28` under AgentX). Under AgentX the sweep is off unless `--enable-conc-sweep` is passed, since every rung is a 3600 s window.
 
 Operator server flags are the workload baseline, but they are not sacred. When
 the configuration arm has evidence or an operator hint that a pinned flag may
@@ -988,7 +1014,7 @@ shell — set it when you resume a non-default session.
 `profile_atom.yaml`; the Magpie atom wrapper bridges `PROFILE=1` to
 atom's `--torch-profiler-dir`, and TraceLens consumes the resulting
 `*.pt.trace.json.gz` unchanged. atom source roots (`/app/ATOM/atom/`)
-are in PolicyGate's allowlist + `_REUSABLE_SOURCE_ROOTS`, and the repo
+are in the kernel search roots + `_REUSABLE_SOURCE_ROOTS`, and the repo
 URL `https://github.com/ROCm/ATOM.git` is in `hyperloom.agents.framework.repo_map`.
 Unlike sglang/vllm, atom is the only framework with a programmatic
 cold-start seed grid (`_atom_default_grid`: `atom_level_{2,3}`,
@@ -1089,18 +1115,35 @@ fill in the workload block, and `.` it each call.
 **IMPORTANT**: never use a shared filename like `setup_env.sh` — concurrent
 sessions on different pods share `$USER_DATA_PATH` via WekaFS; a single file
 causes MODEL_PATH race conditions where sessions launch the wrong model.
-After `setsid nohup ... &`, locate the optimizer via
+After launching, locate the optimizer via
 `pgrep -af 'hyperloom.inference_optimizer.*optimize'` — `$!` may be a wrapper PID.
 
+**How you launch depends on the harness.** Two things have to hold before the
+bash tool's `run_in_background=true` is the right form: `$CLAW_SESSION_ID` must
+be set, and your bash tool must take a `run_in_background` parameter. Both, or
+`setsid nohup ... &` stays correct.
+
+Each answers half the question. The session id says a platform is reclaiming
+this sandbox on what it can see, so a run detached by hand is one it cannot see.
+The parameter says this deployment serves background shells at all — switched
+off, the tool does not offer one, and there is nothing to hand the block to.
+Off-platform neither holds, and `setsid` is what you want there anyway: nothing
+is reclaiming anything, and a harness's own background shell may not outlive the
+connection that started it. Both forms are detached — the difference is whether
+anything outside the process knows it exists.
+
 ```bash
+set -e
 cd "$REPO_ROOT"
-# .env fills gaps only: re-exporting the non-empty pre-source snapshot keeps every
-# value the caller exported. Wider than install.sh, which guards a fixed list.
-_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
-if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
-eval "$_dotenv_prev"
-unset _dotenv_prev
-. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
+export USER_DATA_PATH
+# Resolve the launch interpreter in this shell; preflight loads generated runtime state.
+export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
 # RUN_LOG/PID/launch-info live under the workspace until the session_dir
@@ -1110,40 +1153,142 @@ export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 export RUN_LOG="$RUN_DIR/run_${RUN_TAG}.log"
 export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
+export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 mkdir -p "$RUN_DIR"
 
-setsid nohup python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
+# $RUN_TAG carries a timestamp, so it cannot be recomputed later. Persist the
+# run-scoped vars where the health check can source them: under Claw the launch
+# is its own background tool call, so the health check necessarily runs in a
+# DIFFERENT shell and inherits none of these exports. Session-scoped name, for
+# the same WekaFS reason setup_env.sh must never be a shared filename. Outside
+# Claw, set $RUN_ENV yourself before launching if two runs share a host.
+export RUN_ENV="$RUN_DIR/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh"
+printf 'export RUN_TAG=%q RUN_DIR=%q RUN_LOG=%q PID_FILE=%q LAUNCH_INFO_FILE=%q\n' \
+  "$RUN_TAG" "$RUN_DIR" "$RUN_LOG" "$PID_FILE" "$LAUNCH_INFO_FILE" > "$RUN_ENV"
+
+python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   --model "$MODEL_PATH" \
   --framework "${FRAMEWORK:-sglang}" \
   --target-gain "${TARGET_GAIN:-10}" \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
-  --launch-info-file "$RUN_DIR/launch_${RUN_TAG}.json" \
-  > "$RUN_LOG" 2>&1 < /dev/null &
-echo $! > "$PID_FILE"
+  --launch-info-file "$LAUNCH_INFO_FILE" \
+  > "$RUN_LOG" 2>&1 < /dev/null
 ```
 
-`setsid nohup ... &` is required for runs > 5 min — Cursor's background
-shell can die on SSH disconnect.
+**When both conditions hold**, pass that block to the bash tool with
+`run_in_background=true` and no `setsid nohup` and no trailing `&` — the tool is
+what detaches it. The
+tool returns a `shell_id`, not a pid, so `$PID_FILE` is written in the health
+check below from the launch-info JSON, which carries the real one. Do not skip
+that reconciliation when checking the optimizer process.
 
-Critic defaults to `--critic-agent`; Robustness defaults to `--robustness-agent`.
-See [Critic Backend Selection](#critic-backend-selection) for `--critic-mock`;
-pod-level overrides via
-`INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` /
-`INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND`.
+If that reconciliation cannot find a real pid, the health check **removes**
+`$PID_FILE` rather than leaving whatever the launch put there. On the `setsid`
+path that leftover may be a dead wrapper pid. An absent pidfile means the
+optimizer PID is unknown, not that the optimizer stopped. Inspect the launch
+log and persisted state before making an explicit recovery decision; a dead
+wrapper alone never justifies restarting.
+
+Because that launch is its own background tool call, the health check has to be
+a **separate foreground** call — it cannot be appended to the same block, or the
+`sleep 30` and every line it prints would run in the background too, invisible
+until you poll `bash_output`. A separate call means a separate shell with none of
+the launch block's `export`s, which is what `$RUN_ENV` above is for: the health
+check and later status queries source it instead of assuming carried-over state.
+
+**Everywhere else**, prefix the `python3 ... optimize` command with `setsid nohup`,
+append ` &`, and `echo $! > "$PID_FILE"`. That form is required for runs > 5 min
+under Cursor, whose background shell can die on SSH disconnect. Reconcile the
+file afterwards all the same: `$!` may be a setsid wrapper that exits immediately,
+not the optimizer PID.
+
+**Docker.** Do **not** wrap this launch in `docker exec -d`. Detached exec
+discards stdout and stderr, so an optimizer that dies on startup looks like
+"backgrounding failed." Run one attached
+`docker exec -w "$REPO_ROOT" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc` that runs
+this same launch block. Preflight loads `kernel-agent.env.sh`; do not source
+it. Under Claw, hand that attached exec to the bash tool with
+`run_in_background=true` and no `setsid`, `nohup`, or trailing `&`. Everywhere
+else, the command inside the exec is the `setsid nohup … > "$RUN_LOG" 2>&1 <
+/dev/null &` recipe (plus `--launch-info-file`). Confirm with
+`pgrep -af 'hyperloom.inference_optimizer.*optimize'`. If launch-info has no
+`.session_dir`, read `$RUN_LOG` and fix that error; do not retry with a
+different backgrounding trick.
+
+**Why the difference is load-bearing under Claw.** `setsid nohup ... &` detaches
+the run from everything, including the platform. The sandbox is deleted once
+`lastActivity + 15m` passes, `lastActivity` only moves for traffic through the
+Router, and Claw stops pinging the moment the agent turn reaches a terminal
+state — so a hand-detached optimizer is indistinguishable from an abandoned
+sandbox, and the pod is reclaimed out from under it about fifteen minutes after
+the turn ends. That is not hypothetical: on 2026-09-02 four dispatches lost a
+live sandbox exactly this way, the cleanest of them reporting `task.completed`
+at 10:43:14 and losing its pod at 10:57:46, with no error in between and the
+optimizer still working.
+
+`run_in_background=true` detaches the same way but through the door the platform
+can see: Hands registers the shell against the session, which is what lets the
+sandbox be kept alive for as long as the run needs and reclaimed normally once
+it does not. It also gives `bash_output` and `kill_shell`, which are better than
+a pidfile — a `/proc` check answers "alive" for a zombie, and sandbox PID 1 does
+not reap.
+
+One thing has to be true on the Claw side for that to hold, and it is the same
+thing the second condition above tests: `BG_SHELL_ENABLED` must be on in the
+deployment, or the tool refuses `run_in_background` outright and the foreground
+ceiling is the only route.
+
+The other half is already there. Claw's keepalive consults the shell registry
+before treating a sandbox as idle, so a registered shell holds the sandbox for
+as long as it runs and stops holding it once it exits — both directions
+confirmed against a live deployment, with a thirty-minute run held across the
+end of its turn and the sandbox reclaimed a few minutes after the run finished.
+
+One thing it costs: a background shell is registered in Hands' memory and Hands
+takes its shells down with it on SIGTERM, so a Hands restart ends the run where
+`setsid nohup` would have outlived it. A sandbox restart ends it either way, and
+being visible is worth more than surviving a restart nothing would have noticed.
+
+Critic defaults to `--critic-agent`. See
+[Critic Backend Selection](#critic-backend-selection) for `--critic-mock` and
+`INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` for a pod-level override.
 
 After launching, do a short health check:
 
 ```bash
 sleep 30
-pid="$(cat "$PID_FILE")"
-test -d "/proc/$pid" && echo "optimizer_alive=true pid=$pid"
+# Re-enter the launch shell's environment. Required under Claw, where this is a
+# separate foreground tool call and the `export`s from the launch block are gone;
+# harmless when it is the same shell.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
+
+# `jq` is not on every node, so read the launch-info JSON with python3.
+read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
+
+# Authoritative pid, from the CLI rather than from whatever launched it: under
+# Claw the tool returned a shell_id, and under setsid `$!` is the wrapper.
+pid="$(read_json "$LAUNCH_INFO_FILE" pid)"
+if [ -n "$pid" ]; then
+  echo "$pid" > "$PID_FILE"
+else
+  # A stale wrapper pid is not the optimizer's identity. Missing means unknown;
+  # inspect the launch log and persisted state without restarting anything.
+  rm -f "$PID_FILE"
+  echo "ERROR: no .pid in $LAUNCH_INFO_FILE; removed $PID_FILE rather than" \
+       "leave a stale wrapper pid. Inspect $RUN_LOG; do not auto-resume." >&2
+fi
+# Not `test -d /proc/$pid`: a zombie keeps its /proc entry, and sandbox PID 1
+# does not reap, so that check reports a dead optimizer as alive indefinitely.
+# Ask for the state and reject Z.
+ps -o stat= -p "$pid" 2>/dev/null | grep -qv '^Z' \
+  && echo "optimizer_alive=true pid=$pid"
 # Authoritative session dir from the launch-info JSON (--launch-info-file).
 # Never guess by timestamp: overlapping sessions break any "latest dir" pick.
-launch_info="$RUN_DIR/launch_${RUN_TAG}.json"
-session_dir="$(jq -r '.session_dir // empty' "$launch_info" 2>/dev/null)"
+session_dir="$(read_json "$LAUNCH_INFO_FILE" session_dir)"
 if [ -z "$session_dir" ]; then
-  echo "ERROR: no .session_dir in $launch_info (launch-info JSON missing or" \
+  echo "ERROR: no .session_dir in $LAUNCH_INFO_FILE (launch-info JSON missing or" \
        "malformed). The optimizer likely died before emitting launch info;" \
        "inspect the HYPERLOOM_LAUNCH line and errors in $RUN_LOG." \
        "Refusing to guess the session dir from timestamps." >&2
@@ -1156,6 +1301,12 @@ test -f "$session_dir/state.json" && echo "state_exists=true" \
 
 Healthy = optimizer process alive + `manifest.json` + `state.json`
 exist + no early `stop_reason`.
+
+Under Claw the launch also returns a `shell_id`; `bash_output` on it is the
+cheaper liveness answer and the one that survives the pid moving, so prefer it
+and keep the `ps` check for the optimizer PID recorded in the pidfile.
+Health checks only observe and reconcile launch metadata; they must not kill,
+restart, or automatically resume the optimizer.
 
 ## Resume Existing Session
 
@@ -1174,69 +1325,34 @@ and kernel-agent artifacts; the CLI clears stale `stop_reason` and
 `crash_count` before retrying.
 
 **Most of the launch shape does not need re-passing.** `state.json` is the
-authority for it, so a bare `--resume` keeps `--server-args`, every
-`--extra-env` pin, the robustness flags (including
-`--robustness-disable-server-probe`) and the warm-replay gates from the original
-launch — the CLI re-exports the derived env from the persisted state and prints
-each one it restored. Re-pass a flag only to *change* it: an explicit flag on
-the resume wins and is persisted as the new value for later resumes. This is
-what lets `robustness_monitor.sh` auto-resume a crashed run without knowing the
-original command line.
+authority for it, so `--resume-from "$SESSION_DIR"` keeps `--server-args`, every
+`--extra-env` pin, and the warm-replay gates from the original launch — the CLI
+re-exports the derived env from the persisted state and prints each one it
+restored. Re-pass a flag only to *change* it: an explicit flag on the resume
+wins and is persisted as the new value for later resumes. Resuming is an
+explicit operator decision; no background process relaunches the optimizer.
 
 Three exceptions:
 
 - **`--nodes` must be re-passed for a multi-node resume**, together with
   `--mn-backend` / `--gpus-per-node` if they were set and the
-  `HYPERLOOM_MN_EXT_*` hand-off. The persisted count only feeds the robustness
-  defaults and the IR-8 check; the cluster hand-off is resolved from argv before
-  `state.json` is read, so a bare `--resume` of a `--nodes >= 2` session
+  `HYPERLOOM_MN_EXT_*` hand-off. The cluster hand-off is resolved from argv before
+  `state.json` is read, so omitting these flags on a `--nodes >= 2` resume
   benchmarks against the wrong endpoint.
 - `--reference-script` is fixed at launch — the recipe is parsed into
   `state.json` once, so re-passing it on a resume does nothing. Start a fresh
   session to change the reference.
 - `--server-args` and `--extra-env` are restored as a **set**: re-passing either
   replaces the whole thing, so changing one pin means re-passing them all.
-  Robustness flags layer per-key instead.
-
-## Robustness Monitor for Long Runs
-
-For runs > 5 min, start a monitor in its own `setsid nohup` process. It polls
-`state.json` every 5 min, exits without resuming when the session is terminal
-(any `stop_reason` in `STOP_REASON_VOCAB`, `phase=CLOSE`, or
-`reports/final.md` present — including failure sentinels like
-`baseline_failed`), and resumes via `--resume-from` only when the optimizer
-dies without those markers (unexpected crash).
-
-```bash
-export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
-mkdir -p "$RUN_DIR"
-# Point the monitor at the authoritative session dir: it reads
-# $INFERENCE_OPTIMIZER_SESSION_DIR first, else .session_dir from the
-# launch-info JSON in $LAUNCH_INFO_FILE (written by --launch-info-file).
-export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
-cp "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/robustness_monitor.sh.example" \
-   "$RUN_DIR/robustness_monitor.sh"
-chmod +x "$RUN_DIR/robustness_monitor.sh"
-setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
-  > "$RUN_DIR/robustness_monitor_$(date +%Y%m%d_%H%M%S).log" \
-  2>&1 < /dev/null &
-```
-
-Reads `$PID_FILE` plus (optional) `$INFERENCE_OPTIMIZER_SESSION_DIR` /
-`$LAUNCH_INFO_FILE` / `$MAX_HOURS` / `$TARGET_GAIN`. The session dir comes
-from `$INFERENCE_OPTIMIZER_SESSION_DIR` when set, else from `.session_dir`
-in the launch-info JSON at `$LAUNCH_INFO_FILE` (never from a timestamp
-guess). Edit the example before copying if defaults need to change.
-`stop_reason` interpretation matches the `## Monitoring` reader.
 
 ## Monitoring
 
 Each poll is one fast read of persisted state, and you poll only when you are
 next invoked. **Never block to reach the next poll**: no `sleep`, no wait loop,
 no `tail -f`. The only sanctioned wait is the one-shot `sleep 30` health check
-right after launch. Recurring 5-minute polling is the Robustness Monitor's job
-and already runs in its own `setsid nohup` process (see above) — do not
-reimplement it here.
+right after launch. Do not start a background watchdog or automatic resume
+loop. If the user requests recurring status checks, use the hosting platform's
+scheduled invocations to read persisted state without holding a connection open.
 
 **Why this is load-bearing, not style.** A blocking call holds the sandbox
 connection open for its whole duration. Overlap it with a `roofline` trace flush
@@ -1245,23 +1361,32 @@ MoE — and the connection can drop; the agent harness reads that as an
 unreachable sandbox and rebuilds it, which kills the optimizer and the in-flight
 profile with it. Session `Kimi-K3_20260818T062936Z_a62853e5` lost 3/3 rooflines,
 its `analysis.md`, and its whole KERNEL phase to a `sleep 110; sleep 110;
-sleep 80` progress loop. Launch, check once, hand off to the monitor, report.
+sleep 80` progress loop. Launch, check once, and report.
 
-Resolve `$SESSION` the same way the Robustness Monitor does — never from
-`$USER_DATA_PATH`, which is the workspace root, not the session dir.
+Resolve `$SESSION` from the launch-info JSON — never from `$USER_DATA_PATH`,
+which is the workspace root, not the session dir.
 
 ```bash
-export SESSION="${INFERENCE_OPTIMIZER_SESSION_DIR:-$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_dir"])' "$LAUNCH_INFO_FILE")}"
+# Another separate tool call under Claw: source the run-scoped env for
+# $LAUNCH_INFO_FILE before resolving the session dir from it.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
+export SESSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_dir"])' "$LAUNCH_INFO_FILE")"
 python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state.py" "$SESSION"
 ```
 
 It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_best`,
-`last_kernel_opt`, `last_trace_analyze`, `last_sweep`, `explore_last_round`,
+`last_kernel_opt`, `last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
 `phase`, plus the recent lifecycle events.
 
 Recent action counts from SQLite (last 500 events grouped by category):
 
 ```bash
+# Self-sufficient: $SESSION from the block above is gone if this is its own
+# tool call, so re-source and re-resolve rather than inheriting it.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
+export SESSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_dir"])' "$LAUNCH_INFO_FILE")"
 python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/event_counts.py" "$SESSION"
 ```
 
@@ -1281,7 +1406,7 @@ The optimizer should:
   serialised by the lane / GPU lease rather than a policy deny, so
   explore / kernel dispatches keep flowing while analysis refreshes.
   Each analysis also stamps a decode roofline ceiling
-  (`src/hyperloom/orchestrator/kernel/roofline_ceiling.py`) for the report's
+  (`src/hyperloom/inference_optimizer/roofline_ceiling.py`) for the report's
   `## Roofline Comparison` section.
 3. Run `trace_analyze` once per trace/config and cache the result in
   `last_trace_analyze`.
@@ -1310,9 +1435,16 @@ and caches `.so` on disk. First launch of a fresh (model, dtype, TP,
 
 | Cache | Path | Clear |
 |---|---|---|
-| aiter JIT (primary cold-start cost) | `<aiter pkg root>/jit/` (resolved via `import aiter`; wheel installs hold ~80 pre-built `.so` here, plus runtime-JIT staging under `jit/build/<module>/build/`) | `rm -rf <aiter pkg root>/jit/build/` (clears JIT staging only; do NOT delete `jit/*.so` — those are wheel-bundled) |
+| aiter JIT (primary cold-start cost) | The runtime-selected JIT directory (`AITER_JIT_DIR`, otherwise the package `jit/` or initialized user cache), containing serving `.so` modules and `build/` staging | Manual staging cleanup is limited to `build/`. Serving modules are invalidated through the shared JIT transaction, with the scope chosen by the caller. |
 | Triton | `~/.triton/cache/` (resolves via `$HOME`) | `rm -rf ~/.triton/cache` |
 | torch.compile / Inductor | `/tmp/torchinductor_<user>/` (override `$TORCHINDUCTOR_CACHE_DIR`) | `rm -rf /tmp/torchinductor_root` |
+
+An AITER runtime-JIT source patch invalidates the full serving-module set together
+with `build/`; revert restores its baseline and removes candidate artifacts in that scope.
+CSV/GEMM registry preparation invalidates only its selected modules, preserving
+unrelated serving modules. Full invalidation can require substantial first-use
+compilation; its cost depends on the installed cache and workload. Do not delete
+serving modules manually or infer patch success from a warm, stale module.
 
 `sgl_kernel` (`site-packages/sgl_kernel/common_ops.*.so`) is build-time only;
 only `kernel_opt` / `integrate` may rebuild it.
@@ -1323,19 +1455,29 @@ First launch on this pod; change to `--max-model-len` / `--max-num-seqs` /
 `--gpu-memory-utilization` / `--cuda-graph-max-bs` / `--quantization` /
 `--enable-torch-compile`; pod rebuild; manual cache `rm`; aiter source patch.
 
-### Auto-detection + timeout
+### Benchmark deadlines and output visibility
 
-The baseline executor counts aiter `.so` files (**< 20 = COLD**)
-and picks a subprocess timeout accordingly: COLD → 9000s, WARM → 7800s
-(`task.params['timeout_sec']` always wins). The profile executor inherits
-the same probe with a 14400s warm default, so a COLD probe there lowers the
-cap to 9000s. Each launch logs a
-`baseline_executor: ...` marker and the cache state lands in the
-`Preflight diagnostics:` block. If COLD_START repeats across retries the
-JIT was killed mid-`hipcc` — bump
-`INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC` above its 9000s default (e.g.
-`=12000`; it replaces the cold cap, so a smaller value shortens it).
-Override the probe dir via `INFERENCE_OPTIMIZER_AITER_JIT_DIR`.
+Benchmark subprocesses use two finite, positive limits:
+
+- `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` (default **7800** seconds) is the
+  hard wall-clock limit for each actual spawn, including server boot and accuracy
+  evaluation. Output never extends this deadline.
+- `INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC` (default **600** seconds)
+  measures output silence only after real server readiness. It is not armed
+  during pre-ready startup or for scriptable workloads without a serving server.
+
+Session `--max-hours` and cancellation remain effective independently of those
+limits. Session exhaustion is cooperative: it cannot guarantee termination of a
+frozen Coordinator. Busy logs are not proof of useful progress. Setting
+`PYTHONUNBUFFERED=1` only affects Python output; it does not force shell or native
+programs, or upstream subprocess capture, to stream output. The Magpie streaming
+fix is local-only and unpublished; do not assume the installed pin includes it
+or that a run has been validated with it.
+
+Cold-start detection is diagnostic, not a separate benchmark timeout policy.
+Profile, KernelForge, GEAK, LLM-call, and framework-owned watchdog budgets retain
+their own contracts. In particular, SGLang's server watchdog is independent of
+these optimizer benchmark limits.
 
 ## Kernel Apply Safety
 
@@ -1376,7 +1518,7 @@ budget on untested params/backend candidates or the next kernel.
 Auth / SDK drift (`Claude SDK exit code 1`, `Primus.00009 token not present`,
 `ANTHROPIC_AUTH_TOKEN not set`, `BackendError: claude-agent-sdk not installed`,
 `Fatal error in message reader`) is owned by `_preflight()`; see
-`## Setup → Recovery` for the supervisor + install rerun loop. Manual SDK
+`## Setup → Recovery` for explicit diagnosis and an install rerun. Manual SDK
 fallback if frozen pip blocks `_ensure_python_sdks()`:
 `python -m pip install 'claude-agent-sdk>=0.2.110' 'openai>=1.50' 'httpx>=0.27'`.
 Transient SDK errors retry/resume up to the Coordinator emergency threshold.
@@ -1412,7 +1554,7 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 - Repeated `trace_analyze` with unchanged trace/config: bug — reuse `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
 - `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
-- `stop_reason=policy_loop`: a legacy stop_reason kept in the vocabulary for resuming old sessions; nothing in the runtime sets it. Repeated `policy_denied` for the same (action, rule) pair is advisory only — there is no auto-prune at streak ≥5 and no `policy_loop` stop at streak ≥10. Inspect `SharedState.policy_denial_history` via the `why_denied` tool or the `=== Recent policy denials ===` block, then change something substantive (a new `params.grid` variant, a different `benchmark_script`, or a sibling action family). Do not hand-edit `state.json`.
+- `policy_denied` streaks (not a stop reason — nothing in the runtime stops a run over them): repeated denial of the same (action, rule) pair is advisory only — there is no auto-prune at streak ≥5 and no stop at streak ≥10. Inspect `SharedState.policy_denial_history` via the `why_denied` tool or the `=== Recent policy denials ===` block, then change something substantive (a new `params.grid` variant, a different `benchmark_script`, or a sibling action family). Do not hand-edit `state.json`.
 - `stop_reason=time_exhausted`: resume same session (`--resume-from`); do not start fresh.
 
 ## Report Back To User

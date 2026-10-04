@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Resolution of KernelForge's ``serving_patches`` tree.
-
-The SGLang fp8 block-scale CK patch is entirely fail-soft: every miss returns
-``None`` and the run continues with ``SGLANG_FP8_BLOCKSCALE_CK_MAX_M`` quietly
-no-opping on an unpatched tree. That makes a resolver regression invisible in a
-green run -- the patch simply stops being applied and the speedup disappears --
-so the resolution order is asserted directly here.
-
-Before KernelForge was vendored into Hyperloom this read ``$FORGE_PATH`` and
-nothing else, so an unset env var meant "no patches". The packaged tree is now
-the normal answer, and the only override left is ``$KERNELFORGE_PROJECT_ROOT``,
-which substitutes the whole data tree rather than a repository checkout.
-"""
+"""Resolution of KernelForge's ``serving_patches`` tree."""
 
 from __future__ import annotations
 
@@ -50,12 +38,7 @@ def test_packaged_tree_is_used_when_nothing_is_configured() -> None:
 
 
 def test_explicit_root_wins_over_the_packaged_tree(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    """The caller-supplied root is the highest-precedence override.
-
-    Patching SGLang from anywhere other than the shipped tree is worth a line
-    in the log: every failure on this path is silent, so an override that wins
-    should not be something you discover by reading a diff months later.
-    """
+    """The caller-supplied root is the highest-precedence override."""
     tree = _fake_tree(tmp_path / "explicit")
 
     with caplog.at_level("WARNING"):
@@ -65,11 +48,7 @@ def test_explicit_root_wins_over_the_packaged_tree(tmp_path: Path, caplog: pytes
 
 
 def test_an_explicit_root_without_the_tree_falls_through_to_the_package(tmp_path: Path) -> None:
-    """The override is a preference, not a veto.
-
-    Pointing at a root that carries no ``serving_patches`` used to leave the
-    resolver with nothing, which silently dropped the patch entirely.
-    """
+    """The override is a preference, not a veto."""
     empty = tmp_path / "no-patches-here"
     empty.mkdir()
 
@@ -82,11 +61,7 @@ def test_an_explicit_root_without_the_tree_falls_through_to_the_package(tmp_path
 def test_project_root_override_wins_and_is_logged(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """``$KERNELFORGE_PROJECT_ROOT`` is the surviving env-var override.
-
-    It is how an air-gapped operator drops in a newer sglang patch ahead of an
-    image rebuild, so it must beat the packaged copy -- and say that it did.
-    """
+    """``$KERNELFORGE_PROJECT_ROOT`` is the surviving env-var override."""
     project_root = tmp_path / "kernelforge-project"
     tree = _fake_tree(project_root)
     monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))

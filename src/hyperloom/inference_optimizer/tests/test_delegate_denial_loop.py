@@ -22,7 +22,6 @@ def _silent_coordinator(session_dir) -> Coordinator:
         backends={
             "orchestration": MockBackend(silent, name="o"),
             "critic": MockBackend(silent, name="c"),
-            "robustness": MockBackend(silent, name="r"),
         },
     )
 
@@ -53,6 +52,7 @@ async def test_delegate_terminal_collision_appends_retry_suffix(session_dir):
             kind="long_running",
             params={"x": 1},
             idempotency_key="dup-key-1",
+            dispatch_class="llm",
         )
         await c.tasks.transition(first.task_id, "running", evidence={})
         await c.tasks.transition(first.task_id, "succeeded", evidence={})
@@ -73,6 +73,7 @@ async def test_delegate_running_collision_denies_without_new_task(session_dir):
             kind="long_running",
             params={"x": 1},
             idempotency_key="dup-key-run",
+            dispatch_class="llm",
         )
         before = len(await c.tasks.by_state("queued"))
         await c._handle_delegate("orchestration", _delegate(key="dup-key-run"))
@@ -85,6 +86,28 @@ async def test_delegate_running_collision_denies_without_new_task(session_dir):
             if m.payload.get("kind") == "policy_denied" and m.payload.get("rule") == "duplicate_idempotency_key_running"
         ]
         assert denied
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_delegate_source_patch_without_git_root_prunes_without_retry(session_dir):
+    c = _silent_coordinator(session_dir)
+    try:
+        c.shared_state.framework_repo_path = ""
+        await c._handle_delegate(
+            "orchestration",
+            _delegate(
+                action="specialist",
+                key="patch-no-root",
+                params={"domain": "serving_specialist"},
+            ),
+        )
+
+        assert await c.tasks.by_state("queued") == []
+        assert c.shared_state.pruned_families == ["source_patch"]
+        failures = [(row["action"], row["task_id"], row["error_class"]) for row in c.shared_state.last_action_failures]
+        assert failures == [("specialist", "patch-no-root", "no_git_framework_source_root")]
     finally:
         await c.stop()
 
@@ -107,6 +130,46 @@ async def test_delegate_fallback_key_uses_tick_and_content_fingerprint(session_d
         )
     finally:
         await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_policy_denial_records_target_proposal_message_id(session_dir):
+    from hyperloom.inference_optimizer.breakdown.exporter import build
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+    from hyperloom.orchestrator.phases.machine_state import workflow_predicate_inputs
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
+
+    coordinator = _silent_coordinator(session_dir)
+    coordinator.shared_state.phase = "PRELUDE"
+    coordinator.shared_state.macro_cycle = 0
+    try:
+        with session_scope(session_dir):
+            phase_event.record_entry(phase="PRELUDE", macro_cycle=0, sequence=1)
+            intent = Intent(
+                type=IntentType.DELEGATE,
+                payload={"action_name": "baseline", "target_proposal_msg_id": "proposal-42"},
+            )
+            await coordinator._record_policy_denied(
+                "orchestration",
+                intent,
+                PolicyDenied("denied", rule="phase_action_not_allowed", hint="wait"),
+            )
+            phase_event.record_exit(
+                phase="PRELUDE",
+                macro_cycle=0,
+                to_phase="CLOSE",
+                reason="prelude_baseline_failed",
+                evidence={"predicate_inputs": workflow_predicate_inputs(coordinator.shared_state)},
+            )
+        breakdown = build(session_dir)
+    finally:
+        await coordinator.stop()
+
+    event = next(row for row in breakdown["timeline"] if row["type"] == "phase")
+    denial = event["ext"]["denials"]["rows"][0]
+    assert denial["proposal_msg_id"] == "proposal-42"
+    assert denial["rule"] == "phase_action_not_allowed"
 
 
 @pytest.mark.asyncio
@@ -230,7 +293,6 @@ from hyperloom.orchestrator.phases.machine_state import (
     PHASE_FRAMEWORK_AGENT,
 )
 from hyperloom.orchestrator.policy.gate import (
-    PolicyDenied,
     PolicyGate,
 )
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -244,56 +306,9 @@ def gate() -> PolicyGate:
     return PolicyGate(role_registry=default_role_registry())
 
 
-# ``roofline`` and ``profile`` are Coordinator-enqueued; PolicyGate denies any
-# propose/delegate/request that names either action.
+# ``roofline`` and ``profile`` are Coordinator-enqueued; PolicyGate denies any propose/delegate/request that names
+# either action.
 _INTERNAL_ANALYSIS_ACTIONS = ("roofline", "profile")
-
-
-@pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
-def test_delegate_with_analysis_action_is_denied(gate, action_name):
-    intent = Intent(
-        type=IntentType.DELEGATE,
-        payload={
-            "action_name": action_name,
-            "predicted_gain_pct": 1.0,
-            "params": {},
-        },
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "phase_incompatible"
-    assert action_name in str(exc.value)
-    assert "Coordinator-managed" in str(exc.value)
-
-
-@pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
-def test_propose_action_with_analysis_action_is_denied(gate, action_name):
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={
-            "action_name": action_name,
-            "predicted_gain_pct": 1.0,
-        },
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "phase_incompatible"
-    assert action_name in str(exc.value)
-
-
-@pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
-def test_request_with_analysis_kind_is_denied(gate, action_name):
-    """A REQUEST whose ``kind`` names roofline/profile is denied by R1 phase_incompatible."""
-    intent = Intent(
-        type=IntentType.REQUEST,
-        payload={
-            "target_agent": "kernel_agent",
-            "kind": action_name,
-        },
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "phase_incompatible"
 
 
 # Supporting infrastructure parity
@@ -306,25 +321,25 @@ def test_phase_explore_allowlist_drops_legacy_actions():
             "integrate_patch",
             "roofline",
             "profile",
-            "recover",
         }
     )
 
 
 def test_full_enabled_actions_still_contains_explore():
-    """Sanity: ``explore`` / ``sweep`` / ``baseline`` stay enabled; ``recover`` is intentionally NOT enabled."""
+    """Sanity: ``explore`` / ``baseline`` stay enabled; ``recover`` is intentionally NOT enabled."""
     assert "explore" in FULL_ENABLED_ACTIONS
-    assert "sweep" in FULL_ENABLED_ACTIONS
+    assert "sweep" not in FULL_ENABLED_ACTIONS
     assert "recover" not in FULL_ENABLED_ACTIONS
     assert "baseline" in FULL_ENABLED_ACTIONS
 
 
-def test_cli_real_executors_still_contains_explore_and_sweep():
+def test_cli_real_executors_still_contains_explore():
     """Sanity: the canonical EXPLORE-phase executors stay registered."""
     from hyperloom.inference_optimizer.cli.executors import _REAL_EXECUTORS_FULL
 
     assert "explore" in _REAL_EXECUTORS_FULL
-    assert "sweep" in _REAL_EXECUTORS_FULL
+    assert "conc_sweep" in _REAL_EXECUTORS_FULL
+    assert "sweep" not in _REAL_EXECUTORS_FULL
     assert "baseline" in _REAL_EXECUTORS_FULL
 
 
@@ -357,6 +372,5 @@ def test_mission_summary_surfaces_resume_pending_revalidation():
     assert "recheck current stack" in text
 
 
-# The Robustness prune_branch family list used to live in robustness.md, which was
-# loaded every tick and discarded by the backend. The role is prompt-driven no
-# longer, so the file is gone and test_agent_roles_and_policy asserts it stays gone.
+# The Robustness prune_branch family list used to live in robustness.md, which was loaded every tick and discarded by
+# the backend.

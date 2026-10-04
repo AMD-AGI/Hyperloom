@@ -1,19 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reference launch-recipe parsing and rendering.
-
-A *reference recipe* is an operator-supplied launch script (local path or URL).
-The optimizer lifts its **static, fully-resolved** server flags plus the
-``export`` lines the denylist allows, and uses them as the lowest-priority base
-for the baseline server args (the optimisation phase can still override). The shell is never
-executed — anything dynamic (``$VARS``: TP/CONC/ISL/OSL/model/port) is skipped,
-because the optimizer's normal env seeding already owns those.
-"""
+"""Reference launch-recipe parsing and rendering."""
 
 from __future__ import annotations
 
 import logging
+import json
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -21,11 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import is_allowed_external_env_key, is_secret_shaped_env_name
+from hyperloom.common.overlay import validate_overlay_pythonpath
 
 log = logging.getLogger(__name__)
 
-# Flags that never belong in the lifted base: the optimizer's env seeding owns
-# the workload + I/O, so drop these even when fully resolved.
+# Flags that never belong in the lifted base: the optimizer's env seeding owns the workload + I/O, so drop these even
+# when fully resolved.
 _DROP_FLAGS = frozenset(
     {
         "--port",
@@ -46,6 +40,34 @@ class ReferenceRecipe:
     server_args: str = ""
     envs: dict[str, str] = field(default_factory=dict)
     model: str | None = None
+    launch_controls: dict[str, Any] = field(default_factory=dict)
+
+
+_CONTROLS_PREFIX = "# hyperloom-launch-controls: "
+
+
+def _validate_launch_controls(controls: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(controls, dict) or set(controls) - {
+        "overlay_pythonpath",
+        "unset_envs",
+        "remove_args",
+        "args_mode",
+    }:
+        raise ValueError("invalid reference launch controls")
+    for key in ("unset_envs", "remove_args"):
+        values = controls.get(key, [])
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise ValueError(f"reference {key} must be a list of strings")
+    if any(not is_allowed_external_env_key(name) for name in controls.get("unset_envs", [])):
+        raise ValueError("reference unset_envs contains a forbidden environment name")
+    mode = controls.get("args_mode", "append")
+    if not isinstance(mode, str) or mode not in {"append", "replace"}:
+        raise ValueError("invalid reference args_mode")
+    overlay = controls.get("overlay_pythonpath", "")
+    if not isinstance(overlay, str):
+        raise ValueError("reference overlay_pythonpath must be a string")
+    validate_overlay_pythonpath(overlay)
+    return controls
 
 
 def _read_source(source: str) -> str:
@@ -131,28 +153,42 @@ def _should_drop_flag(name: str) -> bool:
 
 
 def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
-    """Lift ``(server_args, envs, model)`` from a reference recipe; raises on a
-    source that cannot be read or shell-parsed."""
-    text = _read_source(source)
+    """Lift static launch settings from an untrusted local or remote recipe.
 
+    Executable overlay imports require resuming the owning session or explicitly
+    running its exported launcher; a recipe comment cannot authorize Python code.
+    """
+    text = _read_source(source)
+    controls: dict[str, Any] = {}
+    for raw in text.splitlines():
+        if raw.startswith(_CONTROLS_PREFIX):
+            if controls:
+                raise ValueError("duplicate reference launch controls")
+            controls = _validate_launch_controls(json.loads(raw[len(_CONTROLS_PREFIX) :]))
+            if controls.get("overlay_pythonpath"):
+                raise ValueError(
+                    "reference overlay_pythonpath imports executable code; resume the owning session "
+                    "or review and run the exported launcher directly"
+                )
     envs = _extract_envs(text)
     line = _find_entrypoint_line(text, framework)
     if not line:
         log.warning(
             "reference-script: no %s entrypoint in %r; carrying exports only", _entrypoint_markers(framework), source
         )
-        return ReferenceRecipe(server_args="", envs=envs, model=None)
+        return ReferenceRecipe(server_args="", envs=envs, model=None, launch_controls=controls)
 
     server_args, model = _extract_server_args(shlex.split(line), framework)
-    return ReferenceRecipe(server_args=server_args, envs=envs, model=model)
+    return ReferenceRecipe(server_args=server_args, envs=envs, model=model, launch_controls=controls)
 
 
 def _extract_envs(text: str) -> dict[str, str]:
     """Pull literal exports the denylist allows, resolving self-referential defaults."""
     envs: dict[str, str] = {}
     dropped: list[str] = []
-    pat = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)\s*$")
-    for line in text.splitlines():
+    pat = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
+    lines = iter(text.splitlines(keepends=True))
+    for line in lines:
         m = pat.match(line)
         if not m:
             continue
@@ -160,19 +196,51 @@ def _extract_envs(text: str) -> dict[str, str]:
         if not is_allowed_external_env_key(key):
             dropped.append(key)
             continue
-        # strip surrounding quotes if present
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
-            val = val[1:-1]
-        if _has_var(val):
-            resolved = _resolve_self_default(key, val)
+        while True:
+            try:
+                tokens = shlex.split(val)
+                break
+            except ValueError:
+                continuation = next(lines, None)
+                if continuation is None:
+                    tokens = []
+                    break
+                val += continuation
+        if len(tokens) != 1 and val.strip():
+            dropped.append(key)
+            continue
+        literal = tokens[0] if tokens else ""
+        if _has_shell_expansion(val):
+            resolved = _resolve_self_default(key, literal)
             if resolved is None:
                 dropped.append(key)
                 continue
-            val = resolved
-        envs[key] = val
+            literal = resolved
+        envs[key] = literal
     if dropped:
         log.info("reference recipe: dropped %d export(s): %s", len(dropped), ", ".join(sorted(set(dropped))))
     return envs
+
+
+def _has_shell_expansion(value: str) -> bool:
+    """Recognize dynamic shell syntax while preserving quoted literal values."""
+    quote = ""
+    escaped = False
+    for char in value.strip():
+        if escaped:
+            escaped = False
+        elif quote == "'":
+            if char == "'":
+                quote = ""
+        elif char == "\\":
+            escaped = True
+        elif char == quote:
+            quote = ""
+        elif not quote and char in ("'", '"'):
+            quote = char
+        elif char in ("$", "`") or (not quote and char in ";&|<>()"):
+            return True
+    return False
 
 
 # ``${FOO:-1}`` / ``${FOO-1}``, capturing the name and the default.
@@ -180,29 +248,19 @@ _SELF_DEFAULT_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*):?-(.*)\}$")
 
 
 def _resolve_self_default(key: str, val: str) -> str | None:
-    """Return the literal default of ``${key:-default}``, else ``None``.
-
-    Only the *self*-referential form counts: ``export FOO=${BAR:-1}`` depends on
-    an unrelated variable, so its default is not FOO's effective value here.
-    """
+    """Return the literal default of ``${key:-default}``, else ``None``."""
     m = _SELF_DEFAULT_RE.match(val)
     if not m or m.group(1) != key:
         return None
     default = m.group(2)
-    return None if _has_var(default) else default
+    return None if _has_shell_expansion(default) else default
 
 
 def _extract_server_args(
     tokens: list[str],
     framework: str,
 ) -> tuple[str, str | None]:
-    """Walk entrypoint tokens as (flag, value) pairs; keep static flags only.
-
-    Returns ``(server_args, model_basename_or_None)``. A flag whose value
-    contains ``$`` is dropped together with its value (no orphan flags). The
-    positional model and drop-listed flags are removed from ``server_args`` but
-    the model is captured for caller-side model-gating.
-    """
+    """Walk entrypoint tokens as (flag, value) pairs; keep static flags only."""
     tokens = _strip_redirection(tokens)
     # Skip the entrypoint prefix itself.
     fw = str(framework or "").strip().lower()
@@ -274,9 +332,13 @@ def _extract_server_args(
     return " ".join(kept), model
 
 
-# git -C resolves a relative patch path against the target tree, not the caller,
-# so the script dir is baked in.
-_APPLY_PATCH_FUNC = """\
+#: ``vcs`` value of a framework root with no version control of its own.
+#: Duplicates ``orchestrator.bringup.trees.VCS_NONE``, which this layer cannot
+#: import without inverting the package layering.
+VCS_NONE = "none"
+
+# git -C resolves a relative patch path against the target tree, not the caller, so the script dir is baked in.
+_APPLY_PATCH_GIT = """\
 apply_patch() {
   local patch_file="$SCRIPT_DIR/$1"
   for lvl in 1 0 2 3 4 5 6 7 8; do
@@ -289,60 +351,99 @@ apply_patch() {
   return 1
 }"""
 
+# For a root with no git of its own -- an installed wheel -- where ``git
+# apply`` has nothing to run against.
+_APPLY_PATCH_NO_GIT = """\
+apply_patch() {
+  local patch_file="$SCRIPT_DIR/$1"
+  for lvl in 1 0 2 3 4 5 6 7 8; do
+    if patch -p"$lvl" --fuzz=0 --dry-run -d "$FRAMEWORK_ROOT" -i "$patch_file" >/dev/null 2>&1; then
+      patch -p"$lvl" --fuzz=0 -d "$FRAMEWORK_ROOT" -i "$patch_file"
+      return 0
+    fi
+  done
+  echo "ERROR: could not apply $patch_file at any strip level" >&2
+  return 1
+}"""
+
+
+def _apply_patch_func(framework_root_vcs: str) -> str:
+    """Return the ``apply_patch`` helper that matches the target tree's kind.
+
+    Args:
+        framework_root_vcs: The framework root's vcs discriminant. Only
+            :data:`VCS_NONE` selects the POSIX ``patch`` channel.
+
+    Returns:
+        str: The shell function body.
+    """
+    return _APPLY_PATCH_NO_GIT if framework_root_vcs == VCS_NONE else _APPLY_PATCH_GIT
+
+
+def _shell_ready_server_args(server_args: Any) -> str:
+    """Return ``server_args`` with every token quoted for the shell that will run it.
+
+    The script this renders is executed by a shell, and the args were stored as
+    a command line, not as shell source. ``--compilation-config
+    {"max_cudagraph_capture_size":8,"cudagraph_mode":"NONE"}`` interpolated raw
+    is brace-expanded and quote-stripped into three words -- the flag, a value
+    that is no longer JSON, and a stray operand -- so the one setting that kept
+    the server from segfaulting silently did not reach it. Patches and artifacts
+    on the lines above are already quoted; this line was not.
+
+    Tokenized by the splitter the launch path itself uses, so the script hands
+    the server the same argv every other consumer got, rather than a second
+    opinion about where the tokens are.
+    """
+    text = str(server_args or "").strip()
+    if not text:
+        return ""
+    from hyperloom.inference_optimizer.grid_server_args import _split_args_preserving_json
+
+    tokens = _split_args_preserving_json(text)
+    if tokens is None:
+        # Unparseable to the canonical splitter: quote it whole rather than
+        # guess where it breaks. A single odd operand beats three wrong ones.
+        return shlex.quote(text)
+    return " ".join(shlex.quote(tok) for tok in tokens)
+
 
 def render_reference_script(
     *,
     framework: str,
     server_args: str,
     envs: dict[str, str] | None = None,
+    overlay_pythonpath: str | None = None,
+    unset_envs: list[str] | None = None,
+    remove_args: list[str] | None = None,
+    args_mode: str = "append",
     model: str | None = None,
     tp: int | None = None,
     max_model_len: int | None = None,
     gpu_type: str | None = None,
     setup_commands: list[str] | None = None,
     framework_root: str | None = None,
+    framework_root_vcs: str = "",
     runtime: str | None = None,
     rounds: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Render a runnable ``*.sh`` artifact from a launch recipe.
-
-    With only the base parameters, renders the ``current_setting.sh`` summary
-    for the current optimization best. When ``setup_commands``, ``framework_root``
-    or ``rounds`` are supplied, renders an ``enablement_setting.sh`` that
-    additionally installs dependencies, replays the accepted enablement rounds,
-    and launches the server.
-
-    Args:
-        framework: Framework identifier (``sglang``, ``vllm``, ``atom``, …).
-        server_args: Extra server-arg CLI fragment.
-        envs: Extra environment variable exports (values containing shell
-            variable references are skipped).
-        model: Model path, emitted as ``export MODEL=<path>`` so the launch line
-            can reference ``$MODEL``.  A bare basename is emitted as a comment
-            instead, since it cannot be launched.
-        tp: Tensor-parallel degree, emitted as ``export TP=<n>``.
-        max_model_len: Context length cap, emitted as ``export MAX_MODEL_LEN=<n>``.
-        gpu_type: GPU type string, emitted as ``export GPU_TYPE=<s>``.
-        setup_commands: Ordered install commands to run before launching.
-            Only emit when generating an enablement artifact.
-        framework_root: Framework source tree root where patches are applied.
-            Emitted as ``export FRAMEWORK_ROOT=<path>`` and used in the
-            ``apply_patch`` helper. Required for a round carrying patches.
-        runtime: If non-empty, a note is appended warning that this enablement
-            round relied on an isolated attempt venv at the given path and the
-            script does not reproduce that layer.
-        rounds: Accepted enablement rounds in order, each
-            ``{"patches": [...], "artifacts": [...]}`` with script-relative
-            paths. A round's patches precede its artifacts, matching the order
-            integrate_patch applied them.
-
-    Returns:
-        The script text, always terminated by a newline.
-    """
+    """Render a runnable ``*.sh`` artifact from a launch recipe."""
     fw = str(framework or "sglang").strip().lower()
     has_enablement = bool(setup_commands or framework_root or rounds)
 
     lines: list[str] = ["#!/usr/bin/env bash"]
+    controls = _validate_launch_controls(
+        {
+            **({"overlay_pythonpath": overlay_pythonpath} if overlay_pythonpath else {}),
+            **({"unset_envs": unset_envs} if unset_envs else {}),
+            **({"remove_args": remove_args} if remove_args else {}),
+            **({"args_mode": args_mode} if args_mode == "replace" else {}),
+        }
+    )
+    if controls:
+        lines.append(_CONTROLS_PREFIX + json.dumps(controls, sort_keys=True))
+    for name in unset_envs or []:
+        lines.append(f"unset {shlex.quote(name)}")
     if has_enablement:
         lines.append("# Auto-generated by hyperloom — enablement fix replay script.")
         lines.append("set -euo pipefail")
@@ -355,8 +456,8 @@ def render_reference_script(
     if exported_model:
         lines.append(f"export MODEL={shlex.quote(str(model))}")
     elif model:
-        # A bare basename cannot be launched; the parser records one when the
-        # operator recipe named the model without a path.
+        # A bare basename cannot be launched; the parser records one when the operator recipe named the model without
+        # a path.
         lines.append(f"# model: {model}")
     if has_enablement and not exported_model:
         # The launch line dereferences $MODEL, which set -u would kill first.
@@ -370,14 +471,16 @@ def render_reference_script(
     if framework_root:
         lines.append(f"export FRAMEWORK_ROOT={shlex.quote(str(framework_root))}")
     for k, v in (envs or {}).items():
-        if not str(k).strip() or _has_var(str(v)):
+        if not str(k).strip():
             continue
-        # The artifact is archived and uploaded, so a credential-shaped value is
-        # named but never written out.
+        # The artifact is archived and uploaded, so a credential-shaped value is named but never written out.
         if is_secret_shaped_env_name(k):
             lines.append(f"# export {k}=<redacted; supply manually>")
         else:
             lines.append(f"export {k}={shlex.quote(str(v))}")
+    if overlay_pythonpath:
+        prefix = shlex.quote(str(overlay_pythonpath))
+        lines.append(f'export PYTHONPATH={prefix}"${{PYTHONPATH:+:$PYTHONPATH}}"')
 
     if runtime:
         lines.append("")
@@ -393,7 +496,7 @@ def render_reference_script(
     if rounds:
         if any(rnd.get("patches") for rnd in rounds):
             lines.append("")
-            lines.append(_APPLY_PATCH_FUNC)
+            lines.append(_apply_patch_func(framework_root_vcs))
         for rnd in rounds:
             if rnd.get("patches"):
                 lines.append("")
@@ -406,7 +509,7 @@ def render_reference_script(
                     src = f'"$SCRIPT_DIR"/{shlex.quote(art["archive_path"])}'
                     lines.append(f"install -D {src} {shlex.quote(art['target'])}")
 
-    args = str(server_args or "").strip()
+    args = _shell_ready_server_args(server_args)
     lines.append("")
     if "atom" in fw:
         entry = f"python3 -m atom.entrypoints.openai_server {args}".rstrip()

@@ -18,27 +18,12 @@ def now_iso(timespec: str = "microseconds", *, z_suffix: bool = False) -> str:
 
 
 def utc_now_compact() -> str:
-    """Current UTC time as a compact ``YYYYMMDDTHHMMSSZ`` id timestamp.
-
-    Returns:
-        The current UTC time formatted as ``%Y%m%dT%H%M%SZ``.
-    """
+    """Current UTC time as a compact ``YYYYMMDDTHHMMSSZ`` id timestamp."""
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def iso_z(ts: Any) -> str:
-    """Normalise any ISO-8601 timestamp to canonical second-precision ``...Z`` UTC.
-
-    Naive timestamps are assumed UTC; aware ones are converted to UTC. Returns
-    ``""`` for empty input, or the original string when it cannot be parsed.
-
-    Args:
-        ts: An ISO-8601 timestamp value (any suffix), or ``None``.
-
-    Returns:
-        The canonical ``...Z`` UTC string, ``""`` for empty input, or the
-        original string when unparseable.
-    """
+    """Normalise any ISO-8601 timestamp to canonical second-precision ``...Z`` UTC."""
     if ts is None:
         return ""
     s = str(ts).strip()

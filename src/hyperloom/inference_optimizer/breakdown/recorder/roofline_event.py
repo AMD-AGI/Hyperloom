@@ -1,0 +1,974 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The SBD V6 ``roofline`` action: recorded the same way wherever it belongs."""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+from .event_fields import (
+    analysis_detail as _analysis_detail,
+    as_dict as _as_dict,
+    as_list as _as_list,
+    clip as _clip,
+    failure_row as _failure_row,
+    float_or_none as _float_or_none,
+    int_or_none as _int_or_none,
+    now_iso_seconds as _now_iso,
+    text_or_none as _text_or_none,
+    worst_status as _worst_status,
+)
+from .event_ids import event_id
+from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
+from .event_sink import RecordSink
+from .event_timeline import finish_event, open_event
+
+log = logging.getLogger(__name__)
+
+EVENT_TYPE = "roofline"
+EVENT_KIND = "roofline"
+
+#: The component segment of a standalone roofline event id. The phase segment
+#: is the phase that dispatched it, which is why it is a parameter.
+EVENT_COMPONENT = "roofline"
+
+PRODUCER = "orchestrator"
+
+#: The event-level section, holding one fragment per event rather than per
+#: action. It is separate from :data:`SECTION_ACTION` because the two are
+#: counted differently: an event has one timeline sequence and, when a phase
+#: dispatched roofline twice in a cycle, several actions -- so a section serving
+#: both would put a row with no action in it among the actions.
+SECTION_EVENT = "roofline_event"
+
+SECTION_ACTION = "roofline_action"
+SECTION_PROFILE_RUN = "roofline_profile_run"
+SECTION_ANALYSIS_RUN = "roofline_analysis_run"
+
+#: One row per kernel in the analysis's own roofline table, read back from the
+#: sidecar the analyzer wrote. A section of its own rather than a list on the
+#: action row because the table is the widest thing the action produces and it
+#: is per-kernel, not per-action: folding it into the action row would make the
+#: row's size scale with the model's operator count.
+SECTION_KERNEL = "roofline_kernel"
+
+ROW_ACTION = "action"
+ROW_PROFILE_RUN = "profile_run"
+ROW_ANALYSIS_RUN = "analysis_run"
+ROW_KERNEL = "kernel"
+
+# ``trace_files`` reaches 424 entries on multi-rank xDiT runs (p99 424, p50 2), which would be ~85 KiB of paths per
+# profile run.
+_MAX_SAMPLE_TRACE_FILES = 4
+
+# Trace-structure issues are prose written for an operator; a handful is enough to characterize a degraded trace and
+# the count carries the rest.
+_MAX_TRACE_ISSUES = 8
+
+# The roofline table names every kernel the trace attributed, which on a large
+# MoE reaches the low hundreds. Kept generous rather than top-N: the table is
+# what a reader consults to find the one kernel worth optimizing, and a cutoff
+# by GPU share is exactly the wrong filter for "which cheap kernel is
+# memory-bound at 3% efficiency". The cap only exists so a pathological trace
+# cannot write an unbounded fragment.
+_MAX_ROOFLINE_KERNELS = 512
+
+# ``perfmodel_breakdown.ops`` is a per-operator analytical model, one row per op
+# in the decode path. A few dozen covers the model; the rest are tail ops whose
+# individual times round to nothing.
+_MAX_PERFMODEL_OPS = 64
+
+# Every profile run row names why it ran, so a multi-attempt roofline can be read
+# without re-deriving the retry reason from log text.
+PROFILE_ATTEMPT_INITIAL = "initial"
+PROFILE_ATTEMPT_AFTER_EXCEPTION = "retry_after_exception"
+PROFILE_ATTEMPT_AFTER_BAD_RETURN = "retry_after_bad_return"
+PROFILE_ATTEMPT_AFTER_FAILURE = "retry_after_failure"
+PROFILE_ATTEMPT_AFTER_NO_TRACE = "retry_after_no_trace"
+PROFILE_ATTEMPT_AFTER_CAPTURE_ONLY = "retry_after_capture_only"
+PROFILE_ATTEMPT_AFTER_ZERO_OPS = "retry_after_zero_ops"
+PROFILE_ATTEMPT_COMPUTE_BOUND = "compute_bound_reprofile"
+
+ANALYSIS_ATTEMPT_INITIAL = "initial"
+ANALYSIS_ATTEMPT_N26_RETRY = "n26_steady_state_retry"
+ANALYSIS_ATTEMPT_COMPUTE_BOUND = "compute_bound_reprofile"
+
+# The two halves of a roofline action, named because ``failed_substep`` reports which one failed and the crash path
+# has only the in-flight half to go on.
+SUBSTEP_PROFILE = "profile"
+SUBSTEP_ANALYSIS = "analysis"
+# The executor names its failure exits after the step that produced them (``profile_no_trace``, ``trace_analyze``,
+# ...), which is finer than the two halves above; these are the spellings that mean the analysis half.
+_ANALYSIS_PHASES = frozenset({SUBSTEP_ANALYSIS, "trace_analyze"})
+
+__all__ = [
+    "ANALYSIS_ATTEMPT_COMPUTE_BOUND",
+    "ANALYSIS_ATTEMPT_INITIAL",
+    "ANALYSIS_ATTEMPT_N26_RETRY",
+    "EVENT_COMPONENT",
+    "EVENT_KIND",
+    "EVENT_TYPE",
+    "PRODUCER",
+    "PROFILE_ATTEMPT_AFTER_BAD_RETURN",
+    "PROFILE_ATTEMPT_AFTER_CAPTURE_ONLY",
+    "PROFILE_ATTEMPT_AFTER_EXCEPTION",
+    "PROFILE_ATTEMPT_AFTER_FAILURE",
+    "PROFILE_ATTEMPT_AFTER_NO_TRACE",
+    "PROFILE_ATTEMPT_AFTER_ZERO_OPS",
+    "PROFILE_ATTEMPT_COMPUTE_BOUND",
+    "PROFILE_ATTEMPT_INITIAL",
+    "SECTION_ACTION",
+    "SECTION_ANALYSIS_RUN",
+    "SECTION_EVENT",
+    "SECTION_KERNEL",
+    "SECTION_PROFILE_RUN",
+    "SUBSTEP_ANALYSIS",
+    "SUBSTEP_PROFILE",
+    "RooflineEventRecorder",
+    "assemble_roofline_action",
+    "assemble_roofline_ext",
+    "make_roofline_recorder",
+    "read_kernel_roofline",
+    "roofline_event_id",
+]
+
+
+def roofline_event_id(phase: str, macro_cycle: Any) -> str:
+    """Build ``{phase}:{macro_cycle}:roofline``, the id of one phase's rooflines in one cycle.
+
+    Raises:
+        ValueError: If either segment is malformed.
+    """
+    return event_id(phase, macro_cycle, EVENT_COMPONENT)
+
+
+def _rank_of(path: str) -> str:
+    """Extract the rank token from a per-rank trace filename.
+
+    xDiT tensor/sequence-parallel profiles write one trace per rank, named with
+    a ``rank<N>`` / ``_<N>.pt.trace.json.gz`` suffix. Grouping by rank turns a
+    424-entry path list into a histogram that shows whether every rank reported.
+    A filename with no rank encoded in it yields ``"unknown"``.
+    """
+    name = Path(str(path)).name
+    for token in name.replace("-", "_").split("_"):
+        if token.startswith("rank") and token[4:].isdigit():
+            return token[4:]
+    return "unknown"
+
+
+def _kernel_roofline_row(entry: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Normalize one row of the analyzer's kernel-roofline table.
+
+    The TraceLens and bypass routes agree on the identity and cost fields and
+    diverge in the tail: bypass measures attainment against a real rocprof
+    ceiling (``roofline_attainment_pct`` / ``roofline_measured``) where
+    TraceLens has only its analytical model. Both spellings are kept, because
+    the absent one is itself the answer to "was this number measured". A row
+    carrying no kernel identity cannot be joined to anything and yields
+    ``None``.
+    """
+    kernel_id = _text_or_none(entry.get("kernel_id"))
+    name = _text_or_none(entry.get("name"))
+    if not kernel_id and not name:
+        return None
+    intensity = entry.get("arithmetic_intensity")
+    if intensity is None:
+        intensity = entry.get("flops_per_byte")
+    return {
+        "kernel_id": kernel_id or "",
+        "name": _clip(name or ""),
+        "kernel_category": str(entry.get("kernel_category") or ""),
+        "source_file": _text_or_none(entry.get("source_file")),
+        "gpu_pct": _float_or_none(entry.get("gpu_pct")),
+        "duration_us": _float_or_none(entry.get("duration_us")),
+        "call_count": _int_or_none(entry.get("call_count")),
+        "bottleneck": _text_or_none(entry.get("bottleneck")),
+        "bound_type": _text_or_none(entry.get("bound_type")),
+        "arithmetic_intensity": _float_or_none(intensity),
+        "flops_per_byte": _float_or_none(entry.get("flops_per_byte")),
+        "efficiency_percent": _float_or_none(entry.get("efficiency_percent")),
+        "compute_utilization_pct": _float_or_none(entry.get("compute_utilization_pct")),
+        "bandwidth_utilization_pct": _float_or_none(entry.get("bandwidth_utilization_pct")),
+        "roofline_attainment_pct": _float_or_none(entry.get("roofline_attainment_pct")),
+        "roofline_name": _text_or_none(entry.get("roofline_name")),
+        "roofline_source": str(entry.get("roofline_source") or ""),
+        "roofline_measured": bool(entry.get("roofline_measured")),
+        "suggestion": _clip(entry.get("suggestion") or ""),
+        "recommended_actions": [str(item) for item in _as_list(entry.get("recommended_actions"))],
+        "reusable_native_kernel": bool(entry.get("reusable_native_kernel")),
+        "rocprof_roofline": _as_dict(entry.get("rocprof_roofline")) or None,
+    }
+
+
+def read_kernel_roofline(path: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Read the kernel-roofline sidecar the analyzer wrote for one run.
+
+    The analyzer runs in a subprocess and cannot hold a recorder, so it leaves
+    the table on disk. Reading it here -- in the orchestrator, at the moment the
+    action that produced it settles -- is what makes the table a recorded fact
+    rather than something the exporter re-derives from whatever files survived
+    to the end of the session.
+
+    The rows come back ordered by descending GPU share, behind the table's own
+    provenance header. An unreadable or malformed sidecar gives ``({}, [])``:
+    the table is a detail of a run that already succeeded, so losing it must
+    not turn that run into a failure.
+    """
+    text = str(path or "")
+    if not text:
+        return {}, []
+    try:
+        payload = json.loads(Path(text).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log.debug("roofline: kernel roofline sidecar unreadable at %s", text, exc_info=True)
+        return {}, []
+    if not isinstance(payload, Mapping):
+        return {}, []
+    rows: list[dict[str, Any]] = []
+    for entry in _as_list(payload.get("kernels")):
+        if not isinstance(entry, Mapping):
+            continue
+        row = _kernel_roofline_row(entry)
+        if row is not None:
+            rows.append(row)
+    rows.sort(key=lambda row: (-(row.get("gpu_pct") or 0.0), row.get("kernel_id") or ""))
+    header = {
+        "schema_version": _text_or_none(payload.get("schema_version")),
+        "source": str(payload.get("source") or ""),
+        "trace_input": str(payload.get("trace_input") or ""),
+        "trace_input_type": str(payload.get("trace_input_type") or ""),
+        "analysis_md_path": str(payload.get("analysis_md_path") or ""),
+        "kernel_candidates_path": str(payload.get("kernel_candidates_path") or ""),
+        "path": text,
+        # The table's own size, not the recorded row count: with ``truncated``
+        # it says how much the cap dropped, which a count of what survived
+        # cannot.
+        "kernel_count": len(rows),
+        "truncated": len(rows) > _MAX_ROOFLINE_KERNELS,
+    }
+    return header, rows[:_MAX_ROOFLINE_KERNELS]
+
+
+def _snapshot_row(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize a roofline snapshot into the shape the event carries.
+
+    The snapshot is the run's quantitative conclusion -- where the achieved
+    throughput sits against the memory and compute ceilings, and which of the
+    two binds -- carried in full rather than by id, because session state is
+    overwritten by later runs.
+    """
+    top_kernel = _as_dict(snapshot.get("top_kernel"))
+    row = {
+        "snapshot_id": _int_or_none(snapshot.get("snapshot_id")),
+        "ts": str(snapshot.get("ts") or ""),
+        "framework": str(snapshot.get("framework") or ""),
+        "macro_cycle": _int_or_none(snapshot.get("macro_cycle")),
+        "throughput_unit": str(snapshot.get("throughput_unit") or ""),
+        "achieved_tok_per_sec": _float_or_none(snapshot.get("achieved_tok_per_sec")),
+        "theoretical_peak_tok_per_sec": _float_or_none(snapshot.get("theoretical_peak_tok_per_sec")),
+        "roofline_mem_ceiling_tok_per_sec": _float_or_none(snapshot.get("roofline_mem_ceiling_tok_per_sec")),
+        "roofline_cmp_ceiling_tok_per_sec": _float_or_none(snapshot.get("roofline_cmp_ceiling_tok_per_sec")),
+        "roofline_bound_kind": str(snapshot.get("roofline_bound_kind") or ""),
+        "e2e_mean_ms": _float_or_none(snapshot.get("e2e_mean_ms")),
+        "roofline_ideal_ms": _float_or_none(snapshot.get("roofline_ideal_ms")),
+        "within_roofline_pct": _float_or_none(snapshot.get("within_roofline_pct")),
+        "within_roofline_pct_uncapped": _float_or_none(snapshot.get("within_roofline_pct_uncapped")),
+        "gap_to_roofline_pct": _float_or_none(snapshot.get("gap_to_roofline_pct")),
+        "roofline_ceiling_exceeded": bool(snapshot.get("roofline_ceiling_exceeded")),
+        "ceiling_arm": str(snapshot.get("ceiling_arm") or ""),
+        "compute_pct": _float_or_none(snapshot.get("compute_pct")),
+        "idle_pct": _float_or_none(snapshot.get("idle_pct")),
+        "comm_pct": _float_or_none(snapshot.get("comm_pct")),
+        "top_bottleneck": str(snapshot.get("top_bottleneck") or ""),
+        "top_kernel": {
+            "name": _clip(top_kernel.get("name") or ""),
+            "gpu_pct": _float_or_none(top_kernel.get("gpu_pct")),
+            "efficiency_pct": _float_or_none(top_kernel.get("efficiency_pct")),
+            "bound_type": str(top_kernel.get("bound_type") or ""),
+        }
+        if top_kernel
+        else None,
+        "roofline_provenance": _as_dict(snapshot.get("roofline_provenance")) or None,
+    }
+    breakdown = _as_dict(snapshot.get("perfmodel_breakdown"))
+    if breakdown:
+        ops = [_as_dict(op) for op in _as_list(breakdown.get("ops"))]
+        row["perfmodel_breakdown"] = {
+            **{key: value for key, value in breakdown.items() if key != "ops"},
+            "op_count": len(ops),
+            "ops": [op for op in ops if op][:_MAX_PERFMODEL_OPS],
+        }
+    return row
+
+
+def _summarize_trace_files(profile_result: dict[str, Any]) -> dict[str, Any]:
+    """Summarize the profile's trace file set without carrying every path."""
+    files = [str(row) for row in _as_list(profile_result.get("trace_files")) if row]
+    by_rank: dict[str, int] = {}
+    for path in files:
+        rank = _rank_of(path)
+        by_rank[rank] = by_rank.get(rank, 0) + 1
+    return {
+        "main_path": str(profile_result.get("main_trace_path") or ""),
+        "trace_dir": str(profile_result.get("trace_dir") or ""),
+        "file_count": len(files),
+        "rank_count": len([rank for rank in by_rank if rank != "unknown"]),
+        "files_by_rank": by_rank,
+        "sample_files": files[:_MAX_SAMPLE_TRACE_FILES],
+        "selection_reason": str(profile_result.get("profile_trace_selection_reason") or ""),
+    }
+
+
+def _summarize_trace_health(profile_result: dict[str, Any]) -> dict[str, Any]:
+    """Project ``trace_health`` into the action's bounded health block.
+
+    Carries the three booleans the executor branches on, the structured
+    per-check rows the profile validator emits, and a clipped slice of the
+    operator-facing issue prose.
+    """
+    health = _as_dict(profile_result.get("trace_health"))
+    issues = [_clip(row) for row in _as_list(health.get("issues"))]
+    return {
+        "zero_ops": bool(health.get("zero_ops")),
+        "capture_traces_present": bool(health.get("capture_traces_present")),
+        "per_kernel_attribution_degraded": bool(health.get("per_kernel_attribution_degraded")),
+        "issue_count": len(issues),
+        "issues": issues[:_MAX_TRACE_ISSUES],
+    }
+
+
+def _summarize_trace_quality(validate: dict[str, Any]) -> dict[str, Any]:
+    """Project selfcert's measurements into scalars the event can hold.
+
+    The certificate's own tables are per-rank, per-candidate and per-chunk, so their size follows the topology and
+    they stay in the file ``certificate_path`` points at. What lands here is the fixed set of numbers a reader
+    needs to judge trace quality without opening that file, taken from the rank the probe actually analysed. Every
+    ratio is accompanied by the terms it was computed from and by the scope it was computed over, because a
+    coverage figure drawn from a truncated aggregation is a different measurement than one drawn from the whole
+    trace.
+    """
+    ranks = [row for row in _as_list(validate.get("rank_level")) if isinstance(row, dict)]
+    rank = ranks[0] if ranks else {}
+    parse = _as_dict(rank.get("parse"))
+    attribution = _as_dict(rank.get("attribution"))
+    density = _as_dict(rank.get("density"))
+    time_structure = _as_dict(rank.get("time_structure"))
+    inventory = _as_dict(validate.get("trace_dir_level"))
+    capture = _as_dict(inventory.get("capture_sidecar_probe"))
+    measures = _as_dict(_as_dict(validate.get("verdict")).get("measures"))
+    return {
+        "rank_count_certified": len(ranks),
+        "analyzed_rank": rank.get("rank"),
+        # Parse scope: what the numbers below were computed over.
+        "event_total": parse.get("event_total"),
+        "aggregation_scope": parse.get("aggregation_scope"),
+        "truncated": parse.get("truncated"),
+        "truncation_reason": parse.get("truncation_reason"),
+        # Attribution, with the terms of every ratio.
+        "attributed_pct": attribution.get("attributed_pct"),
+        "attributed_gpu_ms": attribution.get("attributed_gpu_ms"),
+        "gpu_kernel_sum_ms": attribution.get("gpu_kernel_sum_ms"),
+        "attributed_kernels": attribution.get("attributed_kernels"),
+        "unlinked_kernels": attribution.get("unlinked_kernels"),
+        "graph_attributed_kernels": attribution.get("graph_attributed_kernels"),
+        "cuda_runtime_links": attribution.get("cuda_runtime_links"),
+        "op_meta_coverage": attribution.get("op_meta_coverage"),
+        "op_meta_basis": _as_dict(attribution.get("op_meta_basis")),
+        # Graph capture density, with the threshold its boolean was compared against.
+        "kernel_count": density.get("kernel_count"),
+        "graph_mode": density.get("graph_mode"),
+        "graph_launch_count": density.get("graph_launch_count"),
+        "graph_launch_coverage": density.get("graph_launch_coverage"),
+        "graph_under_recorded": density.get("graph_under_recorded"),
+        "graph_under_recorded_threshold": density.get("graph_under_recorded_threshold"),
+        "busy_fraction": density.get("busy_fraction"),
+        "kernel_per_launch": density.get("kernel_per_launch"),
+        "idle_pct_full_trace": time_structure.get("idle_pct_full_trace"),
+        # Capture sidecars: counts and one coverage, never the per-file table.
+        "capture_sidecar_files_present": capture.get("files_present"),
+        "capture_sidecar_files_scanned": capture.get("files_scanned"),
+        "capture_sidecar_truncated_scan": capture.get("truncated_scan"),
+        "capture_op_meta_coverage": capture.get("op_meta_coverage"),
+        "capture_cpu_op_total": capture.get("cpu_op_total"),
+        "capture_kernel_count": capture.get("kernel_count"),
+        # Which file the live resolver would open, which decides whether any of the above describes production.
+        "selected_role": inventory.get("selected_role"),
+        "production_selected_role": inventory.get("production_selected_role"),
+        "production_would_analyze_split_chunk": inventory.get("production_would_analyze_split_chunk"),
+        "file_count_by_role": _as_dict(inventory.get("file_count_by_role")),
+        "chunk_count_certified": len(_as_list(validate.get("chunk_level"))),
+        "verdict_measures": measures,
+    }
+
+
+def _summarize_validate(profile_result: dict[str, Any]) -> dict[str, Any]:
+    """Project the structured profile-trace validation into the run row.
+
+    The validator runs per profile attempt, so its verdict is stored on the run
+    row rather than on the effective-run summary: "attempt 1 recorded no graph
+    launches, attempt 2 did" is only answerable when each attempt keeps the
+    verdict computed against the trace it produced. Empty when the validator
+    did not run.
+    """
+    validate = _as_dict(profile_result.get("trace_validate"))
+    if not validate:
+        return {}
+    checks = [_as_dict(row) for row in _as_list(validate.get("checks")) if isinstance(row, dict)]
+    verdict = _as_dict(validate.get("verdict"))
+    usable_by = [str(name) for name in _as_list(verdict.get("usable_by"))]
+    return {
+        # Carried as two independent axes.
+        "usable_by": usable_by,
+        "decode_conclusions_valid": verdict.get("decode_conclusions_valid"),
+        "silently_wrong": verdict.get("silently_wrong"),
+        "blocking_reasons": [_clip(row) for row in _as_list(verdict.get("blocking_reasons"))],
+        "warnings": [_clip(row) for row in _as_list(verdict.get("warnings"))],
+        "severity": verdict.get("severity"),
+        "recommended_steady_state_mode": verdict.get("recommended_steady_state_mode"),
+        "recommended_splitter_mode": verdict.get("recommended_splitter_mode"),
+        "modes_that_would_fail": verdict.get("modes_that_would_fail"),
+        "steady_state_forecast": _as_dict(validate.get("steady_state_forecast")),
+        "hot_kernel_list_would_be_suppressed": verdict.get("hot_kernel_list_would_be_suppressed"),
+        "thresholds_effective": _as_dict(verdict.get("thresholds_effective")),
+        "trace_quality": _summarize_trace_quality(validate),
+        # Where the unbounded per-rank / per-candidate / per-chunk tables live.
+        "certificate_path": str(profile_result.get("trace_validate_path") or ""),
+        "schema_version": validate.get("schema_version"),
+        "probe_version": validate.get("probe_version"),
+        "probe_status": str(validate.get("probe_status") or ""),
+        "probe_error": _clip(validate.get("probe_error") or ""),
+        "checked_at": str(validate.get("checked_at") or ""),
+        "failed_check_ids": [str(row.get("check_id") or "") for row in checks if row.get("status") == "failed"],
+        "checks": checks,
+    }
+
+
+class RooflineEventRecorder:
+    """Records one roofline action's facts into whichever event owns it."""
+
+    def __init__(
+        self,
+        sink: RecordSink,
+        *,
+        task_id: str = "",
+        task_kind: str = "",
+        reason: str = "",
+        framework: str = "",
+        params: dict[str, Any] | None = None,
+        owns_event: bool = True,
+    ):
+        """Bind a recorder to one action inside one event."""
+        self._sink = sink
+        self._t0 = time.monotonic()
+        self._start_time = _now_iso()
+        self._owns_event = bool(owns_event)
+        self._sequence: int | None = None
+        self._closed = False
+        self._substep = SUBSTEP_PROFILE
+        params = _as_dict(params)
+        # ``arm`` names the configuration the run measured, which only a roofline dispatch does.
+        kind = str(task_kind or "")
+        arm = (
+            ""
+            if kind not in ("", EVENT_TYPE)
+            else ("baseline" if str(reason or "") == "prelude_initial" else "current_best")
+        )
+        self._task_id = str(task_id or "")
+        self._action_id = self._task_id or "unnamed"
+        self._sink.record(
+            SECTION_ACTION,
+            {
+                "task_id": self._task_id,
+                "start_time": self._start_time,
+                "in_flight_substep": self._substep,
+                "request": {
+                    "task_id": self._task_id,
+                    "task_kind": kind,
+                    "reason": str(reason or ""),
+                    "arm": arm,
+                    "framework": str(framework or ""),
+                    "workspace_path": str(params.get("workspace_path") or ""),
+                },
+            },
+            row_type=ROW_ACTION,
+            natural_ids=self._action_id,
+        )
+
+    @property
+    def event_id(self) -> str:
+        """str: The event this action's rows belong to."""
+        return self._sink.event_id
+
+    @property
+    def task_id(self) -> str:
+        """str: The task id separating this action from others in its event."""
+        return self._task_id
+
+    def _record_action(self, payload: Mapping[str, Any]) -> None:
+        """Update this action's own row."""
+        self._sink.record(SECTION_ACTION, payload, row_type=ROW_ACTION, natural_ids=self._action_id)
+
+    # ---- lifecycle -------------------------------------------------------
+
+    def begin(self, *, max_profile_attempts: int) -> None:
+        """Record the retry budget and, when this action owns the event, open it."""
+        self._record_action({"max_profile_attempts": int(max_profile_attempts)})
+        if not self._owns_event:
+            return
+        self._sequence = open_event(
+            event_type=EVENT_TYPE,
+            event=self.event_id,
+            event_section=SECTION_EVENT,
+            producer=PRODUCER,
+            kind=EVENT_KIND,
+            start_time=self._start_time,
+            ext={"in_flight_substep": self._substep},
+        )
+
+    def record_preflight(self, payload: Mapping[str, Any]) -> None:
+        """Record the conditions the action found before it profiled anything.
+
+        They are facts about the starting state -- leftover
+        servers, free disk, trace files already sitting in this task's own output directory -- and they change
+        how a later reader should read the result, so the event has to carry them whether or not the run
+        succeeded.
+        """
+        self._record_action({"preflight": dict(payload)})
+
+    def record_profile_run(
+        self,
+        *,
+        run_index: int,
+        attempt_reason: str,
+        status: str,
+        started_at: str,
+        duration_sec: float | None,
+        disable_cuda_graph: bool,
+        profile_result: dict[str, Any] | None = None,
+        failure: dict[str, Any] | None = None,
+        server_liveness: Mapping[str, Any] | None = None,
+        instrumentation: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Record one profile attempt.
+
+        ``server_liveness`` is the post-attempt process-level probe. A run whose trace exported completely and
+        whose engine then died is indistinguishable from a clean run by the result dict alone, so the row carries
+        the process outcome next to the wall clock rather than leaving it to be inferred.
+
+        ``instrumentation`` is which patchers ran on this attempt and what they returned. It is stored on the run
+        row rather than folded into ``validate`` because ``validate`` only exists once a trace was produced and
+        certified, and the attempts that never got that far are exactly the ones whose patch state is in question.
+        """
+        result = _as_dict(profile_result)
+        self._sink.record(
+            SECTION_PROFILE_RUN,
+            {
+                "task_id": self._task_id,
+                "run_index": int(run_index),
+                "effective": False,
+                "attempt_reason": str(attempt_reason),
+                "status": str(status),
+                "start_time": str(started_at or ""),
+                "end_time": _now_iso(),
+                "duration_sec": duration_sec,
+                "disable_cuda_graph": bool(disable_cuda_graph),
+                "failure": failure,
+                "server_liveness": dict(server_liveness) if server_liveness else None,
+                "instrumentation": dict(instrumentation) if instrumentation else None,
+                "validate": _summarize_validate(result),
+            },
+            row_type=ROW_PROFILE_RUN,
+            natural_ids=(self._action_id, str(int(run_index))),
+        )
+        # An action-level rollup of the per-run flag. Roofline does not fall back to eager on a capture failure,
+        # so this only latches when the arm or the operator override asked for graph capture to be off -- which
+        # matters downstream, because kernel shapes differ between eager and captured execution.
+        if disable_cuda_graph:
+            self._record_action({"graph_capture_disabled": True})
+
+    def adopt_profile_run(
+        self,
+        *,
+        run_index: int,
+        profile_result: dict[str, Any] | None,
+        recovered: bool = False,
+        params: dict[str, Any] | None = None,
+    ) -> None:
+        """Mark one profile attempt as the one the action carried forward."""
+        result = _as_dict(profile_result)
+        self._substep = SUBSTEP_ANALYSIS
+        self._record_action(
+            {
+                "profile_effective_run_index": int(run_index),
+                "recovered": bool(recovered),
+                "in_flight_substep": self._substep,
+                "profile_effective_run": {
+                    "run_index": int(run_index),
+                    "status": str(result.get("status") or ""),
+                    "framework": str(result.get("framework") or ""),
+                    "model": str(result.get("model") or ""),
+                    "workspace": str(result.get("workspace") or ""),
+                    "report_path": str(result.get("report_path") or ""),
+                    "trace": _summarize_trace_files(result),
+                    "trace_health": _summarize_trace_health(result),
+                    "framework_rewrite_candidate_count": _int_or_none(result.get("framework_rewrite_candidate_count")),
+                    "params": {
+                        key: params[key]
+                        for key in ("workspace_path", "reason", "framework", "num_prompts", "request_rate")
+                        if isinstance(params, dict) and key in params
+                    },
+                },
+            }
+        )
+
+    def record_analysis_run(
+        self,
+        *,
+        run_index: int,
+        attempt_reason: str,
+        status: str,
+        started_at: str,
+        duration_sec: float | None,
+        trace_input: str,
+        requested_steady_state_mode: str = "",
+        ta_result: dict[str, Any] | None = None,
+        failure: dict[str, Any] | None = None,
+    ) -> None:
+        """Record one trace-analysis attempt."""
+        result = _as_dict(ta_result)
+        meta = _as_dict(result.get("analysis_meta"))
+        self._sink.record(
+            SECTION_ANALYSIS_RUN,
+            {
+                "task_id": self._task_id,
+                "run_index": int(run_index),
+                "effective": False,
+                "attempt_reason": str(attempt_reason),
+                "status": str(status),
+                "start_time": str(started_at or ""),
+                "end_time": _now_iso(),
+                "duration_sec": duration_sec,
+                "route": str(meta.get("route") or ""),
+                "tool": str(meta.get("tool") or ""),
+                "requested_steady_state_mode": str(requested_steady_state_mode or meta.get("steady_state_mode") or ""),
+                "trace_input": str(trace_input or ""),
+                "hot_kernel_count": len(
+                    [row for row in _as_list(result.get("hot_kernels_top15") or result.get("hot_kernels")) if row]
+                ),
+                "failure": failure,
+            },
+            row_type=ROW_ANALYSIS_RUN,
+            natural_ids=(self._action_id, str(int(run_index))),
+        )
+
+    def adopt_analysis_run(
+        self,
+        *,
+        run_index: int,
+        ta_result: dict[str, Any] | None,
+        trace_input: str,
+    ) -> None:
+        """Mark one analysis attempt as the one the action concluded from."""
+        result = _as_dict(ta_result)
+        payload: dict[str, Any] = {
+            "analysis_effective_run_index": int(run_index),
+            "analysis_effective_run": {
+                "run_index": int(run_index),
+                "trace_input": str(trace_input or ""),
+                "orchestrator_mode": str(result.get("orchestrator_mode") or ""),
+                "orchestrator_error": _clip(result.get("orchestrator_error")),
+                **_analysis_detail(result),
+            },
+        }
+        n26 = _as_dict(result.get("n26_auto_retry"))
+        if n26:
+            payload["n26_auto_retry"] = n26
+        self._record_action(payload)
+
+    def record_compute_bound_reprofile(self, *, attempted: bool, adopted: bool, reason: str = "") -> None:
+        """Record the multi-node compute-bound re-profile decision."""
+        self._record_action(
+            {
+                "compute_bound_reprofile": {
+                    "attempted": bool(attempted),
+                    "adopted": bool(adopted),
+                    "reason": _clip(reason),
+                }
+            }
+        )
+
+    def finish_succeeded(
+        self,
+        *,
+        snapshot_id: Any,
+        hot_kernel_count: int,
+        kernel_attribution_degraded: bool,
+        cached: dict[str, Any] | None,
+        trace_path: str,
+        snapshot: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Close the action as succeeded and record the promoted artifacts.
+
+        Also records the two things the run concluded: the snapshot's own
+        numbers, and the per-kernel roofline table read back from the sidecar.
+        ``kernel_attribution_degraded`` says that zero hot kernels are an
+        attribution artifact rather than a real absence, and ``snapshot`` is
+        passed in rather than looked up because the recorder holds no reference
+        to session state.
+        """
+        promoted = _as_dict(cached)
+        roofline_path = str(promoted.get("kernel_roofline_path") or "")
+        table, kernels = read_kernel_roofline(roofline_path)
+        for rank, kernel in enumerate(kernels):
+            self._sink.record(
+                SECTION_KERNEL,
+                {"task_id": self._task_id, "rank": rank, **kernel},
+                row_type=ROW_KERNEL,
+                # Ranked by GPU share rather than keyed by kernel id alone: a
+                # re-profile within the same action rewrites the table, and the
+                # rank is what keeps the rewritten rows in the reader's order
+                # instead of interleaving them with the ones they replaced.
+                natural_ids=(self._action_id, f"{rank:04d}"),
+            )
+        # Zero routable candidates is a completed roofline that cannot advance
+        # kernel work, which is a different operational state from a clean run.
+        self._close(
+            status="degraded" if kernel_attribution_degraded else "succeeded",
+            payload={
+                "outcome": {
+                    "snapshot_id": _int_or_none(promoted.get("roofline_snapshot_id") or snapshot_id),
+                    "hot_kernel_count": int(hot_kernel_count),
+                    "kernel_attribution_degraded": bool(kernel_attribution_degraded),
+                    "profile_trace": str(trace_path or ""),
+                    "steady_state_trace": str(promoted.get("steady_state_trace") or ""),
+                    "analysis_md_path": str(promoted.get("analysis_md_path") or ""),
+                    "candidates_path": str(promoted.get("candidates_path") or ""),
+                    "kernel_roofline_path": roofline_path,
+                    "snapshot": _snapshot_row(snapshot) if isinstance(snapshot, Mapping) and snapshot else None,
+                },
+                "kernel_roofline_table": table or None,
+            },
+        )
+
+    def finish_failed(self, *, phase: str, error_class: str = "", message: Any = "") -> None:
+        """Close the action as failed, naming the sub-step that failed."""
+        # Matched against the analysis spellings rather than prefixed, because the crash path passes the in-flight
+        # substep itself: ``"analysis"`` does not start with ``"trace_analyze"``, so a crash after the profile had
+        # already been adopted was reported as a profile failure.
+        named = str(phase or "")
+        analysis = named in _ANALYSIS_PHASES or named.startswith("trace_analyze")
+        self._close(
+            status="failed",
+            payload={
+                "failed_substep": SUBSTEP_ANALYSIS if analysis else SUBSTEP_PROFILE,
+                "failure": _failure_row(
+                    stage=phase,
+                    error_class=error_class or f"{phase}_failed",
+                    message=message,
+                ),
+            },
+        )
+
+    def finish_crashed(self, exc: BaseException) -> None:
+        """Close an action whose executor raised instead of returning a result.
+
+        Distinguishes "the executor blew up" from "the session was killed
+        mid-roofline", which would otherwise both read as a dangling
+        ``status="running"`` event.
+        """
+        if self._closed:
+            return
+        self.finish_failed(
+            phase=self._substep or EVENT_TYPE,
+            error_class=type(exc).__name__,
+            message=f"roofline action raised: {exc!r}",
+        )
+
+    def _close(self, *, status: str, payload: Mapping[str, Any]) -> None:
+        """Record the action's terminal facts and, when it owns the event, close it."""
+        if self._closed:
+            return
+        self._closed = True
+        end_time = _now_iso()
+        self._record_action(
+            {
+                **payload,
+                "status": str(status),
+                "in_flight_substep": None,
+                "end_time": end_time,
+                "duration_sec": round(time.monotonic() - self._t0, 3),
+            }
+        )
+        if not self._owns_event:
+            return
+        from .assembler import roofline_event_parts
+        from .recorder_warnings import RECORDING_ERRORS, note_failure
+
+        try:
+            ext, derived = assemble_roofline_ext(roofline_event_parts(self.event_id), event=self.event_id)
+            finish_event(
+                event_type=EVENT_TYPE,
+                event=self.event_id,
+                sequence=self._sequence,
+                status=derived or status,
+                ext=ext,
+                kind=EVENT_KIND,
+                start_time=self._start_time,
+                end_time=end_time,
+            )
+        except RECORDING_ERRORS as exc:
+            note_failure(section=SECTION_EVENT, error=exc, detail=f"closing roofline event {self.event_id}")
+
+
+def assemble_roofline_action(
+    parts: Mapping[str, list[dict[str, Any]]],
+    *,
+    event: str,
+    task_id: str,
+) -> dict[str, Any] | None:
+    """Assemble one roofline action out of its recorded rows."""
+    actions = assemble_roofline_actions(parts, event=event)
+    wanted = str(task_id or "")
+    for action in actions:
+        if str(action.get("task_id") or "") == wanted:
+            return action
+    return None
+
+
+def assemble_roofline_actions(
+    parts: Mapping[str, list[dict[str, Any]]],
+    *,
+    event: str,
+) -> list[dict[str, Any]]:
+    """Assemble every roofline action belonging to one event."""
+    action_rows = sort_rows(
+        rows_for_event(parts.get(SECTION_ACTION) or [], event),
+        keys=("start_time", "task_id"),
+    )
+    profiles = group_rows(
+        sort_rows(rows_for_event(parts.get(SECTION_PROFILE_RUN) or [], event), keys=("run_index",)),
+        "task_id",
+    )
+    analyses = group_rows(
+        sort_rows(rows_for_event(parts.get(SECTION_ANALYSIS_RUN) or [], event), keys=("run_index",)),
+        "task_id",
+    )
+    kernels = group_rows(
+        sort_rows(rows_for_event(parts.get(SECTION_KERNEL) or [], event), keys=("rank",)),
+        "task_id",
+    )
+
+    actions: list[dict[str, Any]] = []
+    for row in action_rows:
+        task = str(row.get("task_id") or "")
+        profile_index = _int_or_none(row.get("profile_effective_run_index"))
+        analysis_index = _int_or_none(row.get("analysis_effective_run_index"))
+        profile_runs = _mark_effective(wire_rows(profiles.get(task, []), drop=("event_id", "task_id")), profile_index)
+        analysis_runs = _mark_effective(wire_rows(analyses.get(task, []), drop=("event_id", "task_id")), analysis_index)
+        actions.append(
+            {
+                "task_id": task,
+                "status": str(row.get("status") or "running"),
+                "start_time": str(row.get("start_time") or ""),
+                "end_time": str(row.get("end_time") or ""),
+                "duration_sec": row.get("duration_sec"),
+                "in_flight_substep": row.get("in_flight_substep"),
+                "failed_substep": row.get("failed_substep"),
+                "request": _as_dict(row.get("request")),
+                "preflight": _as_dict(row.get("preflight")),
+                "profile": {
+                    "attempt_count": len(profile_runs),
+                    "max_attempts": _int_or_none(row.get("max_profile_attempts")) or 0,
+                    "effective_run_index": profile_index,
+                    "recovered": bool(row.get("recovered")),
+                    "graph_capture_disabled": bool(row.get("graph_capture_disabled")),
+                    "runs": profile_runs,
+                    "effective_run": _as_dict(row.get("profile_effective_run")),
+                },
+                "analysis": {
+                    "attempt_count": len(analysis_runs),
+                    "effective_run_index": analysis_index,
+                    "n26_auto_retry": row.get("n26_auto_retry"),
+                    "compute_bound_reprofile": _as_dict(row.get("compute_bound_reprofile"))
+                    or {"attempted": False, "adopted": False, "reason": ""},
+                    "runs": analysis_runs,
+                    "effective_run": _as_dict(row.get("analysis_effective_run")),
+                },
+                "outcome": _as_dict(row.get("outcome")),
+                "kernel_roofline": _kernel_roofline_block(row, kernels.get(task, [])),
+                "failure": _as_dict(row.get("failure")) or None,
+            }
+        )
+    return actions
+
+
+def _kernel_roofline_block(
+    action_row: Mapping[str, Any],
+    kernel_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Assemble the action's per-kernel roofline table.
+
+    ``None`` when the action recorded none -- a failed action, or one whose
+    analyzer wrote no sidecar.
+    """
+    header = _as_dict(action_row.get("kernel_roofline_table"))
+    if not header and not kernel_rows:
+        return None
+    return {
+        **header,
+        "kernels": wire_rows(kernel_rows, drop=("event_id", "task_id", "rank")),
+    }
+
+
+def assemble_roofline_ext(
+    parts: Mapping[str, list[dict[str, Any]]],
+    *,
+    event: str,
+) -> tuple[dict[str, Any], str]:
+    """Assemble one roofline event's ``ext`` out of its recorded rows.
+
+    The ``ext`` holds one entry per action the event owns, and the derived
+    status is the worst of theirs: a phase can dispatch roofline more than once
+    in a macro cycle, and an event reading ``succeeded`` while one of its
+    actions failed would hide the failure behind the retry that recovered.
+    """
+    actions = assemble_roofline_actions(parts, event=event)
+    return {"actions": actions}, _worst_status([str(action.get("status") or "") for action in actions])
+
+
+def _mark_effective(runs: list[dict[str, Any]], effective_index: int | None) -> list[dict[str, Any]]:
+    """Stamp ``effective`` onto the one run the action adopted."""
+    for run in runs:
+        run["effective"] = effective_index is not None and _int_or_none(run.get("run_index")) == effective_index
+    return runs
+
+
+def make_roofline_recorder(
+    sink: RecordSink | None,
+    *,
+    task_id: str = "",
+    task_kind: str = "",
+    reason: str = "",
+    framework: str = "",
+    params: dict[str, Any] | None = None,
+    owns_event: bool = True,
+) -> RooflineEventRecorder | None:
+    """Build a recorder, or ``None`` when ``sink`` is absent."""
+    if sink is None:
+        return None
+    return RooflineEventRecorder(
+        sink,
+        task_id=task_id,
+        task_kind=task_kind,
+        reason=reason,
+        framework=framework,
+        params=params,
+        owns_event=owns_event,
+    )

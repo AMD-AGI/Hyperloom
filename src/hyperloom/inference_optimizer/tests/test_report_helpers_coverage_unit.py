@@ -58,7 +58,7 @@ def test_format_md_shows_validated_gain_when_timestamp_missing():
             "session_id": "s1",
             "model_name": "m",
             "model_path": "/models/m",
-            "stop_reason": "conc_sweep_done",
+            "stop_reason": "sweep_done",
             "max_minutes": 360,
             "report_generated_at": "2026-06-23T00:00:00+00:00",
             "baseline_tput": 100.0,
@@ -232,7 +232,7 @@ def test_format_md_renders_stop_explanation():
 
 # ---- stop_reason explanation vocabulary coverage ----
 def test_every_stop_reason_vocab_member_has_explanation():
-    from hyperloom.orchestrator.phases.machine_state import STOP_REASON_VOCAB
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import STOP_REASON_VOCAB
 
     missing = sorted(r for r in STOP_REASON_VOCAB if not rp._explain_stop_reason(r))
     assert missing == [], f"stop reasons without an explanation: {missing}"
@@ -274,11 +274,7 @@ def _summary_without_platform(**extra) -> dict:
 
 
 def test_report_says_platform_is_missing_when_the_summary_predates_the_field():
-    """A summary with no platform key still gets a line.
-
-    This is the case with no ``reason`` to print, and it is the one worth
-    stating: silence reads as a host that was checked and found unremarkable.
-    """
+    """A summary with no platform key still gets a line."""
     md = rp._format_md(_summary_without_platform())
     assert "- platform       : not recorded" in md
 

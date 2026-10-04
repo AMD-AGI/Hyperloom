@@ -146,6 +146,7 @@ async def test_warm_specialist_params_fills_pr_monitor_available(tmp_path: Path)
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
     coord.knowledge_plane = _FakeKnowledgePlane()
 
     @dataclass
@@ -176,6 +177,7 @@ async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
     coord.knowledge_plane = None
 
     @dataclass
@@ -213,7 +215,6 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
                 "confidence": 0.7,
             },
         ],
-        "empty": False,
         "summary": ("Surveyed sglang main; expert-parallel scheduling looks safe"),
         "reason": "kb_evidence",
         "confidence": 0.7,
@@ -267,7 +268,7 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
     assert result_dict["gap_canonical_id"] == "gap.scheduler.moe"
 
     sd = result_dict["specialist_done"]
-    assert sd["empty"] is False
+    assert sd["proposal_set"]
     assert len(sd["proposal_set"]) == 1
     assert sd["proposal_set"][0]["variant_name"] == "moe_expert_parallel"
 
@@ -281,7 +282,6 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
         "gap_canonical_id",
         "domain",
         "proposal_set",
-        "empty",
         "summary",
         "reason",
         "confidence",
@@ -332,7 +332,7 @@ async def test_specialist_adapter_synthesises_empty_done_on_runner_failure(
 
     assert result_dict["runner_status"] == "empty_synthesised"
     sd = result_dict["specialist_done"]
-    assert sd["empty"] is True
+    assert sd["proposal_set"] == []
     assert sd["proposal_set"] == []
     # Transcript + done file still on disk (some specialist_done is always written).
     workspace = tmp_path / "runs" / "specialist" / "task-stale-1"

@@ -2,57 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Audit the AMD EPYC CPU tuning that affects inference benchmark results.
-
-Reads only what the operating system exposes -- ``/sys``, ``/proc`` and, when
-run as root, the HWCR MSR.
-
-Judges Core Performance Boost and the cpufreq governor. Records determinism
-control, SMT and nodes-per-socket without a verdict. A knob is only judged when
-there is a defensible answer *and* a trustworthy way to read it here; see
-``SOURCE`` below for the citation and the per-knob reasoning.
-
-Power is still the determinism setting to want, because it maximizes what a
-given platform can do. It is recorded rather than judged because the OS layer
-cannot read it -- only infer it from per-core frequency spread -- and that
-inference is not steady enough to gate on. The cost of Power, that platforms
-then differ from each other, is paid by recording the setting: a system-to-
-system delta stays explicable because the report says which mode each run
-was in.
-
-Why check at all, given a session's A/B is same-machine: host tuning applies to
-baseline and candidates alike, so it cancels out of the *delta*. It does not
-cancel out of what the session exports. On a de-tuned node the absolute
-throughput is low, and the optimizer is searching around a CPU-side bottleneck
-that will not exist on a correct machine -- so the configuration it selects can
-be tuned against a phantom constraint and is then filed in the recipe KB for
-other people to use.
-
-Scope: OS layer only. Three further knobs -- APBDIS, DF C-states and the
-platform's High Performance profile -- are not readable this way on kernels
-without ``amd_hsmp`` and require Redfish against the BMC. Reaching them means
-minting a temporary privileged account on the service processor, which is a
-different risk class from anything here, so it lives in a separate tool and its
-own review rather than being smuggled in behind a ``--bmc-host`` flag.
-
-Deliberately self-contained: the point of this script is to audit a node that
-may not have Hyperloom installed, so it copies a little sysfs plumbing rather
-than importing ``hyperloom.common.platform_probe``. That duplication is a
-choice for portability, not drift -- the in-repo callers all share one helper.
-
-Usage::
-
-    python3 scripts/platform_audit.py            # full, ~10s of measurement
-    python3 scripts/platform_audit.py --quick    # no load generation
-    sudo python3 scripts/platform_audit.py       # adds the MSR reading
-    python3 scripts/platform_audit.py --json
-
-Exit codes:
-
-    0  every checked knob is on target
-    1  a knob is definitively wrong
-    2  a knob could not be resolved on this host
-"""
+"""Audit the AMD EPYC CPU tuning that affects inference benchmark results."""
 
 from __future__ import annotations
 
@@ -167,9 +117,7 @@ def read(path: str) -> str:
         return ""
 
 
-# --------------------------------------------------------------------------
 # CPU identity and topology
-# --------------------------------------------------------------------------
 
 _EPYC_FAMILIES = {
     "9005": "Turin",
@@ -182,14 +130,7 @@ _EPYC_FAMILIES = {
 
 
 def epyc_generation(model: str) -> str:
-    """Family name from an EPYC model number, or ``"unknown"``.
-
-    The series lives in the first and last digits of a four-digit part (9575F ->
-    9005), not the middle ones. Parts with a non-numeric model such as the
-    cloud-specific ``EPYC 9V84`` do not match and return ``"unknown"``: that is
-    a refusal to guess, and it only costs the generation-keyed boost-ceiling
-    expectation, which simply is not available on those hosts.
-    """
+    """Family name from an EPYC model number, or ``\"unknown\"``."""
     m = re.search(r"EPYC\s+(\d{4})", model)
     if not m:
         return "unknown"
@@ -198,12 +139,7 @@ def epyc_generation(model: str) -> str:
 
 
 def list_dir(path: str) -> list[str]:
-    """Directory entries, or ``[]`` when the tree is absent.
-
-    A host without ``/sys/devices/system/cpu`` -- a minimal container, usually
-    -- has nothing to count rather than something to fail on. One shared helper
-    is what keeps that true at every call site instead of at most of them.
-    """
+    """Directory entries, or ``[]`` when the tree is absent."""
     try:
         return os.listdir(path)
     except OSError:
@@ -226,9 +162,7 @@ def cpu_identity() -> dict:
         - {""}
     )
     nodes = len([d for d in list_dir("/sys/devices/system/node") if re.fullmatch(r"node\d+", d)])
-    # Both counts are required. Dividing into a missing node tree would yield
-    # "NPS0", a value no BIOS can hold, which reads downstream as a real
-    # misconfiguration rather than as an unanswerable question.
+    # Both counts are required.
     nps = f"NPS{nodes // sockets}" if sockets and nodes else "unknown"
     return {
         "model": model,
@@ -267,9 +201,7 @@ def sample_cores(count: int) -> list[int]:
     return [cores[int(i * step)] for i in range(count)]
 
 
-# --------------------------------------------------------------------------
 # Measurement
-# --------------------------------------------------------------------------
 
 
 def _spinner(seconds: int) -> subprocess.Popen:
@@ -302,12 +234,7 @@ def core_freq_mhz(cpu: int) -> float | None:
 
 
 def measure_peak_mhz(core: int | None = None, seconds: int = 4) -> float | None:
-    """Load one core and sample *that core's* achieved frequency.
-
-    Returns ``None`` when the measurement cannot be trusted -- affinity refused,
-    or the frequency unreadable -- so the caller reports UNKNOWN rather than a
-    verdict built on a number that never described the pinned core.
-    """
+    """Load one core and sample *that core's* achieved frequency."""
     cores = sample_cores(1) if core is None else [core]
     if not cores:
         return None
@@ -333,11 +260,7 @@ def measure_peak_mhz(core: int | None = None, seconds: int = 4) -> float | None:
 
 
 def per_core_spread(cores: list[int] | None = None, seconds: int = 3) -> float | None:
-    """Frequency spread across loaded physical cores, or ``None`` if untrustworthy.
-
-    A partial sample cannot distinguish a uniform part from a failed
-    measurement, so anything short of a reading per loaded core returns None.
-    """
+    """Frequency spread across loaded physical cores, or ``None`` if untrustworthy."""
     cores = sample_cores(4) if cores is None else cores
     if len(cores) < 2:
         return None
@@ -374,18 +297,7 @@ def read_hwcr() -> int | None:
 
 
 def infer_determinism(spread: float | None) -> tuple[str | None, str]:
-    """Infer determinism from per-core spread.
-
-    Returns ``(value, note)`` where value is the normalized ``"power"`` /
-    ``"performance"`` / ``None`` and note is the human-readable caveat. The two
-    must stay separate: any caveat folded into the value becomes a value that
-    contains the name of another setting, which is a trap for every comparison
-    downstream.
-
-    Spread is the only input. Comparing achieved MHz against ``cpuinfo_max_freq``
-    cannot add anything, because under ``amd_pstate`` that file *is* the boost
-    ceiling.
-    """
+    """Infer determinism from per-core spread."""
     if spread is None:
         return None, "no trustworthy frequency sample"
     if spread > DETERMINISM_SPREAD_MHZ:
@@ -423,8 +335,7 @@ def os_layer(quick: bool = False) -> dict:
     out["core_performance_boost"] = cpb_msr or sysfs_cpb or "unknown"
 
     if quick:
-        # No load generation, so the measured knobs have nothing to report. None
-        # of them is judged, so the exit code is unaffected.
+        # No load generation, so the measured knobs have nothing to report.
         out["peak_mhz"] = None
         out["core_spread_mhz"] = None
         out["determinism"] = "unknown"
@@ -442,9 +353,7 @@ def os_layer(quick: bool = False) -> dict:
     return out
 
 
-# --------------------------------------------------------------------------
 # Verdicts
-# --------------------------------------------------------------------------
 
 
 def normalize(value: object) -> str:
@@ -453,12 +362,7 @@ def normalize(value: object) -> str:
 
 
 def verdict(key: str, value: object) -> str:
-    """PASS/FAIL/UNKNOWN for a checked knob.
-
-    Exact match after normalization. Substring matching was removed: no target
-    needs it, and it silently passed any value that merely *contained* a target
-    word.
-    """
+    """PASS/FAIL/UNKNOWN for a checked knob."""
     v = normalize(value)
     if v in ("", "unknown", "auto", "n/a", "none"):
         return "UNKNOWN"
@@ -470,12 +374,7 @@ EXIT_OK, EXIT_FAIL, EXIT_UNKNOWN = 0, 1, 2
 
 
 def build_rows(osl: dict) -> list[dict]:
-    """One row per checked knob, then one per recorded knob.
-
-    Every knob that needs load generation is recorded rather than checked, so
-    ``--quick`` reaches every verdict this tool offers and needs no special
-    case: a fast run and a full run return the same exit code on the same host.
-    """
+    """One row per checked knob, then one per recorded knob."""
     rows = []
     for key, spec in CHECKED.items():
         value = osl.get(key, "unknown")
@@ -500,8 +399,8 @@ def build_rows(osl: dict) -> list[dict]:
                 "verdict": "RECORD",
                 "note": osl.get(f"{key}_note", ""),
                 "inferred": bool(spec.get("inferred")),
-                # Carried into --json so the record explains its own silence to
-                # whoever reads it later, without the reader needing this file.
+                # Carried into --json so the record explains its own silence to whoever reads it later, without the
+                # reader needing this file.
                 "why": spec["why"],
             }
         )
@@ -509,13 +408,7 @@ def build_rows(osl: dict) -> list[dict]:
 
 
 def exit_code(rows: list[dict]) -> int:
-    """Worst status across the *checked* knobs.
-
-    An unresolved knob is distinguished from one that is genuinely wrong: a
-    fleet sweep chases FAILs first and treats UNKNOWNs as missing coverage.
-    RECORD rows never influence the exit code -- that is what makes them
-    recorded rather than checked.
-    """
+    """Worst status across the *checked* knobs."""
     checked = [r for r in rows if r["verdict"] in ("PASS", "FAIL", "UNKNOWN")]
     if any(r["verdict"] == "FAIL" for r in checked):
         return EXIT_FAIL
@@ -537,8 +430,8 @@ def render(osl: dict, rows: list[dict]) -> None:
     for r in rows:
         target = f"  (want {r['target']})" if r["target"] and r["verdict"] != "PASS" else ""
         print(f"  {r['verdict']:<7} {r['knob']:<{width}}  {r['value']}{target}")
-        # An inferred row always shows its note: the value is a deduction, and a
-        # reader who cannot see that will treat it as a reading.
+        # An inferred row always shows its note: the value is a deduction, and a reader who cannot see that will treat
+        # it as a reading.
         if r["note"] and (r["verdict"] in ("UNKNOWN", "FAIL") or r["inferred"]):
             prefix = "inferred: " if r["inferred"] else ""
             print(f"          {' ' * width}  {prefix}{r['note']}")

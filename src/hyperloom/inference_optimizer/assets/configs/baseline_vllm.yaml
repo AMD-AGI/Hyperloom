@@ -21,6 +21,8 @@ benchmark:
     MAX_MODEL_LEN: 8192
     # ROCR_VISIBLE_DEVICES injected at runtime by baseline.py
     # (`0..TP-1`); export `ROCR_VISIBLE_DEVICES=...` to override.
+    # Graph capture is slow enough to trip vLLM's per-step timeout.
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
     PATH: "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
   gpu_selection:

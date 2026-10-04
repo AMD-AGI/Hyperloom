@@ -5,36 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Producer for the model-agnostic ``TraceShapeManifest`` (P0-A / WP-1).
-
-The manifest is the frozen contract consumed by the Trace->CSV tuning loop
-(KernelForge ``kernelforge.gemm_tune``). Unlike the existing hot-kernel candidate
-lists (which *collapse* dtype/shape variants and *discard* CUDA-graph capture
-shards), this producer keeps a **variant-discriminating signature** per row and
-weights each row by its steady-state replay time.
-
-Design (frozen decisions, 2026-07-23):
-
-* **graph_variant / node_ordinal** -- for a CUDA-graph-on run, a variant is one
-  captured graph, identified by the ``bs_<batch>`` capture shard it was recorded
-  in; ``node_ordinal`` is the launch order inside that shard. For an eager run
-  (no capture) the variant is ``"eager"`` and ordinal is the steady-window launch
-  order.
-* **Dual coverage tag** -- every row carries ``is_gemm`` (all GEMM-family) and
-  ``is_target_gemm`` (the tuner-addressable subset). Coverage/gating denominators
-  use ``is_target_gemm``; reports may also use ``is_gemm`` for the global share.
-* **capture_only weighting** -- capture shards only observe each internal kernel
-  once, so capture-derived rows are marked ``capture_only=True`` and their
-  ``cum_gpu_us`` is the single capture-time cost. The steady replay multiplier is
-  recorded per variant in ``workload.variant_steady_replay`` (from the main
-  trace's graph-launch count) and is left ``null`` when it cannot be attributed
-  to a specific variant -- the producer never fabricates steady per-node time.
-
-This module is pure: it operates on already-parsed ``analyze_trace`` result
-dicts and returns a manifest dict. All file I/O and env gating live in the
-calling tool (``bypass_trace_analysis.py``). It has no GPU/serving dependency
-and is unit-testable with synthetic inputs.
-"""
+"""Producer for the model-agnostic ``TraceShapeManifest`` (P0-A / WP-1)."""
 
 from __future__ import annotations
 
@@ -51,9 +22,7 @@ MANIFEST_KIND = "trace_shape_manifest"
 #: Variant label used when a run has no CUDA-graph capture shards (eager mode).
 EAGER_VARIANT = "eager"
 
-# --- op taxonomy -------------------------------------------------------------
-# Ordered (first match wins). Kept intentionally small and additive; the
-# consumer refines tuner-addressability. Names are lower-cased before matching.
+# --- op taxonomy ------------------------------------------------------------- Ordered (first match wins).
 _OP_RULES: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     ("moe", re.compile(r"moe|fmoe|expert|grouped.*(gemm|mm)|group_gemm")),
     ("gemm", re.compile(r"gemm|matmul|hipblas|cutlass|tensile|\bmm\b|_mm_|linear|wgrad|dgemm|sgemm")),
@@ -83,11 +52,7 @@ _GRAPH_LAUNCH_RE = re.compile(r"graphlaunch|graph_launch|hipgraphlaunch|cudagrap
 
 
 def classify_op(name: str, op_name: str = "") -> str:
-    """Return the coarse op category for a kernel/op name pair.
-
-    Matches the launching op name first (more semantic), then the device kernel
-    name. Returns ``"other"`` when nothing matches.
-    """
+    """Return the coarse op category for a kernel/op name pair."""
     hay = f"{op_name or ''} {name or ''}".lower()
     for label, rule in _OP_RULES:
         if rule.search(hay):
@@ -101,12 +66,7 @@ def _is_gemm(op: str) -> bool:
 
 
 def _tuner_addressable(dtypes: Any) -> bool:
-    """Best-effort check that at least one input dtype maps to a known tuner.
-
-    ``dtypes`` is the Kineto ``Input type`` payload (list of strings or a
-    string). Empty/unknown dtype -> not addressable (an unmatched shape is
-    treated as uncovered, mirroring AITER exact-match semantics).
-    """
+    """Best-effort check that at least one input dtype maps to a known tuner."""
     if not dtypes:
         return False
     if isinstance(dtypes, (list, tuple)):
@@ -117,19 +77,7 @@ def _tuner_addressable(dtypes: Any) -> bool:
 
 
 def _canon_dims(shapes: Any) -> dict[str, Any]:
-    """Best-effort extraction of GEMM dims from Kineto ``Input Dims``.
-
-    The first 2-D operand is the activation ``A = [M, K]``. The second 2-D
-    operand is the weight, which may be stored either ``[N, K]`` (inference
-    layout, e.g. ``aiter::gemm_a8w8_blockscale_ck``) or ``[K, N]`` (plain
-    ``torch.mm``). We pick ``N`` as the weight dim that is *not* ``K`` (verified
-    against ``A``), which is correct for both conventions; a square weight is
-    unambiguous. Scale operands (``[M, K/128]``, ``[N/128, K/128]``) follow the
-    weight in the operand list, so taking the first two 2-D operands avoids them.
-
-    Leaves fields ``None`` and preserves the raw shapes on anything unexpected.
-    Never raises.
-    """
+    """Best-effort extraction of GEMM dims from Kineto ``Input Dims``."""
     dims: dict[str, Any] = {"M": None, "N": None, "K": None, "batch": None, "groups": None, "raw": shapes or []}
     try:
         mats = [s for s in (shapes or []) if isinstance(s, (list, tuple)) and len(s) >= 2]
@@ -181,22 +129,13 @@ def _signature_fields(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def signature_key(row: dict[str, Any]) -> str:
-    """Deterministic sha256 over the discriminating tuple (see frozen schema).
-
-    Two rows sharing the same math shape but differing on graph_variant / layout
-    / quant / epilogue / phase / bucket get *different* keys and are never
-    merged.
-    """
+    """Deterministic sha256 over the discriminating tuple (see frozen schema)."""
     payload = json.dumps(_signature_fields(row), sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _dtype_tokens(dtypes: Any) -> tuple[str, str]:
-    """Return (in_dtype, out_dtype) best-effort from a Kineto ``Input type``.
-
-    First token is the input dtype; output dtype is unknown from inputs alone so
-    it mirrors the input (best-effort) unless a distinct trailing token exists.
-    """
+    """Return (in_dtype, out_dtype) best-effort from a Kineto ``Input type``."""
     if not dtypes:
         return ("", "")
     if isinstance(dtypes, (list, tuple)):
@@ -217,13 +156,7 @@ def build_row(
     bucket: str,
     capture_only: bool,
 ) -> dict[str, Any]:
-    """Build one manifest row from an enriched ``kernel_launches`` record.
-
-    ``launch`` is expected to carry ``name``/``op_name``/``dur`` and, when the
-    reader enrichment is present, ``shapes``/``dtypes``/``kernel_file``/
-    ``kernel_backend``. Missing enrichment degrades to empty signature fields
-    (row still produced, just coarser).
-    """
+    """Build one manifest row from an enriched ``kernel_launches`` record."""
     name = launch.get("name", "") or ""
     op_name = launch.get("op_name", "") or ""
     op = classify_op(name, op_name)
@@ -279,15 +212,7 @@ def build_variant_rows(
     bucket: str,
     capture_only: bool,
 ) -> list[dict[str, Any]]:
-    """Build variant-discriminating rows from one trace ``analyze_trace`` result.
-
-    Iterates the time-ordered ``kernel_launches`` (requires the reader was called
-    with ``emit_launches=True``) and emits one row per launch, with
-    ``node_ordinal`` assigned by launch order. Because ``node_ordinal``
-    participates in ``signature_key``, rows are never merged and ``replay_count``
-    is always 1; the steady replay multiplier is recorded separately in
-    ``workload.variant_steady_replay``.
-    """
+    """Build variant-discriminating rows from one trace ``analyze_trace`` result."""
     launches = sorted(
         (analysis.get("kernel_launches") or []),
         key=lambda r: float(r.get("ts", 0.0) or 0.0),
@@ -314,12 +239,7 @@ def build_variant_rows(
 
 
 def count_graph_replays(main_analysis: dict[str, Any]) -> int:
-    """Count CUDA-graph replay launches in the main trace (steady window).
-
-    Uses the aggregated ``kernels`` list: sums ``count`` over kernel names that
-    look like a graph-launch wrapper. Returns 0 when none are found (eager run or
-    unwrapped trace).
-    """
+    """Count CUDA-graph replay launches in the main trace (steady window)."""
     total = 0
     for k in main_analysis.get("kernels") or []:
         if _GRAPH_LAUNCH_RE.search(str(k.get("name", "") or "")):
@@ -328,12 +248,7 @@ def count_graph_replays(main_analysis: dict[str, Any]) -> int:
 
 
 def _phase_and_bucket(graph_variant: str, phase_hint: str) -> tuple[str, str]:
-    """Derive (phase, bucket) labels for a variant.
-
-    Bucket is the batch label carried by the variant (``bs_<batch>`` or the
-    variant string itself); phase comes from the caller's hint (prefill/decode/
-    mixed) since a single capture shard does not by itself distinguish phase.
-    """
+    """Derive (phase, bucket) labels for a variant."""
     bucket = graph_variant
     phase = phase_hint or "mixed"
     return phase, bucket
@@ -370,26 +285,7 @@ def build_shape_manifest(
     generated_at: str = "",
     phase_hint: str = "mixed",
 ) -> dict[str, Any]:
-    """Assemble the ``TraceShapeManifest`` (frozen schema v1).
-
-    Args:
-        main_analysis: ``analyze_trace`` result for the steady main trace (used
-            for the graph-replay count and for the eager fallback rows).
-        capture_variants: list of ``(variant_label, analyze_trace_result)`` for
-            each CUDA-graph capture shard; empty/None -> eager fallback (rows are
-            derived from ``main_analysis`` with variant ``"eager"``).
-        provenance: provenance block (from the shared builder; a minimal stub is
-            acceptable for the first cut -- missing fields default to null).
-        main_trace_hash: sha256 of the steady main trace file.
-        capture_trace_hashes: ``{variant_label: sha256}`` for capture shards.
-        tracelens_revision: optional TraceLens revision string.
-        analysis_route: which route produced the inputs ("bypass"/"tracelens").
-        generated_at: caller-supplied UTC timestamp (kept out of this pure fn).
-        phase_hint: prefill/decode/mixed hint applied to variant rows.
-
-    Returns:
-        The manifest dict (see module docstring for semantics).
-    """
+    """Assemble the ``TraceShapeManifest`` (frozen schema v1)."""
     warnings: list[str] = []
     rows: list[dict[str, Any]] = []
     variant_steady_replay: dict[str, Any] = {}
@@ -408,10 +304,7 @@ def build_shape_manifest(
                     capture_only=True,
                 )
             )
-        # Steady replay attribution: only unambiguous when a single variant
-        # exists. With multiple variants we cannot split the main-trace graph
-        # launches per bs bucket yet -> record null + a warning (to be hardened
-        # by the engagement work-package). Never fabricate a per-variant count.
+        # Steady replay attribution: only unambiguous when a single variant exists.
         if len(capture_variants) == 1:
             variant_steady_replay[capture_variants[0][0]] = total_graph_replays or None
         else:
@@ -419,9 +312,8 @@ def build_shape_manifest(
                 variant_steady_replay[variant_label] = None
             warnings.append("multi_variant_replay_unresolved")
     else:
-        # Eager fallback: the steady window already is one representative
-        # iteration, so per-node cum_gpu_us is real steady time (capture_only
-        # False) and no replay multiplier is needed.
+        # Eager fallback: the steady window already is one representative iteration, so per-node cum_gpu_us is real
+        # steady time (capture_only False) and no replay multiplier is needed.
         phase, bucket = _phase_and_bucket(EAGER_VARIANT, phase_hint)
         rows.extend(
             build_variant_rows(

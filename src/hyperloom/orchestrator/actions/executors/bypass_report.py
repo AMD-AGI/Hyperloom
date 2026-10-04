@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Bypass benchmark report writer.
-
-Normalizes an InferenceX-style raw result (``inferencex_result.json``) into a
-Magpie-compatible ``benchmark_report.json`` so Hyperloom's existing
-``extract_benchmark_measurement`` / breakdown collectors consume bypass runs
-unchanged. Also owns the bypass workspace layout, which mirrors Magpie's
-``benchmark_<framework>_<timestamp>/`` structure.
-
-Only the fields Hyperloom actually reads are emitted; the schema is kept
-byte-compatible with Magpie's ``BenchmarkResult.to_dict()`` for the serving
-path (throughput + latency + success/framework/model/errors).
-"""
+"""Bypass benchmark report writer."""
 
 from __future__ import annotations
 
@@ -23,15 +12,7 @@ from typing import Any
 
 
 def create_workspace(base_dir: Path, framework: str) -> Path:
-    """Create a Magpie-compatible benchmark workspace.
-
-    Args:
-        base_dir: Output root the workspace is created under.
-        framework: Framework name used in the workspace directory name.
-
-    Returns:
-        The created workspace directory (absolute).
-    """
+    """Create a Magpie-compatible benchmark workspace."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     workspace = (base_dir / f"benchmark_{framework}_{timestamp}").resolve()
     workspace.mkdir(parents=True, exist_ok=True)
@@ -72,27 +53,7 @@ def build_report(
     analysis: dict[str, Any] | None = None,
     profiling_enabled: bool = False,
 ) -> dict[str, Any]:
-    """Build a Magpie-compatible ``benchmark_report.json`` dict.
-
-    The raw result is the flat InferenceX ``inferencex_result.json`` mapping
-    (same keys Magpie's ``ResultParser.parse_inferencex_result`` reads).
-
-    Args:
-        raw_result: Flat InferenceX result mapping, or None when absent.
-        framework: Framework name.
-        model: Model id/path.
-        success: Whether the benchmark process succeeded.
-        workspace_dir: Absolute workspace path.
-        execution_time: Wall-clock seconds of the run.
-        errors: Optional list of error strings.
-        analysis: Optional bypass-specific analysis block; emitted under
-            ``report["bypass_analysis"]`` only when provided so the
-            serving schema stays unchanged.
-        profiling_enabled: Whether torch_profiler was enabled for this run.
-
-    Returns:
-        A report dict matching the fields Hyperloom consumes.
-    """
+    """Build a Magpie-compatible ``benchmark_report.json`` dict."""
     raw = raw_result or {}
     report: dict[str, Any] = {
         "success": bool(success),
@@ -146,11 +107,8 @@ def build_report(
                 "std_ms": _f(raw.get("std_e2el_ms")),
             },
         }
-        # Scriptable extras are carried verbatim so downstream gates can branch;
-        # only emitted when present to keep the serving schema unchanged. The
-        # Scriptable diagnostic fields (bench_summary/bench_config/frames_per_run/
-        # precision_locked) are relayed too so the fps breakdown + config reach
-        # benchmark_report.json for inspection.
+        # Scriptable extras are carried verbatim so downstream gates can branch; only emitted when present to keep the
+        # serving schema unchanged.
         for key in (
             "workload_kind",
             "throughput_unit",
@@ -234,18 +192,7 @@ def write_log_aliases(workspace: Path) -> None:
 
 
 def write_report(workspace: Path, report: dict[str, Any]) -> Path:
-    """Write Magpie-compatible report artifacts into the workspace.
-
-    Emits ``benchmark_report.json``, ``summary.txt``, and aggregated
-    ``benchmark_stdout.log`` / ``benchmark_stderr.log`` aliases.
-
-    Args:
-        workspace: Benchmark workspace directory.
-        report: Report dict to serialize.
-
-    Returns:
-        Path to the written report file.
-    """
+    """Write Magpie-compatible report artifacts into the workspace."""
     report_path = workspace / "benchmark_report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     try:

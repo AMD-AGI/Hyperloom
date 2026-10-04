@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CK block-scale patch wiring tests at the env-materialization choke point.
-
-The ``SGLANG_FP8_BLOCKSCALE_CK_MAX_M`` env only yields a speedup on a
-KernelForge-patched sglang ``fp8_utils.py`` (M-aware CK routing), so
-``materialize_config_with_envs`` must call ``ensure_sglang_patched_for_ck_blockscale``
-whenever it injects the env. These tests pin the wiring: the patcher is invoked
-exactly when (sglang framework + env present + ``HYPERLOOM_ENABLE_PATCH`` on),
-never otherwise, and a fail-soft patch result must not break materialization.
-"""
+"""CK block-scale patch wiring tests at the env-materialization choke point."""
 
 from __future__ import annotations
 
@@ -18,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
+from hyperloom.inference_optimizer import gpu_types
 from hyperloom.orchestrator.actions.executors import _workload_envs
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_config_with_envs,
@@ -33,7 +25,7 @@ def _hermetic_env(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_ENABLE_PATCH", raising=False)
     monkeypatch.delenv("GPU_TYPE", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setattr(cli_model_gate, "_autodetect_gpu_type", lambda: None)
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: None)
     for key in ("CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "PRECISION", "RUN_EVAL", "FRAMEWORK", _CK_ENV):
         monkeypatch.delenv(key, raising=False)
 

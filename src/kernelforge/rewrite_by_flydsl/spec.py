@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Rewrite specification — the normalized description of one cross-language
-rewrite task (source kernel -> FlyDSL), shared by every stage of the pipeline.
-
-A :class:`RewriteSpec` is operator-agnostic on purpose: it captures WHAT to
-rewrite (the source kernel to port + read as the port reference) and the shapes
-that drive correctness + benchmark. It carries no LLM/GPU state, and it makes NO
-assumption about the operator's tensor signature (input/output count, ranks,
-dtypes). The concrete "build inputs / call reference / call candidate / compare /
-time" logic lives in a supplied or rewrite-prepared measurement driver, so the
-spec does not encode any single operator family's I/O shape.
-"""
+"""Rewrite specification — the normalized description of one cross-language rewrite task (source kernel -> FlyDSL), shared by every stage of the pipeline."""
 
 from __future__ import annotations
 
@@ -27,33 +17,22 @@ from kernelforge.rewrite_by_flydsl import protocol
 class RewriteSpec:
     """Everything the rewrite pipeline needs, resolved once at ingest."""
 
-    # Stable logical identity of the operation, as the caller names it; it may
-    # carry a namespace or punctuation. ``protocol`` derives the Python factory
-    # symbol from it. The factory and launch signatures are defined by the
-    # task's measurement driver, NOT fixed here.
+    # Stable logical identity of the operation, as the caller names it; it may carry a namespace or punctuation.
     op_name: str
 
     # Source (to rewrite) — absolute paths inside the workspace.
     source_kernel: str  # e.g. /ws/softmax.py or /ws/attention.hip
     target_functions: list[str]  # kernel entry names, e.g. ["softmax_kernel_online"]
-    # Host callable in the source that runs the kernel (a hint shown to the port
-    # agent). Optional: the measurement driver owns how the reference is invoked,
-    # so an unresolved entry does not block the pipeline. Auto-derived if "".
+    # Host callable in the source that runs the kernel (a hint shown to the port agent).
     source_entry: str = ""
 
-    # One of ``protocol.SUPPORTED_SOURCE_LANGUAGES``, resolved at ingest. Read by
-    # the stages that reason about the source rather than the FlyDSL output:
-    # entry discovery and the port prompt. "" when unresolved.
+    # One of ``protocol.SUPPORTED_SOURCE_LANGUAGES``, resolved at ingest.
     source_language: str = ""
 
     # Produced file (this layer only rewrites into FlyDSL).
     flydsl_kernel: str = ""  # e.g. /ws/kernel.py (the file the agent writes)
 
-    # Shapes driving correctness (vs the source oracle) and benchmark. Each entry
-    # is an operator-defined dict of dims + a ``dtype`` string, e.g.
-    # {"M": 8192, "N": 8192, "dtype": "fp16"} or {"M":.., "N":.., "K":.., "dtype":..}.
-    # The measurement driver owns case selection; this list remains rewrite
-    # context and is never converted into forge-loop shape selectors.
+    # Shapes driving correctness (vs the source oracle) and benchmark.
     shapes: list[dict] = field(default_factory=list)
 
     # Correctness gate.

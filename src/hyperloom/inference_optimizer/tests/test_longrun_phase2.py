@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Long-run exploration-depth bottleneck re-direction acceptance tests.
-
-Covers that a cyclic EXPLORE plateau is actionable, that ``compute_next_phase``
-routes a plateaued EXPLORE → KERNEL_AGENT, that the Coordinator stamps the
-bottleneck-switch handoff and renders the redirect advisory, and that
-rejected/tested fingerprints are bucketed per macro-cycle. All deterministic +
-offline.
-"""
+"""Long-run exploration-depth bottleneck re-direction acceptance tests."""
 
 from __future__ import annotations
 
@@ -16,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -27,12 +21,7 @@ def _plateaued_explore_state(
     started_hours_ago: float = 0.5,
     top_bottleneck: str = "MoE_fused",
 ) -> SharedState:
-    """Optimisation-phase state with both arms dry and budget remaining.
-
-    Config arm: no winners and enough trailing empty specialist rounds.
-    Source arm: ``framework_agent_phase_done``. The merged phase leaves only
-    when both report dry, so a config-only plateau would keep it open.
-    """
+    """Optimisation-phase state with both arms dry and budget remaining."""
     now = datetime.now(timezone.utc)
     st = SharedState(
         session_id="t",
@@ -42,12 +31,10 @@ def _plateaued_explore_state(
         max_minutes=max_minutes,
         macro_cycle=macro_cycle,
     )
-    # No winners → recent_keep_gain 0 < threshold.
-    st.explore_search = {"schema_version": 1, "winners_history": []}
-    # Enough trailing empty specialist rounds → empty_streak >= threshold.
-    st.specialist_rounds = [
-        {"proposals_total": 0, "proposals_kept": 0} for _ in range(ps.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
-    ]
+    # Enough config attempts that adopted nothing: no recent gain, and a
+    # trailing no-keep run at the threshold.
+    for _ in range(ps.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK):
+        st.record_attempt({"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False})
     st.framework_agent_phase_done = True
     if top_bottleneck:
         st.roofline_snapshots = [{"snapshot_id": 1, "top_bottleneck": top_bottleneck}]
@@ -83,7 +70,6 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockRobustnessBackend,
         ScriptedPlan,
     )
     from .conftest import seed_target_analysis_marker
@@ -93,7 +79,6 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
     c = Coordinator(sd, backends=backends)
     yield c
@@ -110,8 +95,7 @@ async def test_coordinator_marks_bottleneck_switch_on_plateau(cyclic_coordinator
     st.phase_started_unix = src.phase_started_unix
     st.max_minutes = src.max_minutes
     st.macro_cycle = src.macro_cycle
-    st.explore_search = src.explore_search
-    st.specialist_rounds = src.specialist_rounds
+    st.attempts = src.attempts
     st.framework_agent_phase_done = src.framework_agent_phase_done
     st.roofline_snapshots = src.roofline_snapshots
 
@@ -179,7 +163,7 @@ def test_cycle_strategy_planner_avoids_saturated_focus(cyclic_coordinator):
     row = st.cycle_strategy_log[-1]
     assert row["cycle"] == 2
     assert row["focus"] != "kernel_switch_specialist"
-    block = c._cycle_strategy_seed_block()
+    block = c._cycle_strategy_block()
     assert "=== Cycle 2 strategy ===" in block
     assert f"focus={row['focus']}" in block
 
@@ -254,8 +238,7 @@ def test_tested_and_rejected_stamped_with_macro_cycle():
     assert st.explore_search["tested"]["fp_a"]["cycle"] == 0
     assert st.explore_search["rejected"][0]["cycle"] == 0
 
-    # Next cycle: a new rejection is bucketed under cycle 1; the old one keeps
-    # its cycle-0 attribution.
+    # Next cycle: a new rejection is bucketed under cycle 1; the old one keeps its cycle-0 attribution.
     st.macro_cycle = 1
     st.apply_explore_search_update(
         {

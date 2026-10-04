@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A serving failure only accuses the kernel when the GPU actually faulted.
-
-serving_smoke documents this ("a harness/env error is a neutral soft-fail") and
-the loop used to contradict it: every failure, evidence or not, produced the
-CUDA-graph lesson. A run that cannot start the server then spends its whole
-attempt budget re-authoring a kernel that passed parity and microbench.
-"""
+"""A serving failure only accuses the kernel when the GPU actually faulted."""
 
 from __future__ import annotations
 
@@ -78,11 +72,7 @@ def test_the_root_cause_outranks_the_wrapper_that_points_at_it() -> None:
 
 
 def _gate_verdict(monkeypatch, tmp_path, server_log: str):
-    """Run the serving gate against a failed boot and return the resulting verdict.
-
-    The attribution is the one the smoke itself would make from this log, so the
-    test exercises the wiring rather than restating the classifier's answer.
-    """
+    """Run the serving gate against a failed boot and return the resulting verdict."""
     monkeypatch.setattr(cli_module, "_serving_check_enabled", lambda: True)
     verdict = SmokeVerdict(
         ok=False,

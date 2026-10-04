@@ -1,159 +1,203 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The AgentX baseline cap, and why the aiter cold/warm probe cannot supply it.
-
-The probe counts .so files across the whole aiter JIT dir and calls anything
-above 20 warm. The signature it is really about is (model, dtype, TP,
-max_model_len) -- and AgentX is precisely what moves max_model_len, from the
-synthetic 6144 to the model's native window. So the first AgentX round on any
-box that has run synthetic work is reported WARM, handed the 7800s cap, and then
-pays the 30+ minute first-compile for a signature it has never built.
-
-Measured rounds are 4774s (SGLang) and 6676s (vLLM) before that compile; with it
-and a cold corpus mmap the worst case is ~9316s. Neither the warm cap (7800) nor
-the cold cap (9000) covers that, and neither escape hatch reaches it -- the
-cold-cap env var is only read when the probe says cold, and nothing writes
-params["timeout_sec"] for a baseline. A baseline timeout kills the session
-before the search starts, so this is not a risk but a certainty.
-
-The synthetic path must keep the probe-driven behaviour exactly.
-"""
+"""Fixed benchmark caps remain independent of AgentX client warmup settings."""
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
-from hyperloom.orchestrator.actions.executors.baseline import (
-    AGENTX_BASELINE_OVERHEAD_SEC,
-    AGENTX_DEFAULT_DURATION_SEC,
-    BASELINE_DEFAULT_TIMEOUT_SEC,
-    BaselineExecutor,
-    agentx_baseline_timeout_sec,
+from hyperloom.orchestrator.actions.executors import _agentx_timeouts as _timeouts
+from hyperloom.orchestrator.actions.executors._agentx_timeouts import (
+    AGENTX_CANON_WARMUP_CONC,
+    AGENTX_CANON_WARMUP_GRACE_SEC,
+    agentx_warmup_grace_conc,
+    agentx_warmup_grace_sec,
 )
-
-_MEASURED_VLLM_SEC = 6676  # the E4 round, warm corpus, no first-compile
-_FIRST_COMPILE_SEC = 1800  # the cold-start comment's own "30+ minutes"
-_COLD_CORPUS_SEC = 840  # the client's own "4-14 min" upper bound
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
+from hyperloom.orchestrator.actions.executors._workload_envs import apply_agentx_switch
 
 
 def _clear(monkeypatch):
-    for k in (
+    _timeouts._AGENTX_SAID.clear()
+    for key in (
         "HYPERLOOM_AGENTX",
-        "AGENTX_DURATION",
-        "AGENTX_BASELINE_TIMEOUT_SEC",
-        "AGENTX_BASELINE_OVERHEAD_SEC",
+        "AGENTX_WARMUP_GRACE_PERIOD",
+        "AGENTX_WARMUP_GRACE_CONC",
+        "CONC",
+        "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC",
     ):
-        monkeypatch.delenv(k, raising=False)
+        monkeypatch.delenv(key, raising=False)
 
 
-# --- the derived cap -----------------------------------------------------------
-
-
-def test_default_cap_covers_the_measured_worst_case(monkeypatch):
-    """The number has to clear a measurement, not a hunch."""
+@pytest.mark.parametrize("agentx", ["0", "1"])
+def test_baseline_cap_does_not_expand_with_workload(monkeypatch, tmp_path, agentx):
     _clear(monkeypatch)
-    worst = _MEASURED_VLLM_SEC + _FIRST_COMPILE_SEC + _COLD_CORPUS_SEC
-    cap = agentx_baseline_timeout_sec()
-    assert cap == AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC
-    assert cap > worst, f"cap {cap} does not clear the modelled worst case {worst}"
+    monkeypatch.setenv("HYPERLOOM_AGENTX", agentx)
+    monkeypatch.setenv("AGENTX_DURATION", "50000")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "20000")
+    executor = BaselineExecutor(magpie_python=sys.executable, session_dir=tmp_path)
+    assert executor._resolve_timeout({"timeout_sec": 99}) == 7800
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "123.5")
+    assert executor._resolve_timeout({}) == 123.5
 
 
-def test_neither_stock_cap_would_have_covered_it():
-    """Why this exists at all: both existing caps lose to the same arithmetic."""
-    from hyperloom.orchestrator.actions.executors._aiter_jit import (
-        BASELINE_COLD_START_TIMEOUT_SEC,
-    )
-
-    worst = _MEASURED_VLLM_SEC + _FIRST_COMPILE_SEC + _COLD_CORPUS_SEC
-    assert BASELINE_DEFAULT_TIMEOUT_SEC < worst
-    assert BASELINE_COLD_START_TIMEOUT_SEC < worst
+def test_profile_retains_nonbenchmark_budget(monkeypatch, tmp_path):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "99")
+    executor = ProfileExecutor(magpie_python=sys.executable, session_dir=tmp_path)
+    assert executor.benchmark_watchdog is False
+    assert executor._resolve_timeout({}) == 14400
+    assert executor._resolve_timeout({"timeout_sec": 15000}) == 15000
 
 
-def test_cap_tracks_the_measurement_window(monkeypatch):
-    """Derived, not pinned: a longer window must not need a second edit."""
+def test_agentx_switch_keeps_profile_yaml_cap(monkeypatch):
     _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_DURATION", "7200")
-    assert agentx_baseline_timeout_sec() == 7200 + AGENTX_BASELINE_OVERHEAD_SEC
+    monkeypatch.setenv("AGENTX_DURATION", "50000")
+    bench = {"framework": "sglang", "timeout_seconds": 14400}
+    apply_agentx_switch(bench, active=True)
+    assert bench["timeout_seconds"] == 14400
 
 
-def test_overhead_budget_is_tunable(monkeypatch):
+@pytest.mark.parametrize("conc", ["1", "4", "8"])
+def test_the_grace_is_untouched_at_or_below_the_anchor(monkeypatch, conc):
     _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "3600")
-    assert agentx_baseline_timeout_sec() == AGENTX_DEFAULT_DURATION_SEC + 3600
-
-
-def test_explicit_cap_wins_outright(monkeypatch):
-    _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_DURATION", "7200")
-    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "3600")
-    monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "12345")
-    assert agentx_baseline_timeout_sec() == 12345
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    monkeypatch.setenv("CONC", conc)
+    assert agentx_warmup_grace_sec() == 3600
 
 
 @pytest.mark.parametrize("bad", ["", "  ", "abc", "0", "-1"])
-def test_unparseable_or_nonpositive_env_falls_back(monkeypatch, bad):
-    """A typo must not silently produce a cap of zero."""
+def test_an_unusable_grace_falls_back_to_canonical(monkeypatch, bad):
+    """A typo must not hand the client a warmup bound of zero."""
     _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", bad)
-    monkeypatch.setenv("AGENTX_DURATION", bad)
-    assert agentx_baseline_timeout_sec() == AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", bad)
+    assert agentx_warmup_grace_sec() == AGENTX_CANON_WARMUP_GRACE_SEC
 
 
-# --- wiring into _resolve_timeout ----------------------------------------------
-
-
-def _probe_must_not_run(*_a, **_k):
-    raise AssertionError("the aiter probe was consulted on the AgentX path")
-
-
-def test_agentx_bypasses_the_probe(monkeypatch):
-    """Asking the probe first would return WARM and the cap that cannot work."""
+@pytest.mark.parametrize("bad", ["", "abc", "0", "-8", "8.5"])
+def test_an_unusable_conc_leaves_the_grace_alone(monkeypatch, bad):
     _clear(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.baseline._probe_aiter_jit_cache",
-        _probe_must_not_run,
-    )
-    assert BaselineExecutor()._resolve_timeout({}) == agentx_baseline_timeout_sec()
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    monkeypatch.setenv("CONC", bad)
+    assert agentx_warmup_grace_sec() == 3600
 
 
-def test_explicit_task_param_still_outranks_agentx(monkeypatch):
-    """The pre-existing highest-priority override keeps its place."""
+def test_the_grace_never_shrinks(monkeypatch):
     _clear(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    assert BaselineExecutor()._resolve_timeout({"timeout_sec": 4242}) == 4242
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    for conc in (1, 2, 4, 8, 9, 16, 32, 64, 128):
+        monkeypatch.setenv("CONC", str(conc))
+        assert agentx_warmup_grace_sec() >= 3600
 
 
-def test_synthetic_path_still_uses_the_probe(monkeypatch):
-    """Zero regression: AgentX off must reach the probe and its warm default."""
-    seen = {}
+# --- the grace declares which concurrency it was measured at -------------------
 
-    def _fake_probe():
-        seen["called"] = True
-        return {"probe_status": "found", "is_cold": False, "path": "/x", "kernel_count": 99, "size_mb": 1}
 
+def test_the_anchor_defaults_to_the_repo_measurement(monkeypatch):
+    """Unset means "8", which is where this repo's measurements start."""
     _clear(monkeypatch)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.baseline._probe_aiter_jit_cache",
-        _fake_probe,
-    )
-    assert BaselineExecutor()._resolve_timeout({}) == BASELINE_DEFAULT_TIMEOUT_SEC
-    assert seen.get("called") is True
+    assert agentx_warmup_grace_conc() == AGENTX_CANON_WARMUP_CONC
 
 
-def test_synthetic_cold_start_bump_is_untouched(monkeypatch):
-    from hyperloom.orchestrator.actions.executors._aiter_jit import (
-        BASELINE_COLD_START_TIMEOUT_SEC,
-    )
-
+@pytest.mark.parametrize("bad", ["", "  ", "abc", "0", "-8", "8.5"])
+def test_an_unusable_anchor_disables_scaling_rather_than_dividing_by_it(monkeypatch, bad):
+    """A zero or garbage anchor must not reach the division -- and must not be quietly replaced by the default either."""
     _clear(monkeypatch)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.baseline._probe_aiter_jit_cache",
-        lambda: {"probe_status": "found", "is_cold": True, "path": "/x", "kernel_count": 1, "size_mb": 1},
-    )
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.baseline.sweep_stale_aiter_locks_if_dead",
-        lambda: {},
-    )
-    assert BaselineExecutor()._resolve_timeout({}) == BASELINE_COLD_START_TIMEOUT_SEC
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", bad)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "32")
+    assert agentx_warmup_grace_conc() == AGENTX_CANON_WARMUP_CONC
+    assert agentx_warmup_grace_sec() == 3600
+
+
+def test_a_grace_measured_at_a_higher_conc_is_not_double_counted(monkeypatch):
+    """The defect a hardcoded anchor causes, stated as a test."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "16")
+    monkeypatch.setenv("CONC", "16")
+    assert agentx_warmup_grace_sec() == 14400
+
+
+def test_the_declared_anchor_drives_the_ratio(monkeypatch):
+    """Both numbers, not one: 14400s at CONC=16 doubles at CONC=32."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "16")
+    monkeypatch.setenv("CONC", "32")
+    assert agentx_warmup_grace_sec() == 28800
+
+
+def test_below_the_declared_anchor_the_grace_is_untouched(monkeypatch):
+    """Identity holds at the anchor the operator declared, not at a fixed 8."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "16")
+    for conc in (2, 4, 8, 16):
+        monkeypatch.setenv("CONC", str(conc))
+        assert agentx_warmup_grace_sec() == 14400
+
+
+def test_declaring_the_default_anchor_is_what_enables_the_floor(monkeypatch):
+    """Declaring 8 is not a no-op: it is the statement that turns scaling on."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "32")
+    assert agentx_warmup_grace_sec() == 3600
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", str(AGENTX_CANON_WARMUP_CONC))
+    assert agentx_warmup_grace_sec() == 3600 * 32 // AGENTX_CANON_WARMUP_CONC
+
+
+def test_a_whole_number_written_with_a_decimal_point_is_honoured(monkeypatch):
+    """\"16.0\" is an anchor of 16, not a missing anchor."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400.0")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "16.0")
+    monkeypatch.setenv("CONC", "16")
+    assert agentx_warmup_grace_conc() == 16
+    assert agentx_warmup_grace_sec() == 14400
+
+
+@pytest.mark.parametrize("bad", ["8.5", "abc", "", "-16.0", "0"])
+def test_a_fractional_or_unparseable_anchor_is_still_rejected(monkeypatch, bad):
+    """A non-integral concurrency is a typo, not an intent."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", bad)
+    assert agentx_warmup_grace_conc() == AGENTX_CANON_WARMUP_CONC
+
+
+def test_an_exponent_form_whole_number_is_accepted(monkeypatch):
+    """``1e3`` is 1000, unambiguously. The bar is integrality, not notation."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "1e3")
+    assert agentx_warmup_grace_conc() == 1000
+
+
+def test_a_changed_derivation_still_speaks_up(monkeypatch, caplog):
+    """Deduping on the payload, not on a bare flag: new numbers are new news."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    with caplog.at_level("INFO"):
+        monkeypatch.setenv("CONC", "16")
+        agentx_warmup_grace_sec()
+        monkeypatch.setenv("CONC", "32")
+        agentx_warmup_grace_sec()
+    scaled = [r for r in caplog.records if "scaling the warmup share" in r.getMessage()]
+    assert len(scaled) == 2, [r.getMessage() for r in scaled]
+
+
+def test_declaring_the_anchor_is_what_turns_scaling_on(monkeypatch):
+    """The floor is opt-in, and one line buys it."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "32")
+    assert agentx_warmup_grace_sec() == 3600
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    assert agentx_warmup_grace_sec() == 14400

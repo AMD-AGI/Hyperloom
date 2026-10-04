@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,16 @@ class RewriteBudgetPolicy:
     @property
     def applyback_start_min_remaining_sec(self) -> int:
         return self.applyback_host_validation_reserve_sec + self.applyback_min_agent_sec
+
+    def without_applyback(self) -> "RewriteBudgetPolicy":
+        """The same policy holding no reserve for a stage the caller declined.
+
+        The reserve exists to leave the apply-back agent and its host validation
+        room to finish. A caller that wants only the standalone kernel would
+        otherwise pay for a stage that never runs, which is the search time it
+        asked for.
+        """
+        return replace(self, applyback_reserve_sec=0)
 
     def search_stop_unix(self, deadline_unix: float) -> float:
         return deadline_unix - self.applyback_reserve_sec

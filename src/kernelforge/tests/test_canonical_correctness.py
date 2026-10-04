@@ -23,11 +23,7 @@ def _python(*commands: str) -> list[str]:
 
 
 def _config(workspace, *commands: str, **settings) -> None:
-    """Declare a task whose compilation is a no-op and whose Step 2 is ``commands``.
-
-    The arena fails a task that declares no ``compile_command`` at all, so every
-    workspace a correctness-focused test builds still needs one that passes.
-    """
+    """Declare a task whose compilation is a no-op and whose Step 2 is ``commands``."""
     document = {
         "compile_command": _python("pass"),
         "correctness_command": _python(*commands),
@@ -56,8 +52,8 @@ def test_passing_suite_passes_the_gate(tmp_path):
 
 
 def test_non_zero_exit_fails_the_gate(tmp_path):
-    # The mla-decode shape: the task runner asserts its own tolerance and dies,
-    # and the number it names is the only thing that says what to fix.
+    # The mla-decode shape: the task runner asserts its own tolerance and dies, and the number it names is the only
+    # thing that says what to fix.
     _config(
         tmp_path,
         "raise AssertionError('normalized max err 0.02468 too high')",
@@ -109,8 +105,8 @@ def test_missing_config_leaves_the_candidate_unverified_rather_than_failed(tmp_p
 
 
 def test_config_without_a_correctness_command_fails_the_gate(tmp_path):
-    # The ``compile_command`` is well-formed filler: without it the gate would
-    # stop on Step 1's declaration and never reach the case this test names.
+    # The ``compile_command`` is well-formed filler: without it the gate would stop on Step 1's declaration and never
+    # reach the case this test names.
     tmp_path.joinpath("config.yaml").write_text('compile_command:\n  - "true"\n')
 
     result = _run(tmp_path)
@@ -177,14 +173,12 @@ def test_declared_timeout_binds_when_it_is_below_the_stage_ceiling(tmp_path):
 
 
 def test_arena_default_timeout_is_the_one_the_arena_applies():
-    # AgentKernelArena src/evaluator.py::_DEFAULT_CORRECTNESS_TIMEOUT_S. A task
-    # that declares nothing is judged under this, so forge must reproduce it.
+    # AgentKernelArena src/evaluator.py::_DEFAULT_CORRECTNESS_TIMEOUT_S.
     assert ARENA_DEFAULT_CORRECTNESS_TIMEOUT_SEC == 3600
 
 
 def test_arena_default_compile_timeout_is_the_one_the_arena_applies():
-    # AgentKernelArena src/evaluator.py::_DEFAULT_COMPILE_TIMEOUT_S. It is a
-    # separate constant from the correctness one, read from a separate key.
+    # AgentKernelArena src/evaluator.py::_DEFAULT_COMPILE_TIMEOUT_S.
     assert ARENA_DEFAULT_COMPILE_TIMEOUT_SEC == 3600
 
 
@@ -223,8 +217,7 @@ def test_a_failing_compile_fails_the_gate_before_correctness_is_run(tmp_path):
     assert result.passed is False
     assert "compilation" in result.detail
     assert "exited 2" in result.detail
-    # The arena stops the whole evaluation at Step 1; a kernel that does not
-    # build has nothing for Step 2 to measure.
+    # The arena stops the whole evaluation at Step 1; a kernel that does not build has nothing for Step 2 to measure.
     assert not marker.exists()
 
 
@@ -279,8 +272,8 @@ def test_a_passing_gate_reports_both_steps(tmp_path):
 
 
 def test_config_without_a_compile_command_fails_the_gate(tmp_path):
-    # evaluate_compilation returns (False, "No compile_command specified") when
-    # the key is absent -- a failure, not a skip, unlike anything else there.
+    # evaluate_compilation returns (False, "No compile_command specified") when the key is absent -- a failure, not a
+    # skip, unlike anything else there.
     tmp_path.joinpath("config.yaml").write_text("correctness_command:\n  - true\n")
 
     result = _run(tmp_path)
@@ -291,8 +284,7 @@ def test_config_without_a_compile_command_fails_the_gate(tmp_path):
 
 
 def test_a_compile_command_that_prints_failure_but_exits_zero_passes(tmp_path):
-    # evaluate_compilation judges by exit status alone; only evaluate_correctness
-    # scans the text. A warning naming a failed probe must not reject the build.
+    # evaluate_compilation judges by exit status alone; only evaluate_correctness scans the text.
     _two_step_config(
         tmp_path,
         compile_=_python("print('hipcc: note: fail-fast codegen path disabled')"),
@@ -369,14 +361,7 @@ def test_a_non_numeric_declared_compile_timeout_fails_the_gate(tmp_path):
 
 
 def test_a_kernel_that_only_builds_at_the_full_shape_fails_the_gate(tmp_path):
-    """The tilelang_dsa_sparse_mla_glm5 incident, reduced to a hermetic stub.
-
-    The agent made the launch geometry sweepable and guarded it with an
-    assertion that holds for every shape it measured. The task's compile step
-    shrinks ``num_seqs`` to keep the smoke test cheap, ``inner_iter`` collapses
-    to 1 there, and the assertion fires for every knob value -- which forge's
-    thirteen iterations, all run at the full shape, never saw.
-    """
+    """The tilelang_dsa_sparse_mla_glm5 incident, reduced to a hermetic stub."""
     kernel = tmp_path / "kernel_stub.py"
     kernel.write_text(
         textwrap.dedent(

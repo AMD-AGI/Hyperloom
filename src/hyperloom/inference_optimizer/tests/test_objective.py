@@ -23,7 +23,9 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.objective import (
     ObjectiveError,
     TargetBaselineObjective,
+    AnyObjective,
     TargetGainObjective,
+    TargetRooflineObjective,
     TargetTputObjective,
     TimeOnlyObjective,
     build_objective,
@@ -49,7 +51,6 @@ def _backends_silent() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="o"),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
 
 
@@ -159,6 +160,27 @@ def test_target_baseline_missing_report_rejected(tmp_path):
         TargetBaselineObjective(baseline_dir=str(workspace))
 
 
+def _write_report(root, rel, tput):
+    path = root / rel / "benchmark_report.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"throughput": {"output_throughput": tput}}))
+    return path
+
+
+def test_target_baseline_falls_back_to_a_warmup_only_reference(tmp_path):
+    """A budget-dropped measure round leaves the warmup as the only report."""
+    workspace = tmp_path / "warmup-only"
+    _write_report(workspace, "warmup_round/bench", 800.0)
+    assert TargetBaselineObjective(baseline_dir=str(workspace))._ref_tput == pytest.approx(800.0)
+
+
+def test_target_baseline_prefers_the_measured_round_over_the_warmup(tmp_path):
+    workspace = tmp_path / "both"
+    _write_report(workspace, "warmup_round/bench", 800.0)
+    _write_report(workspace, "measured/bench", 1200.0)
+    assert TargetBaselineObjective(baseline_dir=str(workspace))._ref_tput == pytest.approx(1200.0)
+
+
 # TimeOnlyObjective
 def test_time_only_never_reached():
     obj = TimeOnlyObjective()
@@ -232,7 +254,8 @@ async def test_run_stops_on_max_ticks(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_run_stops_on_objective_reached(session_dir):
+async def test_run_routes_a_met_objective_through_sweep(session_dir):
+    """A met target marks the session and leaves through SWEEP, not straight to CLOSE."""
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.baseline_tput = 1000.0
@@ -242,7 +265,11 @@ async def test_run_stops_on_objective_reached(session_dir):
             objective=TargetGainObjective(target_gain_pct=10.0),
             max_ticks=10,
         )
-        assert reason == "target_reached"
+        assert c.shared_state.target_reached_at
+        assert [row.get("to_phase") for row in c.shared_state.phase_history].count("SWEEP") == 1
+        # The ladder never ran in this harness, so SWEEP names its own failure rather than borrowing the target's
+        # success.
+        assert reason == "sweep_failed"
     finally:
         await c.stop()
 
@@ -278,8 +305,8 @@ async def test_run_stops_on_time_exhausted(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         reason = await c.run(max_minutes=0.001, max_ticks=1000)
-        # The 60 ms budget can expire before or after PRELUDE depending on the
-        # runner's speed; both reasons prove that the session bound stopped it.
+        # The 60 ms budget can expire before or after PRELUDE depending on the runner's speed; both reasons prove that
+        # the session bound stopped it.
         assert reason in {"time_exhausted", "time_exhausted_during_prelude"}
     finally:
         await c.stop()
@@ -349,7 +376,6 @@ async def test_run_closing_phase_skips_reactor(session_dir):
     backends = {
         "orchestration": spy,
         "critic": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="c"),
-        "robustness": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="r"),
     }
     c = Coordinator(session_dir, backends=backends)
     c.sub.register_executor("report", report_executor)
@@ -362,7 +388,7 @@ async def test_run_closing_phase_skips_reactor(session_dir):
         calls_at_closing.append(spy.calls)
         return await real_enter(grace_sec=grace_sec)
 
-    c.phase_close._enter_closing_phase = _enter_and_record  # type: ignore[method-assign]
+    c._enter_closing_phase = _enter_and_record  # type: ignore[method-assign]
     try:
         await c.run(
             max_minutes=0.0001,
@@ -371,8 +397,7 @@ async def test_run_closing_phase_skips_reactor(session_dir):
             tick_interval_sec=0.0,
         )
         assert calls_at_closing, "expected closing phase to be entered"
-        # A spent bound cancels phase-enter and skips reactors on the tick
-        # that trips CLOSE. CLOSE itself must still not add LLM turns.
+        # A spent bound cancels phase-enter and skips reactors on the tick that trips CLOSE.
         assert spy.calls == calls_at_closing[0]
     finally:
         await c.stop()
@@ -423,7 +448,7 @@ async def test_run_records_tick_exception_and_continues(session_dir, monkeypatch
         if calls["n"] == 1:
             raise RuntimeError("dispatcher boom")
 
-    monkeypatch.setattr(c.dispatcher, "_pump_dispatcher_once", flaky_dispatcher_once)
+    monkeypatch.setattr(c, "_pump_dispatcher_once", flaky_dispatcher_once)
     try:
         reason = await c.run(max_ticks=2)
         assert reason == "max_ticks"
@@ -446,7 +471,7 @@ async def test_run_repeated_tick_exceptions_stop_as_emergency(
     async def broken_dispatcher_once() -> None:
         raise RuntimeError("persistent dispatcher boom")
 
-    monkeypatch.setattr(c.dispatcher, "_pump_dispatcher_once", broken_dispatcher_once)
+    monkeypatch.setattr(c, "_pump_dispatcher_once", broken_dispatcher_once)
     try:
         reason = await c.run(max_ticks=10, crash_emergency_threshold=2)
         assert reason == "emergency"
@@ -470,7 +495,7 @@ async def test_run_finally_labels_residual_escape_as_coordinator_exception(
     def broken_stop_when(_c) -> bool:
         raise ValueError("stop callback failed")
 
-    monkeypatch.setattr(c.dispatcher, "_pump_dispatcher_once", broken_dispatcher_once)
+    monkeypatch.setattr(c, "_pump_dispatcher_once", broken_dispatcher_once)
     try:
         with pytest.raises(ValueError, match="stop callback failed"):
             await c.run(stop_when=broken_stop_when, max_ticks=10)
@@ -545,3 +570,105 @@ async def test_run_async_stop_when_callback(session_dir):
         assert reason == "custom"
     finally:
         await c.stop()
+
+
+# --- the roofline target ---
+
+
+def _state_with_within(value: object) -> SharedState:
+    st = SharedState(session_id="s")
+    st.roofline_snapshots = [{"snapshot_id": 1, "within_roofline_pct": value}]
+    return st
+
+
+class TestARooflineTargetOnlyCountsAMeasuredRoofline:
+    """The objective has no separate "was it profiled" gate; an unmeasured ceiling simply reads as zero progress."""
+
+    def test_no_snapshot_reads_as_unmeasured(self):
+        st = SharedState(session_id="s")
+        assert st.current_within_roofline_pct() is None
+        obj = TargetRooflineObjective(80.0)
+        assert obj.reached(st) is False
+        assert obj.progress(st) == 0.0
+        assert obj.gap_pct(st) == pytest.approx(80.0)
+
+    @pytest.mark.parametrize("value", [None, "62.5"])
+    def test_a_non_numeric_within_reads_as_unmeasured(self, value):
+        st = _state_with_within(value)
+        assert st.current_within_roofline_pct() is None
+        assert TargetRooflineObjective(80.0).reached(st) is False
+
+    def test_the_latest_snapshot_wins(self):
+        st = _state_with_within(20.0)
+        st.roofline_snapshots.append({"snapshot_id": 2, "within_roofline_pct": 81.0})
+        assert st.current_within_roofline_pct() == pytest.approx(81.0)
+        assert TargetRooflineObjective(80.0).reached(st) is True
+
+    def test_below_and_at_the_bar(self):
+        obj = TargetRooflineObjective(80.0)
+        assert obj.reached(_state_with_within(79.99)) is False
+        assert obj.reached(_state_with_within(80.0)) is True
+        assert obj.gap_pct(_state_with_within(62.5)) == pytest.approx(17.5)
+        assert obj.progress(_state_with_within(40.0)) == pytest.approx(0.5)
+
+    @pytest.mark.parametrize("bad", [0.0, -1.0, 100.1])
+    def test_the_target_is_a_percentage(self, bad):
+        with pytest.raises(ObjectiveError):
+            TargetRooflineObjective(bad)
+
+
+class TestEitherTargetEndsTheRun:
+    """Gain and roofline measure different axes, so they compose rather than compete."""
+
+    def _both(self) -> AnyObjective:
+        return AnyObjective([TargetGainObjective(300.0), TargetRooflineObjective(80.0)])
+
+    def test_the_roofline_alone_is_enough(self):
+        st = _state_with_within(81.0)
+        st.cumulative_gain_validated = 5.0
+        assert self._both().reached(st) is True
+
+    def test_the_gain_alone_is_enough(self):
+        st = _state_with_within(10.0)
+        st.cumulative_gain_validated = 301.0
+        assert self._both().reached(st) is True
+
+    def test_neither_leaves_the_run_going(self):
+        st = _state_with_within(10.0)
+        st.cumulative_gain_validated = 5.0
+        assert self._both().reached(st) is False
+
+    def test_the_gap_comes_from_the_closest_member_not_the_smaller_number(self):
+        """The two gaps are percentage points of different quantities, so the smaller number is not the nearer target."""
+        st = _state_with_within(40.0)
+        st.cumulative_gain_validated = 200.0
+        both = self._both()
+        assert both.progress(st) == pytest.approx(2 / 3)
+        assert both.gap_pct(st) == pytest.approx(100.0)
+
+
+class TestBuildObjectiveComposesTheRooflineTarget:
+    def test_the_roofline_target_alone(self):
+        obj = build_objective({"MAX_HOURS": 1, "TARGET_WITHIN_ROOFLINE_PCT": "80"})
+        assert isinstance(obj, TargetRooflineObjective)
+        assert obj.kind() == "roofline_pct"
+
+    def test_composed_with_the_gain_target(self):
+        obj = build_objective({"MAX_HOURS": 1, "TARGET_GAIN_PCT": "300", "TARGET_WITHIN_ROOFLINE_PCT": "80"})
+        assert isinstance(obj, AnyObjective)
+        assert obj.kind() == "gain_pct+roofline_pct"
+
+    def test_the_throughput_targets_stay_mutually_exclusive(self):
+        with pytest.raises(ObjectiveError):
+            build_objective({"MAX_HOURS": 1, "TARGET_GAIN_PCT": "300", "TARGET_TPUT_PER_GPU": "900"})
+
+    def test_it_does_not_relax_that_when_a_roofline_target_is_present(self):
+        with pytest.raises(ObjectiveError):
+            build_objective(
+                {
+                    "MAX_HOURS": 1,
+                    "TARGET_GAIN_PCT": "300",
+                    "TARGET_TPUT_PER_GPU": "900",
+                    "TARGET_WITHIN_ROOFLINE_PCT": "80",
+                }
+            )

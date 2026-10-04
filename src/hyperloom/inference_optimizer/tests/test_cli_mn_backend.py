@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Regression: the ``optimize --mn-backend`` flag must be registered.
-
-``_resolve_mn_backend`` reads ``getattr(args, "mn_backend", ...)`` and SKILL.md /
-error messages advertise ``optimize --mn-backend infera`` as the primary way to
-select the Infera backend, but the flag was never ``add_argument``-ed — so the
-documented command died with ``error: unrecognized arguments`` and only the
-``INFERENCE_OPTIMIZER_MN_BACKEND`` env var worked. These lock the flag in and
-pin the resolution precedence (flag > env > rayjob).
-"""
+"""Regression: the ``optimize --mn-backend`` flag must be registered."""
 
 from __future__ import annotations
 

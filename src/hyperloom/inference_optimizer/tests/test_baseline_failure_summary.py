@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``baseline_failed`` root-cause surfacing tests.
-
-On ``baseline_failed`` the top-level ``final.json`` / report must headline the
-real terminal engine/worker fault from the last failed baseline attempt, not a
-benign upstream WARN. The failed result is recorded into ``SharedState`` via
-:meth:`SharedState.record_action_attempt` / :meth:`SharedState.record_action_failure`
-and the report layer reads it back from state.
-"""
+"""``baseline_failed`` root-cause surfacing tests."""
 
 from __future__ import annotations
 
@@ -36,8 +29,7 @@ _SERVER_LOG_OOM = (
     "EngineCore failed to start.\n"
 )
 
-# A subprocess_nonzero stderr tail that mixes the benign WARN with the real
-# fault on separate lines.
+# A subprocess_nonzero stderr tail that mixes the benign WARN with the real fault on separate lines.
 _MIXED_STDERR = (
     f"{_BENIGN_WARN}\n"
     "Loading safetensors checkpoint shards: 100% complete\n"
@@ -233,8 +225,8 @@ def test_classify_root_cause_type_kv_cache_oom():
 
 
 def test_classify_root_cause_ignores_mem_fraction_static_in_argv():
-    # A generic failure whose text merely echoes --mem-fraction-static in the
-    # launch command must not be mislabeled kv_cache_oom.
+    # A generic failure whose text merely echoes --mem-fraction-static in the launch command must not be mislabeled
+    # kv_cache_oom.
     result = _classify_root_cause_type(
         "subprocess_nonzero",
         "server cmd: python -m sglang.launch_server --mem-fraction-static 0.9 --tp 8; exited 1 with a segfault",
@@ -243,8 +235,8 @@ def test_classify_root_cause_ignores_mem_fraction_static_in_argv():
 
 
 def test_classify_root_cause_kv_cache_oom_specific_phrase_still_matches():
-    # The "Raise --mem-fraction-static above" remediation line is a genuine
-    # KV-cache OOM signal even when error_class is generic.
+    # The "Raise --mem-fraction-static above" remediation line is a genuine KV-cache OOM signal even when error_class
+    # is generic.
     assert (
         _classify_root_cause_type(
             "subprocess_nonzero",

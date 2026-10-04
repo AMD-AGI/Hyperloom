@@ -6,17 +6,25 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import shlex
+import subprocess
+import sys
 
 import pytest
 
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockRobustnessBackend,
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.bus.message_bus import MessageBus
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+from hyperloom.orchestrator.policy.gate import PolicyGate
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.inference_optimizer.session.session_binding import bind_session
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
@@ -28,6 +36,24 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     return make_session_dir()
 
 
+@pytest.fixture
+def update_state_coordinator(session_dir, monkeypatch):
+    """Wire the real update route without boot-time GPU, source-tree or process work."""
+    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
+    bind_session(session_dir)
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = session_dir
+    # A phase is required: recording a denial stamps the breakdown event id with it.
+    c.shared_state = SharedState(current_action="before", target_summary="original", phase="PRELUDE")
+    c.db = SqliteConnection(session_dir / "coordinator.db", journal_mode="DELETE")
+    c.bus = MessageBus(c.db)
+    c.policy = PolicyGate(role_registry=default_role_registry(), shared_state=c.shared_state)
+    try:
+        yield c
+    finally:
+        c.db.close()
+
+
 def _heartbeat() -> Intent:
     return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 
@@ -37,7 +63,6 @@ def _backends_full() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
 
 
@@ -57,6 +82,8 @@ def test_save_load_round_trip(tmp_path):
         model_name="meta-llama/Llama-3.1-8B-Instruct",
         baseline_tput=1840.0,
         cumulative_gain_validated=12.5,
+        working_recipe_generation=3,
+        validated_recipe_generation=2,
         pruned_families=["deep_kernel"],
         current_best={"action": "backends", "tput": 2010.0},
         last_fusion={"status": "complete", "kept": False},
@@ -68,10 +95,31 @@ def test_save_load_round_trip(tmp_path):
     assert s2.model_name == "meta-llama/Llama-3.1-8B-Instruct"
     assert s2.baseline_tput == 1840.0
     assert s2.cumulative_gain_validated == 12.5
+    assert (s2.working_recipe_generation, s2.validated_recipe_generation) == (3, 2)
+    assert s2.optimization_stack_has_unvalidated_keeps()
     assert s2.pruned_families == ["deep_kernel"]
     assert s2.current_best == {"action": "backends", "tput": 2010.0}
     assert s2.last_fusion == {"status": "complete", "kept": False}
     assert s2.last_fusion_integrate == {"status": "ok", "decision": "KEEP"}
+
+
+def test_a_session_saved_before_recipe_generations_loads_on_the_stack_watermark(tmp_path):
+    s = SharedState(
+        session_id="legacy", optimization_stack=[{"action": "explore"}], cumulative_gain_validated_stack_len=1
+    )
+    s.save(tmp_path)
+    path = tmp_path / "state.json"
+    payload = json.loads(path.read_text())
+    payload.pop("working_recipe_generation")
+    payload.pop("validated_recipe_generation")
+    path.write_text(json.dumps(payload))
+
+    s2 = SharedState.load_or_init(tmp_path)
+
+    assert (s2.working_recipe_generation, s2.validated_recipe_generation) == (0, 0)
+    assert not s2.optimization_stack_has_unvalidated_keeps()
+    s2.optimization_stack.append({"action": "explore"})
+    assert s2.optimization_stack_has_unvalidated_keeps()
 
 
 def test_profile_osl_round_trip(tmp_path):
@@ -120,6 +168,22 @@ def test_save_is_atomic(tmp_path):
     assert leftovers == []
 
 
+def test_load_legacy_state_keeps_defaults_without_rewriting_file(tmp_path):
+    path = tmp_path / "state.json"
+    original = b'{"session_id": "legacy", "unknown_future_field": 42}\n'
+    path.write_bytes(original)
+
+    state = SharedState.load_or_init(tmp_path)
+
+    assert state.session_id == "legacy"
+    assert state.crash_count == 0
+    assert state.crash_timestamps == []
+    assert state.current_action == ""
+    assert state.target_summary == ""
+    assert not hasattr(state, "unknown_future_field")
+    assert path.read_bytes() == original
+
+
 def test_from_dict_drops_unknown_fields():
     raw = {"session_id": "s", "unknown_future_field": 42, "baseline_tput": 100.0}
     s = SharedState.from_dict(raw)
@@ -129,15 +193,12 @@ def test_from_dict_drops_unknown_fields():
     assert not hasattr(s, "unknown_future_field")
 
 
-def test_apply_changes_only_known_fields():
+def test_agent_update_schema_is_not_persisted():
     s = SharedState()
-    applied = s.apply_changes(
-        {"current_action": "baseline", "bogus": 1, "cumulative_gain_validated": 5.0},
-        allow_core=True,
-    )
-    assert applied == {"current_action": "baseline", "cumulative_gain_validated": 5.0}
-    assert s.current_action == "baseline"
-    assert s.cumulative_gain_validated == 5.0
+    assert "AGENT_UPDATE_FIELDS" not in s.to_dict()
+    restored = SharedState.from_dict({"AGENT_UPDATE_FIELDS": {"crash_timestamps": "str"}})
+    assert "AGENT_UPDATE_FIELDS" not in restored.__dict__
+    assert restored.AGENT_UPDATE_FIELDS == {"current_action": str, "target_summary": str}
 
 
 def test_add_pruned_family_idempotent():
@@ -197,7 +258,7 @@ async def test_coordinator_prune_branch_persists(session_dir):
     c = Coordinator(session_dir, backends=_backends_full())
     try:
         await c._handle_intent(
-            "robustness",
+            "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
                 payload={"family": "deep_kernel", "reason": "3 fails"},
@@ -215,7 +276,7 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
     c1 = Coordinator(session_dir, backends=_backends_full())
     try:
         await c1._handle_intent(
-            "robustness",
+            "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
                 payload={"family": "long", "reason": "expensive"},
@@ -244,45 +305,64 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_update_state_persists_known_fields(session_dir):
-    """Orchestration may write non-core fields; core fields are gated by PolicyGate's CORE_STATE_FIELDS."""
-    c = Coordinator(session_dir, backends=_backends_full())
-    try:
-        await c._handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.UPDATE_STATE,
-                payload={"changes": {"current_action": "baseline", "target_summary": "GEMM-bound 8B model"}},
-            ),
-        )
-        assert c.shared_state.current_action == "baseline"
-        assert c.shared_state.target_summary == "GEMM-bound 8B model"
-        on_disk = json.loads((session_dir / "state.json").read_text())
-        assert on_disk["current_action"] == "baseline"
-        assert on_disk["target_summary"] == "GEMM-bound 8B model"
-    finally:
-        await c.stop()
+async def test_coordinator_update_state_persists_known_fields(update_state_coordinator):
+    """Orchestration may persist the two text fields advertised by its prompt."""
+    c = update_state_coordinator
+    await c._handle_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.UPDATE_STATE,
+            payload={"changes": {"current_action": "baseline", "target_summary": "GEMM-bound 8B model"}},
+        ),
+    )
+    assert c.shared_state.current_action == "baseline"
+    assert c.shared_state.target_summary == "GEMM-bound 8B model"
+    on_disk = json.loads((c.session_dir / "state.json").read_text())
+    assert on_disk["current_action"] == "baseline"
+    assert on_disk["target_summary"] == "GEMM-bound 8B model"
+    obs = await c.bus.tail(topic="observation")
+    assert obs[0].payload == {
+        "kind": "update_state",
+        "changes": {"current_action": "baseline", "target_summary": "GEMM-bound 8B model"},
+    }
 
 
+@pytest.mark.parametrize(
+    "bad_field, bad_value",
+    [
+        ("future_unknown_key", 42),
+        ("phase", "CLOSE"),
+        ("crash_timestamps", [1.0]),
+        # A writable name carrying the wrong type refuses the update too.
+        ("current_action", 42),
+        ("target_summary", None),
+    ],
+)
 @pytest.mark.asyncio
-async def test_coordinator_update_state_drops_unknown_fields(session_dir):
-    c = Coordinator(session_dir, backends=_backends_full())
-    try:
-        await c._handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.UPDATE_STATE,
-                payload={"changes": {"current_action": "baseline", "future_unknown_key": 42}},
-            ),
-        )
-        assert c.shared_state.current_action == "baseline"
-        obs = await c.bus.tail(topic="observation", n=20)
-        update_events = [m for m in obs if m.payload.get("kind") == "update_state"]
-        assert update_events
-        last = update_events[0]  # tail returns DESC
-        assert "future_unknown_key" in last.payload["rejected"]
-    finally:
-        await c.stop()
+async def test_coordinator_update_state_refuses_a_whole_intent_with_one_bad_key(
+    update_state_coordinator,
+    bad_field,
+    bad_value,
+):
+    """One unwritable key refuses the update outright, so the writable field beside it does not land either."""
+    c = update_state_coordinator
+    writable = next(name for name in SharedState.AGENT_UPDATE_FIELDS if name != bad_field)
+    changes = {writable: "GEMM-bound 8B model", bad_field: bad_value}
+    intent = Intent(type=IntentType.UPDATE_STATE, payload={"changes": changes})
+    before = c.shared_state.to_dict()
+
+    await c._handle_intent("orchestration", intent)
+
+    # Not one field of the refused update landed, including the writable one.
+    after = c.shared_state.to_dict()
+    assert after["target_summary"] == before["target_summary"] == "original"
+    assert after["current_action"] == before["current_action"] == "before"
+    assert after.get(bad_field) == before.get(bad_field)
+    assert not (c.session_dir / "state.json").exists()
+    obs = await c.bus.tail(topic="observation")
+    assert [m.payload["kind"] for m in obs] == ["policy_denied"]
+    assert obs[0].payload["rule"] == "state_field"
+    assert repr(bad_field) in obs[0].payload["reason"]
 
 
 def test_reference_fields_survive_resume(tmp_path):
@@ -336,6 +416,97 @@ def test_save_current_setting_prefers_persisted_framework(tmp_path, monkeypatch)
     assert "sglang.launch_server" not in text
 
 
+@pytest.mark.parametrize("pythonpath_source", ["unset", "empty", "inherited", "configured"])
+def test_saved_current_setting_loads_overlay_in_child(tmp_path, pythonpath_source):
+    """A saved recipe loads the literal overlay ahead of the prior import path."""
+    overlay = tmp_path / "overlay ' $literal $(touch injected_dollar) `touch injected_backtick`"
+    package = overlay / "sglang"
+    package.mkdir(parents=True)
+    (overlay / "sitecustomize.py").write_text("")
+    (package / "__init__.py").write_text("")
+    (overlay / "overlay_probe.py").write_text("VALUE = 'selected overlay'\n")
+    (package / "launch_server.py").write_text(
+        "import json, os, sys\n"
+        "import overlay_probe\n"
+        "print(json.dumps({'pythonpath': os.environ['PYTHONPATH'], "
+        "'selected': overlay_probe.VALUE, 'argv': sys.argv[1:]}))\n"
+    )
+    inherited = tmp_path / "inherited path"
+    configured = tmp_path / "configured path"
+    for path in [inherited, configured]:
+        path.mkdir()
+        (path / "overlay_probe.py").write_text("VALUE = 'prior import path'\n")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    python = bindir / "python3"
+    python.write_text(f'#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} -B "$@"\n')
+    python.chmod(0o755)
+    env = dict(os.environ, PATH=f"{bindir}:{os.defpath}")
+    env.pop("PYTHONPATH", None)
+    prior = ""
+    if pythonpath_source == "empty":
+        env["PYTHONPATH"] = ""
+    elif pythonpath_source in ("inherited", "configured"):
+        env["PYTHONPATH"] = str(inherited)
+        prior = str(inherited)
+    extra_envs = {}
+    if pythonpath_source == "configured":
+        extra_envs["PYTHONPATH"] = str(configured)
+        prior = str(configured)
+    state = SharedState(session_id="overlay", framework="sglang", reference_model="/models/M")
+    state.current_best = {
+        "extra_server_args": "--max-running-requests 4",
+        "extra_envs": extra_envs,
+        "final_overlay": str(overlay),
+    }
+    session = tmp_path / "session"
+    session.mkdir()
+    state.save(session)
+    restored = SharedState.load_or_init(session)
+    assert restored.current_best["final_overlay"] == str(overlay)
+    restored.save(session)
+
+    result = subprocess.run(
+        ["bash", "-eu", str(session / "current_setting.sh")],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+
+    observed = json.loads(result.stdout)
+    assert observed["selected"] == "selected overlay"
+    assert observed["pythonpath"] == str(overlay) + (":" + prior if prior else "")
+    assert observed["argv"] == ["--model-path=/models/M", "--max-running-requests", "4"]
+    assert not (tmp_path / "injected_dollar").exists()
+    assert not (tmp_path / "injected_backtick").exists()
+
+
+@pytest.mark.parametrize("overlay", [None, ""])
+def test_current_setting_without_overlay_is_unchanged(tmp_path, overlay):
+    state = SharedState(session_id="plain", framework="sglang", reference_model="/models/M", tp=2)
+    state.current_best = {
+        "extra_server_args": "--max-running-requests 4",
+        "extra_envs": {"SGLANG_USE_AITER": "1"},
+    }
+    if overlay is not None:
+        state.current_best["final_overlay"] = overlay
+
+    state.save(tmp_path)
+
+    assert (tmp_path / "current_setting.sh").read_text() == (
+        "#!/usr/bin/env bash\n"
+        "# Auto-generated by hyperloom — current best launch recipe.\n"
+        "export MODEL=/models/M\n"
+        "export TP=2\n"
+        "export SGLANG_USE_AITER=1\n"
+        "\n"
+        "python3 -m sglang.launch_server --model-path=$MODEL --max-running-requests 4\n"
+    )
+
+
 def test_save_no_current_setting_when_no_best(tmp_path):
     """No current_best → no current_setting.sh (0-degrade)."""
     sd = tmp_path / "session"
@@ -343,6 +514,20 @@ def test_save_no_current_setting_when_no_best(tmp_path):
     s = SharedState(session_id="t", model_name="m", model_path="/x/m")
     s.save(sd)
     assert not (sd / "current_setting.sh").exists()
+
+
+@pytest.mark.parametrize("invalid", [{"final_overlay": "/missing-overlay"}, {"unset_envs": ["PYTHONPATH"]}])
+def test_failed_current_setting_export_removes_stale_launcher_but_preserves_state(tmp_path, caplog, invalid):
+    state = SharedState(session_id="invalid-export", framework="sglang")
+    state.current_best = {"tput": 100.0, "extra_server_args": "--tp 8", "extra_envs": {"SGLANG_USE_AITER": "1"}}
+    state.save(tmp_path)
+    launcher = tmp_path / "current_setting.sh"
+    assert launcher.is_file()
+    state.current_best.update(invalid)
+    state.save(tmp_path)
+    assert not launcher.exists()
+    assert SharedState.load_or_init(tmp_path).current_best == state.current_best
+    assert "current_setting.sh render failed" in caplog.text
 
 
 def test_save_current_setting_includes_workload_identity(tmp_path, monkeypatch):

@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""sglang ``--watchdog-timeout`` injection tests.
-
-Hyperloom injects a longer ``--watchdog-timeout`` into ``EXTRA_SGLANG_ARGS``
-unless the user pinned one. Exercised at both the pure-helper and
-``materialize_config_with_envs`` layers.
-"""
+"""sglang ``--watchdog-timeout`` injection tests."""
 
 from __future__ import annotations
 

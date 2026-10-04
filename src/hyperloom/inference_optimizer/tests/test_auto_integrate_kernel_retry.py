@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""KERNEL-phase auto-integrate retry for un-exhausted integration faults.
-
-Covers ``Coordinator._auto_enqueue_pending_integrations`` re-dispatching a
-retryable integration fault inside the KERNEL_AGENT phase (rather than deferring to
-the SWEEP-entry drain), the recorded-attempt-count in-flight guard, and the
-``SharedState.integrate_attempt_count_for_kernel`` helper that powers it.
-"""
+"""KERNEL-phase auto-integrate retry for un-exhausted integration faults."""
 
 from __future__ import annotations
 
@@ -15,6 +9,8 @@ import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
+
+from .conftest import seed_kernel_keep
 
 
 def _ok_result(
@@ -42,6 +38,7 @@ def _ok_result(
 def _integrate_result(
     kernel_id: str,
     *,
+    integration_id: str = "",
     decision: str | None = None,
     status: str = "ok",
     error_class: str | None = None,
@@ -54,6 +51,7 @@ def _integrate_result(
         "status": status,
         "decision": decision,
         "kernel_id": kernel_id,
+        "integration_id": integration_id,
         "patch_path": patch_path or f"/tmp/{kernel_id}_opt.py",
         "target_file": target_file,
         "error_class": error_class,
@@ -76,11 +74,17 @@ def _coord(state: SharedState) -> Coordinator:
     c = Coordinator.__new__(Coordinator)
     c.shared_state = state
     c.bus = _FakeBus()
+    c._attempt_marks = {}
     return c
 
 
 def _dispatched_kids(coord: Coordinator) -> list[str]:
     return [m.payload.get("kernel_id") for m in coord.bus.sent]
+
+
+def _dispatched_integration_id(coord: Coordinator) -> str:
+    """The ``integration_id`` carried by the most recent integrate request."""
+    return str(coord.bus.sent[-1].payload.get("integration_id") or "")
 
 
 # integrate_attempt_count_for_kernel helper
@@ -106,14 +110,13 @@ def test_integrate_attempt_count_sums_across_patch_keys():
 @pytest.mark.asyncio
 async def test_auto_enqueue_dispatches_pending_keep_once_then_guards_inflight():
     state = SharedState()
-    state.record_kernel_opt(
-        _ok_result(
-            "k001",
-            "KEEP",
-            3.0,
-            source_file="/p/a.py",
-            artifact="/tmp/k001_opt.py",
-        )
+    seed_kernel_keep(
+        state,
+        "k001",
+        decision="KEEP",
+        micro=3.0,
+        source_file="/p/a.py",
+        artifact="/tmp/k001_opt.py",
     )
     coord = _coord(state)
 
@@ -129,14 +132,13 @@ async def test_auto_enqueue_dispatches_pending_keep_once_then_guards_inflight():
 @pytest.mark.asyncio
 async def test_auto_enqueue_retries_unexhausted_fault():
     state = SharedState()
-    state.record_kernel_opt(
-        _ok_result(
-            "k001",
-            "KEEP",
-            3.0,
-            source_file="/p/a.py",
-            artifact="/tmp/k001_opt.py",
-        )
+    seed_kernel_keep(
+        state,
+        "k001",
+        decision="KEEP",
+        micro=3.0,
+        source_file="/p/a.py",
+        artifact="/tmp/k001_opt.py",
     )
     coord = _coord(state)
 
@@ -148,6 +150,7 @@ async def test_auto_enqueue_retries_unexhausted_fault():
     entry = state.record_kernel_integrate_result(
         _integrate_result(
             "k001",
+            integration_id=_dispatched_integration_id(coord),
             decision="REVERT",
             status="failed",
             error_class="rebaseline_exception",
@@ -165,14 +168,13 @@ async def test_auto_enqueue_retries_unexhausted_fault():
 @pytest.mark.asyncio
 async def test_auto_enqueue_stops_after_fault_budget_exhausted():
     state = SharedState()
-    state.record_kernel_opt(
-        _ok_result(
-            "k001",
-            "KEEP",
-            3.0,
-            source_file="/p/a.py",
-            artifact="/tmp/k001_opt.py",
-        )
+    seed_kernel_keep(
+        state,
+        "k001",
+        decision="KEEP",
+        micro=3.0,
+        source_file="/p/a.py",
+        artifact="/tmp/k001_opt.py",
     )
     coord = _coord(state)
 
@@ -182,6 +184,7 @@ async def test_auto_enqueue_stops_after_fault_budget_exhausted():
         state.record_kernel_integrate_result(
             _integrate_result(
                 "k001",
+                integration_id=_dispatched_integration_id(coord),
                 decision="REVERT",
                 status="failed",
                 error_class="apply_failed",
@@ -200,14 +203,13 @@ async def test_auto_enqueue_stops_after_fault_budget_exhausted():
 @pytest.mark.asyncio
 async def test_auto_enqueue_no_redispatch_after_keep():
     state = SharedState()
-    state.record_kernel_opt(
-        _ok_result(
-            "k001",
-            "KEEP",
-            3.0,
-            source_file="/p/a.py",
-            artifact="/tmp/k001_opt.py",
-        )
+    seed_kernel_keep(
+        state,
+        "k001",
+        decision="KEEP",
+        micro=3.0,
+        source_file="/p/a.py",
+        artifact="/tmp/k001_opt.py",
     )
     coord = _coord(state)
 
@@ -243,14 +245,13 @@ async def test_auto_enqueue_no_redispatch_after_keep():
 @pytest.mark.asyncio
 async def test_auto_enqueue_no_redispatch_after_genuine_revert():
     state = SharedState()
-    state.record_kernel_opt(
-        _ok_result(
-            "k001",
-            "KEEP",
-            3.0,
-            source_file="/p/a.py",
-            artifact="/tmp/k001_opt.py",
-        )
+    seed_kernel_keep(
+        state,
+        "k001",
+        decision="KEEP",
+        micro=3.0,
+        source_file="/p/a.py",
+        artifact="/tmp/k001_opt.py",
     )
     coord = _coord(state)
 

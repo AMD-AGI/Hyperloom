@@ -7,34 +7,37 @@ from __future__ import annotations
 
 import argparse
 import os
+from math import isfinite
 from pathlib import Path
 from typing import NoReturn
 
 from .. import framework_registry
 from .backends import CRITIC_PROTOCOL_CHOICES
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
-from hyperloom.common.llm_config import provider_model_defaults
-from hyperloom.orchestrator.roles.agent_role import (
+from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
+
+# Workload knob fallbacks live in ``hyperloom.common`` so that the orchestrator
+# can read the same numbers without importing this module, which would close a
+# cycle. Only the ones this module quotes in help text are pulled in here.
+from hyperloom.common.workload_defaults import (
+    DEFAULT_CONC,
+    DEFAULT_ISL,
+    DEFAULT_OSL,
+    DEFAULT_PRECISION,
+    DEFAULT_TP,
+)
+from hyperloom.common.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 
-# Workload knob fallbacks applied when the operator passes neither the CLI flag
-# nor an inherited value. Flags default to ``None`` so "omitted" is
-# distinguishable from "typed the default"; the resolver in ``cli`` applies
-# these constants only for genuinely-unset knobs (issue #903).
-DEFAULT_ISL = 1024
-DEFAULT_OSL = 1024
-DEFAULT_CONC = 64
-DEFAULT_TP = 1
-DEFAULT_EP = 1
-DEFAULT_PRECISION = "bf16"
-
+#: Fallback wall-clock budget. Named because ``--resume-from`` reads it back as
+#: the "operator did not set this" signal: unlike the target flags, this one has
+#: a real default, so the value alone cannot say whether it was asked for.
+DEFAULT_MAX_HOURS = 2.0
 
 # Substrings that mark a flag or a NAME=VALUE name as carrying a credential.
-# Deliberately broad: over-redacting a pod env var costs nothing, while missing
-# one writes a live token into a log the platform ships elsewhere.
 _SECRET_NAME_HINTS = (
     "token",
     "secret",
@@ -48,33 +51,13 @@ _REDACTED = "***"
 
 
 def _is_secret_name(name: str) -> bool:
-    """Report whether a flag or variable name suggests a credential.
-
-    Args:
-        name: A flag (leading dashes tolerated) or a ``NAME=VALUE`` name.
-
-    Returns:
-        bool: ``True`` when the name matches any known credential hint.
-    """
+    """Report whether a flag or variable name suggests a credential."""
     lowered = name.lstrip("-").lower()
     return any(hint in lowered for hint in _SECRET_NAME_HINTS)
 
 
 def _redact_unknown_args(tokens: list[str]) -> str:
-    """Render unrecognised CLI tokens for logging with credential values masked.
-
-    Names are always kept and only values are dropped, so a misspelled real flag
-    stays as diagnosable as before. A value is masked when its own flag looks
-    sensitive (``--api-key foo``) or when it is a ``NAME=VALUE`` pair with a
-    sensitive name (``--extra-env HF_TOKEN=foo``), which is how credentials
-    normally reach the pods.
-
-    Args:
-        tokens: The leftover argv entries argparse could not place.
-
-    Returns:
-        str: A space-joined, log-safe rendering of ``tokens``.
-    """
+    """Render unrecognised CLI tokens for logging with credential values masked."""
 
     def _mask(value: str, flag_is_secret: bool) -> str:
         name, sep, _ = value.partition("=")
@@ -101,44 +84,16 @@ def _redact_unknown_args(tokens: list[str]) -> str:
 
 
 class RedactingArgumentParser(argparse.ArgumentParser):
-    """Parser whose unrecognised-argument error cannot print a credential.
-
-    argparse renders the offending tokens verbatim. The platform hands its whole
-    prompt FLAGS block to this CLI, pod credentials included, so an argument
-    this parser does not know -- a flag the platform added before Hyperloom
-    declared it, or a plain typo -- would otherwise write a live token into a
-    log shipped elsewhere. Only the values are masked; every name survives, so
-    the message still says exactly which argument was rejected.
-    """
+    """Parser whose unrecognised-argument error cannot print a credential."""
 
     _UNRECOGNIZED_PREFIX = "unrecognized arguments: "
 
     def error(self, message: str) -> NoReturn:
-        """Exit 2 like argparse, with credential values masked.
-
-        Args:
-            message: The argparse-generated error message.
-        """
+        """Exit 2 like argparse, with credential values masked."""
         if message.startswith(self._UNRECOGNIZED_PREFIX):
             tail = message[len(self._UNRECOGNIZED_PREFIX) :]
             message = self._UNRECOGNIZED_PREFIX + _redact_unknown_args(tail.split())
         super().error(message)
-
-
-def _default_pr_monitor_mcp_url() -> str | None:
-    """Derive the PR Monitor MCP URL from ``$PRIMUS_CORTEX_PR_API``.
-
-    Appends ``/mcp/`` so the one env var that already defaults
-    ``--pr-monitor-url`` also configures the specialist PR-Monitor MCP server,
-    instead of silently leaving the MCP half disabled. The trailing
-    slash is kept because the bare ``/mcp`` form answers 307 and MCP clients do
-    not re-POST across the redirect.
-
-    Returns:
-        The derived URL, or ``None`` when the env var is unset.
-    """
-    base = (os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip().rstrip("/")
-    return f"{base}/mcp/" if base else None
 
 
 def _positive_int_arg(value: str) -> int:
@@ -152,13 +107,24 @@ def _positive_int_arg(value: str) -> int:
     return parsed
 
 
-def _default_claude_model_env() -> str:
-    """Resolve the default Claude model from env.
+def _positive_ms_arg(value: str) -> float:
+    """argparse type for a millisecond ceiling.
 
-    Runs before ``_preflight`` normalizes the environment, so it consults
-    :func:`provider_model_defaults` itself: a gateway that only serves its own
-    models must not be handed the AMD Claude default.
+    The gate this feeds fails closed, so its switch must not fail open: an
+    unusable value has to stop the launch rather than resolve to "no budget" and
+    leave the operator believing an SLA is enforced.
     """
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}") from exc
+    if not isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}")
+    return parsed
+
+
+def _default_claude_model_env() -> str:
+    """Resolve the default Claude model from env."""
     explicit = (os.environ.get("CLAUDE_MODEL") or "").strip()
     if explicit:
         return explicit
@@ -167,25 +133,14 @@ def _default_claude_model_env() -> str:
     gateway_model = provider_model_defaults().get("CLAUDE_MODEL", "")
     if gateway_model:
         return gateway_model
-    openai_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
-    anthropic_url = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-    if openai_url and not anthropic_url:
+    if is_openai_only():
         return (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
     return DEFAULT_CLAUDE_MODEL
 
 
 def _default_codex_model_env() -> str:
-    """Resolve the default Codex-style model from env.
-
-    When the operator only configured the Anthropic side, Codex-style JSON
-    roles run through the unified gateway with the same Claude model as
-    orchestration. This also overrides generated default ``CODEX_MODEL`` values
-    from setup env files. Explicit ``CODEX_MODEL`` keeps the historical
-    OpenAI-compatible behavior when an OpenAI base URL is configured.
-    """
-    anthropic_url = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-    openai_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
-    if anthropic_url and not openai_url:
+    """Resolve the default Codex-style model from env."""
+    if is_anthropic_only():
         return (os.environ.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
     explicit = (os.environ.get("CODEX_MODEL") or "").strip()
     if explicit:
@@ -197,36 +152,21 @@ def _default_codex_model_env() -> str:
 
 
 def _default_research_lane_capacity() -> int:
-    """Default ``--research-lane-capacity`` to the GPU ceiling (2×GPU).
-
-    Returns:
-        int: The policy GPU ceiling.
-    """
+    """Default ``--research-lane-capacity`` to the GPU ceiling (2×GPU)."""
     from hyperloom.orchestrator.policy.gate import research_lane_ceiling
 
     return research_lane_ceiling()
 
 
 def _default_gpu_specialist_capacity() -> int:
-    """Default ``--gpu-specialist-capacity`` to the whole visible machine.
-
-    WS2 turns GPU specialists on by default at whole-machine capacity. When the
-    operator needs a different value, pass ``--gpu-specialist-capacity``.
-
-    Returns:
-        int: The detected whole-machine GPU count, or ``0`` when nothing can be probed.
-    """
-    from hyperloom.orchestrator.policy.gate import detect_gpu_count
+    """Default ``--gpu-specialist-capacity`` to the whole visible machine."""
+    from hyperloom.common.visible_devices import detect_gpu_count
 
     return detect_gpu_count()
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the top-level CLI argument parser and subcommands.
-
-    Returns:
-        The configured :class:`argparse.ArgumentParser`.
-    """
+    """Build the top-level CLI argument parser and subcommands."""
     from hyperloom.orchestrator.specialists.domains import (
         DEFAULT_SPECIALIST_MAX_TURNS as _DEFAULT_SPECIALIST_MAX_TURNS,
     )
@@ -275,8 +215,8 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--gpu-type",
         type=str.lower,
-        # Sorted for a stable --help listing, and derived so a board added to
-        # the identities table is accepted here without a second edit.
+        # Sorted for a stable --help listing, and derived so a board added to the identities table is accepted here
+        # without a second edit.
         choices=sorted(AMD_GPU_DISPATCH_IDENTITIES),
         default=None,
         help="Hint for the real target GPU. The rocm-smi probe always "
@@ -308,8 +248,7 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--streams-per-partition",
         type=int,
-        # None, not 2, so a resume can tell "not passed" from "passed 2" and
-        # let the persisted value stand. The 2 is applied where it is resolved.
+        # None, not 2, so a resume can tell "not passed" from "passed 2" and let the persisted value stand.
         default=None,
         metavar="N",
         help="Concurrent streams to place on each partition when the card is "
@@ -390,16 +329,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="GPUs per multi-node pod (Infera worker/prefill/decode or RayJob "
         "head+workers). Defaults to 8 when omitted.",
     )
-    # Platform-owned, inert here. Primus-Claw parses ONE prompt FLAGS block for
-    # both itself and this CLI, and these configure the cluster it provisions
-    # (pod image, per-pod cpu/mem, pod env) before the optimizer ever starts.
-    # Nothing reads them; they are declared so strict parsing accepts a real
-    # platform prompt.
-    #
-    # Declared individually rather than tolerating unknown arguments wholesale,
-    # so a misspelled Hyperloom flag still fails fast instead of running for
-    # hours on a default. No similarity heuristic could stand in for this list:
-    # ``--cpus-per-node`` and ``--gpus-per-node`` are one character apart.
+    # Platform-owned, inert here.
     opt.add_argument("--mn-image", default=None, help=argparse.SUPPRESS)
     opt.add_argument("--cpus-per-node", type=int, default=None, help=argparse.SUPPRESS)
     opt.add_argument("--mem-per-node", type=int, default=None, help=argparse.SUPPRESS)
@@ -539,7 +469,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "state.json under `explore_search.last_round.skipped_dup`, and in the "
         "action's per-variant outcomes, tagged `user_skip`.",
     )
-    opt.add_argument("--max-hours", type=float, default=2.0, help="Wall-clock budget in hours (default 2.0)")
+    opt.add_argument(
+        "--max-hours",
+        type=float,
+        # No argparse default: ``--resume-from`` must tell "the operator asked
+        # for this many hours" from "the operator said nothing", and a default
+        # would make an explicit value indistinguishable from absence.
+        default=None,
+        help=f"Wall-clock budget in hours (default {DEFAULT_MAX_HOURS})",
+    )
+    opt.add_argument(
+        "--extend-hours",
+        dest="extend_hours",
+        type=float,
+        default=0.0,
+        help="On --resume-from, grant this many additional hours to the "
+        "session budget. Elapsed time is summed forward across every leg and "
+        "never reset, so this is the only way to lengthen a run that has "
+        "already spent its budget. The grant is recorded in the session state "
+        "with its reason.",
+    )
     opt.add_argument(
         "--closing-grace-sec",
         type=float,
@@ -599,37 +548,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "--framework-version=0.4.5 to pin a specific tag for the run."
         ),
     )
-    # ``None`` rather than True: the deprecated alias below has to be able to
-    # tell "not passed" from an explicit value, or it could never be honoured
-    # without also overriding this flag. bootstrap applies the real default.
-    opt.add_argument(
-        "--auto-kernel-opt",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help=(
-            "At KERNEL entry, dispatch the source-level kernel_opt batch "
-            "without waiting for an orchestration request — every untried "
-            "candidate above the dispatch floor goes in one batch. Runs on "
-            "both entry routes (with and without FP8 GEMM tuning), since "
-            "tuning GEMM shape tables and rewriting kernel source are "
-            "unrelated. --no-auto-kernel-opt leaves source-level kernel_opt "
-            "to explicit orchestration requests; it does not disable the "
-            "forge-fusion or collective lanes, which have their own gates. "
-            "Default: enabled."
-        ),
-    )
-    # Deprecated spelling of --auto-kernel-opt, still honoured so a launcher
-    # template that passes it keeps its opt-out instead of silently getting the
-    # default back. ``None`` default distinguishes "not passed" from an explicit
-    # value; bootstrap resolves the precedence and warns. Unlike the retired
-    # no-ops below, this one still feeds the same dest.
-    opt.add_argument(
-        "--continue-kernel-after-gemm",
-        dest="continue_kernel_after_gemm",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help=argparse.SUPPRESS,
-    )
     grp = opt.add_mutually_exclusive_group()
     grp.add_argument(
         "--target-gain",
@@ -641,10 +559,36 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target-tput",
         type=float,
         default=None,
-        help="Stop when current best reaches N (serving: tok/s/GPU; xDiT: img/s)",
+        help="Stop when current best reaches N, whole-server total (serving: tok/s; xDiT: img/s)",
     )
     grp.add_argument(
         "--target-baseline-dir", type=str, default=None, help="Stop when current best matches the baseline in DIR"
+    )
+    # Outside the group: it measures a different axis, so it ORs with whichever of the three above is set rather than
+    # competing with them.
+    opt.add_argument(
+        "--target-roofline",
+        type=float,
+        default=None,
+        help=(
+            "Stop when the latest roofline snapshot reaches N%% of its modelled "
+            "ceiling. Inert until a roofline has been measured, and satisfied "
+            "independently of --target-gain / --target-tput / --target-baseline-dir."
+        ),
+    )
+    # Outside the group as well, and for a stronger reason than --target-roofline: this is a constraint rather than
+    # an objective. It does not say when to stop, it says which winners are admissible, so it composes with whichever
+    # target is in use instead of competing with one.
+    opt.add_argument(
+        "--max-latency-ms",
+        type=_positive_ms_arg,
+        default=None,
+        help=(
+            "Scriptable frameworks (xdit, custom) only. Refuse any KEEP whose mean "
+            "end-to-end latency exceeds N ms. Off by default. A candidate that "
+            "reported no end-to-end latency is refused too, since an unmeasured "
+            "constraint is not a satisfied one."
+        ),
     )
     opt.add_argument(
         "--resume-from",
@@ -729,11 +673,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-allow-mm-text-fallback to fail-fast on text-coercible "
         "models too. Default: enabled.",
     )
-    # Retired with the kernel LLM role; accepted as no-ops so a launcher or
-    # operator template that still passes them does not exit 2. Nothing reads
-    # the dests. ``--kernel-prompt`` took a path, so it has to keep consuming
-    # one: as a store_true its value would land as a stray positional and
-    # argparse would exit 2 anyway, which is the failure this exists to avoid.
+    # Retired with the kernel LLM role; accepted as no-ops so a launcher or operator template that still passes them
+    # does not exit 2.
     for _retired in ("--kernel-codex", "--kernel-claude"):
         opt.add_argument(_retired, action="store_true", default=False, help=argparse.SUPPRESS)
     opt.add_argument("--kernel-prompt", type=str, default=None, help=argparse.SUPPRESS)
@@ -833,81 +774,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Protocol for the Critic's review inference. 'openai' uses the "
         "OpenAI SDK; 'anthropic' uses the Messages API, or the Claude CLI when a "
         "CLAUDE_CODE_OAUTH_TOKEN subscription is the only credential. "
-        "'auto' (default) derives it from the configured credentials; an "
-        "explicit value fails at startup when that side has no credential. "
+        "'auto' (default) reviews with the orchestration model over the protocol "
+        "orchestration runs on; an explicit value reviews with that side's model "
+        "(CLAUDE_MODEL or CODEX_MODEL) and fails at startup when that side has no "
+        "credential. Preflight sends the review model one request and refuses to "
+        "start when it does not answer; there is no fallback model. "
         "Ignored (with a warning) under --critic-mock, which runs no review "
         "inference.",
-    )
-    # Robustness backend selection (mirrors critic)
-    opt.add_argument(
-        "--robustness-mock",
-        dest="robustness_backend",
-        action="store_const",
-        const="mock",
-        default=None,
-        help="Force the heartbeat-only mock Robustness backend.",
-    )
-    opt.add_argument(
-        "--robustness-agent",
-        dest="robustness_backend",
-        action="store_const",
-        const="agent",
-        help="Force the robustness-agent runtime backend (subprocess + JSON, "
-        "mirrors critic-agent transport). Requires ROBUSTNESS_AGENT_ROOT "
-        "or a sibling $REPO_ROOT/robustness-agent/ directory.",
-    )
-    opt.add_argument(
-        "--robustness-llm-rca",
-        dest="robustness_llm_rca",
-        action="store_true",
-        default=None,
-        help="Forward llm_rca_enabled=true into request.options. The agent "
-        "still falls back to NoopRcaEngine when LLM credentials aren't "
-        "set in the runtime env.",
-    )
-    opt.add_argument(
-        "--no-robustness-llm-rca",
-        dest="robustness_llm_rca",
-        action="store_false",
-        help="Forward llm_rca_enabled=false into request.options.",
-    )
-    opt.add_argument(
-        "--robustness-disable-local-probe",
-        dest="robustness_disable_local_probe",
-        action="store_true",
-        default=None,
-        help="Force disable_local_probe=true. The robustness-agent silences "
-        "its LocalProbe fallback so per-pod sandbox checks (ps, rocm-smi, "
-        "local HTTP) cannot emit false-positive symptoms.",
-    )
-    opt.add_argument(
-        "--no-robustness-disable-local-probe",
-        dest="robustness_disable_local_probe",
-        action="store_false",
-        help="Force disable_local_probe=false (keep the LocalProbe fallback even in multi-node mode).",
-    )
-    opt.add_argument(
-        "--robustness-disable-server-probe",
-        dest="robustness_disable_server_probe",
-        action="store_true",
-        default=None,
-        help="Force auto_probe_inference_server=false: stop the robustness-agent "
-        "from auto-probing the local inference-server health endpoint "
-        "(http://127.0.0.1:8888/health). Unlike --robustness-disable-local-probe "
-        "this is surgical — the REST of LocalProbe (gpu-leak, gateway 401, "
-        "coordinator-zombie, aiter-JIT, disk/fd) stays active. Use on "
-        "single-node runs where the optimizer restarts the inference server "
-        "between benchmarks: those restart windows otherwise trip "
-        "false-positive local_server_unreachable symptoms (which can escalate "
-        "to a premature skip_to_close / robustness_escalated stop). "
-        "Auto-enabled in multi-node.",
-    )
-    opt.add_argument(
-        "--no-robustness-disable-server-probe",
-        dest="robustness_disable_server_probe",
-        action="store_false",
-        help="Force auto_probe_inference_server=true (keep the 127.0.0.1:8888 "
-        "/health auto-probe even in multi-node mode).",
     )
     opt.add_argument(
         "--orch-prompt", type=str, default=None, help="Override Orchestration system prompt (file path or inline)"
@@ -939,16 +812,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "no-ops). Also short-circuits any legacy IR-3 KB probe marker. "
         "Manifest records the reason as ``explicit_flag`` when set "
         "explicitly.",
-    )
-    opt.add_argument(
-        "--recipe-kb-strict-fingerprint",
-        dest="recipe_kb_strict_fingerprint",
-        action="store_true",
-        default=False,
-        help="When set, T0 refuses warm_start_recipe rows whose "
-        "stack_fingerprint does not match the current pod (recorded "
-        "in manifest.json). Default: lenient (M1 records the flag "
-        "in manifest only; consumed by M5 specialist assembly).",
     )
     # Warm-recipe replay: PRELUDE auto-applies KB best_config before optimising.
     opt.add_argument(
@@ -987,27 +850,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "``status=drift`` and continue with the regular optimisation "
         "flow without inheriting the warm config.",
     )
-    # PR Monitor REST + MCP.
-    opt.add_argument(
-        "--pr-monitor-url",
-        dest="pr_monitor_url",
-        type=str,
-        default=(os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip() or None,
-        help="PR Monitor REST URL for this run (flag wins). Default: "
-        "$PRIMUS_CORTEX_PR_API, else unset. Set this flag or env var to a "
-        "reachable primus_cortex HTTPS endpoint. Pair with "
-        "--pr-monitor-mcp-url when exposing the corresponding MCP server.",
-    )
-    opt.add_argument(
-        "--pr-monitor-mcp-url",
-        dest="pr_monitor_mcp_url",
-        type=str,
-        default=_default_pr_monitor_mcp_url(),
-        help="PR Monitor MCP URL handed to specialist LLM backends (flag "
-        "wins). Default: $PRIMUS_CORTEX_PR_API + '/mcp/', else unset, which "
-        "disables PR Monitor MCP tools. The trailing slash is mandatory when "
-        "configured.",
-    )
+    # PR Monitor REST + MCP are co-hosted by KB Store and derived from $KB_STORE_URL.
     opt.add_argument(
         "--degraded-pr",
         dest="degraded_pr",
@@ -1053,8 +896,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "comma-separated GPU id pool when the specialist pool should "
         "not use device ids 0..N-1. Locked at session start.",
     )
-    # Advisory specialist-proposal scorer (ProposalScorer): scores each
-    # proposal_set with gateway models as a reference for Orchestration; never gates.
+    # Advisory specialist-proposal scorer (ProposalScorer): scores each proposal_set with gateway models as a
+    # reference for Orchestration; never gates.
     opt.add_argument(
         "--proposal-scorer-models",
         dest="proposal_scorer_models",
@@ -1105,9 +948,9 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="specialist_per_turn_max_seconds",
         type=float,
         default=600.0,
-        help="Wall-clock fallback ceiling per specialist task when no "
-        "explicit wall_budget_sec is provided (legacy backstop, default "
-        "600s; production dispatches use the WS1 wall-clock budget).",
+        help="Per-LLM-call timeout for an in-process specialist backend "
+        "(default 600s). It bounds one call, never the task: the task is "
+        "bounded by the absolute deadline the dispatcher hands down.",
     )
     # specialist dispatch shape
     opt.add_argument(
@@ -1131,8 +974,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "servers into private task-local config. Default: None.",
     )
 
-    # Integration toggles. Roofline refresh is unconditional (fires at PRELUDE
-    # and every 10% cumulative_gain_validated crossing).
+    # Integration toggles.
     opt.add_argument(
         "--enable-roofline",
         dest="enable_roofline",
@@ -1205,33 +1047,30 @@ def _build_parser() -> argparse.ArgumentParser:
         "directions. Advisory only — never gates Objective or scoring. "
         "Default on; pass ``--no-target-advisory`` to disable.",
     )
-    # Post-optimization concurrency sweep (on by default): a baseline-vs-optimized
-    # Magpie grid across CONC values (see orchestrator/conc_sweep.py).
+    # Post-optimization concurrency sweep: a baseline-vs-optimized Magpie grid across CONC values (see
+    # orchestrator/conc_sweep.py). Defaults to None so bootstrap can pick by benchmark mode.
     opt.add_argument(
         "--enable-conc-sweep",
         dest="enable_conc_sweep",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="Run a post-optimization concurrency sweep (baseline vs "
         "current_best across CONC) and write "
         "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
-        "On by default; disable with --no-enable-conc-sweep.",
+        "On by default, off under AgentX (each rung is a 3600s window); "
+        "force either way with --enable-conc-sweep / --no-enable-conc-sweep.",
     )
     opt.add_argument(
         "--conc-sweep-concs",
         dest="conc_sweep_concs",
         type=str,
-        default="256,128,64,32,16,8,4,2",
-        help="Comma-separated CONC ladder for --enable-conc-sweep. Default 256,128,64,32,16,8,4,2 (high-to-low for single-server arm reuse).",
-    )
-    opt.add_argument(
-        "--conc-sweep-timeout-sec",
-        dest="conc_sweep_timeout_sec",
-        type=int,
-        default=1800,
-        help="Per-variant timeout (seconds) for --enable-conc-sweep. "
-        "Default 1800 (~30 min). Per-variant cap is also clamped "
-        "by the remaining --conc-sweep-total-budget-sec.",
+        default=None,
+        help="Comma-separated CONC ladder for --enable-conc-sweep. Ordered "
+        "high-to-low internally for single-server arm reuse, so the order given "
+        "does not matter. Defaults to the ladder for the workload: "
+        "256,128,64,32,16,8,4,2 synthetic, 1,4,8,10,14,20,28 under "
+        "HYPERLOOM_AGENTX (an agentic request carries orders of magnitude more "
+        "prompt, so the same card saturates far lower).",
     )
     opt.add_argument(
         "--conc-sweep-total-budget-sec",
@@ -1247,54 +1086,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "main session wall-clock deadline since conc_sweep runs as "
         "a SWEEP-phase action.",
     )
-    # Per-variant explore overtime kill ratio (mirrored to
-    # SharedState.explore_overtime_kill_ratio). 0 disables.
-    opt.add_argument(
-        "--explore-overtime-kill-ratio",
-        dest="explore_overtime_kill_ratio",
-        type=float,
-        default=2.0,
-        help="Per-variant explore overtime kill: each single-variant "
-        "Magpie run in the explore loop is reaped once its "
-        "POST-READY (pure hot client) wall-clock exceeds "
-        "``decision_anchor_sec * RATIO`` (the warm-decision anchor is "
-        "``baseline_warm_runtime_sec``; pre-ready boot / weight load / "
-        "first-request recompile is excluded — see "
-        "INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY). The variant is "
-        "recorded with outcome=KILLED_OVERTIME + runtime_sec + "
-        "wall_clock_ratio_vs_baseline (no tput) so the LLM can "
-        "distinguish it from a hard timeout / crash. Default 2.0 (kill "
-        "at +100%% over the warm client anchor). Pass 0 to disable.",
-    )
-    # Explore variant hard timeout — operator override for the auto-derived cap.
-    # 0 (default) keeps auto-derive; mirrored to
-    # SharedState.explore_variant_timeout_sec_override.
-    opt.add_argument(
-        "--explore-variant-timeout-sec",
-        dest="explore_variant_timeout_sec",
-        type=int,
-        default=0,
-        help="Pin the per-variant hard timeout (seconds) inside the "
-        "optimisation phase. ``0`` (default) auto-derives from "
-        "``baseline_runtime_sec * (--explore-overtime-kill-ratio + "
-        "--explore-variant-timeout-safety-margin)`` once baseline "
-        "lands, with a 2400-14400 s range guard. Set to a positive "
-        "integer to pin (CI smoke runs / debugging).",
-    )
-    opt.add_argument(
-        "--explore-variant-timeout-safety-margin",
-        dest="explore_variant_timeout_safety_margin",
-        type=float,
-        default=0.5,
-        help="Headroom (as a fraction of baseline_runtime_sec) added on "
-        "top of --explore-overtime-kill-ratio when the explore hard "
-        "cap is auto-derived. Default 0.5 (≈ 50%% of baseline as "
-        "buffer for variant cold starts: torch.compile AOTI compile, "
-        "fresh aiter shapes, spec-decoding draft load). Bump for "
-        "workloads with heavy compile cost; lower to tighten the "
-        "backstop. No effect when --explore-variant-timeout-sec is "
-        "set to a positive value.",
-    )
+    # Per-variant explore overtime kill ratio (mirrored to SharedState.explore_overtime_kill_ratio). 0 disables.
+    # Explore variant hard timeout — operator override for the auto-derived cap. 0 (default) keeps auto-derive;
+    # mirrored to SharedState.explore_variant_timeout_sec_override.
     opt.add_argument(
         "--reset-state",
         dest="reset_state",
@@ -1303,17 +1097,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Back up the existing ``state.json`` (if any) to "
         "``state.json.preReset.<unix_ts>`` and start the session "
         "from a blank SharedState. Recipe KB is NOT touched.",
-    )
-    # observability
-    opt.add_argument(
-        "--breakdown-include-transcripts",
-        dest="breakdown_include_transcripts",
-        type=str,
-        choices=("true", "false"),
-        default="false",
-        help="Inline specialist transcript bodies into "
-        "``specialist_runs`` (true) or reference them by path "
-        "only (false, default). KB_design §3.12 §7.",
     )
     # plateau threshold tuning: override defaults; locked at session start.
     opt.add_argument(
@@ -1365,9 +1148,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="KERNEL plateau: number of trailing integrate attempts the gain sum is computed over. Default 5.",
     )
-    # phase budget percentages: each phase claims a fraction of the wall-clock
-    # budget (caps; may exit earlier). Both ``--max-minutes-*-pct`` and
-    # ``--phase-budget-*-pct`` spellings are accepted.
+    # phase budget percentages: each phase claims a fraction of the wall-clock budget (caps; may exit earlier).
     opt.add_argument(
         "--max-minutes-prelude-pct",
         "--phase-budget-prelude-pct",
@@ -1379,15 +1160,14 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--max-minutes-framework-pct",
         "--phase-budget-framework-pct",
-        # The EXPLORE spellings land on the same option: configuration search
-        # and source landing are two arms of one phase with one budget, so a
-        # separate share for either would be a number nothing reads.
+        # The EXPLORE spellings land on the same option: configuration search and source landing are two arms of one
+        # phase with one budget, so a separate share for either would be a number nothing reads.
         "--max-minutes-explore-pct",
         "--phase-budget-explore-pct",
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.40.",
+        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.38.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
@@ -1395,7 +1175,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.50.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",
@@ -1412,21 +1192,6 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Wall-clock budget cap for CLOSE. Default: 0.02.",
-    )
-    opt.add_argument(
-        "--strict-phase",
-        dest="strict_phase",
-        action="store_true",
-        default=True,
-        help="Enforce PolicyGate R1 phase_incompatible. "
-        "Action proposals outside the current phase's allowlist "
-        "return policy_denied so the LLM self-corrects.",
-    )
-    opt.add_argument(
-        "--no-strict-phase",
-        dest="strict_phase",
-        action="store_false",
-        help="Disable R1 enforcement (warn-only). Useful for back-compat smoke tests; production should stay strict.",
     )
 
     rec = sub.add_parser(
@@ -1452,6 +1217,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "generations. Use ONLY when the live emitter never ran for this "
         "session (e.g. it was disabled during the run); otherwise it "
         "duplicates generations already pushed live.",
+    )
+    rec.add_argument(
+        "--confirm-stopped",
+        metavar="TASK_ID",
+        help="Attest that one task's complete process tree, remote workers and Ray actor have stopped, "
+        "then cancel unfinished work and release only its unattributed execution/GPU ownership records. Requires POSIX session locking "
+        "and --confirmation-reason; rejects recorded nonempty owner scopes. Does not stop processes, "
+        "accept old results, rebuild reports or resume execution.",
+    )
+    rec.add_argument(
+        "--confirmation-reason",
+        metavar="TEXT",
+        help="Required audit reason for --confirm-stopped. Both options must be provided together "
+        "and cannot be combined with --force or --backfill-trace.",
     )
 
     return p

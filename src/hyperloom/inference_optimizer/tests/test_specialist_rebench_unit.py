@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for the optional GPU-specialist rebench helper.
-
-``run_grid`` / Magpie are mocked, so these exercise port resolution,
-leased-card reporting, env-pair parsing, result shapes, and the CLI ``main``.
-"""
+"""Unit coverage for the optional GPU-specialist rebench helper."""
 
 from __future__ import annotations
 
@@ -17,12 +13,7 @@ from hyperloom.orchestrator.specialists import rebench as sr
 
 
 def _variant_result(**overrides) -> VariantResult:
-    """A real ``VariantResult``, which is what ``run_grid`` returns.
-
-    Built from the dataclass rather than a namespace so a field the production
-    code reads under the wrong name fails here instead of silently yielding
-    ``None`` in the emitted result.
-    """
+    """A real ``VariantResult``, which is what ``run_grid`` returns."""
     fields = {
         "name": "rebench",
         "extra_server_args": "",
@@ -89,7 +80,6 @@ async def test_run_specialist_rebench_success(tmp_path, monkeypatch) -> None:
     assert "w1" in res["warnings"]
     assert seen["base_extra_args"] == "--kv-cache-dtype fp8_e4m3"
     assert seen["grid"][0].extra_server_args == ""
-    assert seen["preclean_before_run"] is False
 
 
 @pytest.mark.asyncio

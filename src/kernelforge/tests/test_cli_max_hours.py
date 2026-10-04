@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the ``--max-hours`` guard on the forge-loop command.
-
-A run shorter than MIN_MAX_HOURS can't complete a productive campaign (the time
-reserve would block iterations, or the budget exhausts immediately), so the CLI
-rejects it up front. These tests require no LLM / GPU / gateway."""
+"""Unit tests for the ``--max-hours`` guard on the forge-loop command."""
 
 from __future__ import annotations
 
@@ -39,10 +35,8 @@ def test_validate_max_hours_accepts_minimum_and_above():
 
 
 def test_validate_max_hours_floor_is_not_env_overridable(monkeypatch):
-    # The floor exists because the loop won't start an iteration once less than
-    # budget_reserve_sec (900s) of the budget remains: below the floor a campaign
-    # finalizes having done little or nothing and still exits 0. No env escape
-    # hatch may weaken it, otherwise CI can go green on an empty campaign.
+    # The floor exists because the loop won't start an iteration once less than budget_reserve_sec (900s) of the
+    # budget remains: below the floor a campaign finalizes having done little or nothing and still exits 0.
     monkeypatch.setenv("KF_CI_SMOKE", "1")
     with pytest.raises(click.BadParameter):
         _validate_max_hours(None, None, 0.1)
@@ -107,9 +101,7 @@ def test_max_hours_help_describes_long_horizon_agents():
 
 
 def test_forge_loop_rejects_an_unregistered_producer():
-    # A producer names an index in the KB identity scheme. Accepting a free
-    # string here would publish under an address nothing ever reads back,
-    # and the failure would only surface as a permanently cold warm start.
+    # A producer names an index in the KB identity scheme.
     result = CliRunner().invoke(
         main,
         [
@@ -273,3 +265,32 @@ def test_failed_later_keep_preserves_warm_publication_and_marks_pending():
     assert publication["published_commit"] == "warm-local-commit"
     assert publication["pending_commit"] == "keep-commit"
     assert publication["status"] == "pending_retry"
+
+
+def test_a_keep_the_store_declined_on_merit_stops_being_pending():
+    """A decision is not a failure, so it must not be retried forever.
+
+    A warm-started run that ends no faster than the solution it started from is declined because re-recording it would
+    only add a second copy. That is the common refusal now that losing to the source baseline no longer causes one, and
+    holding it pending would leave the campaign waiting on an attempt that can never succeed.
+    """
+    state = _initial_remote_publication_state(
+        {
+            "applied": True,
+            "applied_commit": "warm-local-commit",
+            "solution_slug": "kernelforge-exp/op/existing-solution",
+        }
+    )
+    state["pending_commit"] = "keep-commit"
+
+    _record_remote_publication_result(
+        state,
+        commit="keep-commit",
+        result={"written": False, "reason": "no_improvement_over_reuse"},
+    )
+
+    publication = _remote_publication_view(state, "keep-commit")
+    assert publication["status"] == "no_improvement_over_reuse"
+    assert publication["pending_commit"] == ""
+    # The warm-started solution keeps its standing; only this attempt is over.
+    assert publication["published_commit"] == "warm-local-commit"

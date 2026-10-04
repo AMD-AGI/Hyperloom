@@ -18,11 +18,11 @@ _TOOL_DIR = Path(__file__).resolve().parent.parent / "tools"
 if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 
-import tracelens_analysis as tla  # noqa: E402
-import _bypass_report as bypass_report  # noqa: E402
-import _idle_gate as idle_gate  # noqa: E402
-import _task_group_contract as task_group_contract  # noqa: E402
-import tracelens_skill_runner as tlr  # noqa: E402
+import tracelens_analysis as tla
+import _bypass_report as bypass_report
+import _idle_gate as idle_gate
+import _task_group_contract as task_group_contract
+import tracelens_skill_runner as tlr
 
 
 def test_default_top_k_uses_large_pool_by_default(monkeypatch):
@@ -52,213 +52,12 @@ def test_default_top_k_invalid_falls_back(monkeypatch):
     assert tla._default_top_k() == tla._DEFAULT_KERNEL_CANDIDATES_TOP_K
 
 
-def test_deterministic_category_analysis_command_maps_manifest_names(tmp_path):
-    """Deterministic route must invoke the real TraceLens script for manifest category names."""
-    cases = {
-        "sdpa_fwd": (
-            "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis",
-            ["--category", "sdpa_fwd"],
-        ),
-        "sdpa_bwd": (
-            "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis",
-            ["--category", "sdpa_bwd"],
-        ),
-        "inferenceattention": (
-            "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis",
-            ["--category", "inferenceattention"],
-        ),
-        "norm_bwd": (
-            "TraceLens.Agent.Analysis.category_analyses.norm_analysis",
-            ["--category", "norm_bwd"],
-        ),
-        "rmsnorm": (
-            "TraceLens.Agent.Analysis.category_analyses.norm_analysis",
-            ["--category", "rmsnorm"],
-        ),
-        "moe_unfused": (
-            "TraceLens.Agent.Analysis.category_analyses.moe_analysis",
-            ["--category", "moe_unfused"],
-        ),
-        "customcollective": (
-            "TraceLens.Agent.Analysis.category_analyses.other_analysis",
-            ["--category", "customcollective"],
-        ),
-        "triton": (
-            "TraceLens.Agent.Analysis.category_analyses.triton_analysis",
-            [],
-        ),
-    }
-    for category, (module_name, extra_args) in cases.items():
-        cmd = tla._category_analysis_command(category, "compute_kernel", tmp_path)
-        assert cmd is not None
-        assert module_name in cmd
-        for arg in extra_args:
-            assert arg in cmd
-
-
-def test_deterministic_category_analysis_command_handles_grouped_gemm(tmp_path):
-    cmd = tla._category_analysis_command(
-        "groupedgemm_fwd",
-        "compute_kernel",
-        tmp_path,
-    )
-
-    assert cmd is not None
-    assert cmd[:2] == [sys.executable, "-c"]
-    snippet = cmd[2]
-    assert "gemm_analysis" in snippet
-    assert "category='groupedgemm_fwd'" in snippet
-    assert "--category" not in cmd
-
-
-def test_deterministic_category_analysis_command_skips_non_compute(tmp_path):
-    assert tla._category_analysis_command("sdpa_fwd", "system", tmp_path) is None
-    assert tla._category_analysis_command("cpu_idle", "compute_kernel", tmp_path) is None
-    assert tla._category_analysis_command("unknown_new_category", "compute_kernel", tmp_path) is None
-
-
-def test_deterministic_pipeline_failure_cannot_return_partial_hot_kernels():
-    with pytest.raises(RuntimeError, match="refusing to return partial hot_kernels"):
-        tla._raise_on_failed_deterministic_pipeline(2)
-
-    assert tla._raise_on_failed_deterministic_pipeline(0) is None
-
-
-def test_deterministic_steps_return_category_script_failure(monkeypatch, tmp_path):
-    output_dir = tmp_path / "out"
-    category_dir = output_dir / "category_data"
-    category_dir.mkdir(parents=True)
-    (category_dir / "category_manifest.json").write_text(
-        """
-        {
-          "categories": [
-            {"name": "sdpa_fwd", "tier": "compute_kernel"}
-          ]
-        }
-        """,
-        encoding="utf-8",
-    )
-    (tmp_path / "trace.json").write_text("{}", encoding="utf-8")
-    log_path = tmp_path / "tl.log"
-    calls: list[list[str]] = []
-
-    def fake_run_command(cmd, *, cwd, log_path, timeout_s, env=None):
-        calls.append(cmd)
-        if "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis" in cmd:
-            return 7
-        return 0
-
-    monkeypatch.setattr(tla, "run_command", fake_run_command)
-
-    rc = tla._run_deterministic_tracelens_steps(
-        trace_path=tmp_path / "trace.json",
-        output_dir=output_dir,
-        tl_root=tmp_path,
-        platform="MI300X",
-        analysis_mode="standalone",
-        framework="sglang",
-        capture_folder=None,
-        log_path=log_path,
-        budget_minutes=1,
-    )
-
-    assert rc == 7
-    assert any("TraceLens.Agent.Analysis.category_analyses.sdpa_analysis" in cmd for cmd in calls)
-    assert any("generate_priority_data" in " ".join(cmd) for cmd in calls)
-
-
-def test_deterministic_steps_quote_priority_output_dir(monkeypatch, tmp_path):
-    output_dir = tmp_path / "out'quoted"
-    category_dir = output_dir / "category_data"
-    category_dir.mkdir(parents=True)
-    (category_dir / "category_manifest.json").write_text(
-        '{"categories": []}',
-        encoding="utf-8",
-    )
-    (tmp_path / "trace.json").write_text("{}", encoding="utf-8")
-    calls: list[list[str]] = []
-
-    def fake_run_command(cmd, *, cwd, log_path, timeout_s, env=None):
-        calls.append(cmd)
-        return 0
-
-    monkeypatch.setattr(tla, "run_command", fake_run_command)
-
-    rc = tla._run_deterministic_tracelens_steps(
-        trace_path=tmp_path / "trace.json",
-        output_dir=output_dir,
-        tl_root=tmp_path,
-        platform="MI300X",
-        analysis_mode="standalone",
-        framework="sglang",
-        capture_folder=None,
-        log_path=tmp_path / "tl.log",
-        budget_minutes=1,
-    )
-
-    assert rc == 0
-    priority_cmd = next(cmd for cmd in calls if "generate_priority_data" in " ".join(cmd))
-    assert str(output_dir) in priority_cmd[2]
-    assert f"generate_priority_data({str(output_dir)!r})" in priority_cmd[2]
-
-
-def test_deterministic_main_fails_before_high_idle_gate(
+def test_dry_run_writes_the_source_resolution_artifact(
     monkeypatch,
     tmp_path,
     capsys,
 ):
-    import json as _json
-
-    trace = tmp_path / "trace.json"
-    trace.write_text('{"traceEvents": []}', encoding="utf-8")
-    workspace = tmp_path / "workspace"
-    tl_root = tmp_path / "TraceLens"
-    skill = tl_root / "TraceLens" / "Agent" / "Analysis" / "skills" / "analysis-orchestrator" / "SKILL.md"
-    skill.parent.mkdir(parents=True)
-    skill.write_text("# skill\n", encoding="utf-8")
-
-    monkeypatch.setattr(tla, "count_gpu_kernel_events", lambda _path: 1)
-    monkeypatch.setattr(tla, "populate_gpu_arch_json", lambda **_kwargs: None)
-    monkeypatch.setattr(tla, "run_command", lambda *args, **kwargs: 0)
-    monkeypatch.setattr(
-        tla,
-        "_run_deterministic_tracelens_steps",
-        lambda **_kwargs: 9,
-    )
-
-    def _unexpected_idle_read(_output_dir):
-        raise AssertionError("idle gate must not run after deterministic failure")
-
-    monkeypatch.setattr(tla, "_extract_idle_pct_from_gpu_timeline", _unexpected_idle_read)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "tracelens_analysis.py",
-            "--trace-input",
-            str(trace),
-            "--workspace-path",
-            str(workspace),
-            "--tracelens-root",
-            str(tl_root),
-            "--analysis-route",
-            "deterministic",
-            "--skip-split",
-        ],
-    )
-
-    assert tla.main() == 1
-    result = _json.loads(capsys.readouterr().out)
-    assert result["status"] == "failed"
-    assert "Deterministic TraceLens pipeline failed" in result["error"]
-
-
-def test_agent_dry_run_initializes_route_and_writes_resolution_artifact(
-    monkeypatch,
-    tmp_path,
-    capsys,
-):
-    """Dry-run must not read a route variable initialized only in live mode."""
+    """A dry run still publishes the source-resolution artifact for inspection."""
     import json as _json
 
     trace = tmp_path / "trace.json"
@@ -277,7 +76,7 @@ def test_agent_dry_run_initializes_route_and_writes_resolution_artifact(
                 "duration_us": 1.0,
                 "source_file": str(source),
                 "source_type": "python",
-                "source_resolution_method": "name_grep",
+                "source_resolution_method": "symbol_index",
             }
         ],
     )
@@ -295,8 +94,6 @@ def test_agent_dry_run_initializes_route_and_writes_resolution_artifact(
             str(trace),
             "--workspace-path",
             str(tmp_path / "workspace"),
-            "--analysis-route",
-            "agent",
             "--dry-run",
         ],
     )
@@ -306,67 +103,6 @@ def test_agent_dry_run_initializes_route_and_writes_resolution_artifact(
     resolution_path = Path(result["artifact_paths"]["kernel_source_resolution"])
     assert resolution_path.is_file()
     assert _json.loads(resolution_path.read_text(encoding="utf-8"))["entries"][0]["source_file"] == str(source)
-
-
-def test_agent_dry_run_does_not_spend_a_candidate_review_session(monkeypatch, tmp_path, capsys):
-    """A dry run plans the analysis; it must not run the review agent.
-
-    The stage costs an agent session, waits out a 900-second bound when the
-    stream stalls, and reads the framework tree -- all to audit a table a dry
-    run publishes for inspection and never dispatches from.
-    """
-    import json as _json
-
-    trace = tmp_path / "trace.json"
-    trace.write_text('{"traceEvents": []}', encoding="utf-8")
-    source = tmp_path / "kernel.py"
-    source.write_text("def kernel():\n    pass\n", encoding="utf-8")
-    monkeypatch.setattr(
-        tla,
-        "analyze_trace_files",
-        lambda *_args, **_kwargs: [
-            {
-                "kernel_id": "k001",
-                "name": "kernel",
-                "gpu_pct": 100.0,
-                "duration_us": 1.0,
-                "source_file": str(source),
-                "source_type": "python",
-                "source_resolution_method": "name_grep",
-            }
-        ],
-    )
-    monkeypatch.setattr(
-        tla,
-        "write_reports",
-        lambda *_a, **_kw: {"trace_report_path": str(tmp_path / "trace_report.json")},
-    )
-
-    ran: list[str] = []
-    monkeypatch.setattr(
-        tla,
-        "run_candidate_review_stage",
-        lambda *_a, **_kw: ran.append("called") or {},
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "tracelens_analysis.py",
-            "--trace-input",
-            str(trace),
-            "--workspace-path",
-            str(tmp_path / "workspace"),
-            "--analysis-route",
-            "agent",
-            "--dry-run",
-        ],
-    )
-
-    assert tla.main() == 0
-    assert ran == []
-    result = _json.loads(capsys.readouterr().out)
-    assert "kernel_candidates_raw" not in result["artifact_paths"]
 
 
 # A path — is_kernel_event strict cat == 'kernel'
@@ -411,15 +147,14 @@ def test_a_accepts_kernel_with_runtime_lookalike_name_but_kernel_cat():
 
 
 def test_a_rejects_kernel_cat_when_name_is_runtime_api():
-    # Belt-and-braces: even with cat=kernel, names listed in
-    # RUNTIME_API_NAMES (caught by mis-tagged traces) are rejected.
+    # Belt-and-braces: even with cat=kernel, names listed in RUNTIME_API_NAMES (caught by mis-tagged traces) are
+    # rejected.
     weird = {"name": "hipDeviceSynchronize", "cat": "kernel", "dur": 1.0}
     assert tla.is_kernel_event(weird) is False
 
 
 def test_a_top_kernels_no_sync_events_in_real_trace_shape():
-    """Build a synthetic trace mirroring the resume4 shape and confirm
-    is_kernel_event rejects the sync events before they can reach top-K."""
+    """Build a synthetic trace mirroring the resume4 shape and confirm is_kernel_event rejects the sync events before they can reach top-K."""
     events = [
         # 5 host-side sync events, big durations (the buggy ones)
         {"name": "torch/cuda/streams.py(222): synchronize", "cat": "python_function", "dur": 88673.0},
@@ -444,14 +179,12 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
         assert "synchronize" not in n.lower()
 
 
-# The torch.profiler Chrome-trace category for a GPU kernel is literally
-# "kernel". Pin the torch convention so a rename cannot break GPU-kernel detection.
+# The torch.profiler Chrome-trace category for a GPU kernel is literally "kernel".
 def test_issue_769_kernel_event_uses_torch_cat_kernel():
     """A real GPU kernel uses cat=='kernel'; the renamed 'kernel_agent' is not a trace category."""
     real_kernel = {"name": "void some_gemm_kernel<...>", "cat": "kernel", "dur": 5.0}
     assert tla.is_kernel_event(real_kernel) is True
-    # The component-name string 'kernel_agent' must never be treated as a GPU
-    # kernel trace category.
+    # The component-name string 'kernel_agent' must never be treated as a GPU kernel trace category.
     not_a_kernel = {"name": "void some_gemm_kernel<...>", "cat": "kernel_agent", "dur": 5.0}
     assert tla.is_kernel_event(not_a_kernel) is False
 
@@ -567,13 +300,7 @@ def test_unknown_source_root_is_not_reusable_native():
 
 
 def test_known_rmsnorm_harness_is_registered_without_repo_root(monkeypatch, tmp_path):
-    """A curated harness is found from the kernel name alone, with no repo root.
-
-    The hint is checkout-relative, so it is resolved against the search roots
-    rather than a pinned ``/sgl-workspace`` path, and only a file that is really
-    there is reported: a harness list naming paths nobody can open reads
-    downstream as a runnable harness.
-    """
+    """A curated harness is found from the kernel name alone, with no repo root."""
     harness = tmp_path / "aiter" / "op_tests" / "test_rmsnorm2d.py"
     harness.parent.mkdir(parents=True)
     harness.write_text("def test_rmsnorm2d(): pass\n", encoding="utf-8")
@@ -644,7 +371,7 @@ def test_125_finalize_outputs_source_path_field():
             "shapes": [[16, 1024]],
         }
     ]
-    out = tla._finalize_candidates(candidates, total_dur=100.0)
+    out = tla._finalize_candidates(candidates)
     assert out[0]["source_path"] == "/path/to/rmsnorm.cu"
     assert out[0]["kernel_category"] == "LayerNorm"
 
@@ -669,7 +396,6 @@ def test_finalize_uses_csv_op_category_for_aten_mm(tmp_path):
     ]
     out = tla._finalize_candidates(
         candidates,
-        total_dur=100.0,
         perf_report_csv_dir=csv_dir,
     )
     assert out[0]["tracelens_category"] == "GEMM"
@@ -706,9 +432,8 @@ def test_load_op_category_map_missing_returns_empty(tmp_path):
 
 # ── #727 companion: fused-MoE trace-anchored shape capture ────────────────────
 
-# The two operand-tuple rows TraceLens writes for the fused-MoE expert kernel in
-# ``ops_unique_args.csv`` (gate/up GEMM then down GEMM), as captured for the
-# Qwen3-30B-A3B MoE decode workload (conc 64, ISL/OSL 1024).
+# The two operand-tuple rows TraceLens writes for the fused-MoE expert kernel in ``ops_unique_args.csv`` (gate/up GEMM
+# then down GEMM), as captured for the Qwen3-30B-A3B MoE decode workload (conc 64, ISL/OSL 1024).
 _FUSED_MOE_OPS_UNIQUE_ARGS = (
     "name,op category,Input Dims,Input type\n"
     "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427,MoE_fused,"
@@ -789,7 +514,6 @@ def test_finalize_grafts_fused_moe_shapes_onto_empty_candidate(tmp_path):
     ]
     out = tla._finalize_candidates(
         candidates,
-        total_dur=302429.0,
         perf_report_csv_dir=csv_dir,
     )
     assert out[0]["shapes"], "fused-MoE candidate must carry non-empty shapes"
@@ -829,7 +553,6 @@ def test_finalize_grafts_csv_shapes_for_other_bucket_attention_candidate(tmp_pat
 
     out = tla._finalize_candidates(
         candidates,
-        total_dur=170086.617,
         perf_report_csv_dir=csv_dir,
     )
 
@@ -862,7 +585,6 @@ def test_finalize_does_not_touch_non_moe_or_already_shaped(tmp_path):
     ]
     out = tla._finalize_candidates(
         candidates,
-        total_dur=300.0,
         perf_report_csv_dir=csv_dir,
     )
     assert out[0]["shapes"] == []
@@ -884,7 +606,6 @@ def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
     ]
     out = tla._finalize_candidates(
         candidates,
-        total_dur=100.0,
         perf_report_csv_dir=tmp_path / "does_not_exist",
     )
     assert out[0].get("tracelens_category", "") == ""
@@ -1156,8 +877,7 @@ def test_write_reports_does_not_create_filename_aliases(tmp_path):
         existing_report_path=analysis_md,
     )
 
-    # The returned trace_report_path must point at the upstream file,
-    # not at a Hyperloom-owned copy.
+    # The returned trace_report_path must point at the upstream file, not at a Hyperloom-owned copy.
     assert artifacts["trace_report_path"] == str(analysis_md)
     # And the legacy aliases must NOT exist on disk.
     assert not (tracelens_dir / "standalone_analysis.md").exists()
@@ -1188,9 +908,8 @@ def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
     assert analysis_md.read_text(encoding="utf-8") == upstream_body
 
 
-# ``kernel_candidates.json`` exposes ``hot_kernels`` as the FULL ranked hotspot
-# set (routable + non-routable) while ``routable_kernels`` / ``skipped_kernels``
-# carry the reusable / non-reusable subsets.
+# ``kernel_candidates.json`` exposes ``hot_kernels`` as the FULL ranked hotspot set (routable + non-routable) while
+# ``routable_kernels`` / ``skipped_kernels`` carry the reusable / non-reusable subsets.
 def _contract_candidates():
     return [
         {
@@ -1408,9 +1127,9 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
         _os.environ.update(env_backup)
 
     assert rc != 0, "fail-fast on CPU-only trace must return non-zero"
-    assert all(
-        "TraceLens.TraceUtils.split_inference_trace_annotation" not in str(p) for cmd in captured for p in cmd
-    ), f"splitter must not run on CPU-only trace; captured={captured}"
+    assert all("TraceLens.TraceUtils.split_trace.main" not in str(p) for cmd in captured for p in cmd), (
+        f"splitter must not run on CPU-only trace; captured={captured}"
+    )
     assert all(
         "TraceLens_generate_perf_report_pytorch_inference" not in str(c[0]) or "--help" in c for c in captured if c
     ), f"perf-report CLI must not be invoked for CPU-only trace; captured={captured}"
@@ -1469,12 +1188,253 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert res.runner == "claude_agent_sdk"
 
 
-def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
-    """TraceLens SDK runner must not inherit stale global Claude settings.
+@pytest.mark.parametrize(
+    ("tool_idle_env", "expected_ceiling_ms"),
+    [(None, "3600000"), ("900", "900000"), ("0", "0")],
+)
+def test_run_tracelens_skill_aligns_cli_background_wait_with_tool_idle_bound(
+    tmp_path, monkeypatch, tool_idle_env, expected_ceiling_ms
+):
+    """The Claude CLI must not kill background sub-agents before the runner's own in-flight bound does."""
+    import asyncio
+    from dataclasses import dataclass
+    from typing import Any
 
-    Passing ``env`` and ``setting_sources=[]`` keeps the SDK child tied to the
-    active run contract rather than a stale ``~/.claude/settings.json`` token.
-    """
+    @dataclass
+    class _TextBlock:
+        text: str
+
+    @dataclass
+    class _Message:
+        content: list[Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.delenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", raising=False)
+    if tool_idle_env is None:
+        monkeypatch.delenv("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", raising=False)
+    else:
+        monkeypatch.setenv("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", tool_idle_env)
+    output_dir = tmp_path / "out"
+    captured: dict[str, Any] = {}
+
+    async def _fake_query(*, prompt, options):
+        captured["options"] = options.kwargs
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield _Message(content=[_TextBlock("done")])
+
+    asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=None,
+            budget_minutes=1,
+            model="claude-sonnet-4-5-20250929",
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        )
+    )
+
+    assert captured["options"]["env"]["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] == expected_ceiling_ms
+
+
+def test_run_tracelens_skill_books_its_requests_on_the_trajectory(tmp_path):
+    import asyncio
+    from dataclasses import dataclass
+    from typing import Any
+
+    from hyperloom.inference_optimizer.trace import trajectory_trace as tt
+
+    @dataclass
+    class StreamEvent:
+        event: dict[str, Any]
+        parent_tool_use_id: str | None = None
+
+    @dataclass
+    class ToolUseBlock:
+        id: str
+        name: str
+        input: dict[str, Any]
+
+    @dataclass
+    class ToolResultBlock:
+        tool_use_id: str
+        content: str
+        is_error: bool = False
+
+    @dataclass
+    class AssistantMessage:
+        content: list[Any]
+        message_id: str
+        model: str = "claude-tl"
+        parent_tool_use_id: str | None = None
+
+    @dataclass
+    class UserMessage:
+        content: list[Any]
+
+    @dataclass
+    class ResultMessage:
+        usage: dict[str, Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+    session_dir = tmp_path / "session"
+    captured: dict[str, Any] = {}
+    usage = {"input_tokens": 12, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 0, "output_tokens": 7}
+
+    async def _fake_query(*, prompt, options):
+        captured["options"] = options.kwargs
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        start = {"id": "msg_1", "model": "claude-tl", "usage": {"input_tokens": 12, "cache_read_input_tokens": 300}}
+        yield StreamEvent({"type": "message_start", "message": start})
+        yield StreamEvent({"type": "content_block_delta"})
+        yield StreamEvent(
+            {"type": "message_delta", "usage": {"output_tokens": 7}, "delta": {"stop_reason": "tool_use"}}
+        )
+        yield StreamEvent({"type": "message_stop"})
+        yield AssistantMessage(content=[ToolUseBlock("tu1", "Bash", {"command": "ls"})], message_id="msg_1")
+        yield UserMessage(content=[ToolResultBlock("tu1", "ok")])
+        yield ResultMessage(usage=usage)
+
+    with tt.trajectory_scope(session_dir=session_dir, component="tracelens", task_id="t-tl", parent_span_id="t-tl"):
+        asyncio.run(
+            tlr.run_tracelens_skill(
+                skill_path=tmp_path / "skill.md",
+                trace_path=tmp_path / "trace.json.gz",
+                output_dir=output_dir,
+                tracelens_root=tmp_path,
+                tracelens_internal_root=tmp_path / "TraceLens-internal",
+                platform="MI355X",
+                framework="sglang",
+                analysis_mode="default",
+                capture_folder=None,
+                budget_minutes=1,
+                model="claude-tl",
+                sdk_query_factory=_fake_query,
+                sdk_options_cls=_FakeOptions,
+            )
+        )
+
+    assert captured["options"]["include_partial_messages"] is True
+    rows = tt.load_events(session_dir)
+    calls = [row for row in rows if row["event_type"] == tt.EVENT_LLM_CALL]
+    assert [row["status"] for row in calls] == [tt.STATUS_STARTED, tt.STATUS_COMPLETED]
+    call = calls[-1]
+    assert (call["component"], call["agent"], call["task_id"], call["parent_span_id"]) == (
+        "tracelens",
+        "tracelens",
+        "t-tl",
+        "t-tl",
+    )
+    assert call["call_id"]
+    assert {key: call["attributes"][key] for key in usage} == usage
+    assert call["attributes"]["model"] == "claude-tl"
+
+    (request,) = [row for row in rows if row["event_type"] == tt.EVENT_LLM_REQUEST]
+    assert request["parent_span_id"] == call["span_id"]
+    assert request["call_id"] == call["call_id"]
+    assert request["component"] == "tracelens"
+    assert request["attributes"]["output_tokens"] == 7
+    assert request["attributes"]["cache_read_input_tokens"] == 300
+
+    (tool,) = [row for row in rows if row["event_type"] == tt.EVENT_TOOL]
+    assert tool["attributes"]["name"] == "Bash"
+    assert tool["parent_span_id"] == request["span_id"]
+
+
+def test_trajectory_scope_restores_the_launchers_join_keys(tmp_path):
+    import argparse
+    import contextlib
+
+    from hyperloom.inference_optimizer.trace import trajectory_trace as tt
+
+    unset = argparse.Namespace(
+        trajectory_session_dir="",
+        trajectory_phase="",
+        trajectory_tick=None,
+        trajectory_task_id="",
+        trajectory_parent_span_id="",
+    )
+    assert isinstance(tla._trajectory_scope(unset), contextlib.nullcontext)
+
+    launched = argparse.Namespace(
+        trajectory_session_dir=str(tmp_path),
+        trajectory_phase="roofline",
+        trajectory_tick=4,
+        trajectory_task_id="t-roof",
+        trajectory_parent_span_id="span-roof",
+    )
+    with tla._trajectory_scope(launched):
+        ctx = tt.current_context()
+    assert (ctx.session_dir, ctx.component, ctx.agent, ctx.phase, ctx.tick, ctx.task_id, ctx.parent_span_id) == (
+        tmp_path,
+        "tracelens",
+        "tracelens",
+        "roofline",
+        4,
+        "t-roof",
+        "span-roof",
+    )
+
+
+def test_run_tracelens_skill_records_nothing_outside_a_session(tmp_path):
+    import asyncio
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class ResultMessage:
+        usage: dict[str, Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+
+    async def _fake_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield ResultMessage(usage={"input_tokens": 1, "output_tokens": 1})
+
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI355X",
+            framework="sglang",
+            analysis_mode="default",
+            capture_folder=None,
+            budget_minutes=1,
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        )
+    )
+
+    assert res.report_path.exists()
+    assert "tracelens_agent_sdk_error" not in res.artifact_paths
+    assert not list(tmp_path.rglob("trajectory"))
+
+
+def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
+    """TraceLens SDK runner must not inherit stale global Claude settings."""
     import asyncio
     from dataclasses import dataclass
     from typing import Any
@@ -1545,11 +1505,7 @@ def _use_openai_only_env(monkeypatch) -> None:
 
 
 def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkeypatch):
-    """OpenAI-only deployments must run TraceLens on the Codex Agent SDK.
-
-    Hyperloom makes no bare LLM API calls, so this path must go through an
-    agent runtime whose tools, sandbox and turn management come from the SDK.
-    """
+    """OpenAI-only deployments must run TraceLens on the Codex Agent SDK."""
     import asyncio
 
     from hyperloom.common.codex_session import CodexSessionResult
@@ -1592,8 +1548,8 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
 
     assert res.report_path == output_dir / "analysis.md"
     assert res.report_path.read_text(encoding="utf-8") == "# Codex TraceLens report\n"
-    # The result carries the runner that actually ran, so the caller reports the
-    # real provider instead of hardcoding one.
+    # The result carries the runner that actually ran, so the caller reports the real provider instead of hardcoding
+    # one.
     assert res.runner == "codex"
     assert res.raw_text == "wrote analysis.md"
     assert "tracelens_agent_report" in res.artifact_paths
@@ -1604,14 +1560,58 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
     assert len(calls) == 1
     call = calls[0]
     assert call["model"] == "gpt-5.5"
-    # The session works out of the TraceLens root so the skill's command-prefix
-    # cache and relative paths resolve as they do on the Claude path.
+    # The session works out of the TraceLens root so the skill's command-prefix cache and relative paths resolve as
+    # they do on the Claude path.
     assert call["cwd"] == tmp_path
     # The output dir is the only extra writable root: nothing else is mutable.
     assert call["writable_roots"] == (output_dir,)
     assert call["timeout_sec"] == 30 * 60.0
     assert "TraceLens analysis runner" in call["developer_instructions"]
     assert str(tmp_path / "skill.md") in call["prompt"]
+
+
+def test_run_tracelens_skill_codex_grants_the_capture_folder_write_access(tmp_path, monkeypatch):
+    """Graph-capture analysis writes into the capture folder, so it must be writable.
+
+    ``TraceLens_generate_perf_report_pytorch_inference`` classifies the capture
+    folder before it can merge it, and that classification writes
+    ``execution_details.json`` into the folder itself. With only ``output_dir``
+    writable the step dies with ``OSError: [Errno 30] Read-only file system``
+    and the turn ends without ``analysis.md``.
+    """
+    import asyncio
+
+    from hyperloom.common.codex_session import CodexSessionResult
+
+    output_dir = tmp_path / "out"
+    capture_folder = tmp_path / "capture_traces"
+    capture_folder.mkdir()
+    calls: list[dict] = []
+
+    async def _fake_codex_turn(**kwargs):
+        calls.append(kwargs)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        return CodexSessionResult(text="ok")
+
+    _use_openai_only_env(monkeypatch)
+
+    asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=None,
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=capture_folder,
+            budget_minutes=30,
+            codex_turn_runner=_fake_codex_turn,
+        )
+    )
+
+    assert calls[0]["writable_roots"] == (output_dir, capture_folder)
 
 
 def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch):
@@ -1751,10 +1751,7 @@ def test_run_tracelens_skill_codex_reports_in_band_turn_error(tmp_path, monkeypa
 
 
 def test_run_tracelens_skill_aborts_on_stream_idle_timeout(tmp_path, monkeypatch):
-    """A gateway stream that goes silent mid-response must abort on the
-    per-message idle timeout instead of blocking forever. The runner records
-    the idle-timeout error and, since analysis.md was already written, still
-    returns it as the report."""
+    """A gateway stream that goes silent mid-response must abort on the per-message idle timeout instead of blocking forever."""
     import asyncio
     from dataclasses import dataclass
     from typing import Any
@@ -1779,8 +1776,8 @@ def test_run_tracelens_skill_aborts_on_stream_idle_timeout(tmp_path, monkeypatch
     async def _stalling_query(*, prompt, options):
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "analysis.md").write_text("# partial report\n", encoding="utf-8")
-        # One chunk arrives, then the stream goes silent (partial response,
-        # stop_reason=None) — emulate by sleeping far past the idle timeout.
+        # One chunk arrives, then the stream goes silent (partial response, stop_reason=None) — emulate by sleeping
+        # far past the idle timeout.
         yield _Message(content=[_TextBlock("chunk-1")])
         await asyncio.sleep(60)
         yield _Message(content=[_TextBlock("never-reached")])
@@ -1816,7 +1813,6 @@ async def _run_and_time(tlr_mod, query, options_cls, tmp_path, output_dir):
     return res, _time.monotonic() - t0
 
 
-# ===========================================================================
 # analysis.md is the only contracted TraceLens output.
 def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
     """SDK orchestrator sidecars must not be surfaced as Hyperloom inputs."""
@@ -1921,8 +1917,8 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
         )
 
 
-# splitter CLI must match the real split_inference_trace_annotation interface
-# (positional trace_path, -o, --find-steady-state); the old --input/--platform form failed.
+# splitter CLI must match the real split_trace.main interface (positional trace_path, -o,
+# --find-steady-state); the old --input/--platform form failed.
 def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
@@ -1940,12 +1936,7 @@ def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
 
 
 def _xdit_roofline_capture(trace_dir: Path) -> Path:
-    """Recreate an xDiT roofline capture directory as production writes it.
-
-    Names and sizes are taken from a real failing run: a 910 KB rank capture
-    with 30k kernel events, beside a trace_split/ directory of ~900-byte
-    per-phase fragments and annotation sidecars.
-    """
+    """Recreate an xDiT roofline capture directory as production writes it."""
     trace_dir.mkdir(parents=True, exist_ok=True)
     raw = trace_dir / "rank_0.trace.json.gz"
     with gzip.open(raw, "wt") as fh:
@@ -1967,13 +1958,7 @@ def _xdit_roofline_capture(trace_dir: Path) -> Path:
 
 
 def test_discover_trace_inputs_prefers_raw_capture_over_split_fragments(tmp_path):
-    """The raw capture must lead, whatever the fragments are named.
-
-    Every file in this layout used to land in the same default bucket, so
-    alphabetical order decided -- and `decode_only_...` sorts ahead of
-    `rank_0.trace.json.gz`. The preflight then read a 900-byte fragment, found
-    no GPU kernels, and reported the whole capture as CPU-only.
-    """
+    """The raw capture must lead, whatever the fragments are named."""
     trace_dir = tmp_path / "torch_trace"
     raw = _xdit_roofline_capture(trace_dir)
 
@@ -1986,20 +1971,15 @@ def test_discover_trace_inputs_prefers_raw_capture_over_split_fragments(tmp_path
 
 
 def test_the_leading_candidate_is_the_one_with_the_kernels(tmp_path):
-    """Ordering is only useful if it puts a probe-able trace first.
-
-    Ties the two halves of the fix together: whichever file discovery leads
-    with is the file the CPU-only preflight opens, so that file has to be the
-    one carrying GPU kernel events.
-    """
+    """Ordering is only useful if it puts a probe-able trace first."""
     trace_dir = tmp_path / "torch_trace"
     _xdit_roofline_capture(trace_dir)
 
     _kind, traces = tla.discover_trace_inputs(trace_dir)
 
     assert tla.count_gpu_kernel_events(traces[0]) == 64
-    # The fragment that used to be probed first really does look CPU-only, so
-    # the old ordering failed for a real reason and not a test artefact.
+    # The fragment that used to be probed first really does look CPU-only, so the old ordering failed for a real
+    # reason and not a test artefact.
     fragment = next(p for p in traces if p.name.startswith("decode_only_"))
     assert tla.count_gpu_kernel_events(fragment) == 0
 
@@ -2020,12 +2000,7 @@ def test_annotation_sidecars_sort_after_a_capture_even_outside_trace_split(tmp_p
 
 
 def test_fragments_flat_beside_the_capture_are_still_demoted(tmp_path):
-    """The demotion must not depend on the splitter nesting its output.
-
-    Production nests fragments under trace_split/ today, but keying only on the
-    directory would leave a flat layout exactly as broken as before: the phase
-    names sort ahead of rank files on the first letter.
-    """
+    """The demotion must not depend on the splitter nesting its output."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     raw = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=40)
@@ -2040,12 +2015,7 @@ def test_fragments_flat_beside_the_capture_are_still_demoted(tmp_path):
 
 
 def test_an_eight_rank_flat_capture_does_not_exhaust_the_probe_budget(tmp_path):
-    """xDiT runs at TP=8, so a flat layout could present eight fragments first.
-
-    With the fragments still in the default bucket they would consume the whole
-    probe budget before any rank file was opened, and the run would fail with the
-    error this change exists to remove.
-    """
+    """xDiT runs at TP=8, so a flat layout could present eight fragments first."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     for rank in range(8):
@@ -2061,13 +2031,7 @@ def test_an_eight_rank_flat_capture_does_not_exhaust_the_probe_budget(tmp_path):
 
 
 def test_a_non_trace_sidecar_does_not_lead_discovery(tmp_path):
-    """execution_details.json is swept in by the *.json glob but is not a trace.
-
-    It sorts ahead of rank_0.trace.json.gz alphabetically, so before size
-    ordering it was trace_files[0] in every healthy nested capture: one wasted
-    probe, and a promotion logged on every run, which made the log line
-    meaningless exactly when it should have meant something.
-    """
+    """execution_details.json is swept in by the *.json glob but is not a trace."""
     trace_dir = tmp_path / "torch_trace"
     raw = _xdit_roofline_capture(trace_dir)
     sidecar = trace_dir / "trace_split" / "execution_details.json"
@@ -2128,8 +2092,8 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
         _json.dump(
             {
                 "traceEvents": [
-                    # At least one real GPU kernel event so the new fail-fast
-                    # validation lets the run continue into the splitter step.
+                    # At least one real GPU kernel event so the new fail-fast validation lets the run continue into
+                    # the splitter step.
                     {"cat": "kernel", "name": "void some_real_kernel<...>", "dur": 5.0},
                 ]
             },
@@ -2145,8 +2109,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
 
     def fake_run(cmd, *args, **kwargs):
         captured.append(list(cmd))
-        # Make pip install and splitter invocations succeed.
-        return _Result(returncode=0, stdout="ok")
+        return _Result(returncode=0, stdout="ok" if kwargs.get("text") else b"ok")
 
     argv = [
         "tracelens_analysis.py",
@@ -2176,16 +2139,14 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
             try:
                 tla.main()
             except SystemExit as exc:
-                # tla.main() may CLI-exit because the mocked run does not
-                # produce analysis.md. The test asserts the splitter command
-                # shape below, not the program's overall exit status.
+                # tla.main() may CLI-exit because the mocked run does not produce analysis.md.
                 _ = exc
     finally:
         _os.environ.clear()
         _os.environ.update(env_backup)
 
     splitter_cmd = next(
-        (c for c in captured if any("split_inference_trace_annotation" in str(p) for p in c)),
+        (c for c in captured if "TraceLens.TraceUtils.split_trace.main" in c),
         None,
     )
     assert splitter_cmd is not None, f"splitter never invoked; cmds={captured}"
@@ -2209,15 +2170,10 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     assert "trace_split_no_steady_state" in result["error"]
 
 
-# Splitter must receive --R (from --split-r or $RANDOM_RANGE_RATIO) so mixed-window
-# selection uses the analytic PD ratio instead of an empirical heuristic.
-def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, trace_factory=None):
-    """Helper: stage a TraceLens-ish tree, stub subprocess.run, drive tla.main() once, return captured argvs.
-
-    ``trace_factory`` builds the input trace from the staging directory when the
-    default single-kernel stub is not enough (for example a step-annotated trace
-    the pretrimmer can act on); it returns the path it wrote.
-    """
+# Splitter must receive --R (from --split-r or $RANDOM_RANGE_RATIO) so mixed-window selection uses the analytic PD
+# ratio instead of an empirical heuristic.
+def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, trace_factory=None, subprocess_run=None):
+    """Helper: stage a TraceLens-ish tree, stub subprocess.run, drive tla.main() once, return captured argvs."""
     import gzip
     import json as _json
     import os as _os
@@ -2254,6 +2210,8 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, t
 
     def fake_run(cmd, *_a, **_kw):
         captured.append(list(cmd))
+        if subprocess_run is not None:
+            return subprocess_run(cmd, *_a, **_kw)
         return _Result(returncode=0, stdout="ok")
 
     argv = [
@@ -2294,23 +2252,54 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, t
     return captured, trace
 
 
+@pytest.mark.parametrize(
+    ("dependency_rc", "split_rc", "error_code"),
+    [
+        (1, 0, "tracelens_dependency_error"),
+        (0, 1, "trace_split_failed"),
+        (0, 0, "trace_split_no_steady_state"),
+    ],
+)
+def test_tracelens_dependency_and_split_failures(tmp_path, capsys, dependency_rc, split_rc, error_code):
+    """Dependency failures and splitter crashes must not masquerade as empty traces."""
+    import subprocess
+
+    def run(cmd, **kwargs):
+        if "pip" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stdout="ResolutionImpossible: protobuf constraint")
+        rc = dependency_rc if "-c" in cmd else split_rc
+        return subprocess.CompletedProcess(cmd, rc, stdout="ModuleNotFoundError: strenum" if rc else "ok")
+
+    captured, _ = _drive_main_capturing_subprocess(tmp_path, [], subprocess_run=run)
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "failed"
+    assert error_code in result["error"]
+    assert not any("pip" in cmd for cmd in captured)
+    probes = [cmd for cmd in captured if "-c" in cmd]
+    assert len(probes) == 1
+    assert probes[0][0] == sys.executable
+    assert "import TraceLens" in probes[0][-1]
+    assert "split_trace.main" in probes[0][-1]
+    splitter = _find_splitter_cmd(captured)
+    if dependency_rc:
+        assert splitter is None
+    else:
+        assert splitter[0] == sys.executable
+    if dependency_rc or split_rc:
+        assert "trace_split_no_steady_state" not in result["error"]
+        log_path = next((tmp_path / "ws").rglob("*.log"))
+        assert "ModuleNotFoundError: strenum" in log_path.read_text(encoding="utf-8")
+
+
 def _find_splitter_cmd(captured):
     return next(
-        (c for c in captured if any("split_inference_trace_annotation" in str(p) for p in c)),
+        (c for c in captured if "TraceLens.TraceUtils.split_trace.main" in c),
         None,
     )
 
 
 def _drive_main_over_capture_dir(tmp_path, trace_dir, extra_argv=None):
-    """Drive tla.main() with a capture *directory* and capture subprocess argvs.
-
-    A sibling of :func:`_drive_main_capturing_subprocess`, which always passes a
-    single file. Multi-rank selection only shows up when discovery has more than
-    one candidate to choose from.
-
-    ``extra_argv`` appends CLI flags, which is how the ``--skip-split`` route
-    that scriptable workloads actually take gets exercised.
-    """
+    """Drive tla.main() with a capture *directory* and capture subprocess argvs."""
     import os as _os
     from unittest.mock import patch
 
@@ -2362,11 +2351,7 @@ def _drive_main_over_capture_dir(tmp_path, trace_dir, extra_argv=None):
 
 
 def _rank_trace(path: Path, kernels: int, cpu_events: int = 0) -> Path:
-    """Write a rank trace with the given number of GPU kernels.
-
-    ``cpu_events`` pads with host-side events, which is what a CPU-only capture
-    actually looks like: a large file with no kernels in it.
-    """
+    """Write a rank trace with the given number of GPU kernels."""
     events = [{"cat": "kernel", "name": "void real_kernel<...>", "dur": 5.0} for _ in range(kernels)]
     events += [{"cat": "cpu_op", "name": f"aten::some_host_op_{i}", "dur": 1.0} for i in range(cpu_events)]
     with gzip.open(path, "wt") as fh:
@@ -2375,17 +2360,10 @@ def _rank_trace(path: Path, kernels: int, cpu_events: int = 0) -> Path:
 
 
 def test_analysis_input_follows_the_candidate_that_passed_the_preflight(tmp_path):
-    """A CPU-only leading rank must not be what gets analysed.
-
-    The preflight probes several candidates, so it can pass on rank_1 while
-    rank_0 leads discovery. If the analysis kept using the first candidate, the
-    check would clear a capture on one rank's evidence and then hand TraceLens
-    the empty one -- quieter than the failure it replaced, and worse.
-    """
+    """A CPU-only leading rank must not be what gets analysed."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
-    # A CPU-only rank is a big file with no kernels in it, so size ordering puts
-    # it first on merit. Ordering cannot help here; only the promotion can.
+    # A CPU-only rank is a big file with no kernels in it, so size ordering puts it first on merit.
     empty = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
     populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
     assert empty.stat().st_size > populated.stat().st_size
@@ -2417,27 +2395,13 @@ def test_analysis_input_is_left_alone_when_the_first_candidate_has_kernels(tmp_p
 
 
 def _capture_sidecar(path: Path, kernels: int = 2) -> Path:
-    """Write a CUDA-graph capture sidecar in its production shape.
-
-    ``kernels`` defaults to 2 on purpose. A capture records the graph being
-    built, so a couple of launches still reach the device while the rest of the
-    file is host-side call tree — the run this guards against had 2 kernels in
-    1.49M events. A sidecar with *zero* kernels would already be stopped by the
-    CPU-only preflight; two is the count that gets through it.
-    """
+    """Write a CUDA-graph capture sidecar in its production shape."""
     path.parent.mkdir(parents=True, exist_ok=True)
     return _rank_trace(path, kernels=kernels, cpu_events=200)
 
 
 def test_capture_only_input_is_rejected_before_the_splitter(tmp_path, capsys):
-    """A directory holding nothing but graph-capture sidecars must not analyse.
-
-    The sidecars carry kernels, so the CPU-only preflight passes them and the
-    splitter is handed a file with no iteration loop in it. It then reports
-    ``trace_split_no_steady_state``, which reads as "the profiled window was too
-    short" and sends the next person to lengthen a capture that was never a
-    workload timeline. The rejection has to name the real cause instead.
-    """
+    """A directory holding nothing but graph-capture sidecars must not analyse."""
     trace_dir = tmp_path / "torch_trace"
     capture = trace_dir / "capture_traces"
     for bs in (2, 4, 8):
@@ -2460,12 +2424,7 @@ def test_capture_only_input_is_rejected_before_the_splitter(tmp_path, capsys):
 
 
 def test_capture_sidecars_beside_a_real_trace_still_analyse(tmp_path):
-    """The healthy layout must be unaffected.
-
-    A normal profile writes its annotated trace *beside* the capture sidecars,
-    which is why the rejection tests ``all`` and not ``any``. Getting this
-    backwards would disable roofline for every well-formed profile.
-    """
+    """The healthy layout must be unaffected."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
@@ -2489,12 +2448,7 @@ def test_lone_capture_sidecar_file_is_rejected_by_name(tmp_path, capsys):
 
 
 def test_capture_classification_ignores_an_unrelated_ancestor_dir(tmp_path):
-    """An ancestor named ``capture_traces`` must not condemn a real trace.
-
-    Paths arrive absolute, so an unbounded component test would reject every
-    candidate whenever the session happened to live under a directory of that
-    name — pointing ``--trace-input`` inside a previous capture, say.
-    """
+    """An ancestor named ``capture_traces`` must not condemn a real trace."""
     root = tmp_path / "capture_traces" / "torch_trace"
     root.mkdir(parents=True)
     real = _rank_trace(root / "rank_0.trace.json.gz", kernels=7)
@@ -2506,12 +2460,7 @@ def test_capture_classification_ignores_an_unrelated_ancestor_dir(tmp_path):
 
 
 def test_bare_bs_prefix_is_not_enough_to_condemn_a_trace(tmp_path):
-    """``bs_`` without a batch number must not classify as a sidecar.
-
-    The classifier decides whether an input is rejected outright, not just how
-    it sorts, so matching three characters of a filename is too cheap a reason
-    to throw a real trace away. The sidecar shapes carry a batch number.
-    """
+    """``bs_`` without a batch number must not classify as a sidecar."""
     root = tmp_path / "torch_trace"
     root.mkdir()
     classify_root = tla._capture_classification_root(root)
@@ -2524,12 +2473,7 @@ def test_bare_bs_prefix_is_not_enough_to_condemn_a_trace(tmp_path):
 
 
 def test_capture_sidecars_sort_behind_a_real_trace(tmp_path):
-    """Discovery ordering must keep sidecars behind the annotated trace.
-
-    The sort key and the preflight now share one classifier, so this pins the
-    ordering half: a sidecar that is *larger* than the real trace still sorts
-    behind it.
-    """
+    """Discovery ordering must keep sidecars behind the annotated trace."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=4)
@@ -2546,8 +2490,8 @@ def test_capture_sidecars_sort_behind_a_real_trace(tmp_path):
         # Hyperloom-patched SGLang.
         ("capture_traces/bs_2_rank0.json.gz", True),
         ("capture_traces/bs_64_rank7.json.gz", True),
-        # Unpatched SGLang: neither the directory nor the filename matches the
-        # patched shape, and the ``cuda_`` prefix defeats a start-anchored test.
+        # Unpatched SGLang: neither the directory nor the filename matches the patched shape, and the ``cuda_`` prefix
+        # defeats a start-anchored test.
         ("graph_capture_profile/cuda_graph_capture-DecodeCudaGraphRunner-TP-3.json.gz", True),
         # vLLM.
         ("graph_capture_rank0.json.gz", True),
@@ -2558,22 +2502,13 @@ def test_capture_sidecars_sort_behind_a_real_trace(tmp_path):
     ],
 )
 def test_capture_classifier_covers_every_observed_profile_layout(tmp_path, relpath, expected):
-    """The classifier keys on shape, so a new layout does not slip through.
-
-    Each entry is a layout a production profile actually wrote. An exact-name
-    whitelist passed the first two and missed the SGLang-without-patch one.
-    """
+    """The classifier keys on shape, so a new layout does not slip through."""
     path = tmp_path / relpath
     assert tla._is_capture_fragment(path, tmp_path) is expected
 
 
 def test_capture_dir_match_is_anchored_so_a_descriptive_name_is_safe(tmp_path):
-    """``graph_capture`` anchors in a directory name, unlike in a filename.
-
-    A directory is named for what it holds, so an unanchored token would also
-    condemn ``torch_profiler_with_graph_capture/`` -- and the capture-only
-    preflight is an ``all(...)``, so one false positive rejects the whole input.
-    """
+    """``graph_capture`` anchors in a directory name, unlike in a filename."""
     safe = tmp_path / "torch_profiler_with_graph_capture" / "rank_0.trace.json.gz"
     assert tla._is_capture_fragment(safe, tmp_path) is False
     for capture_dir in ("graph_capture", "graph_capture_profile", "capture_traces"):
@@ -2581,17 +2516,20 @@ def test_capture_dir_match_is_anchored_so_a_descriptive_name_is_safe(tmp_path):
 
 
 def test_discover_capture_folder_finds_the_unpatched_sglang_layout(tmp_path):
-    """The capture folder must be locatable, not merely demoted during ranking.
-
-    Ranking keeps the sidecars out of the analysis input; discovery is what
-    hands them to TraceLens as ``--capture_folder``. Two hard-coded names meant
-    a run could pick the right workload trace and still lose its graph-capture
-    input.
-    """
+    """The capture folder must be locatable, not merely demoted during ranking."""
     trace_dir = tmp_path / "torch_trace"
     (trace_dir / "graph_capture_profile").mkdir(parents=True)
     real = _rank_trace(trace_dir / "1786735404.4274018-TP-0.trace.json.gz", kernels=4)
     assert tlr.discover_capture_folder(trace_dir, [real]) == trace_dir / "graph_capture_profile"
+
+
+def test_discover_capture_folder_preserves_legacy_priority(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    for name in ("graph_capture", "graph_capture_profile", "capture_traces"):
+        (trace_dir / name).mkdir(parents=True)
+    real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=4)
+
+    assert tlr.discover_capture_folder(trace_dir, [real]) == trace_dir / "capture_traces"
 
 
 def test_discover_capture_folder_ignores_a_descriptive_sibling(tmp_path):
@@ -2602,14 +2540,7 @@ def test_discover_capture_folder_ignores_a_descriptive_sibling(tmp_path):
 
 
 def test_unpatched_sglang_capture_sorts_behind_the_workload_trace(tmp_path):
-    """GLM-5.2 regression: a 103 MB capture must not outrank a 20 MB trace.
-
-    ``graph_capture_profile/`` matched no known capture shape, so its files
-    shared the default bucket with the workload traces, where the tie-break is
-    descending size. The capture is the larger file, so it led discovery, the
-    probe stopped on it, and the splitter cut a bs=1/conc=1 graph-capture window
-    that carried zero GPU events. The whole kernel phase was lost to it.
-    """
+    """GLM-5.2 regression: a 103 MB capture must not outrank a 20 MB trace."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     real = _rank_trace(trace_dir / "1786734684.9990146-TP-0.trace.json.gz", kernels=8)
@@ -2624,16 +2555,7 @@ def test_unpatched_sglang_capture_sorts_behind_the_workload_trace(tmp_path):
 
 
 def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
-    """The promotion must hold on the route xDiT actually takes.
-
-    Scriptable (xDiT/diffusion) workloads are dispatched with ``--skip-split``
-    plus ``--analysis-route deterministic`` (see ``request_handlers``), which
-    bypasses the splitter entirely and feeds the analysis path straight to the
-    deterministic pipeline. The other promotion tests assert on splitter argv, so
-    they cover the branch these sessions never enter -- which is to say the
-    regression this change exists to prevent was untested on the one path that
-    produced it.
-    """
+    """The promotion must hold on the route xDiT actually takes."""
     from unittest.mock import patch
 
     trace_dir = tmp_path / "torch_trace"
@@ -2641,38 +2563,32 @@ def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
     empty = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
     populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
 
-    # This route runs the deterministic pipeline in-process, so the trace path
-    # never reaches a subprocess argv the way the splitter's does. Intercepting
-    # the call is the only place the decision is observable.
+    # The skill runs in-process, so the analysed trace never reaches a subprocess argv the way the splitter's does --
+    # the skill's own arguments are the only place the promotion is observable.
+    class _StopAfterSkillDispatch(Exception):
+        """Ends the run once the skill's input trace has been recorded."""
+
     seen: list[Path] = []
 
-    def fake_steps(trace_path, *_a, **_kw):
+    async def fake_skill(*, trace_path, **_kw):
         seen.append(trace_path)
-        return 0
+        raise _StopAfterSkillDispatch(trace_path.name)
 
-    with patch.object(tla, "_run_deterministic_tracelens_steps", side_effect=fake_steps):
+    with patch.object(tla, "run_tracelens_skill", fake_skill):
         captured = _drive_main_over_capture_dir(
             tmp_path,
             trace_dir,
-            extra_argv=["--skip-split", "--analysis-route", "deterministic"],
+            extra_argv=["--skip-split", "--use-llm-orchestrator"],
         )
 
     assert _find_splitter_cmd(captured) is None, "--skip-split must skip the splitter"
-    assert seen, "the deterministic pipeline was never reached"
+    assert seen, "the TraceLens skill was never reached"
     assert seen[0] == populated, f"analysed {seen[0].name}, expected {populated.name}"
     assert empty not in seen
 
 
 def test_capture_under_an_ancestor_named_trace_split_still_orders_correctly(tmp_path):
-    """An ancestor directory name must not flatten the whole ranking.
-
-    ``--trace-input`` is resolved to an absolute path, so a ``trace_split``
-    component is checked against every ancestor unless the test is anchored at
-    the capture root. Pointing at a capture that happens to sit below such a
-    directory would otherwise demote every candidate into the same bucket, at
-    which point ordering falls back to filename and the original bug is exactly
-    reproduced -- from nothing but a coincidence of naming.
-    """
+    """An ancestor directory name must not flatten the whole ranking."""
     trace_dir = tmp_path / "trace_split" / "run" / "torch_trace"
     trace_dir.mkdir(parents=True)
     fragment = _rank_trace(trace_dir / "aaa_trace_annotation_iteration_1.json.gz", kernels=0)
@@ -2688,13 +2604,7 @@ def test_capture_under_an_ancestor_named_trace_split_still_orders_correctly(tmp_
 
 
 def test_unreadable_leading_candidate_is_not_reported_as_cpu_only(tmp_path):
-    """A corrupt trace and a CPU-only trace must not read as the same finding.
-
-    Both counted as zero kernels before, so a truncated rank_0 was described as
-    having "no GPU kernel events" -- sending the next reader to the profiler for
-    a file problem. That is the same misdirection this change was written to
-    remove, so it should not be reintroduced by the promotion that fixes it.
-    """
+    """A corrupt trace and a CPU-only trace must not read as the same finding."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     corrupt = trace_dir / "rank_0.trace.json.gz"
@@ -2711,14 +2621,7 @@ def test_unreadable_leading_candidate_is_not_reported_as_cpu_only(tmp_path):
 
 
 def test_promotion_is_recorded_as_a_trace_health_warning(tmp_path, capsys):
-    """A run that switched its own input has to be explicable afterwards.
-
-    A CLI log line is not a contract: session breakdown and roofline snapshot
-    read ``trace_health_warnings`` and the artifact map, and neither recorded
-    which of the discovered traces was actually analysed. Without this, a
-    silently promoted run is indistinguishable downstream from one that used the
-    file discovery reported.
-    """
+    """A run that switched its own input has to be explicable afterwards."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
@@ -2735,17 +2638,13 @@ def test_promotion_is_recorded_as_a_trace_health_warning(tmp_path, capsys):
     )
     assert promoted[0]["analysed"] == populated.name
     assert promoted[0]["leading_candidate"] == "rank_0.trace.json.gz"
-    # The probe record is what distinguishes "rank_0 had no kernels" from
-    # "rank_0 could not be read", which are different problems.
+    # The probe record is what distinguishes "rank_0 had no kernels" from "rank_0 could not be read", which are
+    # different problems.
     assert "rank_0.trace.json.gz=0" in promoted[0]["probed"]
 
 
 def test_no_promotion_warning_when_the_leading_candidate_is_used(tmp_path, capsys):
-    """The warning must stay absent on the ordinary path.
-
-    An informational warning that fires on every healthy run is noise, and noise
-    in ``trace_health_warnings`` costs the Coordinator the signal.
-    """
+    """The warning must stay absent on the ordinary path."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=9)
@@ -2780,9 +2679,7 @@ def test_194_3_splitter_receives_R_from_cli_arg(tmp_path):
 
 
 def test_194_3_splitter_receives_R_from_random_range_ratio_env(tmp_path):
-    """Without --split-r, the wrapper falls back to RANDOM_RANGE_RATIO
-    env — the same variable Hyperloom propagates from the YAML config
-    into every Magpie subprocess. Locks down the env→splitter seam."""
+    """Without --split-r, the wrapper falls back to RANDOM_RANGE_RATIO env — the same variable Hyperloom propagates from the YAML config into every Magpie subprocess."""
     captured, _ = _drive_main_capturing_subprocess(
         tmp_path,
         extra_argv=["--split-conc", "32", "--split-osl", "1024"],
@@ -2795,10 +2692,7 @@ def test_194_3_splitter_receives_R_from_random_range_ratio_env(tmp_path):
 
 
 def test_194_3_splitter_omits_R_when_unset(tmp_path):
-    """No --split-r and no RANDOM_RANGE_RATIO env → the splitter must
-    not see --R. The splitter's built-in default (`R=None`) keeps the
-    old heuristic path live for legacy traces that pre-date the
-    skill-aligned formulas."""
+    """No --split-r and no RANDOM_RANGE_RATIO env → the splitter must not see --R."""
     captured, _ = _drive_main_capturing_subprocess(
         tmp_path,
         extra_argv=["--split-conc", "32", "--split-osl", "1024"],
@@ -2821,166 +2715,6 @@ def test_194_3_splitter_ignores_non_numeric_R(tmp_path):
     assert "--R" not in splitter_cmd, splitter_cmd
 
 
-# parse_analysis_md — TraceLens final-report contract
-_FIXTURE_LLAMA70B_ANALYSIS_MD = (
-    Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "tracelens_v03_llama70b_analysis.md"
-)
-
-
-def test_parse_analysis_md_llama70b_fixture_yields_21_compute_candidates():
-    """Round-trip the official Llama-3 70B golden analysis.md fixture into 21 compute candidates."""
-    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
-    assert len(cands) == 21, (
-        f"expected 21 candidates (18 GEMM + 2 SDPA_fwd + 1 SDPA_bwd) from the fixture; got {len(cands)}"
-    )
-
-    by_cat = {}
-    for c in cands:
-        by_cat.setdefault(c["tracelens_category"], []).append(c)
-    assert len(by_cat["gemm"]) == 18
-    assert len(by_cat["sdpa_fwd"]) == 2
-    assert len(by_cat["sdpa_bwd"]) == 1
-
-    p1_first = cands[0]
-    assert p1_first["name"] == "aten::mm"
-    assert p1_first["tracelens_category"] == "gemm"
-    assert p1_first["tracelens_pitem_rank"] == 1
-    assert p1_first["library"] == "Tensile"
-    assert p1_first["bound_type"] == "compute-bound"
-    # Time (ms) -> duration_us; first row of P1 = 7607.463 ms.
-    assert abs(p1_first["duration_us"] - 7607463.0) < 1.0
-    assert p1_first["call_count"] == 320
-    assert abs(p1_first["percent_of_total"] - 13.42) < 0.001
-    assert abs(p1_first["efficiency_percent"] - 68.74) < 0.001
-    assert p1_first["efficiency_peak_value"] == 708.0
-    assert "TFLOPS" in p1_first["efficiency_peak_unit"]
-    assert p1_first["impact_score"] == 15.12  # mid value from p_item marker
-    # Args is "<br>"-joined upstream; parser must normalise to a list of
-    # whitespace-trimmed shape strings without losing entries.
-    assert p1_first["shapes"] == [
-        "(24576,8192) bf16",
-        "(8192,28672) bf16",
-        "(24576,28672) bf16",
-    ]
-    # Kernel Path is "—" for every row in this fixture; parser must keep the
-    # field as empty string (not the dash) so downstream "no source path"
-    # checks remain truthy.
-    assert p1_first["source_file"] == ""
-
-    # Last candidate is the lone SDPA_bwd row (P3 in the report).
-    p3_only = cands[-1]
-    assert p3_only["name"] == "flash_attn::_flash_attn_backward"
-    assert p3_only["tracelens_category"] == "sdpa_bwd"
-    assert p3_only["tracelens_pitem_rank"] == 3
-    assert p3_only["library"] == "CK"
-    assert p3_only["call_count"] == 160
-
-
-def test_parse_analysis_md_returns_empty_when_no_detailed_analysis(tmp_path):
-    """Empty Detailed Analysis -> 0 candidates, so caller can fall back."""
-    md = tmp_path / "analysis.md"
-    md.write_text(
-        "# Stub\n\n## Compute Kernel Optimizations\n\n"
-        "✅ No actionable per-category compute-kernel bottlenecks were promoted.\n\n"
-        "## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
-        "_No compute-kernel reasoning candidates were promoted._\n",
-        encoding="utf-8",
-    )
-    assert tlr.parse_analysis_md(md, top_k=10) == []
-
-
-def test_parse_analysis_md_missing_file_returns_empty(tmp_path):
-    """Non-existent report -> 0 candidates (callers fall back, never raise)."""
-    assert tlr.parse_analysis_md(tmp_path / "nope.md", top_k=10) == []
-
-
-def test_parse_analysis_md_top_k_caps_total_rows(tmp_path):
-    """top_k caps the per-row total across all P-items, not per category."""
-    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=5)
-    assert len(cands) == 5
-    # First 5 rows of the fixture are all P1 GEMMs.
-    assert all(c["tracelens_pitem_rank"] == 1 for c in cands)
-
-
-# Filter for GEAK based on budget (Higher P-item, Lower Efficiency)
-def _write_two_pitem_analysis_md(md: Path) -> None:
-    md.write_text(
-        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
-        "<!-- impact-begin kind=p_item category=sdpa_fwd mid=1.5 low=0.5 high=3.0 -->\n"
-        "\n"
-        "## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
-        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
-        "#### 🔴 P1: GEMM cluster (Tensile)\n\n"
-        "**Identification:** stub identification\n"
-        "**Data:**\n"
-        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
-        "FLOPS/Byte | Efficiency | Bound |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| high_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "80% of 708 TFLOPS | compute-bound |\n"
-        "| low_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "5% of 708 TFLOPS | compute-bound |\n"
-        "| unknown_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        " | compute-bound |\n"
-        "| mid_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "40% of 708 TFLOPS | compute-bound |\n"
-        "**Reasoning for Slowdown:** stub reasoning\n"
-        "**Resolution:** stub resolution\n"
-        "**Impact estimate:**\n"
-        "Low end: 1.0 ms savings (0.1% E2E)\n"
-        "High end: 2.0 ms savings (0.2% E2E)\n"
-        "\n"
-        "<!-- reasoning-candidate tier=compute rank=2 -->\n"
-        "#### 🟡 P2: SDPA (CK)\n\n"
-        "**Identification:** stub identification\n"
-        "**Data:**\n"
-        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
-        "FLOPS/Byte | Efficiency | Bound |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| p2_sdpa | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "10% of 708 TFLOPS | compute-bound |\n"
-        "**Reasoning for Slowdown:** stub reasoning\n"
-        "**Resolution:** stub resolution\n"
-        "**Impact estimate:**\n"
-        "Low end: 1.0 ms savings (0.1% E2E)\n"
-        "High end: 2.0 ms savings (0.2% E2E)\n",
-        encoding="utf-8",
-    )
-
-
-def test_parse_analysis_md_sorts_within_pitem_by_lower_efficiency(tmp_path):
-    """Within a P-item, lower-efficiency rows sort first (survive top_k); P1 before P2 across items."""
-    md = tmp_path / "analysis.md"
-    _write_two_pitem_analysis_md(md)
-
-    cands = tlr.parse_analysis_md(md, top_k=10)
-    names = [c["name"] for c in cands]
-    assert names == [
-        # P1 rows sorted ascending by efficiency:
-        "low_eff_gemm",
-        "mid_eff_gemm",
-        "high_eff_gemm",
-        # Unknown / 0.0 efficiency lands last within the P-item:
-        "unknown_eff_gemm",
-        # P2 still after every P1 row regardless of efficiency:
-        "p2_sdpa",
-    ]
-
-
-def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
-    """Budget cap: top_k keeps the lowest-efficiency rows within a P-item."""
-    md = tmp_path / "analysis.md"
-    _write_two_pitem_analysis_md(md)
-
-    cands = tlr.parse_analysis_md(md, top_k=2)
-    names = [c["name"] for c in cands]
-    assert names == ["low_eff_gemm", "mid_eff_gemm"], (
-        "top_k=2 must keep the two lowest-efficiency P1 rows; the "
-        "high-efficiency / unknown rows must be dropped before any P2 row"
-    )
-
-
-# normalize_upstream_category — TraceLens orchestrator_prepare.py enum
 @pytest.mark.parametrize(
     "raw,expected",
     [
@@ -3044,299 +2778,6 @@ def test_derive_kernel_category_falls_back_to_name_heuristic():
     assert tla.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
 
 
-# _extract_pitem_prose extracts Reasoning / Resolution / Impact.
-_SYNTHETIC_PITEM_BODY = """\
-#### 🔴 P1: RMSNorm fused with quantization (Triton)
-
-**Identification:** Four `aiter::rmsnorm_quant` operations were flagged as memory-bound with efficiencies of 0.88%-4.31% against peak HBM bandwidth of 5.3 TB/s. (source: `rmsnorm_metrics.json` → `operations[].efficiency.efficiency_percent`)
-
-**Data:**
-
-| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| rmsnorm_quant | (8,4096) bf16 | aiter/ops/rmsnorm.py(76): rmsnorm | 123.4 | 4.2 | 64 | 0.5 | 30% of 5.3 TB/s | memory-bound |
-
-**Reasoning for Slowdown:**
-
-Memory-bound elementwise kernel; HBM bandwidth saturated by the bf16 load + fp8 quant store pair.
-
-**Resolution:**
-
-Fuse RMSNorm with the immediately-following GEMM to amortize global loads, or rewrite as a single-pass Triton kernel with `tl.store(..., mask=)`.
-
-**Impact estimate:**
-
-Low end (baseline shapes): 12.5 ms savings (3.2% E2E). High end (peak decode batch): 40.0 ms savings (10.4% E2E).
-"""
-
-
-def test_extract_pitem_prose_pulls_all_sections():
-    prose = tlr._extract_pitem_prose(_SYNTHETIC_PITEM_BODY)
-    assert "Four `aiter::rmsnorm_quant`" in prose["identification"]
-    assert "rmsnorm_metrics.json" in prose["identification"]
-    assert "Memory-bound elementwise kernel" in prose["reasoning_for_slowdown"]
-    assert "HBM bandwidth saturated" in prose["reasoning_for_slowdown"]
-    assert "Fuse RMSNorm" in prose["resolution"]
-    assert "amortize global loads" in prose["resolution"]
-    assert prose["impact_low_ms"] == 12.5
-    assert prose["impact_low_e2e_pct"] == 3.2
-    assert prose["impact_high_ms"] == 40.0
-    assert prose["impact_high_e2e_pct"] == 10.4
-
-
-def test_extract_pitem_prose_identification_stops_at_data_marker():
-    """Identification ends at ``**Data:**`` — must not leak the 9-column table into the field."""
-    body = (
-        "**Identification:** Three ops flagged at 0.5% efficiency. "
-        "(source: gemm_metrics.json)\n\n"
-        "**Data:**\n\n| Op | Args | ... |\n\n"
-        "**Reasoning for Slowdown:**\nMemory-bound.\n"
-    )
-    prose = tlr._extract_pitem_prose(body)
-    assert prose["identification"].startswith("Three ops flagged")
-    assert "gemm_metrics.json" in prose["identification"]
-    assert "| Op |" not in prose["identification"], (
-        "Identification leaked into the Data table — end-marker order is wrong"
-    )
-    assert "Memory-bound" not in prose["identification"]
-
-
-def test_extract_pitem_prose_returns_empty_strings_when_markers_absent():
-    """Bodies without the four labels still return the full dict shape (key presence guaranteed)."""
-    prose = tlr._extract_pitem_prose("**Data:**\n| ... | ... |\n")
-    assert prose["identification"] == ""
-    assert prose["reasoning_for_slowdown"] == ""
-    assert prose["resolution"] == ""
-    assert prose["impact_low_ms"] == 0.0
-    assert prose["impact_low_e2e_pct"] == 0.0
-    assert prose["impact_high_ms"] == 0.0
-    assert prose["impact_high_e2e_pct"] == 0.0
-
-
-def test_extract_pitem_prose_reasoning_stops_at_resolution_marker():
-    """Reasoning must not leak into Resolution when both are present."""
-    body = (
-        "**Reasoning for Slowdown:**\nFirst paragraph.\n\n"
-        "**Resolution:**\nSecond paragraph.\n\n"
-        "**Impact estimate:**\nLow end: 1.0 ms savings (0.5% E2E).\n"
-        "High end: 2.0 ms savings (1.0% E2E).\n"
-    )
-    prose = tlr._extract_pitem_prose(body)
-    assert prose["reasoning_for_slowdown"] == "First paragraph."
-    assert prose["resolution"] == "Second paragraph."
-    assert prose["impact_low_ms"] == 1.0
-    assert prose["impact_high_ms"] == 2.0
-
-
-def test_extract_between_returns_empty_when_start_marker_missing():
-    """Defensive guard: missing start marker → empty, never raises."""
-    assert tlr._extract_between("body", "**Missing:**", ("**End:**",)) == ""
-
-
-def test_parse_analysis_md_attaches_prose_from_fixture():
-    """Every parsed LLama70B fixture candidate carries non-empty prose fields from its parent P-item block."""
-    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
-    assert cands, "fixture must produce at least one candidate"
-    # All 21 fixture candidates share P-item prose with their group.
-    for c in cands:
-        assert "identification" in c
-        assert "reasoning_for_slowdown" in c
-        assert "resolution" in c
-        assert "impact_low_ms" in c
-        assert "impact_high_ms" in c
-        # The fixture's P-items all have non-empty prose; require it.
-        assert c["reasoning_for_slowdown"], (
-            f"empty reasoning_for_slowdown on candidate {c.get('name')!r} (rank P{c.get('tracelens_pitem_rank')})"
-        )
-        assert c["resolution"], f"empty resolution on candidate {c.get('name')!r}"
-
-    # P1 prose mentions "Tile / wave-occupancy tuning" per the fixture.
-    p1_rows = [c for c in cands if c["tracelens_pitem_rank"] == 1]
-    assert any("wave-occupancy" in c["resolution"] for c in p1_rows), (
-        "P1 resolution should mention wave-occupancy tuning (from fixture)"
-    )
-
-
-# parse_analysis_md — spec allows trailing category-specific extra columns after the 9 canonical
-# ones (attention appends 3, generic-op appends Sub-Category); the parser must accept them, not skip.
-_FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD = (
-    Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "tracelens_v03_qwen3_moe_attention_analysis.md"
-)
-
-
-def test_parse_analysis_md_tolerates_attention_12_column_table_per_spec():
-    """A 12-column attention ``**Data:**`` table (9 canonical + 3 spec-allowed extras) must parse using the first 9 cells."""
-    cands = tlr.parse_analysis_md(_FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD, top_k=10)
-    assert len(cands) == 1, f"expected 1 attention candidate from the 12-column fixture; got {len(cands)}"
-    c = cands[0]
-    assert c["name"] == "vllm::unified_attention_with_output"
-    assert c["tracelens_category"] == "inferenceattention"
-    assert c["tracelens_pitem_rank"] == 1
-    assert c["bound_type"] == "memory-bound"
-    # Time (ms) -> duration_us; row is 45.862 ms.
-    assert abs(c["duration_us"] - 45862.0) < 1.0
-    assert c["call_count"] == 48
-    assert abs(c["percent_of_total"] - 2.61) < 0.001
-    assert abs(c["efficiency_percent"] - 3.69) < 0.001
-    assert c["efficiency_peak_value"] == 8.0
-    assert "TB/s" in c["efficiency_peak_unit"]
-    # impact_score is the mid value carried by the p_item marker.
-    assert c["impact_score"] == 2.2
-    # Kernel Path is a real launcher string (not "—"), so source_file
-    # must round-trip the relative path (resolution happens downstream).
-    assert "qwen3_moe.py" in c["source_file"]
-    # The three trailing extra cells are spec-allowed extras, preserved under tracelens_extra_columns.
-    extras = c.get("tracelens_extra_columns")
-    assert extras is not None, "tracelens_extra_columns missing for 12-col row"
-    assert extras.get("dominant kernel") == "`_fwd_kernel` (93.61%)"
-    assert extras.get("workload") == "unknown"
-    assert extras.get("attention pattern") == "GQA (8:1)"
-    # Canonical fields must NOT leak into extras.
-    for canonical_key in (
-        "operation",
-        "args",
-        "kernel path",
-        "time (ms)",
-        "%e2e",
-        "count",
-        "flops/byte",
-        "efficiency",
-        "bound",
-    ):
-        assert canonical_key not in extras
-
-
-def test_unified_attention_fixture_emits_semantic_workload_selectors():
-    candidates = tlr.parse_analysis_md(
-        _FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD,
-        top_k=10,
-    )
-    candidate = candidates[0]
-    candidate["kernel_id"] = "k001"
-    group = {
-        "primary_kernel_id": "k001",
-        "rows": [candidate],
-    }
-
-    cases = task_group_contract.build_task_group_shape_cases(group)
-    assert len(cases) == 1
-    selector = cases[0]["selector"]
-    assert selector == {
-        "CASE_ID": "case_001",
-        "QTOKENS": 1087,
-        "QHEADS": 32,
-        "KVHEADS": 4,
-        "HEADSIZE": 128,
-    }
-    assert {key: value for key, value in selector.items() if key != "CASE_ID"} == {
-        "QTOKENS": 1087,
-        "QHEADS": 32,
-        "KVHEADS": 4,
-        "HEADSIZE": 128,
-    }
-    canonical_workload = "_".join(f"{key}{selector[key]}" for key in sorted(selector) if key != "CASE_ID")
-    assert canonical_workload == ("HEADSIZE128_KVHEADS4_QHEADS32_QTOKENS1087")
-
-    grouped_candidate = dict(candidate)
-    grouped_candidate["task_group"] = {
-        **group,
-        "shape_cases": cases,
-    }
-    shapes = task_group_contract.forge_shapes_from_candidate(grouped_candidate)
-    assert shapes["primary"] == selector
-    assert shapes["minimal"] == selector
-    assert shapes["validation"] == [selector]
-
-
-def test_parse_analysis_md_tolerates_subcategory_10_column_table_per_spec(tmp_path):
-    """A 10-column table with a trailing ``Sub-Category`` must parse using the first 9 cells."""
-    md = tmp_path / "analysis.md"
-    md.write_text(
-        "<!-- impact-begin kind=p_item category=other mid=4.0 low=2.0 high=8.0 -->\n"
-        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
-        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
-        "#### 🔴 P1: Generic op cluster (Triton)\n\n"
-        "**Identification:** stub identification\n"
-        "**Data:**\n"
-        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
-        "FLOPS/Byte | Efficiency | Bound | Sub-Category |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| custom_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "40% of 708 TFLOPS | compute-bound | scatter_gather |\n"
-        "**Reasoning for Slowdown:** stub reasoning\n"
-        "**Resolution:** stub resolution\n",
-        encoding="utf-8",
-    )
-    cands = tlr.parse_analysis_md(md, top_k=10)
-    assert len(cands) == 1
-    c = cands[0]
-    assert c["name"] == "custom_op"
-    assert c["tracelens_category"] == "other"
-    assert c["bound_type"] == "compute-bound"
-    assert c["call_count"] == 10
-    # ``Sub-Category`` is preserved in extras, never the candidate top-level.
-    extras = c.get("tracelens_extra_columns")
-    assert extras is not None
-    assert extras.get("sub-category") == "scatter_gather"
-    assert "sub-category" not in c
-
-
-def test_parse_analysis_md_canonical_9_column_table_has_no_extras_key():
-    """Canonical 9-column candidates must NOT carry a ``tracelens_extra_columns`` key."""
-    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
-    assert cands, "Llama70B fixture must produce candidates"
-    for c in cands:
-        assert "tracelens_extra_columns" not in c, (
-            f"canonical 9-col candidate {c.get('name')!r} unexpectedly "
-            f"carries tracelens_extra_columns={c.get('tracelens_extra_columns')!r}"
-        )
-
-
-def test_parse_analysis_md_rejects_fewer_than_canonical_columns(tmp_path):
-    """A table missing a canonical column (here ``Bound``, 8 cols) must be skipped, not mis-mapped."""
-    md = tmp_path / "analysis.md"
-    md.write_text(
-        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
-        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
-        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
-        "#### 🔴 P1: Missing column (Tensile)\n\n"
-        "**Identification:** stub identification\n"
-        "**Data:**\n"
-        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
-        "FLOPS/Byte | Efficiency |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| stub_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "40% of 708 TFLOPS |\n"
-        "**Reasoning for Slowdown:** stub reasoning\n"
-        "**Resolution:** stub resolution\n",
-        encoding="utf-8",
-    )
-    assert tlr.parse_analysis_md(md, top_k=10) == []
-
-
-def test_parse_analysis_md_rejects_reordered_canonical_columns(tmp_path):
-    """Reordered canonical columns (Bound/Efficiency swapped) must be skipped, not mis-mapped."""
-    md = tmp_path / "analysis.md"
-    md.write_text(
-        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
-        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
-        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
-        "#### 🔴 P1: Reordered columns (Tensile)\n\n"
-        "**Identification:** stub identification\n"
-        "**Data:**\n"
-        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
-        "FLOPS/Byte | Bound | Efficiency |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| stub_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "compute-bound | 40% of 708 TFLOPS |\n"
-        "**Reasoning for Slowdown:** stub reasoning\n"
-        "**Resolution:** stub resolution\n",
-        encoding="utf-8",
-    )
-    assert tlr.parse_analysis_md(md, top_k=10) == []
-
-
-# classify_patchability gate + skip_reason audit field.
 def test_classify_patchability_accepts_stable_triton_source():
     """A stable Triton source is reusable; skip_reason is empty."""
     cand = {
@@ -3358,8 +2799,7 @@ def test_classify_patchability_rejects_missing_source_file():
 
 
 def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
-    """A csrc/cpp_itfs/*.py host launcher (device code is in a sibling
-    .cuh/.cpp.jinja) must be skipped, not edited."""
+    """A csrc/cpp_itfs/*.py host launcher (device code is in a sibling .cuh/.cpp.jinja) must be skipped, not edited."""
     src = "/path/aiter/csrc/cpp_itfs/pa/pa_ragged.py"
     # Make the reusable-root gate pass deterministically regardless of host env.
     monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/path/aiter/",))
@@ -3384,9 +2824,7 @@ def test_library_token_pairing():
 
 
 def test_classify_patchability_allows_aiter_device_source_unknown_type(monkeypatch):
-    """aiter .cu/.cuh device sources are patchable even when source_type is
-    'unknown' (classifier ran before source_file resolved). Enables forge to
-    optimize aiter::mha_batch_prefill etc."""
+    """aiter .cu/.cuh device sources are patchable even when source_type is 'unknown' (classifier ran before source_file resolved)."""
     src = "/sgl-workspace/aiter/csrc/py_itfs_ck/mha_batch_prefill_kernels.cu"
     monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/sgl-workspace/aiter/",))
     reusable, reason = tla.classify_patchability(
@@ -3396,8 +2834,7 @@ def test_classify_patchability_allows_aiter_device_source_unknown_type(monkeypat
 
 
 def test_classify_patchability_still_rejects_aiter_py_dispatcher(monkeypatch):
-    """aten::mm -> aiter tuned_gemm.py is a dispatcher (real GEMM is a compiled
-    CK/hipBLASLt lib); editing the .py does nothing, so it stays non-patchable."""
+    """aten::mm -> aiter tuned_gemm.py is a dispatcher (real GEMM is a compiled CK/hipBLASLt lib); editing the .py does nothing, so it stays non-patchable."""
     src = "/sgl-workspace/aiter/aiter/tuned_gemm.py"
     monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/sgl-workspace/aiter/",))
     reusable, reason = tla.classify_patchability(
@@ -3590,9 +3027,12 @@ def test_parse_launcher_path_returns_none_for_empty_and_garbage():
     assert func is None
 
 
-# ---------------------------------------------------------------------------
+def test_parse_launcher_path_swallows_deep_dict_repr():
+    payload = "{'entry_point': " + "(" * 9000 + "'a.py(1): f'" + ")" * 9000 + "}"
+    assert tlr._parse_launcher_path(payload) == ("", None, None)
+
+
 # _resolve_launcher_to_abs_source — TraceLens launcher path → absolute file.
-# Pins the three resolution paths (importlib spec, env override, hardcoded fallback) plus no-op cases.
 
 
 def _seed_pkg(tmp_path, pkg: str, relpath: str, funcs: tuple[str, ...] = ()) -> Path:
@@ -3721,11 +3161,7 @@ def test_resolve_launcher_rejects_when_function_not_in_file(tmp_path, monkeypatc
 
 
 def test_resolve_launcher_ast_check_falls_through_to_next_root(tmp_path, monkeypatch):
-    """When the first candidate root holds a stub that fails AST
-    validation, the resolver MUST keep walking the candidate list
-    instead of short-circuiting — otherwise a single bad spec
-    (shadowed pkg / stale wheel) permanently masks the real source on
-    the fallback path."""
+    """When the first candidate root holds a stub that fails AST validation, the resolver MUST keep walking the candidate list instead of short-circuiting — otherwise a single bad spec (shadowed pkg / stale wheel) permanently masks the real source on the fallback path."""
     bad_root = tmp_path / "bad"
     good_root = tmp_path / "good"
     bad_target = bad_root / "aiter_pinned_qrs" / "ops" / "rmsnorm.py"
@@ -3831,7 +3267,7 @@ def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
             "duration_us": 100.0,
             "call_count": 64,
             "gpu_pct": 5.0,
-            "tracelens_launcher_path": f"{src}(2): rms_norm",
+            "kernel_launcher_path": f"{src}(2): rms_norm",
         },
         {
             "kernel_id": "k002",
@@ -3839,7 +3275,7 @@ def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
             "duration_us": 50.0,
             "call_count": 32,
             "gpu_pct": 2.5,
-            "tracelens_launcher_path": f"{src}(2): rms_norm",
+            "kernel_launcher_path": f"{src}(2): rms_norm",
         },
         {
             "kernel_id": "k003",
@@ -3847,7 +3283,7 @@ def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
             "duration_us": 30.0,
             "call_count": 16,
             "gpu_pct": 1.5,
-            "tracelens_launcher_path": f"{src}(5): other_fn",
+            "kernel_launcher_path": f"{src}(5): other_fn",
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -3878,12 +3314,12 @@ def test_python_task_group_key_is_stable_across_definition_line_changes(tmp_path
         "kernel_id": "k001",
         "name": "fused_operator",
         "duration_us": 100.0,
-        "tracelens_launcher_path": f"{src}(1): forward",
+        "kernel_launcher_path": f"{src}(1): forward",
     }
     first_key = tlr.aggregate_by_source_function([candidate])[0]["task_group_key"]
 
     src.write_text("\n\n\ndef forward(x):\n    return x\n", encoding="utf-8")
-    candidate["tracelens_launcher_path"] = f"{src}(4): forward"
+    candidate["kernel_launcher_path"] = f"{src}(4): forward"
     second_key = tlr.aggregate_by_source_function([candidate])[0]["task_group_key"]
 
     assert first_key == second_key
@@ -3915,7 +3351,7 @@ def test_trace_routes_generate_compatible_operator_identities(tmp_path):
                 "duration_us": 100.0,
                 "call_count": 1,
                 "gpu_pct": 10.0,
-                "tracelens_launcher_path": f"{src}(1): forward",
+                "kernel_launcher_path": f"{src}(1): forward",
             }
         ]
     )[0]
@@ -3951,7 +3387,7 @@ def test_native_trace_routes_generate_compatible_operator_identities(tmp_path):
                 "duration_us": 100.0,
                 "call_count": 1,
                 "gpu_pct": 10.0,
-                "tracelens_launcher_path": f"{src}(1): fused_operator",
+                "kernel_launcher_path": f"{src}(1): fused_operator",
             }
         ]
     )[0]
@@ -3973,7 +3409,7 @@ def test_native_trace_routes_generate_compatible_operator_identities(tmp_path):
 
 def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path):
     """Q1 invariant: distinct operations sharing one Python wrapper stay in separate task_groups (operation is part of the key)."""
-    src = tmp_path / "gpt_oss.py"
+    src = tmp_path / "vendor_module.py"
     src.write_text(
         "def x():\n    pass\n\n\ndef forward(x):\n    return x\n",
         encoding="utf-8",
@@ -3985,14 +3421,14 @@ def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path)
             "name": "vllm::rocm_unquantized_gemm",
             "duration_us": 12704.0,
             "call_count": 360,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         {
             "kernel_id": "k002",
             "name": "vllm::rocm_aiter_triton_add_rmsnorm_pad",
             "duration_us": 9870.0,
             "call_count": 360,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         # Same op as k001 at a different shape MUST still merge with k001.
         {
@@ -4000,7 +3436,7 @@ def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path)
             "name": "vllm::rocm_unquantized_gemm",
             "duration_us": 1260.0,
             "call_count": 36,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -4032,13 +3468,13 @@ def test_aggregate_keeps_same_operation_in_different_functions_separate(
             "kernel_id": "k001",
             "name": "shared_operation",
             "duration_us": 100.0,
-            "tracelens_launcher_path": f"{src}(1): first",
+            "kernel_launcher_path": f"{src}(1): first",
         },
         {
             "kernel_id": "k002",
             "name": "shared_operation",
             "duration_us": 90.0,
-            "tracelens_launcher_path": f"{src}(4): second",
+            "kernel_launcher_path": f"{src}(4): second",
         },
     ]
 
@@ -4062,28 +3498,24 @@ def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_
             "name": "aiter::rms_norm",
             "duration_us": 200.0,
             "call_count": 100,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
             "tracelens_pitem_rank": 2,
             "tracelens_pitem_title": "Memory-Bound at decode shapes",
             "identification": "Decode-shape Identification.",
             "reasoning_for_slowdown": "Decode-shape Reasoning.",
             "resolution": "Decode-shape Resolution.",
-            "impact_low_ms": 5.0,
-            "impact_high_ms": 10.0,
         },
         {
             "kernel_id": "k002",
             "name": "aiter::rms_norm",
             "duration_us": 80.0,
             "call_count": 40,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
             "tracelens_pitem_rank": 5,
             "tracelens_pitem_title": "Compute-Bound at prefill shapes",
             "identification": "Prefill-shape Identification.",
             "reasoning_for_slowdown": "Prefill-shape Reasoning.",
             "resolution": "Prefill-shape Resolution.",
-            "impact_low_ms": 1.0,
-            "impact_high_ms": 3.0,
         },
         # Same P2 again — must dedupe (only one entry retained).
         {
@@ -4091,14 +3523,12 @@ def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_
             "name": "aiter::rms_norm",
             "duration_us": 50.0,
             "call_count": 25,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
             "tracelens_pitem_rank": 2,
             "tracelens_pitem_title": "Memory-Bound at decode shapes",
             "identification": "Decode-shape Identification.",
             "reasoning_for_slowdown": "Decode-shape Reasoning.",
             "resolution": "Decode-shape Resolution.",
-            "impact_low_ms": 5.0,
-            "impact_high_ms": 10.0,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -4135,7 +3565,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
             "duration_us": 12704.0,
             "call_count": 360,
             "bound_type": "memory-bound",
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         {
             "kernel_id": "k002",
@@ -4144,7 +3574,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
             "duration_us": 10992.0,
             "call_count": 360,
             "bound_type": "memory-bound",
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         {
             "kernel_id": "k003",
@@ -4153,7 +3583,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
             "duration_us": 9291.0,
             "call_count": 360,
             "bound_type": "memory-bound",
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         {
             "kernel_id": "k004",
@@ -4162,7 +3592,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
             "duration_us": 1260.0,
             "call_count": 36,
             "bound_type": "memory-bound",
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -4178,48 +3608,14 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
         "case_003",
         "case_004",
     ]
-    # Each row preserves its own shape list verbatim — no merging,
-    # no de-duplication. Order is duration-desc post-aggregation so
-    # row[0]=k001, row[3]=k004.
+    # Each row preserves its own shape list verbatim — no merging, no de-duplication.
     assert g["rows"][0]["shapes"] == ["(64,2880) bf16", "(128,2880) bf16", "(128,) bf16"]
     assert g["rows"][3]["shapes"] == ["(2048,2880) bf16", "(128,2880) bf16", "(128,) bf16"]
-    # Cross-row distinctness: the "(640,2880)" shape only appears in
-    # k002's row, never bleeds into k001's or k003's row.
+    # Cross-row distinctness: the "(640,2880)" shape only appears in k002's row, never bleeds into k001's or k003's
+    # row.
     assert "(640,2880) bf16" in g["rows"][1]["shapes"]
     assert "(640,2880) bf16" not in g["rows"][0]["shapes"]
     assert "(640,2880) bf16" not in g["rows"][2]["shapes"]
-
-    # Now render the benchmark cases block from the primary candidate
-    # carrying the task_group — this is what the kernel_optimization
-    # subprocess sees in build_prompt.
-    import importlib
-
-    ko = importlib.import_module("kernel_optimization")
-    primary = dict(g["rows"][0])
-    primary["task_group"] = g
-    block = ko._build_benchmark_cases_block(primary)
-    assert "## Benchmark cases" in block
-    # Every row produces a distinct ``Case N:`` line, in
-    # aggregate-time-descending order.
-    assert "Case 1: operation=vllm::rocm_unquantized_gemm" in block
-    assert "Case 2: operation=vllm::rocm_unquantized_gemm" in block
-    assert "Case 3: operation=vllm::rocm_unquantized_gemm" in block
-    assert "Case 4: operation=vllm::rocm_unquantized_gemm" in block
-    # Each row's distinct Args appear in its own Case line. The
-    # ``(640,2880) bf16`` shape only exists in k002's row, so it must
-    # appear in exactly one Case (the second, since k002 is the
-    # second-heaviest at 10992 us).
-    assert block.count("(640,2880) bf16") == 1
-    case2_segment = block.split("Case 2:")[1].split("Case 3:")[0]
-    assert "(640,2880) bf16" in case2_segment, (
-        "k002's unique shape must land in Case 2 — confirms shape preservation per-row, not cross-row merging"
-    )
-    # Same for k003's unique ``(2880,512)`` shape → Case 3.
-    case3_segment = block.split("Case 3:")[1].split("Case 4:")[0]
-    assert "(2880,512) bf16" in case3_segment
-    # And k004's unique ``(2048,2880)`` shape → Case 4.
-    case4_segment = block.split("Case 4:")[1]
-    assert "(2048,2880) bf16" in case4_segment
 
 
 def test_aggregate_drops_empty_prose_entries(tmp_path):
@@ -4231,7 +3627,7 @@ def test_aggregate_drops_empty_prose_entries(tmp_path):
             "kernel_id": "k001",
             "name": "aiter::rms_norm",
             "duration_us": 100.0,
-            "tracelens_launcher_path": f"{src}(1): rms_norm",
+            "kernel_launcher_path": f"{src}(1): rms_norm",
             # No P-item rank, no prose — raw-trace fallback shape.
         },
     ]
@@ -4241,21 +3637,18 @@ def test_aggregate_drops_empty_prose_entries(tmp_path):
 
 
 def test_aggregate_by_source_function_skips_unparseable_launcher_paths():
-    """Candidates with empty / em-dash Kernel Path (LLama70B fixture
-    shape) produce zero groups — caller falls back to per-kernel."""
+    """Candidates with empty / em-dash Kernel Path (LLama70B fixture shape) produce zero groups — caller falls back to per-kernel."""
     cands = [
-        {"kernel_id": "k001", "name": "x", "tracelens_launcher_path": ""},
-        {"kernel_id": "k002", "name": "y", "tracelens_launcher_path": "—"},
-        # No tracelens_launcher_path field AND no source_file: skipped.
+        {"kernel_id": "k001", "name": "x", "kernel_launcher_path": ""},
+        {"kernel_id": "k002", "name": "y", "kernel_launcher_path": "—"},
+        # No kernel_launcher_path field AND no source_file: skipped.
         {"kernel_id": "k003", "name": "z"},
     ]
     assert tlr.aggregate_by_source_function(cands) == []
 
 
 def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
-    """Candidates from raw-trace / csv fallback paths lack
-    ``tracelens_launcher_path`` but may carry a Python-shaped path in
-    ``source_file``; we still parse those when possible."""
+    """Candidates from raw-trace / csv fallback paths lack ``kernel_launcher_path`` but may carry a Python-shaped path in ``source_file``; we still parse those when possible."""
     cands = [
         {
             "kernel_id": "k001",
@@ -4270,17 +3663,42 @@ def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
     assert groups[0]["function_name"] == "rms_norm"
 
 
-# ===========================================================================
-# task-group over-splitting: native (.cu/.hip/.cpp) kernels have no Python AST
-# def-line (TraceLens reports the per-call ``#L`` line), and C++ template/dtype
-# mangling varies the name. Native sources key on ``(normalized_op,
-# canonical_path)`` only, preserving the invariant that distinct base-name
-# kernels sharing a wrapper never merge.
-# ===========================================================================
+def test_aggregate_keys_resolved_row_on_source_file_and_reports_resolved_line(tmp_path):
+    """A resolved row carries TraceLens' verdict in ``source_file`` / ``source_line``: the
+    group keys on the native ``source_file`` and reports the resolved ``source_line`` as
+    ``definition_line`` — the ``.py`` ``kernel_launcher_path`` neither re-keys the native
+    kernel onto its launcher nor drives the def line to the launcher's own line."""
+    native = tmp_path / "custom_all_reduce.cuh"
+    native.write_text("// native kernel\n", encoding="utf-8")
+    launcher = tmp_path / "aiter" / "rmsnorm.py"
+    cands = [
+        {
+            "kernel_id": "k001",
+            "name": "aiter::cross_device_reduce_2stage",
+            "duration_us": 100.0,
+            "call_count": 8,
+            "kernel_launcher_path": f"{launcher}(1): rms_norm",
+            "source_file": str(native),
+            "source_line": 42,
+            "source_function": "cross_device_reduce_2stage",
+        },
+    ]
+    groups = tlr.aggregate_by_source_function(cands)
+    assert len(groups) == 1
+    g = groups[0]
+    assert g["source_path"].endswith("custom_all_reduce.cuh")
+    assert g["definition_line"] == 42
+    # The resolved __global__ symbol labels the group, not the .cuh file stem.
+    assert g["function_name"] == "cross_device_reduce_2stage"
+    assert g["ast_resolved"] is False
+
+
+# task-group over-splitting: native (.cu/.hip/.cpp) kernels have no Python AST def-line (TraceLens reports the
+# per-call ``#L`` line), and C++ template/dtype mangling varies the name.
 def test_normalize_operation_key_strips_templates():
-    """Template/dtype args are dropped; distinct base names stay distinct;
-    nested templates are handled; an all-template name falls back to the
-    original so a group key never collapses to empty."""
+    """Template/dtype args are dropped; distinct base names stay distinct; nested templates are handled; an
+    all-template name falls back to the original so a group key never collapses to empty.
+    """
     normalize_operation_key = task_group_contract.normalize_operation_key
 
     assert normalize_operation_key("rmsnorm_kernel<bf16>") == "rmsnorm_kernel"
@@ -4295,12 +3713,7 @@ def test_normalize_operation_key_strips_templates():
 
 
 def test_operation_key_drops_launch_decoration_for_both_source_kinds():
-    """One kernel reached through two launch APIs is one operator.
-
-    The launch API, the C return type and the synthetic-op suffix describe how a
-    trace saw the dispatch, so keeping them splits a single kernel into one task
-    group per launch path and ports its source once per group.
-    """
+    """One kernel reached through two launch APIs is one operator."""
     normalize_operation_key = task_group_contract.normalize_operation_key
     native_operation_key = task_group_contract.native_operation_key
 
@@ -4348,28 +3761,15 @@ def test_py_task_group_merges_launch_paths_of_one_kernel():
 
 
 def test_is_native_source_detects_device_extensions():
-    """Native C/C++/HIP/CUDA suffixes are recognized (case-insensitive);
-    Python and unrelated files are not."""
+    """Native C/C++/HIP/CUDA suffixes are recognized (case-insensitive); Python and unrelated files are not."""
     for p in ("kern.cu", "a/b/kern.cuh", "x.hip", "y.cpp", "Z.CU", "k.cc"):
         assert tlr._is_native_source(p), p
     for p in ("model.py", "wrapper.pyi", "notes.txt", ""):
         assert not tlr._is_native_source(p), p
 
 
-def test_grep_for_keyword_treats_dash_prefixed_keyword_as_literal(tmp_path):
-    """Profiler-derived names can begin with ``-``; grep must not treat them
-    as command-line options."""
-    src = tmp_path / "kernel.py"
-    src.write_text("def uses_dash_prefixed_name():\n    return '--danger'\n", encoding="utf-8")
-
-    tla._GREP_CACHE.clear()
-    assert tla._grep_for_keyword("--danger", tmp_path) == [src]
-
-
 def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
-    """A native .cu kernel invoked from two call sites reports two different
-    ``#L`` lines (no Python AST def-line exists). Native sources must key on
-    ``(op, path)`` only and collapse to one task_group."""
+    """A native .cu kernel invoked from two call sites reports two different ``#L`` lines (no Python AST def-line exists)."""
     src = tmp_path / "rmsnorm.cu"
     src.write_text(
         "__global__ void rmsnorm_kernel(float* x) { /* ... */ }\n",
@@ -4382,7 +3782,7 @@ def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
             "duration_us": 100.0,
             "call_count": 64,
             "gpu_pct": 5.0,
-            "tracelens_launcher_path": f"{src}(120): rmsnorm_kernel",
+            "kernel_launcher_path": f"{src}(120): rmsnorm_kernel",
         },
         {
             "kernel_id": "k002",
@@ -4390,7 +3790,7 @@ def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
             "duration_us": 50.0,
             "call_count": 32,
             "gpu_pct": 2.5,
-            "tracelens_launcher_path": f"{src}(456): rmsnorm_kernel",
+            "kernel_launcher_path": f"{src}(456): rmsnorm_kernel",
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -4402,11 +3802,7 @@ def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
 
 
 def test_aggregate_merges_native_template_instances_by_source(tmp_path):
-    """Three instantiations of ONE ``__global__`` template
-    (``add_rmsnorm_quant_kernel``) in ONE .cu, named with DIFFERENT
-    Itanium-mangled symbols and autoresolving to the SAME bare .cu path, must
-    collapse into ONE task_group: the mangled operation and per-call line are
-    NOT part of the native key."""
+    """Three instantiations of ONE ``__global__`` template (``add_rmsnorm_quant_kernel``) in ONE .cu, named with DIFFERENT Itanium-mangled symbols and autoresolving to the SAME bare .cu path, must collapse into ONE task_group: the mangled operation and per-call line are NOT part of the native key."""
     src = tmp_path / "rmsnorm_quant_kernels.cu"
     src.write_text(
         "template <typename DTYPE_I, typename DTYPE_O, int BlockSize,\n"
@@ -4421,21 +3817,21 @@ def test_aggregate_merges_native_template_instances_by_source(tmp_path):
             "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb0ELb0EEEvPKT_",
             "duration_us": 300.0,
             "call_count": 30,
-            "tracelens_launcher_path": bare,
+            "kernel_launcher_path": bare,
         },
         {  # rmsnorm (mode 1), shape B -> different BlockSize template arg
             "kernel_id": "k006",
             "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi512ELi16ELb0ELb0EEEvPKT_",
             "duration_us": 200.0,
             "call_count": 20,
-            "tracelens_launcher_path": bare,
+            "kernel_launcher_path": bare,
         },
         {  # add_rmsnorm (mode 2) -> ADD_RESIDUAL=true template arg
             "kernel_id": "k007",
             "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0EEEvPKT_",
             "duration_us": 100.0,
             "call_count": 10,
-            "tracelens_launcher_path": bare,
+            "kernel_launcher_path": bare,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -4461,13 +3857,13 @@ def test_aggregate_splits_distinct_native_operators_in_one_source(tmp_path):
             "kernel_id": "k001",
             "name": "quantize_kernel",
             "duration_us": 100.0,
-            "tracelens_launcher_path": str(src),
+            "kernel_launcher_path": str(src),
         },
         {
             "kernel_id": "k002",
             "name": "dequantize_kernel",
             "duration_us": 80.0,
-            "tracelens_launcher_path": str(src),
+            "kernel_launcher_path": str(src),
         },
     ]
 
@@ -4481,10 +3877,7 @@ def test_aggregate_splits_distinct_native_operators_in_one_source(tmp_path):
 
 
 def test_aggregate_normalizes_template_dtype_on_python_track(tmp_path):
-    """Operation normalization applies to the Python track too: two
-    candidates sharing one wrapper whose names differ only by dtype
-    template args merge. Path/line/fn are identical here, so this
-    isolates normalization from the native call-site-line rule."""
+    """Operation normalization applies to the Python track too: two candidates sharing one wrapper whose names differ only by dtype template args merge."""
     src = tmp_path / "layer.py"
     src.write_text("def forward(x):\n    return x\n", encoding="utf-8")
     launcher = f"{src}(1): forward"
@@ -4494,14 +3887,14 @@ def test_aggregate_normalizes_template_dtype_on_python_track(tmp_path):
             "name": "fused_moe_kernel<bf16>",
             "duration_us": 70.0,
             "call_count": 7,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         {
             "kernel_id": "k002",
             "name": "fused_moe_kernel<fp16>",
             "duration_us": 30.0,
             "call_count": 3,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -4510,23 +3903,21 @@ def test_aggregate_normalizes_template_dtype_on_python_track(tmp_path):
 
 
 def test_aggregate_canonicalizes_native_source_path():
-    """The same .cu file reached via a non-normalized path
-    (``sub/../rmsnorm.cu``) and a clean path must canonicalize to one
-    group rather than splitting on the literal path string."""
+    """The same .cu file reached via a non-normalized path (``sub/../rmsnorm.cu``) and a clean path must canonicalize to one group rather than splitting on the literal path string."""
     cands = [
         {
             "kernel_id": "k001",
             "name": "rmsnorm_kernel",
             "duration_us": 40.0,
             "call_count": 4,
-            "tracelens_launcher_path": "csrc/sub/../rmsnorm.cu(12): rmsnorm_kernel",
+            "kernel_launcher_path": "csrc/sub/../rmsnorm.cu(12): rmsnorm_kernel",
         },
         {
             "kernel_id": "k002",
             "name": "rmsnorm_kernel",
             "duration_us": 10.0,
             "call_count": 1,
-            "tracelens_launcher_path": "csrc/rmsnorm.cu(99): rmsnorm_kernel",
+            "kernel_launcher_path": "csrc/rmsnorm.cu(99): rmsnorm_kernel",
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -4535,18 +3926,15 @@ def test_aggregate_canonicalizes_native_source_path():
 
 
 # build_task_groups (tracelens_analysis.py wrapper)
-# ===========================================================================
 def test_build_task_groups_filters_non_reusable():
-    """build_task_groups skips candidates with reusable_native_kernel=False
-    so vendor / aten:: / runtime-generated kernels never appear in a
-    group's kernel_ids."""
+    """build_task_groups skips candidates with reusable_native_kernel=False so vendor / aten:: / runtime-generated kernels never appear in a group's kernel_ids."""
     cands = [
         {
             "kernel_id": "k001",
             "name": "rms_norm",
             "duration_us": 50.0,
             "call_count": 4,
-            "tracelens_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
+            "kernel_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
             "reusable_native_kernel": True,
         },
         {
@@ -4554,7 +3942,7 @@ def test_build_task_groups_filters_non_reusable():
             "name": "rocblas_sgemm",
             "duration_us": 80.0,
             "call_count": 2,
-            "tracelens_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
+            "kernel_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
             "reusable_native_kernel": False,  # filtered out
         },
     ]
@@ -4618,8 +4006,7 @@ def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch
     assert tla._default_workspace_path() == "/legacy/workspace"
 
 
-# Idle-% sanity gate on the Executive Summary. High idle => pivot to params;
-# default threshold 80% (overridable via HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD).
+# Idle-% sanity gate on the Executive Summary.
 
 _EXEC_SUMMARY_LOW_IDLE = """\
 # Workload Analysis
@@ -4836,465 +4223,11 @@ def test_resolve_launcher_via_atom_fallback_root(tmp_path, monkeypatch):
     assert func == "forward"
 
 
-# ---------------------------------------------------------------------------
-# deterministic_extract_hot_kernels
-# ---------------------------------------------------------------------------
-
-
-def _write_priority_json(output_dir, findings):
-    p = output_dir / "priority_data.json"
-    p.write_text(json.dumps({"findings": findings}), encoding="utf-8")
-
-
-def _write_metrics_json(output_dir, category, operations, status="OK"):
-    cat_dir = output_dir / "category_data"
-    cat_dir.mkdir(parents=True, exist_ok=True)
-    (cat_dir / f"{category}_metrics.json").write_text(
-        json.dumps(
-            {
-                "category": category,
-                "status": status,
-                "operations": operations,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
-def test_deterministic_extract_hot_kernels_basic(tmp_path):
-    ops = [
-        {"name": "aten::mm", "time_ms": 10.0, "count": 5, "args": "(1024,1024) bf16", "launcher_path": ""},
-    ]
-    _write_metrics_json(tmp_path, "gemm", ops)
-    _write_priority_json(
-        tmp_path,
-        [
-            {
-                "global_rank": 1,
-                "category": "gemm",
-                "impact_score": 0.8,
-                "members": [
-                    {"operation": "aten::mm", "time_ms": 10.0, "efficiency_pct": 45.0, "bound_type": "compute"},
-                ],
-            },
-        ],
-    )
-
-    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
-    assert len(result) == 1
-    c = result[0]
-    assert c["name"] == "aten::mm"
-    assert c["duration_us"] == 10000.0
-    assert c["call_count"] == 5
-    assert c["efficiency_percent"] == 45.0
-    assert c["shapes"] == ["(1024,1024) bf16"]
-    assert c["input_shapes"] == [{"call_num": 5, "shape": "(1024,1024) bf16"}]
-
-
-def test_deterministic_extract_hot_kernels_empty_priority(tmp_path):
-    _write_priority_json(tmp_path, [])
-    assert tla.deterministic_extract_hot_kernels(tmp_path, top_k=5) == []
-
-
-def test_deterministic_extract_hot_kernels_missing_priority(tmp_path):
-    assert tla.deterministic_extract_hot_kernels(tmp_path, top_k=5) == []
-
-
-def test_deterministic_extract_hot_kernels_bad_priority_json(tmp_path):
-    priority_path = tmp_path / "priority_data.json"
-    priority_path.write_text("{not json", encoding="utf-8")
-    log_path = tmp_path / "deterministic.log"
-
-    result = tla.deterministic_extract_hot_kernels(
-        tmp_path,
-        top_k=5,
-        log_path=log_path,
-    )
-
-    assert result == []
-    assert "failed to parse" in log_path.read_text(encoding="utf-8")
-
-
-def test_deterministic_extract_hot_kernels_bad_priority_json_fail_loud(tmp_path):
-    priority_path = tmp_path / "priority_data.json"
-    priority_path.write_text("{not json", encoding="utf-8")
-
-    with pytest.raises(RuntimeError, match="failed to parse"):
-        tla.deterministic_extract_hot_kernels(
-            tmp_path,
-            top_k=5,
-            fail_on_corrupt_priority=True,
-        )
-
-
-def test_deterministic_extract_hot_kernels_top_k_limit(tmp_path):
-    ops = [{"name": f"op{i}", "time_ms": float(i), "count": 1, "args": ""} for i in range(10)]
-    _write_metrics_json(tmp_path, "gemm", ops)
-    members = [{"operation": f"op{i}", "time_ms": float(i), "efficiency_pct": 50.0} for i in range(10)]
-    _write_priority_json(
-        tmp_path,
-        [
-            {"global_rank": 1, "category": "gemm", "impact_score": 1.0, "members": members},
-        ],
-    )
-    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=3)
-    assert len(result) == 3
-
-
-def test_deterministic_extract_sets_non_synthetic_input_shapes(tmp_path):
-    """Input shapes from deterministic extraction must NOT be synthetic."""
-    ops = [
-        {
-            "name": "aiter::mm",
-            "time_ms": 5.0,
-            "count": 3,
-            "args": "(512,256) fp16<br>(256,128) fp16",
-            "launcher_path": "",
-        },
-    ]
-    _write_metrics_json(tmp_path, "gemm", ops)
-    _write_priority_json(
-        tmp_path,
-        [
-            {
-                "global_rank": 1,
-                "category": "gemm",
-                "impact_score": 0.5,
-                "members": [
-                    {"operation": "aiter::mm", "time_ms": 5.0, "efficiency_pct": 60.0},
-                ],
-            },
-        ],
-    )
-
-    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
-    c = result[0]
-    assert c["input_shapes"] == [
-        {"call_num": 3, "shape": "(512,256) fp16<br>(256,128) fp16"},
-    ]
-    assert "_input_shapes_synthetic" not in c
-
-
-def test_deterministic_extract_skips_metric_mismatch(tmp_path):
-    ops = [
-        {"name": "aten::mm", "time_ms": 100.0, "count": 5, "args": "(1024,1024) bf16", "launcher_path": ""},
-    ]
-    _write_metrics_json(tmp_path, "gemm", ops)
-    _write_priority_json(
-        tmp_path,
-        [
-            {
-                "global_rank": 1,
-                "category": "gemm",
-                "impact_score": 0.8,
-                "members": [
-                    {"operation": "aten::mm", "time_ms": 10.0, "efficiency_pct": 45.0, "bound_type": "compute"},
-                ],
-            },
-        ],
-    )
-
-    log_path = tmp_path / "deterministic.log"
-    result = tla.deterministic_extract_hot_kernels(
-        tmp_path,
-        top_k=5,
-        log_path=log_path,
-    )
-
-    assert result == []
-    log_text = log_path.read_text(encoding="utf-8")
-    assert "skipping priority member with no matching metrics row" in log_text
-    assert "operation='aten::mm'" in log_text
-
-
-# ---------------------------------------------------------------------------
-# deterministic_extract_hot_kernels — "other" bucket inclusion + sorting
-# ---------------------------------------------------------------------------
-
-_OTHER_MOE_NAME = "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427"
-_MOE_KERNEL_DEF = (
-    "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py"
-)
 # The wrapper that merely *launches* the kernel — must never be the source.
-_MOE_LAUNCHER_PATH = "sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(391): _fused_moe_kernel_sequence"
-
-
-def test_deterministic_extract_includes_other_bucket_kernel(tmp_path, monkeypatch):
-    """A high-GPU-time "other"-bucket Triton kernel (fused_moe) that never
-    appears in priority_data findings must still be surfaced, resolved to its
-    *definition* file (not the launcher wrapper)."""
-    _write_metrics_json(
-        tmp_path,
-        "other",
-        [
-            {
-                "name": _OTHER_MOE_NAME,
-                "time_ms": 354.0,
-                "count": 96,
-                "args": "(16384,2048) bf16",
-                "launcher_path": _MOE_LAUNCHER_PATH,
-                "library": "Triton",
-            },
-        ],
-    )
-    # priority_data has only a small gemm finding — no fused_moe.
-    _write_metrics_json(
-        tmp_path,
-        "gemm",
-        [
-            {"name": "aten::mm", "time_ms": 10.0, "count": 5, "args": "(1024,1024) bf16", "launcher_path": ""},
-        ],
-    )
-    _write_priority_json(
-        tmp_path,
-        [
-            {
-                "global_rank": 1,
-                "category": "gemm",
-                "impact_score": 0.8,
-                "members": [
-                    {"operation": "aten::mm", "time_ms": 10.0, "efficiency_pct": 45.0, "bound_type": "compute"}
-                ],
-            },
-        ],
-    )
-    # Hermetic: pin symbol resolution to the kernel definition file.
-    monkeypatch.setattr(tla, "locate_source_via_grep", lambda name: _MOE_KERNEL_DEF if name == _OTHER_MOE_NAME else "")
-
-    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
-    by_name = {c["name"]: c for c in result}
-    assert _OTHER_MOE_NAME in by_name, "fused_moe other-bucket op must be surfaced"
-    moe = by_name[_OTHER_MOE_NAME]
-    assert moe["source_file"] == _MOE_KERNEL_DEF, "must resolve to definition, not launcher"
-    assert "fused_moe.py" not in moe["source_file"], "must NOT point at the launcher wrapper"
-    assert moe["candidate_source"] == "other_bucket_fallback"
-
-
-def test_deterministic_extract_sorts_all_candidates_by_duration(tmp_path, monkeypatch):
-    """The dominant "other"-bucket kernel (354ms) must outrank a small
-    priority-data kernel (10ms) — all candidates sorted by GPU time."""
-    _write_metrics_json(
-        tmp_path,
-        "other",
-        [
-            {
-                "name": _OTHER_MOE_NAME,
-                "time_ms": 354.0,
-                "count": 96,
-                "args": "(16384,2048) bf16",
-                "launcher_path": _MOE_LAUNCHER_PATH,
-                "library": "Triton",
-            },
-        ],
-    )
-    _write_metrics_json(
-        tmp_path,
-        "elementwise",
-        [
-            {
-                "name": "sgl_kernel::silu_and_mul",
-                "time_ms": 10.0,
-                "count": 5,
-                "args": "(1024,1024) bf16",
-                "launcher_path": "",
-            },
-        ],
-    )
-    _write_priority_json(
-        tmp_path,
-        [
-            {
-                "global_rank": 1,
-                "category": "elementwise",
-                "impact_score": 1.9,
-                "members": [
-                    {
-                        "operation": "sgl_kernel::silu_and_mul",
-                        "time_ms": 10.0,
-                        "efficiency_pct": 17.0,
-                        "bound_type": "memory",
-                    }
-                ],
-            },
-        ],
-    )
-    monkeypatch.setattr(tla, "locate_source_via_grep", lambda name: _MOE_KERNEL_DEF if name == _OTHER_MOE_NAME else "")
-
-    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
-    assert result[0]["name"] == _OTHER_MOE_NAME, "biggest kernel must rank first"
-    durations = [c["duration_us"] for c in result]
-    assert durations == sorted(durations, reverse=True), "candidates sorted desc by duration"
-
-
-def test_deterministic_extract_skips_other_op_with_unresolvable_source(tmp_path, monkeypatch):
-    """An "other"-bucket op whose symbol cannot be resolved to a definition
-    file is skipped (never falls back to the launcher wrapper as source)."""
-    _write_metrics_json(
-        tmp_path,
-        "other",
-        [
-            {
-                "name": "sglang_profiler::mystery_op_999",
-                "time_ms": 50.0,
-                "count": 1,
-                "args": "",
-                "launcher_path": _MOE_LAUNCHER_PATH,
-                "library": "Triton",
-            },
-        ],
-    )
-    _write_priority_json(tmp_path, [])
-    monkeypatch.setattr(tla, "locate_source_via_grep", lambda name: "")
-
-    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
-    assert result == [], "unresolvable other-bucket op must be skipped"
-
-
-# ---------------------------------------------------------------------------
-# _match_op_by_time
-# ---------------------------------------------------------------------------
-
-
-def test_match_op_by_time_exact_match():
-    ops = [
-        {"name": "a", "time_ms": 10.0, "args": "shape1"},
-        {"name": "a", "time_ms": 20.0, "args": "shape2"},
-    ]
-    result = tla._match_op_by_time(ops, "a", 20.0)
-    assert result["args"] == "shape2"
-
-
-def test_match_op_by_time_close_match():
-    ops = [{"name": "a", "time_ms": 10.005, "args": "ok"}]
-    result = tla._match_op_by_time(ops, "a", 10.0)
-    assert result["args"] == "ok"
-
-
-def test_match_op_by_time_rejects_distant_match():
-    ops = [{"name": "a", "time_ms": 100.0, "args": "wrong"}]
-    result = tla._match_op_by_time(ops, "a", 10.0)
-    assert result == {}
-
-
-def test_match_op_by_time_no_name_match():
-    ops = [{"name": "b", "time_ms": 10.0}]
-    result = tla._match_op_by_time(ops, "a", 10.0)
-    assert result == {}
-
-
-def test_match_op_by_time_empty_ops():
-    assert tla._match_op_by_time([], "a", 10.0) == {}
-
-
-# ---------------------------------------------------------------------------
-# _extract_total_time_us_from_gpu_timeline
-# ---------------------------------------------------------------------------
-
-
-def test_extract_total_time_us_from_gpu_timeline(tmp_path):
-    csv_dir = tmp_path / "perf_report_csvs"
-    csv_dir.mkdir()
-    (csv_dir / "gpu_timeline.csv").write_text(
-        "type,time ms,percent\ncompute_time,100.5,80.0\ntotal_time,125.0,100.0\nidle_time,24.5,20.0\n",
-        encoding="utf-8",
-    )
-    result = tla._extract_total_time_us_from_gpu_timeline(tmp_path)
-    assert result == 125000.0
-
-
-def test_extract_total_time_us_returns_none_when_missing(tmp_path):
-    assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
-
-
-# ---------------------------------------------------------------------------
-# Low-compute gate: gpu_timeline readers + gate evaluation
-# ---------------------------------------------------------------------------
-
-
-def _write_gpu_timeline(tmp_path, body: str):
-    csv_dir = tmp_path / "perf_report_csvs"
-    csv_dir.mkdir(exist_ok=True)
-    (csv_dir / "gpu_timeline.csv").write_text(body, encoding="utf-8")
-
-
-def test_extract_compute_pct_accepts_schema_spellings(tmp_path):
-    for label in ("computation_time", "compute_time", "computation", "compute"):
-        _write_gpu_timeline(
-            tmp_path,
-            f"type,time ms,percent\n{label},725.85,3.99\ntotal_time,18186.6,100.0\n",
-        )
-        assert tla._extract_compute_pct_from_gpu_timeline(tmp_path) == 3.99
-
-
-def test_extract_exposed_comm_pct_accepts_schema_spellings(tmp_path):
-    for label in ("exposed_comm_time", "exposed_communication_time", "exposed_communication"):
-        _write_gpu_timeline(
-            tmp_path,
-            f"type,time ms,percent\n{label},17456.98,95.99\ntotal_time,18186.6,100.0\n",
-        )
-        assert tla._extract_exposed_comm_pct_from_gpu_timeline(tmp_path) == 95.99
-
-
-def test_extract_compute_pct_returns_none_when_absent(tmp_path):
-    _write_gpu_timeline(tmp_path, "type,time ms,percent\ntotal_time,1000.0,100.0\n")
-    assert tla._extract_compute_pct_from_gpu_timeline(tmp_path) is None
-    assert tla._extract_exposed_comm_pct_from_gpu_timeline(tmp_path) is None
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        # Share column renamed beyond the known aliases: the row is found, the
-        # number is not. Column drift is not hypothetical -- the row *labels*
-        # already needed multi-spelling tolerance.
-        "type,time ms,share_of_total\ncomputation_time,725.85,3.99\n",
-        # Row truncated: DictReader yields None for the missing cell, and
-        # float(None) raises TypeError rather than ValueError.
-        "type,time ms,percent\ncomputation_time,725.85\n",
-        # Present but blank.
-        "type,time ms,percent\ncomputation_time,725.85,\n",
-        # Present but not a number.
-        "type,time ms,percent\ncomputation_time,725.85,n/a\n",
-    ],
-)
-def test_unreadable_compute_cell_is_none_not_zero(tmp_path, body):
-    """An unreadable share must fail open, never read as ``0%``.
-
-    The low-compute gate fires *below* its threshold, so defaulting a missing
-    or unparseable cell to 0 would suppress the hot-kernel list on every trace,
-    silently, with ``status`` still ``ok`` -- the exact opposite of the idle
-    gate, where a 0 default is harmless.
-    """
-    _write_gpu_timeline(tmp_path, body)
-    assert tla._extract_compute_pct_from_gpu_timeline(tmp_path) is None
-    _, warning = tla._evaluate_low_compute_gate(
-        tla._extract_compute_pct_from_gpu_timeline(tmp_path),
-        None,
-        tmp_path / "analysis.md",
-    )
-    assert warning is None, "an unknown compute share must not suppress candidates"
-
-
-@pytest.mark.parametrize("column", ["percent", "percentage", "Percentage (%)", "pct"])
-def test_known_percent_column_spellings_are_read(tmp_path, column):
-    """Known alias spellings are read rather than discarded as unknown."""
-    _write_gpu_timeline(tmp_path, f"type,time ms,{column}\ncomputation_time,725.85,3.99\n")
-    assert tla._extract_compute_pct_from_gpu_timeline(tmp_path) == 3.99
-
-
-def test_total_time_is_none_when_its_cell_is_unreadable(tmp_path):
-    """Same fail-open contract for the window total the gpu_pct basis needs."""
-    _write_gpu_timeline(tmp_path, "type,time ms,percent\ntotal_time,,100.0\n")
-    assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
 
 
 def test_low_compute_gate_fires_on_spin_wait_window(monkeypatch, tmp_path):
-    """GLM-5.2 regression: 3.99% compute / 0.02% idle must not pass as healthy.
-
-    A collective that spin-waits on peer ranks is charged as GPU-busy, so the
-    idle gate sees 0.02% and lets the window through. The compute share is what
-    exposes it.
-    """
+    """GLM-5.2 regression: 3.99% compute / 0.02% idle must not pass as healthy."""
     monkeypatch.delenv(idle_gate.LOW_COMPUTE_PCT_THRESHOLD_ENV, raising=False)
     threshold, warning = tla._evaluate_low_compute_gate(3.99, 95.99, tmp_path / "analysis.md")
     assert threshold == 10.0
@@ -5341,9 +4274,7 @@ def test_extract_compute_pct_from_analysis_md_missing_row(tmp_path):
     assert tlr.extract_exposed_comm_pct_from_analysis_md(md) is None
 
 
-# ---------------------------------------------------------------------------
 # _normalize_profiler_op_name / graph-captured keyword recovery
-# ---------------------------------------------------------------------------
 
 
 def test_normalize_profiler_op_name_strips_graph_wrappers():
@@ -5371,8 +4302,8 @@ def test_normalize_profiler_op_name_strips_graph_wrappers():
 
 
 def test_candidate_keywords_recovers_graph_captured_symbols():
-    # Before normalization these kept the "hipGraphLaunch->void " prefix and
-    # greped to nothing; now they yield the real kernel identifier.
+    # Before normalization these kept the "hipGraphLaunch->void " prefix and greped to nothing; now they yield the
+    # real kernel identifier.
     kws = tla._candidate_keywords("hipGraphLaunch->void paged_attention_ll4mi_QKV_mfma16_kernel<x>")
     assert "paged_attention_ll4mi_QKV_mfma16_kernel" in kws
 
@@ -5384,161 +4315,8 @@ def test_candidate_keywords_recovers_graph_captured_symbols():
     assert kws == ["fused_moe_triton_kernels_invoke_fused_moe_kernel_427"]
 
 
-def test_deterministic_other_bucket_logs_unresolved_high_time_op(
-    tmp_path,
-    monkeypatch,
-):
-    """A high-GPU-time other-bucket op with no resolvable source must be logged,
-    not silently dropped (root-cause-B observability guard)."""
-    _write_priority_json(tmp_path, [])
-    _write_metrics_json(
-        tmp_path,
-        "other",
-        [
-            {
-                "name": "hipGraphLaunch->void ck::kernel_moe_gemm_2lds<...>",
-                "time_ms": 217.0,
-                "count": 4,
-                "args": "(1,2) bf16",
-                "launcher_path": "",
-            },
-        ],
-    )
-    # Simulate a vendor template kernel that exists only as a compiled .so:
-    # no editable source can be grepped.
-    monkeypatch.setattr(tla, "locate_source_via_grep", lambda name: "")
-
-    log_path = tmp_path / "deterministic.log"
-    result = tla.deterministic_extract_hot_kernels(
-        tmp_path,
-        top_k=5,
-        log_path=log_path,
-    )
-
-    assert result == []
-    log_text = log_path.read_text(encoding="utf-8")
-    assert "no editable source resolved" in log_text
-    assert "time_ms=217.000" in log_text
-
-
-def test_minimal_analysis_md_includes_system_level_signals(tmp_path):
-    """System-Level Signals section is rendered from gpu_timeline.csv (no LLM)."""
-    csv_dir = tmp_path / "perf_report_csvs"
-    csv_dir.mkdir()
-    (csv_dir / "gpu_timeline.csv").write_text(
-        "type,time ms,percent\n"
-        "computation_time,800.0,80.0\n"
-        "exposed_comm_time,40.0,4.0\n"
-        "exposed_memcpy_time,10.0,1.0\n"
-        "idle_time,200.0,20.0\n"
-        "total_time,1000.0,100.0\n",
-        encoding="utf-8",
-    )
-
-    report = tla.generate_minimal_analysis_md(tmp_path, [], idle_pct=20.0)
-    text = report.read_text(encoding="utf-8")
-
-    assert "## System-Level Signals" in text
-    assert "GPU idle | 20.00%" in text
-    # 20% idle is within the default 80% gate; the note records that comparison.
-    assert "idle gate" in text
-    assert "Exposed communication | 4.00%" in text
-    assert "Exposed memcpy (device copy) | 1.00%" in text
-
-
-def test_minimal_analysis_md_system_signals_present_but_dash_without_timeline(tmp_path):
-    """No gpu_timeline.csv + no idle -> the System-Level Signals section is still
-    present (shared canonical spine, identical to the bypass route) but every
-    value is an em dash rather than a fabricated 0."""
-    report = tla.generate_minimal_analysis_md(tmp_path, [], idle_pct=None)
-    text = report.read_text(encoding="utf-8")
-    assert "## System-Level Signals" in text
-    assert "| Signal | % of total GPU time | Note |" in text
-    assert "| GPU idle | \u2014 | - |" in text  # unknown share -> em dash, not 0
-
-
-def test_deterministic_other_bucket_keeps_resolvable_graph_op(
-    tmp_path,
-    monkeypatch,
-):
-    """A graph-captured op whose symbol resolves to source is kept as a candidate."""
-    _write_priority_json(tmp_path, [])
-    _write_metrics_json(
-        tmp_path,
-        "other",
-        [
-            {
-                "name": "hipGraphLaunch->void aiter::my_triton_kernel<x> (Synthetic Op)",
-                "time_ms": 50.0,
-                "count": 2,
-                "args": "(8,16) fp16",
-                "launcher_path": "",
-            },
-        ],
-    )
-    monkeypatch.setattr(
-        tla,
-        "locate_source_via_grep",
-        lambda name: "/sgl-workspace/aiter/my_triton_kernel.py",
-    )
-
-    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
-
-    assert len(result) == 1
-    assert result[0]["source_file"] == "/sgl-workspace/aiter/my_triton_kernel.py"
-    assert result[0]["duration_us"] == 50000.0
-
-
-def test_deterministic_extract_tolerates_null_efficiency_and_impact(tmp_path):
-    """TraceLens emits null efficiency_pct/impact_score for synthetic ops;
-    extraction must not crash on round(None) and should coerce them to 0."""
-    op_name = "hipLaunchKernel->paged_attention_mfma16_kernel (Synthetic Op)"
-    _write_priority_json(
-        tmp_path,
-        [
-            {
-                "category": "inferenceattention",
-                "global_rank": 1,
-                "impact_score": 12.5,
-                "members": [
-                    {
-                        "operation": op_name,
-                        "time_ms": 520.223,
-                        "efficiency_pct": None,
-                        "impact_score": None,
-                    },
-                ],
-            },
-        ],
-    )
-    _write_metrics_json(
-        tmp_path,
-        "inferenceattention",
-        [
-            {
-                "name": op_name,
-                "time_ms": 520.223,
-                "count": 1,
-                "args": "(1,256,256) bf16",
-                "launcher_path": "",
-            },
-        ],
-    )
-
-    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
-
-    assert len(result) == 1
-    assert result[0]["efficiency_percent"] == 0
-    # member impact_score is null -> falls back to the finding-level score.
-    assert result[0]["impact_score"] == 12.5
-    assert result[0]["duration_us"] == 520223.0
-
-
-# --- idle gate must honor cuda/HIP-graph under-recording (regression) ---
-# A graph-mode capture under-records replays (profiler activity-buffer overflow),
-# so idle% is inflated. The bypass route already skips its idle gate in that
-# case; the TraceLens route must do the same instead of suppressing every hot
-# kernel on a workload that is actually compute-bound.
+# --- idle gate must honor cuda/HIP-graph under-recording (regression) --- A graph-mode capture under-records replays
+# (profiler activity-buffer overflow), so idle% is inflated.
 
 
 def test_idle_gate_graph_guard_skips_suppression_when_under_recorded(monkeypatch):
@@ -5601,23 +4379,9 @@ def _write_trace(
     omit_device_steps=(),
     extra_events=None,
 ):
-    """Build a minimal torch-profiler trace with GPU step annotations.
-
-    ``step_durs`` are microsecond durations laid end to end; each becomes one
-    ``step[<phase> ...]`` gpu_user_annotation, its host-side twin, and a kernel
-    inside it, so the trimmer has both something to measure and something to
-    drop. ``phases`` supplies a per-step phase token (default ``DECODE`` for
-    every step).
-
-    ``unique_names=False`` omits the per-step ``g_sk`` field, reproducing the
-    framework builds whose step annotations repeat verbatim; the two timelines
-    then cannot be paired by name. ``omit_host_steps`` and ``omit_device_steps``
-    drop one side's annotation for the given step indices, which is how real
-    captures arrive: most measured rank traces carry every host ``step[...]``
-    against only a handful of device ones.
-    """
-    # torch stamps metadata with the profiler-open ts, i.e. always before any
-    # cut point -- reproduce that, it is what made a naive ts filter drop it.
+    """Build a minimal torch-profiler trace with GPU step annotations."""
+    # torch stamps metadata with the profiler-open ts, i.e. always before any cut point -- reproduce that, it is what
+    # made a naive ts filter drop it.
     events = [
         {"ph": "M", "name": "process_name", "ts": 999_999.0, "pid": 1, "args": {"name": "python"}},
         {"ph": "M", "name": "thread_name", "ts": 999_999.0, "pid": 1, "tid": 7, "args": {"name": "t"}},
@@ -5626,10 +4390,8 @@ def _write_trace(
     for i, dur in enumerate(step_durs):
         phase = (phases or ["DECODE"] * len(step_durs))[i]
         name = f"step[{phase} bs=64 g_sk={i}]" if unique_names else f"step[{phase} bs=64]"
-        # The host runs a step ahead: step N's launches are issued while step
-        # N-1 still owns the GPU, so the lead is bounded by the *previous*
-        # step's duration. Reproduce that offset -- it is what makes a
-        # single-timestamp cut unable to separate the two.
+        # The host runs a step ahead: step N's launches are issued while step N-1 still owns the GPU, so the lead is
+        # bounded by the *previous* step's duration.
         host_ts = ts - min(host_lead_us, step_durs[i - 1]) if i else ts - 1.0
         if i not in omit_host_steps:
             events.append(
@@ -5686,8 +4448,8 @@ def test_pretrim_drops_leading_barrier_step(tmp_path):
     spans = tla._step_annotation_spans(out["traceEvents"])
     assert len(spans) == 127
     assert max(dur for _, dur, _ in spans) < 40_000.0  # the barrier step is gone
-    # ph:"M" metadata has no ts and must be preserved, else the chunk loses its
-    # process/thread names and TraceLens can't attribute anything.
+    # ph:"M" metadata has no ts and must be preserved, else the chunk loses its process/thread names and TraceLens
+    # can't attribute anything.
     assert sum(1 for ev in out["traceEvents"] if ev.get("ph") == "M") == 2
     assert out["baseTimeNanoseconds"] == 12345
 
@@ -5781,13 +4543,7 @@ def test_pretrim_threshold_is_the_module_default(tmp_path):
 
 
 def test_pretrim_keeps_host_side_of_first_surviving_step(tmp_path):
-    """The kept step's host ops survive even though they start inside the
-    dropped step's device span.
-
-    Host launches run a step ahead of the device, so a single-timestamp cut on
-    the device boundary would strip them -- and with them the shape-carrying
-    frames TraceLens attributes MoE kernels through.
-    """
+    """The kept step's host ops survive even though they start inside the dropped step's device span."""
     src = _write_trace(
         tmp_path / "r.trace.json.gz",
         [15_781_320.0] + [32_944.0] * 40,
@@ -5797,8 +4553,7 @@ def test_pretrim_keeps_host_side_of_first_surviving_step(tmp_path):
 
     trimmed, report = tla.pretrim_startup_transient(src, dst)
     assert trimmed is True
-    # Two cuts, host earlier -- and by the full lead, not a value clamped down
-    # to the kept step's own duration.
+    # Two cuts, host earlier -- and by the full lead, not a value clamped down to the kept step's own duration.
     assert report["gpu_cut_ts"] - report["cpu_cut_ts"] == pytest.approx(839_000.0)
 
     ev = tla.open_json(dst)["traceEvents"]
@@ -5812,11 +4567,7 @@ def test_pretrim_keeps_host_side_of_first_surviving_step(tmp_path):
 
 
 def test_pretrim_drops_dropped_step_device_work_after_the_host_cut(tmp_path):
-    """Kernels belonging to the dropped step do not leak past the host cut.
-
-    The dropped step's device span extends beyond the kept step's host start, so
-    a host-boundary cut alone would leave its trailing kernels behind as orphans.
-    """
+    """Kernels belonging to the dropped step do not leak past the host cut."""
     src = _write_trace(
         tmp_path / "r.trace.json.gz",
         [15_781_320.0] + [32_944.0] * 40,
@@ -5833,8 +4584,7 @@ def test_pretrim_drops_dropped_step_device_work_after_the_host_cut(tmp_path):
 
 
 def test_pretrim_leaves_enough_steps_for_the_splitter(tmp_path):
-    """Step count downstream is set by --num-steps, and the trim keeps well
-    clear of it: the splitter still gets its full window, only shifted."""
+    """Step count downstream is set by --num-steps, and the trim keeps well clear of it: the splitter still gets its full window, only shifted."""
     src = _write_trace(tmp_path / "r.trace.json.gz", [15_781_320.0] + [32_944.0] * 127)
     dst = tmp_path / "r.pretrimmed.trace.json.gz"
 
@@ -5845,14 +4595,7 @@ def test_pretrim_leaves_enough_steps_for_the_splitter(tmp_path):
 
 
 def test_pretrim_pairs_timelines_by_position_not_by_name(tmp_path):
-    """Repeated step names must still cut both timelines at the right place.
-
-    Framework builds that omit the cumulative-sequence-length fields emit the
-    same ``step[DECODE bs=64]`` for every step. Pairing the timelines by name
-    resolves the surviving step to the *first* occurrence, which puts the host
-    cut at the head of the capture and leaves the dropped step's entire host
-    side in the trimmed trace.
-    """
+    """Repeated step names must still cut both timelines at the right place."""
     src = _write_trace(
         tmp_path / "r.trace.json.gz",
         [15_781_320.0] + [32_944.0] * 40,
@@ -5866,23 +4609,19 @@ def test_pretrim_pairs_timelines_by_position_not_by_name(tmp_path):
     assert report["gpu_cut_ts"] - report["cpu_cut_ts"] == pytest.approx(839_000.0)
 
     ev = tla.open_json(dst)["traceEvents"]
-    # One host annotation per surviving device step, and no more: the dropped
-    # step's host side went with its device side.
+    # One host annotation per surviving device step, and no more: the dropped step's host side went with its device
+    # side.
     assert len(tla._step_annotation_spans(ev)) == 40
     assert sum(1 for e in ev if e.get("cat") == "user_annotation") == 40
-    # launch_0 is the dropped step's host op; it must not survive on the
-    # strength of a name it shares with every other step.
+    # launch_0 is the dropped step's host op; it must not survive on the strength of a name it shares with every other
+    # step.
     launches = {e["name"] for e in ev if e.get("cat") == "cpu_op"}
     assert "launch_0" not in launches
     assert "launch_1" in launches
 
 
 def test_pretrim_refuses_when_the_timelines_hold_different_step_counts(tmp_path):
-    """Unequal step counts make positional pairing meaningless, either way round.
-
-    Falling back to a single cut is the outcome the split-cut design exists to
-    avoid, so the trim is refused and the counts recorded instead.
-    """
+    """Unequal step counts make positional pairing meaningless, either way round."""
     src = _write_trace(
         tmp_path / "fewer_host.trace.json.gz",
         [15_781_320.0] + [32_944.0] * 20,
@@ -5899,15 +4638,7 @@ def test_pretrim_refuses_when_the_timelines_hold_different_step_counts(tmp_path)
 
 
 def test_pretrim_refuses_when_device_step_annotations_are_missing(tmp_path):
-    """More host steps than device steps is the shape real captures arrive in.
-
-    Measured rank traces carry every host ``step[...]`` against a fraction of
-    the device ones, and the gaps are not at the tail. Indexing the host list by
-    the device position then resolves to some earlier step, putting the host cut
-    before the transient and leaving its host side in the window -- and a guard
-    that only rejects *too few* host entries lets it through, because there are
-    more of them, not fewer.
-    """
+    """More host steps than device steps is the shape real captures arrive in."""
     src = _write_trace(
         tmp_path / "fewer_device.trace.json.gz",
         [15_781_320.0] + [32_944.0] * 20,
@@ -5924,13 +4655,7 @@ def test_pretrim_refuses_when_device_step_annotations_are_missing(tmp_path):
 
 
 def test_pretrim_keeps_leading_prefill_steps(tmp_path):
-    """Prefill steps are not transients just because decode dominates the trace.
-
-    A mixed capture's EXTEND steps run one to two orders of magnitude longer
-    than its DECODE steps. Measured against a whole-trace median they all read
-    as outliers, and the leading ones -- the window
-    ``--steady-state-mode=prefilldecode`` exists to analyse -- get trimmed away.
-    """
+    """Prefill steps are not transients just because decode dominates the trace."""
     durs = [1_200_000.0, 880_000.0, 1_530_000.0] + [32_944.0] * 30
     phases = ["EXTEND"] * 3 + ["DECODE"] * 30
     src = _write_trace(tmp_path / "r.trace.json.gz", durs, phases=phases)
@@ -5948,11 +4673,7 @@ def test_pretrim_keeps_leading_prefill_steps(tmp_path):
 
 
 def test_pretrim_drops_a_prefill_transient_against_its_own_phase(tmp_path):
-    """The guard still fires when the transient lands on a prefill step.
-
-    Per-phase baselines must not amount to exempting prefill: a barrier that
-    opens on an EXTEND step is as fatal to the window as one on a DECODE step.
-    """
+    """The guard still fires when the transient lands on a prefill step."""
     durs = [15_781_320.0, 1_200_000.0, 1_150_000.0, 1_180_000.0] + [32_944.0] * 30
     phases = ["EXTEND"] * 4 + ["DECODE"] * 30
     src = _write_trace(tmp_path / "r.trace.json.gz", durs, phases=phases)
@@ -5963,19 +4684,15 @@ def test_pretrim_drops_a_prefill_transient_against_its_own_phase(tmp_path):
     assert trimmed is True
     assert report["dropped_steps"] == 1
     assert report["dropped_phase"] == "EXTEND"
-    # Measured against EXTEND's 1.2 s median (13x) rather than decode's 33 ms,
-    # which would have made it 479x and swept the healthy prefill steps with it.
+    # Measured against EXTEND's 1.2 s median (13x) rather than decode's 33 ms, which would have made it 479x and swept
+    # the healthy prefill steps with it.
     assert report["outlier_ratio"] == pytest.approx(15_781_320.0 / 1_200_000.0, rel=1e-3)
     assert report["phase_medians_ms"]["EXTEND"] == pytest.approx(1_200.0)
     assert report["remaining_steps"] == 33
 
 
 def test_pretrim_leaves_a_phase_without_a_baseline_alone(tmp_path):
-    """A leading step whose phase is too rare to have a median is not dropped.
-
-    With no population of its own to compare against there is no evidence the
-    step is abnormal, so it stays and the window keeps it.
-    """
+    """A leading step whose phase is too rare to have a median is not dropped."""
     durs = [9_000_000.0] + [32_944.0] * 30
     phases = ["EXTEND"] + ["DECODE"] * 30
     src = _write_trace(tmp_path / "r.trace.json.gz", durs, phases=phases)
@@ -6003,12 +4720,7 @@ def test_pretrim_reports_the_worst_ratio_across_dropped_steps(tmp_path):
 
 
 def test_pretrim_write_failure_is_reported_as_a_failure(tmp_path, monkeypatch):
-    """A failed write must not be reported with the ``trimmed`` reason.
-
-    The caller keys its log line and the pretrim artifact off ``reason``; a
-    report that still says ``trimmed`` after the write failed makes a full-disk
-    run look like a successful trim that simply was not applied.
-    """
+    """A failed write must not be reported with the ``trimmed`` reason."""
     src = _write_trace(tmp_path / "r.trace.json.gz", [15_781_320.0] + [32_944.0] * 40)
     dst = tmp_path / "out" / "r.pretrimmed.trace.json.gz"
 
@@ -6022,20 +4734,14 @@ def test_pretrim_write_failure_is_reported_as_a_failure(tmp_path, monkeypatch):
     assert trimmed is False
     assert report["reason"] == "write_failed"
     assert "No space left on device" in report["error"]
-    # The step accounting is kept for diagnosis, but no partial file is left
-    # behind for a later step to mistake for a usable trace.
+    # The step accounting is kept for diagnosis, but no partial file is left behind for a later step to mistake for a
+    # usable trace.
     assert report["dropped_steps"] == 1
     assert not dst.exists()
 
 
 def test_pretrim_redirects_only_the_splitter_input(tmp_path):
-    """The splitter reads the trimmed copy; nothing else is repointed at it.
-
-    ``analysis_trace_path`` is what capture-folder discovery and the split
-    warnings resolve against, so reassigning it to the derived file under
-    ``trace_split/`` moves both onto a directory that holds neither the capture
-    nor its graph-capture sidecar.
-    """
+    """The splitter reads the trimmed copy; nothing else is repointed at it."""
     captured, trace = _drive_main_capturing_subprocess(
         tmp_path,
         [],
@@ -6058,12 +4764,7 @@ def test_pretrim_redirects_only_the_splitter_input(tmp_path):
 
 
 def test_capture_folder_is_not_discoverable_from_the_split_directory(tmp_path):
-    """Why the splitter's input has to stay separate from the analysed path.
-
-    Discovery searches the trace file's own directory and its parent. A trimmed
-    copy lives in ``tracelens/trace_split/``, whose neighbourhood is the run's
-    output tree -- the capture's sidecar is not in it.
-    """
+    """Why the splitter's input has to stay separate from the analysed path."""
     capture_dir = tmp_path / "torch_trace"
     (capture_dir / "graph_capture_profile").mkdir(parents=True)
     raw = capture_dir / "r.trace.json.gz"

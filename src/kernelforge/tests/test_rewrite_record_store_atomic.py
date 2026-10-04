@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from kernelforge import durable_io
 from kernelforge.rewrite_by_flydsl import record_store
 
 CANONICAL_ID = "kernel:flydsl:softmax:vllm:1.0:flydsl:mi355x"
@@ -71,7 +72,7 @@ def test_failed_session_write_preserves_the_complete_old_session(
     elif failure == "json":
         monkeypatch.setattr(
             record_store,
-            "_write_json_synced",
+            "_write_bytes_synced",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("json failed")),
         )
     else:
@@ -101,8 +102,8 @@ def test_failed_champion_write_preserves_the_old_pointer(
     store.promote(CANONICAL_ID, "old-session", 2.0)
     if failure == "json":
         monkeypatch.setattr(
-            record_store,
-            "_write_json_synced",
+            durable_io.os,
+            "fsync",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("champion json failed")),
         )
     else:
@@ -146,7 +147,7 @@ def _paused_writer(
             Path(source),
             version="new",
         )
-    except Exception as error:  # pragma: no cover - surfaced through the parent
+    except Exception as error:  # pragma: no cover - surfaced through the parent  # noqa: BLE001
         errors.put(repr(error))
 
 
@@ -232,12 +233,7 @@ def test_local_top_n_ranks_all_sessions_not_only_twenty_recent(tmp_path):
 
 
 def test_rewriting_a_record_keeps_the_measurement_a_consumer_recorded(tmp_path):
-    """A replacing write must not hand the ranking back the claim that lost.
-
-    Ranking trusts a measured value over any claim, and only a consumer that ran
-    the candidate can produce one. Dropping it on rewrite would restore the
-    inflated claim that the measurement exists to correct.
-    """
+    """A replacing write must not hand the ranking back the claim that lost."""
     root = tmp_path / "records"
     store = record_store.LocalRewriteRecords(root)
     source = _artifact(tmp_path, "kernel.py", b"first")

@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator resume tests.
-
-Covers resume detection, ``replay_for_resume`` rebuilding undecided
-pending_proposals, pruned_families preservation, lazy replay on the first
-``tick()``, and reopening the phase machine for a session that stopped in CLOSE.
-"""
+"""Coordinator resume tests."""
 
 from __future__ import annotations
 
@@ -15,7 +10,6 @@ import pytest
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockRobustnessBackend,
     MockTurn,
     ScriptedPlan,
 )
@@ -34,7 +28,6 @@ def _backends_full() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
 
 
@@ -63,14 +56,7 @@ async def test_existing_state_json_triggers_resume(session_dir):
 
 
 class TestAClosedSessionIsReopenedOnResume:
-    """CLOSE has no way out, so a leg that loads it would tick in it to the end.
-
-    The machine's only terminal phase, and the run loop stops on ``stop_reason``
-    rather than on the phase. A resumed leg that keeps CLOSE therefore spends its
-    whole new clock in a phase admitting nothing but ``report``,
-    ``session_breakdown`` and ``recover``. Every design that stops early on the
-    promise of "resume with more budget" rests on this being reopened.
-    """
+    """CLOSE has no way out, so a leg that loads it would tick in it to the end."""
 
     @pytest.mark.asyncio
     async def test_a_session_stopped_in_close_starts_the_next_leg_at_the_entrance(
@@ -105,12 +91,7 @@ class TestAClosedSessionIsReopenedOnResume:
         self,
         session_dir,
     ):
-        """The flag means "the sequencer already wrote the breakdown".
-
-        Carried into a leg that then never reaches CLOSE, it silences the
-        end-of-run safety net that would have written one, and the leg finishes
-        with no breakdown at all.
-        """
+        """The flag means \"the sequencer already wrote the breakdown\"."""
         SharedState(session_id="closed", phase="CLOSE", close_sequence_done=True).save(session_dir)
 
         coordinator = Coordinator(session_dir, backends=_backends_full())
@@ -136,15 +117,7 @@ class TestAClosedSessionIsReopenedOnResume:
         self,
         session_dir,
     ):
-        """Reopening the phase is only half of it; the round has to be admissible.
-
-        A cold anchor is a positive ``baseline_tput``, which is what the singleton
-        rule refuses repeats on -- so the leg would reopen at PRELUDE, decline to
-        finish while the mark is set, decline to close while the clock is healthy,
-        and have the one round that clears the mark denied on its way in. This is
-        the last link in the chain the whole cold-anchor design rests on, and
-        nothing above it can tell whether it holds.
-        """
+        """Reopening the phase is only half of it; the round has to be admissible."""
         SharedState(
             session_id="cold",
             phase="CLOSE",
@@ -197,7 +170,6 @@ async def test_replay_rebuilds_undecided_proposals(session_dir):
             ScriptedPlan(turns=[MockTurn(intents=[propose])], default_intent=_heartbeat()), name="o"
         ),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
     c1 = Coordinator(session_dir, backends=backends_no_critic)
     try:
@@ -267,7 +239,6 @@ async def test_replay_skips_rejected_proposals(session_dir):
             name="o",
         ),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
@@ -304,7 +275,6 @@ async def test_replay_mixed_pending_and_decided(session_dir):
     backends = {
         "orchestration": MockBackend(silent, name="o"),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
@@ -327,8 +297,8 @@ async def test_replay_mixed_pending_and_decided(session_dir):
             tail = await c1.bus.tail(topic="proposal", n=1)
             proposal_ids.append(tail[0].msg_id)
             if action == "baseline":
-                # profile/explore require baseline_tput > 0 (execution_order);
-                # the real baseline action would have set this on completion.
+                # profile/explore require baseline_tput > 0 (execution_order); the real baseline action would have set
+                # this on completion.
                 c1.shared_state.baseline_tput = 100.0
 
         await c1._handle_intent(
@@ -369,12 +339,11 @@ async def test_resume_preserves_pruned_and_restores_pending(session_dir):
     backends = {
         "orchestration": MockBackend(silent, name="o"),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
         await c1._handle_intent(
-            "robustness",
+            "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
                 payload={"family": "deep_kernel", "reason": "x"},
@@ -406,7 +375,6 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
     backends = {
         "orchestration": MockBackend(silent, name="o"),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
@@ -473,7 +441,7 @@ class TestN23ResumePerSession:
         "argv",
         [
             ["optimize", "--resume"],
-            # The command line already-deployed robustness monitor copies send.
+            # Historical automatic-resume invocations remain unsupported.
             ["optimize", "--resume", "--resume-from", "/tmp/sess"],
         ],
     )
@@ -586,12 +554,7 @@ class TestN24KernelAgentEnvHardFail:
         monkeypatch,
         capsys,
     ):
-        """The installer emits credentials as a conditional block (#1169).
-
-        The comparison line inside it contains ``=`` without being an
-        assignment, so a parser that splits on ``=`` alone would invent a key
-        and warn about it on every launch.
-        """
+        """The installer emits credentials as a conditional block (#1169)."""
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         (runtime / "kernel-agent.env.sh").write_text(
@@ -612,8 +575,8 @@ class TestN24KernelAgentEnvHardFail:
             cli_preflight._load_kernel_agent_env_fallback()
             loaded_key = _os.environ.get("ANTHROPIC_API_KEY")
         finally:
-            # The loader writes straight into os.environ, which monkeypatch
-            # cannot roll back; a leaked credential reshapes later auth tests.
+            # The loader writes straight into os.environ, which monkeypatch cannot roll back; a leaked credential
+            # reshapes later auth tests.
             _os.environ.pop("ANTHROPIC_API_KEY", None)
 
         assert loaded_key == "ak-install-time"
@@ -637,11 +600,14 @@ class TestN24KernelAgentEnvHardFail:
         assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/custom"
 
 
-# A stale/placeholder TRACELENS_ROOT is corrected from the installer-written env
-# file; template placeholders are treated as unset.
+# A stale/placeholder TRACELENS_ROOT is corrected from the installer-written env file; template placeholders are
+# treated as unset.
 class TestTracelensRootEnvCorrection:
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch):
+        import os
+
+        snapshot = dict(os.environ)
         for var in (
             "HYPERLOOM_KERNEL_AGENT_ROOT",
             "KERNEL_AGENT_ENV",
@@ -650,6 +616,11 @@ class TestTracelensRootEnvCorrection:
             "MAGPIE_PATH",
         ):
             monkeypatch.delenv(var, raising=False)
+        try:
+            yield
+        finally:
+            os.environ.clear()
+            os.environ.update(snapshot)
 
     def _write_env_file(self, tmp_path, tracelens_dir):
         runtime = tmp_path / "runtime"
@@ -668,11 +639,12 @@ class TestTracelensRootEnvCorrection:
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "ghost" / "TraceLens"))
 
-        cli_preflight._load_kernel_agent_env_fallback()
+        outcome = cli_preflight._load_kernel_agent_env_fallback()
 
         import os as _os
 
         assert _os.environ["TRACELENS_ROOT"] == str(good)
+        assert outcome["detail"]["corrected_keys"] == ["TRACELENS_ROOT"]
         assert "TRACELENS_ROOT" in capsys.readouterr().err
 
     def test_keeps_valid_inherited_root(self, tmp_path, monkeypatch):
@@ -686,31 +658,78 @@ class TestTracelensRootEnvCorrection:
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("TRACELENS_ROOT", str(inherited))
 
-        cli_preflight._load_kernel_agent_env_fallback()
+        outcome = cli_preflight._load_kernel_agent_env_fallback()
 
         import os as _os
 
         assert _os.environ["TRACELENS_ROOT"] == str(inherited)
+        assert outcome["detail"]["corrected_keys"] == []
 
-    def test_magpie_path_is_not_corrected(self, tmp_path, monkeypatch):
-        """MAGPIE_PATH is out of scope: a merely-existing non-checkout dir in the
-        env file must NOT be promoted to an explicit MAGPIE_PATH override."""
+    @pytest.mark.parametrize("override_kind", ["missing", "non-checkout", "empty"])
+    def test_magpie_path_is_not_corrected(self, tmp_path, monkeypatch, override_kind):
+        """TraceLens correction must not replace an explicit Magpie value, even an invalid one."""
         runtime = tmp_path / "runtime"
         runtime.mkdir()
-        magpie_dir = tmp_path / "not-a-magpie-checkout"
-        magpie_dir.mkdir()
+        magpie_dir = tmp_path / "installed-magpie"
+        (magpie_dir / "Magpie").mkdir(parents=True)
+        (magpie_dir / "Magpie" / "__init__.py").write_text("", encoding="utf-8")
+        override = tmp_path / "not-a-magpie-checkout"
+        if override_kind == "non-checkout":
+            override.mkdir()
+        selected = "" if override_kind == "empty" else str(override)
         (runtime / "kernel-agent.env.sh").write_text(
             f"export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\nexport MAGPIE_PATH='{magpie_dir}'\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        monkeypatch.setenv("MAGPIE_PATH", selected)
 
-        cli_preflight._load_kernel_agent_env_fallback()
+        outcome = cli_preflight._load_kernel_agent_env_fallback()
 
         import os as _os
 
-        assert _os.environ.get("MAGPIE_PATH") is None
+        assert _os.environ["MAGPIE_PATH"] == selected
+        assert "MAGPIE_PATH" not in outcome["detail"]["corrected_keys"]
+
+    @pytest.mark.parametrize("root_already_set", [False, True])
+    def test_runtime_magpie_gapfill_reaches_child_imports(self, tmp_path, monkeypatch, root_already_set):
+        """A reused kernel-agent root must not suppress the runtime's missing Magpie import root."""
+        import os
+        import subprocess
+        import sys
+
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        magpie_dir = tmp_path / "runtime Magpie"
+        (magpie_dir / "Magpie").mkdir(parents=True)
+        (magpie_dir / "Magpie" / "__init__.py").write_text("RUNTIME_MARKER = 'installer-checkout'\n", encoding="utf-8")
+        (runtime / "kernel-agent.env.sh").write_text(
+            f"export HYPERLOOM_KERNEL_AGENT_ROOT=/installed/kernel\nexport MAGPIE_PATH='{magpie_dir}'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        monkeypatch.setenv("PYTHONPATH", "")
+        if root_already_set:
+            monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/operator/kernel")
+
+        outcome = cli_preflight._load_kernel_agent_env_fallback()
+        cli_preflight._derive_runtime_paths()
+
+        assert os.environ["MAGPIE_PATH"] == str(magpie_dir)
+        assert os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == (
+            "/operator/kernel" if root_already_set else "/installed/kernel"
+        )
+        assert "MAGPIE_PATH" not in outcome["detail"]["corrected_keys"]
+        child = subprocess.run(
+            [sys.executable, "-c", "import Magpie; print(Magpie.RUNTIME_MARKER)"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert child.returncode == 0, child.stderr
+        assert child.stdout.strip() == "installer-checkout"
 
     def test_placeholder_path_to_your_is_unset(self):
         assert cli_preflight._is_placeholder_tracelens_path("/path/to/your/TraceLens") is True

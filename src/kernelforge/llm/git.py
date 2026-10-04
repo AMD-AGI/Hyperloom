@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""One way to run git.
-
-A failed git command means the working tree is not what the caller believes it
-is, so the default here is to raise rather than to return a result nobody
-inspects. Callers that genuinely tolerate a non-zero exit -- probing whether a
-ref exists, asking a detached HEAD for its branch -- say so with ``check=False``.
-
-Every command runs in its own session and under a timeout, so a git wedged on a
-lock is bounded instead of holding the run open.
-"""
+"""One way to run git."""
 
 from __future__ import annotations
 
@@ -21,8 +12,7 @@ import signal
 import subprocess
 from pathlib import Path
 
-# No local plumbing command on a large worktree comes close to this; anything
-# that does is stuck rather than slow.
+# No local plumbing command on a large worktree comes close to this; anything that does is stuck rather than slow.
 DEFAULT_TIMEOUT_SEC = 300.0
 
 
@@ -38,12 +28,7 @@ class GitError(subprocess.CalledProcessError):
 
 
 def _kill_process_group(pid: int) -> None:
-    """Take down the whole session, not just the direct child.
-
-    Every command here is spawned with ``start_new_session``, so a helper an
-    alias or a hook started is in the same group and would otherwise survive
-    and hold the pipes open long after the caller gave up.
-    """
+    """Take down the whole session, not just the direct child."""
     with contextlib.suppress(ProcessLookupError):
         os.killpg(os.getpgid(pid), signal.SIGKILL)
 
@@ -86,8 +71,8 @@ def git(
         try:
             stdout, stderr = process.communicate(input, timeout=timeout)
         except BaseException:
-            # ``subprocess.run`` would kill only git itself here, leaving an
-            # alias or hook's own child holding the pipes it inherited.
+            # ``subprocess.run`` would kill only git itself here, leaving an alias or hook's own child holding the
+            # pipes it inherited.
             _kill_process_group(process.pid)
             raise
     return _checked(
@@ -96,18 +81,44 @@ def git(
     )
 
 
+FALLBACK_COMMIT_IDENTITY = ("KernelForge", "kernel-forge@localhost")
+
+
+def ensure_commit_identity(cwd: str | Path) -> str:
+    """Name a committer for a repository that has none to auto-detect.
+
+    Written repo-locally, only when git can resolve no identity at all, and only
+    for the keys the repository lacks, so a workspace already carrying the
+    operator's own identity keeps it.
+
+    Args:
+        cwd: The repository to configure.
+
+    Returns:
+        The settings written, or an empty string when an identity was already
+        available or the directory is not a repository.
+    """
+    if git("var", "GIT_AUTHOR_IDENT", cwd=cwd, check=False).returncode == 0:
+        return ""
+    written: list[str] = []
+    for key, value in zip(("user.name", "user.email"), FALLBACK_COMMIT_IDENTITY):
+        # A half-configured repository keeps the half it has: an unresolvable
+        # address is no reason to rename the operator.
+        if git("config", "--get", key, cwd=cwd, check=False).returncode == 0:
+            continue
+        if git("config", key, value, cwd=cwd, check=False).returncode != 0:
+            return ""
+        written.append(f"{key}={value}")
+    return ", ".join(written)
+
+
 async def git_async(
     *args: str,
     cwd: str | Path | None = None,
     check: bool = True,
     timeout: float | None = DEFAULT_TIMEOUT_SEC,
 ) -> subprocess.CompletedProcess:
-    """Await one git command, returning the same result shape as ``git``.
-
-    Kept on the asyncio spawn path so a cancelled gather -- lane preparation
-    giving up and removing the directory it was cloning into -- takes the git
-    process down with it instead of racing the removal.
-    """
+    """Await one git command, returning the same result shape as ``git``."""
     process = await asyncio.create_subprocess_exec(
         "git",
         *args,
@@ -120,9 +131,6 @@ async def git_async(
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
     except BaseException:
         # Any exit without a finished communicate() leaves the child running.
-        # Named by no type on purpose: which class wait_for raises for a
-        # timeout changed in 3.11, and enumerating them once left the group
-        # alive on 3.10 for the one case this exists to handle.
         _kill_process_group(process.pid)
         await process.wait()
         raise

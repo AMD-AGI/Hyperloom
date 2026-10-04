@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for machine_state pure helpers: escalate hints, budget normalization,
-time/budget remaining math, post-prelude target, and history-row builder."""
+"""Coverage for machine_state pure helpers: escalate hints, budget normalization, time/budget remaining math,
+post-prelude target, and history-row builder.
+"""
 
 from __future__ import annotations
 
@@ -11,13 +12,14 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_VOCAB, is_valid_escalate_hint
 
 
 def test_is_valid_escalate_hint() -> None:
-    assert ps.is_valid_escalate_hint("not-a-real-hint") is False
+    assert is_valid_escalate_hint("not-a-real-hint") is False
     # at least one vocab member should validate
-    some_vocab = next(iter(ps.ESCALATE_HINT_VOCAB))
-    assert ps.is_valid_escalate_hint(some_vocab) is True
+    some_vocab = next(iter(ESCALATE_HINT_VOCAB))
+    assert is_valid_escalate_hint(some_vocab) is True
 
 
 def test_normalize_budget_pct_defaults_and_filters() -> None:
@@ -32,9 +34,10 @@ def test_normalize_budget_pct_defaults_and_filters() -> None:
     )
     assert out[ps.PHASE_FRAMEWORK_AGENT] == 0.4
     assert "BOGUS_PHASE" not in out
-    # A dropped entry falls back to its default rather than vanishing: a phase
-    # with no share would run to whatever it costs.
-    assert set(out) == set(ps.PHASE_NAMES)
+    # A dropped entry falls back to its default rather than vanishing: a capped phase with no share would run to
+    # whatever it costs. ENABLEMENT carries no default, so it stays absent and uncapped.
+    assert set(out) == set(ps.DEFAULT_PHASE_BUDGET_PCT)
+    assert ps.PHASE_ENABLEMENT not in out
     assert out[ps.PHASE_SWEEP] == ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_SWEEP]
 
 
@@ -59,7 +62,7 @@ def test_phase_started_unix_bad_value() -> None:
 
 
 def test_pending_escalate_hint() -> None:
-    valid = next(iter(ps.ESCALATE_HINT_VOCAB))
+    valid = next(iter(ESCALATE_HINT_VOCAB))
     assert ps._pending_escalate_hint(SimpleNamespace(pending_escalate_hint=valid)) == valid
     assert ps._pending_escalate_hint(SimpleNamespace(pending_escalate_hint="garbage")) == ""
     assert ps._pending_escalate_hint(SimpleNamespace(pending_escalate_hint="")) == ""
@@ -104,7 +107,7 @@ def test_phase_budget_remaining_seconds() -> None:
 
 def test_session_remaining_seconds() -> None:
     assert ps.session_remaining_seconds(SimpleNamespace(max_minutes=0)) is None
-    # no start_ts -> None
+    # Nothing dates the session: no charge, no anchor, no stamp.
     assert (
         ps.session_remaining_seconds(
             SimpleNamespace(max_minutes=60, start_ts=""),
@@ -126,20 +129,45 @@ def test_session_remaining_seconds() -> None:
         SimpleNamespace(max_minutes=60, start_ts=now_iso),
     )
     assert rem is not None and 0.0 < rem <= 3600.0
-    assert (
-        ps.session_remaining_seconds(
-            SimpleNamespace(max_minutes=60, start_ts=now_iso, deadline_unix=1000.0),
-            now_unix=400.0,
-        )
-        == 600.0
+
+
+def test_a_live_leg_is_charged_from_its_anchor() -> None:
+    """With a leg open, the answer is the charged total plus the leg so far."""
+    state = SimpleNamespace(max_minutes=12 * 60, elapsed_charged_sec=3600.0, leg_anchor_unix=10_000.0, start_ts="")
+
+    remaining = ps.session_remaining_seconds(state, now_unix=10_000.0 + 10 * 3600.0)
+
+    assert remaining == pytest.approx(3600.0)
+
+
+def test_an_unarmed_anchor_does_not_hand_a_started_session_its_budget_again() -> None:
+    """Nothing has charged this session, but it started eleven hours ago.
+
+    Reading the leg fields alone reports a full twelve hours left, which is the
+    budget being reissued to a run that has already spent most of it.
+    """
+    from datetime import datetime, timezone
+
+    started = 1_000_000.0
+    state = SimpleNamespace(
+        max_minutes=12 * 60,
+        elapsed_charged_sec=0.0,
+        leg_anchor_unix=0.0,
+        start_ts=datetime.fromtimestamp(started, timezone.utc).isoformat(),
     )
-    assert (
-        ps.session_remaining_seconds(
-            SimpleNamespace(max_minutes=0, deadline_unix=2000.0),
-            now_unix=1400.0,
-        )
-        == 600.0
-    )
+
+    remaining = ps.session_remaining_seconds(state, now_unix=started + 11 * 3600.0)
+
+    assert remaining == pytest.approx(3600.0)
+
+
+def test_an_unarmed_anchor_between_legs_is_not_charged_for_the_idle_gap() -> None:
+    """A charged total answers on its own: the gap between legs ran nothing."""
+    state = SimpleNamespace(max_minutes=12 * 60, elapsed_charged_sec=3600.0, leg_anchor_unix=0.0, start_ts="")
+
+    remaining = ps.session_remaining_seconds(state, now_unix=10_000_000.0)
+
+    assert remaining == pytest.approx(11 * 3600.0)
 
 
 @pytest.mark.parametrize(
@@ -173,13 +201,7 @@ def test_make_history_row() -> None:
 
 
 def test_phase_budget_help_quotes_the_real_default() -> None:
-    """``--help`` must quote the default the run will actually use.
-
-    These flags default to None and fall through to DEFAULT_PHASE_BUDGET_PCT,
-    so the number in the help text is the only place a user can read the real
-    value, and nothing recomputes it. Both the KERNEL_AGENT and SWEEP shares
-    had been retuned without the help text following.
-    """
+    """``--help`` must quote the default the run will actually use."""
     import re
 
     from hyperloom.inference_optimizer.cli.parser import _build_parser
@@ -207,4 +229,7 @@ def test_phase_budget_help_quotes_the_real_default() -> None:
     real["FRAMEWORK"] = real.pop("FRAMEWORK_AGENT")
     real["KERNEL"] = real.pop("KERNEL_AGENT")
 
+    # A capped phase has a flag quoting its default; an uncapped one has no flag
+    # at all, since nothing would enforce what it set.
     assert quoted == real
+    assert ps.PHASE_ENABLEMENT not in ps.DEFAULT_PHASE_BUDGET_PCT

@@ -15,12 +15,6 @@ from hyperloom.orchestrator.kernel.attempt_summary import (
     CATEGORY_INTEGRATED,
     CATEGORY_IN_FLIGHT,
     CATEGORY_KEEP_PENDING,
-    CATEGORY_UNATTEMPTED,
-    OUTCOME_SKIP,
-    UNATTEMPTED_BELOW_MIN_GPU_PCT,
-    UNATTEMPTED_NOT_REUSABLE,
-    UNATTEMPTED_NO_BACKEND,
-    UNATTEMPTED_NO_SOURCE,
     build_kernel_optimization_summary,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -123,63 +117,6 @@ def _write_backend_results(
     )
 
 
-def test_unattempted_no_source_classifies_vendor_lib_ops(tmp_path: Path) -> None:
-    state = _make_state(
-        top15=[_top15_entry("k001", name="aten::mm", source_file="", reusable=False, backends=[])],
-    )
-    out = build_kernel_optimization_summary(state, tmp_path)
-    assert out["totals"]["unattempted"] == 1
-    assert out["totals"]["attempted"] == 0
-    row = out["by_kernel"][0]
-    assert row["category"] == CATEGORY_UNATTEMPTED
-    assert row["unattempted_reason"] == UNATTEMPTED_NO_SOURCE
-    assert "vendor-library" in row["unattempted_detail"].lower() or "vendor" in row["unattempted_detail"].lower()
-
-
-def test_unattempted_not_reusable_distinct_from_no_source(tmp_path: Path) -> None:
-    state = _make_state(
-        top15=[_top15_entry("k001", source_file="/some/file.py", reusable=False, backends=[])],
-    )
-    out = build_kernel_optimization_summary(state, tmp_path)
-    assert out["by_kernel"][0]["unattempted_reason"] == UNATTEMPTED_NOT_REUSABLE
-
-
-def test_unattempted_no_backend_when_reusable_but_empty_recs(tmp_path: Path) -> None:
-    state = _make_state(
-        top15=[_top15_entry("k001", source_file="/some/file.py", reusable=True, backends=[])],
-    )
-    out = build_kernel_optimization_summary(state, tmp_path)
-    assert out["by_kernel"][0]["unattempted_reason"] == UNATTEMPTED_NO_BACKEND
-
-
-def test_a_kernel_the_filter_skipped_reads_as_unattempted(tmp_path: Path) -> None:
-    """A dispatch gate is not a failure, and the summary must not call it one.
-
-    The classification keys on the presence of a ledger row, so a row written
-    for a kernel no backend ever saw lands in ``attempted`` with no decision --
-    IN_FLIGHT, whose empty backend ladder rolls up to ``fail``. Recording the
-    skip is what has to be avoided; this pins the report the absence produces.
-    """
-    from hyperloom.orchestrator.kernel.request_handlers import record_kernel_opt
-
-    state = _make_state(
-        top15=[_top15_entry("k001", source_file="/pkg/aiter/gqa.py", gpu_pct=1.0)],
-    )
-    record_kernel_opt(
-        state,
-        {"status": "skipped", "reason": "below_min_gpu_pct=5.0", "kernel_id": "k001"},
-    )
-
-    out = build_kernel_optimization_summary(state, tmp_path)
-
-    assert out["totals"]["attempted"] == 0
-    assert out["totals"]["unattempted"] == 1
-    row = out["by_kernel"][0]
-    assert row["category"] == CATEGORY_UNATTEMPTED
-    assert row["unattempted_reason"] == UNATTEMPTED_BELOW_MIN_GPU_PCT
-    assert row["outcome_class"] == OUTCOME_SKIP
-
-
 def test_attempted_rejected_revert_classifies_correctly(tmp_path: Path) -> None:
     state = _make_state(
         top15=[_top15_entry("k001", gpu_pct=43.9, efficiency_pct=48.4)],
@@ -203,8 +140,7 @@ def test_attempted_rejected_revert_classifies_correctly(tmp_path: Path) -> None:
 
 
 def test_ledger_only_rejection_reaches_the_breakdown(tmp_path: Path) -> None:
-    """A rejected kernel that never made top15 must be in both the total and the
-    per-reason split, or ``totals.rejected`` and ``rejection_breakdown`` disagree."""
+    """A rejected kernel that never made top15 must be in both the total and the per-reason split, or ``totals.rejected`` and ``rejection_breakdown`` disagree."""
     state = _make_state(
         top15=[_top15_entry("k001")],
         attempts={
@@ -231,6 +167,73 @@ def test_integrated_kernel_classifies_correctly(tmp_path: Path) -> None:
     assert out["totals"]["integrated"] == 1
     assert out["by_kernel"][0]["category"] == CATEGORY_INTEGRATED
     assert "integrated" in out["by_kernel"][0]["summary"].lower()
+
+
+def test_forge_loop_integration_classifies_as_integrated_without_a_ledger_row(tmp_path: Path) -> None:
+    """Reproduces a real session: forge-loop integrated "_fwd_grouped_kernel_stage1" via
+    kernel_rewrite_controller, landing an optimization_stack entry keyed by the long-form recipe id
+    ("kernel:forge-loop:<operator>:<framework>:<framework_version>:<backend>:<gpu>"). It never wrote
+    kernel_opt_task_attempts and never shares a kernel_id/source_file with the roofline trace's k001.
+    Without operator-name reconciliation, this kernel falsely reports as "never attempted" even though it
+    is the exact kernel that landed the session's validated gain."""
+    state = _make_state(
+        top15=[
+            _top15_entry(
+                "k001",
+                name="_fwd_grouped_kernel_stage1",
+                source_file="/sgl-workspace/aiter/op_tests/triton_tests/utils/mla_decode_ref.py",
+            )
+        ],
+    )
+    state.optimization_stack = [
+        {
+            "action": "integrate",
+            "kernel_id": "kernel:forge-loop:fwd_grouped_kernel_stage1:sglang:0.5.17:triton:mi355x",
+            "target_file": "/sgl-workspace/sglang/python/sglang/kernels/ops/attention/decode_attention.py",
+            "ts": "2026-09-21T18:30:06.535892+00:00",
+        }
+    ]
+    out = build_kernel_optimization_summary(state, tmp_path)
+    assert out["totals"]["attempted"] == 1
+    assert out["totals"]["integrated"] == 1
+    assert out["kernel_opt_outcome"] != "skip"
+    row = out["by_kernel"][0]
+    assert row["kernel_id"] == "k001"
+    assert row["category"] == CATEGORY_INTEGRATED
+    # This kernel's real gain is recorded elsewhere in optimization_stack -- this row must never
+    # print a fabricated "measured 0.000x" for a micro benchmark that never ran.
+    assert "0.000x" not in row["summary"]
+    assert "micro_speedup=" not in row["summary"]
+    # The raw field must agree with the summary text: absent, not 0.0, so nothing reading the JSON
+    # directly (bypassing the rendered string) sees a fabricated zero either.
+    assert row["last_micro_speedup"] is None
+
+
+def test_gemm_tuning_keep_lands_as_its_own_standalone_entry(tmp_path: Path) -> None:
+    """Reproduces a real session: the winning optimization was a gemm_tuning KEEP (one campaign
+    retuning 14 GEMM shapes through a CSV), which never writes kernel_opt_task_attempts and has no
+    single roofline top15 kernel_id to match against. Without a standalone entry, this session's
+    kernel_optimization_summary.json reports attempted:0 / kernel_opt_outcome:skip even though the
+    session's current_best came from exactly this KEEP."""
+    state = _make_state(top15=[])
+    state.optimization_stack = [
+        {
+            "action": "gemm_tuning",
+            "variant_name": "forge_fmoe_ck",
+            "gain_pct": 6.957474814637951,
+            "tput": 1263.3585977736439,
+            "ts": "2026-09-18T14:19:56.765419+00:00",
+        }
+    ]
+    out = build_kernel_optimization_summary(state, tmp_path)
+    assert out["totals"]["attempted"] == 1
+    assert out["totals"]["integrated"] == 1
+    assert out["kernel_opt_outcome"] != "skip"
+    row = out["by_kernel"][0]
+    assert row["kernel_id"] == "forge_fmoe_ck"
+    assert row["category"] == CATEGORY_INTEGRATED
+    assert "micro_speedup=" not in row["summary"]
+    assert row["last_micro_speedup"] is None
 
 
 def test_keep_pending_classifies_correctly(tmp_path: Path) -> None:
@@ -414,25 +417,12 @@ def test_glossary_present_and_documents_efficiency_pct(tmp_path: Path) -> None:
     assert "backend_ladder" in out["field_glossary"]
 
 
-def test_dispatch_skip_reason_surfaced_when_present(tmp_path: Path) -> None:
-    """A no_eligible_kernels dispatch skip rides through to the summary."""
-    state = _make_state(top15=[_top15_entry("k001")])
-    state.last_kernel_opt_dispatch_skip = {
-        "reason": "no_eligible_kernels",
-        "kernels_considered": 5,
-        "message": "no eligible kernels to optimize (...)",
-        "ts": "2026-06-22T00:00:00+00:00",
-    }
+def test_takeaway_claims_nothing_about_lanes_that_do_not_report_here(tmp_path: Path) -> None:
+    """An empty ledger is silence, not a verdict on the workload."""
+    state = _make_state(top15=[])
     out = build_kernel_optimization_summary(state, tmp_path)
-    assert out["dispatch_skip_reason"]["reason"] == "no_eligible_kernels"
-    assert out["dispatch_skip_reason"]["kernels_considered"] == 5
-
-
-def test_dispatch_skip_reason_empty_by_default(tmp_path: Path) -> None:
-    """No dispatch skip => empty dict, never a failure marker."""
-    state = _make_state(top15=[_top15_entry("k001")])
-    out = build_kernel_optimization_summary(state, tmp_path)
-    assert out["dispatch_skip_reason"] == {}
+    joined = " ".join(out["top_takeaways"])
+    assert "No kernels were attempted through the lanes recorded here." in joined
 
 
 def test_zero_attempts_session_does_not_crash(tmp_path: Path) -> None:
@@ -445,7 +435,6 @@ def test_zero_attempts_session_does_not_crash(tmp_path: Path) -> None:
         "keep_pending": 0,
         "rejected": 0,
         "in_flight": 0,
-        "unattempted": 0,
     }
     assert out["by_kernel"] == []
     assert out["top_takeaways"][0].startswith("No kernels were attempted")
@@ -746,3 +735,81 @@ def test_failure_breakdown_classifies_by_error_class(tmp_path: Path) -> None:
     assert breakdown.get("preprocess_failed") == 1, breakdown
     assert breakdown.get("timeout") == 1, breakdown
     assert breakdown.get("other", 0) == 0, f"new buckets should absorb root causes, leaving other empty: {breakdown}"
+
+
+def test_geak_accepted_kernel_is_counted_as_e2e_success(tmp_path: Path) -> None:
+    state = _make_state(top15=[])
+    state.geak_result = {
+        "status": "ok",
+        "accepted_kernels": [{"kernel_name": "rms_norm", "e2e_delta_pct": 3.05}],
+    }
+
+    out = build_kernel_optimization_summary(state, tmp_path)
+
+    assert out["schema_version"] == 2
+    assert out["totals"]["attempted"] == 1
+    assert out["lane_totals"]["geak"] == {
+        "attempted": 1,
+        "success": 1,
+        "unvalidated": 0,
+        "failed": 0,
+        "outcome": "success",
+    }
+
+
+def test_forge_micro_winners_without_e2e_are_unvalidated(tmp_path: Path) -> None:
+    state = _make_state(top15=[])
+    state.gemm_tuning_attempts = [
+        {
+            "status": "ok",
+            "engine": "forge",
+            "requires_e2e_validation": True,
+            "tuners_run": [
+                {
+                    "tuner": f"tuner-{index}",
+                    "kept": index < 22,
+                    "best_micro_speedup": 1.05 if index < 22 else 1.0,
+                }
+                for index in range(23)
+            ],
+        }
+    ]
+
+    out = build_kernel_optimization_summary(state, tmp_path)
+
+    assert out["lane_totals"]["gemm_tuning"] == {
+        "attempted": 23,
+        "success": 0,
+        "unvalidated": 22,
+        "failed": 1,
+        "outcome": "unvalidated",
+    }
+    assert out["kernel_opt_outcome"] == "unvalidated"
+
+
+def test_only_never_run_lanes_are_skipped(tmp_path: Path) -> None:
+    out = build_kernel_optimization_summary(_make_state(top15=[]), tmp_path)
+
+    assert out["lane_totals"] == {
+        "source_level": {
+            "attempted": 0,
+            "success": 0,
+            "unvalidated": 0,
+            "failed": 0,
+            "outcome": "skip",
+        },
+        "geak": {
+            "attempted": 0,
+            "success": 0,
+            "unvalidated": 0,
+            "failed": 0,
+            "outcome": "skip",
+        },
+        "gemm_tuning": {
+            "attempted": 0,
+            "success": 0,
+            "unvalidated": 0,
+            "failed": 0,
+            "outcome": "skip",
+        },
+    }

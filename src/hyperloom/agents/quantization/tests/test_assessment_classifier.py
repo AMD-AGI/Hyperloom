@@ -1,18 +1,18 @@
-"""classify_attempt — one fixture per outcome row (where artifact-driven).
-
-Some outcomes are only visible via sdk_error or blocked.md; the classifier
-covers them via the sdk_error pattern path or the blocked.md outcome-id parser.
-"""
+"""classify_attempt — one fixture per outcome row (where artifact-driven)."""
 
 from __future__ import annotations
 
-from hyperloom.agents.quantization.driver.assessment import build_assessment, classify_attempt, derive_status
-from hyperloom.agents.quantization.driver.outcomes import OutcomeId
+from hyperloom.agents.quantization.driver.assessment import (
+    _parse_blocked_outcome,
+    build_assessment,
+    classify_attempt,
+    derive_status,
+)
+from hyperloom.agents.quantization.driver.outcomes import SUCCESS_TAGS, OutcomeId
 from hyperloom.agents.quantization.driver.result_collector import collect_artifacts
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# bootstrap / sdk_error path
+# ───────────────────────────────────────────────────────────────────────────── bootstrap / sdk_error path
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -48,8 +48,7 @@ def test_sdk_runtime_error_rate_limit(build_workspace):
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# explicit blocked.md outcome marker
+# ───────────────────────────────────────────────────────────────────────────── explicit blocked.md outcome marker
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -65,8 +64,24 @@ def test_blocked_md_invalid_outcome_id_ignored(build_workspace):
     assert classify_attempt(ws) is None  # successful artifacts
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# phase-aware artifact gaps
+def test_blocked_md_eval_gap_accepted_does_not_bypass(build_workspace):
+    ws = build_workspace(
+        blocked_md="outcome_id: eval_gap_accepted\n",
+        include_quantized_dir=False,
+        include_validation_report=False,
+        include_eval_report=False,
+    )
+    assert classify_attempt(ws) != OutcomeId.eval_gap_accepted
+
+
+def test_blocked_md_accepts_every_known_non_success_outcome():
+    """New known failures are blocked unless explicitly classified as success."""
+    for outcome in list(OutcomeId):
+        parsed = _parse_blocked_outcome(f"outcome_id: {outcome.value}\n")
+        assert parsed is (None if outcome in SUCCESS_TAGS else outcome)
+
+
+# ───────────────────────────────────────────────────────────────────────────── phase-aware artifact gaps
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -106,8 +121,7 @@ def test_manifest_missing_under_manifest_phase(build_workspace):
     assert classify_attempt(ws) == OutcomeId.manifest_artifact_invalid_or_missing
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MUST-have on quantized dir
+# ───────────────────────────────────────────────────────────────────────────── MUST-have on quantized dir
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -126,8 +140,7 @@ def test_must_have_tokenizer_missing(build_workspace):
     assert classify_attempt(ws) == OutcomeId.must_have_tokenizer_missing
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# validator
+# ───────────────────────────────────────────────────────────────────────────── validator
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -161,8 +174,7 @@ def test_must_validate_skipped(build_workspace):
     assert classify_attempt(ws) == OutcomeId.must_validate_skipped
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# eval
+# ───────────────────────────────────────────────────────────────────────────── eval
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -231,8 +243,7 @@ def test_eval_report_malformed_treated_as_env_unavailable(build_workspace):
     assert classify_attempt(ws) == OutcomeId.eval_env_unavailable
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# phase-tagged sdk errors
+# ───────────────────────────────────────────────────────────────────────────── phase-tagged sdk errors
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -244,8 +255,7 @@ def test_exec_oom_via_sdk_error_under_exec_phase(build_workspace):
         include_eval_report=False,
         last_phase="exec",
     )
-    # Test the phase-tagged sdk_error path with manifest present but quantized
-    # dir absent.
+    # Test the phase-tagged sdk_error path with manifest present but quantized dir absent.
     ws2 = build_workspace(
         include_quantized_dir=False,
         include_validation_report=False,
@@ -281,8 +291,7 @@ def test_exec_calibration_data_missing_via_sdk_error(build_workspace):
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# fallback
+# ───────────────────────────────────────────────────────────────────────────── fallback
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -299,8 +308,7 @@ def test_clean_success_returns_none(build_workspace):
     assert classify_attempt(ws) is None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Assessment assembly
+# ───────────────────────────────────────────────────────────────────────────── Assessment assembly
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -340,8 +348,7 @@ def test_assessment_to_dict_roundtrip(build_workspace):
     assert d["recovered"] is True
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# derive_status
+# ───────────────────────────────────────────────────────────────────────────── derive_status
 # ─────────────────────────────────────────────────────────────────────────────
 
 

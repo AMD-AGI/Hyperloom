@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the session-scoped orphaned serving-process reaper.
-
-A monitor-process death (e.g. raylet crash taking the optimizer down) leaves the
-setsid'd SGLang/vLLM server tree alive with its pidfile still on disk. The next
-launch/resume must reap those orphans, scoped strictly to the current session's
-own pidfiles and guarded by a cmdline match so a recycled pid is never killed.
-"""
+"""Tests for the session-scoped orphaned serving-process reaper."""
 
 from __future__ import annotations
 
@@ -16,6 +10,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 from hyperloom.orchestrator.actions.executors._server_lifecycle import (
     reap_orphaned_servers,
@@ -33,13 +29,7 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _wait_for_cmdline_marker(pid: int, marker: str, timeout: float = 5.0) -> None:
-    """Block until ``/proc/<pid>/cmdline`` contains ``marker``.
-
-    ``subprocess.Popen`` returns as soon as the child is forked, but the reaper
-    matches on ``/proc/<pid>/cmdline`` which stays empty until the child has
-    finished ``exec``-ing the interpreter. Polling here removes that race so the
-    reaper deterministically sees a server-looking cmdline.
-    """
+    """Block until ``/proc/<pid>/cmdline`` contains ``marker``."""
     deadline = time.time() + timeout
     proc_cmdline = Path(f"/proc/{pid}/cmdline")
     while time.time() < deadline:
@@ -109,18 +99,24 @@ def _spawn_dead_leader_with_live_child(tmp_path: Path, marker: str) -> tuple[int
     raise AssertionError("leader did not write child pid")
 
 
-def test_reap_kills_matching_orphan_and_clears_pidfile(tmp_path):
+@pytest.mark.parametrize(
+    ("marker", "tag"),
+    [("sglang.launch_server", "sglang_8888"), ("atom.entrypoints.openai_server", "atom_8888")],
+    ids=["sglang", "atom"],
+)
+def test_reap_kills_matching_orphan_and_clears_pidfile(tmp_path, marker, tag):
     """A live server whose cmdline matches is reaped and its pidfile removed."""
-    proc = _spawn_marker_process("sglang.launch_server")
-    pidfile = _write_pidfile(tmp_path, "sglang_8888", proc.pid)
+    proc = _spawn_marker_process(marker)
+    pidfile = _write_pidfile(tmp_path, tag, proc.pid)
     try:
         reaped = reap_orphaned_servers(tmp_path)
 
-        # Reap the zombie so the liveness probe reflects true termination
-        # (the reaper is not this process's parent-waiter).
+        # Reap the zombie so the liveness probe reflects true termination (the reaper is not this process's
+        # parent-waiter).
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
+            # The assertions below report a survivor; finally still cleans it up.
             pass
 
         assert proc.pid in reaped
@@ -130,6 +126,7 @@ def test_reap_kills_matching_orphan_and_clears_pidfile(tmp_path):
         try:
             proc.kill()
         except OSError:
+            # The reaper may already have terminated and collected the child.
             pass
         proc.wait(timeout=5)
 

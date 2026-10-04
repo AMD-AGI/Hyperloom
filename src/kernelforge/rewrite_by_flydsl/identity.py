@@ -1,14 +1,4 @@
-"""Resolve a producer-owned ``kernel:`` recipe identity for a rewrite record.
-
-The rewrite path used to address records by operator and framework alone and
-carry the GPU as a filter applied after reading. Here the GPU is part of the
-address, because a port validated on one architecture is not a candidate for
-another and should not be fetched only to be discarded.
-
-``framework_version`` is the dimension the rewrite path never tracked. It is
-read from the installed distribution, so records stop being shared across
-framework upgrades that change the very source the port was written against.
-"""
+"""Resolve a producer-owned ``kernel:`` recipe identity for a rewrite record."""
 
 from __future__ import annotations
 
@@ -21,6 +11,7 @@ from kernelforge.knowledge.experience_sink import (
     resolve_operation,
 )
 from kernelforge.knowledge.implementation_identity import (
+    canonical_framework_version,
     implementation_signature,
     normalize_operator_name,
 )
@@ -36,11 +27,6 @@ REWRITE_PRODUCER = "flydsl"
 #: Stands in for a dimension that could not be resolved, and is also what
 #: ``detect_framework`` returns for a file owned by no framework package.
 UNKNOWN_SEGMENT = "unknown"
-#: The version of a framework that is not there. A literal keeps the dimension
-#: populated without pretending a version was observed.
-NO_FRAMEWORK_VERSION = "none"
-#: The framework is known but its distribution is not installed here.
-UNKNOWN_VERSION = "unspecified"
 
 _DISALLOWED = re.compile(r"[^a-z0-9._+-]+")
 _LEADING = re.compile(r"^[^a-z0-9_]+")
@@ -52,12 +38,7 @@ _FINGERPRINT_LEN = 12
 
 
 def segment(value: str, *, fallback: str) -> str:
-    """Fold a free-form value into one identity dimension.
-
-    Dimensions are lowercase ASCII and colon-free because they are the address:
-    a value that cannot be rendered would otherwise silently file the record
-    somewhere the next reader will not look.
-    """
+    """Fold a free-form value into one identity dimension."""
     folded = _DISALLOWED.sub("-", str(value or "").strip().lower())
     folded = _LEADING.sub("", folded).strip("-")
     if not folded:
@@ -66,28 +47,24 @@ def segment(value: str, *, fallback: str) -> str:
 
 
 def framework_version(framework: str) -> str:
-    """Read the installed version of the framework that owns the source."""
+    """Read the release of the framework that owns the source.
+
+    A framework that is not there, one whose distribution is not installed, and
+    one whose wheel was built on another machine each resolve here to the
+    release, or to the single word for not knowing it. Answers in their own
+    words -- ``none``, ``unspecified``, ``0.24.0+rocm723`` -- would give one
+    kernel a page per answer.
+    """
     name = str(framework or "").strip().lower()
-    if not name or name == UNKNOWN_SEGMENT:
-        return NO_FRAMEWORK_VERSION
     try:
-        return segment(metadata.version(name), fallback=UNKNOWN_VERSION)
+        installed = metadata.version(name) if name and name != UNKNOWN_SEGMENT else ""
     except metadata.PackageNotFoundError:
-        return UNKNOWN_VERSION
+        installed = ""
+    return segment(canonical_framework_version(installed), fallback=UNKNOWN_SEGMENT)
 
 
 def session_id(canonical_id: str, kernel_name: str, port_digest: str) -> str:
-    """Name one candidate under one identity.
-
-    Artifact keys are partitioned by session id alone, so an id that repeated
-    across identities would let two of them collide on any shared artifact
-    path. The identity fingerprint is what keeps this id distinct per identity.
-    The port digest is what keeps it stable, so re-recording the same port
-    updates one candidate instead of accumulating one per run.
-
-    The kernel name is here only to keep the id legible, and is budgeted rather
-    than trusted: a dimension may be longer than a whole id is allowed to be.
-    """
+    """Name one candidate under one identity."""
     name = _UNSAFE_IN_SESSION_ID.sub("-", str(kernel_name or "")).strip("-.")
     legible = name[:_NAME_BUDGET].strip("-.") or UNKNOWN_SEGMENT
     identity_fingerprint = hashlib.sha256(str(canonical_id or "").encode()).hexdigest()[:_FINGERPRINT_LEN]

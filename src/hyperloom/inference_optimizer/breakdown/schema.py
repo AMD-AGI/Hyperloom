@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Schema (TypedDict shape) for ``session_breakdown.json``.
-
-The single contract between ``inference_optimizer`` and downstream
-consumers. All fields are optional-by-convention (consumers treat missing
-data as "not available", never fabricate); the wire shape is plain JSON;
-``schema_version`` bumps only on breaking changes, not additive fields.
-"""
+"""Schema (TypedDict shape) for ``session_breakdown.json``."""
 
 from __future__ import annotations
 
@@ -15,45 +9,39 @@ from typing import Any, Literal, TypedDict
 
 from ..session.sbd_v6 import SCHEMA_VERSION_V6
 
-#: Historical collector-only schema retained for archived-reader identification.
-SCHEMA_VERSION_V2 = "hyperloom.session_breakdown.v2"
 
-#: breakdown schema version stamped when the file was assembled from the
-#: author-time recorder fragments. Same wire shape as v2 plus recorder-only
-#: sections; lets consumers tell a recorder-aggregated breakdown apart from a
-#: legacy collector fallback.
-SCHEMA_VERSION_V3 = "hyperloom.session_breakdown.v3.0"
-
-#: Unified optimization schema. This is a breaking wire-shape cutover: adopted
-#: optimizations are emitted only through ``optimizations``, and that section
-#: is built exclusively from recorder fragments -- never reconstructed from
-#: session business files.
-SCHEMA_VERSION_V5 = "hyperloom.session_breakdown.v5.0"
-
-#: Current breakdown schema version.
-SCHEMA_VERSION = SCHEMA_VERSION_V5
+#: Current breakdown schema version. V6 stamps the document once the timeline
+#: is recorded by the actions themselves rather than projected out of their
+#: artefacts afterwards, which is what makes an event's start time its real one.
+#: ``enablement`` gained its ledger-sourced round fields inside this version:
+#: they add a section to the block rather than reshape the document.
+SCHEMA_VERSION = SCHEMA_VERSION_V6
 
 
-# Session metadata
-class Recovery(TypedDict, total=False):
-    """Crash / interruption / resume history for one optimization session.
+class V6ToolVersion(TypedDict, total=False):
+    """One external tool's recorded provenance."""
 
-    Records the recovery-relevant signals SharedState tracks so the breakdown
-    captures when a run was interrupted and continued.
+    tool: str
+    root_dir: str
+    commit: str
+    version: str
 
-    Attributes:
-        recovered (bool): True when the run crashed and/or was continued after
-            an interruption (any of the signals below fired).
-        crash_count (int): Monotonic total of Coordinator tick/agent crashes.
-        crash_timestamps (list[str]): ISO UTC timestamps of recent crashes
-            (bounded tail).
-        degraded_mode (bool): Whether the run entered degraded operation.
-        resume_pending_revalidation (bool): Accepted stack awaits post-resume
-            revalidation (validated gain not yet re-trusted).
-        last_tick_exception (dict[str, Any] | None): Compact summary of the last
-            Coordinator tick exception (tick / stage / type / message), traceback
-            omitted.
+
+class V6MetadataVersions(TypedDict, total=False):
+    """Version identifiers projected into V6 metadata.
+
+    The breakdown's own schema version and the optimizer's revision are not
+    here: they are the envelope's ``schema_version`` and
+    ``metadata.session.code_revision``.
     """
+
+    framework: str | None
+    framework_version: str | None
+    tools: dict[str, V6ToolVersion]
+
+
+class V6MetadataRecovery(TypedDict, total=False):
+    """Crash / interruption / resume history for the session."""
 
     recovered: bool
     crash_count: int
@@ -63,2784 +51,16 @@ class Recovery(TypedDict, total=False):
     last_tick_exception: dict[str, Any] | None
 
 
-class SessionMeta(TypedDict, total=False):
-    """Identity, timing, and host context for one optimization session.
-
-    Captures the metadata describing the run that produced the breakdown: its
-    identifiers, lifecycle timestamps, stop reason, and runtime environment.
-
-    Attributes:
-        session_id (str): Hyperloom internal id (``manifest.session_id``).
-        claw_session_id (str | None): SaFE / Claw session id (env ``CLAW_SESSION_ID``).
-        sandbox_user_id (str | None): Sandbox user identifier, if any.
-        created_at_utc (str): ISO UTC timestamp when the session was first
-            created; unchanged by a resume.
-        start_ts (str): ISO UTC timestamp the wall-clock budget is counted
-            from. A resume re-anchors it on the new leg only when the previous
-            one crashed or stopped for a recorded reason; after a clean stop it
-            stays at the original start, because ``--max-hours`` keeps counting
-            from there.
-        ended_at_utc (str): ISO UTC timestamp when the session ended.
-        stop_reason (str): Why the run stopped (``target_reached`` /
-            ``time_exhausted`` / ``global_converged`` / ``max_ticks`` /
-            ``baseline_failed`` / ...).
-        max_minutes (int): Configured time budget in minutes.
-        elapsed_minutes (float): Wall-clock minutes from ``start_ts`` to the
-            end, or to now while still running, so it stays comparable with
-            ``max_minutes``. When a resume kept ``start_ts`` this spans the
-            gap between the legs as well, which is the span the budget is
-            charged for too.
-        host (str): Hostname the session executed on.
-        code_revision (str): Source revision of the optimizer.
-        pid (int): Process id of the optimizer.
-        session_dir (str): Absolute path to the session working directory.
-        user_data_path (str): ``USER_DATA_PATH`` root the run wrote under
-            (``session_dir`` nests beneath it in per_model_ts layout); empty
-            when unset. Lets a trace-based consumer locate the on-disk
-            artifacts without re-deriving the path.
-        tick_count (int): Number of orchestration ticks executed.
-        image (str | None): Fully-qualified container image, or None if unset.
-        recovery (Recovery): Crash / interruption / resume history for the run.
-    """
-
-    session_id: str  # hyperloom internal id (manifest.session_id)
-    claw_session_id: str | None  # SaFE / Claw session id (env CLAW_SESSION_ID)
-    sandbox_user_id: str | None
-    created_at_utc: str
-    start_ts: str  # budget anchor; re-anchored only by a resume after a crash or a recorded stop
-    ended_at_utc: str
-    stop_reason: str  # target_reached / time_exhausted / global_converged / max_ticks / baseline_failed / ...
-    max_minutes: int
-    elapsed_minutes: float
-    host: str
-    code_revision: str
-    pid: int
-    session_dir: str
-    user_data_path: str  # USER_DATA_PATH root the run wrote under
-    tick_count: int
-    image: str | None  # container image fully-qualified (or None if not configured)
-    recovery: Recovery  # crash / interruption / resume history
-
-
-# Workload configuration
-class WorkloadObjective(TypedDict, total=False):
-    """Optimization goal the session was asked to pursue.
-
-    Attributes:
-        kind (str): Objective type (``gain_pct`` / ``tput`` / ``baseline`` /
-            ``time_only``).
-        value (Any): Goal value — a float target, a string (e.g.
-            ``target_baseline_dir``), or None when not applicable.
-    """
-
-    kind: str  # gain_pct / tput / baseline / time_only
-    value: Any  # float or str (target_baseline_dir) or None
-
-
-class Workload(TypedDict, total=False):
-    """Model, framework name, and serving configuration under optimization.
-
-    Describes the inference workload (model + framework name + parallelism + shape)
-    plus the objective that defines success for the run.
-
-    Attributes:
-        framework_name (str): Serving framework name (``sglang`` / ``vllm`` / ``atom``).
-        framework_version (str): Version string of the framework.
-        model_name (str): Human-readable model name.
-        model_path (str): Filesystem or registry path to the model weights.
-        model_class (str): Model architecture class.
-        gpu_type (str): GPU SKU (``mi300x`` / ``mi325x`` / ``mi355x``).
-        tp (int | None): Tensor-parallel degree, or None if unset.
-        conc (int | None): Request concurrency, or None if unset.
-        isl (int | None): Input sequence length, or None if unset.
-        osl (int | None): Output sequence length, or None if unset.
-        max_model_len (int | None): Max context length, or None if unset.
-        precision (str): Numeric precision of the served model.
-        objective (WorkloadObjective): The optimization goal for the run.
-    """
-
-    framework_name: str  # sglang / vllm / atom
-    framework_version: str
-    model_name: str
-    model_path: str
-    model_class: str
-    gpu_type: str  # mi300x / mi325x / mi355x
-    tp: int | None
-    conc: int | None
-    isl: int | None
-    osl: int | None
-    max_model_len: int | None
-    precision: str
-    objective: WorkloadObjective
-
-
-# Model basics — architecture/scale summary parsed from the served model's config.json.
-class ModelInfo(TypedDict, total=False):
-    """Structural summary of the served model (architecture / scale / attention).
-
-    Best-effort parse of the model's ``config.json``; every field is
-    optional-by-convention so consumers must null-check. ``{}`` when the model
-    is not a transformers checkpoint (diffusion etc.) or the session predates
-    the field.
-
-    Attributes:
-        model_family (str): Base family with generation (``llama3`` / ``qwen3`` /
-            ``deepseek_v3``).
-        model_type (str): HuggingFace ``model_type`` (``qwen2`` / ``llama``).
-        architectures (list[str]): Architecture class names
-            (``["Qwen3ForCausalLM"]``).
-        attention_type (str): Inferred attention variant (``MHA`` / ``GQA`` /
-            ``MQA`` / ``MLA``).
-        is_moe (bool): Whether the model is a Mixture-of-Experts model.
-        num_hidden_layers (int): Number of transformer layers.
-        hidden_size (int): Model hidden dimension.
-        intermediate_size (int): FFN intermediate dimension.
-        num_attention_heads (int): Number of attention heads.
-        num_key_value_heads (int): Number of KV heads (GQA groups).
-        head_dim (int): Per-head dimension.
-        max_position_embeddings (int): Native context length.
-        vocab_size (int): Vocabulary size.
-        torch_dtype (str): Declared weight dtype (``bfloat16`` / ...).
-        kv_cache_dtype (str): KV cache dtype when declared.
-        quantization (str): Weight quant method (``fp8`` / ...); '' when
-            unquantized.
-        num_experts (int): Expert count (MoE only).
-        num_experts_per_tok (int): Activated experts per token (MoE only).
-    """
-
-    model_family: str
-    model_type: str
-    architectures: list[str]
-    attention_type: str
-    is_moe: bool
-    num_hidden_layers: int
-    hidden_size: int
-    intermediate_size: int
-    num_attention_heads: int
-    num_key_value_heads: int
-    head_dim: int
-    max_position_embeddings: int
-    vocab_size: int
-    torch_dtype: str
-    kv_cache_dtype: str
-    quantization: str
-    num_experts: int
-    num_experts_per_tok: int
-
-
-# Baseline
-class BaselineAttemptSummary(TypedDict, total=False):
-    """One recorded attempt to establish the baseline measurement.
-
-    Attributes:
-        ts (str): ISO UTC timestamp of the attempt.
-        task_id (str): Orchestrator task id for the attempt.
-        status (str): Outcome status of the attempt.
-        decision (str): Decision taken (e.g. promoted / discarded).
-        key_metric (float | None): Headline metric value, or None if absent.
-        workspace (str | None): Benchmark workspace path, or None.
-        error_class (str | None): Error classification on failure, or None.
-        extras (dict[str, Any]): Attempt-specific fields from the writeback
-            audit: ``fingerprint``, ``anchor_kept_tput``, and ``eval_probe``
-            (why an accuracy of ~0 was a runaway generation, not wrong answers).
-    """
-
-    ts: str
-    task_id: str
-    status: str
-    decision: str
-    key_metric: float | None
-    workspace: str | None
-    error_class: str | None
-    # Real failure text from the executor; None on success / reconstruction.
-    error_excerpt: str | None
-    stderr_tail: str | None
-    stderr_log_path: str | None
-    extras: dict[str, Any]
-
-
-class BenchmarkInvocation(TypedDict, total=False):
-    """Replayable record of how a benchmark variant was launched (server cmd + envs + config).
-
-    ``extra_envs`` is allowlist-filtered to keep secrets out of the JSON.
-    """
-
-    framework_args: str  # e.g. "python -m sglang.launch_server --model ... --tp 8"
-    framework_args_source: str
-    # vocab: log_non_default_args / log_args_line / log_python_cmd / yaml_cmd / yaml_benchmark / unknown.
-    extra_envs: dict[str, str]  # allowlisted env vars only (no secrets)
-    config_path: str | None  # baseline_config.with_envs.yaml or variant config
-    server_log_path: str | None  # for debug
-
-
-class Baseline(TypedDict, total=False):
-    """Pre-optimization reference performance for the workload.
-
-    The baseline against which all gains are computed, including latency
-    sub-metrics, attempt history, and the replayable launch invocation.
-
-    Attributes:
-        throughput_tok_s_per_gpu (float): Baseline throughput (tok/s per GPU).
-        accuracy (float): Baseline accuracy score.
-        ttft_mean_ms (float | None): Mean time-to-first-token (ms), or None.
-        e2el_mean_ms (float | None): Mean end-to-end latency (ms), or None.
-        ttft_e2el_source (str): Provenance of the latency metrics
-            (``state_workspace`` / ``runs_baseline_disk`` / ``unavailable``).
-        config_path (str | None): Path to the baseline config, or None.
-        benchmark_report_path (str | None): Path to the benchmark report, or None.
-        attempts_history (list[BaselineAttemptSummary]): Recorded baseline attempts.
-        failure_streak (int): Consecutive baseline failures.
-        total_failures (int): Combined backstop count of ALL baseline failures
-            (any error_class); fast-fails when per-class streaks each stay below
-            threshold but the total reaches it.
-        invocation (BenchmarkInvocation): Replayable launch record.
-        roofline_ceiling (dict[str, Any]): Standalone baseline-arm roofline
-            ceiling backup (theoretical peak + mem/cmp + perfmodel breakdown);
-            frontend ceiling fallback when the roofline step failed. {} when absent.
-    """
-
-    throughput_tok_s_per_gpu: float
-    throughput_unit: str  # "tok/s" (serving) or "img/s" (scriptable xDiT)
-    accuracy: float
-    ttft_mean_ms: float | None
-    e2el_mean_ms: float | None
-    ttft_e2el_source: str  # state_workspace / runs_baseline_disk / unavailable
-    config_path: str | None
-    benchmark_report_path: str | None
-    attempts_history: list[BaselineAttemptSummary]
-    failure_streak: int
-    total_failures: int
-    invocation: BenchmarkInvocation
-    roofline_ceiling: dict[str, Any]
-
-
-# Final state — SaFE contract core
-class Final(TypedDict, total=False):
-    """Final validated optimization state — the SaFE contract core.
-
-    Records the best validated result of the session: throughput, cumulative
-    gain, the applied server-arg/env stack, and closing-phase bookkeeping.
-
-    Attributes:
-        throughput_tok_s_per_gpu (float | None): Final throughput (tok/s/GPU), or None.
-        cumulative_gain_pct_validated (float): Validated cumulative gain percent.
-        validated_at_stack_len (int): Stack depth at which validation occurred.
-        validated_ts (str): ISO UTC timestamp of the validation.
-        stack_changed_after_validation (bool): Whether the stack changed post-validation.
-        extra_server_args (str): Final extra server-arg CLI fragment.
-        extra_envs (dict[str, Any]): Final extra env vars applied.
-        action_path (list[str]): Ordered ``action:variant`` labels from the stack.
-        ttft_mean_ms (float | None): Mean time-to-first-token (ms), or None.
-        e2el_mean_ms (float | None): Mean end-to-end latency (ms), or None.
-        ttft_e2el_source (str): Provenance of the latency metrics (``current_best`` /
-            ``validate_stack_disk`` / ``stack_top_disk`` / ``unavailable``).
-        invocation (BenchmarkInvocation): Replayable launch record for the final state.
-        closing_phase_entered (bool): Whether the closing phase was entered.
-        closing_started_unix (float): Unix time the closing phase started.
-        closing_report_task_id (str): Task id of the closing report.
-    """
-
-    throughput_tok_s_per_gpu: float | None
-    throughput_unit: str  # "tok/s" (serving) or "img/s" (scriptable xDiT)
-    cumulative_gain_pct_validated: float
-    validated_at_stack_len: int
-    validated_ts: str
-    stack_changed_after_validation: bool
-    extra_server_args: str
-    extra_envs: dict[str, Any]
-    action_path: list[str]  # ordered list of action:variant labels from optimization_stack
-    ttft_mean_ms: float | None
-    e2el_mean_ms: float | None
-    ttft_e2el_source: str  # current_best / validate_stack_disk / stack_top_disk / unavailable
-    invocation: BenchmarkInvocation
-    closing_phase_entered: bool
-    closing_started_unix: float
-    closing_report_task_id: str
-
-
-# Phase timeline — chronological events
-class PhaseEvent(TypedDict, total=False):
-    """One chronological event in the optimization timeline.
-
-    A single action attempt (profile, backend trial, kernel opt, validation,
-    etc.) with its outcome and optional contextual extras.
-
-    Attributes:
-        ts (str): ISO UTC timestamp of the event.
-        action (str): Action kind (``baseline`` / ``profile`` / ``explore`` /
-            ``roofline`` / ``sweep`` / ``kernel_opt`` / ``integrate``).
-            ``backends`` / ``params`` / ``validate_stack`` appear only when
-            reading archived sessions (see :class:`CapabilitySummary`).
-        task_id (str): Orchestrator task id.
-        kernel_id (str | None): Kernel id for kernel_agent-owned actions, else None.
-        status (str): Outcome (``succeeded`` / ``failed``).
-        decision (str): Decision label (``promoted`` / ``discarded`` /
-            ``salvaged`` / ``no_promote`` / ``skipped`` / ``error`` / ``KEEP`` /
-            ``PARTIAL`` / ``REVERT``).
-        key_metric (float | None): Headline metric value, or None.
-        key_metric_kind (str | None): Type/label of the key metric, or None.
-        workspace (str | None): Benchmark workspace path, or None.
-        error_class (str | None): Error classification on failure, or None.
-        extras (dict[str, Any]): Action-specific extra fields. For journal-sourced
-            events this carries proposer attribution and a filter label:
-            ``provenance`` (raw explore label), ``proposer`` (resolved component:
-            ``specialist:<domain>`` / ``grid`` / ``orchestration``), ``scope``,
-            ``fingerprint``, ``operation_kind`` (``backend`` / ``param`` / ``env``
-            / ``kernel_opt`` / ``kernel_integrate`` / ``baseline`` / ...), and
-            ``metrics`` (per-variant measurement detail).
-    """
-
-    ts: str
-    action: str  # baseline / profile / explore / roofline / sweep / kernel_opt / integrate (+ archived: backends / params / validate_stack)
-    task_id: str
-    kernel_id: str | None  # only for kernel_agent-owned actions
-    status: str  # succeeded / failed
-    decision: str  # promoted / discarded / salvaged / no_promote / skipped / error / KEEP / PARTIAL / REVERT
-    key_metric: float | None
-    key_metric_kind: str | None
-    workspace: str | None
-    error_class: str | None
-    phase: str  # declared phase (journal-sourced events); "" otherwise
-    change: str  # human-readable change summary (journal) or action key
-    extras: dict[str, Any]
-
-
-# Capability summary — Capability cards in UI
-class CapabilityEntry(TypedDict, total=False):
-    status: str  # kept / reverted / tried / attempted / not_attempted / not_configured / failed / completed
-    attempts: int  # invocation rows, NOT distinct kernels: how many tries
-    keeps: int  # distinct kernels adopted at integrate (NOT micro-only KEEP)
-    micro_only_keeps: int  # micro-KEPT kernels that never reached integrate
-    pending_integrate: int  # micro-KEPT kernels whose integrate verdict is undecided
-    reverts: int  # micro-KEPT kernels reverted at integrate (e2e regressed)
-    e2e_gain_pct: float | None  # best end-to-end integrate gain for this lane's kernel
-    tested: int  # for backends/params/explore: distinct variants tested
-    best_gain_pct: float | None
-    reason: str  # human readable, e.g. "geak backend only this run"
-    # explore-specific:
-    keep_unstable_count: int  # Pre-removal sessions only: KEEP'd variants a confirmation round evicted
-    winners_history: int  # cumulative explore_search.winners_history length
-    # specialist-row only — per-domain split keyed by SpecialistDomain.key;
-    # every catalogue domain is seeded not_attempted for presence-free iteration.
-    by_specialist: dict[str, "CapabilityEntry"]
-
-
-class CapabilitySummary(TypedDict, total=False):
-    """Per-capability roll-up powering the dashboard capability cards.
-
-    Holds one :class:`CapabilityEntry` per capability family. ``backends`` /
-    ``params`` / ``validate_stack`` are retained as compatibility aliases of
-    the primary ``explore`` row.
-
-    Attributes:
-        geak (CapabilityEntry): GEAK kernel-generation capability.
-        forge (CapabilityEntry): Forge kernel-generation capability.
-        explore (CapabilityEntry): Primary explore (param/backend search) row.
-        backends (CapabilityEntry): Compatibility alias for backend exploration.
-        params (CapabilityEntry): Compatibility alias for param exploration.
-        sweep (CapabilityEntry): Concurrency/shape sweep capability.
-        validate_stack (CapabilityEntry): Compatibility alias for stack validation.
-        specialist (CapabilityEntry): Specialist sub-agent capability; ``tested`` =
-            total proposals across rounds, ``keeps`` = proposals kept,
-            ``attempts`` = number of dispatch rounds.
-    """
-
-    geak: CapabilityEntry
-    forge: CapabilityEntry
-    # primary explore row; backends/params/validate_stack are compat aliases.
-    explore: CapabilityEntry
-    backends: CapabilityEntry
-    params: CapabilityEntry
-    sweep: CapabilityEntry
-    validate_stack: CapabilityEntry
-    specialist: CapabilityEntry
-
-
-# Kernel backend invocations
-class KernelMetadata(TypedDict, total=False):
-    """Descriptive metadata for a kernel targeted by a backend invocation.
-
-    Attributes:
-        name (str): Kernel name.
-        source_file (str): Source file the kernel lives in.
-        shapes (list[dict[str, Any]]): Input/output shape descriptors.
-        gpu_pct (float | None): Share of total GPU time (0..100), or None.
-        arithmetic_intensity (float | None): FLOPs per byte, or None.
-    """
-
-    name: str
-    source_file: str
-    shapes: list[dict[str, Any]]
-    gpu_pct: float | None
-    arithmetic_intensity: float | None
-
-
-class Invocation(TypedDict, total=False):
-    """One backend invocation for one kernel; ``backend`` identifies the engine."""
-
-    kernel_id: str
-    attempt_id: str
-    run_id: str
-    ts: str
-    backend: str  # forge / geak / backend name
-    model: str | None
-    kernel_metadata: KernelMetadata
-    prompt_path: str | None
-    optimized_files: list[str]
-    result_path: str | None
-    verification_path: str | None
-    decision: str  # KEEP / PARTIAL / REVERT / FAILED
-    micro_speedup: float | None
-    compile_passed: bool | None
-    correctness_passed: bool | None
-    best_artifact_path: str | None
-    error: str | None
-    cli_log_path: str | None
-
-
-# Kernel lifecycle
-class DetectedKernel(TypedDict, total=False):
-    """A hot kernel surfaced by profiling (stage 1 of the kernel lifecycle).
-
-    Attributes:
-        kernel_id (str): Kernel identifier.
-        name (str): Kernel name.
-        gpu_pct (float | None): Share of total GPU time (0..100), or None.
-        time_ms (float | None): Kernel duration in milliseconds, or None.
-        bottleneck (str): Bottleneck class (``compute`` / ``memory`` / ``comm``).
-        arithmetic_intensity (float | None): FLOPs per byte, or None.
-        reusable_native_kernel (bool): Whether a native kernel can be swapped in.
-        source_file (str | None): Source file of the kernel, or None.
-        detected_from_task (str): Profile task id that surfaced the kernel.
-        benchmark_report_path (str): Path to the benchmark report.
-    """
-
-    kernel_id: str
-    name: str
-    gpu_pct: float | None
-    time_ms: float | None
-    bottleneck: str  # compute / memory / comm
-    arithmetic_intensity: float | None
-    reusable_native_kernel: bool
-    source_file: str | None
-    detected_from_task: str  # which profile task_id surfaced it
-    benchmark_report_path: str
-    # lifecycle stamps (added by _collect_detected_kernels)
-    selected_for_optimization: bool
-    geak: dict[str, Any] | None  # {attempts, best_speedup, decision, last_status}
-    adopted_by: str | None  # geak / forge / kernel_agent / None
-    final_decision: str  # kept / reverted / rejected / attempted / not_optimized
-    integrate_gain_pct: float | None  # e2e (integrate) gain; negative => regressed -> reverted
-
-
-class RecommendedKernel(TypedDict, total=False):
-    """A kernel recommended for optimization (stage 2 of the lifecycle).
-
-    Attributes:
-        kernel_id (str): Kernel identifier.
-        name (str): Kernel name.
-        gpu_pct (float | None): Share of total GPU time (0..100), or None.
-        recommended_backends (list[str]): Suggested optimization backends.
-        recommended_actions (list[str]): Suggested optimization actions.
-        bottleneck (str): Bottleneck class (compute / memory / comm).
-        reusable_native_kernel (bool): Whether a native kernel can be swapped in.
-    """
-
-    kernel_id: str
-    name: str
-    gpu_pct: float | None
-    recommended_backends: list[str]
-    recommended_actions: list[str]
-    bottleneck: str
-    reusable_native_kernel: bool
-
-
-class OptimizedKernel(TypedDict, total=False):
-    """A kernel that went through optimization (stage 3 of the lifecycle).
-
-    Attributes:
-        kernel_id (str): Kernel identifier.
-        backend (str): Winning backend (for example ``forge`` / ``geak``, best-of).
-        total_attempts (int): Total optimization attempts.
-        successful_attempts (int): Attempts that succeeded.
-        best_micro_speedup (float | None): Best micro-benchmark speedup, or None.
-        last_decision (str): Decision of the last attempt.
-        best_artifact_path (str | None): Path to the best artifact, or None.
-        attempts_summary (list[dict[str, Any]]): Per-attempt summary rows.
-    """
-
-    kernel_id: str
-    backend: str  # forge / geak / backend name (best-of)
-    total_attempts: int
-    successful_attempts: int
-    best_micro_speedup: float | None
-    last_decision: str
-    best_artifact_path: str | None
-    attempts_summary: list[dict[str, Any]]
-
-
-class AdoptedKernel(TypedDict, total=False):
-    """A kernel optimization adopted into the stack (stage 4 of the lifecycle).
-
-    Attributes:
-        kernel_id (str): Kernel identifier.
-        patch_path (str): Path to the adopted patch.
-        target_file (str): File the patch applies to.
-        extra_server_args (str): Server-arg fragment introduced by the adoption.
-        e2e_gain_pct (float | None): End-to-end gain percent, or None.
-        validated (bool): Whether the adoption was validated.
-        last_status (str): Last recorded status.
-        adopted_at (str): ISO UTC timestamp of adoption.
-        attempt_count (int): Number of attempts before adoption.
-        basis (str): Throughput basis the gain was measured on ("hot" / "cold"
-            / "" when the writer did not record one). A gain is meaningless
-            without the baseline it was measured against.
-        alignment_status (str): Whether the producer's baseline agreed with the
-            orchestrator's ("" when not recorded).
-    """
-
-    kernel_id: str
-    patch_path: str
-    target_file: str
-    extra_server_args: str
-    e2e_gain_pct: float | None
-    validated: bool
-    last_status: str
-    adopted_at: str
-    attempt_count: int
-    basis: str
-    alignment_status: str
-
-
-class RejectedKernel(TypedDict, total=False):
-    """A kernel optimization that was tried but not adopted (the +1 stage).
-
-    Attributes:
-        kernel_id (str): Kernel identifier.
-        reason (str): Why the kernel optimization was rejected.
-        patch_path (str | None): Path to the rejected patch, or None.
-        target_file (str | None): File the patch targeted, or None.
-        attempt_count (int): Number of attempts made.
-        best_gain_pct (float | None): Best gain percent observed, or None.
-        ts (str): ISO UTC timestamp of rejection.
-    """
-
-    kernel_id: str
-    reason: str
-    patch_path: str | None
-    target_file: str | None
-    attempt_count: int
-    best_gain_pct: float | None
-    ts: str
-
-
-class KernelLifecycle(TypedDict, total=False):
-    """Kernels grouped by lifecycle stage (4+1 stages).
-
-    Tracks kernels as they move from detection through recommendation,
-    optimization, and finally adoption or rejection.
-
-    Attributes:
-        detected (list[DetectedKernel]): Hot kernels surfaced by profiling.
-        recommended (list[RecommendedKernel]): Kernels recommended for optimization.
-        optimized (list[OptimizedKernel]): Kernels that were optimized.
-        adopted (list[AdoptedKernel]): Optimizations adopted into the stack.
-        rejected (list[RejectedKernel]): Optimizations tried but not adopted.
-    """
-
-    detected: list[DetectedKernel]
-    recommended: list[RecommendedKernel]
-    optimized: list[OptimizedKernel]
-    adopted: list[AdoptedKernel]
-    rejected: list[RejectedKernel]
-
-
-# Kernel journey — kernel-major unified lifecycle view
-class KernelToolMetadata(TypedDict, total=False):
-    """Provenance for an external kernel tool (tracelens / geak / forge / kernel_agent).
-
-    Attributes:
-        tool (str): Tool/backend name (``tracelens`` / ``geak`` / ``claude`` / ...).
-        root_dir (str): Resolved tool root directory ("" when not resolvable).
-        commit (str): Short git commit of ``root_dir`` ("" when not a repo).
-        version (str): Tool-reported version string ("" when the tool did not
-            surface one).
-    """
-
-    tool: str
-    root_dir: str
-    commit: str
-    version: str
-
-
-class DiscoveredHotKernel(TypedDict, total=False):
-    """One hot kernel surfaced by a discovery run (projected onto the journey).
-
-    The roofline numeric fields (``arithmetic_intensity`` / ``flops_per_byte``
-    / ``efficiency_percent``) are backfilled at export from ``kernel_roofline``
-    when discovery surfaced them empty (roofline enrichment runs after the
-    discovery record is written).
-    """
-
-    kernel_id: str
-    name: str
-    gpu_pct: float | None
-    time_ms: float | None
-    bound_type: str
-    arithmetic_intensity: float | None
-    flops_per_byte: float | None
-    efficiency_percent: float | None
-    reusable_native_kernel: bool
-    source_file: str | None
-    recommended_backends: list[str]
-    selected_for_optimization: bool
-
-
-class KernelDiscoveryRun(TypedDict, total=False):
-    """One hot-kernel discovery invocation (stage 1).
-
-    Attributes:
-        source (str): Discovery source (``tracelens`` / ``roofline`` / ...).
-        status (str): Run status (``success`` / ``failed``).
-        ts (str): ISO UTC timestamp of the run.
-        duration_sec (float | None): Wall-clock seconds the discovery run took
-            (source efficiency), or None.
-        scan (dict[str, Any]): Scan inputs/outputs (``splitter_mode`` /
-            ``trace_dir`` / ``candidates_path`` / ``trace_report_path``).
-        hot_kernel_count (int): Number of hot kernels surfaced.
-        hot_kernels (list[DiscoveredHotKernel]): The surfaced hot kernels.
-        error (str | None): Failure text, or None on success.
-
-    The discovery tool's authoritative version is not inlined here; it lives in
-    the top-level ``versions`` map keyed by ``source``.
-    """
-
-    source: str
-    status: str
-    ts: str
-    duration_sec: float | None
-    scan: dict[str, Any]
-    hot_kernel_count: int
-    hot_kernels: list[DiscoveredHotKernel]
-    error: str | None
-
-
-class KernelDispatch(TypedDict, total=False):
-    """The dispatch decision for one kernel (stage 2).
-
-    Attributes:
-        kernel_id (str): Kernel identifier.
-        dispatched (bool): Whether any backend was dispatched.
-        backends (list[str]): Backends dispatched to.
-        skip_reason (str): Gate reason when not dispatched.
-        orchestration_commit (str): Orchestrator commit at dispatch time.
-        task_group (str | None): Task-group/correlation id, or None.
-        ts (str): ISO UTC timestamp of the decision.
-    """
-
-    kernel_id: str
-    dispatched: bool
-    backends: list[str]
-    skip_reason: str
-    orchestration_commit: str
-    task_group: str | None
-    ts: str
-
-
-class KernelBackendAttempt(TypedDict, total=False):
-    """One backend attempt for one kernel (stage 3).
-
-    Attributes:
-        kernel_id (str): Kernel identifier.
-        attempt_id (str): Attempt identifier (dedupe key across retries).
-        run_id (str): Kernel-agent run id the attempt belonged to.
-        backend (str): Backend that ran (``geak`` / ``claude`` / ``codex``).
-        model (str | None): Model used by the backend, or None.
-        ts (str): ISO UTC timestamp of the attempt.
-        status (str): Attempt status.
-        decision (str): KEEP / PARTIAL / REVERT / NEEDS_REVIEW / FAILED. The
-            kernel-level verdict on the adopted attempt, the attempt's own
-            otherwise.
-        micro_speedup (float | None): Micro-benchmark speedup, or None.
-        compile_passed (bool | None): Whether compilation passed, or None.
-        correctness_passed (bool | None): Whether correctness passed, or None.
-        correctness_source (str | None): What the correctness verdict was read
-            from (``forge_rewrite_reference`` / ``report_scan`` /
-            ``cli_override`` / ...), or None when nothing recorded one.
-        best_artifact_path (str): The rewritten source the kernel was carried
-            to integrate with. Written on the adopted attempt only; ``""``
-            elsewhere. Distinct from ``optimized_files``, which is the
-            attempt's own output (a stdout log for a real backend run).
-        optimized_files (list[str]): Optimized artifact paths.
-        error (str | None): Failure text, or None.
-        error_class (str | None): Failure classification (pre-dispatch markers).
-        duration_sec (float | None): Wall-clock seconds the attempt ran, or None.
-        pre_dispatch_failure (bool): True for a synthetic marker recorded when a
-            backend failed before running any real attempt (e.g. geak rejecting
-            an empty/non-reusable kernel shape).
-
-    The backend tool's authoritative version is not inlined here; it lives in
-    the top-level ``versions`` map keyed by ``backend``.
-    """
-
-    kernel_id: str
-    attempt_id: str
-    run_id: str
-    backend: str
-    model: str | None
-    ts: str
-    status: str
-    decision: str
-    micro_speedup: float | None
-    compile_passed: bool | None
-    correctness_passed: bool | None
-    correctness_source: str | None
-    best_artifact_path: str
-    optimized_files: list[str]
-    error: str | None
-    error_class: str | None
-    duration_sec: float | None
-    pre_dispatch_failure: bool
-
-
-class KernelE2E(TypedDict, total=False):
-    """The end-to-end integrate outcome for one kernel (stage 4).
-
-    Attributes:
-        kernel_id (str): Kernel identifier.
-        integrated (bool): Whether the optimization was integrated into the stack.
-        e2e_gain_pct (float | None): Validated end-to-end gain percent (negative
-            => regressed and reverted), or None.
-        validated (bool | None): Whether the integrate was validated, or None.
-        decision (str): KEEP / REVERT / REJECTED.
-        patch_path (str | None): Adopted patch path, or None.
-        target_file (str | None): File the patch applies to, or None.
-        extra_server_args (str): Server-arg fragment introduced by the adoption.
-        kernel_repo (str | None): Absolute deploy/apply root the integrated
-            kernel landed in (the kernel analogue of the framework apply root),
-            or None for an env-only adoption that named no repo.
-        ts (str): ISO UTC timestamp of the integrate decision.
-    """
-
-    kernel_id: str
-    integrated: bool
-    e2e_gain_pct: float | None
-    validated: bool | None
-    decision: str
-    patch_path: str | None
-    target_file: str | None
-    extra_server_args: str
-    kernel_repo: str | None
-    self_reported_e2e_gain_pct: float | None
-    revalidation_measured_tput: float
-    revalidation_current_best_tput: float
-    revalidation_provenance: str
-    rejection_reason: str
-    ts: str
-
-
-class KernelJourneyEntry(TypedDict, total=False):
-    """One kernel's full lifecycle, joined across the four stages.
-
-    Attributes:
-        kernel_id (str): Kernel identifier.
-        name (str): Kernel name (from discovery).
-        gpu_pct (float | None): Share of total GPU time (from discovery), or None.
-        bound_type (str): Bottleneck class (from discovery).
-        source_file (str | None): Source file (from discovery), or None.
-        micro_speedup (float | None): Best achieved micro-benchmark speedup
-            across attempts (kernel-level), or None. Pair with
-            ``e2e.e2e_gain_pct`` for the speedup-vs-e2e correlation.
-        discovery (DiscoveredHotKernel): Discovery snapshot.
-        dispatch (KernelDispatch): Dispatch decision.
-        backend_attempts (list[KernelBackendAttempt]): Backend attempts.
-        e2e (KernelE2E): End-to-end integrate outcome.
-        roofline (dict[str, Any]): A copy of the matching ``kernel_roofline``
-            entry (arithmetic intensity / efficiency / bound type / rocprof
-            roofline), attached at export. Absent when no roofline ran.
-        outcome (str): Coarse rollup (``adopted`` / ``reverted`` / ``attempted``
-            / ``dispatched`` / ``skipped`` / ``discovered``).
-    """
-
-    kernel_id: str
-    name: str
-    gpu_pct: float | None
-    bound_type: str
-    source_file: str | None
-    micro_speedup: float | None
-    discovery: DiscoveredHotKernel
-    dispatch: KernelDispatch
-    backend_attempts: list[KernelBackendAttempt]
-    e2e: KernelE2E
-    roofline: dict[str, Any]
-    outcome: str
-
-
-class KernelJourney(TypedDict, total=False):
-    """Kernel-major unified lifecycle view.
-
-    Consolidates what was previously scattered across ``kernel_roofline``,
-    ``geak_invocations`` / ``forge_invocations``, ``kernel_lifecycle`` and the
-    attribution sections into a single per-kernel record threading discovery ->
-    dispatch -> backend attempts -> end-to-end integrate. Composed at assembly
-    from four recorder substreams; empty/absent on sessions that predate them.
-
-    Attributes:
-        discovery_runs (list[KernelDiscoveryRun]): Every discovery invocation,
-            with tool provenance and the hot kernels each surfaced.
-        kernels (list[KernelJourneyEntry]): Per-kernel lifecycle, sorted by
-            ``gpu_pct`` descending.
-    """
-
-    discovery_runs: list[KernelDiscoveryRun]
-    kernels: list[KernelJourneyEntry]
-
-
-# Param search
-class ParamSearchEntry(TypedDict, total=False):
-    """One candidate variant from ``explore_search.{tested,accepted,rejected}``.
-
-    Records a single param/backend variant that was evaluated, its launch
-    fingerprint, the measured throughput, and the resulting gain.
-
-    Attributes:
-        name (str): Variant name.
-        fingerprint (str): Content-hash deduplication key.
-        extra_server_args (str): Server-arg CLI fragment for the variant.
-        extra_envs (dict[str, Any]): Env vars set by the variant.
-        output_throughput (float | None): Measured throughput, or None.
-        gain_pct (float | None): Gain percent vs current best, or None.
-        ts (str): ISO UTC timestamp of evaluation.
-        status (str): Outcome (``accepted`` / ``rejected`` / ``tested``).
-        operation_kind (str): Filter label for the variant's change type
-            (``backend`` / ``param`` / ``env``).
-        provenance (str): Raw explore proposer label (``llm_direct`` /
-            ``default_grid`` / ``specialist:<domain>``).
-        proposer (str): Resolved proposer/component (``specialist:<domain>`` /
-            ``grid`` / ``orchestration``).
-        scope (str): Specialist dial (``domain`` / ``domains`` / ``freeform``).
-    """
-
-    name: str
-    fingerprint: str
-    extra_server_args: str
-    extra_envs: dict[str, Any]
-    output_throughput: float | None
-    gain_pct: float | None
-    ts: str
-    status: str  # accepted / rejected / tested
-    operation_kind: str  # backend / param / env
-    provenance: str
-    proposer: str
-    scope: str
-
-
-class ParamSearchLedger(TypedDict, total=False):
-    """Ledger of one explore family's tested/accepted/rejected variants.
-
-    Attributes:
-        schema_version (int): Ledger schema version.
-        tested_count (int): Total number of variants tested.
-        accepted (list[ParamSearchEntry]): Variants that were accepted.
-        rejected (list[ParamSearchEntry]): Variants that were rejected.
-        top_by_gain (list[ParamSearchEntry]): Best variants ordered by gain.
-        no_promote_streak (int): Consecutive evaluations without a promotion.
-    """
-
-    schema_version: int
-    tested_count: int
-    accepted: list[ParamSearchEntry]
-    rejected: list[ParamSearchEntry]
-    top_by_gain: list[ParamSearchEntry]
-    no_promote_streak: int
-
-
-class ParamSearch(TypedDict, total=False):
-    """Merged explore-search results across the param and backend families.
-
-    Attributes:
-        params (ParamSearchLedger): Ledger for the param-tuning family.
-        backends (ParamSearchLedger): Ledger for the backend-tuning family.
-        synergy_attempted (list[str]): Synergy combinations that were attempted.
-        discovered_flags (dict[str, Any]): Flags discovered during search.
-    """
-
-    params: ParamSearchLedger
-    backends: ParamSearchLedger
-    synergy_attempted: list[str]
-    discovered_flags: dict[str, Any]
-
-
-# Sweep
-class SweepPoint(TypedDict, total=False):
-    """One measured point in a concurrency/shape sweep grid.
-
-    Attributes:
-        variant_name (str): Name of the swept variant.
-        conc (int | None): Concurrency at this point, or None.
-        isl (int | None): Input sequence length, or None.
-        osl (int | None): Output sequence length, or None.
-        output_throughput_tok_s (float | None): Throughput (tok/s), or None.
-        ttft_mean_ms (float | None): Mean time-to-first-token (ms), or None.
-        tpot_mean_ms (float | None): Mean time-per-output-token (ms), or None.
-        e2el_mean_ms (float | None): Mean end-to-end latency (ms), or None.
-        status (str): Point status. ``ok`` when a readable JSON object was
-            read and ``success`` was not false; ``failed`` when the report
-            says failure, was unreadable, or ``abort_reason.json`` is
-            present with no report; ``skipped`` when neither file exists.
-        error (str | None): Non-empty failure reason when ``status`` is
-            ``failed``, else None. Present on every row so table-shaped
-            consumers see a stable key set.
-        benchmark_report_path (str | None): Path to the benchmark report, or None.
-    """
-
-    variant_name: str
-    conc: int | None
-    isl: int | None
-    osl: int | None
-    output_throughput_tok_s: float | None
-    ttft_mean_ms: float | None
-    tpot_mean_ms: float | None
-    e2el_mean_ms: float | None
-    status: str  # ok / skipped / failed
-    error: str | None
-    benchmark_report_path: str | None
-
-
-class Sweep(TypedDict, total=False):
-    """Results of the concurrency/shape sweep across the variant grid.
-
-    Attributes:
-        grid_size (int): Number of points in the sweep grid.
-        best_overall (dict[str, Any]): Best-performing point overall.
-        best_for_each_conc (list[dict[str, Any]]): Best point per concurrency level.
-        pareto_front (list[dict[str, Any]]): Pareto-optimal sweep points.
-        all_variants (list[SweepPoint]): All measured sweep points.
-        config_path (str | None): Path to the sweep config, or None.
-    """
-
-    grid_size: int
-    best_overall: dict[str, Any]
-    best_for_each_conc: list[dict[str, Any]]
-    pareto_front: list[dict[str, Any]]
-    all_variants: list[SweepPoint]
-    config_path: str | None
-
-
-class Geak(TypedDict, total=False):
-    """GEAK e2e KERNEL-phase breakdown section."""
-
-    engaged: bool
-    status: str
-    error_class: str | None
-    error: str | None
-    returncode: int | None
-    # Same-harness adjudication, kept on the result because it is terminal
-    # state: ``geak_pending`` is cleared when the verdict lands, and the final
-    # report still has to say why a measured candidate was dropped.
-    revalidation_status: str | None
-    revalidation_error_class: str | None
-    revalidation_error: str | None
-    recovered_from_disk: bool
-    handoff: dict[str, Any] | None
-    exp_root: str | None
-    stages_reached: list[str]
-    kernels_attempted: list[Any]
-    opbench_results: list[Any]
-    runner_log_tails: dict[str, str]
-    likely_cause: str | None
-    flushed_result_status: str | None
-    last_artifact_ts: str | None
-    baseline_throughput_tok_s: float | None
-    final_throughput_tok_s: float | None
-    throughput_speedup: float | None
-    gain_pct: float | None
-    metric_basis: str | None
-    bench_client: str | None
-    ttft_mean_ms: float | None
-    tpot_mean_ms: float | None
-    output_parity: str | None
-    accepted_kernels: list[Any]
-    accepted_kernels_source: str | None
-    accepted_kernels_kind_sources: dict[str, int]
-    accepted_heads: list[Any]
-    kernels_optimized: int
-    accepted_config: dict[str, Any]
-    validated_regimes: list[Any]
-    eval_dir: str | None
-    report_path: str | None
-    final_launch_script: str | None
-    bench_script: str | None
-    final_patch: str | None
-    runner_timeout_s: int | None
-    kill_timeout_s: int | None
-
-
-# Critic / Robustness
-class CriticIteration(TypedDict, total=False):
-    """One critic-agent review pass over a proposed change.
-
-    Attributes:
-        iteration_id (str): Stable session-unique identity for this persisted
-            review pass, including resume-time reuse of ``iter``.
-        iter (int): Iteration index.
-        ts (str): ISO UTC timestamp of the review.
-        topic (str): What was reviewed (e.g. ``kernel_opt:k001`` / ``backends:flag_X``).
-        verdict (str): Review verdict (``approve`` / ``reject`` / ``redirect`` /
-            ``advise`` / ``needs_review``).
-        summary (str): Human-readable review summary.
-        request_path (str): Path to the review request artifact.
-        judge_bundle_path (str): Path to the judge bundle.
-        emit_path (str): Path to the emitted review output.
-        review_path (str): Path to the review record.
-        phase (str): Coordinator phase captured with the critic request.
-        macro_cycle (int): Coordinator macro cycle captured with the request.
-        framework_reviews (list[dict[str, Any]]): Durable normalized V6
-            Framework review rows.
-    """
-
-    iteration_id: str
-    iter: int
-    ts: str
-    topic: str  # what was reviewed (kernel_opt:k001, backends:flag_X, ...)
-    verdict: str  # approve / reject / redirect / advise / needs_review
-    summary: str
-    request_path: str
-    judge_bundle_path: str
-    emit_path: str
-    review_path: str
-    phase: str
-    macro_cycle: int
-    framework_reviews: list[dict[str, Any]]
-
-
-class RobustnessSignal(TypedDict, total=False):
-    """A fault/recovery event handled during the session.
-
-    Attributes:
-        ts (str): ISO UTC timestamp of the signal.
-        signal (str): Signal type (``crash`` / ``stall`` / ``disk_full`` /
-            ``cluster_fault`` / ...).
-        action (str): Recovery action taken in response.
-        workdir (str): Working directory associated with the signal.
-    """
-
-    ts: str
-    signal: str  # crash / stall / disk_full / cluster_fault / ...
-    action: str  # what was done
-    workdir: str
-
-
-class CriticRobustness(TypedDict, total=False):
-    """Critic-review iterations and robustness signals for the session.
-
-    Attributes:
-        critic_iterations (list[CriticIteration]): Critic-agent review passes.
-        robustness_signals (list[RobustnessSignal]): Fault/recovery events handled.
-        kb_writes_summary (CriticKBWritesSummary): Tally of the critic
-            iterations' verdicts (``total`` plus ``by_verdict``).
-    """
-
-    critic_iterations: list[CriticIteration]
-    robustness_signals: list[RobustnessSignal]
-    # KB writes proxied through the critic's ``commit-review`` protocol.
-    kb_writes_summary: "CriticKBWritesSummary"
-
-
-# Telemetry
-class GpuMonitorAggregate(TypedDict, total=False):
-    """Aggregated GPU power/thermal/clock telemetry over the session.
-
-    Attributes:
-        samples (int): Number of telemetry samples aggregated.
-        avg_power_w (float): Average power draw (watts).
-        max_power_w (float): Peak power draw (watts).
-        avg_temp_c (float): Average temperature (Celsius).
-        max_temp_c (float): Peak temperature (Celsius).
-        avg_clock_mhz (float): Average clock frequency (MHz).
-    """
-
-    samples: int
-    avg_power_w: float
-    max_power_w: float
-    avg_temp_c: float
-    max_temp_c: float
-    avg_clock_mhz: float
-
-
-class LaneTimelineEntry(TypedDict, total=False):
-    """One row of the lane occupancy summary (resource_lock capacity / live holders / expired leases)."""
-
-    lane: str
-    capacity: int
-    live_holders: int
-    lease_expired_count: int
-
-
-class OrchestrationContext(TypedDict, total=False):
-    """Health of the orchestration conversation's compaction loop.
-
-    Attributes:
-        seed_prompts (int): Full state pushes to the orchestration backend.
-        delta_prompts (int): Thin delta pushes.
-        compactions (int): ``orchestration_checkpoint`` events recorded.
-        degenerate_compactions (int): Compactions skipped on an unusable summary.
-        tick_count (int): Ticks executed, for the per-tick rates below.
-        compactions_per_tick (float): ``compactions / tick_count``; near 1.0
-            means the conversation is re-seeded every tick.
-        delta_ratio (float): ``delta_prompts / (seed + delta)``; near 0 means
-            the persistent conversation is buying nothing.
-        context_tokens_at_compaction (dict[str, int]): ``min`` / ``median`` /
-            ``max`` water level recorded on the compaction events. A ``min``
-            above the soft budget means compacting cannot un-trip the trigger.
-    """
-
-    seed_prompts: int
-    delta_prompts: int
-    compactions: int
-    degenerate_compactions: int
-    tick_count: int
-    compactions_per_tick: float
-    delta_ratio: float
-    context_tokens_at_compaction: dict[str, int]
-
-
-class Telemetry(TypedDict, total=False):
-    """Pointers to telemetry artifacts and aggregated hardware metrics.
-
-    Attributes:
-        baseline_report_path (str | None): Path to the baseline report, or None.
-        profile_report_paths (list[str]): Paths to profile reports.
-        torch_trace_paths (list[str]): Paths to torch traces.
-        system_profile_paths (list[str]): Paths to system profiles.
-        server_log_paths (list[str]): Paths to server logs.
-        gpu_monitor_aggregate (GpuMonitorAggregate): Aggregated GPU telemetry.
-        lane_timeline (list[LaneTimelineEntry]): Per-lane capacity/occupancy summary.
-        orchestration_context (OrchestrationContext): Compaction-loop health.
-    """
-
-    baseline_report_path: str | None
-    profile_report_paths: list[str]
-    torch_trace_paths: list[str]
-    system_profile_paths: list[str]
-    server_log_paths: list[str]
-    gpu_monitor_aggregate: GpuMonitorAggregate
-    # per-lane capacity / occupancy summary.
-    lane_timeline: list[LaneTimelineEntry]
-    # SEED/DELTA census + compaction rate for the orchestration conversation.
-    orchestration_context: OrchestrationContext
-
-
-# Attribution
-class StackGainEntry(TypedDict, total=False):
-    """One KEEP/validation event with its incremental gain contribution.
-
-    Records how a single stack change moved the cumulative gain, used to
-    attribute total gain across the optimization stack.
-
-    Attributes:
-        ts (str): ISO UTC timestamp of the event.
-        stack_len_before (int): Stack depth before the change.
-        stack_len_after (int): Stack depth after the change.
-        action (str): Action kind (``backends`` / ``params`` /
-            ``kernel_opt:<kid>`` / ``validate_stack``).
-        variant_name (str | None): Variant label, or None.
-        cum_gain_before (float): Cumulative gain percent before the change.
-        cum_gain_after (float): Cumulative gain percent after the change.
-        delta_pct (float | None): Incremental gain percent; None when
-            ``validate_stack`` re-baselined.
-        extra_server_args (str): Server-arg fragment associated with the change.
-    """
-
-    ts: str
-    stack_len_before: int
-    stack_len_after: int
-    action: str  # backends / params / kernel_opt:<kid> / validate_stack
-    variant_name: str | None
-    cum_gain_before: float
-    cum_gain_after: float
-    delta_pct: float | None  # None when validate_stack re-baselined
-    extra_server_args: str
-
-
-class SourceBreakdown(TypedDict, total=False):
-    """Validated total gain split by contributing source/family.
-
-    Each ``*_pct_of_total`` field is the share of the validated total gain
-    attributed to that source. The per-source values reconcile against
-    ``validated_total_pct``.
-
-    Attributes:
-        forge_pct_of_total (float): Gain share from Forge kernel rewrites,
-            credited only on Forge KEEP evidence. Emitted first by the
-            collector; not yet declared on this TypedDict.
-        geak_pct_of_total (float): Gain share from GEAK kernel rewrites.
-        explore_pct_of_total (float): Gain share from the primary explore family.
-        replay_warm_recipe_pct_of_total (float): Gain share from warm-recipe
-            replay (recipe KB best_config replay); 0.0 when none was adopted.
-        framework_pct_of_total (float): Gain share from FRAMEWORK bake-ins.
-        gemm_tuning_pct_of_total (float): Gain share from the FP8 GEMM tuner
-            (0.0 on non-FP8 workloads or when the tuner produced no KEEP).
-        kernel_unattributed_pct_of_total (float): Kernel-lane gain that could
-            not be tied to any backend KEEP (e.g. no Forge/GEAK KEEP evidence);
-            kept unattributed rather than credited to a backend.
-        unattributed_pct_of_total (float): Gain whose owning source could not
-            be resolved from explicit ownership, recorded phase, or phase
-            history.
-        backends_pct_of_total (float): Gain share from backend exploration.
-        params_pct_of_total (float): Gain share from param exploration.
-        sweep_pct_of_total (float): Gain share attributed to the sweep.
-        validated_total_pct (float): Total validated gain percent.
-    """
-
-    geak_pct_of_total: float
-    # primary explore family bucket.
-    explore_pct_of_total: float
-    # REPLAY_WARM_RECIPE (warm-recipe / recipe KB best_config replay) contribution.
-    replay_warm_recipe_pct_of_total: float
-    # FRAMEWORK_AGENT phase contribution (upstream-PR bake-ins).
-    framework_pct_of_total: float
-    # GEMM_TUNING (deterministic FP8 GEMM tuner) gain; always emitted (0.0 when skipped / no KEEP).
-    gemm_tuning_pct_of_total: float
-    # Kernel-lane gain with no backend KEEP evidence; unattributed on purpose.
-    kernel_unattributed_pct_of_total: float
-    # Gain whose owning source could not be resolved.
-    unattributed_pct_of_total: float
-    backends_pct_of_total: float
-    params_pct_of_total: float
-    sweep_pct_of_total: float
-    validated_total_pct: float
-
-
-class PhaseBreakdownExplore(TypedDict, total=False):
-    """Explore-phase gain split by specialist domain.
-
-    ``by_domain`` keys are normalized to the bare SpecialistDomain.key;
-    non-specialist provenance is ``default_grid`` / ``llm_direct``, v1
-    resumes are ``legacy_<action>``, empty falls back to ``unknown``.
-
-    ``by_scope`` is the additive specialist-dial split (``domain`` /
-    ``domains`` / ``freeform``); sessions that never recorded a ``scope``
-    collapse into ``unspecified``. Omitted on pre-scope breakdowns.
-    """
-
-    total_gain_pct: float
-    by_domain: dict[str, float]
-    by_scope: dict[str, float]
-
-
-class PhaseBreakdownKernel(TypedDict, total=False):
-    """Kernel-phase gain split by ``kernel_id``."""
-
-    total_gain_pct: float
-    by_kernel_id: dict[str, float]
-
-
-class PhaseBreakdownFramework(TypedDict, total=False):
-    """FRAMEWORK_AGENT phase gain split by adopted PR; ``by_pr`` keys on ``variant_name`` (``"?"`` when empty)."""
-
-    total_gain_pct: float
-    by_pr: dict[str, float]
-
-
-class PhaseBreakdownGemmTuning(TypedDict, total=False):
-    """KERNEL-entry FP8 GEMM tuning gain split by ``tuned_file`` (falls back to ``variant_name`` then ``"?"``)."""
-
-    total_gain_pct: float
-    by_tuned_file: dict[str, float]
-
-
-class PhaseBreakdownGeak(TypedDict, total=False):
-    """GEAK e2e gain, split by what was actually running when it was measured.
-
-    ``by_contribution`` keys on ``config`` / ``kernel`` / ``joint``. A GEAK
-    revalidation benchmarks server arguments, env and the authored overlay
-    together against one baseline, so a ``joint`` row's gain cannot be divided
-    between them; it is reported whole under ``joint`` rather than split by
-    guess. ``by_kernel_id`` names the authored kernels that were loaded, and is
-    empty for a config-only gain.
-    """
-
-    total_gain_pct: float
-    by_contribution: dict[str, float]
-    by_kernel_id: dict[str, float]
-
-
-class PhaseBreakdown(TypedDict, total=False):
-    """Per-phase gain attribution.
-
-    Splits the validated total gain across the phase state machine, with each
-    phase carrying its own per-sub-bucket breakdown.
-
-    Attributes:
-        prelude (PhaseBreakdownExplore): PRELUDE phase gain (always 0 by definition).
-        framework (PhaseBreakdownFramework): FRAMEWORK_AGENT phase gain.
-        explore (PhaseBreakdownExplore): Configuration-lever gain by domain.
-        kernel_agent (PhaseBreakdownKernel): KERNEL_AGENT phase gain by
-            ``kernel_id``. Unlike ``framework``, which the producer normalizes
-            down from ``FRAMEWORK_AGENT``, this bucket keeps the phase name.
-        gemm_tuning (PhaseBreakdownGemmTuning): KERNEL-entry GEMM-tuning gain,
-            bucketed separately from source-level kernel rewrites.
-        geak (PhaseBreakdownGeak): GEAK e2e gain, split by whether a config, a
-            kernel, or both were running when it was measured.
-        sweep (PhaseBreakdownExplore): SWEEP phase gain (usually 0; measurement).
-        close (PhaseBreakdownExplore): CLOSE phase gain (usually 0).
-        unattributed (PhaseBreakdownExplore): Gain whose phase could not be inferred.
-    """
-
-    prelude: PhaseBreakdownExplore  # always 0 by definition
-    framework: PhaseBreakdownFramework
-    explore: PhaseBreakdownExplore
-    kernel_agent: PhaseBreakdownKernel
-    gemm_tuning: PhaseBreakdownGemmTuning
-    geak: PhaseBreakdownGeak
-    sweep: PhaseBreakdownExplore  # usually 0 (sweep is measurement)
-    close: PhaseBreakdownExplore  # usually 0
-    unattributed: PhaseBreakdownExplore  # gain whose phase couldn't be inferred
-
-
-class Attribution(TypedDict, total=False):
-    """Gain attribution across stack entries, sources, and phases.
-
-    Attributes:
-        gain_per_stack_entry (list[StackGainEntry]): Per-KEEP incremental gains.
-        method (str): How attribution was computed (``validated`` /
-            ``single_source`` / ``reconstructed`` / ``missing``).
-        source_breakdown (SourceBreakdown): Gain split by contributing source.
-        phase_breakdown (PhaseBreakdown): Gain split per optimization phase.
-        lever_breakdown (dict[str, float]): Gain split by ``lever_kind``:
-            ``config`` (server args / envs), ``source_patch`` (a diff a
-            specialist wrote), ``upstream_pr`` (a diff fetched from a PR),
-            ``enablement`` (graded on runnability, not throughput) and
-            ``kernel`` (a tuned or authored kernel). ``unattributed`` collects
-            gain no stamp claimed. Two levers share the optimisation phase, so
-            the lever -- not the phase that was live -- says which earned it.
-        notes (list[str]): Human-readable caveats about the attribution.
-    """
-
-    gain_per_stack_entry: list[StackGainEntry]
-    # validated / single_source / reconstructed / missing
-    method: str
-    source_breakdown: SourceBreakdown
-    phase_breakdown: PhaseBreakdown
-    lever_breakdown: dict[str, float]
-    notes: list[str]  # human-readable caveats
-
-
-# Phase segments — phase state machine
-class PhaseSegment(TypedDict, total=False):
-    """One contiguous segment of the phase state machine.
-
-    Captures a phase the session occupied between two transitions, including
-    the entry evidence and the events that fell within the segment window.
-
-    Attributes:
-        phase (str): Phase name (``PRELUDE`` / ``FRAMEWORK_AGENT`` /
-            ``FRAMEWORK_AGENT`` / ``KERNEL_AGENT`` / ``SWEEP`` / ``CLOSE``).
-        from_phase (str): Previous phase (empty for the first segment).
-        entered_ts (str): ISO UTC timestamp of entry.
-        entered_unix (float | None): Unix time of entry, or None.
-        exit_ts (str): ISO UTC timestamp of the next transition; "" if current.
-        exit_reason (str): Transition reason; "" for the current segment.
-        evidence (dict[str, Any]): Entry evidence snapshot at transition time.
-        actions (list[PhaseEvent]): Timeline events with ts in [entered, exit).
-        elapsed_seconds (float | None): Segment duration in seconds, or None.
-    """
-
-    phase: str  # PRELUDE / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / CLOSE
-    from_phase: str  # previous phase (empty for first segment)
-    entered_ts: str  # iso UTC of entry
-    entered_unix: float | None
-    exit_ts: str  # iso UTC of next transition; "" for current segment
-    exit_unix: float | None  # unix epoch of next transition; None for current segment
-    exit_reason: str  # transition reason vocab entry; "" for current segment
-    evidence: dict[str, Any]  # entry evidence (snapshot at transition time)
-    events: list[dict[str, Any]]  # non-transition sub-events folded into this phase
-    actions: list[PhaseEvent]  # phase_timeline events attributed to this phase
-    elapsed_seconds: float | None
-
-
-# specialist_runs section
-class SpecialistDomainBreakdown(TypedDict, total=False):
-    """Per-domain attribution for one ``specialist_rounds`` entry."""
-
-    dispatched: int
-    proposals_total: int
-    proposals_kept: int
-    proposals_rejected: int
-
-
-class SpecialistTranscriptRef(TypedDict, total=False):
-    """Reference to a specialist transcript on disk (path only by default; ``body`` inlined when the flag is set)."""
-
-    task_id: str
-    domain: str
-    path: str
-    body: str  # only set when CLI flag enabled
-
-
-class SpecialistRound(TypedDict, total=False):
-    """One element of ``specialist_runs``."""
-
-    # round_id: numeric counter / "explore-NNN" / task-id hash, coerced numeric when possible.
-    round_id: int | str
-    dispatched_at: str
-    completed_at: str
-    domains: list[str]
-    parallelism: int
-    proposals_total: int
-    proposals_kept: int
-    proposals_rejected: int
-    proposals_skipped: int
-    confidence_avg: float | None
-    domain_breakdown: dict[str, SpecialistDomainBreakdown]
-    transcripts: list[SpecialistTranscriptRef]
-    notes: list[str]
-
-
-# critic_robustness.kb_writes_summary sub-block
-class CriticKBWritesSummary(TypedDict, total=False):
-    """Summary of critic-agent ``commit-review`` outputs."""
-
-    total: int
-    by_verdict: dict[str, int]  # APPROVE / REJECT / REDIRECT / ADVISE / NEEDS_REVIEW (upper-cased critic verdicts)
-
-
-# Top-level shape
-class SourceFiles(TypedDict, total=False):
-    """Paths to the on-disk artifacts the breakdown was assembled from.
-
-    Attributes:
-        manifest (str): Path to the session manifest.
-        state (str): Path to the session state file.
-        baseline_report (str | None): Path to the baseline report, or None.
-        profile_reports (list[str]): Paths to profile reports.
-        sweep_reports (list[str]): Paths to sweep reports.
-        kernel_attempts (list[str]): Paths to kernel attempt artifacts.
-        critic_workdir (str | None): Critic working directory, or None.
-        robustness_workdir (str | None): Robustness working directory, or None.
-    """
-
-    manifest: str
-    state: str
-    baseline_report: str | None
-    profile_reports: list[str]
-    sweep_reports: list[str]
-    kernel_attempts: list[str]
-    critic_workdir: str | None
-    robustness_workdir: str | None
-
-
-# Roofline — optimization-progress curve for the dashboard:
-# a stepped line from baseline through every KEEP against ceiling/target
-# reference lines, all derived from ``state.json``.
-class RooflineTrajectoryPoint(TypedDict, total=False):
-    """One x/y/tooltip on the optimization-progress curve (first point is ``baseline``, rest from the KEEP stack)."""
-
-    ts: str  # iso UTC, x value
-    tput: float  # tok/s, y value
-    label: str  # "baseline" / variant_name
-    action: str  # "baseline" / "explore" / "kernel_opt" / ...
-    gain_pct: float  # cumulative gain vs baseline at this point
-    flags: str  # candidate_extra_server_args
-    extra_envs: dict[str, str]  # KEY=value pairs the variant set
-
-
-class RooflineSnapshot(TypedDict, total=False):
-    """One ``state.roofline_snapshots[]`` entry mirrored verbatim (on-disk shape, so new fields flow through)."""
-
-    snapshot_id: int
-    ts: str
-    achieved_tok_per_sec: float
-    theoretical_peak_tok_per_sec: float  # ceiling, vendor peak (unreachable)
-    within_roofline_pct: float  # achieved / peak * 100, capped at 100
-    gap_to_roofline_pct: float
-    within_roofline_pct_uncapped: float | None  # uncapped ratio; >100 = wrong ceiling
-    roofline_ceiling_exceeded: bool
-    compute_pct: float
-    idle_pct: float
-    comm_pct: float
-    top_bottleneck: str  # "MoE_unfused" etc
-    top_kernel: dict[str, Any]  # {name, bound_type, efficiency_pct, gpu_pct}
-    analysis_md_path: str
-    kernel_roofline_path: str
-    trace_input: str
-
-
-class RooflineProgress(TypedDict, total=False):
-    """Top-level ``roofline_progress`` section.
-
-    Carries reference lines (ceiling = vendor peak, target = ceiling ×
-    ratio, default 0.70), the ``trajectory[]`` stepped line
-    (baseline + KEEPs), and raw ``snapshots[]``. Edge cases: no KEEP →
-    trajectory is just the baseline point.
-
-    Two ceiling domains exist. Decode workloads use the throughput fields
-    below. Scriptable / diffusion (xDiT) workloads have no tok/s decode
-    ceiling and instead report a latency-domain ceiling — the collector emits
-    ``ceiling_kind`` (``"throughput"`` / ``"latency"`` / ``"none"``),
-    ``latency_ceiling_ms`` (ideal per-image compute floor),
-    ``achieved_latency_ms`` (measured e2e), ``latency_ceiling_available`` and
-    ``current_best_pct_of_latency_ceiling`` (ideal/measured, so higher is
-    nearer the floor); none of the five are declared below yet. Consumers
-    should branch on ``ceiling_kind``: the latency branch leaves
-    ``ceiling_available`` False while setting ``latency_ceiling_available``
-    True, so ``ceiling_available = False`` does not mean "no ceiling".
-    """
-
-    # Reference lines (only set when snapshots[] is non-empty)
-    ceiling_tok_per_sec: float | None
-    target_tok_per_sec: float | None
-    ceiling_ratio_target: float  # default 0.70
-    ceiling_available: bool
-    snapshot_top_bottleneck: str  # tooltip on the ceiling line
-    snapshot_within_roofline_pct: float
-    snapshot_gap_to_roofline_pct: float
-
-    # Trajectory
-    trajectory: list[RooflineTrajectoryPoint]
-
-    # Headline numbers surfaced so the dashboard's "current" callout needn't recompute them.
-    baseline_tput: float
-    current_best_tput: float
-    cumulative_gain_pct: float
-    current_best_pct_of_ceiling: float | None  # tput/ceiling*100, None when no ceiling
-    current_best_pct_of_target: float | None  # tput/target*100, None when no ceiling
-
-    # Audit / staleness
-    roofline_failure_streak: int  # consecutive watermark roofline failures
-    snapshots: list[RooflineSnapshot]
-
-
-# Optimization stack — raw KEEP ledger passthrough
-class OptimizationStackEntry(TypedDict, total=False):
-    """One KEEP from ``state.optimization_stack[]`` exposed verbatim.
-
-    Always-present fields: ``action`` / ``variant_name`` /
-    ``candidate_extra_server_args`` / ``extra_envs`` / ``tput`` / ``ts`` /
-    ``workspace``. GEMM-tuning entries add ``engine`` / ``tuned_file`` /
-    ``final_report_path`` / ``source``. Other optionals: ``gain_pct`` /
-    ``kernel_id`` / ``fingerprint`` / ``provenance`` / ``task_id`` /
-    ``validated`` (within the last full-stack rebench).
-    """
-
-    action: str
-    variant_name: str
-    candidate_extra_server_args: str
-    extra_envs: dict[str, str]
-    tput: float | None
-    ts: str
-    workspace: str | None
-    validated: bool
-    # gemm_tuning evidence; engine is the tuning provenance ("geak" / "forge").
-    engine: str
-    tuned_file: str
-    final_report_path: str
-    source: str
-    # generic optionals
-    gain_pct: float | None
-    kernel_id: str
-    fingerprint: str
-    provenance: str
-    task_id: str
-    source_phase: str
-    # filter label for the kind of optimization (backend / param / env on
-    # explore KEEPs); specialist dial.
-    operation_kind: str
-    scope: str
-    accepted_heads: list[Any]
-    extra_server_args_is_invariant: bool
-    candidate_flags: Any
-
-
-# Canonical optimizations — single downstream read model
-OptimizationSource = Literal[
-    "warm_replay",
-    "explore",
-    "framework_agent",
-    "kernel_agent",
-    "unattributed",
-]
-OptimizationSourceMethod = Literal[
-    "recorded",
-    "phase_history_ts",
-    "action_family",
-    "unknown",
-]
-KernelOptimizationBackend = Literal["geak", "forge"]
-KernelExecutionMode = Literal["whole_pipeline", "per_kernel"]
-
-
-class OptimizationArtifact(TypedDict, total=False):
-    """One artifact attached to a canonical optimization entry."""
-
-    kind: str
-    path: str
-
-
-class OptimizationConfiguration(TypedDict, total=False):
-    """Effective serving configuration carried by one optimization."""
-
-    extra_server_args: str
-    extra_envs: dict[str, str]
-
-
-class OptimizationEntry(TypedDict, total=False):
-    """One adopted optimization's contribution to the session's reported gain.
-
-    On the recorder path this is a ledger row over ``Optimizations.attempts``:
-    it carries the chain arithmetic and enough identity to read, and defers
-    everything descriptive to the attempt named by ``adopted_attempt_id``.
-    The remaining fields are emitted only by the legacy state-rebuilt path,
-    which has no attempts to point at.
-    """
-
-    id: str
-    stack_index: int
-    adopted_attempt_id: str | None
-    adoption_id: str | None
-    source: OptimizationSource
-    source_method: OptimizationSourceMethod
-    optimization_kind: str
-    name: str
-    backend: KernelOptimizationBackend | None
-    # Gain against the session baseline. This is the only gain figure in the
-    # report that may be summed across rows.
-    gain_pct: float | None
-    gain_method: str
-    # The adopting executor's own measurement, relative to its starting point.
-    local_gain_pct: float | None
-    cumulative_gain_pct: float | None
-    throughput_after: float | None
-    validated: bool
-    ts: str
-    execution_mode: KernelExecutionMode | None
-    kernel_id: str | None
-    action: str
-    variant_name: str
-    fingerprint: str
-    scope: str
-    source_phase: str
-    accepted_heads: list[Any]
-    extra_server_args_is_invariant: bool | None
-    candidate_flags: Any
-    throughput_before: float | None
-    task_id: str
-    provenance: str
-    configuration: OptimizationConfiguration
-    artifacts: list[OptimizationArtifact]
-
-
-class OptimizationSourceSummary(TypedDict, total=False):
-    """Validated KEEP count and gain for one canonical source."""
-
-    keeps: int
-    total_gain_pct: float
-    by_backend: dict[str, "OptimizationSourceSummary"]
-
-
-class OptimizationBackendAttempt(TypedDict, total=False):
-    """One ordered backend attempt, including non-adopted outcomes."""
-
-    attempt_id: str
-    run_id: str
-    kernel_id: str
-    backend: str
-    decision: str
-    sequence: int
-    ts: str
-    duration_sec: float | None
-    micro_speedup: float | None
-    compile_passed: bool | None
-    correctness_passed: bool | None
-    error_class: str | None
-    error: str | None
-    result_path: str | None
-    verification_path: str | None
-
-
-class OptimizationValidation(TypedDict, total=False):
-    """Attribution trust, reconciliation, and diagnostic metadata."""
-
-    method: str
-    validated_at_stack_len: int
-    validated_total_gain_pct: float | None
-    attributed_total_gain_pct: float
-    # Gain the session really moved that no adopted step accounts for, most
-    # often a KEEP that never reached the ledger. Held out of every entry so it
-    # cannot be read as the next step's contribution.
-    unattributed_gain_pct: float
-    attribution_gap_pct: float | None
-    notes: list[str]
-    source_breakdown: dict[str, float]
-    phase_breakdown: dict[str, Any]
-    domain_attribution: dict[str, Any]
-
-
-class OptimizationAttemptGate(TypedDict, total=False):
-    """One gate the attempt had to clear, as evaluated at author time."""
-
-    kind: str
-    name: str
-    status: str
-    decision: str
-    reason: str
-
-
-class OptimizationAttempt(TypedDict, total=False):
-    """One attempt at making the workload faster, adopted or not.
-
-    This is the per-attempt layer of the optimization report: who proposed it,
-    what it touched, what it measured, whether it was kept, why, and what it
-    left behind. Rejected attempts appear here exactly like adopted ones.
-    """
-
-    attempt_id: str
-    agent: AgentBucket
-    # ``recorded`` when the producer stamped the owner, ``derived`` when it was
-    # reconstructed for a session recorded before that field existed.
-    agent_method: str
-    producer: str
-    kind: str
-    name: str
-    subject: dict[str, str]
-    kernel_id: str | None
-    backend: str
-    phase: str
-    macro_cycle: int | None
-    started_at: str
-    ended_at: str
-    duration_sec: float | None
-    status: str
-    decision: str
-    decision_reason: str
-    keep_threshold_pct: float | None
-    adopted: bool
-    attribution_eligible: bool | None
-    # Measured against this attempt's own starting point, not the session
-    # baseline. Never sum these; use ``OptimizationEntry.gain_pct`` instead.
-    local_gain_pct: float | None
-    throughput_before: float | None
-    throughput_after: float | None
-    adoption_id: str | None
-    gates: list[OptimizationAttemptGate]
-    backend_attempts: list[OptimizationBackendAttempt]
-    # Each row carries ``occurrence``, its position among this operation's
-    # readings of that metric name, oldest first, along with
-    # ``occurrences_of_name`` for how many there are in total. Two readings
-    # that agree are two readings: repeatability is the evidence, so it is
-    # counted rather than inferred from the values.
-    measurements: list[dict[str, Any]]
-    # ``adoption_pinned`` when the adoption named the readings it was decided
-    # on, ``latest_occurrence`` when the newest reading of each metric was used
-    # for want of one, ``adoption_pinned_stale`` when the pinned readings were
-    # overwritten by a later re-measure and no longer match the frozen decision
-    # values. ``measurement_occurrences`` counts every reading the operation
-    # kept, so a re-measured subject is visibly re-measured.
-    measurement_source: str
-    measurement_occurrences: int
-    artifacts: list[dict[str, str]]
-
-
-class OptimizationAgentSummary(TypedDict, total=False):
-    """Per-agent rollup: the top layer of the optimization report."""
-
-    attempts: int
-    keeps: int
-    reverts: int
-    attributable_gain_pct: float
-    non_attributable_keeps: int
-    by_kind: dict[str, dict[str, Any]]
-
-
-class Optimizations(TypedDict, total=False):
-    """Canonical downstream optimization API."""
-
-    schema_version: int
-    # ``recorder`` when projected from author-time records, ``state`` when
-    # rebuilt from business state for a session that predates the recorder.
-    source_of_truth: str
-    attempts: list[OptimizationAttempt]
-    entries: list[OptimizationEntry]
-    backend_attempts: list[OptimizationBackendAttempt]
-    summary_by_agent: dict[AgentBucket, OptimizationAgentSummary]
-    summary_by_source: dict[OptimizationSource, OptimizationSourceSummary]
-    summary_by_kind: dict[str, OptimizationSourceSummary]
-    validation: OptimizationValidation
-    gemm_tuning_runs: list["GemmTuningRun"]
-
-
-# GEMM tuning — fixed FP8 block-scale GEMM tuning stage that runs at KERNEL
-# entry. Engine-tagged so GEAK ("geak") and a forge-backed tuner ("forge")
-# share one home; gain is mirrored here while ``attribution`` stays authoritative.
-class GemmTuningRun(TypedDict, total=False):
-    """One GEMM-tuning run, keyed by the produced ``tuned_file`` CSV.
-
-    A run is a config search over many GEMM shapes (not a single-kernel
-    rewrite); its artifact is a dispatch CSV consumed via the
-    ``AITER_CONFIG_GEMM_A8W8_BLOCKSCALE`` env, not a kernel patch.
-
-    Attributes:
-        engine (str): Tuning engine provenance — ``"geak"`` today; a
-            forge-backed tuner records ``"forge"``.
-        status (str): Tool status (``ok`` / ``complete`` / ``skipped`` / ...).
-        decision (str): ``KEEP`` / ``REVERT``.
-        source (str): What triggered the run (``kernel_entry_auto`` / ...).
-        ts (str): ISO UTC timestamp of the run record.
-        precision (str): Workload precision (``fp8``).
-        framework (str): Serving framework (``sglang``).
-        gpu_type (str): Target GPU (``mi355x`` / ...).
-        tp (int): Tensor-parallel degree (locked workload knob).
-        conc (int): Concurrency (locked workload knob).
-        isl (int): Input sequence length (locked workload knob).
-        osl (int): Output sequence length (locked workload knob).
-        libtype (str): Tuner library family (``ck`` / ``cktile`` / ``all``).
-        baseline_tput (float | None): Pre-tuning throughput reference.
-        best_speedup (float | None): Tuned / baseline throughput ratio.
-        gain_pct (float | None): ``(best_speedup - 1) * 100``; mirrors
-            the optimization-stack KEEP gain for this run.
-        tuned_tput (float | None): ``baseline_tput * best_speedup``.
-        tuned_file (str): Absolute path to the produced dispatch CSV.
-        final_report_path (str): Absolute path to ``final_report.json``.
-        workspace (str): Run workspace directory.
-        adopted (bool): Whether this run's ``tuned_file`` landed as a KEEP
-            in ``optimization_stack``.
-        summary (dict[str, Any]): Tool-reported summary passthrough.
-        shapes (list[dict[str, Any]]): Optional per-shape CSV rows
-            (``M`` / ``N`` / ``K`` / ``libtype`` / ``kernelId`` / ``splitK`` /
-            ``us`` / ``tflops``); empty until a producer emits them.
-    """
-
-    engine: str
-    status: str
-    decision: str
-    source: str
-    ts: str
-    duration_sec: float | None
-    error_class: str
-    error: str
-    precision: str
-    framework: str
-    gpu_type: str
-    tp: int
-    conc: int
-    isl: int
-    osl: int
-    libtype: str
-    baseline_tput: float | None
-    best_speedup: float | None
-    gain_pct: float | None
-    tuned_tput: float | None
-    tuned_file: str
-    final_report_path: str
-    workspace: str
-    adopted: bool
-    summary: dict[str, Any]
-    parameters: dict[str, Any]
-    candidates: list[dict[str, Any]]
-    shapes: list[dict[str, Any]]
-
-
-class GemmTuning(TypedDict, total=False):
-    """Top-level GEMM-tuning section envelope.
-
-    Attributes:
-        runs (list[GemmTuningRun]): Every GEMM-tuning run this session
-            recorded, newest-last, across engines.
-        adopted_engine (str): Engine of the KEEP that won (``""`` if none).
-        adopted_tuned_file (str): ``tuned_file`` of the adopted KEEP.
-        total_gain_pct (float): Summed gain of adopted runs; mirrors
-            ``attribution.phase_breakdown.gemm_tuning`` for convenience.
-    """
-
-    runs: list[GemmTuningRun]
-    adopted_engine: str
-    adopted_tuned_file: str
-    total_gain_pct: float
-
-
-# Collective — multi-rank communication campaigns run at KERNEL entry. Kept as
-# its own section because the E2E gate, not the microbenchmark, decides
-# adoption: a campaign that wins its micro run and loses the gate is absent
-# from ``optimizations`` and would otherwise leave no trace in the breakdown.
-class CollectiveAttempt(TypedDict, total=False):
-    """One collective campaign, from candidate selection through the E2E gate.
-
-    Attributes:
-        collective_attempt_id (str): Stable campaign identity; deduplicates a
-            resumed or salvaged run so it is not double-counted.
-        experiment_id (str): KernelForge experiment identity for the campaign.
-        kernel_id (str): Roofline ordinal of the targeted kernel (``k038``).
-        kernel_name (str): Mangled device symbol that was optimized.
-        collective_op (str): ``all_reduce`` / ``reduce_scatter`` / ``all_gather``.
-        world_size (int | None): Rank count the campaign benchmarked against.
-        engine (str): Producing engine (``forge_collective``).
-        status (str): Tool status (``ok`` / ``skipped`` / ...).
-        decision (str): Microbenchmark verdict (``KEEP`` / ``REVERT``).
-        kept (bool): Whether the microbenchmark verdict was a KEEP.
-        salvaged (bool): Whether the record was recovered from a partial run.
-        requires_e2e_validation (bool): Whether a KEEP still owes an E2E gate.
-        iterations (int | None): Campaign iterations forge-loop completed.
-        kernel_speedup (float | None): Mean case speedup from the microbenchmark.
-        gpu_pct (float | None): Share of GPU time the targeted collective held.
-        duration_sec (float | None): Campaign wall time.
-        ts (str): ISO UTC timestamp of the campaign record.
-        source_file (str): Source the patch rewrote.
-        kernel_repo (str): Repo root the patch applies to.
-        workspace (str): Campaign workspace directory.
-        patch_path (str): Absolute path to the produced patch.
-        error_class (str): Machine-readable failure class (``""`` when none).
-        error (str): Human-readable failure detail.
-        integration_decision (str): E2E gate verdict — the one that decides
-            adoption (``KEEP`` / ``REVERT`` / ``NEEDS_REVIEW``).
-        integration_gain_pct (float | None): End-to-end throughput delta.
-        integration_base_tput (float | None): Pre-patch throughput reference.
-        integration_new_tput (float | None): Post-patch measured throughput.
-        bandwidth (dict[str, Any]): Per-case measured bandwidth keyed by case
-            name (``bytes`` / ``algbw_gbps`` / ``busbw_gbps``).
-        artifact_files (list[str]): Repo-relative files the patch touched.
-    """
-
-    collective_attempt_id: str
-    experiment_id: str
-    kernel_id: str
-    kernel_name: str
-    collective_op: str
-    world_size: int | None
-    engine: str
-    status: str
-    decision: str
-    kept: bool
-    salvaged: bool
-    requires_e2e_validation: bool
-    iterations: int | None
-    kernel_speedup: float | None
-    gpu_pct: float | None
-    duration_sec: float | None
-    ts: str
-    source_file: str
-    kernel_repo: str
-    workspace: str
-    patch_path: str
-    error_class: str
-    error: str
-    integration_id: str
-    integration_decision: str
-    patch_cleanup_status: str
-    integration_result_status: str
-    integration_revert_status: str
-    integration_finalize_status: str
-    integration_recovery_action: str
-    integration_error_class: str
-    integration_error: str
-    integration_report_path: str
-    integration_workspace: str
-    integration_ts: str
-    integration_gain_pct: float | None
-    integration_base_tput: float | None
-    integration_new_tput: float | None
-    bandwidth: dict[str, Any]
-    artifact_files: list[str]
-
-
-class Collective(TypedDict, total=False):
-    """Top-level collective-lane section envelope.
-
-    Attributes:
-        only_mode (bool): Mirrors ``HYPERLOOM_COLLECTIVE_ONLY`` — distinguishes
-            a collective-only session from one where the lane merely ran.
-        attempts (list[CollectiveAttempt]): One row per logical campaign,
-            deduplicated by ``collective_attempt_id``, newest-last.
-        last (CollectiveAttempt): The most recent campaign record, carrying the
-            measurement evidence (``bandwidth``) the ledger rows omit.
-    """
-
-    only_mode: bool
-    attempts: list[CollectiveAttempt]
-    last: CollectiveAttempt
-
-
-# Kernel Roofline — hot-kernel table mirroring reports/kernel_roofline.json.
-class KernelRooflineEntry(TypedDict, total=False):
-    """One hot-kernel row (on-disk shape passed through verbatim)."""
-
-    kernel_id: str  # zero-padded rank ordinal, ``k001``.. (one per candidate; pool size = --top-k, default 100)
-    name: str  # ``aiter::ck_moe_stage1`` etc
-    source_file: str  # absolute path; "" when unknown
-    kernel_category: str  # ``MoE`` / ``LayerNorm`` / ``unknown``
-    bound_type: str  # ``memory-bound`` / ``compute-bound``
-    arithmetic_intensity: float
-    flops_per_byte: float
-    efficiency_percent: float  # kernel-self efficiency 0..100
-    gpu_pct: float  # share of overall GPU time 0..100
-    call_count: int
-    duration_us: float
-    reusable_native_kernel: bool  # True ⇒ GEAK can swap in a custom kernel
-
-
-class KernelRoofline(TypedDict, total=False):
-    """Top-level ``kernel_roofline`` section (loaded from the report; empty ``{}`` on missing/malformed)."""
-
-    schema_version: int  # tracelens output schema (currently 1)
-    source: str  # provenance label, e.g. ``tracelens_analysis``
-    analysis_md_path: str  # absolute path to the human-readable analysis
-    kernel_candidates_path: str  # absolute path to kernel_candidates.json
-    trace_input: str  # absolute path to the trace dir
-    trace_input_type: str  # ``capture_dir`` / ``trace_file`` / ...
-    kernels: list[KernelRooflineEntry]
-
-
-# Kernel Optimization Summary — mirror of
-# ``reports/kernel_optimization_summary.json``, passed through verbatim;
-# ``by_kernel[]`` rows stay loose.
-class KernelOptimizationSummary(TypedDict, total=False):
-    schema_version: int  # producer schema (currently 1; int, unlike conc_sweep's str)
-    session_id: str  # global id ``{model}_{ts}_{short_uuid}``
-    model_name: str
-    cumulative_gain_validated_pct: float
-    totals: dict[str, int]  # {top_candidates, attempted, integrated, keep_pending, rejected, in_flight, unattempted}
-    rejection_breakdown: dict[str, int]
-    unattempted_reason_breakdown: dict[str, int]
-    failure_reason_breakdown: dict[str, int]
-    dispatch_skip_reason: dict[
-        str, Any
-    ]  # {} or {reason, kernels_considered, message, ts} when a dispatch found no eligible kernels
-    field_glossary: dict[str, str]  # {field_name: explanation} for tooltips
-    top_takeaways: list[str]  # 2-4 deterministic (non-LLM) sentences
-    by_kernel: list[dict[str, Any]]  # one row per top kernel, sorted gpu_pct desc
-    report_path: str  # rel-to-session path to the mirrored source report
-
-
-# Conc Sweep Summary — mirror of ``reports/conc_sweep_summary.json``, a
-# baseline-vs-current_best curve across a CONC ladder. When ``status="skipped"``
-# the baseline/optimized/comparison/summary blocks are omitted — read ``status`` first.
-class ConcSweepSummary(TypedDict, total=False):
-    schema_version: str  # producer schema (currently "1.0"; str, unlike kernel summary's int)
-    status: str  # succeeded / failed / skipped
-    skip_reason: str  # only when status="skipped"
-    session_id: str
-    isl: int
-    osl: int
-    tp: int
-    concs_requested: list[int]
-    baseline: dict[str, Any]  # {extra_server_args, extra_envs, points[]}
-    optimized: dict[str, Any]  # {extra_server_args, extra_envs, points[]}
-    comparison: list[dict[str, Any]]  # per-CONC paired rows (feeds the dual curve + speedup bars)
-    summary: dict[str, Any]  # {successful_pairs, failed_pairs, best_conc, best_speedup, median_speedup, mean_speedup}
-    workspace: str
-    elapsed_sec: float
-    total_budget_sec: int  # None when budget gate disabled
-    budget_exhausted: bool
-    budget_skip_reason: str  # why budget-gated variants were skipped, when budget_exhausted=true
-    budget_remaining_sec: float
-    report_json_path: str
-    report_csv_path: str  # for the "download CSV" button
-    roofline_ceiling: dict[str, Any]  # per-CONC theoretical peak + MBU%; may be absent on old products
-    report_path: str  # rel-to-session path to the mirrored source report
-
-
-# ---------------------------------------------------------------------------
-# Full-trace: unified token + decision timeline
-# ---------------------------------------------------------------------------
-class TokenBucket(TypedDict, total=False):
-    """Aggregated token counters for one grouping (phase / component / total).
-
-    ``total_cache`` (in the per-decision view) is the sum of cache-creation
-    and cache-read tokens; the rollup view keeps them split.
-    ``total_reasoning_out`` is hidden reasoning output, billed but absent from
-    ``total_out`` (which counts the visible reply). ``calls`` is the number of
-    LLM calls folded into this bucket.
-    """
-
-    total_in: int
-    total_out: int
-    total_cache_creation: int
-    total_cache_read: int
-    total_reasoning_out: int
-    calls: int
-
-
-class DecisionTokens(TypedDict, total=False):
-    by_component: dict[str, TokenBucket]  # component -> its token bucket for this decision
-    total_in: int
-    total_out: int
-    total_cache: int  # cache_creation + cache_read
-    total_reasoning_out: int  # hidden reasoning output, not part of total_out
-    calls: int
-
-
-class DecisionTraceEntry(TypedDict, total=False):
-    phase: str  # phase active at the decision (declared or ts-window backfill)
-    tick: int | None  # orchestrator tick (None when the producer didn't stamp one)
-    ts: str  # ISO ...Z of the decision
-    # ``decision`` carries proposer attribution + a filter label:
-    # {component (resolved proposer: specialist:<domain> / grid / orchestration),
-    #  operation_kind (backend / param / env / kernel_opt / kernel_integrate / ...),
-    #  change/event/verdict, outcome, gain_pct, task_id/dyn_id,
-    #  kind, provenance, scope, fingerprint, metrics}
-    decision: dict[str, Any]
-    tokens: DecisionTokens
-
-
-class TokenRollup(TypedDict, total=False):
-    by_phase: dict[str, TokenBucket]  # phase -> aggregate token bucket
-    by_component: dict[str, TokenBucket]  # component -> aggregate token bucket
-    session_total: TokenBucket  # whole-session token total
-
-
-class DecisionTrace(TypedDict, total=False):
-    """The joined token+decision timeline plus its rollups.
-
-    ``decision_trace`` is one entry per decision (KEEP/REVERT journal row +
-    dynamic_action dispatch event) with the LLM calls attributed to it.
-    ``token_rollup`` summarises every call by phase / component / total.
-    ``unattributed_tokens`` + ``overhead_tokens`` are the buckets of calls that
-    matched no decision (overhead = expected cross-decision spend; unattributed
-    = a real gap), kept so per-decision sums + these reconcile to
-    ``session_total``.
-    """
-
-    decision_trace: list[DecisionTraceEntry]
-    token_rollup: TokenRollup
-    unattributed_tokens: TokenBucket
-    # Inherently cross-decision LLM spend (orchestration / critic / robustness
-    # reactor turns) with no single owning decision — kept separate from
-    # ``unattributed_tokens`` (a genuine attribution gap). Additive/optional.
-    overhead_tokens: TokenBucket
-
-
-# ---------------------------------------------------------------------------
-# Token usage — promoted, discoverable top-level rollup of LLM token spend.
-# ---------------------------------------------------------------------------
-class TokenUsageBucket(TypedDict, total=False):
-    """A token bucket plus two convenience totals for at-a-glance reading.
-
-    Same counters as :class:`TokenBucket` (``total_cache`` appears in the
-    per-action view where creation/read are pre-summed; the rollup view keeps
-    them split). Adds:
-
-    Attributes:
-        total_in_out (int): ``total_in + total_out`` — the visible, non-cache
-            prompt + completion tokens (what most "how many tokens" questions
-            mean).
-        grand_total (int): ``total_in + total_out`` + all cache tokens
-            (creation + read) + ``total_reasoning_out`` — the all-in figure.
-    """
-
-    total_in: int
-    total_out: int
-    total_cache_creation: int
-    total_cache_read: int
-    total_cache: int
-    total_reasoning_out: int
-    calls: int
-    total_in_out: int
-    grand_total: int
-    # cache_read / (cache_creation + cache_read); 0.0 when no split cache data.
-    cache_hit_rate: float
-
-
-class TokenUsageAttribution(TypedDict, total=False):
-    """How much of the session token spend ties back to a decision.
-
-    Attributes:
-        attributed_to_decisions (TokenUsageBucket): Tokens whose call carried a
-            ``task_id`` / ``dyn_id`` that joined to a KEEP/REVERT or
-            dynamic_action decision (e.g. specialist subprocess turns, scorer
-            rounds keyed by their specialist task).
-        overhead (TokenUsageBucket): Inherently cross-decision spend
-            (orchestration / critic / robustness reactor turns) with no single
-            owning decision — expected shared cost, not an attribution gap.
-        unattributed (TokenUsageBucket): Tokens from calls that carried no
-            decision key and are not recognised overhead — a real attribution
-            gap to chase.
-        attributed_calls_pct (float): Percentage of calls that were attributed.
-        overhead_calls_pct (float): Percentage of calls classed as overhead.
-    """
-
-    attributed_to_decisions: TokenUsageBucket
-    overhead: TokenUsageBucket
-    unattributed: TokenUsageBucket
-    attributed_calls_pct: float
-    overhead_calls_pct: float
-
-
-class TokenUsageTimelineEntry(TypedDict, total=False):
-    """One ``action_timeline`` row annotated with the tokens tied to it.
-
-    Tokens join on ``task_id``; rows whose action carries no LLM token spend
-    (most config-exploration actions) get ``tokens: null`` rather than a zero
-    bucket, to make the (intentional) sparsity visible.
-
-    Attributes:
-        task_id (str | None): The action's task id (join key into the ledger).
-        action (str): The action / change label (mirrors action_timeline).
-        phase (str): Phase the action ran in.
-        decision (str): KEEP / REVERT / ... outcome.
-        ts (str): ISO timestamp of the action.
-        tokens (TokenUsageBucket | None): Tokens attributed to this task_id, or
-            None when no LLM call tied to it.
-    """
-
-    task_id: str | None
-    action: str
-    phase: str
-    decision: str
-    ts: str
-    tokens: TokenUsageBucket | None
-
-
-class TokenUsage(TypedDict, total=False):
-    """Top-level, discoverable LLM-token-spend summary for the session.
-
-    A promoted view over ``decision_trace.token_rollup`` (the full per-call
-    ledger ``reports/trace/llm_calls.jsonl``) plus a timeline correlation.
-    Purely derived — no new disk read — so it always reconciles with
-    ``decision_trace``.
-
-    Attributes:
-        session_total (TokenUsageBucket): Whole-session total across every call.
-        by_component (dict[str, TokenUsageBucket]): Per-agent breakdown
-            (orchestration / kernel / critic / specialist / proposal_scorer / ...).
-        by_phase (dict[str, TokenUsageBucket]): Per-phase breakdown
-            (PRELUDE / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / ...).
-        attribution (TokenUsageAttribution): Decision-attributed vs unattributed.
-        timeline (list[TokenUsageTimelineEntry]): ``action_timeline`` rows with
-            their token spend joined on ``task_id``.
-        source (str): The ledger files the totals derive from.
-        correlation (str): How ``timeline`` joins to ``action_timeline``.
-    """
-
-    session_total: TokenUsageBucket
-    by_component: dict[str, TokenUsageBucket]
-    by_phase: dict[str, TokenUsageBucket]
-    attribution: TokenUsageAttribution
-    timeline: list[TokenUsageTimelineEntry]
-    source: str
-    correlation: str
-
-
-# ---------------------------------------------------------------------------
-# Langfuse push receipt — was the trace mirrored live to Langfuse?
-# ---------------------------------------------------------------------------
-class LangfuseConfig(TypedDict, total=False):
-    """Redacted Langfuse connection config that was in effect this session.
-
-    Credentials are never recorded verbatim: only the host URL (not a secret)
-    and presence booleans for the public/secret keys.
-
-    Attributes:
-        enable_flag (bool): Whether ``HYPERLOOM_LANGFUSE_ENABLE`` was on.
-        host (str | None): ``LANGFUSE_HOST`` URL, or None if unset.
-        public_key_set (bool): Whether ``LANGFUSE_PUBLIC_KEY`` was present.
-        secret_key_set (bool): Whether ``LANGFUSE_SECRET_KEY`` was present.
-        sdk_available (bool): Whether the optional ``langfuse`` SDK importable.
-    """
-
-    enable_flag: bool
-    host: str | None
-    public_key_set: bool
-    secret_key_set: bool
-    sdk_available: bool
-
-
-class LangfusePushCounts(TypedDict, total=False):
-    """How many observations the live push actually emitted this session.
-
-    Attributes:
-        generations_sent (int): Generations successfully started.
-        generations_paired (int): Of those, ones that had both a token row and
-            conversation text (vs token-only / text-only).
-        generations_text_only (int): Generations from a conversation row only.
-        generations_token_only (int): Generations from a token row only
-            (an unpaired token half flushed at session end).
-        scores_sent (int): Decision Scores created (span- + trace-level).
-        spans_opened (int): Phase + agent spans created.
-        errors (int): Swallowed send failures (a Langfuse outage never breaks
-            the optimization loop).
-    """
-
-    generations_sent: int
-    generations_paired: int
-    generations_text_only: int
-    generations_token_only: int
-    scores_sent: int
-    spans_opened: int
-    errors: int
-
-
-class LangfusePush(TypedDict, total=False):
-    """Receipt of whether/where/how much the session was pushed to Langfuse.
-
-    The local ``reports/trace/*.jsonl`` ledger is always written; this section
-    records the *optional* second sink (live Langfuse push, default off). When
-    disabled it still reports the config + ``disabled_reason`` so an operator
-    can see why nothing was sent.
-
-    Attributes:
-        enabled (bool): Whether the live push was active (all gates passed).
-        disabled_reason (str | None): Which gate tripped when not enabled
-            (``disabled`` / ``no_credentials`` / ``sdk_missing`` /
-            ``init_failed``); None when enabled.
-        config (LangfuseConfig): Redacted connection config in effect.
-        trace_id (str | None): Langfuse trace id (derived from the correlation
-            id), or None when disabled.
-        session_id (str | None): Langfuse ``session_id`` grouping value.
-        correlated_on (str): Which id seeded the trace
-            (``claw_session_id`` / ``internal_session_id``).
-        counts (LangfusePushCounts): What was actually emitted.
-        counts_final (bool): True once the session-end flush ran (counts then
-            include out-of-process ext shards + decision scores); False when
-            the breakdown was assembled before flush (in-process counts only).
-        receipt_source (str): Where the collector read this from
-            (``receipt_file`` / ``live_emitter`` / ``config_only``).
-    """
-
-    enabled: bool
-    disabled_reason: str | None
-    config: LangfuseConfig
-    trace_id: str | None
-    session_id: str | None
-    correlated_on: str
-    counts: LangfusePushCounts
-    counts_final: bool
-    receipt_source: str
-
-
-class EnablementStackActionSummary(TypedDict, total=False):
-    """One attempt-runtime stack action considered/applied.
-
-    Attributes:
-        kind: Stack-action kind (``runtime_candidate`` / ...).
-        framework: Target framework.
-        capability: Missing capability being repaired.
-        acquisition_method: ``wheel`` / ``editable_ref`` / ...
-        repo_url: Origin git URL (source acquisition), or "".
-        ref: Pinned ref (source acquisition), or "".
-        index_url: Pip index (wheel acquisition), or "".
-        reason: Human-readable justification.
-    """
-
-    kind: str
-    framework: str
-    capability: str
-    acquisition_method: str
-    repo_url: str
-    ref: str
-    index_url: str
-    reason: str
-
-
-class EnablementAttemptRuntime(TypedDict, total=False):
-    """One provisioned attempt runtime (promoted or discarded).
-
-    Attributes:
-        venv_root: Attempt venv root (``$SESSION_DIR/enablement/stacks/...``).
-        bin_path: Attempt bin dir prepended to the materialized-YAML PATH.
-        python_path: Attempt interpreter.
-        installed_versions: Package -> version installed into the attempt venv.
-        promoted: True when this runtime was KEPT (survives rearm).
-    """
-
-    venv_root: str
-    bin_path: str
-    python_path: str
-    installed_versions: dict[str, str]
-    promoted: bool
-
-
-class TargetedBuildAttemptSummary(TypedDict, total=False):
-    """One targeted-build attempt (AITER / sgl-kernel / vLLM-source).
-
-    Attributes:
-        component: ``aiter`` / ``sgl_kernel`` / ``vllm_source`` / ``framework_ext``.
-        ref: Git ref / tag used for the build.
-        gpu_arch: Explicit target arch (``gfx942`` / ``gfx950`` / ...).
-        max_jobs: Parallelism cap passed to the compile.
-        ok: Whether the build probe and install succeeded.
-        failure_class: One of the ``FAILURE_CLASSES`` values, or ``"ok"``.
-        failure_summary: Human-readable reason (agent decision input).
-        installed_versions: torch/ref/sha/arch recorded after a successful build;
-            includes ``source_pr_url`` when a discovered PR ref drove the build.
-        build_probes: Post-build probe descriptors (e.g. ``"import aiter: ok"``).
-        build_log_path: Path to the compile log inside the attempt dir.
-        attempt_root: Attempt directory anchoring the build.
-    """
-
-    component: str
-    ref: str
-    gpu_arch: str
-    max_jobs: int
-    ok: bool
-    failure_class: str
-    failure_summary: str
-    installed_versions: dict[str, str]
-    build_probes: list[str]
-    build_log_path: str
-    attempt_root: str
-
-
-class EnablementBreakdown(TypedDict, total=False):
-    """Enablement subsystem observability section.
-
-    Emitted when the lane did something or was explicitly turned off; ``all`` is
-    the default, so an armed lane that was never needed stays hidden. A
-    boot-origin round repaired by a plain source patch provisions no runtime and
-    builds nothing, so admission and round lifecycle are reported independently
-    of those artifacts.
-
-    Attributes:
-        mode: Admitted lane from ``--enablement``: launch / eval / all / off.
-        engaged: True once a round was dispatched, attempted, or landed a patch.
-        origin: Trigger origin: "boot" (cannot launch) or "eval" (accuracy).
-        attempts: Number of authoring rounds dispatched this session.
-        dispatched: True while an authoring round is in flight.
-        succeeded: True once a round was KEPT (eval-origin additionally requires
-            the revalidation baseline to promote at or above the floor).
-        pending: True while a trigger is captured but unconsumed.
-        validation_pending: True while an eval-origin KEEP awaits baseline
-            revalidation.
-        stall_streak: Consecutive no-progress rounds toward ``enablement_stalled``.
-        inflight_task_id: Specialist task id of the in-flight round.
-        last_specialist_task_id: Specialist task id of the most recent round.
-        revalidation_task_id: TaskRegistry id of the tracked revalidation task.
-        revalidation_generation: Revalidation window counter (idempotency).
-        launch_log_excerpt: Tail of the captured boot failure text that triggered
-            the round.
-        trigger_evidence_excerpt: Tail of the captured eval-failure evidence.
-        kept_patches: Session-relative paths of patches landed by enablement.
-        framework_root: Source tree ``kept_patches`` were applied against.
-        kept_stack_action: The stack action behind the KEPT attempt runtime.
-        candidate_refs: Bridging candidate refs considered for rotation.
-        setup_commands: Setup commands the specialist requested.
-        localization_manifest: Files the localization pass identified.
-        build_novelty: Novelty keys of the targeted builds requested.
-        human_review_count: Number of logs parked for human review.
-        active_runtime: The currently-promoted attempt runtime, or {} when none.
-        attempt_runtimes: Retained attempt-runtime records (capped).
-        failure_kind: Last classified enablement failure kind.
-        build_attempts: Targeted-build attempt history (newest last).
-        last_build_failure: ``{failure_class, failure_summary}`` from the most
-            recent failed build attempt (framework-channel decision input).
-        build_attempt_count: Total number of targeted-build rows attempted.
-        trigger_kind: Eval trigger kind (eval_runtime_failure /
-            accuracy_below_floor / accuracy_unavailable) when origin is "eval".
-        observed_accuracy: Baseline accuracy observed at the eval trigger.
-        accuracy_floor: Effective accuracy floor for the trigger + KEEP gate.
-        observed_task: Eval task name observed at the trigger.
-        observed_metric: Eval metric observed at the trigger.
-        probe_config_path: Materialized config re-run to reproduce the contract.
-        accepted_config_path: Base YAML from the KEEP'd candidate bench, used as
-            the revalidation baseline config.
-        accepted_config: Server args / envs that bench also launched with, which
-            the YAML does not carry; the revalidation replays them on top.
-        eval_contract_fingerprint: Fingerprint of the captured eval contract.
-        setting_script: Session-relative path to the generated
-            ``enablement_setting.sh`` artifact, when it was produced.
-        kept_artifacts: Whole-file installs landed by enablement, as
-            ``target`` / ``rel_target`` / ``kind`` per entry.
-    """
-
-    mode: str
-    engaged: bool
-    origin: str
-    attempts: int
-    dispatched: bool
-    succeeded: bool
-    pending: bool
-    validation_pending: bool
-    stall_streak: int
-    inflight_task_id: str
-    last_specialist_task_id: str
-    revalidation_task_id: str
-    revalidation_generation: int
-    launch_log_excerpt: str
-    trigger_evidence_excerpt: str
-    kept_patches: list[str]
-    kept_artifacts: list[dict[str, Any]]
-    framework_root: str
-    kept_stack_action: EnablementStackActionSummary
-    candidate_refs: list[str]
-    setup_commands: list[str]
-    localization_manifest: list[str]
-    build_novelty: list[str]
-    human_review_count: int
-    active_runtime: EnablementAttemptRuntime
-    attempt_runtimes: list[EnablementAttemptRuntime]
-    failure_kind: str
-    build_attempts: list[TargetedBuildAttemptSummary]
-    last_build_failure: dict[str, str]
-    build_attempt_count: int
-    trigger_kind: str
-    observed_accuracy: float
-    accuracy_floor: float
-    observed_task: str
-    observed_metric: str
-    probe_config_path: str
-    accepted_config_path: str
-    accepted_config: dict[str, Any]
-    eval_contract_fingerprint: str
-    setting_script: str
-
-
-# ---------------------------------------------------------------------------
-# Session Breakdown v4 canonical author-time schema
-# ---------------------------------------------------------------------------
-class SubjectRef(TypedDict, total=False):
-    """Stable reference to a subject participating in an operation."""
-
-    subject_id: str
-    subject_type: str
-    role: str
-    name: str
-    attributes: dict[str, Any]
-
-
-class OperationRelation(TypedDict, total=False):
-    """Typed relation from an operation to another operation or subject."""
-
-    relation_id: str
-    relation_type: str
-    operation_id: str
-    target_operation_id: str
-    subject: SubjectRef
-    metadata: dict[str, Any]
-
-
-class OperationAttempt(TypedDict, total=False):
-    """One execution attempt belonging to an operation."""
-
-    attempt_id: str
-    status: str
-    producer: str
-    backend: str
-    started_at: str
-    ended_at: str
-    sequence: int
-    inputs: dict[str, Any]
-    outputs: dict[str, Any]
-    error: dict[str, Any] | str | None
-    measurements: list[str]
-    artifacts: list[str]
-    metadata: dict[str, Any]
-
-
-class OperationSubstep(TypedDict, total=False):
-    """One stable substep nested under an operation."""
-
-    substep_id: str
-    kind: str
-    name: str
-    status: str
-    started_at: str
-    ended_at: str
-    sequence: int
-    attempts: list[OperationAttempt]
-    measurements: list[str]
-    artifacts: list[str]
-    metadata: dict[str, Any]
-
-
-class OperationGate(TypedDict, total=False):
-    """A gate evaluated while deciding whether an operation may proceed."""
-
-    gate_id: str
-    kind: str
-    name: str
-    status: str
-    decision: str
-    reason: str
-    evaluated_at: str
-    inputs: dict[str, Any]
-    evidence: dict[str, Any]
-    metadata: dict[str, Any]
-
-
-class OperationDecision(TypedDict, total=False):
-    """An author-time decision made within an operation."""
-
-    decision_id: str
-    kind: str
-    verdict: str
-    reason: str
-    component: str
-    confidence: float
-    decided_at: str
-    evidence: dict[str, Any]
-    metadata: dict[str, Any]
-
-
-ExecutorClass = Literal["llm_agent", "llm_tool", "deterministic"]
-IntegrityStatus = Literal["exact", "derived", "partial", "unavailable"]
-
-# Which agent owns a unit of work. Recorded by the producer at author time;
-# ``unattributed`` means the producer genuinely could not name an owner, never
-# that the exporter failed to guess one.
-AgentBucket = Literal[
-    "kernel_agent",
-    "framework_agent",
-    "explore",
-    "warm_replay",
-    "coordinator",
-    "critic",
-    "robustness",
-    "unattributed",
-]
-
-
-class Operation(TypedDict, total=False):
-    """Canonical unit of work, incrementally upserted by stable id."""
-
-    operation_id: str
-    kind: str
-    name: str
-    phase: str
-    status: str
-    producer: str
-    sequence: int
-    started_at: str
-    ended_at: str
-    parent_operation_id: str
-    root_operation_id: str
-    macro_cycle: int
-    source: str
-    executor_class: ExecutorClass
-    purpose: str
-    scope: str
-    # Canonical owning agent, stamped by the producer at author time so the
-    # exporter never has to infer ownership from phase timestamps.
-    agent: AgentBucket
-    strategy_group: str
-    strategy: str
-    subject: SubjectRef
-    subjects: list[SubjectRef]
-    relations: list[OperationRelation]
-    attempts: list[OperationAttempt]
-    substeps: list[OperationSubstep]
-    gates: list[OperationGate]
-    decisions: list[OperationDecision]
-    inputs: dict[str, Any]
-    outputs: dict[str, Any]
-    error: dict[str, Any] | str | None
-    measurement_refs: list[str]
-    artifact_refs: list[str]
-    adoption_refs: list[str]
-    extensions: dict[str, Any]
-    metadata: dict[str, Any]
-
-
-class Measurement(TypedDict, total=False):
-    """Canonical measured value authored at the measurement site."""
-
-    measurement_id: str
-    operation_id: str
-    subject: SubjectRef
-    kind: str
-    name: str
-    value: Any
-    unit: str
-    status: str
-    measured_at: str
-    sequence: int
-    producer: str
-    dimensions: dict[str, Any]
-    statistics: dict[str, Any]
-    source: dict[str, Any] | str
-    metric_basis: str
-    harness: dict[str, Any] | str
-    workload: dict[str, Any]
-    samples: list[Any]
-    aggregation: dict[str, Any] | str
-    metadata: dict[str, Any]
-
-
-class ArtifactRef(TypedDict, total=False):
-    """Canonical reference to an artifact without reading its contents."""
-
-    artifact_id: str
-    operation_id: str
-    subject: SubjectRef
-    kind: str
-    name: str
-    path: str
-    uri: str
-    digest: str
-    mime_type: str
-    size_bytes: int
-    status: str
-    present: bool
-    created_at: str
-    producer: str
-    producer_operation_id: str
-    consumers: list[str]
-    coverage: dict[str, Any] | str
-    retention: dict[str, Any] | str
-    metadata: dict[str, Any]
-
-
-class Adoption(TypedDict, total=False):
-    """Canonical adoption of an operation result into the accepted state."""
-
-    adoption_id: str
-    operation_id: str
-    subject: SubjectRef
-    artifact_ids: list[str]
-    measurement_ids: list[str]
-    kind: str
-    status: str
-    decision: str
-    reason: str
-    adopted_at: str
-    validated: bool
-    gain_pct: float | None
-    # Frozen at adoption time. Measurement ids are stable per subject, so a
-    # later attempt on the same subject overwrites the referenced measurements;
-    # these two carry the numbers this adoption was actually decided on.
-    throughput_before: float | None
-    throughput_after: float | None
-    configuration: dict[str, Any]
-    producer: str
-    # Mirrors ``Operation.agent`` so an adoption can be bucketed without a join.
-    agent: AgentBucket
-    # False for pre-baseline enablement work: real, adopted, and deliberately
-    # excluded from reported gain.
-    attribution_eligible: bool
-    metadata: dict[str, Any]
-
-
-class IntegrityFieldStatus(TypedDict, total=False):
-    """Availability and provenance for one canonical v4 field."""
-
-    status: IntegrityStatus
-    source: str
-    reason: str
-    record_count: int
-    producers: list[str]
-    warnings: list[str]
-
-
-class Integrity(TypedDict, total=False):
-    """Completeness declaration for the v4 canonical envelope."""
-
-    status: IntegrityStatus
-    canonical_source: str
-    fields: dict[str, IntegrityFieldStatus]
-    warnings: list[str]
-    conflicts: list[dict[str, Any]]
-
-
-class V6MetadataVersions(TypedDict, total=False):
-    """Version identifiers projected into V6 metadata."""
-
-    schema_version: str
-    hyperloom: str
-    framework: str | None
-    framework_version: str | None
-    tools: dict[str, str | None]
-
-
 class V6MetadataSession(TypedDict, total=False):
-    """Session identity and lifecycle fields exposed by V6 metadata."""
+    """Session identity and lifecycle fields exposed by V6 metadata.
+
+    ``elapsed_minutes`` is how long this run leg ran and
+    ``total_elapsed_minutes`` how long every leg of the session ran, so
+    neither counts the gap between two legs the way the wall-clock budget
+    does. Both are snapshotted while the run is going, which is why a
+    re-export of a finished session reports the same figures rather than the
+    span since its anchor.
+    """
 
     session_id: str
     claw_session_id: str | None
@@ -2853,10 +73,39 @@ class V6MetadataSession(TypedDict, total=False):
     user_data_path: str
     code_revision: str
     pid: int
+    image: str | None
+    image_id: str | None
     max_minutes: int
     elapsed_minutes: float
+    total_elapsed_minutes: float
     tick_count: int
-    recovery: dict[str, Any]
+    recovery: V6MetadataRecovery
+
+
+class V6ModelArchitecture(TypedDict, total=False):
+    """Structural model summary parsed from the model's own config."""
+
+    model_class: str
+    model_family: str
+    model_type: str
+    architectures: list[str]
+    attention_type: str
+    num_hidden_layers: int | None
+    num_attention_heads: int | None
+    num_key_value_heads: int | None
+    head_dim: int | None
+    hidden_size: int | None
+    intermediate_size: int | None
+    max_position_embeddings: int | None
+    vocab_size: int | None
+    torch_dtype: str
+    kv_cache_dtype: str
+    quantization: str
+    is_moe: bool | None
+    num_experts: int | None
+    num_experts_per_tok: int | None
+    has_shared_expert: bool | None
+    num_shared_experts: int | None
 
 
 class V6TaskConfig(TypedDict, total=False):
@@ -2876,7 +125,91 @@ class V6TaskConfig(TypedDict, total=False):
     objective: dict[str, Any]
     launch_env: dict[str, str]
     launch_server_args: str
-    architecture: dict[str, Any]
+    architecture: V6ModelArchitecture
+
+
+class V6MetadataLangfuse(TypedDict, total=False):
+    """Live-Langfuse trace entrypoint and push receipt."""
+
+    enabled: bool
+    disabled_reason: str | None
+    trace_id: str | None
+    session_id: str | None
+    trace_url: str | None
+    counts: dict[str, int]
+
+
+class V6GradedAxes(TypedDict, total=False):
+    """The axes an AgentX measurement is ranked and reported on.
+
+    ``e2e_norm_intvty_p50`` is the objective. Its guards are the tail and ``output_throughput``; the latter is not a
+    member because the chip count divides both sides of that ratio, so ``output_tput_per_gpu`` -- the frontier's y
+    axis, which is a member -- reproduces the guard exactly. The latency percentiles are the detail view: reported,
+    never graded. ``total_throughput`` is reported for continuity and enters no verdict.
+
+    ``duration_seconds`` and ``request_error_rate`` are the comparability inputs. A pair is graded only when both
+    replayed a window of the same length and the candidate dropped no more requests than its anchor, so a verdict
+    published without them cannot be re-derived from this record.
+
+    Every axis is present on every measurement, ``None`` where nothing measured
+    it: absent would be indistinguishable from an axis the framework failed to
+    report, and zero reads as "measured, and it was zero". A synthetic run
+    carries nulls throughout.
+    """
+
+    e2e_norm_intvty_p90: float | None
+    e2e_norm_intvty_p50: float | None
+    total_throughput: float | None
+    output_tput_per_gpu: float | None
+    input_throughput: float | None
+    ttft_p50_ms: float | None
+    ttft_p90_ms: float | None
+    tpot_p50_ms: float | None
+    tpot_p90_ms: float | None
+    duration_seconds: float | None
+    request_error_rate: float | None
+
+
+class V6GradingTputGuard(TypedDict, total=False):
+    """The throughput constraint riding along with the interactivity objective.
+
+    ``noise_pct`` is ``None`` on a session seeded before the band was recorded:
+    the band that session applied is unknown, and today's environment is not
+    evidence of it.
+    """
+
+    enabled: bool
+    noise_pct: float | None
+
+
+class V6Grading(TypedDict, total=False):
+    """The axis this session was configured to grade on.
+
+    The session-level setting and only that. What a promotion was actually
+    decided on is ``outcome.validation.graded_on``, read off the promotion
+    itself. On a session that promoted anything the two agree, because a
+    comparison that cannot supply the configured axis pair fails rather than
+    settling for another axis -- no promotion is ever graded off-objective.
+    Neither field resolves the other even so: a session can be configured for
+    an axis and promote nothing on it.
+    """
+
+    benchmark_mode: str
+    objective: str
+    tput_guard: V6GradingTputGuard
+
+
+class V6WorkflowMetadata(TypedDict, total=False):
+    """Identity and frozen action surfaces for deterministic workflow replay."""
+
+    workflow_contract_version: str
+    contract_digest: str
+    run_flags: dict[str, Any]
+    phase_actions: dict[str, list[str]]
+    llm_proposable_actions: dict[str, list[str]]
+    coordinator_internal_actions: list[str]
+    coordinator_reserved_actions: dict[str, list[str]]
+    kernel_lane_task_kinds: list[str]
 
 
 class V6Metadata(TypedDict, total=False):
@@ -2886,7 +219,9 @@ class V6Metadata(TypedDict, total=False):
     versions: V6MetadataVersions
     session: V6MetadataSession
     task_config: V6TaskConfig
-    langfuse: dict[str, Any]
+    grading: V6Grading
+    langfuse: V6MetadataLangfuse
+    workflow: V6WorkflowMetadata
     warnings: list[str]
 
 
@@ -2895,7 +230,9 @@ class V6OutcomeGainBucket(TypedDict, total=False):
 
     total_gain_pct: float | None
     keep_count: int
-    non_attributable_keep_count: int
+    #: Adoptions in the bucket with no measurable contribution. Zero of these
+    #: is what makes ``total_gain_pct`` a complete account rather than a floor.
+    unmeasured_keep_count: int
 
 
 class V6OutcomeKernelAttribution(V6OutcomeGainBucket, total=False):
@@ -2920,12 +257,58 @@ class V6OutcomeAttribution(TypedDict, total=False):
 
 
 class V6OutcomeValidation(TypedDict, total=False):
-    """Reconciliation of final measured gain with canonical KEEP entries."""
+    """Reconciliation of the stack ledger's parts against the measured whole.
 
+    Read off the ``stack`` timeline event, whose rows the orchestrator recorded
+    as each adoption was accepted. ``attributed_gain_pct`` is the sum of the
+    per-adoption contributions, all measured against the session baseline;
+    ``chain_total_gain_pct`` is the last adoption's own reading against that
+    same baseline. The two differ by ``unattributed_gain_pct``, which is
+    throughput the chain gained between one adoption's measurement and the
+    next one's. ``validated_total_gain_pct`` is the independent figure measured
+    on the whole stack, and ``reconciliation_gap_pct`` is its distance from the
+    chain -- the number worth alerting on, since the parts and the whole
+    disagreeing means one of them is wrong.
+    """
+
+    #: The axis every percentage here shares, read off the row that produced
+    #: the settled figure. The reconciliation has to be single-axis: an
+    #: attributed figure on one axis against an unattributed figure on another
+    #: makes the gap meaningless.
+    graded_on: str | None
+    #: The settled measurement's own axes, on the same row as the gain they
+    #: produced -- a revalidation moves the cumulative figure without
+    #: re-promoting the recipe, so ``current_best`` can be a later measurement.
+    perf: V6GradedAxes
     attributed_gain_pct: float
     unattributed_gain_pct: float
+    chain_total_gain_pct: float | None
+    validated_total_gain_pct: float | None
     reconciliation_gap_pct: float | None
+    #: How many adoptions the ledger holds, across every source.
+    adoption_count: int
+    #: The stack length the settled figure was measured on, and the author-time
+    #: stamp and basis of that measurement. ``None`` when nothing was validated.
+    validated_at_stack_len: int | None
+    validated_ts: str | None
+    measurement_basis: str | None
+    #: The latency the settled measurement reported, and which field of the
+    #: benchmark report the pair came from, as the measurement labelled it.
+    ttft_mean_ms: float | None
+    e2el_mean_ms: float | None
+    ttft_e2el_source: str | None
+    #: The flags the measured server was launched with, and the run directory
+    #: the measurement was taken in.
+    server_launch_flags: str | None
+    workspace: str | None
+    #: Adoptions landed after the settled figure was measured, so it describes
+    #: a shorter stack than the one that shipped.
+    stack_changed_after_validation: bool
     attribution: V6OutcomeAttribution
+    #: ``unmeasured`` and ``chain_breaks``; see :mod:`.recorder.stack_event`.
+    guards: dict[str, int]
+    #: One entry per finding the ledger's own figures support. Empty is the
+    #: meaningful case: the ledger reconciles.
     notes: list[str]
 
 
@@ -2936,6 +319,7 @@ class V6Outcome(TypedDict, total=False):
     status: Literal["completed", "failed", "aborted"]
     stage_reached: str
     baseline: dict[str, Any]
+    anchoring_eval: dict[str, Any] | None
     final: dict[str, Any]
     validation: V6OutcomeValidation
 
@@ -2946,42 +330,27 @@ class V6TimelineEvent(TypedDict, total=False):
     type: str
     kind: str
     status: str
+    process_status: str
+    business_outcome: str | None
+    failure: dict[str, Any] | None
+    blocked_by: str | None
     start_time: str
     end_time: str
+    id: str
     ext: dict[str, Any]
 
 
 class V6WarmStartMatched(TypedDict, total=False):
     """The Recipe the PRELUDE KB lookup selected.
 
-    Present only on a ``matched`` event. ``tier`` and ``confidence`` name the
+    Present when the lookup found a record, whether or not it turned out to be
+    executable -- a ``seed_only`` match is described here too. ``tier`` and
+    ``confidence`` name the
     rung of the seven-tuple degradation ladder the hit came from, which is what
     separates an exact identity match from one that relaxed hardware or
     framework version to find anything at all. ``origin`` points back at the
     session that wrote the record, so a replay result can be compared against
-    the run it came from.
-
-    Attributes:
-        match_type (str): ``exact`` when the tier is ``exact``, else ``degraded``.
-        tier (str): Ladder rung — ``exact`` / ``same_arch_class`` /
-            ``same_gpu_isa`` / ``compatible_framework_version``.
-        confidence (float | None): Transfer confidence for that rung; gates the
-            replay through ``--warm-replay-min-confidence``.
-        source (str): Store the record came from (``kb-store`` / local).
-        canonical_id (str): The seven-tuple actually matched.
-        scope (dict[str, Any]): The matched record's own workload shape.
-        optimized_throughput (float | None): Throughput the record validated.
-        validated_gain_pct (float | None): Gain the record validated.
-        expected_gain_pct (float | None): Gain the replay is expected to reproduce.
-        replayable (bool | None): Whether the record may be replayed at all.
-        replay_disabled_reason (str | None): Why it may not.
-        replay_material_available (bool | None): Whether the three columns hold
-            anything to replay — separates a hit on an empty record from a hit
-            on a usable one.
-        view_source (str | None): Which Recipe View the record was read through.
-        origin (dict[str, Any]): ``{session_id, gain_pct}`` of the writing session.
-        experience (dict[str, Any]): Counts of the lessons/pitfalls carried over.
-    """
+    the run it came from."""
 
     match_type: Literal["exact", "degraded"]
     tier: str
@@ -3001,162 +370,91 @@ class V6WarmStartMatched(TypedDict, total=False):
 
 
 class V6WarmStartReads(TypedDict, total=False):
-    """``timeline[type=warm_start].ext.reads`` — Recipe KB read attribution.
+    """``timeline[type=warm_start].ext.reads`` — the KB reads T0 made.
 
-    Aggregated from the recipe-snapshot audit log (last 50 reads): how the T0
-    lookups resolved, which backend served each, and which source supplied the
-    champion config. Omitted when the session recorded no readable read.
+    One row per read, recorded as the KB serves it, plus tallies over exactly
+    those rows. Omitted when T0 made no read.
 
-    Attributes:
-        count (int): Number of read rows considered (capped at the last 50).
-        hits (int): How many of those reads returned a usable record.
-        by_resolution (dict[str, int]): Reads counted by resolution outcome.
-        by_remote (dict[str, int]): Reads counted by serving backend
-            (e.g. ``kb-store`` vs local ``recipe_kb``).
-        by_source (dict[str, int]): Contributing-source counts across the reads.
-        best_config_by_source (dict[str, int]): Which source supplied the
-            champion config, counted per source.
-        tail (list[dict[str, Any]]): The most recent raw audit rows; downstream
-            champion-config and donor resolution read the latest hit's own
-            ``result`` off these.
-    """
+    Only T0's own reads are here. ``_kb_amend_recipe`` consults the same store
+    through the same audit hook in the middle of the session; those reads are
+    real but they are not the anchor's, and this block would misreport the
+    lookup if it counted them."""
 
     count: int
     hits: int
     by_resolution: dict[str, int]
-    by_remote: dict[str, int]
-    by_source: dict[str, int]
-    best_config_by_source: dict[str, int]
-    tail: list[dict[str, Any]]
+    by_method: dict[str, int]
+    rows: list[dict[str, Any]]
 
 
 class V6WarmStartExt(TypedDict, total=False):
     """``timeline[type=warm_start].ext`` — what was asked for, what came back.
 
-    Attributes:
-        requested (dict[str, Any]): ``{canonical_id, scope}`` this session asked
-            for. ``canonical_id`` is read from ``recipe_finalize`` rather than
-            rebuilt, because the hardware dimension is topology-aware.
-        match_status (str): The raw ``warm_start_context.status`` when it is not
-            a plain hit; ``seed_only`` is a hit that could not be executed and
-            would otherwise be indistinguishable from a miss.
-        matched (V6WarmStartMatched): Omitted unless the status is ``matched``.
-        reads (V6WarmStartReads): Per-source read attribution from the recipe
-            snapshot audit; omitted when no read was recorded.
-    """
+    Whether the lookup ran and whether it found anything are separate facts:
+    the event's ``status`` carries the first and ``match_status`` the second.
+    Every finding is a ``succeeded`` lookup, because the KB was asked and it
+    answered; only the machinery breaking is a ``failed`` one. A first-ever
+    session for a workload matches the bare anchor row T0 stamped moments
+    earlier and reports ``seed_only``, which is normal and not a fault."""
 
-    requested: dict[str, Any]
+    request: dict[str, Any]
     match_status: str
-    matched: V6WarmStartMatched
-    reads: V6WarmStartReads
-
-
-class V6WarmReplayApplied(TypedDict, total=False):
-    """What was running when a warm replay reproduced its gain.
-
-    Recorded only on ``reproduced``. The columns are applied together and
-    measured together, so one merged configuration is reported rather than a
-    per-column split that would have to guess which column earned the gain. A
-    replay that did not reproduce records its reason instead — its material has
-    already been rolled back, so there is no running configuration to describe.
-
-    Attributes:
-        config (dict[str, Any]): The effective ``extra_server_args`` and
-            ``extra_envs``, recipe and kernel columns already merged.
-        patch (list[str]): Overlay refs that applied successfully. The
-            lexicographic order of a ref is its replay order; the separate
-            ``patch_timeline`` column is retired.
-        kernel (dict[str, Any]): ``{status, total, kept, reverted, columns}``
-            for the kernel column.
-    """
-
-    config: dict[str, Any]
-    patch: list[str]
-    kernel: dict[str, Any]
+    matched: V6WarmStartMatched | None
+    reads: V6WarmStartReads | None
+    failure: V6Failure | None
 
 
 class V6WarmReplayExt(TypedDict, total=False):
-    """``timeline[type=warm_replay].ext`` — did the record reproduce, and why not.
+    """``timeline[type=warm_replay].ext`` — the replay arc from request to verdict.
 
-    Attributes:
-        raw_status (str): The runtime status before it was collapsed onto the
-            five published outcomes (it also spells ``rollback_failed``,
-            ``enqueue_failed``, ``quality_failed``, ``accuracy_failed``,
-            ``promotion_failed``, ``kernel_preparation_failed`` and
-            ``reproduced_but_no_params``).
-        result_type (str): Stable reason code; omitted on a clean reproduce.
-        raw_reason (str | None): The unmapped reason, so normalization cannot
-            silently drop detail.
-        tier (str | None): Ladder rung of the replayed record.
-        confidence (float | None): Transfer confidence of that rung.
-        config_source (str | None): Identity that owned the replayed config.
-        config_donor_tier (str | None): ``self`` when the identity owned it.
-        donor (dict[str, Any]): Borrowed donor's identity, session and gain.
-        before_tput (float | None): Baseline the replay was judged against.
-        after_tput (float | None): Measured HOT-round throughput.
-        gain_pct (float | None): Measured gain against ``before_tput``.
-        expected_gain_pct (float | None): Gain the record claimed.
-        keep_threshold_pct (float | None): Threshold this replay had to clear.
-        historical_reproduce_bar_pct (float | None): ``expected_gain`` scaled by
-            the minimum reproduce ratio.
-        below_historical_reproduce (bool | None): Positive gain that still fell
-            short of that bar — reproduced, but materially degraded.
-        accuracy (dict[str, Any]): ``{eval_ran, baseline, replay, passed}``.
-        applied (V6WarmReplayApplied): Present only on ``reproduced``.
-        active_framework_root (str): Checkout promoted after a reproduce.
-        rollback (dict[str, Any]): ``{ok, errors}`` when material was reverted.
-        failure (dict[str, Any]): ``{error_class, error}``.
-    """
+    One event per replay attempt. ``blocked_by`` names the first gate that did
+    not pass; a successful arc leaves it ``None``. ``failure`` is the canonical
+    crash block when the arc raised rather than settling a verdict."""
 
-    raw_status: str
-    result_type: str
-    raw_reason: str | None
-    tier: str | None
-    confidence: float | None
-    config_source: str | None
-    config_donor_tier: str | None
-    donor: dict[str, Any]
-    before_tput: float | None
-    after_tput: float | None
-    gain_pct: float | None
-    expected_gain_pct: float | None
-    keep_threshold_pct: float | None
-    historical_reproduce_bar_pct: float | None
-    below_historical_reproduce: bool | None
-    accuracy: dict[str, Any]
-    applied: V6WarmReplayApplied
-    active_framework_root: str
-    rollback: dict[str, Any]
-    failure: dict[str, Any]
+    request: dict[str, Any]
+    measurement: dict[str, Any]
+    gates: list[dict[str, Any]]
+    blocked_by: str | None
+    applied: dict[str, Any] | None
+    verdict: dict[str, Any]
+    promotion: dict[str, Any] | None
+    rollback: dict[str, Any] | None
+    skip: dict[str, Any] | None
+    failure: V6Failure | None
+    duration_sec: float | None
+
+
+class V6BaselineExt(TypedDict, total=False):
+    """``timeline[type=baseline].ext`` — one entry per measurement the event owns.
+
+    ``anchoring_eval`` is present only when one of those actions established
+    the session's quality reference."""
+
+    actions: list[dict[str, Any]]
+    anchoring_eval: dict[str, Any]
+
+
+class V6RooflineExt(TypedDict, total=False):
+    """``timeline[type=roofline].ext`` — one entry per analysis the event owns."""
+
+    actions: list[dict[str, Any]]
 
 
 class V6KBWriteBackExt(TypedDict, total=False):
-    """``timeline[type=kb_write_back].ext`` — did this session's Recipe land.
+    """``close.kb_write_back`` — did this session's Recipe land.
+
+    Lives under ``close`` rather than as a timeline event of its own. The
+    session publishes on its way out no matter what, so whether it did is a
+    question always worth answering, and a timeline event that did not happen
+    is simply absent — there would be nowhere to answer it. Absence of this
+    key therefore means the publication was never attempted at all.
 
     The published Recipe body is deliberately not mirrored here: it is the KB
     Store's record, and duplicating three columns of overlay refs into every
     breakdown would grow the export without answering a question the identity
-    and the throughput do not already answer.
+    and the throughput do not already answer."""
 
-    Attributes:
-        result_type (str): Stable reason code. The publisher's own vocabulary is
-            narrower than it looks — build, transport and upload failures all
-            surface as a bare exception class name — so the raw reasons are
-            mapped onto a fixed set here.
-        raw_reason (str | None): The unmapped reason.
-        backend (str | None): ``kb-store`` / ``local`` / ``disabled``.
-        canonical_id (str | None): Identity written to.
-        session_id (str | None): Session id recorded on the KB side.
-        scope (dict[str, Any]): Workload dimensions the Champion is keyed by.
-        optimized_throughput (float | None): Throughput submitted, and the value
-            compared against the incumbent Champion.
-        validated_gain_pct (float | None): Session's cumulative validated gain.
-        attempts (int | None): Finalize attempts; above one means it retried.
-        source (str | None): ``close`` or the ``t4_fallback`` teardown path.
-        queue (dict[str, Any]): Local write-queue depths.
-        failure (dict[str, Any]): ``{error_class, error}``.
-    """
-
+    status: str
     result_type: str
     raw_reason: str | None
     backend: str | None
@@ -3165,244 +463,2259 @@ class V6KBWriteBackExt(TypedDict, total=False):
     scope: dict[str, Any]
     optimized_throughput: float | None
     validated_gain_pct: float | None
-    attempts: int | None
-    source: str | None
+    attempts: list[dict[str, Any]]
     queue: dict[str, Any]
     failure: dict[str, Any]
 
 
-class V6Close(TypedDict, total=False):
-    """V6 session finalization result exposed outside the business timeline."""
+class V6RooflineKernel(TypedDict, total=False):
+    """One kernel in a roofline action's own per-kernel table.
 
-    status: Literal["succeeded", "failed", "degraded"]
+    Recorded by reading the sidecar the analyzer wrote, at the moment the action
+    that produced it settles. The table is not truncated by GPU share, because
+    the kernel worth optimizing is often a cheap one running at low efficiency,
+    which is exactly what a top-N-by-cost cut removes.
+
+    The two analysis routes agree on identity and cost and diverge on
+    provenance: the bypass route measures attainment against a real rocprof
+    ceiling and sets ``roofline_measured`` / ``roofline_attainment_pct``, where
+    TraceLens has only its analytical model. The absent field is itself the
+    answer to "was this number measured"."""
+
+    kernel_id: str
+    name: str
+    kernel_category: str
+    source_file: str | None
+    gpu_pct: float | None
+    duration_us: float | None
+    call_count: int | None
+    bottleneck: str | None
+    bound_type: str | None
+    arithmetic_intensity: float | None
+    flops_per_byte: float | None
+    efficiency_percent: float | None
+    compute_utilization_pct: float | None
+    bandwidth_utilization_pct: float | None
+    roofline_attainment_pct: float | None
+    roofline_name: str | None
+    roofline_source: str
+    roofline_measured: bool
+    suggestion: str
+    recommended_actions: list[str]
+    reusable_native_kernel: bool
+    rocprof_roofline: dict[str, Any] | None
+
+
+class V6RooflineKernelTable(TypedDict, total=False):
+    """A roofline action's per-kernel table with the provenance of its source."""
+
+    schema_version: str | None
+    source: str
+    trace_input: str
+    trace_input_type: str
+    analysis_md_path: str
+    kernel_candidates_path: str
+    path: str
+    kernel_count: int
+    truncated: bool
+    kernels: list[V6RooflineKernel]
+
+
+class V6RooflineEventSnapshot(TypedDict, total=False):
+    """A roofline run's own quantitative conclusion, recorded on its event.
+
+    Carried on the event rather than only as ``snapshot_id``, because a join
+    against the capped session-state history fails once later runs evict the
+    entry."""
+
+    snapshot_id: int | None
+    ts: str
+    framework: str
+    macro_cycle: int | None
+    throughput_unit: str
+    achieved_tok_per_sec: float | None
+    theoretical_peak_tok_per_sec: float | None
+    roofline_mem_ceiling_tok_per_sec: float | None
+    roofline_cmp_ceiling_tok_per_sec: float | None
+    roofline_bound_kind: str
+    e2e_mean_ms: float | None
+    roofline_ideal_ms: float | None
+    within_roofline_pct: float | None
+    within_roofline_pct_uncapped: float | None
+    gap_to_roofline_pct: float | None
+    roofline_ceiling_exceeded: bool
+    ceiling_arm: str
+    compute_pct: float | None
+    idle_pct: float | None
+    comm_pct: float | None
+    top_bottleneck: str
+    top_kernel: dict[str, Any] | None
+    roofline_provenance: dict[str, Any] | None
+    perfmodel_breakdown: dict[str, Any]
+
+
+class V6RooflineTrajectoryPoint(TypedDict, total=False):
+    """One measured step on the session's throughput curve."""
+
+    ts: str
+    tput: float
+    label: str
+    action: str
+    gain_pct: float
+    flags: str
+    extra_envs: dict[str, Any]
+
+
+class V6RooflineProgress(TypedDict, total=False):
+    """How far the session got against its roofline ceiling, snapshotted at close.
+
+    This is the one roofline fact that is not a property of a single roofline
+    run, which is why it sits under ``close`` rather than in a timeline event:
+    the ceiling comes from the last analysis, the curve from every promotion
+    between them, and the streak from the runs that failed.
+
+    ``ceiling_kind`` discriminates two domains that cannot share fields.
+    Token-decoding models are bounded in throughput and report the ``tok/sec``
+    fields; scriptable/diffusion models decode no tokens and are bounded in
+    latency, reporting the ``ms`` fields instead. A reader that ignores
+    ``ceiling_kind`` will read the absent domain's nulls as a failed analysis.
+
+    The snapshot history is deliberately absent: each roofline event carries
+    its own snapshot in full, and a second copy here would be free to disagree.
+    ``latest_snapshot_id`` is the join back to the event that set the ceiling."""
+
+    ceiling_kind: Literal["throughput", "latency", "none"]
+    ceiling_tok_per_sec: float | None
+    target_tok_per_sec: float | None
+    ceiling_ratio_target: float
+    ceiling_available: bool
+    latency_ceiling_ms: float | None
+    achieved_latency_ms: float | None
+    latency_ceiling_available: bool
+    current_best_pct_of_latency_ceiling: float | None
+    trajectory: list[V6RooflineTrajectoryPoint]
+    baseline_tput: float
+    current_best_tput: float
+    cumulative_gain_pct: float
+    current_best_pct_of_ceiling: float | None
+    current_best_pct_of_target: float | None
+    roofline_failure_streak: int
+    latest_snapshot_id: int | None
+    trajectory_incomplete: bool
+    current_best_tput_declared: float
+
+
+class V6BaselineProgress(TypedDict, total=False):
+    """The session's final tally of baseline failures, snapshotted at close.
+
+    Under ``close`` rather than in the baseline event for the same reason the
+    roofline curve is: no single measurement can hold it. Each baseline event
+    closes when its own measurement ends and the counters are advanced by the
+    write-back that accounts for it afterwards, so an event records the count
+    it was dispatched under (``request.failure_streak_before``) while the
+    session total is only final here."""
+
+    failure_streak: int
+    total_failures: int
+    arg_error_streak: int
+
+
+class V6GeakCandidate(TypedDict, total=False):
+    """Where the GEAK candidate stood when the session wound down.
+
+    Under ``close`` for the same reason the baseline tally is. A candidate's
+    attempts belong to the kernel event that ran them, and that event closes
+    when the phase is left -- but a slot still awaiting a rebench, or one the
+    close drain cancelled, is settled after every kernel event has closed.
+
+    The self-reported numbers travel with the verdict so a reader can say what
+    was dropped rather than only that something was. They are the optimizer's
+    own account and were never re-measured; a candidate that survived to a
+    headline has its measured numbers on the stack instead."""
+
+    revalidation_pending: bool
+    status: str
+    revalidation_error: str | None
+    revalidation_error_class: str | None
+    self_reported_gain_pct: float | None
+    self_reported_tput: float | None
+    self_reported_basis: str
+
+
+class V6ConcSweepRequest(TypedDict, total=False):
+    """What the dispatch asked for, before the sweep resolved anything.
+
+    Kept apart from ``plan`` so a ladder the sweep chose is never mistaken for
+    one it was handed: a null ``requested_concs`` is the operator declining to
+    pick, not an empty ladder."""
+
+    task_id: str
+    task_kind: str
+    reason: str
+    requested_concs: list[int]
+    requested_variant_timeout_sec: int | None
+    requested_total_budget_sec: int | None
+
+
+class V6ConcSweepWorkload(TypedDict, total=False):
+    """The shape the ladder is swept over.
+
+    ``benchmark_mode`` names the axis pair the points are drawn on, so a reader
+    never infers it from whether a latency field happens to be null."""
+
+    session_id: str
+    isl: int | None
+    osl: int | None
+    tp: int | None
+    benchmark_mode: str
+
+
+class V6ConcSweepInputAnchor(TypedDict, total=False):
+    """The optimized configuration the sweep was asked to compare.
+
+    The optimized arm is whatever the session's current best was when the sweep
+    started, which is a moving target: a sweep two cycles later compares a
+    different configuration under the same event type. ``base_action`` is the
+    action kind that promoted it."""
+
+    base_variant_id: str | None
+    base_action: str | None
+    input_throughput_tok_s_per_gpu: float | None
+    anchor_tput: float | None
+    baseline_tput: float | None
+    extra_server_args: str
+    extra_envs: dict[str, str]
+
+
+class V6ConcSweepPlan(TypedDict, total=False):
+    """The ladder the sweep resolved and the order it will run it in.
+
+    ``arms_order`` matters to a reader of the budget: the optimized arm runs
+    first as the more informative of the two, so a budget that runs out takes
+    the baseline arm with it. ``concs_ordered`` is descending because a
+    single-server arm boots at the most demanding rung and reuses down."""
+
+    grid_source: str | None
+    concs_requested: list[int]
+    concs_ordered: list[int]
+    num_prompts_factor: int | None
+    variant_timeout_sec: int | None
+    arms_order: list[str]
+
+
+class V6ConcSweepBudget(TypedDict, total=False):
+    """The budget the ladder was admitted under.
+
+    Both totals are kept because they disagree: the sweep raises its own
+    default when that default cannot fund even one rung at the cap the grid
+    runner will actually grant. ``rung_cost_sec`` is that granted cap rather
+    than the declared timeout, since pricing at the smaller admits a rung the
+    budget cannot pay for. ``deadline`` is a wall-clock epoch."""
+
+    declared_total_sec: int | None
+    granted_total_sec: int | None
+    rung_cost_sec: float | None
+    raised: bool
+    gate_active: bool
+    deadline: float | None
+    session_soft_deadline_sec: float | None
+
+
+class V6ConcSweepEnvironment(TypedDict, total=False):
+    """What the sweep resolved to run against.
+
+    ``sweep_task_id`` is the sweep's own minted id, distinct from the dispatched
+    task id: it names the ``runs/conc_sweep/`` workspace the rung artifacts live
+    under, and nothing else ever wrote it down."""
+
+    sweep_task_id: str
+    workspace: str
+    model_path: str
+    gpu_type: str
+    base_config_path: str
+
+
+class V6ConcSweepArtifacts(TypedDict, total=False):
+    """Where the sweep's own report was written."""
+
+    report_json_path: str
+    report_csv_path: str
+
+
+class V6ConcSweepResult(TypedDict, total=False):
+    """The roll-up over the pairs, and the sweep's own word on how it ended.
+
+    ``status`` is the sweep's verdict rather than the event's: the event
+    degrades a budget-truncated success, and keeping both means the two cannot
+    be confused. ``declined`` separates a sweep that refused before running
+    anything from ``was_skipped``, which a ladder that ran and produced no
+    usable pair also sets. ``best_conc`` is the best rung on the objective
+    alone; ``best_conc_guard_holds`` says whether the session's KEEP rule would
+    also have accepted it, and ``guard_axis`` names the axis that verdict is
+    about. Both are empty off the interactivity objective, where there is no
+    second axis to hold."""
+
+    status: str
+    metric: str
+    guard_axis: str
+    best_conc: int | None
+    best_speedup: float | None
+    best_conc_guard_holds: bool | None
+    successful_pairs: int | None
+    failed_pairs: int | None
+    median_speedup: float | None
+    mean_speedup: float | None
+    skip_reason: str
+    was_skipped: bool
+    budget_exhausted: bool | None
+    declined: bool
+
+
+class V6ConcSweepRuntime(TypedDict, total=False):
+    """How the run went, as opposed to what it found.
+
+    ``stop_reason`` is the session's, set when its end cut the sweep short; a
+    sweep stopped that way measured what it got to and did not fail, which is
+    why it is here rather than in ``failure``. ``elapsed_sec`` is the sweep's
+    own accounting and ``duration_sec`` the event's."""
+
+    elapsed_sec: float | None
+    budget_remaining_sec: float | None
+    budget_skip_reason: str
+    stop_reason: str
+    workspace: str
+    duration_sec: float | None
+
+
+class V6ConcSweepCeilingModel(TypedDict, total=False):
+    """The model dimensions the ceiling was computed from.
+
+    Recorded because the ceiling is only auditable against them: the same
+    checkpoint served at a different weight precision yields a different
+    ceiling from the same curve."""
+
+    weight_bytes: int
+    active_weight_bytes: int
+    num_experts: int
+    experts_per_tok: int
+    expert_weight_bytes: int
+    num_layers: int
+    num_kv_heads: int
+    head_dim: int
+    weight_dtype_bytes: float
+
+
+class V6ConcSweepCeilingRow(TypedDict, total=False):
+    """One concurrency's theoretical ceiling, and how close each arm came.
+
+    ``bound_kind`` says which of the two limits ``t_peak_tok_s`` came from, so
+    a rung far below peak can be read as the memory wall or as headroom the
+    configuration is not using."""
+
+    conc: int
+    t_mem_tok_s: float
+    t_cmp_tok_s: float
+    t_peak_tok_s: float
+    bound_kind: str
+    mbu_baseline_pct: float | None
+    mbu_optimized_pct: float | None
+
+
+class V6ConcSweepCeiling(TypedDict, total=False):
+    """The decode roofline the curve is read against, one row per rung."""
+
+    schema_version: int
+    source: str
+    gpu_type: str
+    precision: str
+    tp: int
+    isl: int
+    osl: int
+    model_meta: V6ConcSweepCeilingModel
+    rows: list[V6ConcSweepCeilingRow]
+
+
+class V6ConcSweepLifecycle(TypedDict, total=False):
+    """Whether the framework can hold a server across rungs, and on what port.
+
+    ``eligible`` false is what forces the restart-per-rung path, so a curve
+    that cost a server start per point is explained rather than merely slow."""
+
+    eligible: bool | None
+    reason: str
+    port: int | None
+    framework: str
+
+
+class V6ConcSweepRefused(TypedDict, total=False):
+    """The gate that refused an arm before it built anything."""
+
+    reason: str
+    remaining_sec: float | None
+
+
+class V6ConcSweepRung(TypedDict, total=False):
+    """One planned rung and the load it carries.
+
+    A rung's ``num_prompts`` is derived from its CONC and never written down
+    elsewhere, so a run cannot be reproduced from the report alone."""
+
+    name: str
+    conc: int | None
+    num_prompts: int | None
+
+
+class V6ConcSweepBootAttempt(TypedDict, total=False):
+    """One rung the boot-retry-descend loop tried.
+
+    ``committed`` false is a concurrency the server would not come up at --
+    the capacity finding the sweep produces for free and the report discards."""
+
+    conc: int | None
+    committed: bool
+    status: str
+    error_class: str
+    error: str | None
+    start_time: str
+    wall_duration_sec: float | None
+
+
+class V6ConcSweepBoot(TypedDict, total=False):
+    """How the boot-retry-descend loop resolved.
+
+    ``attempted_concs`` is in the order tried. Absent on an arm refused before
+    it built anything."""
+
+    succeeded: bool
+    booted_conc: int | None
+    attempted_concs: list[int]
+    failed_concs: list[int]
+    attempts: list[V6ConcSweepBootAttempt]
+
+
+class V6ConcSweepPoint(TypedDict, total=False):
+    """One rung of one arm's concurrency curve, as the sweep recorded it.
+
+    The measurement half is the same flattening the sweep's own report writes,
+    so the recorded curve and the written one cannot differ. The process half
+    -- everything from ``stage`` down -- is what the report has no place for:
+    a rung that produced no throughput number is otherwise indistinguishable
+    from one the budget refused, one the server would not boot at, and one the
+    benchmark simply failed."""
+
+    arm: str
+    conc: int
+    status: str
+    output_throughput: float | None
+    request_throughput: float | None
+    total_token_throughput: float | None
+    input_throughput: float | None
+    e2e_norm_intvty_p90: float | None
+    tpot_p90_ms: float | None
+    ttft_mean_ms: float | None
+    e2el_mean_ms: float | None
+    duration_seconds: float | None
+    completed_requests: int | None
+    error: str | None
+    error_class: str | None
+    killed_overtime: bool | None
+    estimated_output_throughput: float | None
+    workspace: str
+    report_path: str
+    stage: str
+    num_prompts: int | None
+    start_time: str
+    end_time: str
+    wall_duration_sec: float | None
+    granted_cap_sec: float | None
+    budget_remaining_sec: float | None
+
+
+class V6ConcSweepArm(TypedDict, total=False):
+    """One arm of a concurrency sweep: a whole ladder under one configuration.
+
+    The two arms differ only by the server args and envs they add, so the
+    curve is only readable alongside the decisions the ladder was run under.
+    The reuse path boots one server at the most demanding rung and reuses it
+    down; the restart path pays a server start per rung. They fail
+    differently, and which one ran is not recoverable after the fact."""
+
+    arm: str
+    status: str
+    start_time: str
+    end_time: str
+    extra_server_args: str
+    extra_envs: dict[str, str]
+    strategy: str
+    strategy_reason: str | None
+    lifecycle: V6ConcSweepLifecycle
+    serving_lease_held: bool | None
+    refused: V6ConcSweepRefused | None
+    failure: V6Failure | None
+    grid: list[V6ConcSweepRung]
+    boot: V6ConcSweepBoot
+    points: list[V6ConcSweepPoint]
+
+
+class V6ConcSweepPair(TypedDict, total=False):
+    """The two arms joined at one concurrency.
+
+    The pair is ranked on one axis and reports a second. ``*_value`` is on the
+    axis ``result.metric`` names -- a slow-tail interactivity percentile
+    whenever the session grades on one, which is why these are not named for
+    throughput. ``*_guard`` and ``guard_holds`` carry the throughput the
+    session would have held a promotion to, reported rather than enforced: a
+    sweep exists to draw the interactivity/throughput frontier, so a rung that
+    moved along it is a result and not a failure. They are null off the
+    interactivity objective, where there is no second axis to hold."""
+
+    conc: int
+    baseline_value: float | None
+    optimized_value: float | None
+    speedup: float | None
+    delta_pct: float | None
+    baseline_guard: float | None
+    optimized_guard: float | None
+    guard_holds: bool | None
+    baseline_status: str
+    optimized_status: str
+    error: str | None
+
+
+class V6Failure(TypedDict, total=False):
+    """The canonical failure row, shared by every event that records one.
+
+    One shape from one producer, so a reader that can parse one event's
+    failure can parse them all. ``stage`` names the step it died at -- a
+    profiling substep, a baseline round, a phase entry -- rather than the phase
+    it died in. Absent on anything that did not fail, which is not the same as
+    a block present and empty: an event stopped early by the session's end
+    reports that beside the rest of how it ran, because nothing about it
+    failed.
+
+    Some events carry their own additions beside these keys, the baseline's
+    ``returncode`` and ``stderr_log_path`` among them."""
+
+    stage: str
+    error_class: str
+    message: str
+
+
+class V6ConcSweepExt(TypedDict, total=False):
+    """The ``conc_sweep`` timeline event's ``ext``, recorded as the sweep runs.
+
+    The sweep runs the CONC ladder twice -- once on the session's optimized
+    server args, once on none -- and pairs the curves into a speedup per
+    concurrency. What the event adds over the report on disk is the run rather
+    than the result: the ladder and where it came from, the budget each arm
+    was admitted under, the strategy each ladder ran with, and every rung
+    including the ones that were refused or would not boot."""
+
+    schema_version: str
+    request: V6ConcSweepRequest
+    input_anchor: V6ConcSweepInputAnchor
+    workload: V6ConcSweepWorkload
+    plan: V6ConcSweepPlan
+    budget: V6ConcSweepBudget
+    environment: V6ConcSweepEnvironment
+    arms: dict[str, V6ConcSweepArm]
+    comparison: list[V6ConcSweepPair]
+    result: V6ConcSweepResult
+    roofline_ceiling: V6ConcSweepCeiling | None
+    runtime: V6ConcSweepRuntime
+    artifacts: V6ConcSweepArtifacts
+    faults: list[V6Failure]
+    failure: V6Failure | None
+    superseded_sweeps: list[str]
+
+
+class V6ArchivedFile(TypedDict, total=False):
+    """One copy an enablement round's archive holds, and what it is.
+
+    ``role`` is a ``round_archive.ROLE_*`` value. It distinguishes a patch
+    the round applied from one it refused, which the round's own result cannot.
+    """
+
+    path: str
+    role: str
+
+
+class V6EnablementAttempt(TypedDict, total=False):
+    """One authoring round of the enablement lane, keyed by its specialist.
+
+    The dispatch and the settlement are recorded onto the same row from
+    different ticks, so a round the session was killed between the two is on
+    the timeline as a round that was dispatched and never ruled -- which a
+    counter could not express at all.
+
+    The gap a round faced and the gap it revealed are separate fields.
+    ``launch_log_excerpt`` is what the round was pointed at;
+    ``next_launch_log_excerpt`` is what its patch uncovered underneath, which
+    is the gap the *next* round will be pointed at. The projection kept one
+    ``launch_log`` for the whole lane and every advance overwrote it, so the
+    export published the newest gap as the reason the lane had opened.
+
+    ``files`` and ``accepted_config_path`` are session-relative and name only
+    copies the round's archive took, which is a weaker claim than "fetchable":
+    ``reports/enablement/**`` is packaged outside ``RESERVED_PATHS``, so a
+    session that hit the file or byte cap ships a truncated package and a
+    consumer must tolerate a miss. ``patches_applied`` and
+    ``artifacts_applied[].target`` are the workspace originals the round
+    reported, which are never packaged -- they are identity, not a way to
+    fetch. Note the asymmetry with ``V6EnablementResult.accepted_config_path``,
+    which stays absolute because the revalidation baseline opens that one
+    directly."""
+
+    attempt: int
+    task_id: str
+    failure_kind: str
+    dispatched_at: str
+    launch_log_excerpt: str | None
+    candidate_refs: list[str]
+    settled_at: str
+    status: str
+    advanced: bool
+    reason: str
+    landed: bool
+    validation_pending: bool
+    stall_streak_after: int
+    patches_applied: list[str]
+    artifacts_applied: list[dict[str, Any]]
+    setup_commands_applied: list[str]
+    patches_dropped_by_grounding: list[str]
+    patches_span_multiple_roots: bool
+    framework_root: str | None
+    files: list[V6ArchivedFile]
+    accepted_config_path: str | None
+    effective_config: dict[str, Any] | None
+    stack_action: dict[str, Any] | None
+    runtime: dict[str, Any] | None
+    localization_manifest: dict[str, Any] | None
+    next_launch_log_excerpt: str | None
+
+
+class V6EnablementBuild(TypedDict, total=False):
+    """One targeted build the enablement lane ran, keyed by its task id.
+
+    ``ok`` is absent, rather than false, on a row that only records an enqueue:
+    a build with no verdict yet has not failed."""
+
+    task_id: str
+    recorded_at: str
+    component: str
+    ref: str
+    gpu_arch: str
+    max_jobs: int
+    installed_versions: dict[str, str]
+    build_probes: list[str]
+    build_log_path: str | None
+    attempt_root: str | None
+    novelty_key: str
+    ok: bool
+    failure_class: str
+    failure_summary: str
+
+
+class V6EnablementRevalidation(TypedDict, total=False):
+    """One eval-origin revalidation window, keyed by its generation.
+
+    An eval-origin KEEP is provisional: the patch passed the gate's own bench,
+    but accuracy is only official once a genuine baseline re-measures it under
+    the frozen eval contract. The window is what holds the lane open until that
+    happens, and its generation is what keeps a fresh enqueue from resolving to
+    a spent task row.
+
+    A window the run stopped is recorded with a ``reason`` and no
+    ``error_class``: it measured nothing, so it is not a failed revalidation
+    and the lane is not charged a stall for it."""
+
+    generation: int
+    opened_at: str
+    task_id: str
+    config_path: str
+    reason: str
+    closed_at: str
+    promoted: bool
+    accuracy: float | None
+    accuracy_floor: float | None
+    error_class: str
+
+
+class V6EnablementExt(TypedDict, total=False):
+    """The ``enablement`` timeline event's ``ext``: one repair lane per session.
+
+    Enablement repairs a (model, backend) combo that cannot be benched at all
+    -- it will not boot, or it boots and fails its accuracy eval. The lane
+    dispatches an authoring specialist, applies its patch, optionally compiles
+    a component, benches the result, and either lands or rearms against the
+    gap the patch revealed underneath. That is a sequence of dispatched actions
+    with outcomes, which is what this event holds.
+
+    The event spans the whole session rather than a phase, because the lane
+    does. Its pump is phase-independent by design: a combo that cannot boot
+    never leaves PRELUDE, and the round that repairs it is ruled in
+    FRAMEWORK_AGENT. A phase-scoped event would hold the trigger in one half
+    and the outcome in the other."""
+
+    mode: str
+    origin: str
+    engaged: bool
+    trigger: dict[str, Any] | None
+    attempts: dict[str, Any]
+    builds: dict[str, Any]
+    revalidations: dict[str, Any]
+    human_review: dict[str, Any]
+    result: dict[str, Any] | None
+    failure: V6Failure | None
+    recipe: dict[str, Any] | None
+
+
+class V6PhaseSegment(TypedDict, total=False):
+    """One entry into a phase, with the exit that ended it.
+
+    A row rather than a whole event because a phase re-entered inside one macro
+    cycle cannot be given a second event id: the id's three segments are
+    ``(phase, macro_cycle, component)`` and every one of them must be
+    recomputable from persisted state, so there is nothing left to tell two
+    entries apart. The event therefore covers all of a phase's time in a cycle
+    and each entry is a segment on it.
+
+    Both endpoints are recorded by the transition that produced them. The
+    legacy ``phase_segments`` key derived them instead, by pairing
+    ``phase_history`` rows off two at a time -- which cannot describe the
+    segment a session ends in, because that one has no successor row to be
+    closed by, and so published it with an empty exit and no duration."""
+
+    sequence: int
+    from_phase: str
+    entered_at: str
+    entered_unix: float | None
+    entered_reason: str
+    entered_evidence: dict[str, Any]
+    to_phase: str
+    exited_at: str
+    exited_unix: float | None
+    exit_reason: str
+    exit_evidence: dict[str, Any]
+    duration_sec: float | None
+
+
+class V6PhaseAction(TypedDict, total=False):
+    """One dispatched action, charged to the phase that ordered it.
+
+    Deliberately thin. The per-dispatch detail belongs to the stage events --
+    ``baseline.ext.actions[]`` carries the discarded cold-warmup rounds,
+    ``framework_agent.ext.attempts[]`` carries the arm and provenance, and
+    neither could be expressed by a flat row -- so restating any of it here
+    would put one semantic in two places. The detail is reached by joining on
+    :attr:`task_id`, which those rows already carry. For ``report``,
+    ``recover``, ``session_breakdown`` and ``target_analysis``, which no stage
+    event covers, this row is the only record and the join finds nothing.
+
+    :attr:`phase` and :attr:`macro_cycle` are recorded at the dispatch, not at
+    the settle. An action can outlive the phase that ordered it -- a baseline
+    settling after a plateau exit -- so reading the phase when the result lands
+    charges the wrong one. That is what the legacy ``phase_timeline`` did: the
+    writer was handed both fields and dropped them, leaving export to attribute
+    each action by testing its timestamp against the phase windows."""
+
+    action: str
+    task_id: str
+    phase: str
+    macro_cycle: int
+    tick: int
+    dispatch_class: Literal["llm", "coordinator", "inline"]
+    allowed: bool
+    denial_rule: str | None
+    dispatched_at: str
+    dispatched_unix: float | None
+    status: str
+    decision: str
+    error_class: str | None
+    workspace: str | None
+    settled_at: str
+    settled_unix: float | None
+    duration_sec: float | None
+
+
+class V6PhaseMarker(TypedDict, total=False):
+    """One non-transition ``phase_history`` marker, in the phase that raised it."""
+
+    sequence: int
+    reason: str
+    evidence: dict[str, Any]
+    ts: str
+
+
+class V6PhaseDenial(TypedDict, total=False):
+    """One author-time PolicyGate refusal in the phase where it happened."""
+
+    actor: str
+    proposal_msg_id: str | None
+    action: str
+    phase: str
+    rule: str
+    hint: str
+    denied_at: str
+
+
+class V6PhaseProposalReview(TypedDict, total=False):
+    """The Critic's ruling on one proposal, filed on the proposal."""
+
+    verdict: str
+    effective_verdict: str
+    held_to_rule: bool
+    source: str
+    reasoning: str
+    confidence: float | None
+    failure_reason_code: str | None
+    required_evidence: list[str]
+    risks: list[dict[str, Any]]
+    advice_text: str | None
+    alternative_action: str | None
+    variants: list[dict[str, Any]]
+    reviewed_at: str
+
+
+class V6PhaseProposalOutcome(TypedDict, total=False):
+    """What the loop did with a proposal once it had a ruling."""
+
+    materialized: bool
+    denied: bool
+    reauthored: bool
+    task_id: str | None
+    patch_verdict_key: str | None
+    settled_at: str
+
+
+class V6PhaseProposal(TypedDict, total=False):
+    """One proposal the phase raised, with the ruling and the result on it.
+
+    Recorded when the proposal is minted rather than when it is acted on,
+    because most proposals are never acted on: one the Critic refused, or one
+    left pending when the phase exited, produces no dispatch and so has no
+    other row anywhere.
+
+    This is the only place a Critic ruling can be filed with the thing it ruled
+    on. ``framework_agent`` carries ``proposals[].critic_review`` too, but its
+    rows exist for two creation paths inside one phase; a ruling on a KERNEL
+    ``kernel_opt``, on a PRELUDE ``baseline``, or on an action no framework arm
+    maps to had no subject row anywhere, and was dropped without trace."""
+
+    proposal_msg_id: str
+    action: str
+    from_agent: str
+    phase: str
+    macro_cycle: int
+    tick: int
+    predicted_gain_pct: float | None
+    candidate_id: str | None
+    variant_name: str | None
+    proposed_at: str
+    critic_review: V6PhaseProposalReview
+    outcome: V6PhaseProposalOutcome
+
+
+class V6PhaseExt(TypedDict, total=False):
+    """The ``phase`` timeline event's ``ext``: the run's time in one phase.
+
+    The one event that is about the run rather than about work. Every other
+    event's id is scoped by a phase, and until this event existed the timeline
+    held no record of the phases themselves -- a reader could see a baseline
+    event tagged ``framework_agent`` and had no way to learn when that phase was
+    entered, why the run left it, or how long it had.
+
+    One event per ``(phase, macro_cycle)``, covering every entry into that phase
+    in that cycle. See :class:`V6PhaseSegment` for why a re-entry is a row here
+    rather than an event of its own."""
+
+    phase: str
+    macro_cycle: int
+    entered_at: str
+    exited_at: str
+    exit_reason: str
+    entries: int
+    duration_sec: float | None
+    open: bool
+    segments: list[V6PhaseSegment]
+    actions: dict[str, Any]
+    markers: dict[str, Any]
+    proposals: dict[str, Any]
+    denials: dict[str, Any]
+
+
+class V6StackAdoption(TypedDict, total=False):
+    """One adoption onto the optimization stack, recorded as it was accepted."""
+
+    stack_index: int
+    recorded_at: str
+    ts: str
+    action: str
+    source: str
+    variant_name: str | None
+    lever_kind: str | None
+    operation_kind: str | None
+    scope: str | None
+    backend: str | None
+    source_phase: str | None
+    task_id: str | None
+    kernel_id: str | None
+    fingerprint: str | None
+    provenance: str | None
+    gap_canonical_id: str | None
+    objective: str
+    degrade_reason: str
+    throughput_before: float | None
+    throughput_after: float | None
+    baseline_tput: float | None
+    contribution_pct: float | None
+    local_gain_pct: float | None
+    cumulative_gain_pct: float | None
+    accuracy: float | None
+    attribution_eligible: bool | None
+    accepted_kernels: list[str]
+
+
+class V6StackValidation(TypedDict, total=False):
+    """One measurement of the whole stack's gain, keyed by the length it covers.
+
+    The ledger's only independent check on itself. Without one of these the
+    session total is the sum of the very steps it is meant to be checking."""
+
+    stack_len: int
+    ts: str
+    baseline_tput: float | None
+    validated_tput: float | None
+    validated_gain_pct: float | None
+    source: str
+    measurement_basis: str
+    #: The axis the figure was graded on, so an intvty-graded gain is not later
+    #: read as an output gain. Always the axis the session was configured for:
+    #: only a comparison the orchestrator found comparable is recorded here.
+    graded_objective: str
+    #: The graded axes of the measurement that produced the figure, recorded
+    #: beside it because a later revalidation moves the cumulative gain without
+    #: re-promoting the recipe.
+    perf: V6GradedAxes
+
+
+class V6StackExt(TypedDict, total=False):
+    """The ``stack`` timeline event's ``ext``: what the session actually kept.
+
+    One event per session, because there is one stack. Its adoptions arrive from
+    PRELUDE warm replay, EXPLORE, FRAMEWORK_AGENT and KERNEL_AGENT and form a
+    single ordered chain; scoping the event by phase would cut that chain at
+    every phase boundary, which is exactly where its before / after pairs have
+    to line up for the reconciliation to mean anything."""
+
+    baseline_tput: float | None
+    objective: str
+    adoptions: dict[str, Any]
+    validations: dict[str, Any]
+    attributed_gain_pct: float
+    chain_total_gain_pct: float | None
+    unattributed_gain_pct: float | None
+    validated_total_gain_pct: float | None
+    reconciliation_gap_pct: float | None
+    guards: dict[str, int]
+
+
+class V6CriticReviewVariant(TypedDict, total=False):
+    """One variant's ruling from a grid the Critic reviewed per variant.
+
+    A rejected variant never reaches a bench, so there is no attempt row for
+    its ruling to live on and this is the only record that it was judged. The
+    map is kept per variant rather than collapsed because the collapse is
+    deliberately lossy: a grid proceeds on its approved subset, and the
+    proposal's summary verdict does not say which variants that was."""
+
+    variant_name: str
+    verdict: str
+    effective_verdict: str
+    held_to_rule: str
+    reason: str
+    failure_reason_code: str
+
+
+class V6CriticReview(TypedDict, total=False):
+    """The Critic's ruling on one proposal, recorded on the proposal itself.
+
+    The review is a sub-structure of its subject rather than a stream of its
+    own. On the bus a proposal and its verdict are two messages about one
+    thing, and the Critic reviews proposals raised by every phase -- so a
+    ruling attached to the proposal follows it wherever it was raised, needs no
+    per-phase home, and leaves nothing to reconcile between a review list and a
+    proposal list.
+
+    Both verdicts are kept. A reject the loop held to a rule that only declared
+    ``advise`` is two facts, and reporting either alone misreads the round: the
+    authored verdict alone says a proposal was refused that in fact ran, the
+    effective verdict alone says one was approved that the Critic refused."""
+
+    verdict: str
+    effective_verdict: str
+    held_to_rule: str
+    reviewer: str
+    iteration: int | None
+    reason: str
+    confidence: float | None
+    failure_reason_code: str
+    concerns: list[str]
+    reviewed_at: str
+    required_evidence: list[Any]
+    risks: list[Any]
+    notes: list[Any]
+    kb_evidence: list[Any]
+    packet_evidence: list[Any]
+    advice_text: str
+    alternative_action: str
+    variants: list[V6CriticReviewVariant]
+    outcome: dict[str, Any]
+
+
+class CriticIteration(TypedDict, total=False):
+    """One critic-agent review pass over a proposed change.
+
+    ``verdict`` reads the iteration's rulings as one line (``2 approve, 1
+    reject``) and ``verdict_counts`` carries the same distribution for callers
+    that need to count. A pass that only spoke -- a heartbeat, a request for
+    context -- rules on nothing and leaves both empty."""
+
+    iteration_id: str
+    iter: int
+    ts: str
+    topic: str
+    verdict: str
+    verdict_counts: dict[str, int]
+    summary: str
+    request_path: str
+    judge_bundle_path: str
+    emit_path: str
+    review_path: str
+    phase: str
+    macro_cycle: int
+    kb_priors: dict[str, Any]
+    framework_reviews: list[dict[str, Any]]
+
+
+class V6Critic(TypedDict, total=False):
+    """The critic agent's own run, outside the business timeline.
+
+    The per-proposal verdicts stay with the proposals they judge; this key
+    carries the agent's session-level run -- how many times it was asked, about
+    what, and what it concluded each time."""
+
+    iterations: list[CriticIteration]
+
+
+class V6RobustnessIntent(TypedDict, total=False):
+    """One intent the robustness agent raised on a turn."""
+
+    type: str
+    severity: str
+    topic: str
+    payload: dict[str, Any]
+
+
+class V6RobustnessTurn(TypedDict, total=False):
+    """The robustness agent's account of one turn.
+
+    ``outcome`` distinguishes a turn that produced intents from one the agent
+    could not complete, which is the distinction the section it replaces could
+    not express: a mute agent and a silent session looked identical."""
+
+    turn_idx: int
+    outcome: Literal["intents", "invalid_envelope", "no_envelope"]
+    ts: str
+    tick_index: int
+    intents: list[V6RobustnessIntent]
+    parse_warnings: list[str]
+    workdir: str
+    detail: str
+
+
+class V6Robustness(TypedDict, total=False):
+    """What the robustness agent raised, outside the business timeline.
+
+    The agent watches the session from the side, so its turns belong to no
+    phase or macro cycle and it keeps a fixed top-level place instead. An
+    empty ``turns`` is an answer, not a gap: the agent never completed a turn."""
+
+    turns: list[V6RobustnessTurn]
+
+
+class V6RobustnessFinding(TypedDict, total=False):
+    """One firing of the robustness ladder, as the ladder itself persisted it.
+
+    Read from the ladder's own JSONL log at close time rather than mirrored
+    through a recorder: the log is already durable and complete, so a second
+    copy taken as each finding was raised could only be the same rows or fewer."""
+
+    tick_index: int
+    timestamp_unix: float
+    symptom_name: str
+    severity: str
+    summary: str
+    rca_text: str
+    intents: list[str]
+    evidence: dict[str, Any]
+
+
+class V6CloseRobustness(TypedDict, total=False):
+    """The close sequencer's final robustness verdict."""
+
+    escalated: bool
+    stop_reason: str
+    findings: list[V6RobustnessFinding]
+    findings_total: int
+
+
+class V6FinalRecipe(TypedDict, total=False):
+    """The configuration the session ended on, as the close-out settled it."""
+
+    throughput: float | None
+    ttft_mean_ms: float | None
+    e2el_mean_ms: float | None
+    action_path: list[str]
+    extra_server_args: str
+    extra_envs: dict[str, str]
+
+
+class V6Close(TypedDict, total=False):
+    """V6 session finalization result exposed outside the business timeline.
+
+    ``status`` is recorded by the CLOSE sequencer, not derived from ``steps``.
+    ``running`` means no verdict was ever recorded, so the process died partway
+    through its own close-out; ``degraded`` means the sequence finished with at
+    least one step reporting a failure. The two are separate words so a healthy
+    session stays distinguishable from a damaged one.
+    """
+
+    status: Literal["running", "succeeded", "failed", "degraded"]
     start_time: str
     end_time: str
     close_sequence_done: bool
     steps: list[dict[str, Any]]
-    robustness: dict[str, Any]
+    # The whole robustness account: the close-out's verdict (``escalated`` and
+    # the ``stop_reason`` it was drawn from), the agent's own ``turns``, and
+    # the ``findings`` the ladder persisted. Together because they are one
+    # account of one thing -- the verdict on its own says a session was
+    # escalated without saying what for, and the findings of an un-escalated
+    # session, the ones judged survivable, had nowhere to be read at all.
+    # ``findings`` and ``findings_total`` are absent when the ladder never
+    # wrote anything, because an empty list would claim it ran and found none.
+    robustness: V6CloseRobustness
     artifacts: dict[str, Any]
+    # Absent when the session never attempted to publish its Recipe.
+    kb_write_back: V6KBWriteBackExt
+    # Absent when the close-out never got far enough to snapshot it.
+    roofline_progress: V6RooflineProgress
+    # Same rule: absent when the close-out never reached the snapshot.
+    baseline_progress: V6BaselineProgress
+    # Absent when the close drain never ran, which a killed session is.
+    geak_candidate: V6GeakCandidate
+    # The recipe that shipped, which ``outcome.final`` is projected from.
+    # Absent when the close-out never reached the snapshot.
+    final_recipe: V6FinalRecipe
+
+
+# V6 FRAMEWORK_AGENT timeline event
+class V6FrameworkPolicyConfigArm(TypedDict, total=False):
+    """The configuration arm's own thresholds."""
+
+    keep_gain_threshold_pct: float | None
+    empty_streak_threshold: int | None
+    lookback: int | None
+
+
+class V6FrameworkPolicySourceArm(TypedDict, total=False):
+    """The source arm's own thresholds."""
+
+    no_keep_streak_threshold: int | None
+    discovery_retry_limit: int | None
+    authoring_enabled: bool | None
+
+
+class V6FrameworkPolicy(TypedDict, total=False):
+    """The thresholds one entry ran under, as it resolved them.
+
+    Recorded rather than cited, because a threshold read back at export is the
+    one the session ended on and not the one this entry acted under."""
+
+    keep_threshold_pct: float | None
+    variant_timeout_sec: int | None
+    overtime_kill_ratio: float | None
+    force_exit_budget_pct: float | None
+    config: V6FrameworkPolicyConfigArm
+    source: V6FrameworkPolicySourceArm
+
+
+class V6FrameworkPlateauReading(TypedDict, total=False):
+    """One plateau evaluation, beside the values it ruled on.
+
+    Appended rather than keyed: two readings that agree are still two readings.
+    ``path`` names the reader -- the advisory asks whether to switch arms and
+    the exit whether the phase may leave -- and ``triggered`` of ``None`` is a
+    reading that could not rule, which the phase treats as a live arm."""
+
+    arm: str
+    path: str
+    evaluated_at: str
+    triggered: bool | None
+    inputs: dict[str, Any]
+    thresholds: dict[str, Any]
+
+
+class V6FrameworkRun(TypedDict, total=False):
+    """One dispatch this entry made, and what it came back with.
+
+    ``role`` is not derivable from ``arm``: the source arm dispatches twice per
+    candidate, once to discover candidates and once to author a patch from one.
+    ``produced_ids`` is projected at assembly from the proposals naming this
+    run, since a run's own row does not know what it yielded."""
+
+    run_id: str
+    role: str
+    arm: str
+    status: str
+    domain: str
+    scope: str
+    gap_canonical_id: str
+    reason: str
+    dispatched_at: str
+    completed_at: str
+    worktree: str
+    summary: str
+    tags: list[str]
+    transcripts: list[str]
+    new_findings: list[str]
+    residual_questions: list[str]
+    notes: list[str]
+    parallelism: int | None
+    proposals_total: int | None
+    empty: bool
+    confidence: float | None
+    confidence_avg: float | None
+    ensemble_scores: dict[str, Any]
+    produced_ids: list[str]
+
+
+class V6FrameworkCriticVariantRuling(TypedDict, total=False):
+    """The Critic's ruling on one variant of a grid reviewed as a whole.
+
+    A rejected variant reaches no bench, so no attempt row carries its
+    ruling and this is the only place it is readable."""
+
+    variant_name: str
+    verdict: str
+    effective_verdict: str
+    held_to_rule: str
+    reason: str
+    failure_reason_code: str
+
+
+class V6FrameworkCriticReviewOutcome(TypedDict, total=False):
+    """What the loop did with a ruling.
+
+    An ``advise`` that materialised and an ``advise`` held at the patch gate
+    are the same ruling with opposite outcomes. ``patch_verdict_key`` is the
+    subject the patch gate consults the ruling under, which connects a blocked
+    ``integrate_patch`` back to the review that blocked it."""
+
+    materialized: bool
+    denied: bool
+    reauthored: bool
+    patch_verdict_key: str
+
+
+class V6FrameworkCriticReview(TypedDict, total=False):
+    """The Critic's ruling on one proposal, inline on the proposal.
+
+    Both verdicts are kept: a reject the loop held to a rule that only declared
+    ``advise`` is two facts, and either alone misreads the round. ``reviewer``
+    separates a ruling the Critic authored from one it never got to make.
+    The Critic's advisory keys are merged in as authored, so a consumer may
+    meet fields beyond the ones named here."""
+
+    verdict: str
+    effective_verdict: str
+    held_to_rule: str
+    reviewer: str
+    iteration: int | None
+    reason: str
+    confidence: float | None
+    failure_reason_code: str
+    concerns: list[str]
+    reviewed_at: str
+    variants: list[V6FrameworkCriticVariantRuling]
+    outcome: V6FrameworkCriticReviewOutcome
+    artifacts: dict[str, Any]
+    kb: dict[str, Any]
+
+
+class V6FrameworkProposalTerminal(TypedDict, total=False):
+    """Where a proposal ended up.
+
+    ``dropped`` covers every way it never reached a measurement and ``reason``
+    says which; ``pending`` is one the phase never resolved, the honest reading
+    of a session killed mid-review."""
+
+    disposition: str
+    reason: str
+    settled_at: str
+
+
+class V6FrameworkLifecycleStep(TypedDict, total=False):
+    """One step a proposal moved through, recorded as it happened.
+
+    Recorded rather than derived from counters, so a candidate re-authored
+    twice and then retried once reads as three steps."""
+
+    step: str
+    ts: str
+    run_ref: str
+    outcome: str
+    reason: str
+
+
+class V6FrameworkProposal(TypedDict, total=False):
+    """One thing this entry pursued, whichever producer raised it.
+
+    ``run_ref`` is absent rather than empty on a proposal with no dispatch
+    behind it, which is the load-bearing fact for the producers that have no
+    parent run at all: the orchestration agent and the seed grid.
+    ``attempt_refs`` is projected at assembly from the attempts naming this
+    proposal, because a second stored copy of the link is a second thing that
+    can disagree."""
+
+    proposal_id: str
+    arm: str
+    producer: str
+    producer_ref: str
+    run_ref: str
+    domain: str
+    scope: str
+    lever_kind: str
+    gap_canonical_id: str
+    source_ref: str
+    repo: str
+    title: str
+    verdict: str
+    route: str
+    changed_files: list[str]
+    confidence: float | None
+    critic_review: V6FrameworkCriticReview
+    terminal: V6FrameworkProposalTerminal
+    lifecycle: list[V6FrameworkLifecycleStep]
+    attempt_refs: list[str]
+
+
+class V6FrameworkStack(TypedDict, total=False):
+    """The configuration an attempt was measured on top of.
+
+    Recorded rather than referenced: every KEEP advances the session's stack,
+    so what the session serves now is not what this attempt was judged
+    against. Both arms have one -- a source patch sits on whatever is being
+    served, exactly as a config variant does."""
+
+    throughput: float | None
+    accuracy: float | None
+    extra_server_args: str
+    extra_envs: dict[str, Any]
+    remove_args: list[str]
+    unset_envs: list[str]
+    args_mode: str | None
+
+
+class V6FrameworkConfigDelta(TypedDict, total=False):
+    """What one configuration variant changed about the serving command."""
+
+    extra_server_args: str
+    extra_envs: dict[str, Any]
+    remove_args: list[str]
+    unset_envs: list[str]
+    args_mode: str | None
+
+
+class V6FrameworkMeasurement(TypedDict, total=False):
+    """Both ends of the throughput pair, and the runtime that produced them.
+
+    The pair rather than the percentage alone, because the anchor advances on
+    every KEEP and a gain without its denominator adds to nothing."""
+
+    before_tput: float | None
+    after_tput: float | None
+    gain_pct: float | None
+    runtime_sec: float | None
+    estimated_output_throughput: float | None
+
+
+class V6FrameworkAccuracy(TypedDict, total=False):
+    """The accuracy gate's inputs and verdict.
+
+    ``required`` of ``None`` is a gate that never ran, which is not the same as
+    one that ran and failed."""
+
+    required: bool | None
+    reference: float | None
+    value: float | None
+    passed: bool | None
+
+
+class V6FrameworkAttemptFailure(TypedDict, total=False):
+    """Why one attempt yielded no measurement to judge."""
+
+    error_class: str
+    error_excerpt: str
+
+
+class V6FrameworkArtifacts(TypedDict, total=False):
+    """Where one attempt's evidence was written."""
+
+    workspace: str
+    server_log_path: str
+    raw_result_path: str
+
+
+class V6FrameworkGate(TypedDict, total=False):
+    """One gate's verdict on one attempt, as it was evaluated.
+
+    A gate never reached writes no row, which is how a reader tells "did not
+    pass" from "did not apply". ``passed`` of ``None`` is a gate that ran and
+    could not rule. Order is the order of evaluation, not of the clock: a whole
+    gating sequence fits inside one tick."""
+
+    gate: str
+    passed: bool | None
+    reason: str
+    observed: float | None
+    threshold: float | None
+    ts: str
+
+
+class V6FrameworkAttempt(TypedDict, total=False):
+    """One measured attempt, from either arm.
+
+    One uniform row per thing measured, discriminated by ``arm``, so the
+    adoption ledger walks both arms with one reader. Which fields carry
+    still follows the arm -- a variant has a ``fingerprint`` and a
+    ``config_delta``, an authored patch has a ``patch_path`` and the files it
+    touched -- but the lifecycle and the verdict are the same shape for both.
+    ``blocked_by`` is projected at assembly as the first gate that did not
+    pass."""
+
+    attempt_id: str
+    arm: str
+    ts: str
+    round_id: str
+    task_id: str
+    proposal_ref: str
+    provenance: str
+    outcome: str
+    reason: str
+    stage: str
+    decision: str
+    adopted: bool | None
+    attribution_eligible: bool | None
+    validation_basis: str
+    fingerprint: str
+    variant_name: str
+    candidate_id: str
+    source_ref: str
+    route: str
+    patch_source: str
+    patch_path: str
+    patches_applied: list[str]
+    target_files: list[str]
+    accepted_kernels: list[str]
+    measured_against: V6FrameworkStack
+    config_delta: V6FrameworkConfigDelta
+    measurement: V6FrameworkMeasurement
+    accuracy: V6FrameworkAccuracy
+    failure: V6FrameworkAttemptFailure
+    artifacts: V6FrameworkArtifacts
+    gates: list[V6FrameworkGate]
+    blocked_by: str | None
+
+
+class V6FrameworkExit(TypedDict, total=False):
+    """Why the entry left. Not a failure -- every entry that closes has one."""
+
+    reason: str
+    trigger: str
+    hint: str
+    switch_bottleneck: bool | None
+
+
+class V6FrameworkExt(TypedDict, total=False):
+    """``ext`` of the V6 ``framework_agent`` timeline event.
+
+    Both OPTIMIZE arms in one event: the configuration arm searches server args
+    and env vars, the source arm lands upstream patches, and the phase leaves
+    only when both have run dry. The shape follows the progression a proposal
+    moves along rather than the arm it belongs to -- ``proposals`` is the main
+    line, ``runs`` holds the dispatch facts those rows reference, and
+    ``attempts`` is one uniform row per thing measured -- because the arms
+    differ in content and not in lifecycle. ``plateau`` sits off that
+    progression.
+
+    ``failure`` is absent on an entry that did not fail as a whole, which is
+    not the same as one that failed at nothing: a failed attempt is on its
+    attempt row, and a failed dispatch on its run row."""
+
+    macro_cycle: int
+    duration_sec: float | None
+    policy: V6FrameworkPolicy
+    plateau: list[V6FrameworkPlateauReading]
+    runs: list[V6FrameworkRun]
+    proposals: list[V6FrameworkProposal]
+    attempts: list[V6FrameworkAttempt]
+    exit: V6FrameworkExit
+    failure: V6Failure | None
+
+
+# V6 KERNEL timeline event
+class V6KernelEntry(TypedDict, total=False):
+    """What the KERNEL entry hook decided and what it inherited."""
+
+    route: str
+    route_reason: str
+    resumed: bool
+    code_revision: str | None
+    stack_depth_in: int | None
+    budget_remaining_sec: float | None
+    roofline_snapshot_id: int | None
+    roofline_snapshot_ts: str | None
+    roofline_baseline_gain_at_snapshot: float | None
+    snapshot_staleness: float | None
+
+
+class V6KernelReprofile(TypedDict, total=False):
+    """The entry re-profile that decides whether cached analysis is stale."""
+
+    ran: bool
+    task_kind: str | None
+    trigger: str | None
+    skipped_reason: str | None
+    idempotency_reason: str | None
+    snapshot_landed: bool
+    snapshot_id_before: int | None
+    snapshot_id_after: int | None
+
+
+class V6RowScope(TypedDict, total=False):
+    """Recording-side bookkeeping every V6 row fragment carries."""
+
+    event_id: str
+    ordinal: int
+
+
+class V6KernelAnalysisArtifacts(TypedDict, total=False):
+    """Paths one trace-analysis run produced."""
+
+    trace_report_path: str
+    analysis_report_path: str
+    candidates_path: str
+    kernel_roofline_path: str
+    tracelens_summary_path: str
+    cli_log_path: str
+
+
+class V6KernelAnalysisDetail(TypedDict, total=False):
+    """Trace-analysis metadata shared by the roofline and kernel events."""
+
+    route: str
+    tool: str
+    tool_run_id: str
+    steady_state: dict[str, Any]
+    preflight: dict[str, Any]
+    split: dict[str, Any]
+    selection: dict[str, Any]
+    steps: Any
+    route_ext: dict[str, Any]
+    hot_kernels: dict[str, Any]
+    warnings: list[dict[str, Any]]
+    artifacts: V6KernelAnalysisArtifacts
+
+
+class V6KernelTraceAnalyzeRun(V6KernelAnalysisDetail, V6RowScope, total=False):
+    """One analysis the KERNEL phase requested for itself."""
+
+    run_id: str
+    trigger: str | None
+    requested_by: str | None
+    request_msg_id: str | None
+    ts: str
+    status: str
+    cache_hit: bool
+    trace_input: str | None
+    top_k: int | None
+    roofline_snapshot_id: int | None
+    roofline_baseline_gain_at_snapshot: float | None
+    steady_state_trace: str | None
+    analysis_md_path: str | None
+    reusable_native_kernel_ids: list[str]
+    trace_validate_ref: str | None
+
+
+class V6KernelRewriteE2E(TypedDict, total=False):
+    """End-to-end integration sub-result of one kernel rewrite.
+
+    Derived at assembly from the event's ``integrate`` rows, never accepted
+    from a caller: the gate that produces it runs outside the phase that
+    produced the rewrite, so the lane has no verdict of its own to state. The
+    rows carry the full account, including the attempts this collapses; this
+    is the standing verdict, on the row it rules on.
+    """
+
+    integrated: bool
+    e2e_gain_pct: float | None
+    validated: bool | None
+    decision: str | None
+    patch_path: str | None
+    target_file: str | None
+
+
+class V6KernelRebenchEngagement(TypedDict, total=False):
+    """Whether the configuration under test actually took effect."""
+
+    config_matched: bool | None
+    overlay_loaded: bool | None
+    expected_cfg_hash: str | None
+    observed_cfg_hash: str | None
+    expected_overlay_digest: str | None
+    observed_overlay_digest: str | None
+
+
+class V6KernelRebenchAttempt(V6RowScope, total=False):
+    """One end-to-end re-measurement of a candidate."""
+
+    attempt_id: str
+    source_kind: str
+    source_ref: str | None
+    idempotency_key: str | None
+    task_id: str | None
+    dispatched_at: str | None
+    settled_at: str | None
+    base_tput: float | None
+    measured_tput: float | None
+    decision: str | None
+    decision_reason: str | None
+    status: str | None
+    engagement: V6KernelRebenchEngagement
+
+
+class V6KernelDiscoveredKernel(TypedDict, total=False):
+    """One kernel the trace attributed, with profiling fields the summary drops."""
+
+    kernel_id: str
+    name: str
+    snapshot_id: int | None
+    provenance: str
+    gpu_pct: float | None
+    duration_us: float | None
+    call_count: int | None
+    kernel_category: str
+    bottleneck: str | None
+    bound_type: str | None
+    arithmetic_intensity: float | None
+    flops_per_byte: float | None
+    efficiency_percent: float | None
+    bandwidth_util_pct: float | None
+    compute_util_pct: float | None
+    source_file: str | None
+    optimization_notes: str
+    recommended_backends: list[str]
+    recommended_actions: list[str]
+    reusable_native_kernel: bool
+    selected: bool
+
+
+class V6KernelForge(TypedDict, total=False):
+    """What is peculiar to the forge route for one visit.
+
+    The candidates forge produced are not here: they are on ``ext.attempts``
+    beside GEAK's, under one set of names. What remains is the work only forge
+    does -- the re-profile it can run on entry, and the trace analysis that
+    nominates its targets."""
+
+    engaged: bool
+    reprofile: V6KernelReprofile | None
+    trace_analyze_runs: list[V6KernelTraceAnalyzeRun]
+    discovered_kernels: list[V6KernelDiscoveredKernel]
+    recommended_kernels: list[V6KernelDiscoveredKernel]
+
+
+class V6KernelGeakHandoff(TypedDict, total=False):
+    """The conditions GEAK was asked to work under."""
+
+    schema_version: int | None
+    model_path: str | None
+    framework: str | None
+    gpu_type: str | None
+    tp: int | None
+    workload: dict[str, Any]
+    baseline_flags: str | None
+    baseline_envs: str | dict[str, Any] | None
+    baseline_env_spec_present: bool
+    launch_recipe: str | None
+    raw_baseline_tput: float | None
+    orchestrator_best_tput_same_config: float | None
+    max_model_len: int | None
+    mem_fraction: float | None
+    bench_client: str | None
+    e2e_metric: str | None
+    bench_protocol_present: bool
+    gpu_ids: str | None
+    exp_root: str | None
+    eval_dir: str | None
+
+
+class V6KernelGeakDelegation(TypedDict, total=False):
+    """How the delegated GEAK runner process itself ended."""
+
+    runner_status: str
+    started_at: str | None
+    ended_at: str | None
+    duration_sec: float | None
+    error_class: str | None
+    error: str | None
+    returncode: int | None
+    runner_timeout_sec: int | None
+    kill_timeout_sec: int | None
+    exp_root: str | None
+    eval_dir: str | None
+    report_path: str | None
+    versions: dict[str, Any]
+    recovered_from_disk: bool
+    stages_reached: list[str]
+
+
+class V6KernelGeakDiscoveryRun(V6RowScope, total=False):
+    """One hot-kernel discovery run GEAK performed for itself."""
+
+    source: str | None
+    status: str | None
+    hot_kernel_count: int
+    scan: dict[str, Any]
+
+
+class V6KernelGeakBackendResult(TypedDict, total=False):
+    """What one backend measured for one kernel GEAK attempted."""
+
+    backend: str | None
+    status: str | None
+    speedup: float | None
+    baseline_us: float | None
+    candidate_us: float | None
+    compile_status: str | None
+    correctness: bool | None
+    artifact_path: str | None
+    error_class: str | None
+
+
+class V6KernelGeakAttempt(V6RowScope, total=False):
+    """One kernel GEAK considered, replayed from its conclusion file.
+
+    GEAK's ``kernel_journey.json`` names every kernel it considered, which
+    backends it dispatched and what each measured, not just the acceptances
+    that survived. These rows are shaped like forge's because the orchestrator
+    replays them through the same field helpers, which is exactly why they are
+    stored under GEAK and tagged with their producer rather than merged into
+    the forge lane the superseded projection appended them to."""
+
+    kernel_id: str
+    name: str
+    op_kind: str | None
+    gpu_pct: float | None
+    micro_speedup: float | None
+    dispatched: bool
+    backends: list[str]
+    skip_reason: str | None
+    task_group: str | None
+    backend_result: V6KernelGeakBackendResult | None
+    e2e: V6KernelRewriteE2E | None
+
+
+class V6KernelGeakAuthoredKernel(V6RowScope, total=False):
+    """One kernel GEAK authored and accepted.
+
+    GEAK routes an acceptance to its kernel queue or its head queue purely by
+    which queue proposed it, and both lanes carry the same parity-checked
+    ``e2e_delta_pct``; reading only the first drops most of the campaign."""
+
+    short_name: str | None
+    kernel_id: str | None
+    cand_tag: str | None
+    name_source: str
+    op_kind: str | None
+    lane: str | None
+    e2e_delta_pct: float | None
+    alias_collapsed: bool
+    aliases: list[str]
+
+
+class V6KernelGeakEnvSelection(V6RowScope, total=False):
+    """One environment / flag selection GEAK accepted."""
+
+    selection: str
+    op_kind: str | None
+    lane: str | None
+    e2e_delta_pct: float | None
+
+
+class V6KernelGeakClaim(TypedDict, total=False):
+    """What GEAK reported about itself, before any re-measurement.
+
+    Every number here is the optimizer's own account of its run. ``verified``
+    is a constant ``False`` so a consumer cannot mistake this block for a
+    conclusion: nothing in it has been re-measured by the orchestrator's own
+    harness, and the adoption verdict rests solely on the rebench."""
+
+    verified: bool
+    self_reported_tput: float | None
+    self_reported_speedup: float | None
+    self_reported_gain_pct: float | None
+    self_reported_basis: str | None
+    geak_status: str | None
+    baseline_alignment_status: str | None
+    authored_kernels: list[V6KernelGeakAuthoredKernel]
+    env_selections: list[V6KernelGeakEnvSelection]
+    kernels_optimized: int
+    accepted_heads_count: int
+    validated_regimes: list[Any]
+    metric_basis: str | None
+    bench_client: str | None
+    ttft_mean_ms: float | None
+    tpot_mean_ms: float | None
+    output_parity: Any
+
+
+class V6KernelGeakProduct(TypedDict, total=False):
+    """The reproducible configuration GEAK handed back."""
+
+    accepted_flags: str | list[str] | None
+    accepted_envs: dict[str, Any]
+    accepted_config: dict[str, Any]
+    cfg_hash: str | None
+    final_overlay: str | None
+    final_overlay_digest: str | None
+    final_launch_script: str | None
+    bench_script: str | None
+    final_patch: str | None
+
+
+class V6KernelGeakRebench(TypedDict, total=False):
+    """How GEAK's re-measurement campaign was bounded, and how it ended.
+
+    The attempts themselves are on ``ext.rebench``, which the settled attempts
+    point at by id. What stays here is what only GEAK's campaign has: the
+    per-cycle ceiling it ran under, which attempt the acceptances were settled
+    against, and the terminal error when it never reached one."""
+
+    required: bool
+    max_attempts: int | None
+    attempts_used: int
+    settled_against: str
+    final_status: str | None
+    final_error_class: str | None
+    final_error: str | None
+    conflicting_decisions: list[str]
+
+
+class V6KernelGeak(TypedDict, total=False):
+    """What is peculiar to the GEAK route for one visit, in causal order.
+
+    The kernels GEAK tried are not here: they are on ``ext.attempts`` beside
+    forge's. What remains is the delegation itself -- the conditions GEAK was
+    given, how its runner ended, what it claimed and what configuration it
+    handed back."""
+
+    engaged: bool
+    handoff: V6KernelGeakHandoff | None
+    delegation: V6KernelGeakDelegation | None
+    discovery_runs: list[V6KernelGeakDiscoveryRun]
+    claim: V6KernelGeakClaim | None
+    product: V6KernelGeakProduct | None
+    rebench: V6KernelGeakRebench
+
+
+class V6KernelAttempt(TypedDict, total=False):
+    """One candidate, from either route, in the shape both routes fill.
+
+    The two routes run different machinery and their producers name the same
+    facts differently -- a status lives on the row for forge and inside a
+    backend block for GEAK. Normalizing at assembly is what lets one reader
+    replay the whole visit in order without knowing which producer wrote a
+    given row.
+
+    ``accepted`` is the producer's own verdict on its candidate: whether the
+    lane kept it, or GEAK named it in its acceptances. ``outcome`` is what the
+    instrument then ruled, and ``settled_by`` names which one ruled it --
+    ``rebench`` for a GEAK candidate re-benched end to end, ``integrate`` for
+    a patch the gate had already measured by the time this visit closed,
+    ``lane`` for a forge candidate on the timing of the lane that produced it.
+    A reader who cannot see which one spoke cannot tell an unsettled candidate
+    from one whose evidence simply lives elsewhere.
+
+    ``gain_pct`` is that instrument's measurement, normalized to a percentage
+    from the ratio a forge lane reports and the delta a rebench computes. It
+    is the number the visit's verdict is read off, and it is ``None`` when the
+    candidate was kept without anything measuring it.
+
+    ``rebench_ref`` and ``integrate_ref`` are the two evidence pointers, and
+    they are symmetric: whichever instrument ruled, the row names the record
+    that holds the measurement. Forge fills the second, GEAK the first.
+
+    ``detail`` carries what is specific to the producing lane and has no
+    counterpart on the other route: a fusion pattern, a GEMM shape count,
+    GEAK's GPU share."""
+
+    attempt_id: str
+    route: str
+    source_kind: str
+    kernel_id: str
+    name: str
+    status: str
+    dispatched: bool
+    skip_reason: str
+    started_at: str
+    ended_at: str
+    duration_sec: float | None
+    backend: str
+    backends_tried: list[str]
+    speedup: float | None
+    gain_pct: float | None
+    compile_status: str
+    correctness: bool | None
+    artifact_path: str
+    error_class: str
+    failure_reason: str
+    micro_decision: str
+    accepted: bool
+    rebench_ref: str
+    integrate_ref: str
+    e2e: V6KernelRewriteE2E | None
+    outcome: str
+    settled_by: str
+    unsettled_reason: str
+    detail: dict[str, Any]
+
+
+class V6KernelDeliveredRow(TypedDict, total=False):
+    """One candidate this visit handed to the optimization stack.
+
+    A row here says the candidate was kept, not that it improved the model:
+    ``gain_pct`` is ``None`` when nothing measured it, and ``settled_by`` says
+    which instrument is behind the number when there is one."""
+
+    route: str
+    source_kind: str
+    ref: str
+    kernel_id: str
+    gain_pct: float | None
+    settled_by: str
+
+
+class V6KernelStackDelta(TypedDict, total=False):
+    """Optimization-stack entries this visit added and removed."""
+
+    added: list[dict[str, Any]]
+    removed: list[dict[str, Any]]
+
+
+class V6Throughput(TypedDict, total=False):
+    """The throughput anchors a stage is judged against, and the gains they yield.
+
+    Three anchors, because a result means different things depending on what it
+    is read against: ``before`` is where the stage started -- the running best
+    when it was entered -- ``after`` is where it left off, and
+    ``session_baseline`` is the session's first measurement, which no stage
+    moves. A flat ``tput_before`` beside a bare ``net_gain_pct`` left the
+    denominator to be inferred, and left the baseline anchor recorded with
+    nothing ever read against it.
+
+    Each gain names the pair it came from: ``gain_pct`` is what this stage
+    moved, ``session_gain_pct`` is where the session stands after it. So a
+    further comparison is one field here, derived from the anchors already
+    beside it, rather than another pair threaded through every outcome.
+
+    Every gain here is arithmetic over those anchors, not an independent
+    measurement. A stage's own numbers can outrun what the ledger will
+    validate; ``cumulative_gain_validated_out`` on the outcome is the
+    validated figure, and the two are meant to be comparable.
+    """
+
+    before: float | None
+    after: float | None
+    session_baseline: float | None
+    gain_pct: float | None
+    session_gain_pct: float | None
+
+
+class V6KernelOutcome(TypedDict, total=False):
+    """How the visit ran, in one vocabulary both routes reach.
+
+    ``verdict`` is derived from the settled attempts rather than stated by the
+    phase, so it cannot contradict the instruments that ruled on them. It is
+    one of ``improved`` (a candidate was kept and something measured a gain on
+    it), ``no_improvement`` (the visit ran and nothing measured a gain) or
+    ``failed`` (the visit raised, or every attempt failed before it could be
+    judged). It is empty on a visit that never concluded -- one rebuilt from
+    the rows a killed session left behind -- because the rows may add up to a
+    gain nobody ever concluded, and the event's ``interrupted`` status is the
+    only statement such a visit supports.
+
+    The subject is the visit, not the eventual fate of what it produced. A
+    forge patch is gated end to end after this visit exits, and that verdict
+    lands on the event of the cycle that ran the gate, so a verdict waiting on
+    it could never be stated here at all. Follow ``delivered`` into a later
+    event's ``integrate`` rows for that.
+
+    ``reason`` says why whenever the verdict is not an improvement.
+    ``error_class`` and ``failed_stage`` name a fault the visit hit, which is
+    not the same as the verdict: a raising tick is filed against the session's
+    crash count and the loop carries on, so a visit can fault somewhere and
+    still deliver a measured candidate. Read together they separate a clean
+    empty-handed visit from one that blew up, and a clean win from one that
+    was not come by cleanly.
+
+    ``throughput`` carries every anchor the visit is read against and the gain
+    against each. ``cumulative_gain_validated_out`` stays outside it because it
+    is a different kind of number: the validated ledger's figure for the whole
+    stack, stated by the phase rather than derived from this visit's anchors,
+    and ``stack_depth_out`` is the stack length it was measured at."""
+
+    route: str
+    verdict: str
+    reason: str
+    error_class: str
+    failed_stage: str
+    exit_reason: str | None
+    throughput: V6Throughput
+    cumulative_gain_validated_out: float | None
+    stack_depth_out: int | None
+    delivered: list[V6KernelDeliveredRow]
+    stack_delta: V6KernelStackDelta
+
+
+class V6KernelIntegrateRun(TypedDict, total=False):
+    """One end-to-end integrate gate verdict on one queued patch.
+
+    The gate is the orchestrator's, not a lane's. A KERNEL visit hands a KEEP
+    to a queue and exits; a later step drains the queue, measures the patch end
+    to end and rules on it. So this is a sibling of the two routes rather than
+    a field inside either, and it can settle in a later cycle than the visit
+    that produced the patch -- which ``settled_in_macro_cycle`` states, because
+    the event this row is attached to is the one that ran the gate.
+
+    ``decision`` and ``rejected_reason`` answer different questions.
+    ``REVERT`` is a verdict on the patch; a ``rejected_reason`` is an
+    exhausted budget, which drops a patch without ever having ruled against
+    it. ``fault_count`` is the same distinction counted: an integration fault
+    never measured the patch fairly."""
+
+    integration_id: str
+    kernel_id: str
+    decision: str
+    status: str
+    attempt_count: int | None
+    fault_count: int | None
+    gain_pct: float | None
+    accuracy_pass: bool | None
+    validation_tier: str
+    patch_path: str
+    target_file: str
+    error_class: str
+    rejected_reason: str
+    retryable: bool
+    settled_at: str
+    settled_in_macro_cycle: int | None
+    extra_server_args: str
+    basis: str
+    alignment_status: str
+    gain_attributed: bool | None
+
+
+class V6KernelExt(TypedDict, total=False):
+    """``ext`` of the V6 ``kernel`` timeline event.
+
+    Three layers, and which layer a fact belongs in is decided by what kind of
+    fact it is rather than by which route produced it. ``attempts`` holds every
+    candidate; ``rebench``, ``integrate`` and ``measurements`` hold the evidence
+    that ruled on them; ``forge`` and ``geak`` hold only what is peculiar to one
+    route; ``outcome`` states what the visit delivered.
+
+    ``geak`` and ``forge`` are mutually exclusive by construction: the entry
+    hook picks one of three routes, so the block that did not run stays absent
+    rather than being emitted empty."""
+
+    macro_cycle: int
+    in_flight_stage: str | None
+    duration_sec: float | None
+    entry: V6KernelEntry
+    failure: dict[str, Any] | None
+    attempts: list[V6KernelAttempt]
+    rebench: list[V6KernelRebenchAttempt]
+    integrate: list[V6KernelIntegrateRun]
+    measurements: list[dict[str, Any]]
+    geak: V6KernelGeak | None
+    forge: V6KernelForge | None
+    outcome: V6KernelOutcome
 
 
 class SessionBreakdown(TypedDict, total=False):
     """Top-level wire shape of ``session_breakdown.json``.
 
     The complete contract between the producer (``inference_optimizer``) and
-    downstream consumers, aggregating every section of the breakdown. Several
-    keys are intentional v1-reader compatibility aliases (``phase_timeline`` /
-    ``action_timeline``, ``param_search`` / ``explore_search``) that carry the
-    same data under both names.
+    downstream consumers. Every section is either recorded at author time or
+    projected from what was recorded: the export re-derives nothing.
 
-    Attributes:
-        schema_version (str): Schema version string (see ``SCHEMA_VERSION``).
-        exported_at_utc (str): ISO UTC timestamp the file was exported.
-        exporter_version (str): Version of the exporter that produced the file.
-        session (SessionMeta): Session identity, timing, and host context.
-        workload (Workload): Model/framework/serving configuration.
-        model_info (ModelInfo): Structural summary of the served model
-            (architecture / scale / attention), parsed from its config.json.
-            Empty {} on non-transformers models or pre-field sessions.
-        baseline (Baseline): Pre-optimization reference performance.
-        final (Final): Final validated optimization state.
-        phase_timeline (list[PhaseEvent]): Flat per-action timeline.
-        phase_segments (list[PhaseSegment]): Phase-boundary view.
-        capability_summary (CapabilitySummary): Per-capability roll-up.
-        geak (Geak): GEAK route diagnostics and accepted artifacts.
-        kernel_lifecycle (KernelLifecycle): Kernels grouped by lifecycle stage.
-        collective (Collective): Collective-lane campaigns and their E2E
-            verdicts; empty {} when the lane never ran.
-        param_search (ParamSearch): Merged explore-search ledger.
-        sweep (Sweep): Concurrency/shape sweep results.
-        critic_robustness (CriticRobustness): Critic reviews and robustness signals.
-        telemetry (Telemetry): Telemetry artifacts and aggregated metrics.
-        optimizations (Optimizations): Canonical adopted-optimization read
-            model spanning Warm Replay, Explore, Framework Agent, and Kernel
-            Agent.
-        specialist_runs (list[SpecialistRound]): Specialist sub-agent dispatch records.
-        kernel_roofline (KernelRoofline): Hot-kernel table for the dashboard.
-        roofline (list[dict[str, Any]]): Per-snapshot roofline comparison list for
-            the markdown report's ``## Roofline`` section.
-        roofline_progress (RooflineProgress): Optimization-progress curve for the dashboard.
-        langfuse (LangfusePush): Live-Langfuse push receipt (enabled? / redacted
-            config / counts); the local trace jsonl is always written regardless.
-        warnings (list[str]): Collector warnings emitted while assembling the file.
-        source_files (SourceFiles): Paths to the source artifacts used.
-    """
+    How the export itself went is reported once, on ``metadata.warnings``."""
 
     schema_version: str
     exported_at_utc: str
     exporter_version: str
 
-    session: SessionMeta
-    workload: Workload
-    # Structural model summary parsed from config.json (state.model_info mirror); {} when absent.
-    model_info: ModelInfo
-    baseline: Baseline
-    final: Final
-    # flat per-action timeline (v1 compat); ``phase_segments`` is the boundary view.
-    phase_timeline: list[PhaseEvent]
-    phase_segments: list[PhaseSegment]
-    # flat-list alias for older readers.
-    action_timeline: list[PhaseEvent]
-    capability_summary: CapabilitySummary
-    geak: Geak
-    kernel_lifecycle: KernelLifecycle
-    collective: Collective
-    # explore_search is the native merged ledger; param_search is a v1 alias.
-    param_search: ParamSearch
-    explore_search: ParamSearch
-    sweep: Sweep
-    critic_robustness: CriticRobustness
-    telemetry: Telemetry
-    # Single downstream read model for every formally adopted optimization.
-    optimizations: Optimizations
-    specialist_runs: list[SpecialistRound]
-    # Hot-kernel table, mirror of ``reports/kernel_roofline.json``.
-    kernel_roofline: KernelRoofline
-    # Kernel-agent attempt outcome summary; empty → dashboard hides Block 1.
-    kernel_optimization_summary: KernelOptimizationSummary
-    # Post-optimization concurrency sweep; empty → dashboard hides Block 2.
-    conc_sweep_summary: ConcSweepSummary
-    # Per-snapshot roofline comparison list driving the markdown ``## Roofline`` section.
-    roofline: list[dict[str, Any]]
-    # Optimization-progress curve (coexists with the list-shaped ``roofline`` above).
-    roofline_progress: RooflineProgress
-    # Full-trace token + decision timeline; {} on pre-trace-subsystem sessions.
-    decision_trace: DecisionTrace
-    # Promoted token-spend rollup derived from decision_trace.token_rollup.
-    token_usage: TokenUsage
-    # Live-Langfuse push receipt; ``enabled`` False (with ``disabled_reason``) when the push is off.
-    langfuse: LangfusePush
-    # Kernel-major unified lifecycle view (discovery -> dispatch -> backend attempts -> e2e); {} when absent.
-    kernel_journey: KernelJourney
-    # Authoritative external-tool versions keyed by tool name; {} when absent.
-    versions: dict[str, KernelToolMetadata]
-    # Enablement attempt-runtime observability; {} → dashboard hides the block.
-    enablement: EnablementBreakdown
     metadata: V6Metadata
     outcome: V6Outcome
     timeline: list[V6TimelineEvent]
     close: V6Close
-
-    warnings: list[str]
-    source_files: SourceFiles
+    critic: V6Critic
+    robustness: V6Robustness
 
 
 __all__ = [
-    "SCHEMA_VERSION",
-    "SCHEMA_VERSION_V2",
-    "SCHEMA_VERSION_V3",
-    "SCHEMA_VERSION_V5",
-    "SCHEMA_VERSION_V6",
-    "Adoption",
-    "AdoptedKernel",
-    "ArtifactRef",
-    "Attribution",
-    "Baseline",
-    "BaselineAttemptSummary",
-    "BenchmarkInvocation",
-    "CapabilityEntry",
-    "CapabilitySummary",
-    "ConcSweepSummary",
     "CriticIteration",
-    "CriticKBWritesSummary",
-    "CriticRobustness",
-    "DecisionTokens",
-    "DecisionTrace",
-    "DecisionTraceEntry",
-    "DetectedKernel",
-    "DiscoveredHotKernel",
-    "EnablementAttemptRuntime",
-    "EnablementBreakdown",
-    "EnablementStackActionSummary",
-    "ExecutorClass",
-    "KernelBackendAttempt",
-    "KernelDiscoveryRun",
-    "KernelDispatch",
-    "KernelE2E",
-    "KernelJourney",
-    "KernelJourneyEntry",
-    "KernelToolMetadata",
-    "LangfuseConfig",
-    "LangfusePush",
-    "LangfusePushCounts",
-    "Measurement",
-    "ModelInfo",
-    "Operation",
-    "OperationAttempt",
-    "OperationDecision",
-    "OperationGate",
-    "OperationRelation",
-    "OperationSubstep",
-    "OptimizationArtifact",
-    "OptimizationBackendAttempt",
-    "OptimizationConfiguration",
-    "OptimizationEntry",
-    "Optimizations",
-    "OptimizationSource",
-    "OptimizationSourceMethod",
-    "OptimizationSourceSummary",
-    "OptimizationValidation",
-    "OrchestrationContext",
-    "Final",
-    "GpuMonitorAggregate",
-    "Invocation",
-    "Integrity",
-    "IntegrityFieldStatus",
-    "IntegrityStatus",
-    "LaneTimelineEntry",
-    "KernelLifecycle",
-    "KernelMetadata",
-    "KernelOptimizationSummary",
-    "KernelExecutionMode",
-    "KernelOptimizationBackend",
-    "OptimizedKernel",
-    "ParamSearch",
-    "ParamSearchEntry",
-    "ParamSearchLedger",
-    "PhaseEvent",
-    "PhaseSegment",
-    "RecommendedKernel",
-    "RejectedKernel",
-    "RobustnessSignal",
+    "SCHEMA_VERSION",
+    "SCHEMA_VERSION_V6",
     "SessionBreakdown",
-    "SessionMeta",
-    "SpecialistDomainBreakdown",
-    "SpecialistRound",
-    "SpecialistTranscriptRef",
-    "SubjectRef",
-    "PhaseBreakdown",
-    "PhaseBreakdownExplore",
-    "PhaseBreakdownKernel",
-    "SourceBreakdown",
-    "SourceFiles",
-    "StackGainEntry",
-    "Sweep",
-    "SweepPoint",
-    "Telemetry",
-    "TokenBucket",
-    "TokenRollup",
-    "TokenUsage",
-    "TokenUsageAttribution",
-    "TokenUsageBucket",
-    "TokenUsageTimelineEntry",
+    "V6ArchivedFile",
+    "V6BaselineExt",
+    "V6BaselineProgress",
+    "V6Close",
+    "V6CloseRobustness",
+    "V6ConcSweepArm",
+    "V6ConcSweepArtifacts",
+    "V6ConcSweepBoot",
+    "V6ConcSweepBootAttempt",
+    "V6ConcSweepBudget",
+    "V6ConcSweepCeiling",
+    "V6ConcSweepCeilingModel",
+    "V6ConcSweepCeilingRow",
+    "V6ConcSweepEnvironment",
+    "V6ConcSweepExt",
+    "V6ConcSweepInputAnchor",
+    "V6ConcSweepLifecycle",
+    "V6ConcSweepPair",
+    "V6ConcSweepPlan",
+    "V6ConcSweepPoint",
+    "V6ConcSweepRefused",
+    "V6ConcSweepRequest",
+    "V6ConcSweepResult",
+    "V6ConcSweepRung",
+    "V6ConcSweepRuntime",
+    "V6ConcSweepWorkload",
+    "V6Critic",
+    "V6CriticReview",
+    "V6CriticReviewVariant",
+    "V6EnablementAttempt",
+    "V6EnablementBuild",
+    "V6EnablementExt",
+    "V6EnablementRevalidation",
+    "V6Failure",
+    "V6FrameworkAccuracy",
+    "V6FrameworkArtifacts",
+    "V6FrameworkAttempt",
+    "V6FrameworkAttemptFailure",
+    "V6FrameworkConfigDelta",
+    "V6FrameworkCriticReview",
+    "V6FrameworkCriticReviewOutcome",
+    "V6FrameworkCriticVariantRuling",
+    "V6FrameworkExit",
+    "V6FrameworkExt",
+    "V6FrameworkGate",
+    "V6FrameworkLifecycleStep",
+    "V6FrameworkMeasurement",
+    "V6FrameworkPlateauReading",
+    "V6FrameworkPolicy",
+    "V6FrameworkPolicyConfigArm",
+    "V6FrameworkPolicySourceArm",
+    "V6FrameworkProposal",
+    "V6FrameworkProposalTerminal",
+    "V6FrameworkRun",
+    "V6FrameworkStack",
+    "V6GeakCandidate",
+    "V6GradedAxes",
+    "V6Grading",
+    "V6GradingTputGuard",
+    "V6KBWriteBackExt",
+    "V6KernelAnalysisArtifacts",
+    "V6KernelAnalysisDetail",
+    "V6KernelAttempt",
+    "V6KernelDeliveredRow",
+    "V6KernelDiscoveredKernel",
+    "V6KernelEntry",
+    "V6KernelExt",
+    "V6KernelForge",
+    "V6KernelGeak",
+    "V6KernelGeakAttempt",
+    "V6KernelGeakAuthoredKernel",
+    "V6KernelGeakBackendResult",
+    "V6KernelGeakClaim",
+    "V6KernelGeakDelegation",
+    "V6KernelGeakDiscoveryRun",
+    "V6KernelGeakEnvSelection",
+    "V6KernelGeakHandoff",
+    "V6KernelGeakProduct",
+    "V6KernelGeakRebench",
+    "V6KernelIntegrateRun",
+    "V6KernelOutcome",
+    "V6KernelRebenchAttempt",
+    "V6KernelRebenchEngagement",
+    "V6KernelReprofile",
+    "V6KernelRewriteE2E",
+    "V6KernelStackDelta",
+    "V6KernelTraceAnalyzeRun",
     "V6Metadata",
+    "V6MetadataLangfuse",
+    "V6MetadataRecovery",
     "V6MetadataSession",
     "V6MetadataVersions",
-    "V6Close",
-    "V6KBWriteBackExt",
+    "V6ModelArchitecture",
+    "V6Outcome",
     "V6OutcomeAttribution",
     "V6OutcomeAttributionBySource",
     "V6OutcomeGainBucket",
     "V6OutcomeKernelAttribution",
-    "V6Outcome",
     "V6OutcomeValidation",
+    "V6PhaseAction",
+    "V6PhaseExt",
+    "V6PhaseMarker",
+    "V6PhaseProposal",
+    "V6PhaseProposalOutcome",
+    "V6PhaseProposalReview",
+    "V6PhaseSegment",
+    "V6Robustness",
+    "V6RobustnessFinding",
+    "V6RobustnessIntent",
+    "V6RobustnessTurn",
+    "V6RooflineEventSnapshot",
+    "V6RooflineExt",
+    "V6RooflineKernel",
+    "V6RooflineKernelTable",
+    "V6RooflineProgress",
+    "V6RooflineTrajectoryPoint",
+    "V6RowScope",
+    "V6StackAdoption",
+    "V6StackExt",
+    "V6StackValidation",
     "V6TaskConfig",
+    "V6Throughput",
     "V6TimelineEvent",
-    "V6WarmReplayApplied",
+    "V6ToolVersion",
     "V6WarmReplayExt",
     "V6WarmStartExt",
     "V6WarmStartMatched",
     "V6WarmStartReads",
-    "Workload",
-    "WorkloadObjective",
 ]

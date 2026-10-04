@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Internal request / context models for the Critic runtime.
-
-Two entry shapes — ``coordinator_inbox`` (textual prompt, must emit an
-intent envelope) and ``critic_decision_request`` (decision review whose
-incremental turns merge against session memory) — both converge on
-:class:`CriticRequest` (session id, context, parsed proposals, raw payload).
-Import-light: only structural validation other modules can rely on.
-"""
+"""Internal request / context models for the Critic runtime."""
 
 from __future__ import annotations
 
@@ -37,9 +30,7 @@ REQUEST_KINDS: frozenset[str] = frozenset(
 )
 
 
-# Context dimensions the KB scope is built from. ``model`` and ``framework``
-# are critical: when either is missing after memory merge, KB reads are skipped
-# and the verdict downgrades to ``needs_review``.
+# Context dimensions the KB scope is built from.
 CONTEXT_DIMENSIONS: tuple[str, ...] = (
     "model",
     "framework",
@@ -55,17 +46,7 @@ CRITICAL_CONTEXT_KEYS: tuple[str, ...] = ("model", "framework")
 # Proposal extracted from a Coordinator inbox row
 @dataclass
 class Proposal:
-    """One ``topic=proposal`` row extracted from a Coordinator inbox.
-
-    Attributes:
-        msg_id: The Coordinator-issued ``msg_id``.
-        from_agent: Originating agent name (e.g. ``orchestration``).
-        seq: Optional bus sequence number (kept for ordering / replay).
-        action_name: Convenience copy of ``payload.action_name``.
-        predicted_gain_pct: Convenience copy of
-            ``payload.predicted_gain_pct``; ``None`` when absent.
-        payload: The raw proposal payload as parsed.
-    """
+    """One ``topic=proposal`` row extracted from a Coordinator inbox."""
 
     msg_id: str
     from_agent: str
@@ -75,23 +56,14 @@ class Proposal:
     predicted_gain_pct: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the proposal as a plain dict via :func:`dataclasses.asdict`.
-
-        Returns:
-            dict[str, Any]: All proposal fields keyed by name.
-        """
+        """Return the proposal as a plain dict via :func:`dataclasses.asdict`."""
         return asdict(self)
 
 
 # CriticRequest
 @dataclass
 class CriticRequest:
-    """Normalised Critic input.
-
-    Both Coordinator-driven and dialogue-driven entry points produce one
-    of these. Downstream modules (``decision_reviewer``,
-    ``intent_envelope``, ``session_memory``) only see this shape.
-    """
+    """Normalised Critic input."""
 
     kind: str
     session_id: str
@@ -105,14 +77,7 @@ class CriticRequest:
     raw: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the request as a plain JSON-serialisable dict.
-
-        The raw payload (``raw``) is intentionally omitted; proposals are
-        converted via :meth:`Proposal.to_dict`.
-
-        Returns:
-            dict[str, Any]: The request fields keyed by name.
-        """
+        """Return the request as a plain JSON-serialisable dict."""
         out: dict[str, Any] = {
             "kind": self.kind,
             "session_id": self.session_id,
@@ -129,20 +94,7 @@ class CriticRequest:
 
 # Parsing
 def _require_str(d: dict[str, Any], key: str, *, where: str) -> str:
-    """Extract a required non-empty string field.
-
-    Args:
-        d (dict[str, Any]): The source mapping.
-        key (str): The field name to read.
-        where (str): Context label used in error messages.
-
-    Returns:
-        str: The field value.
-
-    Raises:
-        RequestValidationError: If the key is missing or not a non-empty
-            string.
-    """
+    """Extract a required non-empty string field."""
     if key not in d:
         raise RequestValidationError(f"{where}: missing required field {key!r}")
     value = d[key]
@@ -152,19 +104,7 @@ def _require_str(d: dict[str, Any], key: str, *, where: str) -> str:
 
 
 def _optional_str(d: dict[str, Any], key: str, *, where: str) -> str | None:
-    """Extract an optional string field.
-
-    Args:
-        d (dict[str, Any]): The source mapping.
-        key (str): The field name to read.
-        where (str): Context label used in error messages.
-
-    Returns:
-        str | None: The string value, or ``None`` when absent/``None``.
-
-    Raises:
-        RequestValidationError: If present but not a string.
-    """
+    """Extract an optional string field."""
     if key not in d or d[key] is None:
         return None
     value = d[key]
@@ -176,20 +116,7 @@ def _optional_str(d: dict[str, Any], key: str, *, where: str) -> str | None:
 
 
 def _optional_dict(d: dict[str, Any], key: str, *, where: str) -> dict[str, Any]:
-    """Extract an optional object field.
-
-    Args:
-        d (dict[str, Any]): The source mapping.
-        key (str): The field name to read.
-        where (str): Context label used in error messages.
-
-    Returns:
-        dict[str, Any]: A copy of the dict value, or ``{}`` when
-        absent/``None``.
-
-    Raises:
-        RequestValidationError: If present but not a dict.
-    """
+    """Extract an optional object field."""
     if key not in d or d[key] is None:
         return {}
     value = d[key]
@@ -201,19 +128,7 @@ def _optional_dict(d: dict[str, Any], key: str, *, where: str) -> dict[str, Any]
 
 
 def _optional_list(d: dict[str, Any], key: str, *, where: str) -> list[Any]:
-    """Extract an optional list field.
-
-    Args:
-        d (dict[str, Any]): The source mapping.
-        key (str): The field name to read.
-        where (str): Context label used in error messages.
-
-    Returns:
-        list[Any]: A copy of the list value, or ``[]`` when absent/``None``.
-
-    Raises:
-        RequestValidationError: If present but not a list.
-    """
+    """Extract an optional list field."""
     if key not in d or d[key] is None:
         return []
     value = d[key]
@@ -223,21 +138,7 @@ def _optional_list(d: dict[str, Any], key: str, *, where: str) -> list[Any]:
 
 
 def parse_request(raw: dict[str, Any]) -> CriticRequest:
-    """Validate the input dict and return a :class:`CriticRequest`.
-
-    Permissive about extra keys (they go into ``raw``) but strict about
-    required ones — invalid requests fail fast.
-
-    Args:
-        raw (dict[str, Any]): The raw request payload.
-
-    Returns:
-        CriticRequest: The validated, normalised request.
-
-    Raises:
-        RequestValidationError: If the payload shape, ``kind``, required
-            fields, or nested proposals/messages are invalid.
-    """
+    """Validate the input dict and return a :class:`CriticRequest`."""
     if not isinstance(raw, dict):
         raise RequestValidationError(f"top-level must be an object, got {type(raw).__name__}")
 

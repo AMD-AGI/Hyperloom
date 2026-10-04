@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Edge-path coverage for the trace parsers and Langfuse mapping helpers.
-
-Exercises the tolerant/degenerate branches (blank lines, malformed JSON,
-non-dict rows, unreadable paths, and non-numeric fields) so a parse miss
-degrades to an empty/``None`` result instead of raising.
-"""
+"""Edge-path coverage for the trace parsers and Langfuse mapping helpers."""
 
 from __future__ import annotations
 
@@ -14,10 +9,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from hyperloom.orchestrator.trace import _row_utils as ru
-from hyperloom.orchestrator.trace import conversation_trace as ct
-from hyperloom.orchestrator.trace import langfuse_mapping as lm
-from hyperloom.orchestrator.trace import parse_usage as pu
+from hyperloom.inference_optimizer.trace import _row_utils as ru
+from hyperloom.inference_optimizer.trace import conversation_trace as ct
+from hyperloom.inference_optimizer.trace import langfuse_mapping as lm
+from hyperloom.inference_optimizer.trace import parse_usage as pu
 
 
 def test_stream_json_usage_skips_blank_and_nondict_lines(tmp_path):
@@ -92,14 +87,6 @@ def test_summarize_tool_input_unserializable_dict_falls_back_to_str():
 def test_summarize_tool_input_non_dict_values():
     assert pu._summarize_tool_input(None) == ""
     assert pu._summarize_tool_input(123) == "123"
-
-
-def test_forge_usage_marker_with_empty_blob_is_none():
-    assert pu.parse_forge_usage("FORGE_LLM_USAGE") is None
-
-
-def test_forge_steps_marker_with_empty_blob_is_none():
-    assert pu.parse_forge_steps("FORGE_STEPS") is None
 
 
 def test_parse_ts_missing_and_unparseable():
@@ -286,6 +273,12 @@ def test_redact_secrets_strips_bearer_and_env_shapes():
     assert "abcd1234efgh" not in out
 
 
+def test_redact_secrets_masks_custom_headers():
+    out = ct.redact_secrets("ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: deadbeefsecret")
+    assert "deadbeefsecret" not in out
+    assert "[REDACTED]" in out
+
+
 def test_coerce_text_none_and_non_str():
     assert ct._coerce_text(None) == ""
     assert ct._coerce_text(123) == "123"
@@ -312,7 +305,7 @@ def test_append_conversation_langfuse_mirror_failure_swallowed(tmp_path, monkeyp
     monkeypatch.setattr(ct, "append_jsonl", _ok)
 
     # Force the Langfuse mirror import/get_emitter to blow up; must be swallowed.
-    import hyperloom.orchestrator.trace.langfuse_emitter as le
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as le
 
     def _boom(_dir):
         raise RuntimeError("langfuse down")

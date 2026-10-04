@@ -1,37 +1,33 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The bottom-up PerfModel roofline and the HF metadata it reads.
-
-The op formulas mirror TraceLens PerfModel, so they are pinned against the
-arithmetic in their own docstrings rather than against recorded outputs: a
-recorded number cannot tell a corrected formula apart from a broken one.
-"""
+"""The bottom-up PerfModel roofline and the HF metadata it reads."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.kernel import roofline_ceiling as rc
+from hyperloom.inference_optimizer import roofline_ceiling as rc
 
 
 # ---- op formulas ----
 
 
 def test_gemm_flops_is_two_mnk():
-    assert rc._gemm_flops(4, 8, 16) == 2.0 * 4 * 8 * 16
+    assert rc._gemm_flops(M=4, N=8, K=16) == 2.0 * 4 * 8 * 16
 
 
 def test_gemm_bytes_separates_activation_from_weight_precision():
     """A quantized weight is read at its own width; activations stay bf16."""
     m, n, k = 4, 8, 16
-    both_fp8 = rc._gemm_bytes(m, n, k, weight_bpe=1.0)
+    both_fp8 = rc._gemm_bytes(M=m, N=n, K=k, weight_bpe=1.0)
     assert both_fp8 == m * k * 1.0 + k * n * 1.0 + m * n * 1.0
 
-    split = rc._gemm_bytes(m, n, k, weight_bpe=1.0, act_bpe=2.0)
+    split = rc._gemm_bytes(M=m, N=n, K=k, weight_bpe=1.0, act_bpe=2.0)
     assert split == m * k * 2.0 + k * n * 1.0 + m * n * 2.0
     # Only the weight read stays narrow, so the split total is the larger one.
     assert split > both_fp8
@@ -68,7 +64,7 @@ def test_sdpa_bytes_ignores_causal():
 def test_fused_moe_flops_counts_gate_up_down_and_aggregation():
     m, k, n, topk = 4, 16, 32, 2
     expected = 2.0 * m * k * n * topk * 2 + 2.0 * m * k * n * topk + m * k * (2 * topk - 1)
-    assert rc._fused_moe_flops(m, k, n, topk) == expected
+    assert rc._fused_moe_flops(M=m, K=k, N=n, topk=topk) == expected
 
 
 def test_fused_moe_active_experts_saturate_with_batch_size():
@@ -77,7 +73,7 @@ def test_fused_moe_active_experts_saturate_with_batch_size():
 
     def _expert_bytes(m):
         # Subtract the activation terms to leave the expert-weight reads.
-        return rc._fused_moe_bytes(m, k, n, num_experts, topk, bpe) - 2 * m * k * bpe
+        return rc._fused_moe_bytes(M=m, K=k, N=n, num_experts=num_experts, topk=topk, weight_bpe=bpe) - 2 * m * k * bpe
 
     one_token = _expert_bytes(1)
     assert one_token == pytest.approx(topk * n * k * bpe * 3)
@@ -88,8 +84,8 @@ def test_fused_moe_active_experts_saturate_with_batch_size():
 
 
 def test_fused_moe_bytes_defaults_activations_to_the_weight_width():
-    args = (4, 16, 32, 8, 2)
-    assert rc._fused_moe_bytes(*args, 1.0) == rc._fused_moe_bytes(*args, 1.0, act_bpe=1.0)
+    shape = dict(M=4, K=16, N=32, num_experts=8, topk=2)
+    assert rc._fused_moe_bytes(**shape, weight_bpe=1.0) == rc._fused_moe_bytes(**shape, weight_bpe=1.0, act_bpe=1.0)
 
 
 # ---- compute_roofline_from_perfmodel ----
@@ -109,6 +105,7 @@ def _dense_meta(**over) -> rc.ModelMeta:
         num_attention_heads=8,
     )
     base.update(over)
+    base.setdefault("expert_weight_dtype_bytes", base["weight_dtype_bytes"])
     return rc.ModelMeta(**base)
 
 
@@ -150,6 +147,14 @@ def test_perfmodel_decode_sits_between_its_own_memory_and_compute_ceilings():
     assert out.decode_tok_per_s == pytest.approx(min(out.decode_mem_tok_per_s, out.decode_cmp_tok_per_s))
     slower = "memory" if out.decode_mem_tok_per_s <= out.decode_cmp_tok_per_s else "compute"
     assert out.bound_kind == slower
+
+
+def test_perfmodel_uses_vendor_peak_when_achievable_spec_is_absent():
+    out = _perfmodel(gpu_type="mi355x")
+
+    assert out is not None
+    assert out.hbm_bw_gbps == pytest.approx(8000.0)
+    assert out.peak_achievable_tflops == pytest.approx(2516.6)
 
 
 def test_perfmodel_routes_a_moe_model_through_the_fused_expert_op():
@@ -282,6 +287,228 @@ def test_load_model_meta_sizes_routed_experts_at_their_own_precision(tmp_path):
     assert meta.expert_weight_bytes > 0
 
 
+#: The Quark MXFP4 shape, verbatim from
+#: ``Qwen3.8-2.4T-A95B-Quark-MXFP4/config.json``: ``quant_method`` names the
+#: toolkit, and the weight precision sits on the nested global weight spec.
+_QUARK_MXFP4_QUANT_CFG = {
+    "quant_method": "quark",
+    "quant_mode": "eager_mode",
+    "global_quant_config": {
+        "input_tensors": {"dtype": "fp4", "is_dynamic": True, "group_size": 32},
+        "weight": {"dtype": "fp4", "is_dynamic": False, "qscheme": "per_group", "group_size": 32},
+        "output_tensors": None,
+    },
+    "layer_quant_config": {},
+}
+
+
+def test_quant_config_weight_bytes_reads_the_nested_quark_weight_spec():
+    """quant_method says "quark"; only the nested weight spec names the precision."""
+    assert rc._resolve_quant_config_weight_bytes(_QUARK_MXFP4_QUANT_CFG) == 0.5
+
+
+def test_quant_config_weight_bytes_still_takes_a_precision_named_method():
+    """The flat HF form keeps working: the method itself is the precision."""
+    assert rc._resolve_quant_config_weight_bytes({"quant_method": "fp8"}) == 1.0
+    # ``awq``/``gptq`` name a 4-bit method the dtype table does not carry.
+    assert rc._resolve_quant_config_weight_bytes({"quant_method": "awq"}) == 0.5
+
+
+def test_quant_config_weight_bytes_reads_compressed_tensors_bit_widths():
+    cfg = {"quant_method": "compressed-tensors", "config_groups": {"group_0": {"weights": {"num_bits": 4}}}}
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 0.5
+
+
+def test_quant_config_weight_bytes_takes_the_precision_most_groups_agree_on():
+    """Per-layer groups need not agree, and dict order must not decide."""
+    cfg = {
+        "quant_method": "quark",
+        "layer_quant_config": {
+            "*.self_attn.q_proj": {"weight": {"dtype": "fp8"}},
+            "*.mlp.experts.*": {"weight": {"dtype": "fp4"}},
+            "*.mlp.experts.down_proj": {"weight": {"dtype": "fp4"}},
+        },
+    }
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 0.5
+    # Same groups, opposite majority -> opposite answer, from the counts alone.
+    cfg["layer_quant_config"]["*.mlp.experts.*"] = {"weight": {"dtype": "fp8"}}
+    cfg["layer_quant_config"]["*.mlp.experts.down_proj"] = {"weight": {"dtype": "fp8"}}
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 1.0
+
+
+def test_quant_config_weight_bytes_breaks_a_tie_toward_the_wider_type():
+    # Undercounting weight bytes raises the roofline and reports a real regression as "already at ceiling", so a tie
+    # resolves upward.
+    cfg = {
+        "quant_method": "quark",
+        "layer_quant_config": {
+            "a": {"weight": {"dtype": "fp4"}},
+            "b": {"weight": {"dtype": "fp8"}},
+        },
+    }
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 1.0
+
+
+def test_a_whole_checkpoint_scope_still_outranks_the_per_group_ones():
+    cfg = {
+        "quant_method": "quark",
+        "global_quant_config": {"weight": {"dtype": "fp4"}},
+        "layer_quant_config": {"a": {"weight": {"dtype": "fp8"}}, "b": {"weight": {"dtype": "fp8"}}},
+    }
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 0.5
+
+
+@pytest.mark.parametrize("quant_cfg", [None, {}, "fp8", {"quant_method": "unknown-toolkit"}])
+def test_quant_config_weight_bytes_is_silent_without_a_decisive_signal(quant_cfg):
+    """No signal returns 0.0 so the caller falls back to the checkpoint dtype."""
+    assert rc._resolve_quant_config_weight_bytes(quant_cfg) == 0.0
+
+
+def test_quant_config_weight_bytes_knows_mxfp8():
+    """MiniMax-M3-MXFP8 names the method ``mxfp8`` with no nested weight spec."""
+    assert rc._resolve_quant_config_weight_bytes({"quant_method": "mxfp8"}) == 1.0
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("num_experts_per_tok", 4),  # the common HF spelling
+        ("num_experts_per_token", 16),  # Kimi-K3
+        ("top_k_experts", 8),  # Gemma-4
+    ],
+)
+def test_experts_per_tok_reads_every_alias_in_use(key, expected):
+    assert rc._derive_experts_per_tok({key: expected}) == expected
+
+
+def test_experts_per_tok_prefers_the_canonical_spelling():
+    assert rc._derive_experts_per_tok({"num_experts_per_tok": 2, "top_k_experts": 9}) == 2
+
+
+def test_experts_per_tok_is_zero_when_no_alias_is_present():
+    assert rc._derive_experts_per_tok({"num_experts": 8}) == 0
+
+
+def test_moe_hidden_size_prefers_the_latent_expert_width():
+    """Kimi-K3 runs its experts at ``routed_expert_hidden_size``, not ``hidden_size``."""
+    assert rc._derive_moe_hidden_size({"hidden_size": 7168, "routed_expert_hidden_size": 3584}) == 3584
+
+
+def test_moe_hidden_size_falls_back_to_the_residual_width():
+    assert rc._derive_moe_hidden_size({"hidden_size": 7168}) == 7168
+
+
+def test_moe_decomposition_reads_a_gemma_style_topk_alias():
+    """Regression: ``top_k_experts`` read as 0 degraded a 128-expert model to dense."""
+    cfg = {
+        "num_experts": 128,
+        "top_k_experts": 8,
+        "hidden_size": 2816,
+        "num_hidden_layers": 30,
+        "moe_intermediate_size": 704,
+    }
+    _, total, experts, per_tok = rc._compute_expert_decomposition(cfg, weight_bytes=51_611_872_412, expert_bpe=2.0)
+    assert (experts, per_tok) == (128, 8)
+    assert total == 30 * 128 * 3 * 2816 * 704 * 2
+
+
+def test_moe_decomposition_sizes_latent_experts_at_their_own_width():
+    """Sizing Kimi-K3's experts at hidden_size doubles them past the checkpoint."""
+    cfg = {
+        "num_experts": 896,
+        "num_experts_per_token": 16,
+        "hidden_size": 7168,
+        "routed_expert_hidden_size": 3584,
+        "num_hidden_layers": 93,
+        "moe_intermediate_size": 3072,
+    }
+    weight_bytes = 1_560_860_324_864
+    _, total, experts, _ = rc._compute_expert_decomposition(cfg, weight_bytes=weight_bytes, expert_bpe=0.5)
+    assert experts == 896
+    assert total == int(93 * 896 * 3 * 3584 * 3072 * 0.5)
+    # The residual width would overshoot the checkpoint and safe-degrade.
+    wide = {k: v for k, v in cfg.items() if k != "routed_expert_hidden_size"}
+    assert rc._compute_expert_decomposition(wide, weight_bytes=weight_bytes, expert_bpe=0.5)[2] == 0
+
+
+def test_perfmodel_sizes_the_moe_op_at_the_latent_expert_width(tmp_path):
+    """A narrower expert width must shrink the MoE op, not just the guard math."""
+
+    def _breakdown(moe_hidden):
+        meta = rc.ModelMeta(
+            weight_bytes=1_000_000,
+            num_layers=4,
+            num_kv_heads=2,
+            head_dim=64,
+            weight_dtype_bytes=0.5,
+            num_experts=128,
+            experts_per_tok=8,
+            expert_weight_dtype_bytes=0.5,
+            hidden_size=4096,
+            moe_intermediate_size=1024,
+            moe_hidden_size=moe_hidden,
+            vocab_size=32000,
+            num_attention_heads=8,
+        )
+        b = rc.compute_roofline_from_perfmodel(
+            meta=meta, gpu_type="mi355x", concurrency=8, isl=1024, osl=128, num_gpus=1, precision_tag="mxfp4"
+        )
+        return next(o for o in b.ops if o.name == "moe_fused")
+
+    assert _breakdown(2048).bytes_moved < _breakdown(0).bytes_moved
+    # 0 means "unset", which must behave exactly like the residual width.
+    assert _breakdown(0).bytes_moved == _breakdown(4096).bytes_moved
+
+
+def test_load_model_meta_keeps_a_quark_moe_checkpoint_decomposed(tmp_path):
+    """Regression: reading only ``quant_method`` sized MXFP4 experts at bf16."""
+    cfg = {
+        **_DENSE_CFG,
+        "num_experts": 512,
+        "num_experts_per_tok": 10,
+        "moe_intermediate_size": 2048,
+        "quantization_config": _QUARK_MXFP4_QUANT_CFG,
+    }
+    # Sized as the real checkpoint is: fp4 experts fit, bf16 experts would not.
+    expert_elems = 4 * 512 * 3 * 512 * 2048  # layers * experts * 3 * hidden * moe_inter
+    weight_bytes = int(expert_elems * 0.5 * 1.15)
+    meta = rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=weight_bytes))
+
+    assert meta.weight_dtype_bytes == 0.5
+    assert (meta.num_experts, meta.experts_per_tok) == (512, 10)
+    assert meta.moe_intermediate_size == 2048
+    assert meta.expert_weight_bytes == int(expert_elems * 0.5)
+    # At bf16 the same config degrades to dense, which is the bug being pinned.
+    assert rc._compute_expert_decomposition(cfg, weight_bytes=weight_bytes, expert_bpe=2.0) == (
+        weight_bytes,
+        0,
+        0,
+        0,
+    )
+
+
+def test_perfmodel_attributes_the_moe_ffn_for_a_quark_checkpoint(tmp_path):
+    """The MoE op must appear, and dominate: it is most of the weight IO."""
+    cfg = {
+        **_DENSE_CFG,
+        "num_experts": 512,
+        "num_experts_per_tok": 10,
+        "moe_intermediate_size": 2048,
+        "quantization_config": _QUARK_MXFP4_QUANT_CFG,
+    }
+    expert_elems = 4 * 512 * 3 * 512 * 2048
+    meta = rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=int(expert_elems * 0.5 * 1.15)))
+    breakdown = rc.compute_roofline_from_perfmodel(
+        meta=meta, gpu_type="mi355x", concurrency=64, isl=8192, osl=1024, num_gpus=8, precision_tag="mxfp4"
+    )
+
+    ops = {o.name: o.pct_time for o in breakdown.ops}
+    assert "moe_fused" in ops
+    assert ops["moe_fused"] == max(ops.values())
+    # Dense gate/up/down must not double-count the FFN alongside the MoE op.
+    assert not {"gate_proj", "up_proj", "down_proj"} & set(ops)
+
+
 def test_moe_decomposition_degrades_when_the_experts_exceed_the_checkpoint():
     """An implausible decomposition is dropped rather than published."""
     cfg = {
@@ -291,7 +518,7 @@ def test_moe_decomposition_degrades_when_the_experts_exceed_the_checkpoint():
         "num_hidden_layers": 4,
         "moe_intermediate_size": 256,
     }
-    active, total, experts, per_tok = rc._compute_expert_decomposition(cfg, weight_bytes=1024, dtype_bytes=2.0)
+    active, total, experts, per_tok = rc._compute_expert_decomposition(cfg, weight_bytes=1024, expert_bpe=2.0)
     assert (active, total, experts, per_tok) == (1024, 0, 0, 0)
 
 
@@ -304,7 +531,7 @@ def test_moe_decomposition_degrades_when_the_experts_exceed_the_checkpoint():
     ],
 )
 def test_moe_decomposition_needs_a_complete_config(cfg):
-    assert rc._compute_expert_decomposition(cfg, weight_bytes=999, dtype_bytes=2.0) == (999, 0, 0, 0)
+    assert rc._compute_expert_decomposition(cfg, weight_bytes=999, expert_bpe=2.0) == (999, 0, 0, 0)
 
 
 def test_load_model_meta_declines_an_unreadable_model(tmp_path):
@@ -327,6 +554,141 @@ def test_load_model_meta_declines_a_config_that_is_not_a_mapping(tmp_path):
     (d / "config.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
     (d / "model.safetensors").write_bytes(b"\0" * 16)
     assert rc.load_model_meta(d) is None
+
+
+# ---- runtime weight precision ----
+
+
+def _load_small_moe_meta(tmp_path: Path, **over) -> rc.ModelMeta:
+    cfg = {
+        **_DENSE_CFG,
+        "num_hidden_layers": 2,
+        "hidden_size": 16,
+        "num_attention_heads": 4,
+        "intermediate_size": 32,
+        "vocab_size": 64,
+        "num_experts": 4,
+        "num_experts_per_tok": 1,
+        "moe_intermediate_size": 8,
+        **over,
+    }
+    return rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=16384))
+
+
+def test_uniform_moe_runtime_quantization_reaches_perfmodel(tmp_path):
+    meta = _load_small_moe_meta(tmp_path)
+    state = SimpleNamespace(last_baseline={"extra_args": "--quantization fp8 --dtype bfloat16"})
+    rt = rc.resolve_runtime_dtype(state, meta)
+    applied = rc.apply_runtime_dtype(meta, rt)
+    breakdown = _perfmodel(applied, concurrency=1, precision_tag=rt.compute_precision_tag)
+    ops = {op.name: op for op in breakdown.ops}
+
+    # Two layers, one routed expert: fp8 weight reads plus bf16 activation IO.
+    assert ops["moe_fused"].bytes_moved == 2 * (3 * 16 * 8 + 2 * 16 * 2)
+    assert ops["q_proj"].bytes_moved == 2 * (16 * 16 + 2 * 16 * 2)
+    assert (meta.expert_weight_dtype_bytes, applied.expert_weight_dtype_bytes) == (2.0, 1.0)
+    assert meta.expert_weight_bytes == 6144
+    assert applied.weight_dtype_bytes == 1.0
+    assert (applied.weight_bytes, applied.active_weight_bytes, applied.expert_weight_bytes) == (8192, 5888, 3072)
+    assert rc.apply_runtime_dtype(applied, rt) == applied
+    assert (meta.weight_bytes, meta.active_weight_bytes, meta.expert_weight_bytes) == (16384, 11776, 6144)
+
+
+@pytest.mark.parametrize(
+    ("server_args", "expected_bytes", "general_bpe", "act_bpe"),
+    [
+        ("--quantization fp8", (8960, 7808, 1536), 1.0, 2.0),
+        ("--dtype float32", (31232, 30080, 1536), 4.0, 4.0),
+    ],
+    ids=["quantization", "dtype"],
+)
+def test_runtime_general_dtype_preserves_experts_stored_elsewhere(
+    tmp_path, server_args, expected_bytes, general_bpe, act_bpe
+):
+    """An override names one precision, so it misses fp4 experts under bf16 attention."""
+    meta = _load_small_moe_meta(tmp_path, expert_dtype="fp4")
+    rt = rc.resolve_runtime_dtype(SimpleNamespace(last_baseline={"extra_args": server_args}), meta)
+    applied = rc.apply_runtime_dtype(meta, rt)
+
+    assert (applied.weight_bytes, applied.active_weight_bytes, applied.expert_weight_bytes) == expected_bytes
+    assert meta.expert_weight_dtype_bytes == applied.expert_weight_dtype_bytes == 0.5
+    assert applied.expert_weight_bytes == meta.expert_weight_bytes
+    assert applied.weight_dtype_bytes == general_bpe
+    assert rc.apply_runtime_dtype(applied, rt) == applied
+    before = next(op for op in _perfmodel(meta, concurrency=1).ops if op.name == "moe_fused")
+    after = next(op for op in _perfmodel(applied, concurrency=1).ops if op.name == "moe_fused")
+    # Expert weights stay at fp4 either way; only the activation width follows the override.
+    assert before.bytes_moved == 2 * (3 * 16 * 8 * 0.5 + 2 * 16 * 2)
+    assert after.bytes_moved == 2 * (3 * 16 * 8 * 0.5 + 2 * 16 * act_bpe)
+
+
+@pytest.mark.parametrize(
+    ("server_args", "expected_bytes"),
+    [("--quantization fp8", (8192, 5888, 3072)), ("--dtype float32", (32768, 23552, 12288))],
+    ids=["quantization", "dtype"],
+)
+def test_declaring_the_experts_at_the_general_precision_is_not_a_second_precision(
+    tmp_path, server_args, expected_bytes
+):
+    """A config that writes ``expert_dtype`` out and one that leaves it inherited describe one model."""
+    state = SimpleNamespace(last_baseline={"extra_args": server_args})
+    inherited = _load_small_moe_meta(tmp_path / "inherited")
+    declared = _load_small_moe_meta(tmp_path / "declared", expert_dtype="bfloat16")
+    applied = [rc.apply_runtime_dtype(meta, rc.resolve_runtime_dtype(state, meta)) for meta in (inherited, declared)]
+    sizes = [(m.weight_bytes, m.active_weight_bytes, m.expert_weight_bytes) for m in applied]
+    assert sizes[0] == sizes[1] == expected_bytes
+    moved = [next(op for op in _perfmodel(m, concurrency=1).ops if op.name == "moe_fused").bytes_moved for m in applied]
+    assert moved[0] == moved[1]
+
+
+def test_runtime_dtype_noop_preserves_moe_metadata(tmp_path):
+    meta = _load_small_moe_meta(tmp_path, expert_dtype="fp4")
+    rt = rc.resolve_runtime_dtype(SimpleNamespace(), meta)
+
+    assert rc.apply_runtime_dtype(meta, rt) == meta
+
+
+@pytest.mark.parametrize(
+    "server_args, source",
+    [
+        ("--quantization fp8 --dtype float32", "server_args_quantization"),
+        ("--dtype float32", "quantization_config"),
+    ],
+)
+def test_prequantized_moe_runtime_dtype_keeps_checkpoint_bytes(tmp_path, server_args, source):
+    meta = _load_small_moe_meta(tmp_path, quantization_config={"quant_method": "fp8"}, expert_dtype="fp4")
+    rt = rc.resolve_runtime_dtype(SimpleNamespace(last_baseline={"extra_args": server_args}), meta)
+
+    assert rt.source == source
+    assert rt.weight_dtype_bytes == 1.0
+    assert meta.expert_weight_dtype_bytes == 0.5
+    assert rc.apply_runtime_dtype(meta, rt) == meta
+
+
+def test_cli_fp8_still_overrides_a_uniform_fp4_checkpoint(tmp_path):
+    meta = _load_small_moe_meta(tmp_path, quantization_config={"quant_method": "fp4"})
+    rt = rc.resolve_runtime_dtype(SimpleNamespace(last_baseline={"extra_args": "--quantization fp8"}), meta)
+    applied = rc.apply_runtime_dtype(meta, rt)
+
+    assert rt.source == "server_args_quantization"
+    assert rt.weight_dtype_bytes == 1.0
+    assert (meta.expert_weight_dtype_bytes, applied.expert_weight_dtype_bytes) == (0.5, 1.0)
+    assert (applied.weight_bytes, applied.active_weight_bytes, applied.expert_weight_bytes) == (32768, 30464, 3072)
+    assert rc.apply_runtime_dtype(applied, rt) == applied
+
+
+def test_runtime_dtype_still_scales_dense_weights():
+    meta = _dense_meta(weight_bytes=16384, active_weight_bytes=16384)
+    rt = rc.resolve_runtime_dtype(SimpleNamespace(last_baseline={"extra_args": "--dtype fp8"}), meta)
+    applied = rc.apply_runtime_dtype(meta, rt)
+
+    assert rt.source == "server_args_dtype"
+    assert applied.weight_dtype_bytes == 1.0
+    assert applied.weight_bytes == 8192
+    assert applied.active_weight_bytes == 8192
+    assert applied.expert_weight_bytes == 0
+    assert applied.expert_weight_dtype_bytes == 1.0
+    assert rc.apply_runtime_dtype(applied, rt) == applied
 
 
 # ---- state-level entry points ----
@@ -490,8 +852,6 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     assert dtype.compute_precision_tag == "fp32"
 
     # 1-vs-2: server_args_quantization must beat quantization_config when both present.
-    # A pre-quantized meta (weight_dtype_bytes=0.5 fp4) + recognised --quantization fp8
-    # → branch 1 must win even though branch 2 would also fire.
     quant_vs_prequant_state = _state(
         tmp_path / "quant_vs_prequant",
         _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--quantization fp8"),
@@ -504,7 +864,6 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     assert quant_vs_prequant.compute_precision_tag == "fp8"
 
     # 2-vs-3: quantization_config must beat server_args_dtype when both present.
-    # A pre-quantized fp8 meta + --dtype float32 → branch 2 must win over branch 3.
     prequant_vs_dtype_state = _state(
         tmp_path / "prequant_vs_dtype",
         _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--dtype float32"),
@@ -523,8 +882,8 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     assert fallback.activation_dtype_bytes == 2.0
     assert fallback.compute_precision_tag == "bf16"
 
-    # Upper edge of `0 < meta_w_bytes < 2.0`: 2.0 must fall through, not take
-    # quantization_config (which a `<= 2.0` widening would incorrectly do).
+    # Upper edge of `0 < meta_w_bytes < 2.0`: 2.0 must fall through, not take quantization_config (which a `<= 2.0`
+    # widening would incorrectly do).
     meta_eq_2 = rc.resolve_runtime_dtype(
         _state(tmp_path / "meta_eq_2", _serving_benchmark(tmp_path / "m")),
         _dense_meta(weight_dtype_bytes=2.0),
@@ -554,9 +913,8 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
 
 
 def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch):
-    # Patch vendor to a *different* positive value (500.0) so swapping the
-    # operands of `achievable or vendor` would change the result.  With vendor==0
-    # both orderings yield 100.0 and the precedence isn't pinned.
+    # Patch vendor to a *different* positive value (500.0) so swapping the operands of `achievable or vendor` would
+    # change the result.
     monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 100.0)
     monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 500.0)
 
@@ -636,3 +994,27 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
         )
         == 0.0
     )
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("fp8_e4m3", 1.0),
+        ("fp8_e5m2", 1.0),
+        ("nvfp4", 0.5),
+        ("int8", 1.0),
+        ("w8a8_int8", 1.0),
+        ("int4", 0.5),
+        ("awq", 0.5),
+        ("gptq", 0.5),
+    ],
+)
+def test_a_nested_spec_reads_the_quant_only_tags_too(tag, expected):
+    """The nested path must consult both tables, exactly as the flat one does."""
+    cfg = {"quant_method": "quark", "global_quant_config": {"weight": {"dtype": tag}}}
+    assert rc._resolve_quant_config_weight_bytes(cfg) == expected
+
+
+def test_num_bits_still_wins_when_the_tag_is_unknown():
+    cfg = {"quant_method": "quark", "global_quant_config": {"weight": {"dtype": "some_new_format", "num_bits": 6}}}
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 0.75

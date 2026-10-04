@@ -32,10 +32,26 @@ kernelforge forge-fuse --trace <t> --model-path <d> --framework sglang \
     --output-dir <d> [options]
 kernelforge gemm-tune run --model-path <M> --framework sglang \
     --precision <p> --output-dir <D> [options]
+kernelforge kernel-rewrite-controller --handoff-dir <H> \
+    --budget-minutes <m> --output-dir <D>
 ```
 
 See {doc}`Experience store </kernelforge/reference/experience-store>` for the exact
 local/remote environment contract and durable local layout.
+
+## kernel-rewrite-controller
+
+Initializes one fresh autonomous kernel-rewrite controller run. It validates the
+Hyperloom handoff, runs one long-lived opportunity-analysis Agent, atomically
+publishes complete operator tasks, and dispatches them sequentially through
+named-kernel `forge-loop` campaigns. The Agent may inspect existing trace and
+source evidence but cannot run shell commands, profiling, or serving benchmarks.
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--handoff-dir <dir>` | required | Directory containing `workload.md`, `serving-context.md`, and `trace-evidence.md`. |
+| `--budget-minutes <m>` | required | Positive total wall-clock budget used to derive the controller deadline. |
+| `--output-dir <dir>` | required | Fresh macro-cycle output directory. Existing controller output is refused rather than resumed. |
 
 ## forge-loop
 
@@ -62,6 +78,8 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--resume` | off | Continue the campaign already stored in that exact workspace. |
 | `--kernel <file>` | none | The kernel file to optimize. This is the anchor the loop edits. |
 | `--driver <file>` | none | The validation/bench driver. |
+| `--auto` | off | Pick the kernel here instead of being handed one. Requires `--nomination-input`, refuses `--kernel` and `--resume`, and makes the result carry a `patches` array plus nomination counts. Off by default, so a run without it is unchanged. |
+| `--nomination-input <file>` | `''` | Nomination request JSON: raw trace path, candidate list path, lane budget and target ceiling. Read only under `--auto`. |
 | `--git-branch <name>` | none | Development branch to optimize on, checked out before the campaign config is snapshotted. |
 | `--program-md-file <file>` | none | Optional task context copied into the campaign. |
 | `--invocation-spec-file <file>` | none | Hyperloom invocation-spec JSON used by task preparation. |
@@ -72,8 +90,9 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--framework <name>` | inferred | Framework identity for the experience KB slug: `vllm`, `sglang`, `aiter`, or `standalone` for a framework-less file. Authoritative when given. |
 | `--kernel-backend <name>` | inferred | Kernel backend override. An unsupported backend falls back to `flydsl`. |
 | `--commit-new-path <glob>` | none | Workspace-relative path or glob naming a file the agent may CREATE and still have committed with a KEEP. Repeatable. Untracked files are otherwise never staged and never removed by a REVERT. `*` does not cross a directory separator and `**` is rejected; name each level. Protected measurement paths are never admitted. Immutable per campaign. |
-| `--snr-threshold <dB>` | `30.0` | SNR pre-filter threshold, stored immutably. A KEEP is decided by the task's own `correctness_command`, not by this value. |
+| `--snr-threshold <dB>` | `30.0` | Threshold the driver's correctness suite must clear, stored immutably. A KEEP needs this and a measured gain over the incumbent; the assembly backend adds the task's own acceptance suite on top. |
 | `--prepare-task` / `--no-prepare-task` | on | Pre-loop preflight of the driver against the loop's stdout contract; on failure one agent authors or repairs the measurement driver (never the kernel), then it is re-checked. Skipped on `--resume`. |
+| `--baseline-json <file>` | none | JSON file holding a scoring anchor measured outside this loop: `{"wall_ms": <float>, "case_times": {"<case id>": <ms>}}`. Every speedup the run reports then divides by those per-case times, and they are the wall time published beside it. The loop still benches the kernel it starts from, but as the search start and first incumbent rather than as the anchor — so the KEEP bar begins at that kernel's own score, not at 1.0x. Use it when the starting kernel already replaced something else and the run should be graded against the original: `forge-rewrite` passes its source kernel's timings this way. Omitted, the loop anchors on its own first bench. |
 
 ### Budget and deadlines
 
@@ -100,7 +119,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--lanes <n>` | `3` | Implementer lanes per round (1–8). Above 1 the round's analysis is partitioned into that many non-overlapping plans, each run concurrently in its own workspace copy and measured on its own. Lanes run concurrently, so a lane costs a session rather than a share of the round's wall clock, and three is what the three specialist analyses divide into. The partition returns fewer when the evidence supports fewer. Needs a provider declaring `stop_hooks` and `session_env`; refused on one that does not. |
+| `--lanes <n>` | `3` | Implementer lanes per round (1–8). Above 1 the round's analysis is partitioned into that many non-overlapping plans, each run concurrently in its own workspace copy and measured on its own. Lanes run concurrently, so a lane costs a session rather than a share of the round's wall clock, and three is what the three specialist analyses divide into. The partition returns fewer when the evidence supports fewer. Needs a provider declaring `session_env`; refused on one that does not, because lanes sharing a build cache measure each other's binaries. A provider without `stop_hooks` runs and is warned: it loses in-session denial, so a lane can waste its session or void the round, but it cannot misreport one. |
 | `--merge-stacking` / `--no-merge-stacking` | on | Once consecutive iterations stop producing a new best, spend one iteration measuring two archived rejected gains applied together, chosen for winning on different cases. Costs a measurement but no Implementer session. Applies at every `--lanes` setting; turn it off to compare against a run that predates it. |
 | `--specialist-probe` / `--no-specialist-probe` | on | Let the read-only planning specialists measure one variant per probe in a scratch tree instead of only arguing about a dispatch constant. Each probe re-runs the workspace driver for one case with declared constants overridden, queues on the same device lock the fan-out lanes take, and never touches the canonical tree. Falls back to `FORGE_SPECIALIST_PROBE`. |
 | `--specialist-probe-max <n>` | `6` | Probes ONE analysis round may make in total, shared across every specialist it dispatches. Every call counts, including a refused one. Falls back to `FORGE_SPECIALIST_PROBE_MAX`. |
@@ -130,7 +149,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--kb-warmstart` / `--no-kb-warmstart` | on | Apply the best matching KB solution before iteration 1. Only meaningful with `--experience-kb`. A caller that prepares the workspace itself, such as `forge-fuse`, turns this off to keep publishing while never replaying a stored patch over a tree it already staged. |
 | `--return-after-read-kb` / `--return-after-read-KB` | off | Return before iteration 1 when a KB solution applies cleanly, passes current correctness and improves current performance. |
 | `--producer <name>` | forge-loop's own | System owning the candidate stream these records belong to. A producer has its own index in the KB identity scheme, so a pipeline driving this command as a subprocess keeps its records out of the kernel campaigns' ranking. |
-| `--pr-kb` / `--no-pr-kb` | off | Inject upstream pull-request references from the Primus Cortex PR Monitor as Implementer prior knowledge. Falls back to `PR_KB_ENABLE`. |
+| `--pr-kb` / `--no-pr-kb` | off | Inject upstream pull-request references from the PR Monitor co-hosted at `${KB_STORE_URL}/pr-monitor/v1`. Falls back to `PR_KB_ENABLE`. |
 | `--experience-id <id>` | `''` | Unique KB run identity, independent of the checkpoint experiment ID. |
 
 ### Output
@@ -186,6 +205,7 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 |:--|:--|:--|
 | `--framework <name>` | inferred | Apply-back target: `aiter`, `vllm` or `sglang`. Inferred from the source path when omitted. |
 | `--applyback-import-module <mod>` | inferred | Import target required to load before and after apply-back. Repeatable; defaults to the source module inferred from its package. |
+| `--applyback` / `--no-applyback` | on | Integrate the optimized kernel back into the framework repository and publish the patch. Disabling it delivers only the standalone kernel: the stage is skipped, its 20-minute reserve returns to the search, and `success` no longer depends on a patch the caller did not ask for. `applyback_required` is then `false`, and `best_commit` names the standalone selection instead of an apply-back commit. |
 | `--max-applyback-attempts <n>` | `2` | Maximum clean-room framework integration sessions. |
 
 ### Hardware, provider and output
@@ -194,7 +214,7 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 |:--|:--|:--|
 | `--gpu-target <arch>` | none | ROCm compilation architecture, e.g. `gfx950`. Also exported to the environment. |
 | `--gpu-type <sku>` | `mi355x` | Hardware SKU for rewrite KB identities. |
-| `--model <name>` | provider default | LLM model; overrides `KERNEL_AGENTS_MODEL`. |
+| `--model <name>` | provider default | LLM model; overrides `CLAUDE_MODEL`/`CODEX_MODEL`. |
 | `--permission-mode <v>` | `acceptEdits` | Claude permission mode. |
 | `--supervisor-backend <name>` | `codex` | OPTIMIZE supervisor backend on stall: `codex` or `claude`. |
 | `--rewrite-kb` / `--no-rewrite-kb` | on | Read and publish rewrite recipes. |
@@ -216,6 +236,11 @@ authors one fused Triton kernel that survives CUDA-graph capture, A/B-validated
 against the framework's own eager op. Writes `fusion_manifest.json` and exits 3
 when no fusion is found.
 
+Which chain is fused is chosen from the trace by default. `--fuse-kernel` fixes it
+instead: name one GPU kernel and the fusion is built around that kernel and its
+trace neighbours. With `--dry-run` this resolves and writes `fusion_anchor.json`
+without reaching an agent, so the selection can be checked before anything is spent.
+
 ### Inputs
 
 | Option | Default | Meaning |
@@ -227,19 +252,23 @@ when no fusion is found.
 | `--framework-root <dir>` | auto-detect | Explicit framework source root, else the installed package is located. |
 | `--decode-batch <n>` | `16` | Representative decode batch size (T) for shapes. |
 | `--decode-steps <n>` | `0` | Decode steps captured in the trace, used to normalize kernels/step. |
+| `--attn-tp <n>` | `1` | Attention tensor-parallel size, mirroring the model's `attn_tp_size`. Local shape dims are divided by it, e.g. `n_local_heads = num_attention_heads // attn_tp`, and for DeepSeek-V4 `n_local_groups = o_groups // attn_tp`. With `--enable-dp-attention` the workload's serving `--tp` is DP, so `attn_tp` is `1`; without it, set `attn_tp` to the attention shard count. |
 
 ### Discovery and authoring
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--discover <mode>` | `patterns` | `patterns` (template library) or `llm` (the LLM reads trace and source, autonomous). |
+| `--discover <mode>` | `patterns` | `patterns` (template library), `llm` (the LLM reads trace and source, autonomous), or `anchored` (fuse around the kernel `--fuse-kernel` names). |
+| `--repo-scope` / `--no-repo-scope` | off | Give discovery and authoring the whole framework repository instead of one resolved file. Discovery embeds no source, explores the tree with its own read/search tools, and may return a fusion whose call sites span several files; authoring may edit all of them. Use when the chain is not in the arch-class model file and you do not want to name its location. Requires `--discover llm` or `--discover anchored`. |
+| `--fuse-kernel <name>` | `''` | Full GPU kernel name, exactly as the trace spells it. Fusion is then built around that kernel and whatever the trace shows running beside it, instead of a ranked guess. Implies `--discover anchored`. A name the trace does not contain is a usage error listing the closest ones; a fragment is not a name. |
 | `--dry-run` | off | Diagnose and locate only; emit a manifest with a recipe skeleton, no authoring or validation. |
 | `--author` / `--no-author` | on | Author the fused kernel via the LLM. Non-dry-run only. |
 | `--fuse-all-confirmed` | off | Author ALL source-confirmed patterns together rather than only the top one, and A/B all their flags. A compile-pass candidate cannot be authored with them, so it is claimed alone and the rest wait for a later round. |
 | `--agent-backend <name>` | `auto` | `auto`, `claude` or `codex`, for discovery and authoring. |
-| `--agent-sandbox-mode <v>` | `workspace-write` | `workspace-write`, `read-only` or `bypass`. Bypass additionally requires `HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1`. |
+| `--agent-sandbox-mode <v>` | `workspace-write` | `workspace-write`, `read-only` or `bypass`. Use `bypass` only when an external sandbox already enforces isolation. |
 | `--model <name>` | provider default | Agent model. An explicit value wins; otherwise `$CODEX_MODEL` / `$CLAUDE_MODEL`, then the registered provider default. |
 | `--max-turns <n>` | `100` | Max authoring turns. |
+| `--max-recipes <n>` | `0` | Cap how many ranked recipes to try. `0` means uncapped, so every discovered recipe is considered; Hyperloom passes the count its fusion lane budget pays for. |
 | `--gpu <id>` | `0` | HIP device id for authoring and A/B. |
 | `--gpu-target <arch>` | auto-detect | Canonical GPU arch the author writes for, e.g. `gfx950`; detected via `rocminfo` when omitted. |
 
@@ -250,7 +279,6 @@ when no fusion is found.
 | `--validate` / `--no-validate` | on | Run the A/B decode validation. Non-dry-run only. |
 | `--ab-isl <n>` | `512` | A/B input length. |
 | `--ab-osl <n>` | `128` | A/B output length. |
-| `--bench-extra <args>` | `''` | Extra `bench_one_batch` args, e.g. `--attention-backend triton`. |
 | `--server-extra <args>` | `''` | Extra serving args for the smoke launch, e.g. `--kv-cache-dtype fp8`. A model whose engine refuses to start without a flag can never reach the kernel the smoke exists to exercise. |
 | `--tp <n>` | `1` | Tensor-parallel size for the serving smoke; must match the session. |
 | `--block-size <n>` | `0` (omit) | vLLM KV `--block-size` for the serving smoke. Required for sparse-attention models that reject the default block size. |
@@ -314,6 +342,7 @@ Search and execution:
 | Option | Default | Meaning |
 |:--|:--|:--|
 | `--tuner <name>` | routed | Force a specific tuner, skipping routing. |
+| `--max-tuners <n>` | `0` | Run at most this many of the routed tuners, in priority order. `0` means uncapped; Hyperloom passes the count its GEMM lane budget pays for. |
 | `--thorough` | off | Full search space: all libtypes, more shapes, no per-shape timeout. Slower, but finds the absolute best config. |
 | `--iters <n>` | `80` | Benchmark iterations per config. |
 | `--warmup <n>` | `20` | Warmup iterations. |

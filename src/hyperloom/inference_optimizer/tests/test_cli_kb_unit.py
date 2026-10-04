@@ -19,8 +19,6 @@ def _args(**over):
         local_kb_root=None,
         degraded_kb=False,
         pr_monitor_enabled=True,
-        pr_monitor_url=None,
-        pr_monitor_mcp_url=None,
     )
     base.update(over)
     return argparse.Namespace(**base)

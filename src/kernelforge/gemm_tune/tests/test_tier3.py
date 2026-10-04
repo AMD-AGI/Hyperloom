@@ -1,21 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the generated-tuner tier.
-
-Three pieces, each guarding something that produced a wrong answer on real
-hardware before it existed:
-
-* ``coverage`` decides whether a generated tuner has a target at all, which was
-  previously settled by argument rather than by the fleet;
-* ``contract`` rejects output whose own numbers contradict each other;
-* ``referee`` is what makes the whole tier safe -- the generated tuner proposes,
-  and only these timings decide.
-"""
+"""Tests for the generated-tuner tier."""
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -29,6 +20,8 @@ from kernelforge.gemm_tune.tier3 import (
     validate_output_csv,
 )
 from kernelforge.gemm_tune.tier3.coverage import CoverageGap
+from kernelforge.gemm_tune.tier3.dispatch import MAX_MOE_MEAN_ERROR, MOE_CORRECTNESS_TRIALS, MOE_TABLE
+from kernelforge.gemm_tune.tuners.base import TuneResult
 
 
 def _demand(table="odd_tuned_gemm.csv", tuner=None, misses=40, keys=7):
@@ -56,21 +49,44 @@ class TestCoverageGaps:
         assert gap.warrants_generated_tuner
 
     def test_a_tuner_that_exists_but_was_not_selected_is_a_routing_gap(self):
-        # A real vLLM log missed 122 bf16 keys while sglang_dense_bf16 -- the
-        # tuner that owns that exact table -- simply was not selected by the
-        # framework branch. The answer is to route better, not to write a tuner,
-        # and conflating the two manufactures demand for the generated tier.
+        # A real vLLM log missed 122 bf16 keys while sglang_dense_bf16 -- the tuner that owns that exact table --
+        # simply was not selected by the framework branch.
         (gap,) = coverage_gaps(_demand(tuner="sglang_dense_bf16"), [TunerSpec("a8w8")])
         assert gap.kind == "not_selected"
         assert not gap.warrants_generated_tuner
 
-    def test_a_tuner_that_declined_for_a_reason_of_its_own_is_not_tier3_work(self):
+    def test_a_tuner_that_declined_for_no_reason_of_substance_is_tier3_work(self):
+        # A missing script is an implementation gap; substantive skips were filtered earlier.
         specs = [TunerSpec("fmoe_ck", skip_reason="the tuner script is missing")]
         (gap,) = coverage_gaps(_demand(tuner="fmoe_ck"), specs)
         assert gap.kind == "skipped"
-        assert not gap.warrants_generated_tuner
+        assert gap.warrants_generated_tuner
 
-    def test_only_a_missing_capability_reaches_the_generated_tier(self):
+    def test_an_owner_that_ran_and_landed_nothing_is_tier3_work(self):
+        # The distinction that matters is not whether a tuner exists but
+        # whether the table got tuned. Selecting an owner that then hands back
+        # nothing leaves the runtime missing every key it asked about.
+        specs = [TunerSpec("sglang_dense_bf16")]
+        demand = _demand(tuner="sglang_dense_bf16")
+        assert coverage_gaps(demand, specs, results=None) == []
+        empty = TuneResult(tuner_name="sglang_dense_bf16", status="no_improvement")
+        (gap,) = coverage_gaps(demand, specs, results=[empty])
+        assert gap.kind == "empty"
+        assert gap.warrants_generated_tuner
+        assert "produced nothing landable" in gap.reason
+
+    def test_an_owner_that_landed_something_is_not_a_gap(self):
+        specs = [TunerSpec("sglang_dense_bf16")]
+        landed = TuneResult(
+            tuner_name="sglang_dense_bf16",
+            status="ok",
+            artifact_path="/tmp/tuned.csv",
+            improved_shapes=3,
+            best_micro_speedup=1.4,
+        )
+        assert coverage_gaps(_demand(tuner="sglang_dense_bf16"), specs, results=[landed]) == []
+
+    def test_routing_is_the_one_kind_that_stays_out(self):
         report = {
             "demands": [
                 {"table": "none.csv", "tuner": None, "miss_count": 5},
@@ -80,15 +96,15 @@ class TestCoverageGaps:
         }
         specs = [TunerSpec("fmoe_ck", skip_reason="script is missing")]
         gaps = coverage_gaps(report, specs)
-        assert [g.table for g in gaps if g.warrants_generated_tuner] == ["none.csv"]
+        assert [g.table for g in gaps if not g.warrants_generated_tuner] == ["unrouted.csv"]
+        assert {g.table for g in gaps if g.warrants_generated_tuner} == {"none.csv", "declined.csv"}
 
     def test_a_covered_table_is_not_a_gap(self):
         specs = [TunerSpec("sglang_dense_bf16")]
         assert coverage_gaps(_demand(tuner="sglang_dense_bf16"), specs) == []
 
     def test_a_skip_that_is_an_answer_is_not_a_gap(self):
-        # The capability exists and said no. A generated tuner would not change
-        # any of these, so calling them coverage gaps would manufacture demand.
+        # The capability exists and said no.
         for reason in (
             "FP4 GEMM is not supported on gfx942",
             "No GEMM shapes available: needs --untuned-csv",
@@ -149,8 +165,8 @@ class TestMandate:
 
     def test_the_brief_carries_the_constraints_that_were_learned_the_hard_way(self):
         text = self._mandate().render()
-        # A single correctness check passes an intermittently wrong kernel at
-        # random; a Python-loop timer cannot rank kernels this small.
+        # A single correctness check passes an intermittently wrong kernel at random; a Python-loop timer cannot rank
+        # kernels this small.
         assert "8 times" in text or "{} times".format(8) in text
         assert "fresh inputs" in text
         assert "captured graph" in text
@@ -169,16 +185,51 @@ class TestMandate:
         assert d["correctness_trials"] == 8
 
     def test_the_brief_says_how_the_error_is_measured(self):
-        # Left to interpretation, the obvious element-wise ratio makes any
-        # output element near zero dominate -- and by that measure the
-        # unmodified torch.matmul scores 1.375, so the gate rejects the
-        # default path. The rule is unusable without its definition.
+        # Left to interpretation, the obvious element-wise ratio makes any output element near zero dominate -- and by
+        # that measure the unmodified torch.matmul scores 1.375, so the gate rejects the default path.
         text = self._mandate().render()
         assert "mean|ref|" in text
         assert "1.375" in text, "the reason has to travel with the rule"
 
     def test_the_definition_reaches_the_machine_readable_form(self):
         assert "mean|ref|" in self._mandate().to_dict()["max_relative_error_definition"]
+
+    def _moe_mandate(self):
+        gap = CoverageGap(
+            table=MOE_TABLE,
+            tuner="fmoe_ck",
+            env_var="AITER_CONFIG_FMOE",
+            key_schema=["token", "model_dim"],
+            miss_count=36,
+            reason="fmoe_ck produced empty output",
+        )
+        return build_mandate(gap, [{"token": 512, "model_dim": 6144}])
+
+    def test_the_fused_moe_brief_quotes_the_screen_its_referee_applies(self):
+        # The first real authoring session was handed the dense rule: fp32 reference, limit 0.05. Its author cannot
+        # build an fp32 reference at all -- aiter's weights arrive quantized and pre-shuffled -- so it invented a
+        # screen of its own, passed fifteen candidates, and the referee rejected all fifteen at ~0.144.
+        m = self._moe_mandate()
+        assert m.correctness_trials == MOE_CORRECTNESS_TRIALS
+        assert m.max_relative_error == MAX_MOE_MEAN_ERROR
+        text = m.render()
+        assert "0.01" in text
+        assert "4 times" in text
+        assert "There is no fp32 reference to build here" in text
+        assert "empty tuned-config CSV" in text
+        assert "1.375" not in text, "the dense rationale does not apply here and reads as authoritative"
+
+    def test_the_dense_rule_is_still_the_default(self):
+        # Only a table whose adapter screens differently overrides it; everything else keeps what was learned on dense.
+        m = self._mandate()
+        assert (m.correctness_trials, m.max_relative_error) == (8, 5e-2)
+        assert "1.375" in m.render()
+
+    def test_the_moe_rule_reaches_the_machine_readable_form(self):
+        d = self._moe_mandate().to_dict()
+        assert d["correctness_trials"] == MOE_CORRECTNESS_TRIALS
+        assert d["max_relative_error"] == MAX_MOE_MEAN_ERROR
+        assert json.loads(json.dumps(d))["max_relative_error_definition"].startswith("mean|got - ref|")
 
 
 class TestContract:
@@ -203,8 +254,7 @@ class TestContract:
         assert v.where == "header"
 
     def test_improved_must_agree_with_its_own_numbers(self, tmp_path):
-        # The cheapest possible tell that a script is not measuring what it
-        # reports.
+        # The cheapest possible tell that a script is not measuring what it reports.
         p = self._write(tmp_path, self._HDR, ["16,1536,7168,x,c=1,8.0,11.0,True"])
         problems = [str(v) for v in validate_output_csv(p, self._mandate())]
         assert any("contradicts" in s for s in problems)
@@ -299,18 +349,14 @@ class TestReferee:
         assert t.usable and t.speedup == pytest.approx(0.5)
 
     def test_interference_on_one_side_only_is_refused(self, clock):
-        # One clean baseline window and four disturbed ones. The best case then
-        # says the baseline is faster and the typical case says the candidate
-        # is; the two sides were not measured under one machine state, so there
-        # is no number to report.
+        # One clean baseline window and four disturbed ones.
         from kernelforge.gemm_tune.tier3 import referee
 
         calls = {"n": 0}
 
         def noisy_baseline():
             calls["n"] += 1
-            # Warmup runs first and is not measured; the first *sampled* window
-            # is the quiet one.
+            # Warmup runs first and is not measured; the first *sampled* window is the quiet one.
             if calls["n"] <= referee.WARMUP_CALLS:
                 return 1e-6
             sample = (calls["n"] - referee.WARMUP_CALLS - 1) // referee.CALLS_PER_SAMPLE
@@ -403,14 +449,7 @@ class TestReferee:
 
 @pytest.mark.parametrize("bad", ["", "16x1536", "16x1536x7168x4", "16xNx7168", "not-a-shape"])
 def test_shape_key_rejects_a_shape_it_cannot_turn_into_m_n_k(bad: str) -> None:
-    """It used to answer ``()`` here, which helped nobody.
-
-    Every caller unpacks the result into three names, so the empty tuple only
-    moved the failure a few frames out and stripped the shape from the message
-    -- and ``"16x1536"`` did not even fail here, it returned a 2-tuple that blew
-    up the same way. The adapter's caller already treats a raised error as
-    "tier3 attempt failed; tuning continues", so this loses no tolerance.
-    """
+    """It used to answer ``()`` here, which helped nobody."""
     from kernelforge.gemm_tune.tier3.dispatch import shape_key
 
     with pytest.raises(ValueError, match="MxNxK"):
@@ -421,3 +460,408 @@ def test_shape_key_parses_the_well_formed_case() -> None:
     from kernelforge.gemm_tune.tier3.dispatch import shape_key
 
     assert shape_key("16x1536x7168") == (16, 1536, 7168)
+
+
+class TestAWinHasToClearTheNoise:
+    """Require a speedup above the measured 1.00925x null-comparison noise."""
+
+    def test_the_floor_sits_above_every_null_reading_we_measured(self):
+        from kernelforge.gemm_tune.tier3 import referee
+
+        assert referee.MIN_SPEEDUP > 1.00925
+
+    def test_a_speedup_inside_the_noise_is_not_an_improvement(self, clock):
+        # 1.0076x is verbatim what torch measured against itself on hardware.
+        j = judge_candidates(
+            "8192x3456x1152",
+            [{"backend": "torch", "config": ""}],
+            baseline=clock.call(1.0076e-6),
+            dispatch=lambda c: clock.call(1e-6),
+        )
+        assert j.best_timing.usable
+        assert j.best_timing.speedup == pytest.approx(1.0076)
+        assert not j.improved, "the unmodified path is not an improvement over itself"
+
+    def test_a_win_that_clears_the_floor_still_counts(self, clock):
+        from kernelforge.gemm_tune.tier3 import referee
+
+        clearly_over = (referee.MIN_SPEEDUP + 0.01) * 1e-6
+        j = judge_candidates(
+            "s",
+            [{"n": "a"}],
+            baseline=clock.call(clearly_over),
+            dispatch=lambda c: clock.call(1e-6),
+        )
+        assert j.improved
+
+    def test_the_timing_is_still_reported_when_it_falls_short(self, clock):
+        """Refusing to call it a win is not the same as hiding the number."""
+        j = judge_candidates(
+            "s",
+            [{"n": "a"}],
+            baseline=clock.call(1.002e-6),
+            dispatch=lambda c: clock.call(1e-6),
+        )
+        assert not j.improved
+        assert j.to_dict()["best_timing"]["speedup"] == pytest.approx(1.002)
+
+
+class TestHipblasltCannotTakeTheRunDownWithIt:
+    """Reject invalid hipBLASLt state before its C++ handler terminates the process."""
+
+    @pytest.fixture
+    def aiter(self, monkeypatch):
+        import sys
+        import types
+
+        mod = types.ModuleType("aiter")
+        mod.calls = []
+        mod.created = False
+        mod.sols = [17, 42, 99]
+
+        def create_extension():
+            mod.created = True
+
+        def findallsols(*a, **k):
+            # The real one dies here when the extension was never created.
+            assert mod.created, "hipb_findallsols before hipb_create_extension"
+            mod.calls.append("findallsols")
+            return list(mod.sols)
+
+        def hipb_mm(a, bt, sol, *rest, **k):
+            assert mod.created, "hipb_mm before hipb_create_extension"
+            assert sol in mod.sols, f"invented solidx {sol} would abort the process"
+            return "out"
+
+        mod.hipb_create_extension = create_extension
+        mod.hipb_findallsols = findallsols
+        mod.hipb_mm = hipb_mm
+        monkeypatch.setitem(sys.modules, "aiter", mod)
+        return mod
+
+    @pytest.fixture
+    def adapter(self, monkeypatch):
+        import types
+
+        from kernelforge.gemm_tune.tier3.dispatch import _Bf16DenseAdapter
+
+        a = _Bf16DenseAdapter()
+        operand = types.SimpleNamespace(t=lambda: "bt")
+        monkeypatch.setattr(a, "_ops", lambda key: (operand, operand))
+        monkeypatch.setattr(a, "_torch", lambda: types.SimpleNamespace(bfloat16="bf16"))
+        return a
+
+    def test_the_extension_is_created_before_anything_touches_the_handle(self, adapter, aiter):
+        call = adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": "solidx=42"})
+        assert aiter.created, "the guard used to warm up with findallsols, which needs the same handle"
+        assert call is not None and call() == "out"
+
+    def test_a_solidx_hipblaslt_never_offered_is_refused_not_run(self, adapter, aiter):
+        call = adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": "solidx=999999999"})
+        assert call is None, "dispatching this would end the process, not raise"
+
+    def test_a_solidx_that_is_not_even_a_number_is_refused(self, adapter, aiter):
+        assert adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": "solidx=fastest"}) is None
+
+    def test_the_solution_set_is_fetched_once_per_shape(self, adapter, aiter):
+        for cfg in ("solidx=17", "solidx=42", "solidx=99"):
+            assert adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": cfg}) is not None
+        assert aiter.calls == ["findallsols"]
+
+    def test_a_different_shape_asks_again(self, adapter, aiter):
+        """Solutions are per-operand; reusing one shape's set would invent indices."""
+        adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": "solidx=17"})
+        adapter._build((1024, 512, 512), {"backend": "hipblaslt", "config": "solidx=17"})
+        assert aiter.calls == ["findallsols", "findallsols"]
+
+
+class TestTheAuthorIsToldWhatACandidateHasToLookLike:
+    """Expose the exact backend, config, and shape vocabulary accepted by dispatch."""
+
+    def _gap(self, table="bf16_tuned_gemm.csv"):
+        return CoverageGap(
+            table=table,
+            tuner="sglang_dense_bf16",
+            env_var="AITER_CONFIG_GEMM_BF16",
+            key_schema=["M", "N", "K"],
+            miss_count=40,
+            reason="sglang_dense_bf16 produced nothing landable",
+        )
+
+    def _brief(self, table="bf16_tuned_gemm.csv"):
+        return build_mandate(self._gap(table), [{"M": 16, "N": 1536, "K": 7168}]).render()
+
+    def test_every_backend_the_referee_can_run_is_named_in_the_brief(self):
+        from kernelforge.gemm_tune.tier3.dispatch import DENSE_BF16_BACKENDS
+
+        text = self._brief()
+        for backend in DENSE_BF16_BACKENDS:
+            assert backend in text, f"{backend} is dispatchable but the author is never told"
+
+    def test_the_config_grammar_and_the_shape_key_are_spelled_out(self):
+        text = self._brief()
+        assert "MxNxK" in text, "the keys of candidates.json are parsed, not free text"
+        assert "8192x3456x1152" in text, "an example beats a description of one"
+        assert "key=value" in text and "`;`" in text
+
+    def test_the_required_key_of_each_backend_is_stated(self):
+        text = self._brief()
+        # A candidate missing these is refused, so leaving them implicit costs
+        # the whole shape.
+        assert "solidx" in text
+        assert "kernelName" in text
+        assert "kernelId" in text
+
+    def test_a_table_with_no_adapter_is_told_so_rather_than_told_nothing(self):
+        text = self._brief("odd_tuned_gemm.csv")
+        assert "re-dispatch" in text
+        assert "hipblaslt" not in text, "naming backends that cannot re-time this table misleads"
+
+    def test_the_protocol_reaches_the_machine_readable_form(self):
+        d = build_mandate(self._gap(), [{"M": 16, "N": 1536, "K": 7168}]).to_dict()
+        assert "hipblaslt" in d["candidate_protocol"]
+
+    def test_a_caller_can_still_supply_its_own(self):
+        m = build_mandate(self._gap(), [], candidate_protocol="say it however you like")
+        assert "say it however you like" in m.render()
+        assert "hipblaslt" not in m.render()
+
+
+class TestTheVocabularyIsOneObject:
+    """Keep the advertised and dispatchable backend sets identical."""
+
+    def test_a_backend_nobody_advertised_is_refused_before_anything_is_touched(self, monkeypatch):
+        from kernelforge.gemm_tune.tier3.dispatch import _Bf16DenseAdapter
+
+        adapter = _Bf16DenseAdapter()
+
+        def explode(*_a, **_k):
+            raise AssertionError("an unknown backend must not reach the operands")
+
+        monkeypatch.setattr(adapter, "_ops", explode)
+        assert adapter._build((16, 16, 16), {"backend": "cutlass", "config": "tile=128"}) is None
+
+    def test_the_advertised_names_are_the_ones_build_implements(self, monkeypatch):
+        """Each advertised backend reaches its own branch, not the fallthrough."""
+        import sys
+        import types
+
+        from kernelforge.gemm_tune.tier3 import dispatch as d
+
+        # Enough of aiter to be imported; the branches are reached and then
+        # bail on their own missing config, which is the point.
+        monkeypatch.setitem(sys.modules, "aiter", types.ModuleType("aiter"))
+        reached = []
+        monkeypatch.setattr(d.log, "warning", lambda msg, *a: reached.append(a[0] if a else msg))
+        adapter = d._Bf16DenseAdapter()
+        operand = types.SimpleNamespace(t=lambda: "bt")
+        monkeypatch.setattr(adapter, "_ops", lambda key: (operand, operand))
+        monkeypatch.setattr(adapter, "_torch", lambda: types.SimpleNamespace(bfloat16="bf16"))
+        for backend in d.DENSE_BF16_BACKENDS:
+            # Deliberately configless: every branch then returns None early or
+            # raises inside its own try, and neither is the fallthrough.
+            adapter._build((16, 16, 16), {"backend": backend, "config": ""})
+        assert reached == [], f"advertised but not implemented: {reached}"
+
+
+class TestTheAuthoringSessionHasSomewhereItIsAllowedToWrite:
+    """Run writable authoring sessions in an isolated git repository."""
+
+    def _work_dir(self, tmp_path):
+        d = tmp_path / "tier3" / "bf16_tuned_gemm_csv"
+        d.mkdir(parents=True)
+        return d
+
+    def test_an_output_directory_becomes_a_worktree_of_its_own(self, tmp_path):
+        from kernelforge.gemm_tune.tier3.generate import _isolate
+
+        work = self._work_dir(tmp_path)
+        assert _isolate(work) is None
+        assert (work / ".git").exists()
+
+    def test_the_guard_can_resolve_a_baseline_afterwards(self, tmp_path):
+        """Exactly what the guard asks for, asked the same way it asks."""
+        import subprocess
+
+        from kernelforge.gemm_tune.tier3.generate import _isolate
+
+        work = self._work_dir(tmp_path)
+        _isolate(work)
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=work, capture_output=True, text=True, check=True
+        )
+        assert top.stdout.strip(), "the guard refuses an empty toplevel"
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=work, capture_output=True, text=True, check=False)
+        assert head.returncode == 0, "rollback needs a commit to roll back to"
+
+    def test_the_sandbox_is_its_own_root_even_inside_a_checkout(self, tmp_path):
+        """Otherwise the guard judges the operator's real tree, not the sandbox."""
+        import subprocess
+
+        from kernelforge.gemm_tune.tier3.generate import _isolate
+
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        work = self._work_dir(tmp_path)
+        _isolate(work)
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=work, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        assert Path(top).resolve() == work.resolve()
+
+    def test_an_existing_worktree_is_left_alone(self, tmp_path):
+        """The retry loop calls this twice; the second must not wipe the first."""
+        from kernelforge.gemm_tune.tier3.generate import _isolate
+
+        work = self._work_dir(tmp_path)
+        _isolate(work)
+        (work / "tuner.py").write_text("# attempt 1", encoding="utf-8")
+        assert _isolate(work) is None
+        assert (work / "tuner.py").read_text(encoding="utf-8") == "# attempt 1"
+
+    def test_git_missing_is_a_reason_not_a_traceback(self, tmp_path, monkeypatch):
+        import subprocess
+
+        from kernelforge.gemm_tune.tier3 import generate
+
+        def no_git(*_a, **_k):
+            raise OSError("No such file or directory: 'git'")
+
+        monkeypatch.setattr(subprocess, "run", no_git)
+        out = generate._isolate(self._work_dir(tmp_path))
+        assert out is not None and not out.ok
+        assert "sandbox worktree" in out.reason
+
+    def test_the_session_is_not_started_when_the_sandbox_cannot_be_made(self, tmp_path, monkeypatch):
+        """A failure here is reported, not walked past into a doomed session."""
+        from kernelforge.gemm_tune.tier3 import generate
+        from kernelforge.gemm_tune.tier3.mandate import TunerMandate
+
+        monkeypatch.setattr(
+            generate,
+            "_isolate",
+            lambda _w: generate.GeneratedTuner(False, None, "could not prepare a sandbox worktree"),
+        )
+
+        def must_not_run(*_a, **_k):
+            raise AssertionError("the authoring session was started without a sandbox")
+
+        monkeypatch.setattr(generate, "_run", must_not_run)
+        out = generate.generate_tuner(
+            TunerMandate(table="t.csv", key_schema=["M"], demand_shapes=[], why_existing_tiers_failed=""),
+            tmp_path / "w",
+        )
+        assert not out.ok and "sandbox worktree" in out.reason
+
+
+class TestTheAuthoringSessionIsAllowedToDoTheJob:
+    """Pre-authorize the write and Python tools required to generate a tuner."""
+
+    def _spec(self, monkeypatch, tmp_path):
+        from kernelforge.gemm_tune.tier3 import generate
+        from kernelforge.gemm_tune.tier3.mandate import TunerMandate
+
+        seen = {}
+
+        class Backend:
+            name = "fake"
+
+            def run(self, spec):
+                seen["spec"] = spec
+                Path(spec.cwd, "tuner.py").write_text("# authored", encoding="utf-8")
+                return type("R", (), {"text": "done", "end_reason": "agent_stopped", "session_id": "s"})()
+
+        monkeypatch.setattr(generate, "_isolate", lambda _w: None)
+        import kernelforge.agent_backends.registry as reg
+
+        monkeypatch.setattr(reg, "select_default_agent_provider", lambda _m: type("P", (), {"name": "fake"})())
+        monkeypatch.setattr(reg, "resolve_agent_runtime", lambda *a, **k: object())
+        monkeypatch.setattr(reg, "create_registered_backend", lambda _r: Backend())
+        out = generate.generate_tuner(
+            TunerMandate(table="t.csv", key_schema=["M"], demand_shapes=[], why_existing_tiers_failed=""),
+            tmp_path,
+        )
+        assert out.ok, out.reason
+        return seen["spec"]
+
+    def test_the_tools_it_needs_are_pre_approved(self, monkeypatch, tmp_path):
+        policy = self._spec(monkeypatch, tmp_path).tool_policy
+        assert policy is not None, "a None policy leaves allowed_tools unset and the session asks"
+        assert policy.write, "it cannot deliver tuner.py without Write"
+        # solidx, ASM kernel names and opus kernel ids only exist in the
+        # installed library; the mandate says inventing one kills the process.
+        assert policy.shell, "it cannot enumerate what is callable without running python"
+
+    def test_it_gets_more_than_one_turn(self, monkeypatch, tmp_path):
+        policy = self._spec(monkeypatch, tmp_path).tool_policy
+        assert policy.max_turns is None or policy.max_turns > 1, (
+            "the mandate tells it to explore before searching, which is several turns"
+        )
+
+    def test_what_the_agent_said_survives_into_the_reason(self, monkeypatch, tmp_path):
+        """Otherwise every failure reads the same and explains nothing."""
+        from kernelforge.gemm_tune.tier3 import generate
+        from kernelforge.gemm_tune.tier3.mandate import TunerMandate
+
+        class Silent:
+            name = "fake"
+
+            def run(self, _spec):
+                return type(
+                    "R",
+                    (),
+                    {
+                        "text": "Please grant Bash python3 execution and write access.",
+                        "end_reason": "agent_stopped",
+                        "session_id": "s",
+                    },
+                )()
+
+        monkeypatch.setattr(generate, "_isolate", lambda _w: None)
+        import kernelforge.agent_backends.registry as reg
+
+        monkeypatch.setattr(reg, "select_default_agent_provider", lambda _m: type("P", (), {"name": "fake"})())
+        monkeypatch.setattr(reg, "resolve_agent_runtime", lambda *a, **k: object())
+        monkeypatch.setattr(reg, "create_registered_backend", lambda _r: Silent())
+        out = generate.generate_tuner(
+            TunerMandate(table="t.csv", key_schema=["M"], demand_shapes=[], why_existing_tiers_failed=""),
+            tmp_path / "w",
+        )
+        assert not out.ok
+        assert "write access" in out.reason, "the agent named its own blocker and we dropped it"
+
+
+class TestTheAuthorIsWarnedThatABadLaunchKillsTheProcess:
+    """Warn that a bad GPU launch kills the process and must be isolated."""
+
+    def _brief(self):
+        gap = CoverageGap(
+            table="bf16_tuned_gemm.csv",
+            tuner="sglang_dense_bf16",
+            env_var="AITER_CONFIG_GEMM_BF16",
+            key_schema=["M", "N", "K"],
+            miss_count=40,
+            reason="sglang_dense_bf16 produced nothing landable",
+        )
+        return build_mandate(gap, [{"M": 16, "N": 1536, "K": 7168}]).render()
+
+    def test_the_failure_mode_is_named_not_hinted_at(self):
+        brief = self._brief().lower()
+        assert "memory access fault" in brief
+        assert "does not raise" in brief, "an author who thinks it raises will wrap it in try/except"
+
+    def test_it_says_the_fault_can_surface_late(self):
+        # Blacklisting the candidate the process died on is only correct if the
+        # author knows it may be the wrong one; without this they trust it.
+        assert "asynchronous" in self._brief()
+
+    def test_it_says_how_to_survive_one(self):
+        brief = self._brief()
+        assert "subprocess" in brief, "in-process recovery is impossible; the brief must say so"
+        assert "on disk" in brief, "state that dies with the process is state that is lost"
+
+    def test_the_default_is_recorded_before_anything_risky(self):
+        # The control row is what lets a shape that was never tuned still meet
+        # the contract's "one row per demanded shape", so a fault costs a
+        # candidate rather than the whole submission.
+        brief = self._brief()
+        assert "the default first, before anything risky" in brief

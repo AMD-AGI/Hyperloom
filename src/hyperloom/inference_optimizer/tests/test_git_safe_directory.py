@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A checkout owned by another uid must stay operable.
-
-The documented container recipe bind-mounts the repo (``-v $REPO_ROOT:$REPO_ROOT``),
-so the trees the optimizer patches are routinely owned by a different uid than
-the process. git then refuses every operation on them, including reads.
-
-``GIT_TEST_ASSUME_DIFFERENT_OWNER`` is git's own hook for this path, so the tests
-need no root and no foreign-owned directory.
-"""
+"""A checkout owned by another uid must stay operable."""
 
 from __future__ import annotations
 

@@ -1,11 +1,4 @@
-"""The forge fmoe_ck tuner must not be E2E-validated on a shape CK cannot serve.
-
-aiter's CK fused-MoE rejects an ``intermediate_size_per_partition`` that is not
-128-aligned, so validating the candidate anyway costs a full server cold start
-that can only end in a dead server. The predicate has its own unit coverage in
-test_moe_runner_backend_injection.py; what is checked here is that the phase
-actually consults it and skips before spending the restart.
-"""
+"""The forge fmoe_ck tuner must not be E2E-validated on a shape CK cannot serve."""
 
 from __future__ import annotations
 
@@ -47,7 +40,7 @@ def _phase(tmp_path: Path, model_path: str, tp: int) -> KernelPhase:
         framework="sglang",
         baseline_tput=100.0,
     )
-    return KernelPhase(coord)
+    return coord
 
 
 def _fmoe_ck_result(csv_path: str) -> dict:

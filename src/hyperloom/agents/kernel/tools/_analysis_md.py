@@ -1,13 +1,4 @@
-"""Canonical ``analysis.md`` renderer shared by the bypass and TraceLens
-deterministic trace-analysis routes.
-
-Both routes emit a human/downstream-readable ``analysis.md`` (NEITHER is the
-LLM-agent parser contract). This module is the single source of truth for the
-report's section structure and table schemas. Each route normalizes its own data
-into the inputs below and fills unmodeled cells with an em dash. Route-specific
-detail is appended verbatim via ``extra_sections`` after the shared sections,
-under a divider.
-"""
+"""Canonical ``analysis.md`` renderer for the trace-analysis routes that build the report themselves rather than having a model write it (today: bypass)."""
 
 from __future__ import annotations
 
@@ -18,7 +9,7 @@ from _kernel_category import canonical_category
 #: Placeholder for a cell a route does not model (keeps every table shape aligned).
 DASH = "\u2014"
 
-#: Canonical section headings, in order (shared by both routes).
+#: Canonical section headings, in order.
 EXEC_SUMMARY_HEADING = "## Executive Summary"
 SYSTEM_SIGNALS_HEADING = "## System-Level Signals"
 TOP_HOT_KERNELS_HEADING = "## Top Hot Kernels"
@@ -78,30 +69,7 @@ def render_report(
     p_items: list[dict[str, Any]],
     extra_sections: str = "",
 ) -> str:
-    """Render the canonical ``analysis.md`` body shared by both routes.
-
-    Args:
-        route: Route id for the provenance line (``bypass`` / ``deterministic``).
-        model_name: Model identifier for the title (blank -> ``Workload``).
-        provenance_detail: Route-specific trailing sentence for the provenance line.
-        exec_summary: ``{total_gpu_time_ms, gpu_busy_pct, gpu_idle_pct,
-            gpu_memcpy_ms, top_bottleneck_category, attribution_pct}`` (any may be
-            ``None`` -> em dash).
-        system_signals: ``{idle_pct, exposed_comm_pct, exposed_memcpy_pct}`` (any
-            may be ``None`` -> row shows an em dash / is still emitted).
-        idle_threshold: Idle-gate threshold for the idle-signal note.
-        hot_kernels: Rows with ``name, time_us, gpu_pct, efficiency_percent,
-            arithmetic_intensity, bound_type, category, source_file`` (ranked as
-            given).
-        p_items: ``{rank, category, rows[...]}`` groups; each row carries
-            ``name, time_us, gpu_pct, e2e_pct, call_count, flops_per_byte,
-            efficiency_percent, bound_type, args, source_file, kernel_path``.
-        extra_sections: Pre-rendered markdown appended after the shared sections
-            (route-specific detail), under a divider.
-
-    Returns:
-        The full canonical markdown report text.
-    """
+    """Render the canonical ``analysis.md`` body."""
     lines: list[str] = []
     title = f"# Performance Analysis Report \u2014 {model_name}" if model_name else "# Performance Analysis Report"
     lines.append(title)

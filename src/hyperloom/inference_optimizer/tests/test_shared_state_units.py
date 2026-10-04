@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import time
+from datetime import datetime, timezone
+
 import pytest
 
 from hyperloom.orchestrator.state.shared_state import (
@@ -14,6 +17,11 @@ from hyperloom.orchestrator.state.shared_state import (
     inject_stack_base_params,
     resolve_grading_anchor_tput,
 )
+
+
+def _at(unix: float) -> datetime:
+    """Return ``unix`` as an aware UTC datetime for elapsed/remaining math."""
+    return datetime.fromtimestamp(unix, tz=timezone.utc)
 
 
 class TestResolveGradingAnchorTput:
@@ -136,71 +144,77 @@ class TestGridSessionDeadline:
         assert s.grid_session_deadline_sec() == pytest.approx(500.0)
 
 
-class TestDeadlineUnix:
-    """The persisted unix deadline is the one remaining-time check."""
+class TestSessionBudget:
+    """Elapsed is summed forward over legs; the budget only ever tightens."""
 
-    def test_an_unbounded_session_does_not_stamp_a_deadline(self):
+    def test_an_unbounded_session_has_no_deadline(self):
         state = SharedState(session_id="s")
-        assert state.stamp_deadline_unix() == 0.0
-        assert state.deadline_unix == 0.0
         assert state.remaining_minutes() is None
+        assert state.session_deadline() is None
 
-    def test_the_first_stamp_is_start_plus_the_budget(self):
-        from hyperloom.common.coerce import to_unix
-
+    def test_a_fresh_leg_starts_with_the_whole_budget(self):
         state = SharedState(session_id="s", max_minutes=60)
-        stamped = state.stamp_deadline_unix()
-        start = to_unix(state.start_ts)
-        assert stamped == pytest.approx(start + 3600.0, abs=1.0)
-        assert state.remaining_minutes() == pytest.approx(60.0, abs=0.1)
+        state.begin_leg(now_unix=1_000.0)
+        assert state.elapsed_minutes(now=_at(1_000.0)) == pytest.approx(0.0)
+        assert state.remaining_minutes(now=_at(1_000.0)) == pytest.approx(60.0)
 
-    def test_a_second_stamp_does_not_reissue_the_budget(self):
+    def test_a_second_leg_resumes_from_what_the_first_spent(self):
         state = SharedState(session_id="s", max_minutes=60)
-        first = state.stamp_deadline_unix(now_unix=1_000.0)
-        state.start_ts = "2099-01-01T00:00:00+00:00"
-        assert state.stamp_deadline_unix(now_unix=9_000.0) == first
-        assert state.deadline_unix == first
+        state.begin_leg(now_unix=1_000.0)
+        state.charge_elapsed(now_unix=2_800.0)  # 30 minutes of leg one
+        # Two hours pass with nothing running, then leg two opens.
+        state.begin_leg(now_unix=10_000.0)
+        assert state.elapsed_minutes(now=_at(10_000.0)) == pytest.approx(30.0)
+        assert state.remaining_minutes(now=_at(10_000.0)) == pytest.approx(30.0)
 
-    def test_remaining_minutes_reads_the_stamp_not_elapsed(self):
-        from datetime import datetime, timezone
+    def test_a_killed_leg_and_a_stopped_leg_charge_the_same(self):
+        # Neither leg records how it ended; both are charged by their last
+        # charge_elapsed, which is what makes them indistinguishable here.
+        killed = SharedState(session_id="killed", max_minutes=60)
+        stopped = SharedState(session_id="stopped", max_minutes=60)
+        for state in (killed, stopped):
+            state.begin_leg(now_unix=1_000.0)
+            state.charge_elapsed(now_unix=2_800.0)
+        stopped.stop_reason = "time_exhausted"
+        killed.stop_reason = ""
+        for state in (killed, stopped):
+            state.begin_leg(now_unix=5_000.0)
+        assert killed.remaining_minutes(now=_at(5_000.0)) == stopped.remaining_minutes(now=_at(5_000.0))
 
+    def test_elapsed_never_goes_backwards_across_charges(self):
         state = SharedState(session_id="s", max_minutes=60)
-        state.deadline_unix = 2_000.0
-        now = datetime.fromtimestamp(1_400.0, tz=timezone.utc)
-        assert state.remaining_minutes(now=now) == pytest.approx(10.0)
+        state.begin_leg(now_unix=1_000.0)
+        state.charge_elapsed(now_unix=1_600.0)
+        # A clock that jumps backwards must not refund budget.
+        state.charge_elapsed(now_unix=1_200.0)
+        assert state.elapsed_charged_sec == pytest.approx(600.0)
 
-    def test_a_spent_stamp_reads_as_zero_not_negative(self):
-        from datetime import datetime, timezone
-
+    def test_a_spent_budget_reads_as_zero_not_negative(self):
         state = SharedState(session_id="s", max_minutes=60)
-        state.deadline_unix = 100.0
-        now = datetime.fromtimestamp(500.0, tz=timezone.utc)
-        assert state.remaining_minutes(now=now) == 0.0
+        state.begin_leg(now_unix=1_000.0)
+        assert state.remaining_minutes(now=_at(9_000.0)) == 0.0
 
-    def test_a_stamp_survives_a_max_minutes_truncated_to_zero(self):
-        from datetime import datetime, timezone
+    def test_a_spent_budget_yields_an_expired_deadline_not_none(self):
+        state = SharedState(session_id="s", max_minutes=60)
+        state.begin_leg(now_unix=time.time() - 7_200.0)
+        deadline = state.session_deadline()
+        assert deadline is not None
+        assert deadline.expired()
 
+    def test_an_extension_lengthens_the_budget_without_refunding_elapsed(self):
+        state = SharedState(session_id="s", max_minutes=60)
+        state.begin_leg(now_unix=1_000.0)
+        state.charge_elapsed(now_unix=4_600.0)  # whole budget spent
+        assert state.remaining_minutes(now=_at(4_600.0)) == 0.0
+        assert state.extend_budget_minutes(30.0, reason="operator") == 90.0
+        assert state.elapsed_minutes(now=_at(4_600.0)) == pytest.approx(60.0)
+        assert state.remaining_minutes(now=_at(4_600.0)) == pytest.approx(30.0)
+        assert state.budget_extensions[-1]["reason"] == "operator"
+
+    def test_an_unbounded_session_is_not_bounded_by_an_extension(self):
         state = SharedState(session_id="s")
-        now_unix = 1_000.0
-        state.start_ts = datetime.fromtimestamp(now_unix, tz=timezone.utc).isoformat()
-        stamped = state.stamp_deadline_unix(
-            budget_minutes=0.0001,
-            now_unix=now_unix,
-        )
-        now = datetime.fromtimestamp(now_unix, tz=timezone.utc)
-        assert stamped == pytest.approx(now_unix + 0.006)
-        assert state.remaining_minutes(now=now) == pytest.approx(0.0001)
-        state.max_minutes = 0
-        now = datetime.fromtimestamp(stamped - 6.0, tz=timezone.utc)
-        assert state.remaining_minutes(now=now) == pytest.approx(0.1)
-
-    def test_remaining_minutes_reads_a_stamp_when_max_minutes_is_zero(self):
-        from datetime import datetime, timezone
-
-        state = SharedState(session_id="s", max_minutes=0)
-        state.deadline_unix = 2_000.0
-        now = datetime.fromtimestamp(1_400.0, tz=timezone.utc)
-        assert state.remaining_minutes(now=now) == pytest.approx(10.0)
+        assert state.extend_budget_minutes(30.0) == 0.0
+        assert state.remaining_minutes() is None
 
     def test_teardown_timings_accumulate_and_keep_a_total(self):
         state = SharedState(session_id="s")
@@ -243,6 +257,9 @@ class TestProfileWorkloadContext:
                 "conc": "128",
             }
         ) == {
+            # A synthetic session stamps the empty mode; AgentX stamps "agentx"
+            # so an agentic trace is never reused for a synthetic profile.
+            "benchmark_mode": "",
             "framework": "sglang",
             "precision": "fp8",
             "model_path": "/models/new",
@@ -251,9 +268,7 @@ class TestProfileWorkloadContext:
             "isl": 1024,
             "osl": 512,
             "max_model_len": 4096,
-            # The context also carries the runtime identity. This payload sets
-            # none of it, so these normalize to their empty forms -- asserted
-            # explicitly so a silent change to the identity shape fails here.
+            # The context also carries the runtime identity.
             "server_args": "",
             "extra_envs": {},
             "remove_args": [],
@@ -371,55 +386,6 @@ class TestPolicyDenialAndPruned:
         assert "a3" in summary
 
 
-class TestApplyChanges:
-    def test_empty_changes_returns_empty(self):
-        assert SharedState().apply_changes({}, allow_core=True) == {}
-
-    def test_unknown_keys_are_skipped(self):
-        s = SharedState()
-        applied = s.apply_changes({"unknown_field": 1}, allow_core=True)
-        assert applied == {}
-
-    def test_known_field_set(self):
-        s = SharedState()
-        applied = s.apply_changes({"model_name": "foo"}, allow_core=True)
-        assert applied == {"model_name": "foo"}
-        assert s.model_name == "foo"
-
-    def test_core_field_dropped_when_allow_core_false(self):
-        # A non-privileged (allow_core=False) changes dict must not write a core field.
-        s = SharedState()
-        before = s.cumulative_gain_validated  # cumulative_gain_validated is a core field
-        applied = s.apply_changes(
-            {"current_action": "baseline", "cumulative_gain_validated": 999.0},
-            allow_core=False,
-        )
-        assert applied == {"current_action": "baseline"}
-        assert s.current_action == "baseline"
-        assert s.cumulative_gain_validated == before  # core write dropped
-
-    def test_a_stop_time_cannot_be_written_apart_from_its_reason(self):
-        # stop_reason is a core field, so a changes dict that carries both must
-        # not land the timestamp half either: the pair is what the export reads
-        # as "the session ended then, for this reason".
-        s = SharedState()
-        s.set_stop_reason("time_exhausted")
-        pinned = s.stop_ts
-        applied = s.apply_changes(
-            {"stop_reason": "target_reached", "stop_ts": "2026-01-01T00:01:00+00:00"},
-            allow_core=False,
-        )
-        assert applied == {}
-        assert s.stop_reason == "time_exhausted"
-        assert s.stop_ts == pinned
-
-    def test_core_field_written_when_allow_core_true(self):
-        s = SharedState()
-        applied = s.apply_changes({"cumulative_gain_validated": 999.0}, allow_core=True)
-        assert applied == {"cumulative_gain_validated": 999.0}
-        assert s.cumulative_gain_validated == 999.0
-
-
 class TestKernelPatchIdentity:
     def test_resolves_explicit_payload(self):
         s = SharedState()
@@ -501,7 +467,6 @@ class TestPersistence:
     [
         ("baseline", "output_throughput", "output_throughput"),
         ("profile", "output_throughput", "output_throughput"),
-        ("sweep", "output_throughput", "output_throughput"),
         ("explore", "best_gain_pct", "gain_pct"),
     ],
 )
@@ -556,16 +521,15 @@ def test_record_action_attempt_failed_truncates_error_excerpt():
     assert last["error_excerpt"].startswith("boom!")
     assert last["reported_success"] is False
     assert last["key_metric"] is None
-    # stderr_tail is now captured for EVERY failure carrying an error blob
-    # (no error_class whitelist), so orchestration/RCA see the actionable tail.
+    # stderr_tail is now captured for EVERY failure carrying an error blob (no error_class whitelist), so
+    # orchestration/RCA see the actionable tail.
     assert last["stderr_tail"] is not None
     assert len(last["stderr_tail"]) == 1000
     assert "boom!" in last["stderr_tail"]
 
 
 def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
-    """A subprocess_nonzero baseline attempt records stderr_tail into the
-    attempts history so the breakdown exporter can surface the raw crash."""
+    """A subprocess_nonzero baseline attempt records stderr_tail into the attempts history so the breakdown exporter can surface the raw crash."""
     s = SharedState()
     big_err = "x" * 2000 + "torch.OutOfMemoryError: HIP out of memory"
     s.record_action_attempt(
@@ -590,11 +554,7 @@ def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
 
 def test_record_action_attempt_redacts_secrets_from_persisted_errors():
     s = SharedState()
-    # Named for what it is -- a value planted to be found missing -- rather
-    # than for what it imitates. A test-local holding a credential-shaped
-    # literal reads to the clear-text-logging analysis as a live credential,
-    # and it then reports every diagnostic path this value could reach as a
-    # leak of it.
+    # Named for what it is -- a value planted to be found missing -- rather than for what it imitates.
     planted = "ak-sensitive-value"
     s.record_action_attempt(
         action="baseline",
@@ -663,7 +623,6 @@ def test_to_prompt_summary_renders_attempt_lines():
     assert "last_baseline=" in txt
     assert "last_profile=" in txt
     assert "last_explore=" in txt
-    assert "last_sweep=" in txt
     assert "attempts_history=" in txt
     assert "baseline:1(s1,f0)" in txt
     assert "explore:1(s0,f1)" in txt
@@ -778,12 +737,7 @@ def test_baseline_current_best_reuses_recorded_profile_runtime():
 
 
 def test_profile_trace_matches_workload_with_server_args():
-    """Regression (H1): profile_trace_matches_workload() with no explicit target
-    must compare the recorded profile against the *current-best* runtime identity,
-    not the bare profile_workload_context() (which reports server_args="" and
-    skips the current_best backfill). Otherwise any workload carrying server
-    args/extra envs reads its own fresh profile as stale on every run and the
-    forge shape resolvers discard a perfectly good TraceLens profile."""
+    """Regression (H1): profile_trace_matches_workload() with no explicit target must compare the recorded profile against the *current-best* runtime identity, not the bare profile_workload_context() (which reports server_args="" and skips the current_best backfill)."""
     state = SharedState(
         framework="vllm",
         precision="fp8",
@@ -803,12 +757,11 @@ def test_profile_trace_matches_workload_with_server_args():
         }
     )
 
-    # The recorded profile matches the active current-best runtime, so freshness
-    # with no explicit target must hold.
+    # The recorded profile matches the active current-best runtime, so freshness with no explicit target must hold.
     assert state.current_profile_workload_context() == state.last_profile_workload
     assert state.profile_trace_matches_workload() is True
-    # The bare context really does disagree (server_args=""), which is exactly why
-    # defaulting to it would falsely flag this fresh profile as stale.
+    # The bare context really does disagree (server_args=""), which is exactly why defaulting to it would falsely flag
+    # this fresh profile as stale.
     assert state.last_profile_workload != state.profile_workload_context()
 
 
@@ -832,8 +785,8 @@ def test_baseline_current_best_ignores_tuned_arm_profile_runtime():
     )
     assert state.last_profile_workload_action == "gemm_tuning"
 
-    # Reverting to a bare baseline drops the tuned runtime, so the fingerprint
-    # must no longer claim the tuned arm's args are in effect.
+    # Reverting to a bare baseline drops the tuned runtime, so the fingerprint must no longer claim the tuned arm's
+    # args are in effect.
     state.current_best = {"action": "baseline", "tput": 100.0}
     context = state.current_profile_workload_context()
 

@@ -104,10 +104,7 @@ def test_load_or_init_roundtrips_through_drop(tmp_path, monkeypatch):
 
 
 def test_scoring_module_was_retired():
-    """The retired ``orchestrator/scoring.py`` scoreboard module never comes back
-    (distinct from the ``hyperloom.orchestrator.scoring`` subpackage holding the
-    always-advisory ``proposal_scorer.py``).
-    """
+    """The retired ``orchestrator/scoring.py`` scoreboard module never comes back (distinct from the ``hyperloom.orchestrator.scoring`` subpackage holding the always-advisory ``proposal_scorer.py``)."""
     scoring_pkg = importlib.import_module("hyperloom.orchestrator.scoring")
     assert not hasattr(scoring_pkg, "get_action_score")
     assert not hasattr(scoring_pkg, "put_action_score")
@@ -228,7 +225,6 @@ def test_kernel_opt_body_references_v08_decision_signals():
         "last_kernel_opt",
         "KERNEL_AGENT plateau",
         "rejected_kernel_ids",
-        "_DEFAULT_KERNEL_OPT_MAX_PARTIAL",
     ):
         assert signal in body, (
             f"_KERNEL_OPT_PIPELINE_BODY missing v0.8 decision signal {signal!r} (KB_gaps/Dead-D §5.1)"

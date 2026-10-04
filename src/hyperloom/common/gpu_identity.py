@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Canonical AMD GPU type -> dispatch identity table.
-
-Owned here rather than in ``inference_optimizer`` so provenance can consult it
-without importing a higher layer. ``gpu_types.py`` re-exports it, so there is
-one table rather than two that drift.
-
-Note the mapping is many-to-one: MI300X, MI308X and MI325X are all ``gfx942``.
-An arch therefore identifies the ISA, not the board -- which is why the session
-``--gpu-type`` remains the authority for anything that must tell them apart.
-"""
+"""Canonical AMD GPU type -> dispatch identity table."""
 
 from __future__ import annotations
 
@@ -30,4 +21,14 @@ def gfx_arch_for_gpu_type(gpu_type: str | None) -> str | None:
     return identity[0] if identity else None
 
 
-__all__ = ["AMD_GPU_DISPATCH_IDENTITIES", "gfx_arch_for_gpu_type"]
+def is_gfx_arch(gpu_type: str | None, arch: str) -> bool:
+    """Return whether ``gpu_type`` means ``arch``.
+
+    Callers receive a GPU type that may already have been resolved to an arch, so the
+    arch names itself as well as every board that dispatches to it.
+    """
+    key = str(gpu_type or "").strip().lower()
+    return bool(key) and (key == arch or gfx_arch_for_gpu_type(key) == arch)
+
+
+__all__ = ["AMD_GPU_DISPATCH_IDENTITIES", "gfx_arch_for_gpu_type", "is_gfx_arch"]

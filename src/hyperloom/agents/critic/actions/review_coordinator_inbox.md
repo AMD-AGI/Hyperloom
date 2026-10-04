@@ -55,8 +55,8 @@ Default behavior summary:
 - `patch_landing` proposal without comparable benchmark + accuracy
   gate → `needs_review` (or `reject` if the packet itself shows a
   regression).
-- `enablement_landing` proposal (enablement / framework-agent
-  `integrate_patch`) → **approve** on the structural bar; do NOT block on
+- `enablement_landing` proposal (enablement `integrate_patch`) →
+  **approve** on the structural bar; do NOT block on
   a missing throughput before/after or a restated rollback plan (rollback is
   automatic). Boot-origin has no baseline yet; eval-origin booted but missed the
   accuracy floor. Either way the downstream runnable-decision gate REVERTs any
@@ -71,7 +71,7 @@ Special cases:
   for every proposal with `source = "critic_unavailable"` and list the
   missing keys in `notes`.
 - `proposals` is empty → emit nothing; the runtime will fall back to a
-  heartbeat in Step 3.
+  an idle intent in Step 3.
 
 Write the result to `$CRITIC_WORKDIR/review.json`:
 
@@ -131,7 +131,7 @@ python -m runtime.cli commit-review \
 ## Failure modes
 
 - **Schema validation error** — runtime exits with code 2; the host
-  should treat it as a Critic outage and fall back to a heartbeat
+  should treat it as a Critic outage and fall back to an idle intent
   envelope.
 - **KB write dead-lettered** — `kb_writes[*].result.status` is
   `dead_lettered`. The verdict is still emitted; cron will replay later.

@@ -1,16 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the Coordinator -> recipe-snapshot KB write chain.
-
-KEEP/REVERT/CLOSE amend the recipe row via ``_kb_amend_recipe`` ->
-``_workload_canonical_id``; if that helper is missing every write silently
-no-ops. Also pins the canonical_id consistency contract between Coordinator
-writes and ``recipe_kb_t0`` anchors.
-"""
+"""Tests for the Coordinator -> recipe-snapshot KB write chain."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
@@ -42,7 +37,6 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
     backends = {
         "orchestration": MockBackend(idle),
         "critic": MockBackend(idle),
-        "robustness": MockBackend(idle),
     }
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"))
     coord = Coordinator(
@@ -224,8 +218,7 @@ def test_sdk_fallback_t0_anchors_into_self_recipe_kb(tmp_path: Path) -> None:
     assert row is not None, "SDK-fallback T0 did not anchor into self.recipe_kb"
 
 
-# The on-disk row must preserve severity / dict measured_impact / session
-# provenance, or warm-start + dedup lose data.
+# The on-disk row must preserve severity / dict measured_impact / session provenance, or warm-start + dedup lose data.
 def _put(store: LocalRecipeStore, **kw) -> None:
     store.put_recipe(
         canonical_id=_expected_cid(),
@@ -275,8 +268,8 @@ def test_local_store_preserves_session_provenance(tmp_path: Path) -> None:
     assert s["stack_len"] == 3
 
 
-# _kb_amend_recipe reads the LOCAL row and preserves T0-stamped extras + audit
-# fields; appends accumulate instead of clobbering.
+# _kb_amend_recipe reads the LOCAL row and preserves T0-stamped extras + audit fields; appends accumulate instead of
+# clobbering.
 def test_amend_preserves_t0_extras_and_audit(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
@@ -311,8 +304,8 @@ def test_amend_appends_lessons_cumulatively(tmp_path: Path) -> None:
     assert [l["statement"] for l in row["lessons"]] == ["first", "second"]
 
 
-# CLOSE finalize must not clobber a better historical best_config with an
-# empty/worse current result, and must merge the fingerprint.
+# CLOSE finalize must not clobber a better historical best_config with an empty/worse current result, and must merge
+# the fingerprint.
 def test_close_does_not_clobber_better_best_config(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
@@ -335,8 +328,7 @@ def test_close_does_not_clobber_better_best_config(tmp_path: Path) -> None:
     assert row["stack_fingerprint"].get("vllm_version") == "0.6.0"
 
 
-# KEEP'd kernel optimizations (incl. E2E-verified-but-no-gain) must be
-# persisted, not just what_worked built from optimization_stack.
+# KEEP'd kernel optimizations (incl.
 def _seed_kept_kernel(coord: Coordinator) -> None:
     """Populate SharedState as a KEEP'd + E2E-integrated kernel leaves it."""
     ss = coord.shared_state
@@ -394,8 +386,7 @@ def test_close_finalize_persists_kept_kernel_to_kb(tmp_path: Path) -> None:
     assert k006["e2e_gain_pct"] == -0.094
 
 
-# A bare-baseline CLOSE whose tput exceeds a historical best must NOT overwrite
-# the validated best_config.
+# A bare-baseline CLOSE whose tput exceeds a historical best must NOT overwrite the validated best_config.
 def test_close_does_not_clobber_with_bare_baseline_higher_tput(
     tmp_path: Path,
 ) -> None:
@@ -415,8 +406,7 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
         },
         best_throughput=2532.0,
     )
-    # Bare baseline: no validated stack/gain, but a higher tput the
-    # better-throughput guard alone would let through.
+    # Bare baseline: no validated stack/gain, but a higher tput the better-throughput guard alone would let through.
     ss = coord.shared_state
     ss.current_best = {"action": "baseline", "name": "baseline", "tput": 2813.5}
     ss.optimization_stack = []
@@ -485,14 +475,77 @@ def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
         }
     ]
     ss.cumulative_gain_validated = 10.0
+    ss.cumulative_gain_validated_stack_len = 1
     coord.finalize_recipe_and_journal()
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 2200.0
     assert "--page-size 32" in row["best_config"].get("extra_server_args", "")
 
 
-# kernel_optimizations[].e2e_decision must carry the integrate verdict, not
-# only the micro-layer decision.
+def _stack_one_keep(state) -> None:
+    state.current_best = {"name": "page32", "extra_server_args": "--page-size 32", "tput": 2200.0}
+    state.optimization_stack = [{"action": "explore", "variant_name": "page32", "extra_server_args": "--page-size 32"}]
+    state.cumulative_gain_validated = 10.0
+
+
+def test_close_skips_a_stack_that_grew_after_validation(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    _stack_one_keep(coord.shared_state)
+
+    def _must_not_finalize_journal():
+        raise AssertionError("an unvalidated working recipe reached journal finalization")
+
+    coord._ensure_journal = _must_not_finalize_journal
+
+    outcome = coord.finalize_recipe_and_journal()
+
+    assert outcome == {
+        "status": "skipped",
+        "reason": "unvalidated_recipe_stack",
+        "backend": "none",
+        "result_type": "unvalidated_recipe",
+    }
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) is None
+
+
+def test_close_skips_a_same_length_lift_the_watermark_cannot_see(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    state = coord.shared_state
+    _stack_one_keep(state)
+    state.cumulative_gain_validated_stack_len = 1
+    state.working_recipe_generation = 2
+    state.validated_recipe_generation = 1
+
+    outcome = coord.finalize_recipe_and_journal()
+
+    assert outcome["reason"] == "unvalidated_recipe_stack"
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) is None
+
+
+def test_lift_then_validation_leaves_the_recipe_publishable(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    state = coord.shared_state
+    state.baseline_tput = 1000.0
+    state.current_best = {"action": "baseline", "tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
+
+    assert coord._lift_to_current_best(
+        "explore",
+        1100.0,
+        {"name": "page16", "extra_server_args": "--page-size 16", "candidate_extra_server_args": "--page-size 16"},
+    )
+    assert (state.working_recipe_generation, state.validated_recipe_generation) == (1, 0)
+    assert state.optimization_stack_has_unvalidated_keeps()
+
+    assert coord._update_cumulative_gain_validated(1100.0, {"output_throughput": 1100.0})
+    assert state.validated_recipe_generation == state.working_recipe_generation == 1
+
+    outcome = coord.finalize_recipe_and_journal()
+
+    assert outcome["result_type"] == "written"
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid())["best_throughput"] == 1100.0
+
+
+# kernel_optimizations[].e2e_decision must carry the integrate verdict, not only the micro-layer decision.
 def test_kernel_e2e_decision_reflects_integrate_revert(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     ss = coord.shared_state
@@ -576,8 +629,8 @@ def test_session_entry_carries_throughput_date_and_actions(
     assert s["actions_taken"] == ["page32", "stream_interval_4"]
 
 
-# A per-variant pitfall with an empty variant dict must still carry the variant
-# NAME in its description, not collapse to the bare task kind.
+# A per-variant pitfall with an empty variant dict must still carry the variant NAME in its description, not collapse
+# to the bare task kind.
 def test_pitfall_description_uses_variant_name_not_bare_kind(
     tmp_path: Path,
 ) -> None:
@@ -602,15 +655,6 @@ def test_pitfall_description_uses_variant_name_not_bare_kind(
 
 
 # --- AgentX stays out of the cross-session KB ----------------------------------
-#
-# The recipe canonical id is a seven-tuple of model/hardware/framework/precision
-# identity: no workload, no mode. The row's workload tags are copied from
-# SharedState.isl/osl, which under AgentX are the inert 1024/1024 placeholders.
-# So an agentic-replay throughput would overwrite a synthetic best_throughput on
-# a bare numeric comparison, and the row would then be tagged as if it were a
-# 1024/1024 synthetic run -- which a later synthetic session's shape filter
-# matches positively. The store is machine-global and --reset-state does not
-# clear it, so the damage outlives the session that caused it.
 
 
 def test_kb_amend_recipe_is_noop_under_agentx(tmp_path: Path, monkeypatch) -> None:
@@ -638,14 +682,7 @@ def test_kb_amend_recipe_still_writes_without_agentx(tmp_path: Path, monkeypatch
 
 
 def test_finalize_recipe_is_skipped_under_agentx(tmp_path, monkeypatch) -> None:
-    """The sink the _kb_amend_recipe gate cannot reach.
-
-    In REMOTE mode _kb_amend_recipe returns early, so finalize_recipe_and_journal
-    is the only Recipe writer -- and it went straight to HyperloomRemoteKB.write
-    with no AgentX check, carrying an agentic-replay throughput into a
-    cross-session store keyed on an identity with no workload or mode segment.
-    Gated ahead of the mode branch, so LOCAL is covered by the same line.
-    """
+    """The sink the _kb_amend_recipe gate cannot reach."""
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     coord = _make_coordinator(tmp_path)
 
@@ -658,17 +695,11 @@ def test_finalize_recipe_is_skipped_under_agentx(tmp_path, monkeypatch) -> None:
     )
     out = coord.finalize_recipe_and_journal(source="close")
     assert out["status"] == "skipped"
-    assert out["reason"] == "agentx"
+    assert out["reason"] == "agentx_local_store_unsupported"
 
 
-def test_finalize_recipe_is_skipped_under_agentx_in_remote_mode(tmp_path, monkeypatch) -> None:
-    """The REMOTE sink specifically -- the one _kb_amend_recipe cannot reach.
-
-    _make_coordinator leaves knowledge_plane unset, which resolves to LOCAL, so a
-    test that only asserts the gate fires there proves nothing about the remote
-    writer. This one puts the coordinator in REMOTE mode and fails if the write
-    is attempted.
-    """
+def test_finalize_recipe_reaches_agentx_remote_kb(tmp_path, monkeypatch) -> None:
+    """AgentX is isolated by its scheme and may now use the remote KB."""
     from types import SimpleNamespace
 
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
@@ -684,29 +715,126 @@ def test_finalize_recipe_is_skipped_under_agentx_in_remote_mode(tmp_path, monkey
         kb_disabled=False,
     )
 
-    def _must_not_run(*_a, **_k):
-        raise AssertionError("AgentX finalize reached the REMOTE Recipe sink")
+    calls = []
+
+    class _Remote:
+        def write(self, canonical_id, state, *, session_id):
+            calls.append((canonical_id, state, session_id))
+            return SimpleNamespace(
+                status="written",
+                reason="",
+                canonical_id=canonical_id,
+                session_id=session_id,
+                primary_metric="interactivity_gain_pct",
+                primary_value=20.0,
+            )
 
     monkeypatch.setattr(
         "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
-        _must_not_run,
+        lambda: _Remote(),
+    )
+    out = coord.finalize_recipe_and_journal(source="close")
+    assert out["status"] == "written"
+    assert calls and calls[0][0].startswith("agentx:")
+    from hyperloom.inference_optimizer.session.session_paths import (
+        recipe_snapshot_audit_jsonl,
+    )
+
+    audit = json.loads(recipe_snapshot_audit_jsonl(coord.session_dir).read_text(encoding="utf-8"))
+    assert audit["result"]["primary_metric"] == "interactivity_gain_pct"
+    assert audit["result"]["primary_value"] == 20.0
+    assert "best_throughput" not in audit["result"]
+
+
+def test_agentx_remote_kb_never_receives_a_gain_measured_for_an_older_recipe(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    coord = _make_coordinator(tmp_path)
+    coord.knowledge_plane = SimpleNamespace(
+        config=KnowledgeConfig.from_env(
+            {
+                "KNOWLEDGE_STORE_MODE": "remote",
+                "KB_STORE_URL": "https://kb.test",
+                "KB_STORE_TOKEN": "token",
+            }
+        ),
+        kb_disabled=False,
+    )
+    state = coord.shared_state
+    state.current_best = {"name": "a+b", "extra_server_args": "--page-size 32", "tput": 120.0}
+    state.optimization_stack = [
+        {"action": "explore", "variant_name": "a"},
+        {"action": "explore", "variant_name": "b"},
+    ]
+    state.cumulative_gain_validated = 20.0
+    state.cumulative_gain_validated_stack_len = 1
+
+    def _must_not_write():
+        raise AssertionError("an unvalidated AgentX stack reached the remote KB")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
+        _must_not_write,
+    )
+
+    out = coord.finalize_recipe_and_journal(source="close")
+
+    assert out["reason"] == "unvalidated_recipe_stack"
+    assert out["result_type"] == "unvalidated_recipe"
+
+
+def test_agentx_remote_skip_audit_does_not_invent_throughput_metric(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    coord = _make_coordinator(tmp_path)
+    coord.knowledge_plane = SimpleNamespace(
+        config=KnowledgeConfig.from_env(
+            {
+                "KNOWLEDGE_STORE_MODE": "remote",
+                "KB_STORE_URL": "https://kb.test",
+                "KB_STORE_TOKEN": "token",
+            }
+        ),
+        kb_disabled=False,
+    )
+
+    class _Remote:
+        def write(self, canonical_id, state, *, session_id):
+            return SimpleNamespace(
+                status="skipped",
+                reason="no_new_keep_or_pure_warm_replay",
+                canonical_id=canonical_id,
+                session_id=session_id,
+                primary_metric="",
+                primary_value=0.0,
+            )
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
+        lambda: _Remote(),
     )
     out = coord.finalize_recipe_and_journal(source="close")
     assert out["status"] == "skipped"
-    assert out["reason"] == "agentx"
-    # Not "disabled": telemetry must stay able to tell an AgentX skip from a KB
-    # that was actually down.
-    assert out["backend"] != "disabled"
+
+    from hyperloom.inference_optimizer.session.session_paths import (
+        recipe_snapshot_audit_jsonl,
+    )
+
+    audit = json.loads(recipe_snapshot_audit_jsonl(coord.session_dir).read_text(encoding="utf-8"))
+    assert "primary_metric" not in audit["result"]
+    assert "primary_value" not in audit["result"]
+    assert "best_throughput" not in audit["result"]
 
 
 def test_finalize_gate_honours_persisted_mode_without_the_env_var(tmp_path, monkeypatch) -> None:
-    """benchmark_mode is stamped so the mode survives a restart; the gate should
-    trust it rather than the shell that happens to be running."""
+    """benchmark_mode is stamped so the mode survives a restart; the gate should trust it rather than the shell that happens to be running."""
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     coord = _make_coordinator(tmp_path)
     coord.shared_state.benchmark_mode = "agentx"
     out = coord.finalize_recipe_and_journal(source="close")
-    assert out["reason"] == "agentx"
+    assert out["reason"] == "agentx_local_store_unsupported"
 
 
 def test_finalize_recipe_still_runs_without_agentx(tmp_path, monkeypatch) -> None:
@@ -718,19 +846,15 @@ def test_finalize_recipe_still_runs_without_agentx(tmp_path, monkeypatch) -> Non
 
 
 def test_t0_anchor_does_not_write_under_agentx(tmp_path, monkeypatch) -> None:
-    """The third Recipe sink, and the one the first two gates never saw.
-
-    ``run_t0_anchor`` calls ``kb.put_recipe`` directly at session start, and
-    ``_build_t0_trace_extras`` copies SharedState.isl/osl into the row -- the
-    inert 1024/1024 placeholders under AgentX. So anchoring mis-tags the
-    cross-session row exactly as the CLOSE-time write would.
-    """
+    """The third Recipe sink, and the one the first two gates never saw."""
     from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
 
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     coord = _make_coordinator(tmp_path)
 
     class _ForbiddenKB:
+        mode = "local"
+
         def __getattr__(self, name: str):
             raise AssertionError(f"AgentX T0 anchor reached the recipe KB: {name}")
 

@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Compose ``gap_description`` + ``keywords`` for the framework arm.
-
-Deterministically composes the gap/keyword text from structured workload data
-(framework, gpu_type, model_class, precision, profile bottleneck) instead of a
-hand-typed gap string. Pure; the executor handles I/O. Returns
-``(gap, keywords)`` so the executor can pass both to fa or pass ``keywords=[]``
-to let fa extract from gap.
-"""
+"""Compose ``gap_description`` + ``keywords`` for the framework arm."""
 
 from __future__ import annotations
 
@@ -49,10 +42,7 @@ _OP_TO_KEYWORD: tuple[tuple[str, str], ...] = (
 )
 
 
-# Rewrite-evidence category -> canonical gap keyword. These name *host-side*
-# bottlenecks, which the kernel-name vocabulary above cannot express: a
-# collective that round-trips through the host to agree on a shape, or a pure
-# function recomputed every step, costs real wall time without owning a kernel.
+# Rewrite-evidence category -> canonical gap keyword.
 _CATEGORY_TO_KEYWORD: tuple[tuple[str, str], ...] = (
     ("eliminate_host_round_trip", "collective_rendezvous"),
     ("eliminate_host_sync", "host_sync"),
@@ -64,19 +54,7 @@ _CATEGORY_TO_KEYWORD: tuple[tuple[str, str], ...] = (
 
 
 def _extract_bottleneck_from_rewrite_evidence(evidence_path: str | Path | None) -> str:
-    """Read the host-side rewrite evidence and return its top bottleneck keyword.
-
-    ``evidence_path`` is ``SharedState.last_framework_rewrite_evidence``. The
-    document's candidates are already ranked by measured cost, so the first one
-    whose category maps to a keyword is the answer.
-
-    Args:
-        evidence_path: Path to the merged rewrite-evidence JSON, or None.
-
-    Returns:
-        One canonical keyword, or "" when the path is empty/unreadable or no
-        candidate maps to a known category.
-    """
+    """Read the host-side rewrite evidence and return its top bottleneck keyword."""
     if not evidence_path:
         return ""
     path = Path(str(evidence_path))
@@ -105,19 +83,7 @@ def _extract_bottleneck_from_rewrite_evidence(evidence_path: str | Path | None) 
 
 
 def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str:
-    """Read the kernel breakdown JSON and return one canonical bottleneck keyword.
-
-    ``breakdown_path`` is ``SharedState.last_profile_kernel_breakdown`` (a
-    sorted-by-time list or dict with ``top_kernels``). Best-effort: returns ""
-    when the path is empty/unreadable or no kernel matches
-    :data:`_OP_TO_KEYWORD`, and the caller falls back to manifest-only gap.
-
-    Args:
-        breakdown_path: Path to the kernel breakdown JSON, or None.
-
-    Returns:
-        One canonical bottleneck keyword, or "" when none is found.
-    """
+    """Read the kernel breakdown JSON and return one canonical bottleneck keyword."""
     if not breakdown_path:
         return ""
     p = Path(str(breakdown_path))
@@ -161,16 +127,7 @@ def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str
 
 
 def _normalize_model_class(model_class: str) -> str:
-    """Reduce moe_mla / moe-swa / Dense / "" to a canonical lowercase token.
-
-    Lowercases and maps -/+/space to _.
-
-    Args:
-        model_class: Raw model-class label.
-
-    Returns:
-        The canonical lowercase token, or "" when the input is empty.
-    """
+    """Reduce moe_mla / moe-swa / Dense / \"\" to a canonical lowercase token."""
     raw = (model_class or "").strip().lower()
     if not raw:
         return ""
@@ -178,15 +135,7 @@ def _normalize_model_class(model_class: str) -> str:
 
 
 def _model_class_to_search_token(model_class: str) -> str:
-    """Map the IO model_class taxonomy to one fa-friendly architectural token.
-
-    Args:
-        model_class: Raw model-class label.
-
-    Returns:
-        An fa-friendly architectural token (``moe`` / ``dense`` / canonical
-        token), or "" when the input is empty.
-    """
+    """Map the IO model_class taxonomy to one fa-friendly architectural token."""
     mc = _normalize_model_class(model_class)
     if not mc:
         return ""
@@ -206,33 +155,7 @@ def compose_gap(
     profile_kernel_breakdown_path: str | Path | None = None,
     rewrite_evidence_path: str | Path | None = None,
 ) -> tuple[str, list[str]]:
-    """Build ``(gap_description, keywords)`` for the framework arm.
-
-    All workload fields are optional; missing pieces drop from the gap.
-    ``precision`` comes from ``manifest.json``'s ``workload.precision``.
-
-    Two independent bottleneck sources contribute a keyword each, because they
-    see different things: the kernel breakdown names the hottest *device*
-    operation, while the host-side rewrite evidence names the costliest
-    *redundant host* work. A framework-level source rewrite usually attacks the
-    latter, which no kernel timeline can surface, so both are carried.
-
-    Args:
-        framework: Inference framework name.
-        gpu_type: Target GPU type.
-        model_class: Model-class label (canonicalised to a search token).
-        precision: Workload precision.
-        profile_kernel_breakdown_path: Optional path to the kernel breakdown
-            JSON used to derive a device-side bottleneck keyword.
-        rewrite_evidence_path: Optional path to the merged host-side rewrite
-            evidence JSON used to derive a host-side bottleneck keyword.
-
-    Returns:
-        A ``(gap_description, keywords)`` tuple: a free-text gap phrase for
-        fa's PR search, and a lowercased/deduped/sorted explicit keyword list
-        (non-empty when any of framework/gpu_type/model_class/bottleneck is
-        known).
-    """
+    """Build ``(gap_description, keywords)`` for the framework arm."""
     fw = (framework or "").strip().lower()
     gpu = (gpu_type or "").strip().lower()
     arch = _model_class_to_search_token(model_class)

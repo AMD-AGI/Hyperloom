@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""RayJob per-rank server logs must land on a cross-node-visible directory.
-
-The launch driver runs on the head; the decode leg runs on another pod. A
-node-local /tmp log dir hides decode_0.log from the driver's health-wait, so its
-fatal-log fast-fail never fires and its failure tail reads bytes=0. These lock
-the resolution that keeps the logs on a shared filesystem instead.
-"""
+"""RayJob per-rank server logs must land on a cross-node-visible directory."""
 
 from __future__ import annotations
 
@@ -55,11 +49,7 @@ def test_unresolved_or_relative_override_is_ignored(monkeypatch: pytest.MonkeyPa
 
 
 def test_defaults_to_session_runtime_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Without an override, logs go to the session's shared runtime dir.
-
-    This is unique per run, so concurrent runs' rank logs cannot collide the way
-    infera's fixed ``$USER_DATA_PATH/server_logs`` default can.
-    """
+    """Without an override, logs go to the session's shared runtime dir."""
     _clear_env(monkeypatch)
     session = tmp_path / "sess"
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session))

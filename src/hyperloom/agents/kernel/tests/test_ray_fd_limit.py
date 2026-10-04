@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Regression tests for Ray fd-limit preflight before ``ray start``.
-
-Ensure the child raylet does not inherit the low container default."""
+"""Regression tests for Ray fd-limit preflight before ``ray start``."""
 
 from __future__ import annotations
 
@@ -19,7 +17,7 @@ for d in (str(TOOLS_DIR), str(BACKENDS_DIR)):
     if d not in sys.path:
         sys.path.insert(0, d)
 
-import ray_runtime  # noqa: E402
+import ray_runtime
 
 # Minimum soft RLIMIT_NOFILE the raylet needs to stay up.
 TARGET_NOFILE = 65536
@@ -35,12 +33,7 @@ def _extract_shell_function(name: str) -> str:
 
 
 class _FakeResource:
-    """Stand-in for the stdlib ``resource`` module with in-memory rlimits.
-
-    Records every ``getrlimit`` / ``setrlimit`` into ``events`` so a test
-    can assert ordering relative to the ``ray start`` subprocess. A process
-    may raise its soft limit only up to the hard limit (raising the hard
-    limit raises ``ValueError`` here)."""
+    """Stand-in for the stdlib ``resource`` module with in-memory rlimits."""
 
     RLIMIT_NOFILE = 7
     RLIM_INFINITY = -1
@@ -51,8 +44,7 @@ class _FakeResource:
         self._events = events
 
     def _exceeds_hard(self, value: int) -> bool:
-        """True when ``value`` is above the current hard cap, treating
-        ``RLIM_INFINITY`` (-1) as +infinity on either side."""
+        """True when ``value`` is above the current hard cap, treating ``RLIM_INFINITY`` (-1) as +infinity on either side."""
         if self._hard == self.RLIM_INFINITY:
             return False
         if value == self.RLIM_INFINITY:
@@ -77,6 +69,8 @@ class _FakeResource:
 
 class _Proc:
     returncode = 0
+    stdout = ""
+    stderr = ""
 
 
 def test_install_sh_fd_limit_function_returns_success_when_hard_cap_sufficient():
@@ -154,10 +148,7 @@ def test_ensure_fd_limit_noop_when_already_high(monkeypatch):
 
 
 def test_ensure_fd_limit_clamps_to_low_hard_limit_and_warns(monkeypatch):
-    """When the hard cap < target, raise soft to the hard cap and warn.
-
-    Unprivileged-container case: only ``docker --ulimit nofile=...`` can lift
-    the hard cap, so the runtime raises soft as high as allowed and warns."""
+    """When the hard cap < target, raise soft to the hard cap and warn."""
     events: list = []
     fake = _FakeResource(soft=1024, hard=4096, events=events)
     monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
@@ -178,9 +169,7 @@ def test_ensure_fd_limit_clamps_to_low_hard_limit_and_warns(monkeypatch):
 
 
 def test_ensure_fd_limit_unlimited_hard_targets_min_soft_without_warning(monkeypatch):
-    """An unlimited hard cap (RLIM_INFINITY = -1) must be treated as "no
-    ceiling": raise soft to exactly ``min_soft`` (NOT min(min_soft, -1) = -1)
-    and emit NO warning."""
+    """An unlimited hard cap (RLIM_INFINITY = -1) must be treated as "no ceiling": raise soft to exactly ``min_soft`` (NOT min(min_soft, -1) = -1) and emit NO warning."""
     events: list = []
     fake = _FakeResource(soft=1024, hard=_FakeResource.RLIM_INFINITY, events=events)
     monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
@@ -202,8 +191,7 @@ def test_ensure_fd_limit_unlimited_hard_targets_min_soft_without_warning(monkeyp
 
 
 def test_ensure_fd_limit_unlimited_soft_is_noop(monkeypatch):
-    """An already-unlimited soft limit (RLIM_INFINITY = -1) must be treated
-    as already-sufficient: no setrlimit, no warning."""
+    """An already-unlimited soft limit (RLIM_INFINITY = -1) must be treated as already-sufficient: no setrlimit, no warning."""
     events: list = []
     fake = _FakeResource(
         soft=_FakeResource.RLIM_INFINITY,
@@ -264,11 +252,7 @@ def test_force_restart_local_cluster_runs_fd_preflight_before_ray_start(monkeypa
 
 
 def test_ray_status_timeout_is_treated_as_down(monkeypatch):
-    """A stale ``ray_current_cluster`` can make ``ray status`` hang on dead GCS.
-
-    Treat timeout as "no usable cluster" so startup can rebuild a local head
-    instead of carrying a stale GCS address into a long optimizer session.
-    """
+    """A stale ``ray_current_cluster`` can make ``ray status`` hang on dead GCS."""
     monkeypatch.delenv("HYPERLOOM_RAY_STATUS_TIMEOUT_SEC", raising=False)
     calls: list = []
 
@@ -299,8 +283,9 @@ def test_ensure_ray_cluster_clears_stale_ray_before_start(monkeypatch):
 
 
 def test_ensure_ray_cluster_binds_dashboard_to_loopback(monkeypatch):
-    """The local head must bind the dashboard/jobs API to loopback, not 0.0.0.0,
-    so the unauthenticated Ray Jobs endpoint is not exposed on the pod network."""
+    """The local head must bind the dashboard/jobs API to loopback, not 0.0.0.0, so the unauthenticated Ray Jobs
+    endpoint is not exposed on the pod network.
+    """
     events: list = []
     fake = _FakeResource(soft=1048576, hard=1048576, events=events)
     monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
@@ -353,6 +338,60 @@ def test_ensure_ray_cluster_declares_serving_slot(monkeypatch):
     assert "--num-gpus=4" in starts[0]
 
 
+def _install_failing_ray_start(monkeypatch, stdout: str, stderr: str):
+    """Make ``ray start`` exit non-zero with output, leaving the cluster down."""
+
+    class _FailedProc:
+        returncode = 1
+
+        def __init__(self):
+            self.stdout = stdout
+            self.stderr = stderr
+
+    monkeypatch.setattr(ray_runtime, "ray_status_ok", lambda: False)
+
+    def _fake_run(cmd, **kwargs):
+        if cmd[:2] == ["ray", "start"]:
+            return _FailedProc()
+        return _Proc()
+
+    monkeypatch.setattr(ray_runtime.subprocess, "run", _fake_run)
+
+
+def test_failed_ray_start_without_a_log_sink_carries_its_output(monkeypatch):
+    """Without a log path the output is the only evidence, so it must reach the error.
+
+    Discarding it leaves the caller with 'see None' and nothing to diagnose from.
+    """
+    fake = _FakeResource(soft=1048576, hard=1048576, events=[])
+    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+    _install_failing_ray_start(
+        monkeypatch,
+        stdout="",
+        stderr="ModuleNotFoundError: No module named 'ray.thirdparty_files'",
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        ray_runtime.ensure_ray_cluster(num_gpus=1)
+
+    message = str(excinfo.value)
+    assert "ModuleNotFoundError: No module named 'ray.thirdparty_files'" in message, message
+    assert "see None" not in message, message
+
+
+def test_failed_ray_start_with_a_log_sink_names_the_file(monkeypatch, tmp_path):
+    """With a log path the output is already on disk, so the error names it."""
+    fake = _FakeResource(soft=1048576, hard=1048576, events=[])
+    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+    _install_failing_ray_start(monkeypatch, stdout="", stderr="boom")
+    log_path = tmp_path / "ray.log"
+
+    with pytest.raises(RuntimeError) as excinfo:
+        ray_runtime.ensure_ray_cluster(num_gpus=1, log_path=log_path)
+
+    assert f"see {log_path}" in str(excinfo.value)
+
+
 def test_force_restart_local_cluster_declares_serving_slot(monkeypatch):
     """A version-mismatch restart re-declares serving_slot on the fresh head."""
     events: list = []
@@ -367,7 +406,7 @@ def test_force_restart_local_cluster_declares_serving_slot(monkeypatch):
     _assert_declares_serving_slot(starts[0])
 
 
-import pytest  # noqa: E402
+import pytest
 
 
 _ISO_ENV_VARS = ("HL_RAY_HEAD_PORT", "RAY_ADDRESS")
@@ -382,15 +421,7 @@ def _arg_value(start_cmd: tuple, flag: str):
 
 
 class TestLocalHeadPortIsolation:
-    """Free-port isolation for spur host-network co-location.
-
-    Co-scheduled sessions share only the host network, so the sole collision is
-    Ray's fixed default ports (GCS 6379 / dashboard 8265 / client 10001): the
-    later head connects to the earlier head's GCS and aborts with a session-name
-    mismatch. Each head is bound to FREE probed ports; rendezvous is via the
-    container-private ``/tmp/ray/ray_current_cluster`` (no ``--temp-dir``, no
-    ``RAY_ADDRESS`` pin), so ``ray.init(address="auto")`` still discovers it.
-    """
+    """Free-port isolation for spur host-network co-location."""
 
     @pytest.fixture(autouse=True)
     def _clean_ray_env(self, monkeypatch):

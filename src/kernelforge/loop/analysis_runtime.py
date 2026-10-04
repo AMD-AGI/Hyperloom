@@ -125,10 +125,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         )
         if not decision.refresh:
             context = self._apply_last_analysis_evidence(context)
-            try:
-                context = analysis_service.apply_checkpoint(context)
-            except Exception as error:  # noqa: BLE001 - best-effort evidence
-                log.debug("invalid Analysis checkpoint ignored: %s", error)
+            context = analysis_service.apply_checkpoint(context)
             self._active_analysis_context = context
             return context
 
@@ -276,18 +273,11 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
                     log.warning(message, exc_info=True)
 
         if self._analysis_bundle is not None and self._analysis_bundle.analysis_commit == context.analysis_commit:
-            # A published bundle, including PARTIAL, is the evidence view for
-            # its own commit. Do not seed it with refs from the prior evidence
-            # commit: that would report a current/non-stale commit while quietly
-            # retaining older paths. Failed unpublished attempts still merge
-            # their checkpoint with ``stale_context`` in the branch below.
+            # A published bundle, including PARTIAL, is the evidence view for its own commit.
             context = self._analysis_bundle.apply(context)
         else:
             context = stale_context
-            try:
-                context = analysis_service.apply_checkpoint(context)
-            except Exception as error:  # noqa: BLE001 - Analysis is best-effort
-                log.debug("invalid Analysis checkpoint ignored: %s", error)
+            context = analysis_service.apply_checkpoint(context)
         cumulative_diff = self._analysis_cumulative_diff(
             evidence_commit=analysis_state.evidence_commit,
             canonical_commit=context.analysis_commit,

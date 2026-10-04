@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -51,7 +52,6 @@ async def _build_coord_with_capacity(
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=tmp_path,
@@ -63,20 +63,46 @@ async def _build_coord_with_capacity(
     return coord
 
 
+async def _pump_until_drained(coord) -> None:
+    """Pump until nothing is queued or in flight; each pump returns on its first completion."""
+    while await coord.tasks.queued() or coord._inflight_actions:
+        await coord._pump_dispatcher_once()
+
+
 class _ConcurrencyProbe:
     """Captures per-task entry/exit times to detect actual parallelism."""
 
-    def __init__(self, sleep_seconds: float = 0.2):
+    def __init__(
+        self, sleep_seconds: float = 0.2, *, expected_concurrency: int | None = None, wait_timeout: float = 10.0
+    ):
         self.sleep_seconds = sleep_seconds
+        self.expected_concurrency = expected_concurrency
+        self.wait_timeout = wait_timeout
         self.entries: list[tuple[str, float]] = []
         self.exits: list[tuple[str, float]] = []
         self.gpu_ids_by_task: dict[str, list[int]] = {}
+        # The deadline the reaper kills this specialist on, as handed down.
+        self.deadlines_by_task: dict[str, object] = {}
+        self.last_task_id: str = ""
         self._lock = asyncio.Lock()
+        self._wave_ready = asyncio.Event()
+        self._wave_entries = 0
 
     async def __call__(self, ctx) -> dict:
         async with self._lock:
             self.entries.append((ctx.task.task_id, time.monotonic()))
             self.gpu_ids_by_task[ctx.task.task_id] = list((ctx.extra or {}).get("gpu_ids") or [])
+            self.deadlines_by_task[ctx.task.task_id] = (ctx.extra or {}).get("specialist_deadline")
+            self.last_task_id = ctx.task.task_id
+            wave_ready = self._wave_ready
+            if self.expected_concurrency is not None:
+                self._wave_entries += 1
+                if self._wave_entries == self.expected_concurrency:
+                    wave_ready.set()
+                    self._wave_ready = asyncio.Event()
+                    self._wave_entries = 0
+        if self.expected_concurrency is not None:
+            await asyncio.wait_for(wave_ready.wait(), timeout=self.wait_timeout)
         await asyncio.sleep(self.sleep_seconds)
         async with self._lock:
             self.exits.append((ctx.task.task_id, time.monotonic()))
@@ -89,7 +115,6 @@ class _ConcurrencyProbe:
                 "gap_canonical_id": ctx.task.params.get("gap_canonical_id", ""),
                 "domain": "serving_specialist",
                 "proposal_set": [],
-                "empty": True,
                 "summary": "concurrency-probe noop",
                 "reason": "test",
                 "confidence": 0.0,
@@ -122,11 +147,64 @@ def _max_concurrent(entries: list[tuple[str, float]], exits: list[tuple[str, flo
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path):
-    """capacity=4 with 4 queued specialists runs all 4 in one pump (peak concurrency 4)."""
+@pytest.mark.parametrize("participants, capacity", [(3, 3), (4, 1)], ids=["missing-participant", "serial"])
+async def test_concurrency_probe_rejects_insufficient_concurrency(participants: int, capacity: int):
+    probe = _ConcurrencyProbe(sleep_seconds=0, expected_concurrency=4, wait_timeout=0.05)
+    slots = asyncio.Semaphore(capacity)
+
+    async def _run(index):
+        async with slots:
+            ctx = SimpleNamespace(task=SimpleNamespace(task_id=str(index), params={}), extra={})
+            return await probe(ctx)
+
+    tasks = [asyncio.create_task(_run(i)) for i in range(participants)]
+    try:
+        results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=10)
+        assert sum(isinstance(result, asyncio.TimeoutError) for result in results) == 3
+        assert len(probe.entries) == participants
+        assert len(probe.exits) == participants - 3
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_concurrency_probe_requires_a_fresh_second_wave():
+    probe = _ConcurrencyProbe(sleep_seconds=0.01, expected_concurrency=2)
+    contexts = [SimpleNamespace(task=SimpleNamespace(task_id=str(i), params={}), extra={}) for i in range(4)]
+    tasks = [asyncio.create_task(probe(ctx)) for ctx in contexts[:2]]
+    try:
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+        tasks.append(asyncio.create_task(probe(contexts[2])))
+        await asyncio.sleep(0.4)
+        assert len(probe.exits) == 2
+        tasks.append(asyncio.create_task(probe(contexts[3])))
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+        assert len(probe.entries) == len(probe.exits) == 4
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("late_entry_delay", [0.0, 0.4], ids=["default", "staggered"])
+async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path, late_entry_delay: float):
+    """capacity=4 with 4 queued specialists runs all 4 at once (peak concurrency 4)."""
     coord = await _build_coord_with_capacity(tmp_path, capacity=4)
-    probe = _ConcurrencyProbe(sleep_seconds=0.3)
-    coord.sub.register_executor("specialist", probe)
+    probe = _ConcurrencyProbe(sleep_seconds=0.3, expected_concurrency=4)
+    first_entry = asyncio.Event()
+
+    async def _staggered_probe(ctx):
+        if ctx.task.params["gap_canonical_id"] == "gap.test.3":
+            await first_entry.wait()
+            await asyncio.sleep(late_entry_delay)
+        else:
+            first_entry.set()
+        return await probe(ctx)
+
+    coord.sub.register_executor("specialist", _staggered_probe)
 
     for i in range(4):
         await coord.tasks.create_or_return_existing(
@@ -140,16 +218,13 @@ async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path):
             requires_lanes=["research_lane"],
         )
 
-    await coord._pump_dispatcher_once()
+    await _pump_until_drained(coord)
 
     assert len(probe.entries) == 4
     assert len(probe.exits) == 4
 
-    # Peak concurrency (from overlapping entry/exit intervals) is the
-    # authoritative, deterministic proof of parallel dispatch: if the 4 tasks
-    # serialised, peak would be 1. A wall-clock elapsed budget is intentionally
-    # NOT asserted here — it is redundant with this check and flaky under CI
-    # load (matches the peak-only assertions in the sibling tests below).
+    # Peak concurrency (from overlapping entry/exit intervals) is the authoritative, deterministic proof of parallel
+    # dispatch: if the 4 tasks serialised, peak would be 1.
     peak = _max_concurrent(probe.entries, probe.exits)
     assert peak == 4, f"expected peak concurrency 4 (capacity=4 with 4 queued), got {peak}"
 
@@ -158,11 +233,9 @@ async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path):
 async def test_dispatcher_caps_concurrency_at_capacity_when_more_queued(
     tmp_path: Path,
 ):
-    """capacity=2 with 4 queued: the pump drains all 4 but never exceeds peak
-    concurrency 2 (the lane-capacity invariant), re-dispatching as a slot frees.
-    """
+    """capacity=2 with 4 queued: all 4 drain but never above peak concurrency 2 (the lane-capacity invariant), re-dispatching as a slot frees."""
     coord = await _build_coord_with_capacity(tmp_path, capacity=2)
-    probe = _ConcurrencyProbe(sleep_seconds=0.3)
+    probe = _ConcurrencyProbe(sleep_seconds=0.3, expected_concurrency=2)
     coord.sub.register_executor("specialist", probe)
 
     for i in range(4):
@@ -177,9 +250,9 @@ async def test_dispatcher_caps_concurrency_at_capacity_when_more_queued(
             requires_lanes=["research_lane"],
         )
 
-    await coord._pump_dispatcher_once()
+    await _pump_until_drained(coord)
 
-    # All four eventually run (queue fully drained in one pump) ...
+    # All four eventually run ...
     assert len(probe.entries) == 4
     assert len(probe.exits) == 4
     # ... but never more than `capacity` at once.
@@ -190,9 +263,7 @@ async def test_dispatcher_caps_concurrency_at_capacity_when_more_queued(
 
 @pytest.mark.asyncio
 async def test_dispatcher_capacity_one_serialises(tmp_path: Path):
-    """capacity=1 serialises execution (peak concurrency 1) while still draining
-    the whole queue across re-scans within a single pump.
-    """
+    """capacity=1 serialises execution (peak concurrency 1) while still draining the whole queue."""
     coord = await _build_coord_with_capacity(tmp_path, capacity=1)
     probe = _ConcurrencyProbe(sleep_seconds=0.1)
     coord.sub.register_executor("specialist", probe)
@@ -209,7 +280,7 @@ async def test_dispatcher_capacity_one_serialises(tmp_path: Path):
             requires_lanes=["research_lane"],
         )
 
-    await coord._pump_dispatcher_once()
+    await _pump_until_drained(coord)
     assert len(probe.entries) == 3
     peak = _max_concurrent(probe.entries, probe.exits)
     assert peak == 1, f"expected serial execution (peak 1), got {peak}"
@@ -221,9 +292,7 @@ async def test_gpu_specialist_pool_limits_concurrency_even_when_research_lane_fr
     tmp_path: Path,
     monkeypatch,
 ):
-    """GPU-specialist pool capacity 1 caps GPU concurrency at 1 even when the
-    research_lane has headroom; both tasks drain serially, reusing GPU id 0.
-    """
+    """GPU-specialist pool capacity 1 caps GPU concurrency at 1 even when the research_lane has headroom; both tasks drain serially, reusing GPU id 0."""
     coord = await _build_coord_with_capacity(
         tmp_path,
         capacity=2,
@@ -247,7 +316,7 @@ async def test_gpu_specialist_pool_limits_concurrency_even_when_research_lane_fr
             requires_lanes=["research_lane"],
         )
 
-    await coord._pump_dispatcher_once()
+    await _pump_until_drained(coord)
 
     # Both ran (drained), but GPU concurrency never exceeded the pool cap of 1.
     assert len(probe.entries) == 2
@@ -263,7 +332,11 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
     tmp_path: Path,
     monkeypatch,
 ):
-    # GPU lease TTL is the wall budget × (1 + grace); kill ≤ lease TTL ≤ lane TTL.
+    # The invariant, not an arithmetic identity: the lease the specialist holds
+    # has to outlive the kill the reaper performs at its deadline. Asserting
+    # equality against a budget recomputed here only ever tests that the test
+    # re-anchors the clock the same way dispatch did, which is the bug this
+    # guards against rather than the property.
     from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
 
     coord = await _build_coord_with_capacity(
@@ -298,21 +371,28 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
         lease_ttl_sec=5,
     )
 
-    await coord._pump_dispatcher_once()
+    await _pump_until_drained(coord)
 
-    budget = coord._specialist_wall_budget_sec(needs_gpu=True)
-    expected_ttl = max(5, int(budget * (1.0 + GPU_LEASE_TTL_GRACE)))
-    assert captured_ttls == [expected_ttl]
-    assert expected_ttl >= int(budget)
+    assert len(captured_ttls) == 1
+    ttl = captured_ttls[0]
+    deadline = probe.deadlines_by_task[probe.last_task_id]
+    assert deadline is not None, "the specialist must be handed the deadline it is killed on"
+    # The lease was taken before the deadline was read back here, so the kill is
+    # this many seconds away at most; the lease must still be held then.
+    assert ttl >= deadline.remaining()
+    budget = coord._specialist_wall_budget_sec(params={"domain": "serving_specialist", "needs_gpu": True})
+    assert ttl == pytest.approx(max(5, budget * (1.0 + GPU_LEASE_TTL_GRACE)), abs=2)
     assert probe.gpu_ids_by_task
 
 
 def test_cli_default_research_lane_capacity_is_ceiling(monkeypatch):
     """The default ``--research-lane-capacity`` is the GPU-derived ceiling (2 × visible GPU)."""
+    from hyperloom.common import visible_devices
     from hyperloom.inference_optimizer import cli as cli_mod
     from hyperloom.orchestrator.policy import gate as policy_mod
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", raising=False)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 4)
     monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
     parser = cli_mod._build_parser()
     args = parser.parse_args(["optimize", "--model", "/tmp/dummy"])
@@ -324,20 +404,24 @@ def test_cli_default_research_lane_capacity_is_ceiling(monkeypatch):
 
 def test_cli_clamps_research_lane_capacity_above_ceiling(tmp_path, monkeypatch):
     """An operator value above the GPU-derived ceiling is clamped down in SharedState."""
-    import argparse
-
+    from hyperloom.common import visible_devices
+    from hyperloom.inference_optimizer import cli as cli_mod
     from hyperloom.inference_optimizer.cli.bootstrap import _seed_shared_state
     from hyperloom.orchestrator.policy import gate as policy_mod
 
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 4)
     monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
 
-    args = argparse.Namespace(
-        research_lane_capacity=32,
-        model="/tmp/dummy-model",
-        model_class="",
-        target_summary="clamp test",
-        target_gain=0.0,
-        max_hours=0,
+    args = cli_mod._build_parser().parse_args(
+        [
+            "optimize",
+            "--model",
+            "/tmp/dummy-model",
+            "--research-lane-capacity",
+            "32",
+            "--target-summary",
+            "clamp test",
+        ]
     )
     state = _seed_shared_state(
         session_dir=tmp_path,

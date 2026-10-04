@@ -18,6 +18,8 @@ from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_QUALIFIED,
     MCP_SERVER_NAME,
     build_emit_intent_server,
+    coerce_emit_intent_input,
+    is_unparsed_tool_wrapper,
     validate_emit_intent_input,
 )
 from .mock_backend import (
@@ -27,12 +29,8 @@ from .mock_backend import (
     ScriptedPlan,
     auto_approve_critic,
 )
-from .robustness_agent import RobustnessAgentBackend
-from .robustness_mock import MockRobustnessBackend
 
-# Public name for the row-scan critic mock (formerly the standalone
-# ``MockCriticBackend`` class). Kept importable so out-of-scope callers
-# (e.g. ``cli/backends.py``) and tests keep working.
+# Public name for the row-scan critic mock.
 MockCriticBackend = auto_approve_critic
 
 __all__ = [
@@ -50,15 +48,15 @@ __all__ = [
     "MCP_SERVER_NAME",
     "MockBackend",
     "MockCriticBackend",
-    "MockRobustnessBackend",
     "MockRowScanBackend",
     "MockTurn",
-    "RobustnessAgentBackend",
     "RuntimeCall",
     "RuntimeCaller",
     "ScriptedPlan",
     "auto_approve_critic",
     "build_context_tools_server",
     "build_emit_intent_server",
+    "coerce_emit_intent_input",
+    "is_unparsed_tool_wrapper",
     "validate_emit_intent_input",
 ]

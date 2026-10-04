@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Check a generated tuner's output before anything downstream reads it.
-
-A generated tuner is the one producer whose output was never reviewed by a
-person, so the shape of what it writes has to be checked rather than assumed.
-The checks are deliberately about form, not about performance: whether the
-result is any *good* is settled later by :mod:`.referee`, and a file that passes
-here has earned nothing except the right to be measured.
-
-Every failure names the row, because the point of running this before the
-expensive step is to say what to fix.
-"""
+"""Check a generated tuner's output before anything downstream reads it."""
 
 from __future__ import annotations
 
@@ -103,14 +93,13 @@ def validate_output_csv(
         if improved not in ("true", "false"):
             bad.append(ContractViolation(where, f"improved={improved!r} is not a boolean"))
         else:
-            # A row that claims an improvement its own numbers contradict is the
-            # cheapest possible tell that the script is not measuring what it
-            # reports, and it costs nothing to catch here.
+            # A row that claims an improvement its own numbers contradict is the cheapest possible tell that the
+            # script is not measuring what it reports, and it costs nothing to catch here.
             try:
                 d, t = float(row["default_us"]), float(row["tuned_us"])
             except (KeyError, ValueError):
-                # Missing or unparseable timings are already recorded by the
-                # column checks above; there is nothing to cross-check here.
+                # Missing or unparseable timings are already recorded by the column checks above; there is nothing to
+                # cross-check here.
                 pass
             else:
                 if d > 0 and t > 0 and (improved == "true") != (t < d):
@@ -147,11 +136,7 @@ def load_candidates(
     candidates_json: Path | str,
     mandate: TunerMandate,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Read the ranked candidate lists, dropping anything malformed.
-
-    Never raises: a candidate file that cannot be read leaves nothing to
-    re-time, which the caller already has to handle.
-    """
+    """Read the ranked candidate lists, dropping anything malformed."""
     path = Path(candidates_json)
     try:
         import json

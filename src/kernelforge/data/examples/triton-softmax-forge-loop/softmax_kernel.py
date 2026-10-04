@@ -1,19 +1,4 @@
-"""Triton fused softmax kernel — the target forge-loop optimizes.
-
-This is the file forge-loop edits for this (single-file) example. To play nicely
-with the loop it must stay:
-
-  * numerically correct (the driver gates it against ``torch.softmax`` via SNR),
-  * with a STABLE public entry point ``softmax(x)`` — the driver imports this
-    exact name and signature; do NOT rename or change its arguments,
-  * in Triton (do not rewrite it in another framework).
-
-The initial launch configuration below is deliberately conservative
-(``num_warps=1``), which is correct but leaves obvious optimization headroom
-(warp count, pipelining, block size, memory-access pattern) for the loop to
-discover. That is the point of the example: watch the loop turn a slow-but-
-correct baseline into a faster one, keeping only the changes that measurably win.
-"""
+"""Triton fused softmax kernel — the target forge-loop optimizes."""
 
 from __future__ import annotations
 
@@ -39,8 +24,8 @@ def _softmax_kernel(
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_cols
 
-    # Load in fp32 for a numerically stable reduction; masked lanes are -inf so
-    # they contribute exp(-inf) = 0 to the sum.
+    # Load in fp32 for a numerically stable reduction; masked lanes are -inf so they contribute exp(-inf) = 0 to the
+    # sum.
     x = tl.load(in_row_ptr + offsets, mask=mask, other=-float("inf")).to(tl.float32)
     x = x - tl.max(x, axis=0)
     numerator = tl.exp(x)

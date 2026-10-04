@@ -5,50 +5,22 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_ENABLEMENT
+from hyperloom.common.deadline import Deadline
+from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 
+from ..bringup import recorded_verdict, session_root
 from ..collaborator import CoordinatorCollaborator
 
 import logging as _logging
 
 log = _logging.getLogger(__name__)
 
-
-def _maybe_build_runtime_candidate(
-    capability_gap: Any,
-    *,
-    framework: str,
-    model: str,
-    gpu_type: str,
-) -> dict[str, Any] | None:
-    """Build a serialized runtime-candidate stack action, or None.
-
-    Returns None when the gap does not require code acquisition, the run is
-    multi-node (single-node-only guard), or the framework adapter cannot produce
-    an evidence-backed candidate. Fully exception-guarded.
-    """
-    if not getattr(capability_gap, "requires_code_acquisition", False):
-        return None
-    try:
-        from ..actions.executors._multi_node_env import is_multi_node
-
-        if is_multi_node():
-            return None
-        from ..framework.adapters import get_adapter
-
-        adapter = get_adapter(framework)
-        action = adapter.build_stack_action(capability_gap, framework=framework, model=model, gpu_type=gpu_type)
-        if action is None:
-            return None
-        return action.to_state()
-    except Exception:  # noqa: BLE001 — candidate construction is best-effort
-        log.debug("enablement: runtime-candidate construction failed", exc_info=True)
-        return None
+#: How long a round may spend discovering bridging candidates before the tick
+#: stops waiting; discovery then degrades to repos-only.
+ENABLEMENT_PARAMS_BUDGET_SEC: float = 45.0
 
 
 def _enablement_carrier_params(state: Any) -> dict[str, Any]:
@@ -69,44 +41,6 @@ def _enablement_carrier_params(state: Any) -> dict[str, Any]:
     return out
 
 
-def _maybe_build_localization_candidate(
-    capability_gap: Any,
-    *,
-    framework: str,
-    model: str,
-    repo_url: str,
-    candidate_refs: tuple[str, ...],
-) -> dict[str, Any] | None:
-    """Build a serialized localization stack action, or None.
-
-    Returns None when the gap does not require code acquisition, the run is
-    multi-node, there is no merged-PR candidate ref, or the framework adapter
-    cannot localize. The compiled-closure gate runs later in the executor.
-    """
-    if not getattr(capability_gap, "requires_code_acquisition", False):
-        return None
-    ref = next((r for r in (candidate_refs or ()) if str(r).strip()), "")
-    if not ref or not repo_url:
-        return None
-    try:
-        from ..actions.executors._multi_node_env import is_multi_node
-
-        if is_multi_node():
-            return None
-        from ..framework.adapters import get_adapter
-
-        adapter = get_adapter(framework)
-        action = adapter.build_localization_action(
-            capability_gap, framework=framework, model=model, candidate_ref=ref, repo_url=repo_url
-        )
-        if action is None:
-            return None
-        return action.to_state()
-    except Exception:  # noqa: BLE001 — candidate construction is best-effort
-        log.debug("enablement: localization-candidate construction failed", exc_info=True)
-        return None
-
-
 class EnablementParams(CoordinatorCollaborator):
     """Builds the enablement authoring specialist's parameters."""
 
@@ -124,24 +58,24 @@ class EnablementParams(CoordinatorCollaborator):
         as ``UNKNOWN`` — the LLM specialist repairs from the raw log so a
         brand-new gap type never wedges the run.
 
-        On a retry (``attempt > 0``) the ranked candidate list is *rotated* so a
-        different bridging PR leads, and the notes flag that prior attempts
-        reverted — steering the sub-agent toward a different bridge.
+        After a round that bought no ground (``attempt > 0``) the ranked
+        candidate list is *rotated* so a different bridging PR leads, and the
+        notes flag the revert — steering the sub-agent toward a different bridge.
 
         Args:
             launch_log: Captured launch / traceback text.
-            attempt: Zero-based dispatch index; drives candidate rotation and a
-                retry hint in the mandate.
+            attempt: Consecutive rounds that cleared nothing; drives candidate
+                rotation and a retry hint in the mandate. Zero after an advance,
+                so a progressing bring-up is never told to change approach.
 
         Returns:
-            dict | None: Specialist task params (tagged ``enablement`` +
-            ``framework_agent_authoring``) or ``None``.
+            dict | None: Specialist task params (tagged ``enablement``) or ``None``.
         """
         text = (launch_log or "").strip()
         if not text:
             return None
-        from hyperloom.agents.framework.enablement import EnablementRequest, classify_failure
-        from hyperloom.agents.framework.enablement_ops import build_search_plan
+        from hyperloom.common.failure_signature import EnablementRequest
+        from .mandate import build_search_plan
         from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
         state = self.shared_state
@@ -152,35 +86,45 @@ class EnablementParams(CoordinatorCollaborator):
         # Dispatch a specialist for ANY non-blank launch log, even one that
         # classifies as ``UNKNOWN``: ``kind`` is advisory (routes bridge-repo
         # hints and labels the mandate), not a gate.
-        signature = classify_failure(text)
+        verdict, loaded = recorded_verdict(
+            state.enablement.launch_observation_path,
+            wrapper_text=text,
+            session_dir=session_root(self),
+        )
+        signature = verdict.signature
+        if loaded.degraded:
+            log.info(
+                "ENABLEMENT: routing on a re-derived signature (%s); no boot observation was recorded",
+                loaded.degraded,
+            )
         req = EnablementRequest(
             framework=framework,
             model=model or "(target model)",
             repo_url=repo_url,
-            launch_log=text,
             gpu_type=(getattr(state, "gpu_type", "") or "").strip().lower(),
         )
         plan = build_search_plan(signature, framework_repo_url=repo_url, model=model)
-        candidate_refs = self._discover_enablement_candidate_refs(req, plan)
-        # Lead with a different candidate each attempt (deterministic left-rotation).
+        candidate_refs = self._discover_enablement_candidate_refs(
+            req,
+            plan,
+            deadline=Deadline.after(ENABLEMENT_PARAMS_BUDGET_SEC),
+        )
+        # Lead with a different candidate each stalled round (deterministic left-rotation).
         if candidate_refs and attempt:
             n = len(candidate_refs)
             k = attempt % n
             candidate_refs = candidate_refs[k:] + candidate_refs[:k]
-        # Persist so _maybe_escalate_to_targeted_build can pick the top candidate.
-        state.enablement.candidate_refs = list(candidate_refs)
+        # Nothing here writes session state: this runs on a worker thread the
+        # tick may already have stopped waiting on. The refs travel back in the
+        # returned params for the lane to record.
         source_context = self._read_enablement_source_context(signature)
         # For a weight-init failure, fold the checkpoint's ground-truth per-layer
         # weight inventory into the mandate so the loop self-corrects each retry.
         weight_facts = self._derive_checkpoint_weight_facts(text)
         if weight_facts:
             source_context = (weight_facts + "\n\n" + source_context) if source_context else weight_facts
-        # Progressing patches from prior rounds, re-applied as a base before this
-        # round's patch (serial-gap stacking); author a fix composing on top.
-        base_patches = [str(p) for p in (state.enablement.kept_patches or [])]
-        # Whole-file artifacts kept by prior rounds, re-installed before the
-        # boot the same way patches are re-applied.
-        base_artifacts = list(state.enablement.kept_artifacts or [])
+        prior_patches = [str(p) for p in (state.enablement.kept_patches or [])]
+        prior_artifacts = list(state.enablement.kept_artifacts or [])
         # Only prior rounds' *actually-applied* setup commands (recorded by the
         # specialist and replayed by integrate_patch) stack as a base. No install
         # command is ever auto-seeded here: an unpinned upgrade of the shared
@@ -192,16 +136,17 @@ class EnablementParams(CoordinatorCollaborator):
         # notes carries only per-dispatch dynamic context that §1b cannot provide.
         notes = ""
         grounding_drops = list(state.enablement.last_grounding_drop_reason or [])
+        apply_feedback = [fb for fb in (state.enablement.last_apply_feedback or []) if isinstance(fb, dict)]
         spanned_roots = bool(state.enablement.patches_span_multiple_roots)
         acc_envs = dict((state.enablement.accepted_config or {}).get("extra_envs") or {})
         acc_args = str((state.enablement.accepted_config or {}).get("extra_server_args") or "").strip()
-        if base_patches or base_setup or base_artifacts or acc_envs or acc_args:
+        if prior_patches or base_setup or prior_artifacts or acc_envs or acc_args:
             progress_bits = []
-            if base_patches:
-                progress_bits.append(f"{len(base_patches)} prior patch(es): {base_patches}")
-            if base_artifacts:
-                art_targets = [a["target"] for a in base_artifacts[:4]]
-                progress_bits.append(f"{len(base_artifacts)} prior artifact(s) installed: {art_targets}")
+            if prior_patches:
+                progress_bits.append(f"{len(prior_patches)} prior patch(es) already in the tree: {prior_patches}")
+            if prior_artifacts:
+                art_targets = [a["target"] for a in prior_artifacts[:4]]
+                progress_bits.append(f"{len(prior_artifacts)} prior artifact(s) already in the tree: {art_targets}")
             if base_setup:
                 progress_bits.append(f"{len(base_setup)} prior setup command(s): {base_setup}")
             if acc_envs or acc_args:
@@ -210,19 +155,34 @@ class EnablementParams(CoordinatorCollaborator):
                     cfg_bits.append(f"envs={acc_envs}")
                 if acc_args:
                     cfg_bits.append(f"args={acc_args!r}")
-                progress_bits.append("accumulated config from prior advanced rounds: " + "; ".join(cfg_bits))
+                progress_bits.append("accumulated config (re-applied on every launch): " + "; ".join(cfg_bits))
             notes = (
-                "STACKED ENABLEMENT (progress so far): the following already "
-                "cleared earlier boot crashes and WILL be re-applied/re-run as a "
-                "base before your changes — do NOT redo them; fix only the CURRENT "
-                "(deeper) failure, composing on top. " + "; ".join(progress_bits)
+                "PRIOR ENABLEMENT PROGRESS: the following already cleared earlier "
+                "boot crashes. Patches and artifacts are permanently in the tree; "
+                "setup commands and config are re-run on every launch. Do NOT redo "
+                "them; fix only the CURRENT (deeper) failure, composing on top. " + "; ".join(progress_bits)
             )
-        elif attempt:
-            notes = (
-                f"RETRY (attempt {attempt + 1}): a previous enablement patch for this "
-                f"failure was REVERTED (did not make the combo runnable). Try a DIFFERENT "
-                f"bridging approach / candidate than before."
+        # Composed rather than an ``elif``: a stalled round that already banked
+        # progress needs both halves, and the stacked note alone reads as "all
+        # good so far, go deeper" while the round in fact cleared nothing.
+        if attempt:
+            retry_note = (
+                f"RETRY ({attempt} prior round(s) cleared nothing): the last enablement "
+                f"patch for this failure never made the combo runnable — it failed to apply "
+                f"or did not advance the boot. Try a DIFFERENT bridging approach / candidate than before."
             )
+            notes = (retry_note + "\n\n" + notes).strip() if notes else retry_note
+        if apply_feedback:
+            from ..actions.executors._apply_feedback import ApplyFeedback
+
+            blocks = [
+                "APPLY FAILURE FEEDBACK: the prior round's patch never reached the "
+                "framework tree. Re-ground the diff against the target file as it "
+                "reads now — the errors below name the conflict."
+            ]
+            blocks.extend(ApplyFeedback.from_dict(fb).format_for_mandate() for fb in apply_feedback[:5])
+            apply_note = "\n\n".join(blocks)
+            notes = (apply_note + "\n\n" + notes).strip() if notes else apply_note
         if grounding_drops:
             drop_note = (
                 "PATCH GROUNDING FAILURE: the patches the prior round submitted "
@@ -241,27 +201,6 @@ class EnablementParams(CoordinatorCollaborator):
             )
             notes = (span_note + "\n\n" + notes).strip() if notes else span_note
         gap_cid = f"gap.enablement.{signature.kind}"
-        from hyperloom.agents.framework.enablement import CapabilityGap
-
-        capability_gap = CapabilityGap.from_signature(signature)
-
-        # When the gap requires code acquisition (not a resource constraint) and
-        # an adapter can build an evidence-backed candidate, attach a
-        # ``runtime_candidate`` so integrate_patch provisions an attempt-scoped
-        # runtime before booting. Skipped in multi-node mode.
-        runtime_candidate = _maybe_build_runtime_candidate(
-            capability_gap, framework=framework, model=model, gpu_type=req.gpu_type
-        )
-        # When a merged-PR candidate exists, attach a ``localization_candidate``
-        # so integrate_patch localizes the closure into the source tree
-        # (compiled closures defer to the targeted build at apply).
-        localization_candidate = _maybe_build_localization_candidate(
-            capability_gap,
-            framework=framework,
-            model=model,
-            repo_url=repo_url,
-            candidate_refs=tuple(candidate_refs),
-        )
 
         params_out: dict[str, Any] = {
             "domain": "enablement_specialist",
@@ -271,26 +210,21 @@ class EnablementParams(CoordinatorCollaborator):
             "gap_layer": "framework",
             "gap_evidence": {"model": model, "failure_kind": signature.kind},
             "framework": framework,
-            # Enablement tag routes the integrate gate to runnable_decision.
-            "framework_agent_authoring": True,
             "enablement": True,
             "lever_kind": LEVER_ENABLEMENT,
             "enablement_attempt": attempt,
             "enablement_failure_kind": signature.kind,
+            # The verdict this round was dispatched on. The prompt builder renders
+            # it; nothing downstream re-classifies a log to recover it.
+            "enablement_failure_signature": signature.to_dict(),
             "enablement_search_repos": list(plan.repos),
-            # Pre-patch failure signature, replayed by integrate_patch.
-            "enablement_before_signature": signature.to_dict(),
-            # CapabilityGap projection: marks resource_constraint as not actionable.
-            "enablement_capability_gap": capability_gap.to_dict(),
+            # The before half of integrate_patch's gate.
+            "enablement_before_observation_path": state.enablement.launch_observation_path,
             "enablement_candidate_refs": list(candidate_refs),
             # Source lines near the offending site, plus (on a weight-init
             # failure) the checkpoint's per-layer weight inventory. Rendered
             # into the mandate by _section_enablement_playbook.
             "enablement_source_context": source_context,
-            # Progressing patches from prior rounds, stacked as a base.
-            "enablement_base_patches": base_patches,
-            # Whole-file artifact records from prior rounds, re-installed before boot.
-            "enablement_base_artifacts": base_artifacts,
             # Allowlisted setup commands from prior rounds, replayed before boot.
             "enablement_setup_commands": base_setup,
             # Config accumulated by prior advanced rounds. The bench variant
@@ -298,23 +232,11 @@ class EnablementParams(CoordinatorCollaborator):
             # whole stack and its effective_config records the whole stack.
             "base_extra_envs": acc_envs,
             "base_extra_args": acc_args,
-            "launch_probe": req.launch_probe,
             "source": "coordinator_internal",
             "notes": notes,
-            # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
-            **self._framework_gpu_params(),
             # eval-origin trigger context (empty for boot-origin enablement).
             **_enablement_carrier_params(state),
         }
-        if runtime_candidate is not None:
-            params_out["runtime_candidate"] = runtime_candidate
-        # Re-activate a prior KEEP'd attempt runtime so serial stacking runs on
-        # the same runtime the last round promoted.
-        kept_action = state.enablement.kept_stack_action
-        if isinstance(kept_action, dict) and kept_action and "runtime_candidate" not in params_out:
-            params_out["runtime_candidate"] = kept_action
-        if localization_candidate is not None:
-            params_out["localization_candidate"] = localization_candidate
         # Inject the last targeted-build failure into the mandate.
         last_build_failure = state.enablement.last_build_failure or {}
         if isinstance(last_build_failure, dict) and last_build_failure:
@@ -337,8 +259,8 @@ class EnablementParams(CoordinatorCollaborator):
     def _read_enablement_source_context(self, signature: Any, *, window: int = 12) -> str:
         """Best-effort read a small source window near the offending site.
 
-        Resolves ``signature.offending_file`` against the framework/ROCm source
-        allowlist, then returns ``window`` lines centred on the first occurrence
+        Resolves ``signature.offending_file`` against the kernel search roots,
+        then returns ``window`` lines centred on the first occurrence
         of ``offending_symbol`` (or the file head when the symbol is absent).
         Fully exception-guarded: any failure returns ``""`` so the mandate
         degrades to the no-context form (G is grounding, never a hard dependency).
@@ -358,9 +280,9 @@ class EnablementParams(CoordinatorCollaborator):
             return ""
         symbol = str(getattr(signature, "offending_symbol", "") or "").strip()
         from ..actions.executors._apply_feedback import source_context_for_file
-        from ..framework.paths import resolve_source_file_allowlist
+        from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
 
-        search_roots = [Path(str(r)) for r in resolve_source_file_allowlist()]
+        search_roots = [Path(str(r)) for r in resolve_kernel_search_roots()]
         return source_context_for_file(
             offending_file,
             symbol=symbol,
@@ -487,65 +409,73 @@ class EnablementParams(CoordinatorCollaborator):
                 "never executed and the SAME weights stayed uninitialized."
             )
             return header + "\n" + "\n".join(lines) + "\n" + footer
-        except Exception:  # noqa: BLE001 — auto-facts are best-effort grounding
+        except Exception:
             log.debug("enablement: checkpoint weight-facts derivation failed", exc_info=True)
             return ""
 
-    def _discover_enablement_candidate_refs(self, req: Any, plan: Any) -> tuple[str, ...]:
+    def _discover_enablement_candidate_refs(
+        self,
+        req: Any,
+        plan: Any,
+        *,
+        deadline: Deadline | None = None,
+    ) -> tuple[str, ...]:
         """Best-effort enumerate + rank bridging PRs for an enablement failure.
 
         Enumerates candidate PRs across every repo in ``plan.repos`` (framework
         + opted-in ROCm/HIP/aiter bridge repos) via the ``sources`` layer, then
-        ranks each :class:`framework_agent.models.Candidate` with
+        ranks each :class:`hyperloom.agents.framework.models.Candidate` with
         ``score_enablement_title`` (per-Candidate so the ref/html_url is
         preserved) and returns the top ``req.max_search_candidates`` refs
         (``html_url`` preferred).
 
-        Network + git; **fully exception-guarded**: any failure degrades to an
-        empty tuple so the mandate falls back to repos-only.
+        Network + git. Enumeration is guarded per repo, so a repo that fails is
+        skipped and the rest are still ranked; a run that collects nothing
+        returns an empty tuple and the mandate falls back to repos-only.
+
+        ``deadline`` bounds the worker thread, not the caller: enumeration stops
+        between repos and ranks whatever was collected.
 
         Args:
-            req: The :class:`framework_agent.enablement.EnablementRequest`.
-            plan: The :class:`framework_agent.enablement_ops.EnablementSearchPlan`.
+            req: The :class:`hyperloom.common.failure_signature.EnablementRequest`.
+            plan: The :class:`hyperloom.orchestrator.enablement.mandate.EnablementSearchPlan`.
+            deadline: When to stop enumerating further repos.
 
         Returns:
             tuple[str, ...]: Ranked candidate refs (best first; possibly empty).
         """
-        from hyperloom.agents.framework.enablement_ops import score_enablement_title
-        from hyperloom.agents.framework.models import Candidate, ExploreRequest
+        from .mandate import score_enablement_title
+        from hyperloom.agents.framework.models import Candidate, CandidateSearchRequest, PRMonitorConfig
         from hyperloom.agents.framework.sources import enumerate_candidates
+        from hyperloom.common.pr_monitor_urls import pr_monitor_base_url
 
         max_candidates = int(getattr(req, "max_search_candidates", 5) or 5)
-        # Only search primus_cortex when its URL is configured.
-        primus_url = str(os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip()
-        if primus_url:
-            search_modes = ["primus_cortex", "github"]
-            primus_block: dict[str, Any] = {"primus_cortex": {"base_url": primus_url}}
-        else:
-            search_modes = ["github"]
-            primus_block = {}
+        # The PR query service is co-hosted by KB Store.
+        plane = getattr(self, "knowledge_plane", None)
+        pr_enabled = bool(plane is not None and getattr(plane, "pr_monitor_enabled", False))
+        pr_monitor_url = pr_monitor_base_url() if pr_enabled else ""
+        pr_monitor = PRMonitorConfig(base_url=pr_monitor_url) if pr_monitor_url else None
+        search_modes = ("pr_monitor", "github") if pr_monitor else ("github",)
 
         collected: list[Candidate] = []
         for repo in plan.repos:
-            try:
-                explore_req = ExploreRequest.from_dict(
-                    {
-                        "framework": getattr(req, "framework", "") or "sglang",
-                        "repo_url": repo,
-                        "work_dir": str(
-                            getattr(req, "work_dir", None) or (Path(tempfile.gettempdir()) / "framework-agent")
-                        ),
-                        "baseline": {"throughput": 1.0},
-                        "search_perf_prs": True,
-                        "search_modes": search_modes,
-                        "keywords": list(plan.keywords),
-                        "pr_states": ["all"],
-                        "max_search_candidates": max_candidates,
-                        **primus_block,
-                    }
+            if deadline is not None and deadline.expired():
+                log.info(
+                    "enablement: candidate discovery stopped at its deadline with %d collected",
+                    len(collected),
                 )
-                collected.extend(enumerate_candidates(explore_req))
-            except Exception:  # noqa: BLE001 — discovery is best-effort
+                break
+            try:
+                search = CandidateSearchRequest(
+                    repo_url=repo,
+                    search_modes=search_modes,
+                    keywords=tuple(plan.keywords),
+                    pr_states=("all",),
+                    max_search_candidates=max_candidates,
+                    pr_monitor=pr_monitor,
+                )
+                collected.extend(enumerate_candidates(search))
+            except Exception:
                 log.debug(
                     "enablement: candidate discovery failed for repo=%s",
                     repo,

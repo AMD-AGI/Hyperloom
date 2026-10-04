@@ -1,29 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Align tuned-GEMM shapes with the M keys aiter actually looks up.
-
-aiter resolves a tuned config by trying three lookup keys in order (see
-``aiter/ops/gemm_op_a8w8.py::get_CKGEMM_config`` and
-``csrc/py_itfs_cu/gemm_common.cu::getPaddedM``):
-
-1. the raw ``M``,
-2. ``gl=0`` fine-grained padding — round M up to 16 (M<=256), 32 (M<=1024),
-   64 (M<=4096) or 128,
-3. ``gl=1`` coarse padding — ``nextPow2(M)``, clamped to 8192 when
-   ``M > 8192 and N > 4096``.
-
-Runtime M is the number of tokens in a scheduled batch, so prefill M is
-data-dependent and effectively never repeats between two runs. Handing the
-tuner the raw M values sampled from one run therefore produces a CSV whose keys
-no runtime lookup can reach: a later run asking for M=1082 pads to 1088 and
-misses a row keyed on M=1076, so aiter falls back to its default config and the
-measured micro speedup contributes nothing end to end.
-
-Keying the CSV on the padded values instead makes each tuned row cover the whole
-bucket that pads onto it, which is what turns a micro-level win into an
-end-to-end one.
-"""
+"""Align tuned-GEMM shapes with the M keys aiter actually looks up."""
 
 from __future__ import annotations
 
@@ -32,20 +10,27 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
+from hyperloom.common.env import is_truthy
+
 # Emitted by aiter on every tuned-config lookup miss, naming the table consulted.
 _AITER_SHAPE_MISS_RE = re.compile(
     r"shape is M:(\d+), N:(\d+), K:(\d+)(?:[^\n]*?)not found tuned config in (\S+?),",
 )
 # Emitted by aiter (only under AITER_LOG_TUNED_CONFIG) on a lookup hit.
 _AITER_SHAPE_HIT_RE = re.compile(
-    r"shape is M:(\d+), N:(\d+), K:(\d+), found padded_M: (\d+)",
+    r"shape is M:(\d+), N:(\d+), K:(\d+)[^\n]*?found padded_M: (\d+)",
+)
+# The table-qualified form is used only when attributing hits to one candidate, so it has to reach the table name;
+# everything between stays unconstrained.
+_AITER_SHAPE_HIT_TABLE_RE = re.compile(
+    r"shape is M:(\d+), N:(\d+), K:(\d+)[^\n]*?found padded_M: (\d+)[^\n]*? in (\S+?)\s*,",
 )
 
 Shape = tuple[int, int, int]
 FmoeDispatchKey = tuple[str, ...]
 
-# Short aliases and canonical torch dtype strings seen in fused-MoE logs/CSVs.
-# Only listed forms are normalized; anything else is preserved for exact matching.
+# Short aliases and canonical torch dtype strings seen in fused-MoE logs/CSVs. Only listed forms are normalized;
+# anything else is preserved for exact matching.
 _FMoe_Q_DTYPE_ALIASES: dict[str, str] = {
     "fp4": "torch.float4_e2m1fn_x2",
     "torch.float4_e2m1fn_x2": "torch.float4_e2m1fn_x2",
@@ -54,10 +39,7 @@ _FMoe_Q_DTYPE_ALIASES: dict[str, str] = {
     "torch.float8_e5m2": "torch.float8_e5m2",
 }
 
-# ``get_2stage_cfgs`` indexes tuned rows on all fourteen columns below (see
-# ``aiter/fused_moe.py::_INDEX_COLS``). Runtime logs the same tuple after gfx
-# was added; the descriptor between ``using 2stage`` and ``for`` is either
-# ``default`` or ``(kernelName1='…', kernelName2='…')``.
+# ``get_2stage_cfgs`` indexes tuned rows on all fourteen columns below (see ``aiter/fused_moe.py::_INDEX_COLS``).
 FMOE_INDEX_COLS = (
     "gfx",
     "cu_num",
@@ -137,35 +119,7 @@ def align_shapes_to_aiter_keys(
     max_shapes: int = 64,
     max_m: int = 0,
 ) -> tuple[list[Shape], dict[str, Any]]:
-    """Re-key observed shapes onto the M values aiter will actually look up.
-
-    Two row families are emitted per observed ``(N, K)`` projection:
-
-    ``ladder``
-        Every power-of-two M rung up to the observed maximum. Because the
-        ``gl=1`` lookup key is ``nextPow2(M)`` and the ``gl=0`` key pads anything
-        below 16 up to 16, a complete ladder makes *every* M resolvable — which
-        matters because a profile trace only ever samples a few operating points
-        and cannot see decode M at all (decode replays inside a CUDA graph and
-        emits no op events).
-    ``fine``
-        The ``gl=0`` padded key for each observed M. These are tried before the
-        ladder, so where the profile does carry evidence the tuner's answer for
-        that neighbourhood wins over the coarser rung.
-
-    Args:
-        shapes: Observed ``(M, N, K)`` triples from a profile trace or server log.
-        max_shapes: Upper bound on the returned shape count, bounding tuning
-            time. The ladder is preserved ahead of the fine rows because it is
-            what guarantees coverage; ladder rungs are then dropped smallest
-            first, since small-M GEMMs contribute least to throughput.
-        max_m: Optional upper bound on the M the workload can schedule (e.g.
-            ``max_num_batched_tokens``). Extends the ladder past the observed
-            maximum when the profile under-sampled prefill.
-
-    Returns:
-        The aligned shapes plus a report describing what changed.
-    """
+    """Re-key observed shapes onto the M values aiter will actually look up."""
     observed = sorted({(int(m), int(n), int(k)) for m, n, k in shapes if min(m, n, k) > 0})
     if not observed:
         return [], {"observed": 0, "aligned": 0, "dropped": 0, "unchanged": True}
@@ -242,6 +196,25 @@ def parse_aiter_shape_lookups(log_text: str) -> tuple[set[Shape], set[Shape]]:
     """Return the ``(missed, hit)`` GEMM shapes aiter reported in a server log."""
     missed = {(int(m), int(n), int(k)) for m, n, k, _table in _AITER_SHAPE_MISS_RE.findall(log_text or "")}
     hit = {(int(m), int(n), int(k)) for m, n, k, _padded in _AITER_SHAPE_HIT_RE.findall(log_text or "")}
+    return missed, hit
+
+
+def parse_aiter_shape_lookups_for_tables(
+    log_text: str,
+    table_names: Iterable[str | Path],
+) -> tuple[set[Shape], set[Shape]]:
+    """Return lookups attributed to the named tuned-config tables."""
+    wanted = {Path(name).name for name in table_names if str(name).strip()}
+    missed = {
+        (int(m), int(n), int(k))
+        for m, n, k, table in _AITER_SHAPE_MISS_RE.findall(log_text or "")
+        if Path(table).name in wanted
+    }
+    hit = {
+        (int(m), int(n), int(k))
+        for m, n, k, _padded, table in _AITER_SHAPE_HIT_TABLE_RE.findall(log_text or "")
+        if Path(table).name in wanted
+    }
     return missed, hit
 
 
@@ -396,13 +369,7 @@ def parse_aiter_fused_moe_dispatches(log_text: str) -> list[dict[str, str]]:
 
 
 def resolve_fmoe_candidate_csv(path: str | Path) -> Path | None:
-    """Resolve the bare candidate CSV used for runtime attribution.
-
-    E2E envs often point at ``merged_<name>.csv`` (for example
-    ``merged_candidate_fmoe.csv`` or ``merged_tuned_fmoe.csv``). Attribution
-    must use the sibling bare file when it exists; the merged superset must
-    not impersonate a candidate row the tuner never produced.
-    """
+    """Resolve the bare candidate CSV used for runtime attribution."""
     resolved = Path(path)
     if not resolved.is_file():
         return None
@@ -423,8 +390,25 @@ def log_has_fused_moe_activity(log_text: str) -> bool:
 
 def aiter_log_tuned_config_enabled(envs: dict[str, str]) -> bool:
     """Mirror dense apply verification: dispatch attribution needs the flag."""
-    raw = str(envs.get("AITER_LOG_TUNED_CONFIG", "1")).strip().lower()
-    return raw not in ("", "0", "false", "no", "off")
+    return is_truthy(envs.get("AITER_LOG_TUNED_CONFIG"), default=True)
+
+
+def _safe_mtime(path: Path) -> float:
+    """Return ``path``'s mtime, or ``0`` when it cannot be read."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def integrate_server_logs(
+    session_dir: Path,
+    integrate_name: str = FMOE_INTEGRATE_RUN,
+) -> list[Path]:
+    """Server logs for one integrate run, retries included, oldest first."""
+    parent = session_dir / "runs" / "integrate"
+    run_dirs = [parent / integrate_name, *sorted(parent.glob(f"{integrate_name}-*"))]
+    return sorted((log_path for run_dir in run_dirs for log_path in run_dir.rglob("server.log")), key=_safe_mtime)
 
 
 def read_latest_integrate_server_log(
@@ -432,11 +416,7 @@ def read_latest_integrate_server_log(
     integrate_name: str = FMOE_INTEGRATE_RUN,
 ) -> tuple[Path, str] | None:
     """Return the newest ``server.log`` under an integrate run, if readable."""
-    run_dir = session_dir / "runs" / "integrate" / integrate_name
-    logs = sorted(
-        run_dir.rglob("server.log"),
-        key=lambda p: p.stat().st_mtime if p.exists() else 0,
-    )
+    logs = integrate_server_logs(session_dir, integrate_name)
     if not logs:
         return None
     try:
@@ -537,15 +517,10 @@ def fmoe_tuned_config_coverage(
 
 
 def parse_aiter_consulted_tables(log_text: str) -> set[str]:
-    """Return the tuned-config files the runtime actually looked in.
-
-    aiter keys each quantisation variant to its own table and env var (plain
-    block-scale vs ``..._BPRESHUFFLE``, for instance). When the server dispatches
-    to a variant the tuner did not target, the tuned CSV is never consulted at
-    all -- a different failure from a CSV that is consulted but has no matching
-    row, and one worth naming separately.
-    """
-    return {table for _m, _n, _k, table in _AITER_SHAPE_MISS_RE.findall(log_text or "")}
+    """Return the tuned-config files the runtime actually looked in."""
+    missed = {table for _m, _n, _k, table in _AITER_SHAPE_MISS_RE.findall(log_text or "")}
+    hit = {table for _m, _n, _k, _padded, table in _AITER_SHAPE_HIT_TABLE_RE.findall(log_text or "")}
+    return missed | hit
 
 
 def tuned_csv_shapes(path: str | Path) -> set[Shape]:
@@ -579,15 +554,12 @@ def tuned_csv_shapes(path: str | Path) -> set[Shape]:
 def tuned_config_coverage(
     tuned_shapes: Iterable[Shape],
     requested_shapes: Iterable[Shape],
+    known_covered: Iterable[Shape] | None = None,
 ) -> dict[str, Any]:
-    """Report how many requested shapes a tuned CSV can actually serve.
-
-    Replays aiter's three-step lookup against the CSV keys, so the result
-    answers "will this artifact ever be used?" rather than "did the micro
-    benchmark look good?".
-    """
+    """Report how many requested shapes a tuned CSV can actually serve."""
     tuned = {(int(m), int(n), int(k)) for m, n, k in tuned_shapes}
     requested = sorted({(int(m), int(n), int(k)) for m, n, k in requested_shapes})
+    confirmed = {(int(m), int(n), int(k)) for m, n, k in (known_covered or ())}
     if not requested:
         return {
             "requested": 0,
@@ -595,11 +567,13 @@ def tuned_config_coverage(
             "coverage_pct": None,
             "tuned_rows": len(tuned),
         }
-    covered = [shape for shape in requested if any(key in tuned for key in aiter_lookup_keys(shape))]
+    covered = {
+        shape for shape in requested if shape in confirmed or any(key in tuned for key in aiter_lookup_keys(shape))
+    }
     return {
         "requested": len(requested),
         "covered": len(covered),
         "coverage_pct": round(100.0 * len(covered) / len(requested), 2),
         "tuned_rows": len(tuned),
-        "uncovered_sample": [{"M": m, "N": n, "K": k} for m, n, k in requested if (m, n, k) not in set(covered)][:10],
+        "uncovered_sample": [{"M": m, "N": n, "K": k} for m, n, k in requested if (m, n, k) not in covered][:10],
     }

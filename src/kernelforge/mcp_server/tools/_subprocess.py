@@ -10,6 +10,8 @@ import contextlib
 import os
 import signal
 
+from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
+
 
 async def kill_process_group(proc: asyncio.subprocess.Process) -> None:
     """Kill and reap a subprocess's isolated process group."""
@@ -20,15 +22,10 @@ async def kill_process_group(proc: asyncio.subprocess.Process) -> None:
     except (ProcessLookupError, PermissionError):
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(asyncio.TimeoutError):
         await asyncio.wait_for(proc.wait(), timeout=10)
-    # AITER's zero-byte FileBaton lock is not released when the child receives
-    # SIGKILL. The cache is per-attempt, so after the whole group is reaped it is
-    # safe to remove only locks owned by this Forge process.
-    with contextlib.suppress(Exception):
-        from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
-
-        cleanup_current_owned_aiter_locks()
+    # AITER's zero-byte FileBaton lock is not released when the child receives SIGKILL.
+    cleanup_current_owned_aiter_locks()
 
 
 async def communicate_process_group(
@@ -36,12 +33,7 @@ async def communicate_process_group(
     *,
     timeout: float,
 ) -> tuple[bytes, bytes]:
-    """Communicate with an isolated subprocess and clean up on cancellation.
-
-    Every caller must create ``proc`` with ``start_new_session=True``.
-    Timeout and cancellation semantics are preserved after the whole process
-    group has been killed and reaped.
-    """
+    """Communicate with an isolated subprocess and clean up on cancellation."""
     try:
         return await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except (asyncio.TimeoutError, asyncio.CancelledError):

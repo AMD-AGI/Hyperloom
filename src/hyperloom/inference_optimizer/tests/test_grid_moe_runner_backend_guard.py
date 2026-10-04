@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Grid variants must not inherit a MoE runner backend the model cannot serve.
-
-The grid never injects ``--moe-runner-backend`` itself, but it inherits one
-from the baseline recipe it is seeded with (or from an authored variant). On an
-aiter-only quant scheme that flag is a guaranteed first-forward-pass crash, and
-the grid has no retry to salvage it.
-"""
+"""Grid variants must not inherit a MoE runner backend the model cannot serve."""
 
 from __future__ import annotations
 

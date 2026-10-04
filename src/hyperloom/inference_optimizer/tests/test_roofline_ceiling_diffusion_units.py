@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The diffusion (xDiT) arm of the roofline ceiling.
-
-Diffusion is measured in images/sec, and its sequence length comes from the
-latent grid rather than a token count, so the DiT geometry readers are what
-decide whether the ceiling is meaningful at all.
-"""
+"""The diffusion (xDiT) arm of the roofline ceiling."""
 
 from __future__ import annotations
 
@@ -15,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.kernel import roofline_ceiling as rc
+from hyperloom.inference_optimizer import roofline_ceiling as rc
 
 
 def _model(tmp_path: Path, *, transformer: dict | None = None, vae: dict | None = None) -> str:

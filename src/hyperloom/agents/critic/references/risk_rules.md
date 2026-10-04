@@ -15,8 +15,8 @@ are true:
 - The patch requires rebuild, reinstall, server restart, or cache clearing but
   the packet does not show that it happened.
 - The change can only be rolled back manually through unclear steps.
-- Robustness reports a related crash, hang, accuracy failure, or cache corruption
-  that the packet does not address.
+- Recorded execution evidence shows a related crash, hang, accuracy failure, or
+  cache corruption that the packet does not address.
 - The patch contains unrelated broad refactors that make the optimization effect
   impossible to isolate.
 
@@ -76,7 +76,7 @@ Required evidence depends on patch scope:
 Reject a KB candidate when:
 
 - The lesson depends on unvalidated benchmark evidence.
-- The result is contradicted by Robustness findings.
+- The result is contradicted by recorded benchmark, correctness, or failure evidence.
 - The action is too specific to a temporary file path or one-off debug state.
 - The entry repeats an existing lesson without new scope, evidence, or
   supersession.

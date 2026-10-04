@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A long task's heartbeat: reported by the executor, landed on its own row.
-
-Covers the plumbing that lets a multi-hour composite action say "unit 3 of 12
-is done" — the ambient reporter, the runner scope that binds it, and the
-registry write that makes the row look alive.
-"""
+"""A long task's heartbeat: reported by the executor, landed on its own row."""
 
 from __future__ import annotations
 
@@ -26,12 +21,13 @@ from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, Sqlite
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.sub_agent_runner import (
     PROGRESS_OWNER_AGENT,
+    ExecutionCleanupUnconfirmed,
     SubAgentRunner,
     _format_progress,
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
-from hyperloom.orchestrator.trace import task_progress
-from hyperloom.orchestrator.trace.task_progress import (
+from hyperloom.inference_optimizer.trace import task_progress
+from hyperloom.inference_optimizer.trace.task_progress import (
     OutputActivity,
     heartbeat_while_output_flows,
     progress_scope,
@@ -60,36 +56,20 @@ def _iso_ago(seconds: float) -> str:
     return datetime.fromtimestamp(time.time() - seconds, tz=timezone.utc).isoformat()
 
 
-# Bound on every wait paced by the heartbeat driver, so a regression that stops
-# the driver fails in seconds instead of hanging the suite.
+# Bound on every wait paced by the heartbeat driver, so a regression that stops the driver fails in seconds instead of
+# hanging the suite.
 _HEARTBEAT_BACKSTOP_S = 10.0
 
-# Bound on every wait for a worker thread the rollback tests hold a lock in, so
-# a regression that never frees it fails instead of hanging the suite.
+# Bound on every wait for a worker thread the rollback tests hold a lock in, so a regression that never frees it fails
+# instead of hanging the suite.
 _ROLLBACK_BACKSTOP_S = 5.0
 
 # How long a cancelled write is given to come back before it is called early.
-# A write that abandoned its rollback returns on the next loop turn, so this is
-# orders of magnitude more than it needs and the assertion still means "it
-# returned while the rollback was queued" rather than "the loop was busy".
 _RETURNED_EARLY_WINDOW_S = 0.2
 
 
 async def _await_notes(notes: list[dict], label: str, count: int, *, interval_s: float) -> None:
-    """Wait until the driver stamping ``label`` has reported ``count`` notes.
-
-    Paces a test on the driver's own reports rather than on elapsed time. A tick
-    is a timer, so "another interval went by" cannot be asserted from a ``sleep``
-    on a runner that may starve the loop for longer than the interval itself; a
-    note is proof the driver got that tick. A driver that is meant to be silent
-    is paced the same way, by the notes of a second one kept deliberately noisy.
-
-    Args:
-        notes (list[dict]): The sink's accumulated notes.
-        label (str): The ``label`` field the driver of interest stamps.
-        count (int): Notes bearing ``label`` to wait for.
-        interval_s (float): The driver's tick interval, used as the poll period.
-    """
+    """Wait until the driver stamping ``label`` has reported ``count`` notes."""
 
     async def _reached() -> None:
         while sum(1 for note in notes if note.get("label") == label) < count:
@@ -99,11 +79,7 @@ async def _await_notes(notes: list[dict], label: str, count: int, *, interval_s:
 
 
 async def _await_cancelled(task: asyncio.Task) -> None:
-    """Await a cancelled task so the caller can inspect leftover state.
-
-    Args:
-        task (asyncio.Task): Already cancelled; must finish as cancelled.
-    """
+    """Await a cancelled task so the caller can inspect leftover state."""
     try:
         await task
         pytest.fail(f"expected CancelledError; the task ended as {task.exception()!r}")
@@ -150,11 +126,7 @@ async def test_every_note_names_the_agent_it_vouches_for(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_heartbeat_leaves_the_running_mark_where_it_was(tmp_path, monkeypatch):
-    """``updated_at`` says when the task started running, not when it last spoke.
-
-    The lease watchdog, the ``extend_lease`` budget math and the in-flight
-    projection all measure elapsed runtime from it.
-    """
+    """``updated_at`` says when the task started running, not when it last spoke."""
     sub = _runner(tmp_path, monkeypatch)
     started_iso = _iso_ago(3600)
     seen: dict[str, Any] = {}
@@ -180,12 +152,8 @@ async def test_a_heartbeat_leaves_the_running_mark_where_it_was(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_a_task_that_heartbeats_all_along_is_still_reclaimed_at_its_lease(tmp_path, monkeypatch):
-    """The R6 watchdog is a runtime budget, not an inactivity timeout.
-
-    A heartbeat that reset its clock would make the backstop unreachable for
-    exactly the long-running rows that hold lanes and read as live work.
-    """
+async def test_an_old_running_task_keeps_its_budget_without_an_age_reclaimer(tmp_path, monkeypatch):
+    """Elapsed admission budget is not evidence that an executor has stopped."""
     sub = _runner(tmp_path, monkeypatch)
     task = await sub.tasks.create(
         kind="roofline",
@@ -201,10 +169,124 @@ async def test_a_task_that_heartbeats_all_along_is_still_reclaimed_at_its_lease(
     for unit in range(3):
         await sub.tasks.record_progress(task.task_id, {"unit": "roofline_step", "index": unit})
 
-    reclaimed = await sub.tasks.reclaim_expired_running(reason="test_watchdog")
+    assert not hasattr(sub.tasks, "reclaim_expired_running")
+    assert await sub.tasks.reclaim_dead_running() == []
+    running = await sub.tasks.get(task.task_id)
+    assert running.state == "running"
+    assert running.lease_ttl_sec == 2700
+    assert await sub.tasks.extend_lease(task.task_id, 60) == 2760
 
-    assert reclaimed == [task.task_id]
-    assert (await sub.tasks.get(task.task_id)).state == "failed"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_scope,dead", [("test-node", True), ("test-node", False), ("", True), ("other", True)])
+async def test_dead_task_requires_local_owner_evidence(tmp_path, monkeypatch, owner_scope, dead):
+    from hyperloom.orchestrator.bus import resource_lock
+
+    monkeypatch.setattr(resource_lock, "local_owner_scope", lambda: "test-node")
+    monkeypatch.setattr(SqliteLeaseBackend, "_pid_alive", staticmethod(lambda pid: not dead))
+    sub = _runner(tmp_path, monkeypatch)
+    task = await sub.tasks.create(kind="explore", params={}, idempotency_key="dead-owner")
+    await sub.tasks.transition(task.task_id, "running")
+    await sub.locks.acquire_many(
+        ["research_lane"], holder_id=task.task_id, task_id=task.task_id, action="explore", ttl_sec=-1
+    )
+    await sub.tasks.db.execute("UPDATE leases SET owner_scope=?, pid=12345", (owner_scope,))
+    reclaimed = await sub.tasks.reclaim_dead_running(reason="test_dead")
+    if owner_scope == "test-node" and dead:
+        assert reclaimed == [task.task_id]
+        row = await sub.tasks.get(task.task_id)
+        assert row.history[-1]["evidence"] == {"reason": "test_dead", "dead_pid": 12345}
+    else:
+        assert reclaimed == []
+        assert (await sub.tasks.get(task.task_id)).state == "running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmed", [True, False])
+@pytest.mark.parametrize("fails", [True, False])
+async def test_worker_cleanup_precedes_lane_release(tmp_path, monkeypatch, confirmed, fails):
+    sub = _runner(tmp_path, monkeypatch)
+    task = await sub.tasks.create(
+        kind="explore", params={}, idempotency_key="cleanup", requires_lanes=["research_lane"]
+    )
+    lease = await sub.locks.acquire_many(
+        ["research_lane"], holder_id=task.task_id, task_id=task.task_id, action="explore", ttl_sec=1
+    )
+
+    async def execute(_ctx):
+        if fails:
+            raise ValueError("executor failed")
+        return {"ok": True}
+
+    async def cleanup():
+        assert (await sub.locks.lane_holders())["research_lane"] == 1
+        return confirmed
+
+    sub.register_executor("explore", execute)
+    try:
+        execution = sub.run_task(task, prebound_lease=lease, release_resources=cleanup)
+        if confirmed:
+            result = await execution
+            assert result.state == ("failed" if fails else "succeeded")
+        else:
+            with pytest.raises(ExecutionCleanupUnconfirmed, match=task.task_id):
+                await execution
+        row = await sub.tasks.get(task.task_id)
+        assert row.state == ("failed" if fails else "succeeded")
+        if fails:
+            assert "executor failed" in row.history[-1]["evidence"]["error"]
+        assert bool(await sub.locks.lane_holders()) is not confirmed
+        retained = await sub.tasks.db.fetchone("SELECT task_id FROM leases WHERE task_id=?", (task.task_id,))
+        assert (retained is not None) is not confirmed
+    finally:
+        sub.tasks.db.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_cancel_during_cleanup_retains_capacity(tmp_path, monkeypatch, caplog):
+    sub = _runner(tmp_path, monkeypatch)
+    task = await sub.tasks.create(
+        kind="explore", params={}, idempotency_key="cancel-cleanup", requires_lanes=["research_lane"]
+    )
+    lease = await sub.locks.acquire_many(
+        ["research_lane"], holder_id=task.task_id, task_id=task.task_id, action="explore", ttl_sec=1
+    )
+    entered = threading.Event()
+    finish = threading.Event()
+
+    def close():
+        entered.set()
+        finish.wait(5)
+        return True
+
+    async def cleanup():
+        return await asyncio.to_thread(close)
+
+    async def execute(_ctx):
+        return {}
+
+    sub.register_executor("explore", execute)
+    running = asyncio.create_task(sub.run_task(task, prebound_lease=lease, release_resources=cleanup))
+    await asyncio.to_thread(entered.wait, 2)
+    try:
+        running.cancel()
+        await _await_cancelled(running)
+        assert (await sub.locks.lane_holders())["research_lane"] == 1
+        assert "cleanup cancelled" in caplog.text
+    finally:
+        finish.set()
+
+
+@pytest.mark.asyncio
+async def test_retired_recover_is_cancelled_without_running(tmp_path, monkeypatch):
+    sub = _runner(tmp_path, monkeypatch)
+    task = await sub.tasks.create(kind="recover", params={}, idempotency_key="legacy-recover")
+    result = await sub.run_task(task)
+    assert result.state == "cancelled"
+    row = await sub.tasks.get(task.task_id)
+    assert row.state == "cancelled"
+    assert row.history[-1]["from"] == "queued"
+    assert row.history[-1]["evidence"]["reason"] == "unsupported_action"
 
 
 @pytest.mark.asyncio
@@ -268,13 +350,7 @@ async def test_a_long_step_keeps_reporting_while_its_child_talks() -> None:
 
 @pytest.mark.asyncio
 async def test_a_step_whose_child_went_quiet_is_allowed_to_go_stale() -> None:
-    """A timer would keep vouching for a wedged process; that is the failure to catch.
-
-    A second heartbeat, kept noisy, paces the quiet stretch: each of its notes is
-    an interval in which the first driver also had a tick and nothing new to
-    report. Sleeping for a multiple of the interval instead would assume the loop
-    was scheduled during it, which is the assumption a 2-vCPU runner breaks.
-    """
+    """A timer would keep vouching for a wedged process; that is the failure to catch."""
     notes: list[dict] = []
 
     async def _sink(**note) -> None:
@@ -299,12 +375,7 @@ async def test_a_step_whose_child_went_quiet_is_allowed_to_go_stale() -> None:
 
 @pytest.mark.asyncio
 async def test_the_driver_stops_with_the_step_it_watches() -> None:
-    """A leaked driver task would report a step that already returned.
-
-    The silence after the step returns is paced by a second heartbeat's notes, so
-    the window a leaked driver would have reported in is three intervals it
-    actually got rather than three the test hoped had gone by.
-    """
+    """A leaked driver task would report a step that already returned."""
     notes: list[dict] = []
 
     async def _sink(**note) -> None:
@@ -326,12 +397,7 @@ async def test_the_driver_stops_with_the_step_it_watches() -> None:
 
 @pytest.mark.asyncio
 async def test_teardown_lets_the_note_in_flight_finish_before_giving_up() -> None:
-    """A note is a ``tasks`` write; cancelling one mid-write wedges the connection.
-
-    Teardown starts on the sink's own signal that it is mid-write rather than
-    after a sleep long enough to hope one began, so the note is always in flight
-    when the grace window opens.
-    """
+    """A note is a ``tasks`` write; cancelling one mid-write wedges the connection."""
     events: list[str] = []
     writing = asyncio.Event()
 
@@ -356,14 +422,7 @@ async def test_teardown_lets_the_note_in_flight_finish_before_giving_up() -> Non
 
 @pytest.mark.asyncio
 async def test_a_wedged_sink_cannot_hold_the_step_open(monkeypatch) -> None:
-    """Cooperative shutdown is bounded: past the grace the driver is cancelled.
-
-    The step is bounded here because the sink is not: a teardown that waited on
-    the sink instead of cancelling it would sit inside the ``async with`` for the
-    hour the sink sleeps, and with no timeout plugin in this suite that blocks
-    until the CI job is killed rather than failing. Which is the failure mode the
-    grace window exists to prevent, so the test for it may not have it either.
-    """
+    """Cooperative shutdown is bounded: past the grace the driver is cancelled."""
     monkeypatch.setattr(task_progress, "_DRIVER_STOP_GRACE_S", 0.05)
     events: list[str] = []
     entered = asyncio.Event()
@@ -387,8 +446,8 @@ async def test_a_wedged_sink_cannot_hold_the_step_open(monkeypatch) -> None:
     await asyncio.wait_for(_step(), timeout=_HEARTBEAT_BACKSTOP_S)
 
     await asyncio.sleep(0)
-    # The cancellation is the whole claim: a teardown that waited on the sink
-    # instead would still be inside the ``async with``, not here.
+    # The cancellation is the whole claim: a teardown that waited on the sink instead would still be inside the
+    # ``async with``, not here.
     assert events == ["cancelled"]
 
 
@@ -421,13 +480,7 @@ async def test_a_cancel_landing_in_teardown_still_cancels_the_step() -> None:
 
 @pytest.mark.asyncio
 async def test_a_cancelled_progress_write_leaves_the_connection_usable(tmp_path, monkeypatch):
-    """A cancel mid-``BEGIN IMMEDIATE`` must not wedge the shared connection.
-
-    Every heartbeat around a long subprocess ends in a cancel-or-stop of a
-    coroutine that may be inside a registry write, so a transaction left open
-    here fails every later write in the session with "cannot start a
-    transaction within a transaction".
-    """
+    """A cancel mid-``BEGIN IMMEDIATE`` must not wedge the shared connection."""
     sub = _runner(tmp_path, monkeypatch)
     task = await sub.tasks.create(kind="explore", params={}, idempotency_key="wedge")
     await sub.tasks.transition(task.task_id, "running")
@@ -456,19 +509,7 @@ async def test_a_cancelled_progress_write_leaves_the_connection_usable(tmp_path,
 
 @pytest.mark.asyncio
 async def test_the_loop_keeps_running_while_a_cancelled_write_rolls_back(tmp_path, monkeypatch):
-    """The rollback waits on a lock a worker thread holds; the loop must not wait with it.
-
-    In production that worker is the abandoned ``BEGIN IMMEDIATE``, blocked for
-    up to ``busy_timeout`` while another writer holds the database and holding
-    ``_sync_lock`` the whole time. Rolling back from the except handler on the
-    event-loop thread queues behind it and stops the entire orchestrator —
-    including the shutdown path that issued the cancel, which is exactly when
-    this fires.
-
-    The worker here holds the lock until the loop proves it is still ticking
-    rather than for a wall-clock interval, so the assertion is a count on a
-    loaded machine as much as an idle one.
-    """
+    """The rollback waits on a lock a worker thread holds; the loop must not wait with it."""
     sub = _runner(tmp_path, monkeypatch)
     task = await sub.tasks.create(kind="explore", params={}, idempotency_key="loop-liveness")
     await sub.tasks.transition(task.task_id, "running")
@@ -510,26 +551,14 @@ async def test_the_loop_keeps_running_while_a_cancelled_write_rolls_back(tmp_pat
     await asyncio.gather(ticker, return_exceptions=True)
 
     assert loop_alive.is_set(), "the event loop stopped while the rollback waited for the worker's lock"
-    # And the rollback is awaited, not fired and forgotten: ``transaction()``
-    # cannot return while the connection is still inside one, or the next
-    # ``BEGIN IMMEDIATE`` would fail the way it did before the rollback existed.
+    # And the rollback is awaited, not fired and forgotten: ``transaction()`` cannot return while the connection is
+    # still inside one, or the next ``BEGIN IMMEDIATE`` would fail the way it did before the rollback existed.
     assert not db.raw.in_transaction
     await sub.tasks.record_progress(task.task_id, {"unit": "variant", "label": "after"})
 
 
 def _rollback_gated_on(db, entered: threading.Event, release: threading.Event, monkeypatch) -> None:
-    """Make ``db``'s rollback announce itself and then wait for ``release``.
-
-    Stands in for the rollback queued behind a worker thread that still holds
-    ``_sync_lock``, which is the state a cancelled ``BEGIN IMMEDIATE`` leaves and
-    the only state in which anything can land on the rollback's own wait.
-
-    Args:
-        db (SqliteConnection): Connection whose ``_rollback`` is gated.
-        entered (threading.Event): Set once the rollback is in flight.
-        release (threading.Event): Awaited before the rollback actually runs.
-        monkeypatch: The active monkeypatch fixture.
-    """
+    """Make ``db``'s rollback announce itself and then wait for ``release``."""
     real_rollback = db._rollback
 
     def _gated_rollback() -> None:
@@ -542,19 +571,7 @@ def _rollback_gated_on(db, entered: threading.Event, release: threading.Event, m
 
 @pytest.mark.asyncio
 async def test_a_cancel_landing_on_the_rollback_does_not_release_the_lock_early(tmp_path, monkeypatch):
-    """The second cancel must not abandon the wait the first one created.
-
-    Abandoning it releases ``_async_lock`` while the rollback is still queued
-    behind the worker the first cancel walked away from — fire and forget with
-    the lock already gone, which is the behaviour this rollback was moved off the
-    loop to avoid rather than to adopt. The next writer then finds the
-    connection still inside a transaction and every write in the session fails
-    with "cannot start a transaction within a transaction".
-
-    Both cancels are ones production delivers: the stop that cancels an
-    in-flight action, and the escalation that follows when shutdown is not
-    making progress.
-    """
+    """The second cancel must not abandon the wait the first one created."""
     sub = _runner(tmp_path, monkeypatch)
     task = await sub.tasks.create(kind="explore", params={}, idempotency_key="second-cancel")
     await sub.tasks.transition(task.task_id, "running")
@@ -594,15 +611,7 @@ async def test_a_cancel_landing_on_the_rollback_does_not_release_the_lock_early(
 
 @pytest.mark.asyncio
 async def test_a_cancel_arriving_while_the_rollback_runs_is_not_lost(tmp_path, monkeypatch):
-    """One cancel is enough, and it must not be swallowed by the rollback handler.
-
-    ``record_progress``'s body raises on its own — a ``BEGIN IMMEDIATE`` that
-    outlasted ``busy_timeout``, a ``history`` column that will not parse — so a
-    single cancel is all it takes to land on the rollback's wait. Swallowed, it
-    leaves the caller with the body's exception, which ``report_progress`` drops:
-    the action then runs on as though it had never been cancelled while the
-    dispatcher's ``gather`` waits for it to stop.
-    """
+    """One cancel is enough, and it must not be swallowed by the rollback handler."""
     sub = _runner(tmp_path, monkeypatch)
     task = await sub.tasks.create(kind="explore", params={}, idempotency_key="lost-cancel")
     await sub.tasks.transition(task.task_id, "running")
@@ -628,13 +637,7 @@ async def test_a_cancel_arriving_while_the_rollback_runs_is_not_lost(tmp_path, m
 
 @pytest.mark.asyncio
 async def test_a_rollback_the_connection_cannot_do_is_logged_not_raised(tmp_path, monkeypatch, caplog):
-    """A rollback that fails outright must not become the exception the caller sees.
-
-    Teardown closes the connection while writes are still unwinding, and a
-    rollback that lands after it raises ``ProgrammingError``. Losing the body's
-    own exception behind that would hide why the write failed in the first
-    place.
-    """
+    """A rollback that fails outright must not become the exception the caller sees."""
     db = SqliteConnection(tmp_path / "coord.db")
 
     def _rollback_on_a_closed_connection() -> None:

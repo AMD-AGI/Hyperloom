@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Model-agnostic library of fusible op-chain patterns (the "hybrid" discovery).
-
-Each :class:`FusionPattern` maps a set of launch-bound trace categories to a
-fusion HYPOTHESIS: a description, what to grep for in the model source, the fused
-math sketch handed to the author, and -- critically -- how to build the
-correctness reference by IMPORTING the real eager ops (never re-implemented).
-
-v1 covers the fusions already validated in kernel/docs (ZAYA, LFM2). New patterns
-are added here, not per-model; the locate stage confirms/localizes them against
-the actual framework source.
-"""
+"""Model-agnostic library of fusible op-chain patterns (the \"hybrid\" discovery)."""
 
 from __future__ import annotations
 
@@ -19,10 +9,8 @@ from .models import Diagnosis, FusionPattern
 
 _SGLANG_VLLM = frozenset({"sglang", "vllm", "vllm-aiter"})
 
-# ROCm authoring guard appended to every pattern's fusion_math: sglang/vllm ship
-# some CUDA-only fused ops (notably `fused_qk_norm_rope`: `cuda_bf16.h` + nvcc-only
-# `--use_fast_math`) that fail to build on ROCm. Prefer a ROCm-native Triton/aiter
-# kernel and verify it compiles + runs on the target GPU (hipcc), not just parity.
+# ROCm authoring guard appended to every pattern's fusion_math: sglang/vllm ship some CUDA-only fused ops (notably
+# `fused_qk_norm_rope`: `cuda_bf16.h` + nvcc-only `--use_fast_math`) that fail to build on ROCm.
 _ROCM_GUARD = (
     " [ROCm] Author a ROCm-native Triton (or aiter) kernel; do NOT reuse a "
     "framework CUDA-only fused op (e.g. `fused_qk_norm_rope`). Verify it BUILDS "
@@ -142,9 +130,8 @@ PATTERNS: tuple[FusionPattern, ...] = (
     ),
     FusionPattern(
         id="qk_norm_rope",
-        # Raised from 0.04: on dense Qwen3 the QK-norm+RoPE tail measured only
-        # ~+0.3% (and sglang's fused_qk_norm_rope is CUDA-only). The predicted-gain
-        # gate is the primary filter; this keeps the pattern from over-triggering.
+        # Raised from 0.04: on dense Qwen3 the QK-norm+RoPE tail measured only ~+0.3% (and sglang's fused_qk_norm_rope
+        # is CUDA-only).
         trigger_categories=frozenset({"rmsnorm", "rope"}),
         min_trigger_share=0.12,
         description="Fuse per-head Q/K RMSNorm (+ any grouped blend / temperature) with RoPE into one kernel.",
@@ -201,21 +188,7 @@ PATTERNS: tuple[FusionPattern, ...] = (
 
 
 def match_patterns(diagnosis: Diagnosis, framework: str) -> list[tuple[FusionPattern, float]]:
-    """Return fusion patterns triggered by a diagnosis, ranked by trigger share.
-
-    A pattern triggers when (a) the framework matches, and (b) the combined
-    GPU-busy-time share of its ``trigger_categories`` present in the trace meets
-    ``min_trigger_share``. The returned share is that combined trigger share,
-    used to rank competing hypotheses.
-
-    Args:
-        diagnosis: Stage-1 diagnosis (carries ``category_shares``).
-        framework: Target framework (``sglang`` / ``vllm`` / ``vllm-aiter``).
-
-    Returns:
-        ``[(pattern, trigger_share), ...]`` sorted by descending trigger share.
-        Empty when the diagnosis is not a candidate or nothing triggers.
-    """
+    """Return fusion patterns triggered by a diagnosis, ranked by trigger share."""
     if not diagnosis.is_candidate:
         return []
     fw = (framework or "").strip().lower()

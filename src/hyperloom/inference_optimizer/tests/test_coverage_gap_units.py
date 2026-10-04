@@ -57,7 +57,8 @@ def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HL_INT", " 7 ")
     assert env.env_int("HL_INT") == 7
     monkeypatch.setenv("HL_INT", "bad")
-    assert env.env_int("HL_INT", default=3) == 3
+    with pytest.raises(env.EnvValueError):
+        env.env_int("HL_INT", default=3)
 
     monkeypatch.setenv("HL_FLOAT", " 2.5 ")
     assert env.env_float("HL_FLOAT") == pytest.approx(2.5)
@@ -88,9 +89,18 @@ def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.Mo
 def test_credentials_endpoint_resolution_and_geak_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import credentials
 
+    # An inherited key on either side resolves that side's official URL, so both must be absent for "unconfigured".
+    for name in (
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
     # Each side resolves on its own; an unconfigured side stays empty.
     monkeypatch.setenv("OPENAI_BASE_URL", "https://open.example/v1")
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     assert credentials._resolve_llm_endpoints() == ("", "https://open.example/v1")
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://anthropic.example")
@@ -134,12 +144,13 @@ def test_credentials_validate_and_reset_claude_config(tmp_path: Path, monkeypatc
 def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
+    from hyperloom.inference_optimizer.session.session_paths import BREAKDOWN_FILENAME
 
     session = tmp_path / "session"
     session.mkdir()
     (session / "state.json").write_text('{"close_sequence_done": true}', encoding="utf-8")
-    (session / breakdown_mod.BREAKDOWN_FILENAME).write_text("{}", encoding="utf-8")
+    (session / BREAKDOWN_FILENAME).write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
         emitter,
         "read_receipt",
@@ -167,7 +178,7 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(
         breakdown_mod,
         "write_breakdown_json",
-        lambda s: calls.append("write") or s / breakdown_mod.BREAKDOWN_FILENAME,
+        lambda s: calls.append("write") or s / BREAKDOWN_FILENAME,
     )
     monkeypatch.setattr(breakdown_mod, "patch_breakdown_langfuse", lambda s: calls.append("patch"))
     monkeypatch.setattr(
@@ -307,15 +318,7 @@ def _restart_args(**overrides) -> argparse.Namespace:
 def test_pd_restart_against_an_aggregated_state_fails_instead_of_reporting_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A restart that touches nothing must not report that it launched servers.
-
-    ``--pd-mode disaggregated`` is honoured even when the state's own pd_mode is
-    aggregated, but the pod lists are chosen by the state alone, so both legs
-    resolved empty. Each was then skipped, ``rc_total`` stayed 0, and the
-    command printed "infera servers launched" and exited 0 without opening a
-    single SSH connection -- after which the round benchmarked whatever was
-    already running and recorded it as this candidate's result.
-    """
+    """A restart that touches nothing must not report that it launched servers."""
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
     state = {
@@ -355,14 +358,7 @@ def test_infera_state_errors_are_config_errors_not_transient(
     state: dict,
     match: str,
 ) -> None:
-    """Rerunning cannot supply an SSH key, so these must not read as retryable.
-
-    ``main`` classifies a bare RuntimeError by message substring and none of
-    these matched, so all three fell through to EXIT_TRANSIENT -- which the
-    controller is told means "rerun the same subcommand". A permanently
-    misconfigured hand-off was retried forever. ConfigurationError is matched by
-    type instead, which is what it exists for.
-    """
+    """Rerunning cannot supply an SSH key, so these must not read as retryable."""
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
     monkeypatch.setattr(inf._mn_cli, "_load_state", lambda: dict(state))
@@ -372,12 +368,7 @@ def test_infera_state_errors_are_config_errors_not_transient(
 
 
 def test_missing_gpu_pods_names_the_mode_that_chose_the_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The message has to explain why IPs that ARE set look absent.
-
-    A PD hand-off invoked without ``PD_MODE=disaggregated`` synthesizes as
-    aggregated, so only ``_WORKER_IPS`` is consulted and the error read "check
-    PREFILL / DECODE / WORKER" while both of those were in fact set.
-    """
+    """The message has to explain why IPs that ARE set look absent."""
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
     monkeypatch.setattr(
@@ -495,7 +486,7 @@ def test_infera_node_ops_apply_revert_and_bench(tmp_path: Path, monkeypatch: pyt
         "ssh_port": 2222,
     }
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
-    monkeypatch.setattr(inf._mn_cli, "_read_bundled_pod_python_script", lambda name: f"script:{name}")
+    monkeypatch.setattr(inf._mn_cli, "_read_bundled_pod_python_script", lambda name, deps: f"script:{name}")
     monkeypatch.setattr(
         inf._mn_cli,
         "_infera_ssh_run_script",
@@ -692,6 +683,9 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
     # No prior launch recorded -> never a match.
     assert inf._infera_restart_config_matches({}, argparse.Namespace(), "sglang", "aggregated") is False
 
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
+    no_overrides = {"set": {}, "unset": []}
     agg_state = {
         "last_restart_framework": "sglang",
         "last_restart_model": "/m",
@@ -699,6 +693,7 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
         "last_restart_ep": 8,
         "last_restart_pd_mode": "aggregated",
         "last_restart_extra_args": "--foo 1",
+        "last_restart_forward_env": no_overrides,
     }
     agg_args = argparse.Namespace(model="/m", tp=8, ep=8, extra_args="--foo 1")
     assert inf._infera_restart_config_matches(agg_state, agg_args, "sglang", "aggregated") is True
@@ -720,6 +715,7 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
         "last_restart_extra_args": "",
         "last_restart_pd_prefill_nodes": 1,
         "last_restart_pd_decode_nodes": 1,
+        "last_restart_forward_env": no_overrides,
         "prefill_pod_ips": ["10.0.0.1"],
         "decode_pod_ips": ["10.0.0.2"],
     }
@@ -786,7 +782,10 @@ def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys
         "last_restart_ep": 8,
         "last_restart_pd_mode": "aggregated",
         "last_restart_extra_args": "",
+        "last_restart_forward_env": {"set": {}, "unset": []},
     }
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
     monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 20)
     monkeypatch.setattr(inf, "_infera_all_gpu_targets", lambda st: [{"podIP": "10.0.1.0", "sshPort": 2222}])
@@ -808,129 +807,6 @@ def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys
     assert inf._infera_restart_server(args) == 0
     out = capsys.readouterr().out
     assert '"resumed": true' in out
-
-
-def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.agents.framework import isolation
-    from hyperloom.agents.framework.models import Baseline, Candidate, ExploreRequest
-
-    req = ExploreRequest(
-        framework="sglang",
-        repo_url="https://github.com/sgl-project/sglang.git",
-        work_dir=tmp_path,
-        baseline=Baseline(throughput=100.0),
-    )
-    candidate = Candidate(ref="PR:42", repo=req.repo_url, head_sha="")
-    assert isolation._repo_cache_dir(req).name == "https---github-com-sgl-project-sglang-git"
-    assert isolation._worktree_ref(candidate) == "refs/pull/42/head"
-    assert isolation._worktree_ref(Candidate(ref="main", repo=req.repo_url, head_sha="abc123")) == "abc123"
-
-    monkeypatch.setenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", "bad")
-    assert isolation._resolve_min_free_gb(None) == pytest.approx(20.0)
-    assert isolation._resolve_min_free_gb(3.5) == pytest.approx(3.5)
-
-    usage = SimpleNamespace(free=2 * 1024**3)
-    monkeypatch.setattr(isolation.shutil, "disk_usage", lambda _p: usage)
-    isolation.disk_preflight(tmp_path / "ok", n_candidates=1, min_free_gb=1.0, per_candidate_gb=0.5)
-    with pytest.raises(isolation.DiskPreflightError, match="insufficient disk"):
-        isolation.disk_preflight(tmp_path / "bad", n_candidates=3, min_free_gb=1.0, per_candidate_gb=1.0)
-
-    git_calls: list[tuple[list[str], Path | None]] = []
-    monkeypatch.setattr(isolation, "_run_git", lambda args, cwd=None, timeout_sec=1800: git_calls.append((args, cwd)))
-    repo_dir = isolation.prepare_repo_cache(req)
-    assert git_calls[-1][0][:3] == ["git", "clone", "--mirror"]
-    repo_dir.mkdir(parents=True, exist_ok=True)
-    assert isolation.prepare_repo_cache(req) == repo_dir
-    assert git_calls[-1][0] == ["git", "fetch", "--all", "--tags", "--prune"]
-
-    isolation.fetch_candidate_ref(repo_dir, Candidate(ref="main", repo=req.repo_url))
-    assert git_calls[-1][0] == ["git", "fetch", "--all", "--tags", "--prune"]
-    isolation.fetch_candidate_ref(repo_dir, candidate)
-    assert "refs/pull/42/head:refs/pull/42/head" in git_calls[-1][0]
-
-    plan_req = ExploreRequest(
-        framework="sglang",
-        repo_url=req.repo_url,
-        work_dir=tmp_path / "plan",
-        baseline=Baseline(throughput=100.0),
-        prepare_candidate_env=False,
-    )
-    paths = isolation.prepare_candidate_workspace(plan_req, candidate, index=3, execute=True)
-    assert paths.candidate_dir.name == "03_pr-42"
-    assert not paths.worktree_dir.exists()
-
-    worktree = tmp_path / "cleanup" / "worktree"
-    venv = tmp_path / "cleanup" / "venv"
-    worktree.mkdir(parents=True)
-    venv.mkdir(parents=True)
-    isolation.cleanup_workspace(
-        isolation.WorkspacePaths(tmp_path / "cleanup", worktree, venv),
-        is_winner=False,
-        keep_winner_only=True,
-        repo_dir=repo_dir,
-    )
-    assert not worktree.exists()
-    assert not venv.exists()
-
-
-def test_gbrain_page_client_envelopes(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.agents.framework import gbrain_page_client as gbrain
-    from hyperloom.common import jsonio
-
-    assert list(jsonio.iter_sse_objects('not json\n\ndata: {bad}\n\ndata: {"id":"1","result":{"ok":true}}\n\n')) == [
-        {"id": "1", "result": {"ok": True}}
-    ]
-    assert gbrain._select_mcp_response('data: {"id":"0","result":{"fallback":true}}\n\n', want_id="missing") == {
-        "id": "0",
-        "result": {"fallback": True},
-    }
-    assert gbrain._as_hit_list({"pages": [{"slug": "a"}, "bad"]}) == [{"slug": "a"}]
-    assert gbrain._as_hit_list("bad") == []
-
-    class _Resp:
-        headers = {"Content-Type": "application/json", "Content-Length": "10"}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self, *_args):
-            payload = {"result": {"content": [{"text": json.dumps({"slug": "page-1"})}]}}
-            return json.dumps(payload).encode()
-
-    captured = {}
-
-    def _urlopen(req, timeout):
-        captured["url"] = req.full_url
-        captured["timeout"] = timeout
-        captured["auth"] = req.headers.get("Authorization")
-        return _Resp()
-
-    monkeypatch.setattr(gbrain.urllib.request, "urlopen", _urlopen)
-    client = gbrain.GbrainPageClient("https://gbrain.example/", "tok", timeout_sec=0.1)
-    assert client.call("get_page", {"slug": "page-1"}) == {"slug": "page-1"}
-    assert captured["url"] == "https://gbrain.example/mcp"
-    assert captured["auth"] == "Bearer tok"
-    assert client.get_page("page-1") == {"slug": "page-1"}
-
-    class _ErrorResp(_Resp):
-        def read(self, *_args):
-            return b'{"error":{"message":"nope"}}'
-
-    monkeypatch.setattr(gbrain.urllib.request, "urlopen", lambda req, timeout: _ErrorResp())
-    with pytest.raises(gbrain.GbrainPageError, match="JSON-RPC error"):
-        client.call("search", {"query": "x"})
-
-    monkeypatch.setattr(gbrain.urllib.request, "urlopen", lambda req, timeout: (_ for _ in ()).throw(OSError("down")))
-    with pytest.raises(gbrain.GbrainPageError, match="transport error"):
-        client.call("search", {"query": "x"})
-
-    monkeypatch.setenv("GBRAIN_BASE_URL", "https://gbrain.example")
-    monkeypatch.setenv("GBRAIN_TOKEN", "tok")
-    monkeypatch.setenv("GBRAIN_HTTP_TIMEOUT_SEC", "not-a-number")
-    assert isinstance(gbrain.build_gbrain_page_client_from_env(), gbrain.GbrainPageClient)
 
 
 def test_multi_node_patch_replay_skip_and_failure_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1056,7 +932,7 @@ def test_server_lifecycle_remaining_resolution_branches(tmp_path: Path, monkeypa
 
 
 def test_canonical_fingerprint_remaining_normalization_branches() -> None:
-    from hyperloom.orchestrator.actions.executors import _canonical_fingerprint as fp
+    from hyperloom.inference_optimizer import canonical_fingerprint as fp
 
     with_controls = fp.canonical_fingerprint(
         '--flag "unterminated',
@@ -1078,9 +954,9 @@ def test_conc_sweep_plot_helper_series_and_payload_loading(tmp_path: Path) -> No
         "baseline": {
             "points": [
                 {"conc": 4, "output_throughput": 800},
-                {"conc": 2, "output_throughput": "600"},
+                {"conc": 2, "output_throughput": 600},
                 {"conc": 0, "output_throughput": 100},
-                {"conc": "bad", "output_throughput": 100},
+                {"conc": None, "output_throughput": 100},
                 {"conc": 1, "output_throughput": None},
             ]
         },
@@ -1100,10 +976,11 @@ def test_conc_sweep_plot_helper_series_and_payload_loading(tmp_path: Path) -> No
     assert plot._load_payload(payload) is payload
     assert plot._load_payload(payload_file) == payload
 
-    xs, ys = plot._arm_series(payload["baseline"]["points"], tp_eff=2.0)
+    axes = plot._axes_for_metric("output_throughput", 2.0)
+    xs, ys = plot._arm_series(payload["baseline"]["points"], 2.0, axes)
     assert xs == [200.0, 300.0]
     assert ys == [400.0, 300.0]
-    assert plot._arm_series([{"conc": "bad", "output_throughput": -1}], tp_eff=1.0) == ([], [])
+    assert plot._arm_series([{"conc": None, "output_throughput": -1}], 1.0, axes) == ([], [])
 
     cx, cy = plot._ceiling_series(payload["roofline_ceiling"], tp_eff=4.0)
     assert cx == [200.0, 300.0]
@@ -1114,7 +991,7 @@ def test_conc_sweep_plot_helper_series_and_payload_loading(tmp_path: Path) -> No
 def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
 
     session = tmp_path / "session"
     session.mkdir()

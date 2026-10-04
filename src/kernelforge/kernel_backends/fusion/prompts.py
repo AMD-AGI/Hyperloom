@@ -12,7 +12,6 @@ from kernelforge.fusion.validate import (
     DEFAULT_SNR_THRESHOLD_DB,
     DEFAULT_TARGET_SPEEDUP,
 )
-from kernelforge.loop.scoring import CANONICAL_GATE_PROMPT
 
 _PROVEN_PATTERNS = """\
 ## Proven fusions (all validated on real sglang serving, CUDA graph ON)
@@ -32,7 +31,15 @@ _PROVEN_PATTERNS = """\
 2. fp32 accumulation INSIDE the Triton kernel — cast bf16->fp32 in-kernel, not
    outside it.
 3. ONE Triton launch replaces the whole tiny-op chain. Fewer launches is the win;
-   a fusion that still launches three kernels has not earned anything.
+   a fusion that still launches three kernels has not earned anything. The count
+   that decides this is NET, over the whole decode step, not over the chain you
+   touched: count the kernels the eager path launches and the kernels the fused
+   path launches, and the fused number must be strictly smaller. A kernel that
+   collapses five ops but needs a scratch-fill, a separate cast, a contiguous
+   copy or a second pass to feed it can break even or lose while the chain alone
+   still microbenchmarks faster. If you cannot state both numbers, you have not
+   verified the fusion; read them off a trace or count the launch sites in the
+   code path you changed, and report them every attempt.
 4. CUDA-GRAPH SAFE. Your kernel runs inside the captured decode graph. Use a
    STATIC launch grid — never size the grid from a runtime or host value.
    Preallocate every scratch and output tensor ONCE outside the fused path: no
@@ -52,6 +59,7 @@ _PROVEN_PATTERNS = """\
 def build_system_prompt(
     config_gpu_target: str,
     knowledge_content: str,
+    canonical_gate: str,
 ) -> str:
     return f"""\
 You are the Fusion kernel backend — a specialist in decode-path kernel fusion for the sglang
@@ -103,10 +111,10 @@ accumulates differently. Pre-filter on SNR (>= {DEFAULT_SNR_THRESHOLD_DB:g} dB),
 strict `allclose`. If you cannot reach it, the fusion is wrong — do not widen
 the tolerance.
 
-{CANONICAL_GATE_PROMPT}
+{canonical_gate}
 
 ## When to Stop
-- Parity holds, the task's suite passes and speedup >= {DEFAULT_TARGET_SPEEDUP:g}x → STOP, report the
+- Parity holds, the driver's suite passes and speedup >= {DEFAULT_TARGET_SPEEDUP:g}x → STOP, report the
   measured numbers
 - The chain is already covered by a framework compile pass → say so and stop;
   claiming the existing pass beats authoring a duplicate
@@ -122,6 +130,7 @@ ATTEMPT N:
   Compiled: yes/no  Triton: yes/no
   SNR: XX.XX dB [PASS/FAIL]   max_abs_err: X.XXe-XX
   Eager: XX.XX us   Fused: XX.XX us   Speedup: X.XXx
+  Launches/decode step: eager N -> fused M   (M < N required; see rule 3)
   CUDA-graph review: {{static grid? preallocated? no host sync?}}
   Decision: {{what to try next}}
 ```

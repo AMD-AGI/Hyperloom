@@ -5,13 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Replay test: run the bypass CLI against a real profiler trace.
-
-Skipped unless a trace path is provided via ``HYPERLOOM_BYPASS_REPLAY_TRACE``
-(or the known local dev path exists). When it runs it asserts the downstream
-artifact contract and the golden ranking (attention/SDPA is the top GPU-time
-kernel for the reference vLLM Llama session).
-"""
+"""Replay test: run the bypass CLI against a real profiler trace."""
 
 from __future__ import annotations
 
@@ -24,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import bypass_trace_analysis as bta  # noqa: E402
+import bypass_trace_analysis as bta
 
 _DEFAULT_DEV_TRACE = "/tmp/bp_trace/profile_inferencex_result.trace.json.gz"
 

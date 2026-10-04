@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for langfuse_emitter SDK-version-tolerant helpers: ns conversion,
-observation start/end shims, OTEL attribute coercion, trace-attr fallback, and
-JSON/JSONL loaders."""
+"""Coverage for langfuse_emitter SDK-version-tolerant helpers: ns conversion, observation start/end shims, OTEL
+attribute coercion, trace-attr fallback, and JSON/JSONL loaders.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.orchestrator.trace import langfuse_emitter as lfe
+from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
 
 def test_to_ns_none_and_non_datetime() -> None:

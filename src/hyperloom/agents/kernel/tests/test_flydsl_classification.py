@@ -18,7 +18,7 @@ import unittest.mock as mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from tracelens_analysis import (  # noqa: E402
+from tracelens_analysis import (
     _defines_traced_triton_kernel,
     _flydsl_kernel_params,
     _flydsl_reusable_roots,
@@ -29,7 +29,7 @@ from tracelens_analysis import (  # noqa: E402
     enrich_candidates_with_runtime_metadata,
     source_type_for,
 )
-from tracelens_skill_runner import (  # noqa: E402
+from tracelens_skill_runner import (
     UPSTREAM_CATEGORY_TO_GEAK,
     normalize_upstream_category,
 )
@@ -160,8 +160,8 @@ class TestReusableSourceRoots(unittest.TestCase):
         self.assertEqual(skip, "")
 
     def test_flydsl_env_configured_root_is_reusable(self) -> None:
-        # A DSL2_ROOT/FLYDSL_ROOT-configured checkout is reusable; no personal
-        # or internal storage path is assumed as a built-in default.
+        # A DSL2_ROOT/FLYDSL_ROOT-configured checkout is reusable; no personal or internal storage path is assumed as
+        # a built-in default.
         with mock.patch.dict(os.environ, {"FLYDSL_ROOT": "/opt/flydsl"}):
             cand = self._flydsl_candidate(
                 "/opt/flydsl/kernels/moe_gemm_2stage.py",
@@ -275,26 +275,6 @@ class TestKernelCategoryDerivation(unittest.TestCase):
         )
 
 
-class TestGEAKKernelTypeMapping(unittest.TestCase):
-    """``source_type=flydsl`` must map to GEAK's ``kernel_type="flydsl"``."""
-
-    def setUp(self) -> None:
-        sys.path.insert(0, str(ROOT / "tools"))
-        import kernel_optimization
-
-        self.mod = kernel_optimization
-
-    def test_flydsl_source_type_maps_to_flydsl(self) -> None:
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["flydsl"], "flydsl")
-
-    def test_existing_mappings_preserved(self) -> None:
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["triton"], "triton")
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["hip_cpp"], "hip")
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["python"], "other")
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["vendor_binary"], "other")
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["unknown"], "other")
-
-
 class TestFlyDSLKernelParams(unittest.TestCase):
     """FlyDSL-specific metadata enrichment for GEAK prompt construction."""
 
@@ -397,9 +377,9 @@ class TestCandidateEnvForwarding(unittest.TestCase):
     def setUp(self) -> None:
         repo_root = Path(__file__).resolve().parents[5]
         sys.path.insert(0, str(repo_root))
-        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
+        from hyperloom.orchestrator.actions.executors import trace_analyze
 
-        self.h = kernel_request_handlers
+        self.h = trace_analyze
 
     def test_flydsl_prefix_allowed(self) -> None:
         self.assertIn("FLYDSL_", self.h._CANDIDATE_ENV_PREFIXES)
@@ -471,36 +451,21 @@ class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
         )
 
 
-class TestPseudoOpSourceFallback(unittest.TestCase):
-    """GEAK source resolution must fall back off pseudo-op frame labels (prefer real readable source)."""
+class TestFlyDSLTargetArch(unittest.TestCase):
+    """FLYDSL_TARGET_ARCH comes from the shared board table, not a copy in this tool."""
 
-    def setUp(self) -> None:
-        sys.path.insert(0, str(ROOT / "tools"))
-        import kernel_optimization
+    def test_every_supported_board_gets_the_table_arch(self) -> None:
+        from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 
-        self.mod = kernel_optimization
+        for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items():
+            self.assertEqual(
+                _flydsl_kernel_params("", board).get("FLYDSL_TARGET_ARCH"),
+                arch,
+                board,
+            )
 
-    def test_frame_label_candidate_falls_back_to_real_explicit(self) -> None:
-        real = str(Path(__file__).resolve())  # any guaranteed-real file
-        cand = {"source_file": "aiter/fused_moe.py(986): fused_moe_2stages"}
-        out = self.mod._resolve_source_file(real, cand, "k001")
-        self.assertEqual(out, real)
-
-    def test_real_candidate_still_wins_over_llm(self) -> None:
-        real = str(Path(__file__).resolve())
-        cand = {"source_file": real}
-        out = self.mod._resolve_source_file("/tmp/some_other.py", cand, "k002")
-        self.assertEqual(out, real)
-
-    def test_empty_candidate_uses_llm(self) -> None:
-        out = self.mod._resolve_source_file("/tmp/x.py", {"source_file": ""}, "k003")
-        self.assertEqual(out, "/tmp/x.py")
-
-    def test_both_unresolvable_returns_candidate(self) -> None:
-        """No real file anywhere -> keep candidate (existing behaviour)."""
-        cand = {"source_file": "aiter/fused_moe.py(986): fused_moe_2stages"}
-        out = self.mod._resolve_source_file("/no/such/file.py", cand, "k004")
-        self.assertEqual(out, "aiter/fused_moe.py(986): fused_moe_2stages")
+    def test_an_unsupported_board_gets_no_arch(self) -> None:
+        self.assertNotIn("FLYDSL_TARGET_ARCH", _flydsl_kernel_params("", "mi250x"))
 
 
 if __name__ == "__main__":

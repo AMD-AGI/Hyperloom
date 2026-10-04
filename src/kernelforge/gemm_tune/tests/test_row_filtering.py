@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for dropping lost-comparison rows from the deployed artifact.
-
-A tuned row that measured *slower* than stock is actively harmful once merged:
-it overrides a better stock choice. But the filter must distinguish "measured
-to be not better" from "never had anything to measure against" -- the second
-covers newly-tuned shapes, the candidate-CSV fallback and hipblaslt-only runs,
-which are exactly the configs the forced-e2e path exists to protect.
-"""
+"""Tests for dropping lost-comparison rows from the deployed artifact."""
 
 from __future__ import annotations
 

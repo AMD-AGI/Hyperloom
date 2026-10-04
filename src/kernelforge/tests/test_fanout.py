@@ -103,12 +103,7 @@ def _git_output(workspace: Path, *args: str) -> str:
 
 
 async def test_a_lane_of_a_worktree_workspace_gets_its_own_index(tmp_path):
-    """`cp -a` copies the .git pointer file, so lanes would share one index.
-
-    A single ``git add`` in a lane then stages the lane's edit into the
-    canonical repository, and the canonical candidate fingerprint reads the
-    lane's work as this round's candidate.
-    """
+    """`cp -a` copies the .git pointer file, so lanes would share one index."""
     workspace = _worktree_workspace(tmp_path)
 
     async def session(_lane: LanePlan, lane_dir: Path, _driver: Path) -> None:
@@ -266,14 +261,7 @@ async def test_a_lane_whose_workspace_stays_busy_is_reported_as_lost(
     tmp_path,
     monkeypatch,
 ):
-    """A lane's leftovers are not just the lane's problem.
-
-    The lanes share one device, and the round's candidates are measured on it
-    afterwards. A lane command that survived the reaper is still benching while
-    the next lane runs, so both the diff it produced and every number taken
-    after it are suspect -- reporting the lane as lost is what keeps that out
-    of the KEEP decision.
-    """
+    """A lane's leftovers are not just the lane's problem."""
     workspace = _workspace(tmp_path)
 
     async def contended_reap(lane_dir: Path) -> ReapReport:
@@ -299,8 +287,8 @@ async def test_a_lane_whose_workspace_stays_busy_is_reported_as_lost(
     assert results[0].produced_candidate is False
     assert "could not be cleared" in results[0].error
     assert "4321" in results[0].error
-    # The same finding the round reads, carried as data rather than recovered
-    # from the sentence above: the round has to decide on it, not parse it.
+    # The same finding the round reads, carried as data rather than recovered from the sentence above: the round has
+    # to decide on it, not parse it.
     assert results[0].contended is True
     assert results[0].reaped is not None
     assert results[0].reaped.blockers == (4321,)
@@ -310,12 +298,7 @@ async def test_a_failed_lane_reports_its_own_failure_not_its_teardown_s(
     tmp_path,
     monkeypatch,
 ):
-    """The teardown runs for a lane that already failed, and finds leftovers.
-
-    Of course it does -- the session died with its commands still running. What
-    the round needs recorded is why the session died, so the teardown's finding
-    must not overwrite it.
-    """
+    """The teardown runs for a lane that already failed, and finds leftovers."""
     workspace = _workspace(tmp_path)
 
     async def contended_reap(lane_dir: Path) -> ReapReport:
@@ -341,14 +324,7 @@ async def test_a_failed_lane_still_reports_the_contention_it_left_behind(
     tmp_path,
     monkeypatch,
 ):
-    """Failing for its own reason must not cost the round the device finding.
-
-    A session that raised is the lane most likely to have left commands running,
-    and the two facts are unrelated: why this lane produced nothing costs the
-    round one candidate, while what is still on the device costs the round its
-    measurement. Folding the second into the first is how it gets lost -- the
-    error is already taken.
-    """
+    """Failing for its own reason must not cost the round the device finding."""
     workspace = _workspace(tmp_path)
 
     async def contended_reap(lane_dir: Path) -> ReapReport:
@@ -392,8 +368,7 @@ async def test_a_lane_that_edits_nothing_reports_no_candidate(tmp_path):
     )
 
     assert results[0].produced_candidate is False
-    # A lane that left nothing running says so, so a round reading the reports
-    # can tell "clean" from "never asked".
+    # A lane that left nothing running says so, so a round reading the reports can tell "clean" from "never asked".
     assert results[0].reaped is not None
     assert results[0].contended is False
 
@@ -413,8 +388,8 @@ async def test_lane_workspaces_are_removed_even_when_a_session_fails(tmp_path):
         driver=DRIVER_NAME,
     )
 
-    # The device sentinel is campaign-scoped and is meant to outlive the round;
-    # what must not survive it is the lane copies.
+    # The device sentinel is campaign-scoped and is meant to outlive the round; what must not survive it is the lane
+    # copies.
     left = set(tmp_path.iterdir()) - {fanout.campaign_device_lock_path(workspace)}
     assert left == before
 
@@ -469,13 +444,7 @@ def _device_events(log: Path) -> list[str]:
 
 
 async def _wait_for_every_lane(barrier: Path, lane_id: str, *, lanes: int) -> None:
-    """Block this lane's session until every other lane's session has started.
-
-    Without this the lanes could finish one after another and a serialized
-    device would prove nothing: the windows would not have had the chance to
-    overlap in the first place. A lane that waits here forever is a lane whose
-    session was serialized, which is the failure this raises on.
-    """
+    """Block this lane's session until every other lane's session has started."""
     (barrier / lane_id).write_text("started")
     deadline = time.monotonic() + 30.0
     while len(list(barrier.iterdir())) < lanes:
@@ -499,14 +468,7 @@ async def _run(*args: str, cwd: Path) -> int:
 
 
 async def test_two_lanes_never_hold_the_device_at_the_same_time(tmp_path):
-    """The whole point of a lane round: sessions overlap, device runs do not.
-
-    Every number a benchmark takes while another benchmark is on the same GPU
-    is worthless, and the lane agent runs the driver from its own shell, in a
-    process this loop never sees. The lock therefore has to be held by the
-    process that runs the driver, which is why the lane is handed a wrapper
-    rather than the driver itself.
-    """
+    """The whole point of a lane round: sessions overlap, device runs do not."""
     log = tmp_path / "device.log"
     barrier = tmp_path / "barrier"
     barrier.mkdir()
@@ -546,20 +508,15 @@ async def test_the_serialized_driver_runs_the_lane_s_own_driver(tmp_path):
         driver=DRIVER_NAME,
     )
 
-    # The lane's own edit of the driver ran, its argument arrived, and its exit
-    # status came back: one argument, so the recording driver exits 1.
+    # The lane's own edit of the driver ran, its argument arrived, and its exit status came back: one argument, so the
+    # recording driver exits 1.
     assert _device_events(log) == ["lane-start", "end"]
     assert log.read_text().splitlines()[1].endswith("--bench-mode")
     assert seen["exit"] == 1
 
 
 async def test_the_serialized_driver_stays_out_of_the_lane_candidate(tmp_path):
-    """A wrapper inside the lane's diff would be rejected as a driver edit.
-
-    The candidate a lane produces is read as ``git diff HEAD -- .`` and refused
-    outright when it touches the measurement surface, so the wrapper has to be
-    invisible to that read even after the routine ``git add -A`` of a session.
-    """
+    """A wrapper inside the lane's diff would be rejected as a driver edit."""
     workspace = _workspace(tmp_path)
 
     async def session(_lane: LanePlan, lane_dir: Path, _driver: Path) -> None:
@@ -601,13 +558,7 @@ async def test_a_lane_whose_driver_is_outside_the_workspace_is_refused(tmp_path)
 
 
 async def test_a_lane_s_detached_driver_is_killed_before_the_round_returns(tmp_path):
-    """An orphan holding the GPU corrupts the canonical KEEP decision itself.
-
-    The lane agent runs the driver through its own shell, each command detached
-    into its own session, so a command still running when the session ends
-    survives it. The canonical validation and benchmark run right after this
-    round returns, on the same device.
-    """
+    """An orphan holding the GPU corrupts the canonical KEEP decision itself."""
     workspace = _workspace(tmp_path)
     leaked: list[subprocess.Popen] = []
 
@@ -668,13 +619,7 @@ def _lane_repository(tmp_path: Path, lane_id: str, driver_source: str) -> Path:
 
 
 async def test_four_lanes_sharing_one_lock_run_the_driver_one_at_a_time(tmp_path):
-    """The lock, exercised the only way it is ever used: from other processes.
-
-    An ``asyncio.Lock`` cannot serialize these runs, because the process that
-    runs the driver is not this one -- the lane agent is a CLI subprocess and it
-    invokes the driver from its own shell, so the timing happens in a
-    grandchild. Four wrappers of one lock contend here for real.
-    """
+    """The lock, exercised the only way it is ever used: from other processes."""
     log = tmp_path / "device.log"
     lock = DeviceBenchmarkLock(tmp_path / "sentinel")
     wrappers = []
@@ -749,13 +694,7 @@ def _serialized_driver(lane_dir: Path) -> str:
 
 
 def test_a_lane_session_gets_its_own_workspace_configuration(tmp_path):
-    """A provider that requires the workspace as its cwd starts there.
-
-    The codex provider declares requires_workspace_cwd, and the session resolves
-    its cwd from config.workspace. Sharing one Config across lanes puts every
-    lane's edits and shell commands in the canonical workspace, while each lane's
-    diff is read from a copy nothing touched.
-    """
+    """A provider that requires the workspace as its cwd starts there."""
     config, workspace, lane_dir = _campaign(tmp_path)
     implementer = _RecordingImplementer()
 
@@ -778,11 +717,7 @@ async def test_a_lane_session_outside_its_lane_is_refused(tmp_path):
 
 
 def test_a_lane_is_pointed_at_its_own_copy_of_every_source_file(tmp_path):
-    """Declared source files become the prompt's entry points and target_files.
-
-    Handing a lane the canonical paths points the agent explicitly at the
-    campaign workspace's files, so only the anchor kernel names the lane's copy.
-    """
+    """Declared source files become the prompt's entry points and target_files."""
     config, workspace, lane_dir = _campaign(tmp_path)
     implementer = _RecordingImplementer()
 
@@ -801,12 +736,7 @@ def test_a_lane_is_given_its_own_copy_of_the_driver(tmp_path):
 
 
 def test_a_relative_path_is_read_against_the_workspace_it_names(tmp_path):
-    """Not against wherever forge was launched from.
-
-    Resolving against the process cwd would rebind whatever happens to sit at
-    the same relative position under it -- and far more often, refuse a path
-    that named the workspace correctly.
-    """
+    """Not against wherever forge was launched from."""
     config, workspace, lane_dir = _campaign(tmp_path)
     implementer = _RecordingImplementer()
     factory = cli._make_lane_agent_factory(
@@ -825,11 +755,7 @@ def test_a_relative_path_is_read_against_the_workspace_it_names(tmp_path):
 
 
 def test_a_lane_is_told_to_run_the_driver_through_its_serialized_copy(tmp_path):
-    """The factory's second argument is the wrapper, and it has to be used.
-
-    It used to be accepted and dropped, which left the device lock resting on a
-    single line of a per-invocation note.
-    """
+    """The factory's second argument is the wrapper, and it has to be used."""
     config, workspace, lane_dir = _campaign(tmp_path)
     implementer = _RecordingImplementer()
 
@@ -891,12 +817,7 @@ async def test_a_lane_session_inside_its_lane_runs(tmp_path):
 
 
 async def test_every_round_serializes_on_one_campaign_wide_sentinel(tmp_path):
-    """A sentinel created per round serializes that round's lanes and nothing else.
-
-    The device is the campaign's: an analysis-phase probe and the next round's
-    lanes drive the same GPU, so the file they all flock has to be the same one
-    in every round and outlive each of them.
-    """
+    """A sentinel created per round serializes that round's lanes and nothing else."""
     workspace = _workspace(tmp_path)
     expected = fanout.campaign_device_lock_path(workspace)
     seen = []

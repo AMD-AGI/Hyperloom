@@ -1,15 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""ClaudeBackend + emit_intent MCP server tests.
-
-All tests use SDK test seams so no real Claude API calls are made and no
-``ANTHROPIC_API_KEY`` is required.
-"""
+"""ClaudeBackend + emit_intent MCP server tests."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,7 +33,7 @@ class FakeToolUseBlock:
     input: dict[str, Any]
 
     @classmethod
-    def __init_subclass__(cls, **kwargs):  # noqa: D401
+    def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
 
 
@@ -91,14 +88,7 @@ def _make_raising_query_factory(exc: BaseException):
 
 @pytest.mark.asyncio
 async def test_stream_api_error_is_marked_as_llm_call_failed():
-    """A non-timeout gateway error must be countable, not just a timeout.
-
-    The failure that motivated this telemetry is a gateway 400
-    (``litellm.BadRequestError: AnthropicException``) surfacing out of the SDK
-    stream. Left unmarked it reaches the Coordinator's "unexpected crash" path
-    and no error row is written, so the LLM error rate silently misses exactly
-    the case it was added for.
-    """
+    """A non-timeout gateway error must be countable, not just a timeout."""
     backend = ClaudeBackend(
         sdk_query_factory=_make_raising_query_factory(RuntimeError("litellm.BadRequestError: AnthropicException")),
         sdk_options_cls=FakeOptions,
@@ -135,6 +125,15 @@ async def test_cancellation_is_not_marked_as_an_llm_failure():
                 "payload": {"target_proposal_msg_id": "abc", "verdict": "approve"},
             },
             id="review_verdict_full",
+        ),
+        pytest.param(
+            {
+                "__unparsedToolInput": {
+                    "raw": '{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}',
+                    "len": 62,
+                }
+            },
+            id="unparsed_wrapper_fallback",
         ),
     ],
 )
@@ -277,17 +276,23 @@ def _clear_effort_env(monkeypatch):
 def test_build_options_effort_defaults_by_role(monkeypatch):
     _clear_effort_env(monkeypatch)
     orch = ClaudeBackend(
-        model="m", conversational=True, sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions
+        model="m", effort_role="orchestration", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions
     )
     o = orch._build_options(tools=[], max_turns=4, system_prompt="sp")
     assert o.kwargs["effort"] == "medium"
     assert o.kwargs["thinking"] == {"type": "adaptive"}
 
     kernel = ClaudeBackend(
-        model="m", conversational=False, sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions
+        model="m", effort_role="kernel", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions
     )
     k = kernel._build_options(tools=[], max_turns=4, system_prompt="sp")
     assert k.kwargs["effort"] == "low"
+
+    # An unrecognised role falls back to the kernel tier, never to no effort.
+    other = ClaudeBackend(
+        model="m", effort_role="nope", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions
+    )
+    assert other._build_options(tools=[], max_turns=4, system_prompt="sp").kwargs["effort"] == "low"
 
 
 def test_build_options_effort_env_override_and_thinking_off(monkeypatch):
@@ -295,7 +300,7 @@ def test_build_options_effort_env_override_and_thinking_off(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT", "high")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_THINKING", "off")
     b = ClaudeBackend(
-        model="m", conversational=True, sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions
+        model="m", effort_role="orchestration", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions
     )
     o = b._build_options(tools=[], max_turns=4, system_prompt="sp")
     assert o.kwargs["effort"] == "high"
@@ -308,13 +313,13 @@ def test_real_sdk_options_accept_hyperloom_kwargs(monkeypatch):
     sdk = pytest.importorskip("claude_agent_sdk")
     b = ClaudeBackend(
         model="m",
-        conversational=True,
+        effort_role="orchestration",
         sdk_query_factory=_make_query_factory([]),
         sdk_options_cls=sdk.ClaudeAgentOptions,
         enable_mcp_emit_intent=False,
     )
-    # Must not raise: effort + thinking + resume all accepted by ClaudeAgentOptions.
-    b._build_options(tools=[], max_turns=4, system_prompt="sp", resume_session_id="sess-1")
+    # Must not raise: effort + thinking both accepted by ClaudeAgentOptions.
+    b._build_options(tools=[], max_turns=4, system_prompt="sp")
 
 
 @pytest.mark.asyncio
@@ -493,6 +498,146 @@ async def test_run_invalid_tool_use_input_drops_block_silently():
     assert len(res.intents) == 1
 
 
+@pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
+@pytest.mark.asyncio
+async def test_unparsed_tool_wrapper_retries_dedupe_to_one_intent(tool_name):
+    """Claude Code retries the same wrapped JSON; keep one validated intent."""
+    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}}'
+    wrapped = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
+    other = '{"intent_type": "send_message", "payload": {"topic": "status", "body_md": "next"}}'
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(name=tool_name, input=dict(wrapped)),
+            ToolUseBlock(name=tool_name, input=dict(wrapped)),
+            ToolUseBlock(
+                name=tool_name,
+                input={"__unparsedToolInput": {"raw": other, "len": len(other)}},
+            ),
+        ]
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([msg]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+        capture_turn_diagnostics=True,
+    )
+    res = await backend.run("p")
+    assert res.metadata["tool_blocks"] == 3
+    assert len(res.intents) == 2
+    assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
+    assert backend.get_turn_diagnostic()["deduped_fallback_intents"] == 1
+
+
+@pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
+@pytest.mark.asyncio
+async def test_string_wrapped_fallback_retries_dedupe_to_one_intent(tool_name):
+    """A string-wrapped fallback dedupes exactly like the dict-wrapped one.
+
+    Behind an OpenAI-compatible / litellm proxy the wrapper arrives inside a
+    JSON *string*. Without wrapper detection accepting that shape, two
+    identical retries would each yield an intent and the duplicate action
+    would be dispatched twice.
+    """
+    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}}'
+    wrapped = json.dumps({"__unparsedToolInput": {"raw": raw, "len": len(raw)}})
+    other_raw = '{"intent_type": "send_message", "payload": {"topic": "status", "body_md": "next"}}'
+    other = json.dumps({"__unparsedToolInput": {"raw": other_raw, "len": len(other_raw)}})
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(name=tool_name, input=wrapped),
+            ToolUseBlock(name=tool_name, input=wrapped),
+            ToolUseBlock(name=tool_name, input=other),
+        ]
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([msg]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+        capture_turn_diagnostics=True,
+    )
+    res = await backend.run("p")
+    assert res.metadata["tool_blocks"] == 3
+    assert len(res.intents) == 2
+    assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
+    assert backend.get_turn_diagnostic()["deduped_fallback_intents"] == 1
+
+
+@pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
+@pytest.mark.asyncio
+async def test_empty_string_tool_input_reports_decode_error(tool_name):
+    """An empty-string input reports a decode error, not a missing intent_type.
+
+    ``input or {}`` used to swallow ``""`` into ``{}``, which decoded cleanly
+    and surfaced later as ``intent_type None not in allowed set`` — pointing a
+    reader at the model rather than at the undecodable envelope.
+    """
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(name=tool_name, input=""),
+            ToolUseBlock(
+                name=tool_name,
+                input={"intent_type": "send_message", "payload": {"topic": "heartbeat"}},
+            ),
+        ]
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([msg]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+        capture_turn_diagnostics=True,
+    )
+    res = await backend.run("p")
+    # The empty-string block is dropped; the rest of the turn is unaffected.
+    assert res.metadata["tool_blocks"] == 2
+    assert len(res.intents) == 1
+    parse_errors = backend.get_turn_diagnostic()["parse_errors"]
+    assert parse_errors == ["emit_intent tool input string is not valid JSON"]
+
+
+@pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
+@pytest.mark.asyncio
+async def test_identical_native_tool_inputs_are_not_deduped(tool_name):
+    """Native Claude objects keep every emit_intent call, even duplicates."""
+    native = {"intent_type": "send_message", "payload": {"topic": "heartbeat"}}
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(name=tool_name, input=dict(native)),
+            ToolUseBlock(name=tool_name, input=dict(native)),
+        ]
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([msg]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+    )
+    res = await backend.run("p")
+    assert res.metadata["tool_blocks"] == 2
+    assert len(res.intents) == 2
+
+
+@pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
+@pytest.mark.asyncio
+async def test_wrapper_then_native_same_intent_keeps_both(tool_name):
+    """A wrapper block and a native block are two tool_use events."""
+    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}'
+    wrapped = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
+    native = {"intent_type": "send_message", "payload": {"topic": "heartbeat"}}
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(name=tool_name, input=dict(wrapped)),
+            ToolUseBlock(name=tool_name, input=dict(native)),
+        ]
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([msg]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+    )
+    res = await backend.run("p")
+    assert res.metadata["tool_blocks"] == 2
+    assert len(res.intents) == 2
+
+
 @pytest.mark.asyncio
 async def test_raw_completion_returns_raw_text_without_intent():
     """raw_completion mode: a text-only reply yields raw_text and does NOT raise NoIntentEmitted."""
@@ -603,9 +748,8 @@ async def test_options_includes_system_prompt_and_max_turns():
     )
     with pytest.raises(NoIntentEmitted):
         await backend.run("the prompt", system_prompt="sys", tools=["Read"], max_turns=3)
-    # max_turns is floored to _RAW_COMPLETION_MIN_MAX_TURNS (8) for every mode:
-    # Claude Code counts its own messages as turns, so a literal max_turns=3
-    # would trip before the model can emit an intent.
+    # max_turns is floored to _RAW_COMPLETION_MIN_MAX_TURNS (8) for every mode: Claude Code counts its own messages as
+    # turns, so a literal max_turns=3 would trip before the model can emit an intent.
     assert captured["options_kwargs"]["max_turns"] == 8
     assert captured["options_kwargs"]["system_prompt"] == "sys"
     assert "Read" in captured["options_kwargs"]["allowed_tools"]

@@ -115,8 +115,8 @@ def test_sqlite_connection_sync_round_trip(tmp_path):
     sc = SqliteConnection(db)
     try:
         sc.raw.execute(
-            "INSERT INTO events(msg_id, from_agent, to_agent, topic, payload, priority, ts) VALUES (?,?,?,?,?,?,?)",
-            ("m1", "Orchestration", "Kernel", "request", "{}", 1, "t"),
+            "INSERT INTO events(msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?,?,?,?,?,?)",
+            ("m1", "Orchestration", "Kernel", "request", "{}", "t"),
         )
         sc.raw.commit()
         rows = sc.fetchall_sync("SELECT msg_id, topic FROM events")
@@ -135,8 +135,8 @@ async def test_sqlite_connection_async_transaction_atomic(tmp_path):
     try:
         async with sc.transaction() as cur:
             cur.execute(
-                "INSERT INTO events(msg_id, from_agent, to_agent, topic, payload, priority, ts) VALUES (?,?,?,?,?,?,?)",
-                ("m-tx", "Critic", "Orchestration", "review_verdict", "{}", 1, "t"),
+                "INSERT INTO events(msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?,?,?,?,?,?)",
+                ("m-tx", "Critic", "Orchestration", "review_verdict", "{}", "t"),
             )
             cur.execute(
                 "INSERT INTO cursors(agent, last_processed_seq, last_processed_msg_id, processed_at) VALUES (?,?,?,?)",
@@ -158,14 +158,12 @@ async def test_sqlite_connection_transaction_rollback_on_error(tmp_path):
         with pytest.raises(sqlite3.IntegrityError):
             async with sc.transaction() as cur:
                 cur.execute(
-                    "INSERT INTO events(msg_id, from_agent, to_agent, topic, "
-                    "payload, priority, ts) VALUES (?,?,?,?,?,?,?)",
-                    ("dup", "A", "B", "t", "{}", 0, "t"),
+                    "INSERT INTO events(msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?,?,?,?,?,?)",
+                    ("dup", "A", "B", "t", "{}", "t"),
                 )
                 cur.execute(
-                    "INSERT INTO events(msg_id, from_agent, to_agent, topic, "
-                    "payload, priority, ts) VALUES (?,?,?,?,?,?,?)",
-                    ("dup", "A", "B", "t", "{}", 0, "t"),
+                    "INSERT INTO events(msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?,?,?,?,?,?)",
+                    ("dup", "A", "B", "t", "{}", "t"),
                 )
         rows = await sc.fetchall("SELECT msg_id FROM events")
         assert rows == []

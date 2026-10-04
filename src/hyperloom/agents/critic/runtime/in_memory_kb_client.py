@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""In-memory KBClient for tests + dry-run mode.
-
-Honours: ``(scope, kind, slug)`` UNIQUE with upsert idempotency, partial
-merge and importance protection; ``contradicts`` auto-mirroring;
-``scope_filter`` containment with ``trim().lowercase()``; ``metadata_filter``
-nested + array-contains. :meth:`simulate_failure` injects faults for
-dead-letter tests. ``updated_at`` uses an injectable ``time_fn`` so tests can
-pin time.
-"""
+"""In-memory KBClient for tests + dry-run mode."""
 
 from __future__ import annotations
 
@@ -25,42 +17,19 @@ from .errors import KBValidationError
 
 # ---------------------------------------------------------------------------
 def _normalise_value(value: Any) -> str:
-    """Normalise a scope value to a trimmed, lower-cased string.
-
-    Args:
-        value (Any): The raw scope value (any type, or ``None``).
-
-    Returns:
-        str: ``""`` for ``None``, otherwise ``str(value).strip().lower()``.
-    """
+    """Normalise a scope value to a trimmed, lower-cased string."""
     if value is None:
         return ""
     return str(value).strip().lower()
 
 
 def _normalise_scope(scope: dict[str, Any]) -> dict[str, str]:
-    """Normalise every value in a scope dict via :func:`_normalise_value`.
-
-    Args:
-        scope (dict[str, Any]): The raw scope mapping.
-
-    Returns:
-        dict[str, str]: A new mapping with the same keys and normalised values.
-    """
+    """Normalise every value in a scope dict via :func:`_normalise_value`."""
     return {k: _normalise_value(v) for k, v in scope.items()}
 
 
 def _scope_contains(row_scope: dict[str, str], scope_filter: dict[str, Any]) -> bool:
-    """Return True if ``row_scope`` matches every key/value in the filter.
-
-    Args:
-        row_scope (dict[str, str]): The stored row's normalised scope.
-        scope_filter (dict[str, Any]): Wanted key/value pairs (normalised before
-            comparison).
-
-    Returns:
-        bool: ``True`` if every filter key matches the row's value.
-    """
+    """Return True if ``row_scope`` matches every key/value in the filter."""
     for k, v in scope_filter.items():
         wanted = _normalise_value(v)
         if row_scope.get(k, "") != wanted:
@@ -69,19 +38,7 @@ def _scope_contains(row_scope: dict[str, str], scope_filter: dict[str, Any]) -> 
 
 
 def _matches_metadata(metadata: dict[str, Any], filter_obj: dict[str, Any]) -> bool:
-    """Recursive nested + array-contains matcher.
-
-    Nested dict filters recurse into nested metadata; list filters require
-    every expected item to be present in the metadata's list (array-contains);
-    scalar filters require equality.
-
-    Args:
-        metadata (dict[str, Any]): The row's metadata.
-        filter_obj (dict[str, Any]): The (possibly nested) match filter.
-
-    Returns:
-        bool: ``True`` if the metadata satisfies every filter clause.
-    """
+    """Recursive nested + array-contains matcher."""
     for key, expected in filter_obj.items():
         if isinstance(expected, dict):
             sub = metadata.get(key)
@@ -107,21 +64,7 @@ def _matches_metadata(metadata: dict[str, Any], filter_obj: dict[str, Any]) -> b
 # ---------------------------------------------------------------------------
 @dataclass
 class _Row:
-    """A single stored KB row in the in-memory client.
-
-    Attributes:
-        id (str): Synthetic row id (``kb_<hex>``).
-        scope (dict[str, str]): Normalised scope key/value pairs.
-        kind (str): The row kind (e.g. ``technique``, ``pitfall``).
-        slug (str): Stable slug, unique within ``(scope, kind)``.
-        importance (float): Importance score (monotonic under upsert).
-        summary (str): Human-readable summary text.
-        metadata (dict[str, Any]): Arbitrary nested metadata.
-        edges (dict[str, list[str]]): Outgoing edges keyed by edge kind.
-        deleted (bool): Soft-delete flag.
-        created_at (float): Unix creation time.
-        updated_at (float): Unix last-update time.
-    """
+    """A single stored KB row in the in-memory client."""
 
     id: str
     scope: dict[str, str]
@@ -136,12 +79,7 @@ class _Row:
     updated_at: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a deep-copied, JSON-serialisable view of the row.
-
-        Returns:
-            dict[str, Any]: All row fields with ``metadata`` deep-copied and
-            ``scope``/``edges`` copied so callers cannot mutate stored state.
-        """
+        """Return a deep-copied, JSON-serialisable view of the row."""
         return {
             "id": self.id,
             "scope": dict(self.scope),
@@ -165,21 +103,13 @@ class InMemoryKBClient:
     """Faithful in-memory mock of the KB service surface."""
 
     def __init__(self, *, time_fn: Callable[[], float] = time.time):
-        """Initialise an empty in-memory KB.
-
-        Args:
-            time_fn (Callable[[], float]): Clock used for ``created_at`` /
-                ``updated_at`` stamps; injectable so tests can pin time.
-                Defaults to :func:`time.time`.
-        """
+        """Initialise an empty in-memory KB."""
         self._rows: dict[str, _Row] = {}
         self._index: dict[tuple[str, str, str], str] = {}
         self._time_fn = time_fn
         self._failure_queue: deque[dict[str, Any]] = deque()
 
-    # ------------------------------------------------------------------
     # Fault injection
-    # ------------------------------------------------------------------
     def simulate_failure(
         self,
         *,
@@ -187,32 +117,12 @@ class InMemoryKBClient:
         times: int,
         error: dict[str, Any],
     ) -> None:
-        """Schedule ``times`` consecutive failures for ``endpoint``.
-
-        ``error`` is propagated as a :class:`KBValidationError` so callers
-        can simulate 4xx-class failures; for 5xx-class behaviour (retry
-        loops) compose with :class:`runtime.kb_client.HTTPKBClient` in an
-        integration test instead.
-
-        Args:
-            endpoint (str): The endpoint name to fail (e.g. ``upsert``).
-            times (int): Number of consecutive failures to schedule.
-            error (dict[str, Any]): Error payload echoed into the raised
-                :class:`KBValidationError`.
-        """
+        """Schedule ``times`` consecutive failures for ``endpoint``."""
         for _ in range(times):
             self._failure_queue.append({"endpoint": endpoint, "error": error})
 
     def _maybe_fail(self, endpoint: str) -> None:
-        """Raise a scheduled failure if the queue head targets ``endpoint``.
-
-        Args:
-            endpoint (str): The endpoint about to be exercised.
-
-        Raises:
-            KBValidationError: If a failure was scheduled for this endpoint;
-                the matching entry is consumed from the queue.
-        """
+        """Raise a scheduled failure if the queue head targets ``endpoint``."""
         if not self._failure_queue:
             return
         head = self._failure_queue[0]
@@ -221,9 +131,7 @@ class InMemoryKBClient:
             err = head["error"]
             raise KBValidationError(f"{endpoint}: simulated failure {err!r}")
 
-    # ------------------------------------------------------------------
     # list
-    # ------------------------------------------------------------------
     def list(
         self,
         *,
@@ -234,26 +142,7 @@ class InMemoryKBClient:
         sort_by: str = "updated_at_desc",
         include_deleted: bool = False,
     ) -> dict[str, Any]:
-        """List rows matching a scope filter (and optional metadata filter).
-
-        Args:
-            scope_filter (dict[str, Any]): Scope key/values rows must contain.
-            kind (str | None): If set, only rows of this kind are returned.
-            metadata_filter (dict[str, Any] | None): Optional nested metadata
-                match (see :func:`_matches_metadata`).
-            limit (int): Maximum number of rows to return (``0`` for no cap).
-            sort_by (str): ``updated_at_desc`` (default) sorts newest first;
-                any other value sorts ascending.
-            include_deleted (bool): When ``True``, soft-deleted rows are kept.
-
-        Returns:
-            dict[str, Any]: ``{"entries": [...], "count": n}`` with each entry a
-            serialised row dict.
-
-        Raises:
-            KBValidationError: If ``scope_filter`` is not a dict, or a failure
-                was scheduled for the ``list`` endpoint.
-        """
+        """List rows matching a scope filter (and optional metadata filter)."""
         self._maybe_fail("list")
         if not isinstance(scope_filter, dict):
             raise KBValidationError("list: scope_filter must be an object")
@@ -273,30 +162,9 @@ class InMemoryKBClient:
             out = out[:limit]
         return {"entries": [r.to_dict() for r in out], "count": len(out)}
 
-    # ------------------------------------------------------------------
     # upsert
-    # ------------------------------------------------------------------
     def upsert(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Insert or merge a row keyed by ``(scope, kind, slug)``.
-
-        New keys insert a fresh row; existing keys merge summary/metadata/edges
-        (partial merge) and only raise importance, never lower it (importance
-        protection). Scope values are trimmed and lower-cased; in practice only
-        a ``None`` value surfaces a ``scope_value_normalized`` warning.
-
-        Args:
-            payload (dict[str, Any]): Must contain ``scope``, ``kind``,
-                ``slug`` and ``importance``; ``summary``, ``metadata`` and
-                ``edges`` are optional.
-
-        Returns:
-            dict[str, Any]: ``{"row": <row dict>, "created": bool,
-            "warnings": [...]}``.
-
-        Raises:
-            KBValidationError: If a required field is missing or a failure was
-                scheduled for the ``upsert`` endpoint.
-        """
+        """Insert or merge a row keyed by ``(scope, kind, slug)``."""
         self._maybe_fail("upsert")
         for f in _REQUIRED_UPSERT_FIELDS:
             if f not in payload:
@@ -358,31 +226,14 @@ class InMemoryKBClient:
         row.updated_at = now
         return {"row": row.to_dict(), "created": False, "warnings": warnings}
 
-    # ------------------------------------------------------------------
     # batch_insert
-    # ------------------------------------------------------------------
     def batch_insert(
         self,
         items: list[dict[str, Any]],
         *,
         on_conflict: str = "upsert",
     ) -> dict[str, Any]:
-        """Insert many rows, optionally erroring on key conflicts.
-
-        Args:
-            items (list[dict[str, Any]]): Upsert payloads to insert.
-            on_conflict (str): ``upsert`` (default) merges conflicts; ``error``
-                raises when a ``(scope, kind, slug)`` key already exists.
-
-        Returns:
-            dict[str, Any]: ``{"results": [...], "count": n}`` with one upsert
-            result per item.
-
-        Raises:
-            KBValidationError: If ``on_conflict`` is invalid, a conflict occurs
-                under ``on_conflict="error"``, or a failure was scheduled for
-                the ``batch_insert`` endpoint.
-        """
+        """Insert many rows, optionally erroring on key conflicts."""
         self._maybe_fail("batch_insert")
         if on_conflict not in ("upsert", "error"):
             raise KBValidationError(f"batch_insert: on_conflict must be upsert|error, got {on_conflict!r}")
@@ -401,28 +252,9 @@ class InMemoryKBClient:
                 results.append(self.upsert(item))
         return {"results": results, "count": len(results)}
 
-    # ------------------------------------------------------------------
     # add_edges
-    # ------------------------------------------------------------------
     def add_edges(self, edges: list[dict[str, Any]]) -> dict[str, Any]:
-        """Add directed edges, auto-mirroring ``contradicts`` edges.
-
-        Edges whose source row is missing are skipped; ``contradicts`` edges
-        are mirrored back onto the destination row, with a skip recorded when
-        the destination is missing.
-
-        Args:
-            edges (list[dict[str, Any]]): Each edge needs ``kind``, ``from_id``
-                and ``to_id``.
-
-        Returns:
-            dict[str, Any]: ``{"added": [...], "mirrored_to": [...],
-            "mirror_skipped": [...]}``.
-
-        Raises:
-            KBValidationError: If an edge is missing a required field or a
-                failure was scheduled for the ``edges/add`` endpoint.
-        """
+        """Add directed edges, auto-mirroring ``contradicts`` edges."""
         self._maybe_fail("edges/add")
         added: list[dict[str, Any]] = []
         mirrored_to: list[dict[str, Any]] = []
@@ -454,15 +286,9 @@ class InMemoryKBClient:
                 mirrored_to.append({"from_id": dst, "to_id": src, "kind": kind})
         return {"added": added, "mirrored_to": mirrored_to, "mirror_skipped": mirror_skipped}
 
-    # ------------------------------------------------------------------
     # Test helpers
-    # ------------------------------------------------------------------
     def all_rows(self) -> list[dict[str, Any]]:
-        """Return serialised copies of every stored row (test helper).
-
-        Returns:
-            list[dict[str, Any]]: All rows, including soft-deleted ones.
-        """
+        """Return serialised copies of every stored row (test helper)."""
         return [r.to_dict() for r in self._rows.values()]
 
     def reset(self) -> None:
@@ -474,30 +300,12 @@ class InMemoryKBClient:
 
 # ---------------------------------------------------------------------------
 def json_scope_key(scope: dict[str, str]) -> str:
-    """Stable scope key used for `(scope, kind, slug)` UNIQUE.
-
-    Args:
-        scope (dict[str, str]): The normalised scope mapping.
-
-    Returns:
-        str: A deterministic ``k=v|k=v`` string with keys sorted.
-    """
+    """Stable scope key used for `(scope, kind, slug)` UNIQUE."""
     return "|".join(f"{k}={scope[k]}" for k in sorted(scope.keys()))
 
 
 def _deep_merge(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
-    """Recursively merge ``incoming`` into a deep copy of ``base``.
-
-    Nested dicts are merged key-by-key; any other value type in ``incoming``
-    replaces the corresponding value in ``base``.
-
-    Args:
-        base (dict[str, Any]): The starting mapping (not mutated).
-        incoming (dict[str, Any]): Values to overlay onto ``base``.
-
-    Returns:
-        dict[str, Any]: A new merged dict.
-    """
+    """Recursively merge ``incoming`` into a deep copy of ``base``."""
     out = copy.deepcopy(base)
     for k, v in incoming.items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):

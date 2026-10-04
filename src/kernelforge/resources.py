@@ -75,20 +75,6 @@ def default_project_root() -> Path:
     return (Path("~/.cache/hyperloom").expanduser() / _STATE_DIR_NAME).resolve()
 
 
-def writable_knowledge_root() -> Path:
-    """Writable destination for knowledge the loop *produces*.
-
-    Postmortem lessons and the tuning DB are written here. The directory is
-    created on demand by its callers.
-
-    Note the name: there used to be a packaged, read-only ``knowledge_base``
-    tree under ``kernelforge/data`` as well, and the two were easy to confuse.
-    That one was removed once an audit found nothing read it. This path is the
-    only ``knowledge_base`` left, and it is writable and outside the package.
-    """
-    return default_project_root() / "knowledge_base"
-
-
 def assert_sandbox_grant(path: str | Path, *, what: str) -> Path:
     """Validate a directory before it is added to an agent sandbox allowlist.
 

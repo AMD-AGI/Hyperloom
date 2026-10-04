@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from hyperloom.orchestrator.loop import coordinator_helpers as ch
 
 
@@ -103,6 +105,29 @@ def test_parse_baseline_workload_extra_non_dict_benchmark(tmp_path):
     assert ch._parse_baseline_workload_extra(str(yaml_path)) == {}
 
 
+@pytest.mark.parametrize(("framework", "env_key"), [("vllm", "EXTRA_VLLM_ARGS"), ("atom", "EXTRA_ATOM_ARGS")])
+def test_parse_baseline_workload_extra_reads_own_framework_args(tmp_path, framework, env_key):
+    yaml_path = tmp_path / "base.yaml"
+    yaml_path.write_text(
+        f"benchmark:\n  framework: {framework}\n  envs:\n    {env_key}: '--max-running-requests 8'\n",
+        encoding="utf-8",
+    )
+    assert ch._parse_baseline_workload_extra(str(yaml_path))["max_running_requests"] == 8
+
+
+def test_parse_baseline_workload_extra_ignores_another_frameworks_args(tmp_path):
+    # An operator --extra-env lands in benchmark.envs unfiltered, so a key for
+    # another framework can sit beside the one this server is launched with.
+    yaml_path = tmp_path / "base.yaml"
+    yaml_path.write_text(
+        "benchmark:\n  framework: vllm\n  envs:\n"
+        "    EXTRA_SGLANG_ARGS: '--max-running-requests 99'\n"
+        "    EXTRA_VLLM_ARGS: '--max-running-requests 8'\n",
+        encoding="utf-8",
+    )
+    assert ch._parse_baseline_workload_extra(str(yaml_path))["max_running_requests"] == 8
+
+
 # ---- _baseline_params_fingerprint ----
 
 
@@ -123,26 +148,8 @@ def test_baseline_params_fingerprint_bad_envs():
     assert out["extra_envs"] is None
 
 
-# ---- _resolve_roofline_watermark_ratio ----
-
-
-def test_watermark_ratio_default():
-    assert ch._resolve_roofline_watermark_ratio() == 1.10
-
-
-def test_watermark_ratio_env_is_ignored(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "1.5")
-    assert ch._resolve_roofline_watermark_ratio() == 1.10
-
-
-def test_watermark_ratio_below_one_env_is_ignored(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "0.5")
-    assert ch._resolve_roofline_watermark_ratio() == 1.10
-
-
-def test_watermark_ratio_invalid_env_is_ignored(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "abc")
-    assert ch._resolve_roofline_watermark_ratio() == 1.10
+def test_roofline_watermark_ratio():
+    assert ch.ROOFLINE_WATERMARK_RATIO == 1.10
 
 
 # ---- _dedupe_extra_server_args ----

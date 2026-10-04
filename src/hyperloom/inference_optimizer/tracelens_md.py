@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared TraceLens markdown sanitizers for LLM prompt injection.
-
-TraceLens ``analysis.md`` often embeds charts as base64 data URLs that
-bloat prompts. Strip them in-memory before injection; the on-disk
-``analysis.md`` stays intact.
-"""
+"""Shared TraceLens markdown sanitizers for LLM prompt injection."""
 
 from __future__ import annotations
 
@@ -16,34 +11,14 @@ _BASE64_IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\(data:image/[^;]+;base
 
 
 def strip_base64_data_urls(text: str | None) -> str:
-    """Replace markdown ``data:image/...;base64,...`` images with placeholders.
-
-    Preserves alt-text in a short marker so downstream agents know a chart
-    was present without receiving the binary payload.
-
-    Args:
-        text (str | None): Markdown text to sanitize; ``None`` is treated as
-            empty.
-
-    Returns:
-        str: Markdown with base64 image data URLs replaced by alt-text
-        placeholders, or the original text when no such images are present.
-    """
+    """Replace markdown ``data:image/...;base64,...`` images with placeholders."""
     if not text:
         return text or ""
     if "data:image/" not in text:
         return text
 
     def _sub(match: re.Match[str]) -> str:
-        """Build the placeholder replacement for one matched data-URL image.
-
-        Args:
-            match (re.Match[str]): Regex match with a named ``alt`` group.
-
-        Returns:
-            str: Markdown image whose URL is a stripped-base64 marker carrying
-            the original alt-text.
-        """
+        """Build the placeholder replacement for one matched data-URL image."""
         alt = match.group("alt") or "image"
         return f"![{alt}](<<stripped: base64 image — {alt}>>)"
 

@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLI entry point for `kernelforge forge-fuse`.
-
-Usage:
-    kernelforge forge-fuse --trace <kineto.json[.gz]> --model-path <dir> \\
-        --framework sglang --output-dir <dir> [--dry-run] [--fuse-all-confirmed]
-
-``--dry-run`` diagnoses the trace, locates fusible patterns, and emits the JSON
-manifest with the localized recipe skeleton (no authoring, no GPU). A full run
-additionally drives the validate-driven autoloop (author -> kernel-level validate
-with cross-attempt experience) and fills in ``validation`` / ``fusion_loop`` /
-``artifacts``. Kernel-level only; e2e serving A/B is Hyperloom's job.
-"""
+"""CLI entry point for `kernelforge forge-fuse`."""
 
 from __future__ import annotations
 
@@ -28,10 +17,13 @@ import statistics
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Sequence
 
 import click
 
+from hyperloom.common.io import atomic_write_json
+from kernelforge.config import resolve_agent_model, resolve_agent_reasoning_effort
+from kernelforge.agent_backends.base import AgentProviderUnavailableError
 from kernelforge.agent_backends.registry import (
     create_registered_backend,
     get_agent_provider,
@@ -53,6 +45,7 @@ from .campaign import (
     fused_module_path,
     run_recipe_campaign,
 )
+from .anchor import AnchorReport, AnchorResolutionError, KernelAnchor, discover_anchored_recipes, resolve_anchor
 from .diagnose import diagnose_trace
 from .discover import discover_recipes, registered_agent_llm_fn
 from .emit import _git_tracks, _is_fused_module_name, export_artifacts, restore_exported_changes
@@ -60,15 +53,23 @@ from .gpu_arch import canon_arch, detect_arch
 from .harness_contract import harness_contract
 from .llm_failure import LlmUnavailableError
 from .locate import build_recipes, resolve_framework_source_file
-from .loop import FusionAbort, LoopConfig, LoopResult, run_fusion_loop
-from .models import CompilePassOutcome, Recipe, ValidationResult
+from .loop import FusionAbort, LoopConfig, LoopResult, RecipePatch, run_fusion_loop
+from .models import CompilePassOutcome, FusionArtifacts, Recipe, ValidationResult
 from .shadow_repo import ensure_git_workspace
-from .report import LLM_UNAVAILABLE_VERDICT, build_manifest, write_manifest
-from .shapes import load_model_config, resolve_decode_shapes
+from .report import (
+    ANCHOR_REPORT_NAME,
+    ANCHOR_RESOLVED_VERDICT,
+    LLM_UNAVAILABLE_VERDICT,
+    build_manifest,
+    write_anchor_report,
+    write_manifest,
+)
+from .shapes import harness_group_dim_mismatch, load_model_config, resolve_decode_shapes
 from .validate import (
     DEFAULT_TARGET_SPEEDUP,
     KERNEL_KEEP_CHECKPOINT,
     HarnessKernelRunner,
+    eager_trace_alignment,
     fused_symbol_invocation_evidence,
     serving_smoke,
     serving_smoke_verdict,
@@ -84,57 +85,52 @@ from kernelforge.llm.git import git
 
 log = logging.getLogger("forge_fusion")
 
-# Exit code for "the run never reached the model". Distinct from 1 so a caller
-# can tell an outage apart from a real fusion failure.
+# Exit code for "the run never reached the model".
 EXIT_LLM_UNAVAILABLE = 3
-# Exit code for "infrastructure failure before fusion was attempted": no git
-# workspace, harness could not be authored, etc. Lets callers distinguish a
-# setup/environment problem from a genuine "nothing to fuse" answer.
+# Exit code for "infrastructure failure before fusion was attempted": no git workspace, harness could not be authored,
+# etc.
 EXIT_INFRASTRUCTURE_FAILURE = 4
 _AGENT_SANDBOX_MODES = frozenset({"workspace-write", "read-only", "bypass"})
-_EXTERNAL_SANDBOX_CONFIRMATION = "HYPERLOOM_CODEX_EXTERNAL_SANDBOX"
-
-
-def _credential_shape() -> tuple[bool, bool]:
-    """Return whether OpenAI-side and Anthropic-side credentials are configured."""
-    openai = any(os.environ.get(name, "").strip() for name in ("OPENAI_API_KEY", "SAFE_API_KEY", "FORGE_API_KEY"))
-    anthropic = any(os.environ.get(name, "").strip() for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")) or any(
-        os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-        for name in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
-    )
-    return bool(openai), bool(anthropic)
 
 
 def _resolve_agent_choice(
     agent_backend: str,
     llm_model: Optional[str],
 ) -> tuple[str, str]:
-    """Resolve provider from credentials, then model from provider precedence."""
+    """Resolve provider from the registry's auto rule, then model from provider precedence."""
     requested = (agent_backend or "auto").strip().lower()
     if requested == "auto":
-        has_openai, has_anthropic = _credential_shape()
-        if has_openai and not has_anthropic:
-            provider = "codex"
-        elif has_anthropic and not has_openai:
-            provider = "claude"
-        elif has_openai and has_anthropic:
-            # Use the project's existing first-available default without passing
-            # a model, so dual-provider selection never guesses from model prefixes.
-            provider = select_default_agent_provider().name
-        else:
-            raise click.UsageError(
-                "--agent-backend auto found no OpenAI or Anthropic credentials; "
-                "configure OPENAI_API_KEY for Codex, ANTHROPIC_API_KEY/"
-                "ANTHROPIC_AUTH_TOKEN for Claude, or pass an explicit backend "
-                "with its provider configuration"
-            )
+        # No credential test of its own: credentials-then-SDK with Claude ahead
+        # of Codex is the registry's single rule, and a second copy here is how
+        # forge-fusion and forge-loop came to disagree about the same box. No
+        # model is passed, so dual-configured selection never guesses from a
+        # model prefix.
+        provider = select_default_agent_provider().name
     else:
         provider = get_agent_provider(requested).name
 
     registration = get_agent_provider(provider)
-    provider_env = "CODEX_MODEL" if provider == "codex" else "CLAUDE_MODEL"
-    model = str(llm_model or "").strip() or os.environ.get(provider_env, "").strip() or registration.default_model
+    # The same ladder forge-loop reads. Resolving it here rather than reading
+    # one variable directly is what keeps forge-fusion and forge-loop agreeing
+    # about which model a box is configured for.
+    model = str(llm_model or "").strip() or resolve_agent_model(provider) or registration.default_model
     return provider, model
+
+
+def _campaign_agent_provider(agent_backend: str, llm_model: Optional[str]) -> str:
+    """The provider forge-loop is handed, or the requested spelling when no provider is installed.
+
+    forge-loop rejects the literal ``auto``, this command's own spelling, so the choice is
+    resolved here rather than forwarded. An unresolvable choice is not fatal at this point:
+    a run that only replays a compile pass authors nothing, and a run that does author still
+    fails on its own when it asks the registry for the backend it actually needs.
+    """
+    try:
+        provider, _model = _resolve_agent_choice(agent_backend, llm_model)
+    except AgentProviderUnavailableError as exc:
+        log.debug("no agent provider resolved for the campaign (%s); forwarding %r", exc, agent_backend)
+        return agent_backend
+    return provider
 
 
 def _resolve_agent_sandbox_mode(explicit: Optional[str]) -> str:
@@ -147,17 +143,10 @@ def _resolve_agent_sandbox_mode(explicit: Optional[str]) -> str:
     if mode not in _AGENT_SANDBOX_MODES:
         choices = ", ".join(sorted(_AGENT_SANDBOX_MODES))
         raise click.UsageError(f"unsupported agent sandbox mode {mode!r}; choose one of: {choices}")
-    if mode == "bypass" and os.environ.get(_EXTERNAL_SANDBOX_CONFIRMATION, "").strip() != "1":
-        raise click.UsageError(
-            f"--agent-sandbox-mode bypass requires {_EXTERNAL_SANDBOX_CONFIRMATION}=1 to confirm an external sandbox"
-        )
     return mode
 
 
-# Per-attempt agent wall clock. Two hours is what a source-level fusion needs: it
-# authors a kernel and then boots the model twice for the A/B. Overridable because
-# the loop grants this budget to EVERY attempt, so an operator sizing a campaign
-# against an outer timeout has to be able to bound a single one.
+# Per-attempt agent wall clock.
 _AGENT_TIMEOUT_DEFAULT_SEC = 7200
 
 
@@ -189,7 +178,9 @@ def _create_agent_backend(
         provider,
         model=model,
         timeout_sec=_agent_timeout_sec(),
-        reasoning_effort="high",
+        # Same switches forge-loop reads. Omitting this pinned every fusion
+        # session to the default depth no matter what the box asked for.
+        reasoning_effort=resolve_agent_reasoning_effort(),
         sandbox_mode=sandbox_mode,
         fallback_provider="",
     )
@@ -213,14 +204,7 @@ def _is_staged_harness_name(name: str) -> bool:
 
 
 def _author_module_dirs(source_files: list[str]) -> list[str]:
-    """Directories in which the author may create new fused helper modules.
-
-    Exactly the directories the export path scans (see
-    :func:`emit._fusion_scoped_paths`), so a helper the author workspace guard keeps
-    is a helper the emitted patch carries. Nominating a wider scope — the harness
-    directory, say — would let an authored module survive the run and never reach
-    the Hyperloom handoff.
-    """
+    """Directories in which the author may create new fused helper modules."""
     dirs: list[str] = []
     for source_file in source_files:
         if not source_file:
@@ -231,21 +215,49 @@ def _author_module_dirs(source_files: list[str]) -> list[str]:
     return dirs
 
 
+def _discovery_root(source_file: str, framework_root: str) -> str:
+    """The directory a discovery session runs in, and repo scope searches within."""
+    return (
+        _framework_repo_root(source_file, framework_root)
+        or framework_root
+        or str(Path(source_file).parent if source_file else Path.cwd())
+    )
+
+
+def _recipe_files(recipes) -> list[str]:
+    """Every framework file the given recipes edit, order-stable and de-duplicated."""
+    files: list[str] = []
+    for recipe in recipes:
+        for path in recipe.edit_files:
+            if path and path not in files:
+                files.append(path)
+    return files
+
+
+def _tracked_roots(repo_root: str, source_files: list[str]) -> list[str]:
+    """The top-level trees the shadow repo indexes, as the author is told them."""
+    if not repo_root:
+        return []
+    root = Path(repo_root).resolve()
+    roots: list[str] = []
+    for source_file in source_files:
+        with contextlib.suppress(OSError, ValueError):
+            rel = Path(source_file).resolve().relative_to(root)
+            if not rel.parts:
+                continue
+            entry = str(root / rel.parts[0])
+            if entry not in roots:
+                roots.append(entry)
+    return roots
+
+
 def _prepare_author_harness(
     author_harness_path: str,
     harness_path: str,
     *,
     inherited: bool,
 ) -> tuple[bool, str, bool]:
-    """Prepare the in-worktree harness target without exposing an outside path.
-
-    Returns ``(ready, reason, deterministic)``. ``deterministic`` is what lets the
-    caller refuse to spend the loop's whole attempt budget on a failure that
-    cannot change: ``author_harness_path`` is a pure function of the repo root and
-    the output directory, so a symlink on that path is there again next attempt,
-    and an existing staging target is self-perpetuating. An ``OSError`` while
-    creating or copying is weather and stays retryable.
-    """
+    """Prepare the in-worktree harness target without exposing an outside path."""
     if not author_harness_path:
         return True, "", False
     target = Path(author_harness_path)
@@ -303,17 +315,13 @@ def _finish_author_harness(
         try:
             if target.exists() or target.is_symlink():
                 target.unlink()
-            # Running the staged harness is what this directory is for, and the
-            # interpreter writes __pycache__ beside the module it just executed.
-            # That byproduct is the framework's own, not foreign content, so
-            # leaving it to block the rmdir turned a successful authoring turn
-            # into a failure -- and one that repeats forever, because every
-            # retry runs the harness again and recreates it.
+            # Running the staged harness is what this directory is for, and the interpreter writes __pycache__ beside
+            # the module it just executed.
             shutil.rmtree(target.parent / "__pycache__", ignore_errors=True)
             target.parent.rmdir()
         except OSError:
-            # Anything else left behind is a workspace-safety violation and must
-            # be surfaced rather than deleted broadly.
+            # Anything else left behind is a workspace-safety violation and must be surfaced rather than deleted
+            # broadly.
             if target.exists():
                 ok = False
                 reason = reason or "author harness staging path could not be removed"
@@ -322,10 +330,8 @@ def _finish_author_harness(
                     leftovers = sorted(p.name for p in target.parent.iterdir())
                 except OSError:
                     leftovers = []
-                # The directory is per-repo while the digest is per-output-dir, so
-                # a sibling harness belongs to another run. Failing on one turned a
-                # finished authoring turn into AUTHOR FAILED, and deleting it is
-                # not ours to do while that run may still be executing it.
+                # The directory is per-repo while the digest is per-output-dir, so a sibling harness belongs to
+                # another run.
                 foreign = [name for name in leftovers if not _is_staged_harness_name(name)]
                 if foreign or not leftovers:
                     ok = False
@@ -334,6 +340,47 @@ def _finish_author_harness(
                         + (f" (left behind: {', '.join(foreign)})" if foreign else "")
                     )
     return ok, reason
+
+
+def _harness_alignment_attempts() -> int:
+    """How many times the harness may be re-authored onto the right code path."""
+    raw = os.environ.get("FORGE_HARNESS_ALIGN_ATTEMPTS", "3")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        log.warning("bad FORGE_HARNESS_ALIGN_ATTEMPTS=%r; using 3", raw)
+        return 3
+
+
+def _probe_eager_alignment(
+    recipe,
+    *,
+    harness_path: str,
+    repo_root: str,
+    gpu: str,
+) -> tuple[Optional[bool], str, list[str]]:
+    """Run the fresh harness once and check its eager arm against the trace.
+
+    This costs one harness run before the campaign starts, which buys the only
+    chance to catch a baseline measured against the wrong implementation. Once
+    the loop is running, every number it produces is relative to this arm and
+    nothing re-examines it.
+    """
+    runner = HarnessKernelRunner(
+        harness_path=harness_path,
+        workdir=repo_root or ".",
+        framework_root=repo_root,
+        gpu=gpu,
+        env_flags={f: "1" for f in recipe.env_flag.split()},
+    )
+    report = runner.report(recipe)
+    observed = [str(k) for k in (report.get("eager_kernels") or []) if str(k).strip()]
+    aligned, reason = eager_trace_alignment(observed, getattr(recipe, "trace_kernels", {}))
+    if aligned is None and report.get("eager_matches_trace") is False:
+        # The harness could not name the kernels but knows it did not match. Its own
+        # verdict is worth more than our inability to check it.
+        return False, "harness reported eager_matches_trace=false", observed
+    return aligned, reason, observed
 
 
 def _author_baseline_harness(
@@ -349,55 +396,122 @@ def _author_baseline_harness(
 ) -> tuple[bool, str]:
     """Write the harness ``recipe``'s campaign benchmarks, before it starts.
 
-    The loop anchors its speedup by benching the unfused framework ahead of its
-    first Implementer session, and this harness is what the driver runs to do
-    it. Authored inside the campaign it arrives a step too late: without the
-    anchor no candidate can be scored, so nothing can ever be kept.
-
-    The harness encodes one chain, so it is per recipe: measuring a candidate
-    against another chain's harness compares it to the wrong baseline.
+    The harness is re-authored while its eager arm demonstrably runs a different
+    code path from the one the trace recorded: a wrong baseline is not a smaller
+    version of a right one, and every later stage inherits it.
     """
-    Path(harness_path).unlink(missing_ok=True)
-    staging = _author_harness_target(repo_root, out)
-    ready, reason, _deterministic = _prepare_author_harness(staging, harness_path, inherited=False)
-    if not ready:
-        return False, reason
-    target = staging or harness_path
-    prompt = (
-        build_campaign_program_md(recipe, harness_path="")
-        + harness_contract(target, recipe.env_flag)
-        + "\nWrite ONLY that harness. Do not edit the framework source and do "
-        "not create any other file; the fused kernel is authored after this.\n"
-    )
-    (out / "harness_prompt.md").write_text(prompt, encoding="utf-8")
-    rc = run_author(
-        prompt,
-        workdir=repo_root or ".",
-        log_path=str(out / "harness_author.log"),
-        gpu=gpu,
-        model=llm_model,
-        max_turns=max_turns,
-        backend=backend,
-        timeout_s=_agent_timeout_sec(),
-        target_files=[target],
-        new_module_dirs=[],
-    )
-    published, error = _finish_author_harness(staging, harness_path, inherited=False, author_ok=rc == 0)
-    if rc != 0:
-        return False, f"harness author exited {rc}"
-    return published, error
+    attempts = _harness_alignment_attempts()
+    feedback = ""
+    published, error = False, "harness was never authored"
+
+    for attempt in range(1, attempts + 1):
+        Path(harness_path).unlink(missing_ok=True)
+        staging = _author_harness_target(repo_root, out)
+        ready, reason, _deterministic = _prepare_author_harness(staging, harness_path, inherited=False)
+        if not ready:
+            return False, reason
+        target = staging or harness_path
+        prompt = (
+            build_campaign_program_md(recipe, harness_path="")
+            + harness_contract(target, recipe.env_flag)
+            + "\nWrite ONLY that harness. Do not edit the framework source and do "
+            "not create any other file; the fused kernel is authored after this.\n" + feedback
+        )
+        suffix = "" if attempt == 1 else f".retry{attempt}"
+        (out / f"harness_prompt{suffix}.md").write_text(prompt, encoding="utf-8")
+        rc = run_author(
+            prompt,
+            workdir=repo_root or ".",
+            log_path=str(out / "harness_author.log"),
+            gpu=gpu,
+            model=llm_model,
+            max_turns=max_turns,
+            backend=backend,
+            timeout_s=_agent_timeout_sec(),
+            target_files=[target],
+            new_module_dirs=[],
+        )
+        published, error = _finish_author_harness(staging, harness_path, inherited=False, author_ok=rc == 0)
+        if rc != 0:
+            return False, f"harness author exited {rc}"
+        if not published:
+            return published, error
+
+        shape_why = harness_group_dim_mismatch(
+            Path(harness_path).read_text(encoding="utf-8", errors="replace"),
+            getattr(recipe, "shapes", {}) or {},
+        )
+        if shape_why:
+            log.warning(
+                "harness attempt %d/%d used the wrong group axis: %s",
+                attempt,
+                attempts,
+                shape_why,
+            )
+            feedback = (
+                "\n## FIX REQUIRED (group axis)\n"
+                f"{shape_why}\n"
+                "Rebuild the tensors from `n_local_groups` / `o_groups` in the "
+                "shapes block. Do not set G from gqa_groups or num_attention_heads.\n"
+            )
+            continue
+
+        aligned, why, observed = _probe_eager_alignment(
+            recipe,
+            harness_path=harness_path,
+            repo_root=repo_root,
+            gpu=gpu,
+        )
+        if aligned is None:
+            log.info("harness eager-arm alignment unchecked: %s", why)
+            return published, error
+        if aligned:
+            log.info("harness eager arm matches the trace: %s", why)
+            return published, error
+
+        log.warning(
+            "harness attempt %d/%d measured the wrong code path: %s",
+            attempt,
+            attempts,
+            why,
+        )
+        feedback = _alignment_feedback(recipe, why, observed)
+
+    if feedback.startswith("\n## FIX REQUIRED (group axis)"):
+        return False, f"harness used the wrong group axis after {attempts} attempts"
+    return False, f"harness eager arm never matched the traced kernels after {attempts} attempts"
+
+
+def _alignment_feedback(recipe, why: str, observed: list[str]) -> str:
+    """Tell the next harness attempt exactly which code path it actually hit."""
+    evidence = getattr(recipe, "trace_kernels", {}) or {}
+    expected = [str(evidence.get("anchor") or "")]
+    for key in ("before", "after"):
+        expected += [str(n) for n in (evidence.get(key) or [])]
+    expected = [e for e in expected if e]
+    seen = "\n".join(f"    {k}" for k in observed[:20]) or "    (the harness named none)"
+    want = "\n".join(f"    {k}" for k in expected[:20])
+    return f"""
+## Your previous harness measured the WRONG code path — rewrite it
+{why}
+
+Kernels your eager arm actually launched:
+{seen}
+
+Kernels the trace recorded for this fusion:
+{want}
+
+The functions you called are not the ones that run in the served model. Do not
+adjust the ones you picked: go back to the model's forward pass and follow the
+calls through to whatever issues the kernels above — the module the layer really
+instantiates, the mixin the attention backend really inherits, the branch this
+configuration really takes. Symbols that merely look right are how the previous
+attempt got here. Verify with the profiler before you report anything.
+"""
 
 
 def _author_rc_after_harness(rc: int, *, harness_ok: bool) -> int:
-    """Fold a harness-finalization failure into the author's return code.
-
-    Retryable on purpose: the bucket mixes an author that rewrote the inherited
-    harness with a plain OSError while publishing it, and only the first is
-    deterministic. It must not replace a verdict the author already reached,
-    though -- a safety stop is decided identically on every attempt, so turning
-    it into a retryable failure sends the loop back to re-run a recipe that is
-    rejected the same way, and the budget goes to proving it again.
-    """
+    """Fold a harness-finalization failure into the author's return code."""
     if harness_ok or rc == AUTHOR_RC_SAFETY:
         return rc
     return AUTHOR_RC_FAILED
@@ -431,6 +545,23 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     root.handlers.clear()
     root.addHandler(fh)
     root.addHandler(sh)
+
+
+def _verdict_override(
+    llm_error: Optional[LlmUnavailableError],
+    anchor_report: Optional[AnchorReport],
+    dry_run: bool,
+) -> str:
+    """Name the outcomes that are not a judgement about the kernel.
+
+    A run that never asked the model must not report ``no_opportunity``: that reads
+    as "there is nothing to fuse here" when nothing was ever looked at.
+    """
+    if llm_error is not None:
+        return LLM_UNAVAILABLE_VERDICT
+    if anchor_report is not None and dry_run:
+        return ANCHOR_RESOLVED_VERDICT
+    return ""
 
 
 @click.command("forge-fuse")
@@ -481,6 +612,16 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     default="",
     help="Explicit framework source root (else auto-detect the installed package).",
 )
+@click.option(
+    "--repo-scope/--no-repo-scope",
+    "repo_scope",
+    default=False,
+    help="Give discovery and authoring the whole framework repository instead of one "
+    "resolved model file. Discovery embeds no source and explores the tree with its own "
+    "read/search tools, may return a fusion whose call sites span several files, and "
+    "authoring may edit all of them. Use when the chain is not in the arch-class model "
+    "file and you do not want to name its location.",
+)
 @click.option("--decode-batch", default=16, type=int, help="Representative decode batch size (T) for shapes.")
 @click.option(
     "--decode-steps",
@@ -491,9 +632,17 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
 @click.option(
     "--discover",
     "discover_mode",
-    type=click.Choice(["patterns", "llm"]),
+    type=click.Choice(["patterns", "llm", "anchored"]),
     default="patterns",
-    help="Recipe discovery: 'patterns' (template library) or 'llm' (LLM reads trace+source, autonomous).",
+    help="Recipe discovery: 'patterns' (template library), 'llm' (LLM reads trace+source, autonomous), "
+    "or 'anchored' (fuse around the kernel named by --fuse-kernel).",
+)
+@click.option(
+    "--fuse-kernel",
+    "fuse_kernel",
+    default="",
+    help="Full GPU kernel name, exactly as the trace spells it. Fusion is then built around "
+    "this kernel and its trace neighbours instead of a ranked guess; implies --discover anchored.",
 )
 @click.option(
     "--dry-run",
@@ -523,7 +672,7 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     envvar="FORGE_AGENT_SANDBOX_MODE",
     default="workspace-write",
     show_default=True,
-    help="Agent runtime sandbox. Bypass additionally requires HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1.",
+    help="Agent runtime sandbox. Use bypass only when an external boundary already enforces isolation.",
 )
 @click.option(
     "--model",
@@ -534,13 +683,14 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     "``--model`` is accepted as an alias (Hyperloom forge-fuse spelling).",
 )
 @click.option("--max-turns", default=100, type=int, help="Max authoring turns.")
+@click.option(
+    "--max-recipes",
+    default=0,
+    type=int,
+    help="Cap how many ranked recipes to try. 0 means uncapped: every discovered recipe is considered.",
+)
 @click.option("--ab-isl", default=512, type=int, help="A/B input length.")
 @click.option("--ab-osl", default=128, type=int, help="A/B output length.")
-@click.option(
-    "--bench-extra",
-    default="",
-    help="Extra bench_one_batch args (e.g. '--attention-backend triton').",
-)
 @click.option(
     "--server-extra",
     default="",
@@ -561,6 +711,16 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     default=1,
     type=int,
     help="Tensor-parallel size for the serving smoke (must match the session).",
+)
+@click.option(
+    "--attn-tp",
+    "attn_tp_size",
+    default=1,
+    type=int,
+    help=(
+        "Attention TP shard used to stamp n_local_heads / n_local_groups "
+        "(default 1; keep 1 under DP-attention even when --tp > 1)."
+    ),
 )
 @click.option(
     "--block-size",
@@ -587,9 +747,11 @@ def run(
     harness_noise_repeat: int,
     harness_noise_env: tuple[str, ...],
     framework_root: str,
+    repo_scope: bool,
     decode_batch: int,
     decode_steps: int,
     discover_mode: str,
+    fuse_kernel: str,
     dry_run: bool,
     author: bool,
     validate: bool,
@@ -599,12 +761,13 @@ def run(
     agent_sandbox_mode: str,
     llm_model: Optional[str],
     max_turns: int,
+    max_recipes: int,
     ab_isl: int,
     ab_osl: int,
-    bench_extra: str,
     server_extra: str,
     gpu_arch: str,
     tp: int,
+    attn_tp_size: int,
     block_size: int,
     max_model_len: int,
     verbose: bool,
@@ -636,6 +799,12 @@ def run(
     ]
     if missing:
         raise click.UsageError(f"Missing option(s): {', '.join(missing)}.")
+
+    fuse_kernel = fuse_kernel.strip()
+    if fuse_kernel:
+        discover_mode = "anchored"
+    elif discover_mode == "anchored":
+        raise click.UsageError("--discover anchored requires --fuse-kernel to name the kernel to fuse around.")
 
     out = Path(output_dir)
     _setup_logging(out, verbose)
@@ -677,19 +846,83 @@ def run(
     )
 
     model_type = str(load_model_config(model_path).get("model_type") or "")
+    if repo_scope and discover_mode == "patterns":
+        # ``patterns`` matches a fixed template library against the trace and never asks a model anything, so there is
+        # nothing in it that could explore a repository.
+        raise click.UsageError("--repo-scope requires --discover llm or --discover anchored")
     llm_error: LlmUnavailableError | None = None
-    if discover_mode == "llm":
-        # LLM-autonomous discovery: the model reads the launch-bound profile + the
-        # real source and proposes fusible chains itself (not capped to templates).
-        shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch)
+    anchor_report = None
+    if discover_mode == "anchored":
+        try:
+            anchor_report = resolve_anchor(trace_path, KernelAnchor(name=fuse_kernel))
+        except AnchorResolutionError as exc:
+            raise click.UsageError(str(exc)) from exc
+        write_anchor_report(anchor_report, out)
+        log.info(
+            "anchor: %s | %d launches, %.1fus, %.2f%% of kernel time | %s (%.1f%%)",
+            anchor_report.category,
+            anchor_report.occurrences,
+            anchor_report.total_us,
+            anchor_report.share * 100,
+            anchor_report.signature,
+            anchor_report.consistency * 100,
+        )
+        for text in anchor_report.warnings:
+            log.warning("anchor: %s", text)
+        shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch, attn_tp_size=attn_tp_size)
+        source_file, _source_note = resolve_framework_source_file(
+            model_path, framework, framework_root=framework_root, model_type=model_type
+        )
+        discovery_root = _discovery_root(source_file, framework_root)
+        if dry_run:
+            # Resolution is the whole point of a dry run here: the operator has to see which launches were
+            # selected before an agent or a GPU is paid for.
+            recipes = []
+            log.info("dry run: anchor resolved to %s, skipping discovery", out / ANCHOR_REPORT_NAME)
+        else:
+            try:
+                discovery_agent = require_agent_backend()
+                recipes = discover_anchored_recipes(
+                    model_type=model_type,
+                    framework=framework,
+                    source_file=source_file,
+                    shapes=shapes,
+                    report=anchor_report,
+                    framework_root=framework_root,
+                    category_shares=diagnosis.category_shares,
+                    repo_scope=repo_scope,
+                    repo_root=discovery_root,
+                    llm_fn=registered_agent_llm_fn(
+                        discovery_agent,
+                        model=discovery_agent.runtime.model,
+                        workdir=discovery_root,
+                        # Discovery is read-only, so the file it is shown is snapshotted
+                        # and restored. Under repo scope no file is shown and the whole
+                        # tree is off limits, so the session's own read-only spec
+                        # carries that instead.
+                        protected_files=[source_file] if source_file else [],
+                        log_path=str(out / "discovery_llm.txt"),
+                    ),
+                )
+            except LlmUnavailableError as exc:
+                llm_error = exc
+                recipes = []
+                log.error(
+                    "anchored discovery could not reach the LLM (%s after %d attempt(s)): %s",
+                    exc.kind,
+                    exc.attempts,
+                    exc,
+                )
+    elif discover_mode == "llm":
+        # LLM-autonomous discovery: the model reads the launch-bound profile + the real source and proposes fusible
+        # chains itself (not capped to templates).
+        shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch, attn_tp_size=attn_tp_size)
         source_file, _source_note = resolve_framework_source_file(
             model_path, framework, framework_root=framework_root, model_type=model_type
         )
         try:
             discovery_agent = require_agent_backend()
-            discovery_workdir = _framework_repo_root(source_file, framework_root) or str(
-                Path(source_file).parent if source_file else Path.cwd()
-            )
+            discovery_workdir = _discovery_root(source_file, framework_root)
             recipes = discover_recipes(
                 diagnosis,
                 model_type=model_type,
@@ -697,13 +930,11 @@ def run(
                 source_file=source_file,
                 shapes=shapes,
                 trace_path=trace_path,
-                # Forwarded for the same reason build_recipes gets it: each
-                # proposal is checked against THIS install's compile-pass config,
-                # and that verdict rewrites the pattern id. Left unset, the check
-                # probes whichever vLLM is importable here, so the run can judge
-                # the wrong install and store under a different key than a run
-                # that passed the flag.
+                # Forwarded for the same reason build_recipes gets it: each proposal is checked against THIS install's
+                # compile-pass config, and that verdict rewrites the pattern id.
                 framework_root=framework_root,
+                repo_scope=repo_scope,
+                repo_root=discovery_workdir,
                 llm_fn=registered_agent_llm_fn(
                     discovery_agent,
                     model=discovery_agent.runtime.model,
@@ -713,9 +944,7 @@ def run(
                 ),
             )
         except LlmUnavailableError as exc:
-            # The model was never reached, so this run knows nothing about the
-            # kernel. Recipes stay empty, but the verdict below must not be the
-            # one an empty list normally produces.
+            # The model was never reached, so this run knows nothing about the kernel.
             llm_error = exc
             recipes = []
             log.error(
@@ -747,45 +976,99 @@ def run(
             "(verdict: %s) — this is NOT a no_opportunity result",
             LLM_UNAVAILABLE_VERDICT,
         )
+    elif anchor_report is not None and dry_run:
+        log.info(
+            "anchor resolved, discovery not run (verdict: %s) — this is NOT a no_opportunity result",
+            ANCHOR_RESOLVED_VERDICT,
+        )
     else:
         log.info("no fusion recipe located (verdict: no_opportunity)")
+
+    def publish(
+        patches: Optional[list[dict[str, Any]]],
+        *,
+        validation=None,
+        artifacts=None,
+        loop=None,
+        compile_pass=None,
+        verdict_override: str = "",
+        error=None,
+        nomination=None,
+    ) -> tuple[dict[str, Any], Path]:
+        """Write the run's manifest, as complete as the run has so far got.
+
+        The aggregate is the only thing that points at a keeper, so it cannot wait for every
+        campaign to return: a run killed in between would report REVERT while proven,
+        already-smoked patches sat in the workspace. Called from ``on_keep`` too, it is never
+        missing, only partial, and the end-of-run call overwrites it with the real loop /
+        compile-pass / error fields before any exit.
+        """
+        manifest = build_manifest(
+            framework=framework,
+            model_path=model_path,
+            model_type=model_type,
+            diagnosis=diagnosis,
+            recipe=top_recipe,
+            candidates=recipes,
+            anchor=anchor_report.to_dict() if anchor_report is not None else None,
+            validation=validation,
+            artifacts=artifacts,
+            loop=loop,
+            compile_pass=compile_pass,
+            verdict_override=verdict_override,
+            error=error,
+            patches=patches,
+            nomination=nomination,
+        )
+        if selected_agent is not None:
+            manifest["agent_backend"] = selected_agent.name
+            manifest["agent_model"] = selected_agent.runtime.model
+            manifest["agent_sandbox_mode"] = selected_agent.runtime.sandbox_mode
+        return manifest, write_manifest(manifest, out)
+
     validation = None
     artifacts = None
     loop_manifest = None
     compile_pass_outcome: Optional[CompilePassOutcome] = None
     loop_result = None
+    # Multi-patch nomination outputs: patches_out is the list of sibling envelopes (None on the combine / single-patch
+    # escape hatch so build_manifest omits the key and the legacy shape stays byte-identical); nomination_summary is
+    # the round's counts.
+    patches_out: Optional[list[dict[str, Any]]] = None
+    nomination_summary: Optional[dict[str, Any]] = None
 
-    # A claim and an authored kernel are validated and exported by different,
-    # non-interchangeable machinery (config A/B vs kernel parity + microbench),
-    # so one run cannot do both. Clearing the flag is what narrows this run to
-    # the claim alone; the authored candidates stay on the manifest for a later
-    # round. Refusing would fail a run the caller cannot fix, the flag being on
-    # by default.
+    # A claim and an authored kernel are validated and exported by different, non-interchangeable machinery (config
+    # A/B vs kernel parity + microbench), so a single UNIT cannot do both.
     claims = [r for r in recipes if r.candidate_kind == "compile_pass"]
     deferred = [r for r in recipes if r.candidate_kind != "compile_pass"]
+    multi_patch = not fuse_all_confirmed
     if fuse_all_confirmed and claims and deferred:
         top_recipe = claims[0]
         fuse_all_confirmed = False
+        multi_patch = False  # combine narrowed to the claim; NOT the multi-patch path
         log.info(
-            "claiming compile pass %s first; deferring %s",
+            "combine: claiming compile pass %s first; deferring %s",
             top_recipe.pattern_id,
             ", ".join(r.pattern_id for r in deferred),
         )
 
     if not dry_run and top_recipe is not None:
         repo_root = _framework_repo_root(top_recipe.source_file, framework_root)
-        # Snapshot the pristine model source BEFORE authoring so a patch can be
-        # produced even when the framework is a non-git pip install (git diff would
-        # otherwise be empty -> patch=null -> integrate skips the KEPT fusion).
-        pristine_dir = _snapshot_fusion_source(repo_root, top_recipe.source_file, out)
-        authored = recipes if fuse_all_confirmed else [top_recipe]
+        # Snapshot the pristine model source BEFORE authoring so a patch can be produced even when the framework is a
+        # non-git pip install (git diff would otherwise be empty -> patch=null -> integrate skips the KEPT fusion).
+        pristine_dir = _snapshot_fusion_source(
+            repo_root, top_recipe.source_file, out, extra_files=top_recipe.extra_files
+        )
+        # combine folds every recipe into one unit; multi-patch authors each non-claim recipe as its own sibling and
+        # runs any claims separately.
+        authored = recipes if fuse_all_confirmed else (deferred if multi_patch else [top_recipe])
         ab_hint = (
             f"forge-fuse validates at the KERNEL level (compile + SNR parity + "
             f"microbench speedup), decode batch {decode_batch} isl {ab_isl} osl {ab_osl}"
         )
         target_speedup = DEFAULT_TARGET_SPEEDUP
-        # One arch value for the whole run: the author tunes for it, so a
-        # mismatch would have it writing for a chip the run is not on.
+        # One arch value for the whole run: the author tunes for it, so a mismatch would have it writing for a chip
+        # the run is not on.
         run_arch = canon_arch(gpu_arch) or canon_arch(detect_arch())
         if run_arch:
             log.info("target GPU arch: %s", run_arch)
@@ -794,44 +1077,80 @@ def run(
 
         exported_ok = False
 
-        if top_recipe.candidate_kind == "compile_pass":
-            # The flip edits a LIVE install, so every exit path must restore it and
-            # the patch must be diffed against the pre-run snapshot (not HEAD, which
-            # would sweep in unrelated uncommitted edits).
-            runtime = resolve_target_runtime(framework, framework_root=framework_root)
-            with _live_file_restored(top_recipe.source_file):
-                compile_pass_outcome = _run_compile_pass(
-                    top_recipe,
-                    runtime=runtime,
-                    model_path=model_path,
-                    gpu=gpu,
-                    validate=validate,
-                    out=out,
-                    isl=ab_isl,
-                    osl=ab_osl,
-                    target_speedup=target_speedup,
+        # The multi-patch nomination runs BOTH pipelines when a run discovered both kinds: each compile-pass claim
+        # through its config A/B, every authored fusion through the kernel autoloop, and every keeper becomes an
+        # independent sibling in patches[].
+        if multi_patch and validate:
+            patches_out, compile_pass_outcome, loop_result, withheld = _run_multi_patch_nomination(
+                claims=claims,
+                authored=authored,
+                framework=framework,
+                framework_root=framework_root,
+                out=out,
+                repo_root=repo_root,
+                author=author,
+                gpu=gpu,
+                llm_model=llm_model,
+                target_speedup=target_speedup,
+                model_path=model_path,
+                run_arch=run_arch,
+                agent_backend=_campaign_agent_provider(agent_backend, llm_model),
+                agent_sandbox_mode=agent_sandbox_mode,
+                server_extra=server_extra,
+                ab_isl=ab_isl,
+                ab_osl=ab_osl,
+                max_turns=max_turns,
+                max_recipes=max_recipes,
+                pristine_dir=pristine_dir,
+                tp=tp,
+                block_size=block_size,
+                max_model_len=max_model_len,
+                repo_scope=repo_scope,
+                agent_factory=require_agent_backend,
+                publish=publish,
+            )
+            if loop_result is not None:
+                validation = loop_result.best
+                loop_manifest = loop_result.to_dict()
+            # Strongest sibling fills the legacy singular ``artifacts`` slot so the combine-era salvage / timeout path
+            # keeps finding a patch.
+            if patches_out:
+                strongest = patches_out[0]
+                artifacts = FusionArtifacts(
+                    patch=strongest.get("patch_path"),
+                    repo_root=strongest.get("kernel_repo") or repo_root,
                 )
-                log.info(
-                    "compile pass %s: kept=%s speedup=%s note=%s",
-                    top_recipe.compile_pass_flag,
-                    compile_pass_outcome.kept,
-                    compile_pass_outcome.speedup,
-                    compile_pass_outcome.note,
-                )
-                if repo_root and compile_pass_outcome.kept:
-                    artifacts = export_artifacts(
-                        repo_root,
-                        top_recipe.source_file,
-                        out,
-                        pristine_dir=pristine_dir,
-                        snapshot_diff_only=True,
-                    )
-            compile_pass_outcome.reverted = True  # the context manager just did it
+                # Mirror the strongest patch under the legacy ``fusion.patch`` name.
+                _mirror_legacy_patch(strongest.get("patch_path"), out)
+            exported_ok = bool(patches_out)
+            nomination_summary = {
+                "candidates_seen": len(recipes),
+                "resolved": len(claims) + len(authored),
+                "selected": len(patches_out),
+                # Resolved targets the lane ceiling never funded, so a starved round is not read as "everything ran
+                # and kept nothing".
+                "withheld": withheld,
+            }
+        elif top_recipe.candidate_kind == "compile_pass":
+            compile_pass_outcome, artifacts = _run_single_compile_pass_claim(
+                top_recipe,
+                framework=framework,
+                framework_root=framework_root,
+                model_path=model_path,
+                gpu=gpu,
+                validate=validate,
+                out=out,
+                isl=ab_isl,
+                osl=ab_osl,
+                target_speedup=target_speedup,
+                repo_root=repo_root,
+                pristine_dir=pristine_dir,
+            )
             exported_ok = compile_pass_outcome.kept
         elif validate:
-            # Validate-driven outer loop: per recipe, author -> kernel-validate ->
-            # serving-smoke with cross-attempt experience injection; early-exit on the
-            # first result that is KEPT (kernel parity + speedup AND survives serving).
+            # Validate-driven outer loop: per recipe, author -> kernel-validate -> serving-smoke with cross-attempt
+            # experience injection; early-exit on the first result that is KEPT (kernel parity + speedup AND survives
+            # serving).
             loop_result = _run_fusion_autoloop(
                 authored,
                 framework=framework,
@@ -845,7 +1164,7 @@ def run(
                 combine=fuse_all_confirmed,
                 model_path=model_path,
                 gpu_arch=run_arch,
-                agent_backend=agent_backend,
+                agent_backend=_campaign_agent_provider(agent_backend, llm_model),
                 agent_sandbox_mode=agent_sandbox_mode,
                 server_extra=server_extra,
                 ab_isl=ab_isl,
@@ -856,6 +1175,7 @@ def run(
                 tp=tp,
                 block_size=block_size,
                 max_model_len=max_model_len,
+                repo_scope=repo_scope,
             )
             validation = loop_result.best
             loop_manifest = loop_result.to_dict()
@@ -869,9 +1189,6 @@ def run(
             )
         elif author:
             # Author-only (validation disabled): keep the single-pass authoring path.
-            # Same prompt contract as the loop path -- the hardware it is targeting,
-            # where the harness goes, and the bar to clear. One harness covers the
-            # whole prompt here, which authors every recipe at once.
             harness_path = str(out / "kernel_harness.py")
             author_harness_path = _author_harness_target(repo_root, out)
             ready, harness_error, harness_fatal = _prepare_author_harness(
@@ -885,7 +1202,9 @@ def run(
                 log.error("author harness preparation failed: %s", harness_error)
             else:
                 prompt_harness_path = author_harness_path or harness_path
-                author_sources = [r.source_file for r in authored if r.source_file]
+                # Every call-site file, not just the primary: the author transaction treats this list as its exact
+                # write allowlist, so a multi-file fusion whose second file is missing here cannot be delivered.
+                author_sources = _recipe_files(authored)
                 prompt = build_multi_author_prompt(
                     [r.to_dict() for r in authored],
                     framework=framework,
@@ -924,52 +1243,57 @@ def run(
             exported_ok = rc == 0
             log.info("author finished rc=%s (no validation requested)", rc)
 
-        # Only export a patch when the run produced a USABLE fusion (validate path:
-        # kernel parity + speedup AND serving survived). A crashing / near-miss attempt
-        # must NOT leave an exported patch behind. The compile-pass branch already
-        # exported and restored inside its own transaction.
-        if repo_root and exported_ok and compile_pass_outcome is None:
-            artifacts = export_artifacts(repo_root, top_recipe.source_file, out, pristine_dir=pristine_dir)
+        # The multi-patch nomination already exported each sibling and restored the tree to base inside its own
+        # transaction, so the single-patch export / restore / discard below must not run for it -- it would diff the
+        # wrong (reset) tree and file a bogus discard.
+        did_multi_patch = patches_out is not None
+        # Only export a patch when the run produced a USABLE fusion (validate path: kernel parity + speedup AND
+        # serving survived).
+        if repo_root and exported_ok and compile_pass_outcome is None and not did_multi_patch:
+            artifacts = export_artifacts(
+                repo_root,
+                top_recipe.source_file,
+                out,
+                pristine_dir=pristine_dir,
+                extra_files=top_recipe.extra_files,
+                repo_scope=repo_scope,
+            )
 
-        # The exported patch is taken back out of the framework. Gated on the
-        # patch rather than on how the run reached it, so neither branch above
-        # can accidentally skip the restore.
-        #
-        # A compile_pass claim is excluded: it exports and restores inside its own
-        # ``_live_file_restored`` transaction, so restoring again here would act on
-        # a tree it already put back.
-        if repo_root and artifacts and artifacts.patch and compile_pass_outcome is None:
+        # The exported patch is taken back out of the framework.
+        if repo_root and artifacts and artifacts.patch and compile_pass_outcome is None and not did_multi_patch:
             restore_exported_changes(repo_root, artifacts, pristine_dir=pristine_dir)
-        # A compile_pass claim runs inside its own restore transaction and authors
-        # no modules, so this rollback has nothing to do there and would only file
-        # a bogus ".failed" attempt.
-        if repo_root and pristine_dir and compile_pass_outcome is None and _needs_discard(exported_ok, artifacts):
-            # Nothing usable came out, so leave the framework exactly as found
-            # rather than carrying unvalidated code into whatever runs next.
-            _discard_failed_attempt(repo_root, top_recipe.source_file, out, pristine_dir)
+        # A compile_pass claim runs inside its own restore transaction and authors no modules, so this rollback has
+        # nothing to do there and would only file a bogus ".failed" attempt.
+        if (
+            repo_root
+            and pristine_dir
+            and compile_pass_outcome is None
+            and not did_multi_patch
+            and _needs_discard(exported_ok, artifacts)
+        ):
+            # Nothing usable came out, so leave the framework exactly as found rather than carrying unvalidated code
+            # into whatever runs next.
+            _discard_failed_attempt(
+                repo_root,
+                top_recipe.source_file,
+                out,
+                pristine_dir,
+                extra_files=top_recipe.extra_files,
+            )
 
-    manifest = build_manifest(
-        framework=framework,
-        model_path=model_path,
-        model_type=model_type,
-        diagnosis=diagnosis,
-        recipe=top_recipe,
-        candidates=recipes,
+    manifest, path = publish(
+        patches_out,
         validation=validation,
         artifacts=artifacts,
         loop=loop_manifest,
         compile_pass=compile_pass_outcome,
-        verdict_override=(LLM_UNAVAILABLE_VERDICT if llm_error is not None else ""),
+        verdict_override=_verdict_override(llm_error, anchor_report, dry_run),
         error=(llm_error.to_dict() if llm_error is not None else None),
+        nomination=nomination_summary,
     )
-    if selected_agent is not None:
-        manifest["agent_backend"] = selected_agent.name
-        manifest["agent_model"] = selected_agent.runtime.model
-        manifest["agent_sandbox_mode"] = selected_agent.runtime.sandbox_mode
-    path = write_manifest(manifest, out)
     log.info("wrote manifest: %s (verdict=%s)", path, manifest["verdict"])
-    # A compile_pass run has no kernel-level ValidationResult, so report ITS verdict
-    # instead of a null that reads as "no validation ran".
+    # A compile_pass run has no kernel-level ValidationResult, so report ITS verdict instead of a null that reads as
+    # "no validation ran".
     click.echo(
         json.dumps(
             {
@@ -994,9 +1318,8 @@ def run(
         )
     )
     if llm_error is not None:
-        # Exit non-zero as well: the manifest is the contract, but a run that
-        # never reached the model must also be visible to anything that only
-        # watches exit codes.
+        # Exit non-zero as well: the manifest is the contract, but a run that never reached the model must also be
+        # visible to anything that only watches exit codes.
         raise SystemExit(EXIT_LLM_UNAVAILABLE)
     if (
         loop_result is not None
@@ -1004,24 +1327,287 @@ def run(
         and loop_result.termination_reason in ("no_git_workspace", "harness_author_failed", "serving_unconfirmed")
     ):
         # Infrastructure failure: the pipeline never had a chance to fuse anything.
-        # Distinct from 0 (no_opportunity / exhausted) and EXIT_LLM_UNAVAILABLE.
-        #
-        # A KEPT run is NOT one of these even when the smoke went unconfirmed: it
-        # produced a validated kernel and a patch, and exiting non-zero would have
-        # Hyperloom read the whole run as failed and discard exactly the KEEP this
-        # deferral exists to preserve.
         raise SystemExit(EXIT_INFRASTRUCTURE_FAILURE)
 
 
-def _combined_recipe(recipes: list[Recipe]) -> Recipe:
-    """Fold several confirmed recipes into ONE unit for the loop.
+def _publish_partial_nomination(
+    publish,
+    smoked: list[RecipePatch],
+    patch: RecipePatch,
+    *,
+    out: Path,
+    repo_root: str,
+) -> None:
+    """Record the keepers proved so far, so a kill after this one does not lose them.
 
-    ``--fuse-all-confirmed`` means "stack all confirmed fusions and measure the
-    COMBINED gain" (matching the proven multi-fusion result), not "try them one at
-    a time and stop at the first that clears the bar". So the loop treats the set
-    as a single recipe: the author writes all fusions together, and validation
-    toggles ALL their env flags. ``env_flag`` becomes the space-joined set.
+    ``fusion_manifest.json`` is the only artifact that points at a keeper, so it is written
+    after each keeper rather than once every campaign has returned. A wrapper killed in
+    between would otherwise report REVERT with ``patch=null`` while smoked, already-published
+    patches sat in the output dir.
+
+    Args:
+        publish: The run's manifest writer, or None on the paths that have no manifest.
+        smoked: Siblings already past their serving smoke; ``patch`` is appended to it.
+        patch: The sibling that just passed.
+        out: The fusion output directory.
+        repo_root: The framework checkout the patches apply to.
     """
+    smoked.append(patch)
+    if publish is None:
+        return
+    # None speedup sorts weakest, the same rule the loop's own patches[] is built on.
+    smoked.sort(key=lambda p: p.micro_speedup if p.micro_speedup is not None else -1.0, reverse=True)
+    best = smoked[0]
+    _mirror_legacy_patch(best.patch_path, out)
+    try:
+        publish(
+            [_recipe_patch_envelope(p, repo_root=repo_root) for p in smoked],
+            artifacts=FusionArtifacts(patch=best.patch_path, repo_root=repo_root),
+            loop={
+                "kept": True,
+                "best": {"kernel_speedup": best.micro_speedup},
+                "best_env_flag": best.env_flag,
+                "termination_reason": "in_progress",
+            },
+        )
+    except OSError as exc:
+        # A manifest that could not be written is not a reason to drop a proven keeper; the
+        # end-of-run write gets another chance at it.
+        log.warning("could not publish the partial nomination: %s", exc)
+
+
+def _recipe_patch_envelope(patch: RecipePatch, *, repo_root: str) -> dict[str, Any]:
+    """One entry of the manifest ``patches[]`` for an authored fusion sibling."""
+    return {
+        "kernel_name": patch.kernel_name,
+        "patch_path": patch.patch_path,
+        "target_file": patch.source_file,
+        "kernel_repo": repo_root,
+        "snapshot_dir": patch.snapshot_dir,
+        "base_commit": patch.base_commit,
+        "micro_speedup": patch.micro_speedup,
+        # The env flag that activates the fused path; the consumer sets it on the re-baseline server or the patch is
+        # measured un-fused and REVERTED.
+        "env_flag": patch.env_flag,
+        "kind": "fusion",
+    }
+
+
+def _compile_pass_envelope(claim, outcome, artifacts, *, repo_root: str) -> dict[str, Any]:
+    """One entry of the manifest ``patches[]`` for a claimed compile pass."""
+    return {
+        "kernel_name": claim.pattern_id,
+        "patch_path": artifacts.patch if artifacts is not None else None,
+        "target_file": claim.source_file,
+        "kernel_repo": repo_root,
+        "snapshot_dir": "",
+        "base_commit": "",
+        "micro_speedup": None,
+        "serving_speedup": outcome.speedup if outcome is not None else None,
+        "kind": "compile_pass",
+    }
+
+
+def _run_single_compile_pass_claim(
+    claim: Recipe,
+    *,
+    framework: str,
+    framework_root: str,
+    model_path: str,
+    gpu: str,
+    validate: bool,
+    out: Path,
+    isl: int,
+    osl: int,
+    target_speedup: float,
+    repo_root: str,
+    pristine_dir: str,
+    patch_name: str = "fusion.patch",
+) -> tuple[CompilePassOutcome, Optional[FusionArtifacts]]:
+    """Claim ONE compile pass: flip the default, A/B it, export its patch, restore."""
+    runtime = resolve_target_runtime(framework, framework_root=framework_root)
+    artifacts: Optional[FusionArtifacts] = None
+    with _live_file_restored(claim.source_file):
+        outcome = _run_compile_pass(
+            claim,
+            runtime=runtime,
+            model_path=model_path,
+            gpu=gpu,
+            validate=validate,
+            out=out,
+            isl=isl,
+            osl=osl,
+            target_speedup=target_speedup,
+        )
+        log.info(
+            "compile pass %s: kept=%s speedup=%s note=%s",
+            claim.compile_pass_flag,
+            outcome.kept,
+            outcome.speedup,
+            outcome.note,
+        )
+        if repo_root and outcome.kept:
+            artifacts = export_artifacts(
+                repo_root,
+                claim.source_file,
+                out,
+                pristine_dir=pristine_dir,
+                snapshot_diff_only=True,
+                patch_name=patch_name,
+            )
+    outcome.reverted = True  # the context manager just did it
+    return outcome, artifacts
+
+
+def _mirror_legacy_patch(patch_path: Optional[str], out: Path) -> None:
+    """Copy the strongest sibling patch to the legacy ``out/fusion.patch`` name."""
+    if not patch_path:
+        return
+    src = Path(patch_path)
+    dst = out / "fusion.patch"
+    try:
+        if src.resolve() == dst.resolve():
+            return
+        if src.is_file():
+            shutil.copy2(src, dst)
+    except OSError as exc:
+        log.warning("could not mirror %s to legacy fusion.patch: %s", patch_path, exc)
+
+
+def _run_multi_patch_nomination(
+    *,
+    claims: list[Recipe],
+    authored: list[Recipe],
+    framework: str,
+    framework_root: str,
+    out: Path,
+    repo_root: str,
+    author: bool,
+    gpu: str,
+    llm_model: Optional[str],
+    target_speedup: float,
+    model_path: str,
+    run_arch: str,
+    agent_backend: str,
+    agent_sandbox_mode: str,
+    server_extra: str,
+    ab_isl: int,
+    ab_osl: int,
+    max_turns: int,
+    max_recipes: int,
+    pristine_dir: str,
+    tp: int,
+    block_size: int,
+    max_model_len: int,
+    agent_factory,
+    repo_scope: bool = False,
+    publish=None,
+) -> tuple[list[dict[str, Any]], Optional[CompilePassOutcome], Optional[LoopResult], int]:
+    """Run BOTH pipelines and collect every keeper as an independent sibling."""
+    patches: list[dict[str, Any]] = []
+
+    # One ceiling across both pipelines, spent in ``rank_recipes`` order: a claim is a deterministic flip, so an
+    # authoring loop must not crowd it out.
+    claims_budget = _recipe_ceiling(len(claims), max_recipes)
+    remaining = max_recipes - claims_budget if max_recipes > 0 else len(authored)
+    authored_budget = min(len(authored), max(0, remaining))
+    withheld = (len(claims) - claims_budget) + (len(authored) - authored_budget)
+    if withheld:
+        log.info(
+            "multi-patch: lane ceiling of %d target(s) withholds %d lower-ranked target(s)",
+            max_recipes,
+            withheld,
+        )
+    claims = claims[:claims_budget]
+    # Sliced here: the autoloop reads a ceiling of 0 as uncapped, not as exhausted.
+    authored = authored[:authored_budget]
+
+    # Authored recipes first: the autoloop owns the shared git workspace, smokes each keeper, and returns siblings
+    # strongest-first.
+    loop_result: Optional[LoopResult] = None
+    if authored:
+        loop_result = _run_fusion_autoloop(
+            authored,
+            framework=framework,
+            out=out,
+            repo_root=repo_root,
+            author=author,
+            gpu=gpu,
+            llm_model=llm_model,
+            target_speedup=target_speedup,
+            keep_threshold=target_speedup,
+            combine=False,  # multi-patch: one sibling per keeper
+            model_path=model_path,
+            gpu_arch=run_arch,
+            agent_backend=agent_backend,
+            agent_sandbox_mode=agent_sandbox_mode,
+            server_extra=server_extra,
+            ab_isl=ab_isl,
+            ab_osl=ab_osl,
+            max_turns=max_turns,
+            max_recipes=authored_budget,
+            agent_factory=agent_factory,
+            pristine_dir=pristine_dir,
+            tp=tp,
+            block_size=block_size,
+            max_model_len=max_model_len,
+            repo_scope=repo_scope,
+            publish=publish,
+        )
+        for patch in loop_result.patches:
+            patches.append(_recipe_patch_envelope(patch, repo_root=repo_root))
+        log.info(
+            "multi-patch: authored loop kept=%s siblings=%d termination=%s",
+            loop_result.kept,
+            len(loop_result.patches),
+            loop_result.termination_reason,
+        )
+
+    # Then the claims, each its own transaction.
+    kept_claims: list[tuple[float, dict[str, Any]]] = []
+    # Report a claim outcome on the manifest's singular ``compile_pass`` slot even when nothing kept: a REJECTED claim
+    # must still be visible as kept=False, not dropped to null (which reads as "no claim ran").
+    reported_outcome: Optional[CompilePassOutcome] = None
+    strongest_kept_speedup = -1.0
+    for claim in claims:
+        outcome, arts = _run_single_compile_pass_claim(
+            claim,
+            framework=framework,
+            framework_root=framework_root,
+            model_path=model_path,
+            gpu=gpu,
+            validate=True,
+            out=out,
+            isl=ab_isl,
+            osl=ab_osl,
+            target_speedup=target_speedup,
+            repo_root=repo_root,
+            pristine_dir=pristine_dir,
+            patch_name=f"fusion_{_safe_artifact_id(claim.pattern_id)}.patch",
+        )
+        if outcome.kept and arts is not None and arts.patch:
+            env = _compile_pass_envelope(claim, outcome, arts, repo_root=repo_root)
+            speedup = outcome.speedup if outcome.speedup is not None else -1.0
+            kept_claims.append((speedup, env))
+            if reported_outcome is None or not reported_outcome.kept or speedup > strongest_kept_speedup:
+                reported_outcome = outcome
+                strongest_kept_speedup = speedup
+        elif reported_outcome is None or not reported_outcome.kept:
+            # Only a rejected claim so far; keep the latest so the manifest is not null.
+            reported_outcome = outcome
+    kept_claims.sort(key=lambda item: item[0], reverse=True)
+    patches.extend(env for _key, env in kept_claims)
+
+    return patches, reported_outcome, loop_result, withheld
+
+
+def _recipe_ceiling(discovered: int, max_recipes: int) -> int:
+    """How many ranked recipes to try out of ``discovered``."""
+    return min(discovered, max_recipes) if max_recipes > 0 else discovered
+
+
+def _combined_recipe(recipes: list[Recipe]) -> Recipe:
+    """Fold several confirmed recipes into ONE unit for the loop."""
     base = recipes[0]
     flags = list(dict.fromkeys(f for r in recipes for f in r.env_flag.split() if f))
     return Recipe(
@@ -1029,6 +1615,10 @@ def _combined_recipe(recipes: list[Recipe]) -> Recipe:
         description="; ".join(r.description for r in recipes),
         env_flag=" ".join(flags),
         source_file=base.source_file,
+        # The union, minus whichever file became the combined call site: every folded
+        # recipe's files must stay tracked or combining would silently narrow the
+        # edit scope to the first recipe's.
+        extra_files=[path for path in _recipe_files(recipes) if path != base.source_file],
         source_hints=[h for r in recipes for h in r.source_hints],
         fusion_math="\n".join(f"[{r.pattern_id}] {r.fusion_math}" for r in recipes),
         eager_reference_hint="; ".join(r.eager_reference_hint for r in recipes),
@@ -1060,41 +1650,54 @@ def _run_fusion_autoloop(
     ab_osl: int,
     max_turns: int,
     agent_factory,
+    max_recipes: int = 0,
     pristine_dir: str = "",
     tp: int = 1,
     block_size: int = 0,
     max_model_len: int = 0,
+    repo_scope: bool = False,
+    publish=None,
 ):
-    """Try each ranked recipe as one forge-loop campaign.
-
-    The loop owns authoring, validation and keep/revert; this only establishes
-    what it needs -- a git workspace over the framework tree, and per recipe a
-    harness and a driver -- then runs the serving smoke on whatever was kept.
-
-    When ``combine`` is set, all confirmed recipes are folded into ONE unit so
-    the campaign stacks every fusion and measures the COMBINED gain.
-    """
+    """Try each ranked recipe as one forge-loop campaign."""
     originals = {r.pattern_id: r for r in recipes}
     loop_recipes = [_combined_recipe(recipes)] if (combine and len(recipes) > 1) else recipes
+    # Every file any recipe edits: the shadow index has to admit all of them up front, because it is built once and
+    # shared by every campaign below.
+    campaign_files = list(dict.fromkeys(_recipe_files(loop_recipes)))
+    tracked_roots = _tracked_roots(repo_root, campaign_files)
 
-    # The author aims at ``target_speedup`` (raised when a record was inherited);
-    # the gate keeps anything above ``keep_threshold`` (absolute). Splitting them
-    # is what stops an inherited record from discarding a usable patch.
+    # Per-recipe pristine snapshots for the multi-patch export.
+    multi_patch = not combine
+    recipe_pristine: dict[str, str] = {}
+    if multi_patch and repo_root:
+        for r in loop_recipes:
+            snap = _snapshot_fusion_source(
+                repo_root,
+                r.source_file,
+                out,
+                subdir=f".pristine_{_safe_artifact_id(r.pattern_id)}",
+                extra_files=r.extra_files,
+            )
+            if snap:
+                recipe_pristine[r.pattern_id] = snap
+
+    # The author aims at ``target_speedup`` (raised when a record was inherited); the gate keeps anything above
+    # ``keep_threshold`` (absolute).
     keep_bar = target_speedup if keep_threshold is None else keep_threshold
 
-    # Only the authoring path runs campaigns. Without one there is nothing to
-    # keep or revert, and the placeholders below would empty the very modules
-    # ``--no-author`` exists to score.
+    # Only the authoring path runs campaigns.
     shadow = None
     if author and loop_recipes:
-        # Every recipe's fused module is tracked at the baseline, not just the
-        # one about to run: the loop keeps with ``git add -u``, which cannot
-        # commit a file created mid-campaign.
+        # Every recipe's fused module is tracked at the baseline, not just the one about to run: the loop keeps with
+        # ``git add -u``, which cannot commit a file created mid-campaign.
         shadow = ensure_git_workspace(
             repo_root,
             loop_recipes[0].source_file,
             git_dir=str(out / "shadow.git"),
             extra_paths=tuple(fused_module_path(r) for r in loop_recipes),
+            # A fusion whose call sites span packages is keepable only if every one of
+            # those packages is in the index.
+            scope_files=campaign_files,
         )
         if shadow is None:
             log.error(
@@ -1122,14 +1725,11 @@ def _run_fusion_autoloop(
                 harness_path=_harness_path_for(recipe),
                 target_speedup=keep_bar,
             )
-        # A fresh campaign refuses to start where the previous one left state,
-        # and the loop anchors that state to the workspace rather than to
-        # ``--experiments-dir``. Without this the SECOND recipe is rejected.
+        # A fresh campaign refuses to start where the previous one left state, and the loop anchors that state to the
+        # workspace rather than to ``--experiments-dir``.
         shutil.rmtree(Path(shadow.root) / LOOP_CAMPAIGN_STATE, ignore_errors=True)
-        # Score every recipe against the UNFUSED framework: the previous
-        # campaign's commits are otherwise still in the tree, and the two
-        # changes get reported stacked as if they were one. Cannot lose a win,
-        # because run_fusion_loop returns the instant a campaign KEEPs.
+        # Score every recipe against the UNFUSED framework: the previous campaign's commits are otherwise still in the
+        # tree, and the two changes get reported stacked as if they were one.
         if not shadow.reset_to_base():
             return ValidationResult(
                 correctness_passed=False,
@@ -1140,6 +1740,7 @@ def _run_fusion_autoloop(
                 fused_us=None,
                 kept=False,
                 note="CAMPAIGN FAILED: could not restore the unfused baseline",
+                correctness_measured=False,
             )
         # After the reset, so the loop's anchor bench measures the unfused tree.
         harness_path = _harness_path_for(recipe)
@@ -1154,8 +1755,8 @@ def _run_fusion_autoloop(
             backend=agent_factory,
         )
         if not ready:
-            # Not this recipe's failure: recording it as one would file a wrong
-            # lesson that the next recipe's campaign is then prompted with.
+            # Not this recipe's failure: recording it as one would file a wrong lesson that the next recipe's campaign
+            # is then prompted with.
             raise FusionAbort(f"no harness for {recipe.pattern_id}: {reason}")
         outcome = run_recipe_campaign(
             recipe,
@@ -1171,13 +1772,86 @@ def _run_fusion_autoloop(
             agent_sandbox_mode=agent_sandbox_mode,
             shadow_env=shadow.env,
             fused_module=fused_module_path(recipe),
+            repo_scope=repo_scope,
+            tracked_roots=tracked_roots,
         )
         if outcome.experiment_id:
             campaign_experiments[recipe.pattern_id] = outcome.experiment_id
         return outcome.result
 
+    # Every sibling that has passed its serving smoke so far, so a run killed mid-campaign still
+    # publishes the ones it already proved.
+    smoked: list[RecipePatch] = []
+
+    def on_keep(recipe, vr):
+        """Export the just-kept recipe's OWN sibling patch before the next reset."""
+        if not multi_patch or not repo_root:
+            return None
+        pristine = recipe_pristine.get(recipe.pattern_id, "")
+        if not pristine:
+            log.warning("no pristine snapshot for kept recipe %s; cannot export its sibling", recipe.pattern_id)
+            return None
+        # Export the patch FIRST, while this recipe's edits are still live in the shared tree (the loop has not reset
+        # to base yet).
+        patch_name = f"fusion_{_safe_artifact_id(recipe.pattern_id)}.patch"
+        # Scope the export to THIS recipe's own fused module.
+        arts = export_artifacts(
+            repo_root,
+            recipe.source_file,
+            out,
+            pristine_dir=pristine,
+            patch_name=patch_name,
+            fused_module=fused_module_path(recipe),
+            extra_files=recipe.extra_files,
+            repo_scope=repo_scope,
+        )
+        if not (arts and arts.patch):
+            log.warning("kept recipe %s produced no patch on export", recipe.pattern_id)
+            return None
+        # Serving smoke EACH keeper, not just the strongest: a sibling that boots and crashes real decode only reveals
+        # it on a full server boot, and Hyperloom's integrate lane is serial at ~25 min per patch.
+        disposition, note, _termination = _run_serving_smoke(
+            recipe,
+            base_note=vr.note or "",
+            framework=framework,
+            out=out,
+            gpu=gpu,
+            model_path=model_path,
+            isl=ab_isl,
+            osl=ab_osl,
+            server_extra=server_extra,
+            tp=tp,
+            block_size=block_size,
+            max_model_len=max_model_len,
+        )
+        vr.note = note
+        if disposition in ("not_wired", "serving_crash"):
+            vr.kept = False
+            vr.kernel_speedup = None
+            if disposition == "serving_crash":
+                vr.correctness_passed = False
+            # The run rejected this sibling, so its exported patch must not outlive the decision: a later
+            # reader has no way to tell it apart from one that passed.
+            with contextlib.suppress(OSError):
+                Path(arts.patch).unlink()
+            log.warning("dropping fusion sibling %s from nomination (%s)", recipe.pattern_id, disposition)
+            return None
+        patch = RecipePatch(
+            kernel_name=recipe.pattern_id,
+            patch_path=arts.patch,
+            source_file=recipe.source_file,
+            micro_speedup=vr.kernel_speedup,
+            snapshot_dir=pristine,
+            base_commit=shadow.base_commit if shadow is not None else "",
+            # The fused path is env-gated; the flag has to reach the e2e re-baseline or integrate measures the
+            # un-fused path (see RecipePatch).
+            env_flag=recipe.env_flag,
+        )
+        _publish_partial_nomination(publish, smoked, patch, out=out, repo_root=repo_root)
+        return patch
+
     cfg = LoopConfig(
-        max_recipes=len(loop_recipes),
+        max_recipes=_recipe_ceiling(len(loop_recipes), max_recipes),
         target_speedup=keep_bar,
         output_dir=str(out),
     )
@@ -1187,8 +1861,14 @@ def _run_fusion_autoloop(
             framework=framework,
             campaign_fn=campaign_fn,
             config=cfg,
+            on_keep=on_keep if multi_patch else None,
         )
-        if result.kept and result.best_recipe is not None:
+        # The combine path folds everything into ONE recipe whose edits are still live in the tree, so the strongest
+        # (only) keeper is smoked here.
+        if multi_patch:
+            if shadow is not None:
+                shadow.reset_to_base()
+        elif result.kept and result.best_recipe is not None:
             apply_serving_gate(
                 result,
                 framework=framework,
@@ -1244,30 +1924,12 @@ def apply_serving_gate(
     block_size: int = 0,
     max_model_len: int = 0,
 ) -> None:
-    """Boot the real server once; only a fused-kernel fault demotes a KEEP.
-
-    Parity and the microbench run on small shapes with no CUDA graph, so a
-    kernel that allocates or host-syncs per call passes both and still crashes
-    the captured decode loop. Booting costs tens of minutes, hence once.
-
-    Session ``tp`` / KV ``block_size`` / ``max_model_len`` must match real serving
-    (sparse vLLM rejects the default block size). A failure the smoke does not
-    attribute to the kernel is not a kernel loss: keep the micro KEEP so
-    Hyperloom e2e can still verify it.
-    """
+    """Boot the real server once; only a fused-kernel fault demotes a KEEP."""
     if not (_serving_check_enabled() and model_path and result.best_recipe):
         return
     recipe = result.best_recipe
-    flags = {f: "1" for f in recipe.env_flag.split()}
-    safe_id = _safe_artifact_id(recipe.pattern_id)
     vr = result.best
-    smoke_block = int(block_size) if int(block_size or 0) > 0 else None
-    smoke_mml = int(max_model_len) if int(max_model_len or 0) > 0 else 4096
-    # Export BEFORE the smoke, so a forge-fuse killed while serving still leaves an
-    # applicable patch. ``pristine_dir`` is what makes that possible on a non-git
-    # framework (a pip install has nothing for `git diff` to report), and the
-    # checkpoint is written only once the patch is on disk: it is the completion
-    # marker Hyperloom salvages on, so it must never point at a missing patch.
+    # Export BEFORE the smoke, so a forge-fuse killed while serving still leaves an applicable patch.
     exported = _export_salvage_patch(
         out,
         getattr(recipe, "source_file", ""),
@@ -1281,26 +1943,77 @@ def apply_serving_gate(
             "no fusion patch could be exported for %s; a killed run cannot be salvaged",
             recipe.pattern_id,
         )
-    # Cheapest gate first, and the only one that catches a fusion nothing calls:
-    # the smoke would boot, decode and PASS, because stock code is what ran.
-    wired, wiring = fused_symbol_invocation_evidence(getattr(recipe, "source_file", ""))
-    if not wired:
+    disposition, note, termination = _run_serving_smoke(
+        recipe,
+        base_note=vr.note,
+        framework=framework,
+        out=out,
+        gpu=gpu,
+        model_path=model_path,
+        isl=isl,
+        osl=osl,
+        server_extra=server_extra,
+        tp=tp,
+        block_size=block_size,
+        max_model_len=max_model_len,
+    )
+    vr.note = note
+    if termination:
+        result.termination_reason = termination
+    # A fusion nothing calls (not_wired) or one that faults CUDA-graph decode (serving_crash) is not a real KEEP:
+    # demote it so Hyperloom never boots it.
+    if disposition in ("not_wired", "serving_crash"):
         result.kept = False
         vr.kept = False
         vr.kernel_speedup = None
-        vr.note = (
-            f"KERNEL OK but NOT WIRED IN: {wiring}. The microbench measured the fused "
+        if disposition == "serving_crash":
+            vr.correctness_passed = False
+        _clear_kernel_keep_checkpoint(out)
+
+
+def _run_serving_smoke(
+    recipe,
+    *,
+    base_note: str,
+    framework: str,
+    out: Path,
+    gpu: str,
+    model_path: str,
+    isl: int,
+    osl: int,
+    server_extra: str = "",
+    tp: int = 1,
+    block_size: int = 0,
+    max_model_len: int = 0,
+) -> tuple[str, str, str]:
+    """Wiring-check + CUDA-graph-ON serving smoke for ONE recipe."""
+    flags = {f: "1" for f in recipe.env_flag.split()}
+    safe_id = _safe_artifact_id(recipe.pattern_id)
+    smoke_block = int(block_size) if int(block_size or 0) > 0 else None
+    smoke_mml = int(max_model_len) if int(max_model_len or 0) > 0 else 4096
+    # Cheapest gate first, and the only one that catches a fusion nothing calls: the smoke would boot, decode and
+    # PASS, because stock code is what ran.
+    wiring = fused_symbol_invocation_evidence(
+        getattr(recipe, "source_file", ""),
+        getattr(recipe, "extra_files", ()),
+    )
+    if wiring.verdict == "not_wired":
+        log.warning("fusion not wired into %s: %s", recipe.pattern_id, wiring.reason)
+        note = (
+            f"KERNEL OK but NOT WIRED IN: {wiring.reason}. The microbench measured the fused "
             f"entry point directly, so its speedup says nothing about the served model, "
             f"whose end-to-end gain is exactly zero. | LESSON: authoring the fused module "
             f"is half the deliverable -- replace the ORIGINAL call site in the framework's "
             f"forward path with a call to the fused entry point, under the same env gate, "
             f"and leave the unfused code as the fallback branch."
         )
-        result.termination_reason = "not_wired"
-        _clear_kernel_keep_checkpoint(out)
-        log.warning("fusion not wired into %s: %s", recipe.pattern_id, wiring)
-        return
-    log.info("fusion wiring confirmed for %s: %s", recipe.pattern_id, wiring)
+        return "not_wired", note, "not_wired"
+    if wiring.verdict == "wired":
+        log.info("fusion wiring confirmed for %s: %s", recipe.pattern_id, wiring.reason)
+        wiring_note = ""
+    else:
+        log.info("fusion wiring NOT CHECKED for %s: %s", recipe.pattern_id, wiring.reason)
+        wiring_note = f" | WIRING UNCHECKED: {wiring.reason}"
     verdict = serving_smoke_verdict(
         model_path,
         flags,
@@ -1316,15 +2029,11 @@ def apply_serving_gate(
     )
     reason = verdict.reason
     if verdict.ok:
-        vr.note = f"{vr.note} | SERVING SMOKE OK"
         log.info("serving smoke OK for %s", recipe.pattern_id)
-        return
+        return "ok", f"{base_note} | SERVING SMOKE OK{wiring_note}", ""
     if verdict.blames_kernel:
-        result.kept = False
-        vr.kept = False
-        vr.correctness_passed = False
-        vr.kernel_speedup = None
-        vr.note = (
+        log.warning("serving smoke FAILED for %s: %s", recipe.pattern_id, reason)
+        note = (
             f"KERNEL OK but SERVING CRASHED (CUDA-graph-ON decode): {reason} "
             f"| LESSON: the kernel is NOT CUDA-graph-capture safe. Use a STATIC "
             f"launch grid (no data-dependent grid size), pre-allocate every "
@@ -1332,23 +2041,20 @@ def apply_serving_gate(
             f"torch.empty/zeros/cat), avoid host<->device syncs, and index "
             f"strictly in bounds for every token count. Re-author CUDA-graph safe."
         )
-        result.termination_reason = "serving_crash"
-        _clear_kernel_keep_checkpoint(out)
-        log.warning("serving smoke FAILED for %s: %s", recipe.pattern_id, reason)
-        return
-    vr.note = (
-        f"{vr.note} | SERVING SMOKE UNCONFIRMED at stage {verdict.stage} "
-        f"(defer e2e): {reason} | LESSON: the GPU did not fault, so nothing here "
-        f"is evidence against the kernel. Do not re-author to fix it; Hyperloom "
-        f"e2e is the KEEP/REVERT gate."
-    )
-    result.termination_reason = "serving_unconfirmed"
+        return "serving_crash", note, "serving_crash"
     log.warning(
         "serving smoke unconfirmed for %s at stage %s (keeping micro KEEP): %s",
         recipe.pattern_id,
         verdict.stage,
         reason,
     )
+    note = (
+        f"{base_note} | SERVING SMOKE UNCONFIRMED at stage {verdict.stage} "
+        f"(defer e2e): {reason}{wiring_note} | LESSON: the GPU did not fault, so nothing here "
+        f"is evidence against the kernel. Do not re-author to fix it; Hyperloom "
+        f"e2e is the KEEP/REVERT gate."
+    )
+    return "unconfirmed", note, "serving_unconfirmed"
 
 
 def validate_existing_source(
@@ -1381,28 +2087,17 @@ def _export_salvage_patch(
     repo_root: str = "",
     pristine_dir: str = "",
 ) -> bool:
-    """Write ``fusion.patch`` for the edits made so far; report whether one exists.
-
-    ``pristine_dir`` is required for a non-git framework tree: ``git diff`` reports
-    nothing for a pip install, so without the snapshot baseline the export is empty
-    and there is nothing for Hyperloom to apply.
-    """
+    """Write ``fusion.patch`` for the edits made so far; report whether one exists."""
     if not repo_root or not source_file:
         return False
-    # This output directory may be reused. Invalidate the previous run's
-    # completion marker and patch BEFORE asking export to produce this run's
-    # artifact; otherwise an empty export can accidentally bless stale bytes.
+    # This output directory may be reused.
     _clear_kernel_keep_checkpoint(out)
-    try:
-        artifacts = export_artifacts(
-            repo_root,
-            source_file,
-            out,
-            pristine_dir=pristine_dir or None,
-        )
-    except Exception as exc:  # noqa: BLE001 — export must never fail the gate.
-        log.warning("fusion patch export failed: %s: %s", type(exc).__name__, exc)
-        return False
+    artifacts = export_artifacts(
+        repo_root,
+        source_file,
+        out,
+        pristine_dir=pristine_dir or None,
+    )
     if not artifacts.patch:
         return False
     patch = Path(artifacts.patch)
@@ -1410,11 +2105,7 @@ def _export_salvage_patch(
 
 
 def _write_kernel_keep_checkpoint(out: Path, recipe, vr, *, repo_root: str = "") -> None:
-    """Persist a micro KEEP so a killed forge-fuse process can still be salvaged.
-
-    Written atomically: a reader that finds this file must find a COMPLETE record,
-    since it is what Hyperloom treats as "this run produced a salvageable KEEP".
-    """
+    """Persist a micro KEEP so a killed forge-fuse process can still be salvaged."""
     payload = {
         "kept": True,
         "kernel_speedup": getattr(vr, "kernel_speedup", None),
@@ -1426,11 +2117,8 @@ def _write_kernel_keep_checkpoint(out: Path, recipe, vr, *, repo_root: str = "")
         "repo_root": repo_root,
         "note": getattr(vr, "note", ""),
     }
-    path = out / KERNEL_KEEP_CHECKPOINT
-    tmp = path.with_suffix(".json.tmp")
     with contextlib.suppress(OSError):
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_json(out / KERNEL_KEEP_CHECKPOINT, payload, make_parents=False)
 
 
 def _clear_kernel_keep_checkpoint(out: Path) -> None:
@@ -1448,18 +2136,7 @@ def measure_harness_noise(
     env_flags: tuple[str, ...] = (),
     workdir: str = ".",
 ) -> dict[str, object]:
-    """Measure how much the same harness varies on this machine.
-
-    The KEEP bar and the plateau noise floor (2%) are assumptions about
-    measurement stability that were never checked against a real GPU. If the
-    run-to-run spread here is comparable to those numbers, then "beat the previous
-    result by 3%" is partly deciding on noise -- which matters most for the
-    inherited floor, where a 3% margin gates whether a result is recorded at all.
-
-    Repeats one harness unchanged, so everything except measurement noise is held
-    constant. Report ``speedup_cv`` (relative standard deviation) against
-    ``bar_in_sigmas``: a bar worth trusting sits several sigma out.
-    """
+    """Measure how much the same harness varies on this machine."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     flags = {name: "1" for name in env_flags}
     speedups: list[float] = []
@@ -1511,8 +2188,7 @@ def measure_harness_noise(
                 "spread_pct": round((max(speedups) - min(speedups)) / mean * 100.0, 2),
                 "eager_us_mean": round(statistics.fmean(eager), 3),
                 "fused_us_mean": round(statistics.fmean(fused), 3),
-                # How far out the 3% improvement bar sits. Comparing two independent
-                # measurements roughly doubles the variance, hence the sqrt(2).
+                # How far out the 3% improvement bar sits.
                 "bar_in_sigmas": round(0.03 / (cv * (2**0.5)), 2) if cv else None,
                 "verdict": (
                     "the 3% bar is within noise"
@@ -1526,15 +2202,7 @@ def measure_harness_noise(
 
 @contextlib.contextmanager
 def _live_file_restored(path: str):
-    """Guarantee byte-exact restoration of a live framework file on EVERY exit.
-
-    The compile-pass path edits an INSTALLED framework, so a failed smoke, an empty
-    patch or an exception must not leave the install silently modified. Restoring
-    the pre-run bytes (not ``git checkout``, which would reset to HEAD and discard
-    unrelated uncommitted edits) also keeps any pre-existing modifications intact,
-    and because the exported patch is diffed against the same pre-run snapshot,
-    those modifications never leak into it.
-    """
+    """Guarantee byte-exact restoration of a live framework file on EVERY exit."""
     target = Path(path) if path else None
     original: Optional[bytes] = None
     mode: Optional[int] = None
@@ -1548,8 +2216,8 @@ def _live_file_restored(path: str):
     try:
         yield
     finally:
-        # Stay in the ``finally`` without returning: a return here would swallow
-        # an exception from the body when there was nothing to restore.
+        # Stay in the ``finally`` without returning: a return here would swallow an exception from the body when there
+        # was nothing to restore.
         if original is not None and target is not None:
             try:
                 if target.read_bytes() != original:
@@ -1604,17 +2272,7 @@ def _run_compile_pass(
     osl: int,
     target_speedup: float,
 ) -> CompilePassOutcome:
-    """Claim a fusion the framework implements but ships switched OFF.
-
-    The edit itself is deterministic and LLM-free, but "the server booted" proves
-    nothing: flipping a class default is a no-op for any flag something else
-    overrides, and an enabled pass can still fail to match the model or cost
-    throughput. So the flip is confirmed against the target's RESOLVED config and
-    then measured by a disabled/enabled A/B on the same runtime, model and request
-    shape, with the same speedup bar the authoring path uses.
-
-    Caller MUST revert the file unless ``kept``; this function does not restore.
-    """
+    """Claim a fusion the framework implements but ships switched OFF."""
     flag = recipe.compile_pass_flag
     outcome = CompilePassOutcome(
         flag=flag, config_file=recipe.source_file, source="default", target_speedup=target_speedup
@@ -1647,8 +2305,7 @@ def _run_compile_pass(
         return outcome
     log.info("flipped native compile pass %s in %s", flag, recipe.source_file)
 
-    # Did the edit actually change what the target RESOLVES? A level or any other
-    # override would silently win, making the patch behaviourally empty.
+    # Did the edit actually change what the target RESOLVES?
     state = verify_pass_enabled(flag, python=runtime.python, require_root=runtime.require_root)
     outcome.enabled_after_edit = state.enabled
     outcome.source = state.source or outcome.source
@@ -1674,8 +2331,8 @@ def _run_compile_pass(
         isl=isl,
         osl=osl,
         launcher_exe=runtime.launcher_exe,
-        # Fusion passes report what they rewrote at debug level; without this the
-        # run cannot tell "fused N sites" from "matched nothing".
+        # Fusion passes report what they rewrote at debug level; without this the run cannot tell "fused N sites" from
+        # "matched nothing".
         env_flags={"VLLM_LOGGING_LEVEL": "DEBUG"},
     )
     outcome.enabled_tok_s = enabled.get("tok_s")
@@ -1711,61 +2368,38 @@ _FUSED_INVENTORY = ".fused_siblings"
 
 
 def _read_fused_inventory(snapshot_dir: Path) -> set[str] | None:
-    """Names of the fused-looking modules that existed BEFORE authoring.
-
-    ``None`` means the inventory was never recorded, which has to be treated as
-    "nothing is known to be author-created" rather than as an empty set.
-    """
+    """Names of the fused-looking modules that existed BEFORE authoring."""
     listing = snapshot_dir / _FUSED_INVENTORY
     try:
         raw = listing.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        # Unreadable and undecodable are the same answer here: this runs while
-        # cleaning up, so it must not raise, and an inventory it cannot trust
-        # means it deletes nothing.
+        # Unreadable and undecodable are the same answer here: this runs while cleaning up, so it must not raise, and
+        # an inventory it cannot trust means it deletes nothing.
         return None
     return {line.strip() for line in raw.splitlines() if line.strip()}
 
 
 def _needs_discard(exported_ok: bool, artifacts) -> bool:
-    """Whether the framework is still carrying changes nobody exported.
-
-    A run that produced a patch has already been restored by
-    :func:`restore_exported_changes`. Everything else -- a rejected attempt, and
-    equally an accepted one whose export came back empty -- leaves edits behind
-    that no artifact records, so they have to be rolled back here. The empty-export
-    case is easy to miss because the run looks successful right up to the point
-    where there is nothing to show for it.
-    """
+    """Whether the framework is still carrying changes nobody exported."""
     if not exported_ok:
         return True
     return not (artifacts and artifacts.patch)
 
 
-def _discard_failed_attempt(repo_root: str, source_file: str, out: Path, pristine_dir: str) -> None:
-    """Put the framework back as it was after a run that produced nothing usable.
-
-    A KEPT run exports a patch and then restores; a failed run used to do neither,
-    leaving the framework carrying code that never passed validation. The fused
-    path is env-gated so a default import is unlikely to hit it, but a pip-installed
-    package silently modified is a trap for whoever uses that machine next -- and
-    inheriting a floor makes failed runs MORE common, so this got likelier.
-
-    The attempt is preserved under ``out/.failed`` first: discarding it outright
-    would throw away the only record of what the author actually wrote.
-
-    Modules the author created are deleted, identified against the inventory the
-    snapshot recorded rather than by name -- a framework file such as
-    ``diffusion_gemma.py`` matches the marker and must survive. The inventory is
-    used instead of the snapshot's own files because copying a sibling is allowed
-    to fail without failing the run, and a failed copy would otherwise make a
-    framework file look author-created. Deleting from ``site-packages`` on that
-    basis is not a mistake worth risking, so a missing inventory removes nothing.
-    """
+def _discard_failed_attempt(
+    repo_root: str,
+    source_file: str,
+    out: Path,
+    pristine_dir: str,
+    extra_files: Sequence[str] = (),
+) -> None:
+    """Put the framework back as it was after a run that produced nothing usable."""
     if not repo_root or not source_file or not pristine_dir:
         return
-    _snapshot_fusion_source(repo_root, source_file, out, subdir=".failed")
-    _reset_fusion_source(repo_root, source_file, pristine_dir=pristine_dir)
+    _snapshot_fusion_source(repo_root, source_file, out, subdir=".failed", extra_files=extra_files)
+    for path in [source_file, *extra_files]:
+        if path:
+            _reset_fusion_source(repo_root, path, pristine_dir=pristine_dir)
 
     for candidate in _author_created_modules(source_file, pristine_dir):
         with contextlib.suppress(OSError):
@@ -1774,20 +2408,7 @@ def _discard_failed_attempt(repo_root: str, source_file: str, out: Path, pristin
 
 
 def _author_created_modules(source_file: str, pristine_dir: str) -> list[Path]:
-    """Fused-looking modules that appeared beside the source during this run.
-
-    Identified against the inventory the snapshot recorded rather than by name: a
-    framework file such as ``fused_moe.py`` matches the marker and must survive.
-    The inventory is used instead of the snapshot's own files because copying a
-    sibling is allowed to fail without failing the run, and a failed copy would
-    otherwise make a framework file look author-created. Deleting from
-    ``site-packages`` on that basis is not a mistake worth risking, so a missing
-    inventory claims nothing.
-
-    Shared by the two paths that have to account for these modules -- discarding a
-    failed attempt, and adopting a KB patch over one -- because a divergence
-    between them is invisible until a framework install is already polluted.
-    """
+    """Fused-looking modules that appeared beside the source during this run."""
     if not source_file or not pristine_dir:
         return []
     pre_existing = _read_fused_inventory(Path(pristine_dir))
@@ -1796,10 +2417,8 @@ def _author_created_modules(source_file: str, pristine_dir: str) -> list[Path]:
     model_dir = Path(source_file).parent
     if not model_dir.is_dir():
         return []
-    # The inventory lists the source's SIBLINGS, so the source is absent from it
-    # by construction -- and a model file can itself be named like a fused module
-    # (``fused_moe.py``). Skipping it explicitly keeps the caller from deleting the
-    # file a restore just put back.
+    # The inventory lists the source's SIBLINGS, so the source is absent from it by construction -- and a model file
+    # can itself be named like a fused module (``fused_moe.py``).
     source_resolved = Path(source_file).resolve()
     found: list[Path] = []
     for candidate in sorted(model_dir.glob("*.py")):
@@ -1811,12 +2430,18 @@ def _author_created_modules(source_file: str, pristine_dir: str) -> list[Path]:
     return found
 
 
-def _snapshot_fusion_source(repo_root: str, source_file: str, out: Path, subdir: str = ".pristine") -> str:
-    """Copy the pristine model source (pre-authoring) into ``out/<subdir>/<rel>``.
+def _snapshot_fusion_source(
+    repo_root: str,
+    source_file: str,
+    out: Path,
+    subdir: str = ".pristine",
+    extra_files: Sequence[str] = (),
+) -> str:
+    """Copy the pristine framework source (pre-authoring) into ``out/<subdir>/<rel>``.
 
-    Lets :func:`emit.export_artifacts` produce a patch by diffing snapshot-vs-live
-    when the framework is a non-git pip install (git diff is empty there). Returns
-    the snapshot root, or "" when nothing could be snapshotted.
+    ``extra_files`` are the further call-site files a multi-file fusion edits. They
+    are snapshotted too so the non-git export can diff them; without a snapshot
+    such a file diffs against nothing and exports as a bogus whole-file creation.
     """
     if not source_file or not Path(source_file).is_file():
         return ""
@@ -1839,21 +2464,20 @@ def _snapshot_fusion_source(repo_root: str, source_file: str, out: Path, subdir:
             log.warning("could not snapshot pristine fusion source %s: %s", f, exc)
             return False
 
-    # The MAIN source snapshot is mandatory: without it, export would diff a
-    # missing snapshot ("") vs the live edited file and emit the whole file as a
-    # bogus "new file". Fail closed (return "") in that case.
+    # The MAIN source snapshot is mandatory: without it, export would diff a missing snapshot ("") vs the live edited
+    # file and emit the whole file as a bogus "new file".
     src = Path(source_file)
     if not _snap(src):
         return ""
 
-    # Also snapshot any pre-existing *_fused*/*_fusion* module beside it, so export
-    # can tell an author-created NEW module from a pre-existing framework file that
-    # merely matches the marker. Failure here is non-fatal.
-    #
-    # Their NAMES are recorded separately from the copies, because a rollback
-    # deletes what is not on this list: listing a directory is reliable, copying
-    # into it is not, and a file missing only because its copy failed must not
-    # look author-created.
+    # The same reasoning applies to every other file this fusion edits, but one of them failing is not fatal: the
+    # primary is what decides whether a patch can be produced at all.
+    for path in extra_files:
+        if path and Path(path).is_file() and Path(path).resolve() != src.resolve():
+            _snap(Path(path))
+
+    # Also snapshot any pre-existing *_fused*/*_fusion* module beside it, so export can tell an author-created NEW
+    # module from a pre-existing framework file that merely matches the marker.
     model_dir = src.parent
     if model_dir.is_dir():
         siblings = [
@@ -1867,40 +2491,22 @@ def _snapshot_fusion_source(repo_root: str, source_file: str, out: Path, subdir:
 
 
 def _reset_fusion_source(repo_root: str, source_file: str, pristine_dir: str = "") -> None:
-    """Revert the tracked model source file to its committed baseline (best-effort).
-
-    Called before each author attempt so a failed attempt does not leave broken
-    edits for the next one. Untracked files (e.g. a stale ``*_fused.py``) are left
-    in place — they are not imported by the reverted eager source and deleting by
-    pattern could remove unrelated modules.
-
-    Non-git framework (pip install): git checkout cannot revert, so restore the
-    source file from the pre-authoring ``pristine_dir`` snapshot when available.
-
-    Only the MAIN source file is restored here, on both paths. Author-created
-    ``*_fused*`` siblings are the caller's to clear, because identifying them needs
-    the pristine inventory (:func:`_author_created_modules`) rather than a name
-    pattern that would also match framework modules. They must not be left for the
-    next attempt: the author guard inventories the module directory when it starts,
-    so a leftover name reads as pre-existing and re-authoring the same fusion is
-    rejected for touching it.
-    """
+    """Revert the tracked model source file to its committed baseline (best-effort)."""
     import subprocess
 
     if not repo_root or not source_file:
         return
-    # Use the SAME rel scheme as _snapshot_fusion_source (basename fallback when the
-    # source is not under repo_root) so the pristine restore below can find the snap.
+    # Use the SAME rel scheme as _snapshot_fusion_source (basename fallback when the source is not under repo_root) so
+    # the pristine restore below can find the snap.
     try:
         rel = str(Path(source_file).resolve().relative_to(Path(repo_root).resolve()))
         rel_is_repo_relative = True
     except ValueError:
         rel = Path(source_file).name
         rel_is_repo_relative = False
-    # Decide by whether the source file is git-TRACKED, NOT merely inside a work
-    # tree — a pip framework under a project-local venv/site-packages is untracked,
-    # so `git checkout` is a no-op there and we must restore from the snapshot.
-    # (Aligned with export_artifacts / restore_exported_changes.)
+    # Decide by whether the source file is git-TRACKED, NOT merely inside a work tree — a pip framework under a
+    # project-local venv/site-packages is untracked, so `git checkout` is a no-op there and we must restore from the
+    # snapshot. (Aligned with export_artifacts / restore_exported_changes.)
     if not _git_tracks(repo_root, source_file):
         if pristine_dir:
             snap = Path(pristine_dir) / rel
@@ -1939,18 +2545,7 @@ def _reset_fusion_source(repo_root: str, source_file: str, pristine_dir: str = "
 
 
 def _package_root(source_file: str) -> str:
-    """Top install dir containing ``source_file``'s package (site-packages-style root).
-
-    Walks up while a parent has ``__init__.py`` and returns the dir ABOVE the
-    top package (e.g. ``.../qwen3.py`` -> ``.../site-packages``). Used as the patch
-    repo_root for a non-git (pip-installed) framework so exported diff paths are
-    package-relative and apply cleanly at that root.
-
-    NOTE: assumes every intermediate package level ships an ``__init__.py`` (true
-    for vLLM/sglang). A PEP 420 namespace package (no ``__init__.py``) would stop
-    the walk early and yield a deeper-than-expected root; revisit if such a
-    framework appears.
-    """
+    """Top install dir containing ``source_file``'s package (site-packages-style root)."""
     if not source_file:
         return ""
     p = Path(source_file).resolve()
@@ -1961,15 +2556,7 @@ def _package_root(source_file: str) -> str:
 
 
 def _framework_repo_root(source_file: str, framework_root: str) -> str:
-    """Repo/install root that patch paths are relative to (for patch export).
-
-    Uses the git work-tree root ONLY when ``source_file`` is actually git-TRACKED
-    there. A pip-installed framework frequently lives under a git work tree (e.g. a
-    project-local ``.venv``/``site-packages``) yet is untracked; returning the
-    project root then makes patch paths project-relative and non-appliable at the
-    package root. In that case (and for a plain pip install) fall back to the
-    package install root so exported diff paths stay package-relative.
-    """
+    """Repo/install root that patch paths are relative to (for patch export)."""
     import subprocess
 
     start = source_file or framework_root
@@ -1989,15 +2576,15 @@ def _framework_repo_root(source_file: str, framework_root: str) -> str:
             toplevel = r.stdout.strip()
             if source_file and _git_tracks(toplevel, source_file):
                 return toplevel
-            # Inside a git work tree but the framework file is untracked (venv in a
-            # git project): use the package root, not the project root.
+            # Inside a git work tree but the framework file is untracked (venv in a git project): use the package
+            # root, not the project root.
             return _package_root(source_file) or toplevel or framework_root or ""
     # Not a git work tree at all (plain pip install).
     return _package_root(source_file) or framework_root or ""
 
 
-# The command is registered on the kernelforge CLI as `forge-fuse`; this alias
-# keeps `python -m kernelforge.fusion.command` working for direct debugging.
+# The command is registered on the kernelforge CLI as `forge-fuse`; this alias keeps `python -m
+# kernelforge.fusion.command` working for direct debugging.
 main = run
 
 

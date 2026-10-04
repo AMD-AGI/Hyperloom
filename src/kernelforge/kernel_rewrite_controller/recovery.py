@@ -1,0 +1,269 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Recover validated forge-loop best results into controller publications."""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
+from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
+from kernelforge.kernel_rewrite_controller.publisher import (
+    PUBLICATION_FILENAME,
+    publication_from_task,
+    publish_operator_result,
+)
+from kernelforge.kernel_rewrite_controller.state import TaskStateStore
+from kernelforge.kernel_rewrite_controller.task import discover_task_dirs, load_task
+from kernelforge.kernel_rewrite_controller.worktree import (
+    FORGE_LOOP_OUTPUT_DIRNAME,
+    OperatorWorktree,
+    changed_files_from_base,
+    commit_exists,
+    export_patch_from_base,
+    operator_workspace,
+)
+from kernelforge.loop.editable_repo import needs_inplace
+from kernelforge.loop.reporting import BestResultPublisher
+
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RecoveryResult:
+    """Outcome of reconciling one task workspace with public results."""
+
+    operator_id: str
+    published: bool
+    patch_dir: Path | None = None
+    best_commit: str = ""
+    reason: str = ""
+
+
+def _load_json(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _trusted_manifest(workspace: Path, repo_root: Path) -> dict[str, Any] | None:
+    publisher = BestResultPublisher(str(workspace))
+    manifest = _load_json(publisher.manifest_path)
+    if not manifest:
+        return None
+    # An in-place campaign shares its experiments directory with every other task in
+    # the same repository, so a manifest found here need not be this task's. The one
+    # thing that settles it is whether the repository can still reach the commit: a
+    # leftover from a released campaign names a commit its branch took with it, and
+    # exporting a patch from it is impossible anyway.
+    if not commit_exists(repo_root, str(manifest.get("commit_hash") or "")):
+        return None
+    try:
+        iteration = int(manifest.get("iteration"))
+    except (TypeError, ValueError):
+        return None
+    commit = str(manifest.get("commit_hash") or "").strip()
+    complete = publisher.describes_current_best(
+        iteration=iteration,
+        commit_hash=commit,
+    )
+    if (
+        not commit
+        or manifest.get("correctness_passed") is not True
+        or manifest.get("total_improved") is not True
+        or not complete
+    ):
+        return None
+    return manifest
+
+
+def _trusted_result_sidecar(task_dir: Path) -> dict[str, Any] | None:
+    result = _load_json(task_dir / "forge-result.json")
+    if not result or result.get("improved") is not True:
+        return None
+    best_commit = str(result.get("best_commit") or "").strip()
+    if not best_commit:
+        checkpoint = result.get("checkpoint")
+        if isinstance(checkpoint, dict) and checkpoint.get("validation_passed") is True:
+            best_commit = str(checkpoint.get("best_commit") or "").strip()
+    if not best_commit:
+        return None
+    return {**result, "commit_hash": best_commit}
+
+
+def _iteration_of(payload: dict[str, Any]) -> int | None:
+    """The loop iteration a trusted result belongs to, when it names one."""
+    for key in ("iteration", "best_iteration"):
+        value = payload.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        return value
+    return None
+
+
+def _select_trusted_result(
+    manifest: dict[str, Any] | None,
+    sidecar: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Choose between the two trusted views of one workspace's best result."""
+    if sidecar is None:
+        return manifest, "best manifest"
+    if manifest is None:
+        return sidecar, "forge result sidecar"
+    if str(sidecar.get("commit_hash") or "") == str(manifest.get("commit_hash") or ""):
+        return manifest, "best manifest"
+    manifest_iteration = _iteration_of(manifest)
+    sidecar_iteration = _iteration_of(sidecar)
+    if manifest_iteration is not None and sidecar_iteration is not None and sidecar_iteration > manifest_iteration:
+        return sidecar, "forge result sidecar"
+    # Either the manifest is at least as new, or one of them names no iteration to compare on.
+    return manifest, "best manifest"
+
+
+def _nothing_to_recover_reason(task: KernelRewriteTask, workspace: Path) -> str:
+    """Say which of two different facts stopped a recovery.
+
+    A borrowed repository is handed back the moment its patch is exported, and
+    forge-loop's best-result bundle lives inside the workspace. The release
+    archives it rather than deleting it, so the bundle outlives the borrow --
+    but at the operator's own directory, not at the repository the sweep would
+    ask about. Both are read before this is reported.
+
+    Only when neither holds anything is there a fact to state, and it is not
+    "no trusted forge-loop best result": that states a verdict on evidence
+    never read, which reads as "the campaign produced nothing" and is a
+    different claim entirely.
+    """
+    if needs_inplace(str(task.repo_root)) and not (workspace / FORGE_LOOP_OUTPUT_DIRNAME).is_dir():
+        return (
+            "the borrowed repository was handed back and its archived forge-loop bundle holds no trusted "
+            "best result; a completed campaign is recovered during dispatch or from the task's result sidecar"
+        )
+    return "no trusted forge-loop best result"
+
+
+def _already_published(layout: ControllerLayout, operator_id: str, best_commit: str) -> bool:
+    metadata = _load_json(layout.patch_dir(operator_id) / PUBLICATION_FILENAME)
+    return bool(metadata and str(metadata.get("best_commit") or "") == best_commit)
+
+
+def recover_task_result(
+    layout: ControllerLayout,
+    task_dir: str | Path,
+    *,
+    update_state: bool = True,
+) -> RecoveryResult:
+    """Publish the newest trusted best result from one operator workspace."""
+    parsed = load_task(task_dir, record_state=False)
+    if parsed.task is None:
+        return RecoveryResult(operator_id=Path(task_dir).name, published=False, reason=parsed.reason)
+    task = parsed.task
+    workspace = operator_workspace(task, layout)
+    if not workspace.is_dir():
+        return RecoveryResult(
+            operator_id=task.operator_id,
+            published=False,
+            reason="operator workspace does not exist",
+        )
+
+    # The archive second, and only if the workspace holds nothing: a borrowed
+    # repository hands its bundle back to the operator's own directory on
+    # release, which is the one copy a run the host killed still leaves
+    # reachable. For a private checkout the two are the same directory.
+    manifest, source = _select_trusted_result(
+        _trusted_manifest(workspace, task.repo_root)
+        or _trusted_manifest(layout.workspace_dir(task.operator_id), task.repo_root),
+        _trusted_result_sidecar(Path(task_dir)),
+    )
+    if manifest is None:
+        return RecoveryResult(
+            operator_id=task.operator_id,
+            published=False,
+            reason=_nothing_to_recover_reason(task, workspace),
+        )
+
+    best_commit = str(manifest.get("commit_hash") or "").strip().lower()
+    if _already_published(layout, task.operator_id, best_commit):
+        patch_dir = layout.patch_dir(task.operator_id)
+        if update_state:
+            TaskStateStore(task_dir).mark_recovered_success(
+                result_patch_dir=str(patch_dir),
+                reason="best result already published",
+            )
+        return RecoveryResult(
+            operator_id=task.operator_id,
+            published=False,
+            patch_dir=patch_dir,
+            best_commit=best_commit,
+            reason="best result already published",
+        )
+
+    worktree = OperatorWorktree(
+        repo_root=task.repo_root,
+        workspace=workspace,
+        branch="",
+        base_commit=task.base_commit,
+        kernel_path=(workspace / task.kernel_path).resolve(),
+        source_files=tuple((workspace / relative).resolve() for relative in task.source_files),
+    )
+    try:
+        patch = export_patch_from_base(worktree, best_commit=best_commit)
+        if not patch.strip():
+            return RecoveryResult(
+                operator_id=task.operator_id,
+                published=False,
+                best_commit=best_commit,
+                reason=f"{source} has no changes from the controller base",
+            )
+        patch_dir = publish_operator_result(
+            layout,
+            publication_from_task(
+                task,
+                best_commit=best_commit,
+                patch=patch,
+                manifest=manifest,
+                changed_files=changed_files_from_base(worktree, best_commit=best_commit),
+            ),
+        )
+        if update_state:
+            TaskStateStore(task_dir).mark_recovered_success(
+                result_patch_dir=str(patch_dir),
+                reason=f"published from {source}",
+            )
+        return RecoveryResult(
+            operator_id=task.operator_id,
+            published=True,
+            patch_dir=patch_dir,
+            best_commit=best_commit,
+        )
+    except Exception as error:  # noqa: BLE001 - recovery must not mask the original failure
+        log.warning(
+            "could not publish result for %s: %s",
+            task.operator_id,
+            error,
+        )
+        return RecoveryResult(
+            operator_id=task.operator_id,
+            published=False,
+            best_commit=best_commit,
+            reason=f"could not publish {source}: {error}",
+        )
+
+
+def recover_all_task_results(layout: ControllerLayout) -> tuple[RecoveryResult, ...]:
+    """Reconcile every published task in deterministic operator order."""
+    return tuple(recover_task_result(layout, task_dir) for task_dir in discover_task_dirs(layout))
+
+
+__all__ = [
+    "RecoveryResult",
+    "recover_all_task_results",
+    "recover_task_result",
+]

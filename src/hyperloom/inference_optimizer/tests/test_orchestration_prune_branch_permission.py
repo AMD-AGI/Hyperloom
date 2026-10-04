@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Orchestration permission widenings for scheduling-police intents.
-
-Orchestration may emit PRUNE_BRANCH and ESCALATE_STRATEGY_CHANGE in addition to
-the robustness path; Kernel/Critic cannot emit any.
-"""
+"""Orchestration permission widenings for scheduling-police intents."""
 
 from __future__ import annotations
 
@@ -87,18 +83,6 @@ def test_orchestration_prune_branch_unknown_scope_rejected(gate):
     assert exc.value.rule == "prune_scope"
 
 
-# Robustness (pre-existing path) — still works
-def test_robustness_can_still_emit_prune_branch(gate):
-    """Pre-existing path unchanged — both sources are in the PRUNE_BRANCH allowlist."""
-    gate.validate_intent(
-        "robustness",
-        Intent(
-            type=IntentType.PRUNE_BRANCH,
-            payload={"family": "kernel_opt", "reason": "five sequential denials"},
-        ),
-    )
-
-
 # Per-intent override widens PRUNE_BRANCH and ESCALATE_STRATEGY_CHANGE.
 def test_orchestration_can_emit_escalate_strategy_change(gate):
     """Orchestration may emit phase-advance hints directly."""
@@ -107,17 +91,6 @@ def test_orchestration_can_emit_escalate_strategy_change(gate):
         Intent(
             type=IntentType.ESCALATE_STRATEGY_CHANGE,
             payload={"next_action_hint": "skip_to_kernel"},
-        ),
-    )
-
-
-def test_robustness_can_still_emit_escalate_strategy_change(gate):
-    """Robustness retains the original authority for the same intent."""
-    gate.validate_intent(
-        "robustness",
-        Intent(
-            type=IntentType.ESCALATE_STRATEGY_CHANGE,
-            payload={"next_action_hint": "skip_to_close"},
         ),
     )
 

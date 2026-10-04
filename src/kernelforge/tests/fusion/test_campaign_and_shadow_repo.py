@@ -1,24 +1,21 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The two pieces that let the forge-loop drive a fusion.
-
-The loop keeps and reverts with git and scores from stdout, and a serving
-framework offers neither: it is usually a pip install with no repository, and
-the harness reports JSON. These tests cover the adapters for both.
-"""
+"""The two pieces that let the forge-loop drive a fusion."""
 
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from kernelforge.fusion import campaign as campaign_module
 from kernelforge.fusion.campaign import (
     build_campaign_program_md,
     build_forge_loop_command,
+    committed_tree_id,
     fused_module_path,
     run_recipe_campaign,
 )
@@ -42,6 +39,31 @@ def _recipe(**over) -> Recipe:
     )
     base.update(over)
     return Recipe(**base)
+
+
+def _git_commit(tmp_path: Path, message: str) -> str:
+    """Commit every tracked modification the way the loop's keep does, and name it."""
+    run = ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run([*run, "add", "-A"], check=True, capture_output=True)
+    subprocess.run([*run, "commit", "-q", "-m", message, "--no-gpg-sign"], check=True, capture_output=True)
+    return subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _committed_candidate(tmp_path: Path) -> tuple[Recipe, str]:
+    """A workspace whose HEAD holds one candidate's tracked tree."""
+    source = tmp_path / "models" / "lfm2.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("def forward(x):\n    return fused(x)\n", encoding="utf-8")
+    recipe = _recipe(source_file=str(source))
+    fused = Path(fused_module_path(recipe))
+    fused.write_text("def fused(x):\n    return x\n", encoding="utf-8")
+    # Tracked but named by no recipe: the loop stages it into the same commit.
+    (tmp_path / "models" / "bench_notes.py").write_text("SHAPES = (16,)\n", encoding="utf-8")
+
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True, capture_output=True)
+    return recipe, _git_commit(tmp_path, "candidate")
 
 
 def _framework_tree(tmp_path: Path) -> tuple[Path, Path]:
@@ -110,7 +132,6 @@ class TestShadowRepo:
 
         assert shadow is not None
         # The tree now has a .git POINTER FILE (one line pointing to shadow.git).
-        # It is not a directory, so no git data is stored inside the tree itself.
         git_entry = root / ".git"
         assert git_entry.is_file(), "expected a .git pointer file, not a directory"
         assert not git_entry.is_dir()
@@ -162,8 +183,8 @@ class TestShadowRepo:
         tracked = _git_out(shadow, "ls-files").split()
         assert "sglang/layers/lfm2.py" in tracked
         assert not any(path.startswith("torch") for path in tracked)
-        # The exclude also keeps git from WALKING the neighbour, which is what
-        # makes every later status cheap rather than merely correct.
+        # The exclude also keeps git from WALKING the neighbour, which is what makes every later status cheap rather
+        # than merely correct.
         assert not any(
             path.startswith("torch") for path in _git_out(shadow, "ls-files", "--others", "--exclude-standard").split()
         )
@@ -183,7 +204,6 @@ class TestShadowRepo:
         root, source = _framework_tree(tmp_path)
         user_head = _make_checkout(root)
         # With an existing .git dir, ensure_git_workspace uses the env fallback.
-        # The developer's history must be unaffected by commits in the shadow.
 
         shadow = ensure_git_workspace(str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git"))
         assert shadow is not None
@@ -244,11 +264,7 @@ class TestShadowRepo:
         assert "def fused(x):" in patch
 
     def test_the_baseline_is_not_left_on_a_trunk_branch(self, tmp_path):
-        """``create_campaign_config`` refuses an unnamed, main or master branch.
-
-        A freshly initialized repository is on exactly one of those, so without
-        this every campaign would be rejected before its first iteration.
-        """
+        """``create_campaign_config`` refuses an unnamed, main or master branch."""
         root, source = _framework_tree(tmp_path)
 
         shadow = ensure_git_workspace(str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git"))
@@ -259,11 +275,7 @@ class TestShadowRepo:
         assert _git_out(shadow, "rev-parse", "HEAD").strip() == shadow.base_commit
 
     def test_the_loop_accepts_the_workspace_the_shadow_hands_it(self, tmp_path, monkeypatch):
-        """Run the loop's own campaign resolution against a real shadow tree.
-
-        Every other test here mocks the subprocess away, so nothing else would
-        notice that the loop rejects the workspace before its first iteration.
-        """
+        """Run the loop's own campaign resolution against a real shadow tree."""
         from kernelforge.loop.campaign_config import create_campaign_config
 
         root, source = _framework_tree(tmp_path)
@@ -297,8 +309,8 @@ class TestShadowRepo:
         )
 
         assert campaign.producer == "fusion"
-        # Package-relative, which is what makes a diff taken here replayable
-        # against an install rather than against one directory inside it.
+        # Package-relative, which is what makes a diff taken here replayable against an install rather than against
+        # one directory inside it.
         assert campaign.kernel_path == "sglang/layers/lfm2.py"
         assert campaign.source_files == [
             "sglang/layers/lfm2.py",
@@ -323,11 +335,7 @@ class TestShadowRepo:
         assert _git_out(shadow, "show", f"{shadow.base_commit}:{rel}") == ""
 
     def test_a_flat_framework_still_tracks_its_placeholder(self, tmp_path):
-        """A source directly under the export root has no package to admit.
-
-        Each placeholder is named in the exclude too, or the whitelist would
-        leave the one file the campaign has to keep untracked.
-        """
+        """A source directly under the export root has no package to admit."""
         root = tmp_path / "framework"
         root.mkdir()
         source = root / "lfm2.py"
@@ -440,8 +448,6 @@ class TestDriverShim:
             ),
             encoding="utf-8",
         )
-        import sys
-
         return subprocess.run([sys.executable, str(driver)], capture_output=True, text=True, cwd=tmp_path)
 
     def test_parity_and_timing_become_the_loop_contract(self, tmp_path):
@@ -503,13 +509,7 @@ class TestDriverShim:
         assert "COMPILE FAILED: cuda_bf16.h not found" in proc.stdout
 
     def test_an_unfused_baseline_anchors_instead_of_failing(self, tmp_path):
-        """The pristine bench runs before any kernel exists, so nothing compiled.
-
-        Observed in production: the harness reported ``compiled: false`` with
-        eager-vs-eager parity, the driver called it a crash, and the loop died
-        with "mean case scoring requires pristine per-case timings" before its
-        first iteration -- every fusion campaign failed the same way.
-        """
+        """The pristine bench runs before any kernel exists, so nothing compiled."""
         fused = tmp_path / "model_fused.py"
         fused.write_text("", encoding="utf-8")  # committed empty by the campaign
         proc = self._run(
@@ -567,9 +567,59 @@ class TestDriverShim:
         )
         assert proc.returncode == 0
         assert "SKIPPED: Mamba backend cannot init on ROCm" in proc.stdout
-        # Reporting the eager time for both arms shows no speedup rather than an
-        # error, which is what a missing microbench actually means.
+        # Reporting the eager time for both arms shows no speedup rather than an error, which is what a missing
+        # microbench actually means.
         assert "case_ms: decode 0.130000" in proc.stdout
+
+    def test_a_microbench_that_ran_and_timed_nothing_fails_the_iteration(self, tmp_path):
+        """No skip, no fused time: the harness claims it benchmarked and has no number to show."""
+        fused = tmp_path / "model_fused.py"
+        fused.write_text("def fused(x):\n    return x\n", encoding="utf-8")
+        proc = self._run(
+            tmp_path,
+            {
+                "compiled": True,
+                "is_triton": True,
+                "error": "",
+                "parity": [{"snr_db": 44.0, "max_abs_err": 1e-05, "label": "T16"}],
+                "eager_us": 130.0,
+                "fused_us": None,
+                "skipped": False,
+                "skip_reason": "",
+            },
+            fused_module=str(fused),
+        )
+
+        assert proc.returncode == 1
+        assert "BENCH MISSING" in proc.stdout
+        # The eager time standing in for the fused arm is exactly what made this look like a clean 1.0x run.
+        assert "case_ms" not in proc.stdout
+        assert "SKIPPED" not in proc.stdout
+
+    def test_an_untimed_fused_arm_still_anchors_before_any_kernel_exists(self, tmp_path):
+        """The pristine bench has no fused arm to time, so a null fused time is the baseline, not a failure."""
+        fused = tmp_path / "model_fused.py"
+        fused.write_text("", encoding="utf-8")  # committed empty by the campaign
+        proc = self._run(
+            tmp_path,
+            {
+                "compiled": False,
+                "is_triton": False,
+                "error": "",
+                "parity": [{"snr_db": 999.0, "max_abs_err": 0.0, "label": "T16 (baseline: eager vs eager)"}],
+                "eager_us": 425.0,
+                "fused_us": None,
+                "skipped": False,
+                "skip_reason": "",
+            },
+            fused_module=str(fused),
+        )
+
+        # Aborting here would kill the campaign before its first iteration: the loop needs these
+        # pristine per-case timings to score against.
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "case_ms: decode 0.425000" in proc.stdout
+        assert "BENCH MISSING" not in proc.stdout
 
 
 class TestFusedModulePath:
@@ -599,26 +649,20 @@ class TestCampaignCommand:
         assert "forge-loop" in cmd
         assert cmd[cmd.index("--kernel-backend") + 1] == "fusion"
         assert cmd[cmd.index("--task-type") + 1] == "repository"
-        # The loop refuses an unnamed / main / master branch, and a shadow
-        # repository is freshly initialized onto exactly one of those.
+        # The loop refuses an unnamed / main / master branch, and a shadow repository is freshly initialized onto
+        # exactly one of those.
         assert cmd[cmd.index("--git-branch") + 1] == SHADOW_BRANCH
         assert SHADOW_BRANCH not in {"", "main", "master"}
         # Discovery and the harness are the pipeline's.
         assert "--no-prepare-task" in cmd
-        # The fused module is an entry point too, or the loop orients on a model
-        # file and never sees where the kernel actually lives.
+        # The fused module is an entry point too, or the loop orients on a model file and never sees where the kernel
+        # actually lives.
         assert cmd[cmd.index("--source-files") + 1] == (
             "/sgl/models/lfm2.py,/sgl/models/lfm2_fused_residual_add_rmsnorm.py"
         )
 
     def test_the_campaign_pins_one_lane(self, tmp_path):
-        """A lane measures a copy; fusion is measured through the real install.
-
-        The loop's own default is above one, so this has to be stated. A lane
-        edits a workspace copy while the benchmark and the serving gate import
-        the framework from where it is installed, and the driver sits outside
-        the workspace entirely, which a round refuses outright.
-        """
+        """A lane measures a copy; fusion is measured through the real install."""
         cmd = build_forge_loop_command(
             _recipe(),
             workspace="/fw",
@@ -640,17 +684,13 @@ class TestCampaignCommand:
         )
         assert "--experience-kb" in cmd and "--no-experience-kb" not in cmd
         assert cmd[cmd.index("--producer") + 1] == "fusion"
-        # Keyed on the chain: several chains share one model file, and the file
-        # is all the loop could infer on its own.
+        # Keyed on the chain: several chains share one model file, and the file is all the loop could infer on its
+        # own.
         assert cmd[cmd.index("--operator-name") + 1] == "residual_add_rmsnorm"
         assert "--no-kb-warmstart" in cmd
 
     def test_the_callers_agent_runtime_reaches_the_process_that_edits(self, tmp_path):
-        """The loop resolves its own runtime from Config defaults otherwise.
-
-        A caller asking for a restricted sandbox would silently get the default
-        ``bypass`` in the one process that writes to the framework.
-        """
+        """The loop resolves its own runtime from Config defaults otherwise."""
         cmd = build_forge_loop_command(
             _recipe(),
             workspace="/fw",
@@ -674,11 +714,7 @@ class TestCampaignCommand:
         assert "Do NOT create any other new module." in program
 
     def test_the_task_document_hands_over_the_harness_read_only(self, tmp_path):
-        """The implementer is measured by this file, so it may not author it.
-
-        The document used to order it to write the harness, which the campaign
-        had already written -- and which the in-session gate would have denied.
-        """
+        """The implementer is measured by this file, so it may not author it."""
         program = build_campaign_program_md(
             _recipe(),
             harness_path="/out/kernel_harness.py",
@@ -694,6 +730,42 @@ class TestCampaignCommand:
         program = build_campaign_program_md(_recipe(), harness_path="")
 
         assert "harness" not in program.lower()
+
+    def test_the_task_document_carries_the_traced_kernel_names(self):
+        """Source names are a guess; the recorded launches settle which path ran."""
+        recipe = _recipe(
+            trace_kernels={
+                "anchor": "void bf16_to_fp32_copy(int)",
+                "before": ["void tgemm_bf16(int)"],
+                "after": ["void sglang::flash_c4_prefill<512l>(Params)"],
+                "span": [
+                    {"name": "void tgemm_bf16(int)", "is_anchor": False},
+                    {"name": "void bf16_to_fp32_copy(int)", "is_anchor": True},
+                ],
+            }
+        )
+        program = build_campaign_program_md(recipe, harness_path="")
+
+        assert "GROUND TRUTH" in program
+        assert "void tgemm_bf16(int)" in program
+        assert "void sglang::flash_c4_prefill<512l>(Params)" in program
+        # The anchor is marked inside the span so its position is unambiguous.
+        assert ">> void bf16_to_fp32_copy(int)" in program
+
+    def test_unanchored_discovery_renders_no_trace_section(self):
+        """An empty heading would read as "the trace recorded nothing"."""
+        assert "GROUND TRUTH" not in build_campaign_program_md(_recipe(), harness_path="")
+
+    def test_the_task_document_demands_the_call_site_be_rewired(self):
+        """A fused module nothing calls is the failure this text exists to stop."""
+        program = build_campaign_program_md(
+            _recipe(),
+            harness_path="/out/kernel_harness.py",
+            fused_module="/sgl/models/lfm2_fused.py",
+        )
+
+        assert "REPLACE the original call site" in program
+        assert "__forge_fused_entry__" in program
 
     def test_a_campaign_writes_its_driver_and_task_document(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
@@ -717,14 +789,9 @@ class TestCampaignCommand:
         assert outcome.result.kept is False
         assert "CAMPAIGN FAILED" in outcome.result.note
 
-    def _campaign_with_result(self, tmp_path, monkeypatch, payload, reports=()):
-        """Run a campaign whose forge-loop writes ``payload`` to --result-json.
-
-        The payload keys are the forge-loop's own (see cli.py _build_result), not
-        a shape invented here: an adapter tested against a fixture it also made up
-        proves only that it is self-consistent. ``reports`` stands in for what the
-        driver recorded while the loop ran.
-        """
+    def _campaign_with_result(self, tmp_path, monkeypatch, payload, reports=(), *, recipe=None):
+        """Run a campaign whose forge-loop writes ``payload`` to --result-json."""
+        recipe = recipe or _recipe()
         result_json = tmp_path / "forge_loop_residual_add_rmsnorm.json"
         report_log = tmp_path / "harness_reports_residual_add_rmsnorm.jsonl"
 
@@ -735,20 +802,27 @@ class TestCampaignCommand:
             def wait(self, timeout=None):
                 return 0
 
-        def fake_popen(*_a, **_k):
+        real_popen = subprocess.Popen
+
+        def fake_popen(cmd, *a, **k):
+            # Only the forge-loop is stubbed; the campaign's own git plumbing has to really run.
+            if cmd and cmd[0] == "git":
+                return real_popen(cmd, *a, **k)
             result_json.write_text(json.dumps(payload), encoding="utf-8")
             report_log.write_text("".join(json.dumps(r) + "\n" for r in reports), encoding="utf-8")
             return _Proc()
 
         monkeypatch.setattr(campaign_module.subprocess, "Popen", fake_popen)
         return run_recipe_campaign(
-            _recipe(),
+            recipe,
             workspace=str(tmp_path),
             harness_path=str(tmp_path / "kernel_harness.py"),
             output_dir=str(tmp_path),
+            fused_module=fused_module_path(recipe),
         )
 
     def test_a_campaign_that_beat_the_bar_is_kept(self, tmp_path, monkeypatch):
+        recipe, commit = _committed_candidate(tmp_path)
         outcome = self._campaign_with_result(
             tmp_path,
             monkeypatch,
@@ -759,14 +833,26 @@ class TestCampaignCommand:
                 "best_ms": 82.6,
                 "improved": True,
                 "best_iteration": 3,
-                "best_commit": "c0ffee1",
+                "best_commit": commit,
                 "experiment_id": "exp-1",
             },
+            reports=[
+                {
+                    "compiled": True,
+                    "skipped": False,
+                    "eager_us": 120.0,
+                    "fused_us": 96.0,
+                    "parity": [{"snr_db": 51.0, "max_abs_err": 2e-05, "label": "T16"}],
+                    "tracked_tree": committed_tree_id(str(tmp_path), commit),
+                }
+            ],
+            recipe=recipe,
         )
 
         assert outcome.result.kept is True
         assert outcome.result.correctness_passed is True
         assert outcome.result.kernel_speedup == 1.21
+        assert outcome.result.max_abs_err == 2e-05
         assert outcome.experiment_id == "exp-1"
 
     def test_the_loops_pre_iteration_anchor_is_not_a_validated_candidate(self, tmp_path, monkeypatch):
@@ -827,6 +913,7 @@ class TestCampaignCommand:
 
     def test_parity_and_timings_come_from_the_report_behind_the_kept_candidate(self, tmp_path, monkeypatch):
         """The loop's result carries a speedup and nothing else."""
+        recipe, commit = _committed_candidate(tmp_path)
         outcome = self._campaign_with_result(
             tmp_path,
             monkeypatch,
@@ -836,38 +923,95 @@ class TestCampaignCommand:
                 "best_ms": 0.096,
                 "improved": True,
                 "best_iteration": 3,
+                "best_commit": commit,
                 "experiment_id": "exp-1",
             },
             reports=[
-                # An earlier, slower candidate the loop did not settle on.
-                {
-                    "compiled": True,
-                    "skipped": False,
-                    "eager_us": 120.0,
-                    "fused_us": 111.0,
-                    "parity": [{"snr_db": 44.0, "max_abs_err": 1e-05, "label": "a"}],
-                },
+                # Another attempt's sources, whose timings happen to sit closer to best_ms.
                 {
                     "compiled": True,
                     "skipped": False,
                     "eager_us": 120.0,
                     "fused_us": 96.0,
+                    "parity": [{"snr_db": 44.0, "max_abs_err": 1e-05, "label": "a"}],
+                    "tracked_tree": "0" * 40,
+                },
+                {
+                    "compiled": True,
+                    "skipped": False,
+                    "eager_us": 120.0,
+                    "fused_us": 99.0,
                     "parity": [
                         {"snr_db": 55.0, "max_abs_err": 1e-06, "label": "a"},
                         {"snr_db": 38.0, "max_abs_err": 4e-04, "label": "b"},
                     ],
+                    "tracked_tree": committed_tree_id(str(tmp_path), commit),
                 },
             ],
+            recipe=recipe,
         )
 
         assert outcome.result.eager_us == 120.0
-        assert outcome.result.fused_us == 96.0
+        assert outcome.result.fused_us == 99.0
         # The WORST shape decided correctness, so it is the one recorded.
         assert outcome.result.max_abs_err == 4e-04
-        # Provenance differs on purpose: the speedup is the loop's mean over
-        # repeated benchmarks, not fused_us/eager_us from this one report.
+        # Provenance differs on purpose: the speedup is the loop's mean over repeated benchmarks, not
+        # fused_us/eager_us from this one report.
         assert outcome.result.kernel_speedup == 1.25
         assert outcome.result.rtol is None
+
+    def _campaign_won_on_time(self, tmp_path, monkeypatch, *, eager_launches, fused_launches):
+        """A campaign the loop kept on timing alone, with the given launch counts."""
+        recipe, commit = _committed_candidate(tmp_path)
+        return self._campaign_with_result(
+            tmp_path,
+            monkeypatch,
+            {
+                "mean_case_speedup": 1.25,
+                "baseline_ms": 0.120,
+                "best_ms": 0.096,
+                "improved": True,
+                "best_iteration": 3,
+                "best_commit": commit,
+                "experiment_id": "exp-1",
+            },
+            reports=[
+                {
+                    "compiled": True,
+                    "skipped": False,
+                    "eager_us": 120.0,
+                    "fused_us": 96.0,
+                    "parity": [{"snr_db": 55.0, "max_abs_err": 1e-06, "label": "a"}],
+                    "eager_launches": eager_launches,
+                    "fused_launches": fused_launches,
+                    "tracked_tree": committed_tree_id(str(tmp_path), commit),
+                }
+            ],
+            recipe=recipe,
+        )
+
+    def test_a_loop_keeper_that_added_launches_is_refused(self, tmp_path, monkeypatch):
+        """The loop scores on time, so it can keep a candidate that costs a launch."""
+        outcome = self._campaign_won_on_time(tmp_path, monkeypatch, eager_launches=6, fused_launches=7)
+
+        assert outcome.result.kept is False
+        assert outcome.result.kernel_speedup == 1.25  # it really was faster
+        assert "REJECTED" in outcome.result.note
+        assert "ADDS launches: 6 -> 7" in outcome.result.note
+
+    def test_a_loop_keeper_that_removed_launches_is_kept(self, tmp_path, monkeypatch):
+        outcome = self._campaign_won_on_time(tmp_path, monkeypatch, eager_launches=6, fused_launches=1)
+
+        assert outcome.result.kept is True
+        assert (outcome.result.eager_launches, outcome.result.fused_launches) == (6, 1)
+        assert "REJECTED" not in outcome.result.note
+
+    def test_a_harness_that_reported_no_counts_still_keeps(self, tmp_path, monkeypatch):
+        """Older harnesses predate the field; unverified must not mean failed."""
+        outcome = self._campaign_won_on_time(tmp_path, monkeypatch, eager_launches=None, fused_launches=None)
+
+        assert outcome.result.kept is True
+        assert outcome.result.fused_launches is None
 
     def test_a_crashed_campaign_does_not_report_the_previous_runs_keep(self, tmp_path, monkeypatch):
         """The result file outlives the run that wrote it."""
@@ -893,7 +1037,9 @@ class TestCampaignCommand:
         assert "exited 1" in outcome.result.note
         assert not stale.exists(), "the stale result must be gone before the run"
 
-    def test_a_missing_report_log_degrades_rather_than_failing_the_recipe(self, tmp_path, monkeypatch):
+    def test_a_commit_no_report_measured_is_not_a_verified_recipe(self, tmp_path, monkeypatch):
+        """The manifest this feeds is the authoritative record, so an unmeasured commit says so."""
+        recipe, commit = _committed_candidate(tmp_path)
         outcome = self._campaign_with_result(
             tmp_path,
             monkeypatch,
@@ -903,12 +1049,159 @@ class TestCampaignCommand:
                 "best_ms": 0.099,
                 "improved": True,
                 "best_iteration": 2,
-                "best_commit": "c0ffee1",
+                "best_commit": commit,
                 "experiment_id": "exp-1",
             },
+            recipe=recipe,
         )
 
-        assert outcome.result.kept is True
-        assert outcome.result.kernel_speedup == 1.21
+        assert outcome.result.correctness_passed is False
+        assert outcome.result.kept is False
         assert outcome.result.eager_us is None
         assert outcome.result.max_abs_err is None
+        assert "no harness report benchmarked that tree" in outcome.result.note
+        # The loop's own number survives; it is the parity claim that is missing.
+        assert outcome.result.kernel_speedup == 1.21
+
+    def test_a_commit_only_a_compile_failure_reported_is_not_a_verified_recipe(self, tmp_path, monkeypatch):
+        """A record that compiled nothing cannot stand in for the kept candidate."""
+        recipe, commit = _committed_candidate(tmp_path)
+        outcome = self._campaign_with_result(
+            tmp_path,
+            monkeypatch,
+            {
+                "mean_case_speedup": 1.21,
+                "baseline_ms": 0.120,
+                "best_ms": 0.099,
+                "improved": True,
+                "best_iteration": 2,
+                "best_commit": commit,
+                "experiment_id": "exp-1",
+            },
+            reports=[
+                {
+                    "compiled": True,
+                    "skipped": False,
+                    "eager_us": 120.0,
+                    "fused_us": 99.0,
+                    "parity": [{"snr_db": 55.0, "max_abs_err": 1e-06, "label": "a"}],
+                    "tracked_tree": committed_tree_id(str(tmp_path), commit),
+                },
+                # The loop runs to its hour budget, so an iteration AFTER the keep appends here too.
+                {
+                    "compiled": False,
+                    "skipped": False,
+                    "eager_us": None,
+                    "fused_us": None,
+                    "parity": [],
+                    "error": "undefined symbol",
+                    "tracked_tree": committed_tree_id(str(tmp_path), commit),
+                },
+            ],
+            recipe=recipe,
+        )
+
+        assert outcome.result.correctness_passed is True
+        assert outcome.result.fused_us == 99.0
+        assert outcome.result.max_abs_err == 1e-06
+
+    def test_two_attempts_differing_outside_the_recipes_files_are_not_confusable(self, tmp_path, monkeypatch):
+        """The loop commits every tracked edit, so every tracked edit is part of the identity."""
+        recipe, commit = _committed_candidate(tmp_path)
+        kept_tree = committed_tree_id(str(tmp_path), commit)
+        # A later attempt that left the recipe's source file and fused module byte-identical.
+        (tmp_path / "models" / "bench_notes.py").write_text("SHAPES = (16, 32)\n", encoding="utf-8")
+        later_tree = committed_tree_id(str(tmp_path), _git_commit(tmp_path, "later attempt"))
+
+        assert later_tree != kept_tree
+
+        outcome = self._campaign_with_result(
+            tmp_path,
+            monkeypatch,
+            {
+                "mean_case_speedup": 1.21,
+                "baseline_ms": 0.120,
+                "best_ms": 0.099,
+                "improved": True,
+                "best_iteration": 2,
+                "best_commit": commit,
+                "experiment_id": "exp-1",
+            },
+            reports=[
+                {
+                    "compiled": True,
+                    "skipped": False,
+                    "eager_us": 120.0,
+                    "fused_us": 99.0,
+                    "parity": [{"snr_db": 55.0, "max_abs_err": 1e-06, "label": "a"}],
+                    "tracked_tree": kept_tree,
+                },
+                {
+                    "compiled": True,
+                    "skipped": False,
+                    "eager_us": 120.0,
+                    "fused_us": 240.0,
+                    "parity": [{"snr_db": 12.0, "max_abs_err": 9e-01, "label": "a"}],
+                    "tracked_tree": later_tree,
+                },
+            ],
+            recipe=recipe,
+        )
+
+        assert outcome.result.fused_us == 99.0
+        assert outcome.result.max_abs_err == 1e-06
+
+    def test_the_driver_stamps_the_identity_the_campaign_matches_on(self, tmp_path):
+        """One tree id, named from the worktree by one side and from the commit by the other."""
+        recipe, commit = _committed_candidate(tmp_path)
+        harness = tmp_path / "kernel_harness.py"
+        harness.write_text(
+            "import json\nprint(json.dumps({'compiled': True, 'parity': [{'snr_db': 44.0}], 'fused_us': 90.0}))\n",
+            encoding="utf-8",
+        )
+        report_log = tmp_path / "reports.jsonl"
+        driver = tmp_path / "driver.py"
+        driver.write_text(
+            render_driver(
+                str(harness),
+                (),
+                report_log=str(report_log),
+                case_id="decode",
+                fused_module=fused_module_path(recipe),
+                workspace=str(tmp_path),
+            ),
+            encoding="utf-8",
+        )
+        proc = subprocess.run([sys.executable, str(driver)], capture_output=True, text=True, cwd=tmp_path)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        recorded = json.loads(report_log.read_text(encoding="utf-8").splitlines()[-1])
+        assert recorded["tracked_tree"] == committed_tree_id(str(tmp_path), commit)
+
+    def test_an_edit_the_recipe_never_named_is_a_different_attempt(self, tmp_path):
+        """Identity is the measured tree, so a tracked edit outside the recipe's files moves it."""
+        recipe, commit = _committed_candidate(tmp_path)
+        harness = tmp_path / "kernel_harness.py"
+        harness.write_text(
+            "import json\nprint(json.dumps({'compiled': True, 'parity': [{'snr_db': 44.0}], 'fused_us': 90.0}))\n",
+            encoding="utf-8",
+        )
+        report_log = tmp_path / "reports.jsonl"
+        driver = tmp_path / "driver.py"
+        driver.write_text(
+            render_driver(
+                str(harness),
+                (),
+                report_log=str(report_log),
+                case_id="decode",
+                fused_module=fused_module_path(recipe),
+                workspace=str(tmp_path),
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "models" / "bench_notes.py").write_text("SHAPES = (16, 32)\n", encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(driver)], capture_output=True, text=True, cwd=tmp_path)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        recorded = json.loads(report_log.read_text(encoding="utf-8").splitlines()[-1])
+        assert recorded["tracked_tree"] != committed_tree_id(str(tmp_path), commit)

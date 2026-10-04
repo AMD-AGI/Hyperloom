@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the YAML-layer runtime override.
-
-Verifies that runtime_override lands in materialized YAML benchmark.envs
-and that os.environ is never mutated.
-"""
+"""Tests for the YAML-layer runtime override."""
 
 from __future__ import annotations
 
@@ -28,9 +24,7 @@ def _base_yaml(tmp_path: Path, framework: str = "vllm") -> Path:
     return p
 
 
-# ---------------------------------------------------------------------------
 # Unit tests for apply_runtime_override
-# ---------------------------------------------------------------------------
 
 
 def test_path_prefix_prepended():
@@ -78,14 +72,11 @@ def test_empty_override_is_noop():
     assert envs == {"FOO": "bar"}
 
 
-# ---------------------------------------------------------------------------
 # Integration test: override lands in materialized YAML, NOT os.environ
-# ---------------------------------------------------------------------------
 
 
 def test_runtime_override_in_yaml_not_process_env(tmp_path):
-    """The attempt framework_bin must appear in materialized YAML benchmark.envs,
-    and os.environ must be unchanged."""
+    """The attempt framework_bin must appear in materialized YAML benchmark.envs, and os.environ must be unchanged."""
     base_yaml = _base_yaml(tmp_path)
     variant = GridVariant(name="test-rt")
     variant.runtime_override = {
@@ -131,9 +122,7 @@ def test_no_runtime_override_field_is_noop(tmp_path):
     assert "HYPERLOOM_FRAMEWORK_BIN" not in envs
 
 
-# ---------------------------------------------------------------------------
 # compiled-artifact runtime prefixes
-# ---------------------------------------------------------------------------
 
 
 def test_pythonpath_prefixes_multi_entry_ordered_prepended():
@@ -206,7 +195,7 @@ def test_runtime_python_exe_overrides_framework_python():
 
 def test_extended_framework_runtime_lands_in_yaml(tmp_path):
     """An extended FrameworkRuntime.to_runtime_override lands end-to-end in YAML."""
-    from hyperloom.orchestrator.framework.stack_actions import FrameworkRuntime
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import FrameworkRuntime
 
     base_yaml = _base_yaml(tmp_path)
     (tmp_path / "pkg").mkdir()
@@ -232,30 +221,3 @@ def test_extended_framework_runtime_lands_in_yaml(tmp_path):
     assert "/attempt/lib" in envs["LD_LIBRARY_PATH"]
     assert envs["INFERENCE_OPTIMIZER_AITER_JIT_DIR"] == str(tmp_path / "jit")
     assert "/attempt/console" in envs["PATH"]
-
-
-# ---------------------------------------------------------------------------
-# Fingerprint: runtime_override participates but stays back-compatible
-# ---------------------------------------------------------------------------
-
-
-def test_fingerprint_unchanged_for_empty_override():
-    plain = GridVariant(name="a", extra_server_args="--x 1")
-    with_empty = GridVariant(name="b", extra_server_args="--x 1")
-    with_empty.runtime_override = {}
-    assert plain.fingerprint == with_empty.fingerprint
-
-
-def test_fingerprint_changes_with_runtime_override():
-    base = GridVariant(name="a", extra_server_args="--x 1")
-    overridden = GridVariant(name="a", extra_server_args="--x 1")
-    overridden.runtime_override = {"pythonpath_prefixes": ["/a/pkg"]}
-    assert base.fingerprint != overridden.fingerprint
-
-
-def test_fingerprint_order_independent_for_override():
-    v1 = GridVariant(name="a")
-    v1.runtime_override = {"pythonpath_prefixes": ["/a", "/b"], "runtime_env": {"X": "1", "Y": "2"}}
-    v2 = GridVariant(name="a")
-    v2.runtime_override = {"runtime_env": {"Y": "2", "X": "1"}, "pythonpath_prefixes": ["/b", "/a"]}
-    assert v1.fingerprint == v2.fingerprint

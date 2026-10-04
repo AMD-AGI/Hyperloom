@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``resolve_local_model_dir`` (repo id / path -> local model dir).
-
-Covers the shared resolver that lets in-process config readers (roofline
-ceiling, model-config summary, KB tags, model-class inference, fp8 detection)
-accept a bare HF repo id, not only a local directory.
-"""
+"""Unit tests for ``resolve_local_model_dir`` (repo id / path -> local model dir)."""
 
 from __future__ import annotations
 
@@ -42,8 +37,8 @@ def test_resolve_existing_dir_returned_as_is(tmp_path):
 
 
 def test_resolve_permission_error_degrades_to_none(monkeypatch):
-    # A path that raises PermissionError on stat (e.g. in CI sandbox) must
-    # degrade gracefully to None rather than propagating the exception.
+    # A path that raises PermissionError on stat (e.g. in CI sandbox) must degrade gracefully to None rather than
+    # propagating the exception.
     from unittest.mock import patch
     from pathlib import Path
 
@@ -54,8 +49,7 @@ def test_resolve_permission_error_degrades_to_none(monkeypatch):
 
 
 def test_resolve_repo_id_uncached_returns_none(monkeypatch):
-    # huggingface_hub missing (or a cache miss) -> graceful None. Forcing the
-    # module to None in sys.modules makes the import raise deterministically.
+    # huggingface_hub missing (or a cache miss) -> graceful None.
     monkeypatch.setitem(sys.modules, "huggingface_hub", None)
     assert resolve_local_model_dir("Qwen/Qwen3-0.6B") is None
 

@@ -1,8 +1,4 @@
-"""REST client for PR Monitor.
-
-404 means absence; contract and transport failures remain distinct. Pagination
-is disabled because the service cursor skips rows sharing its timestamp.
-"""
+"""REST client for PR Monitor."""
 
 from __future__ import annotations
 
@@ -18,9 +14,9 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any
 
-log = logging.getLogger(__name__)
+from hyperloom.common.pr_monitor_urls import pr_monitor_base_url, pr_monitor_enabled
 
-DEFAULT_BASE_URL = "https://global.primus-safe.amd.com/pr-monitor"
+log = logging.getLogger(__name__)
 
 # Self-imposed ceiling: no query may ask for more than one bounded first page.
 BOUNDED_PAGE_LIMIT = 50
@@ -51,7 +47,9 @@ class FetchOutcome:
 
 def normalize_base_url(raw: str = "") -> str:
     """Return the service root without a trailing ``/v1``."""
-    base = (raw or os.environ.get("PRIMUS_CORTEX_PR_API", "") or DEFAULT_BASE_URL).strip()
+    if not pr_monitor_enabled():
+        return ""
+    base = (raw or pr_monitor_base_url()).strip()
     base = base.rstrip("/")
     if base.endswith("/v1"):
         base = base[: -len("/v1")].rstrip("/")
@@ -98,6 +96,10 @@ class PRMonitorClient:
 
     def _url(self, path: str, params: dict[str, Any] | None = None) -> str:
         """Build one absolute ``/v1`` URL, dropping parameters left as None."""
+        if not self._base:
+            if not pr_monitor_enabled():
+                raise PRMonitorError("PR Monitor is disabled by runtime preflight")
+            raise PRMonitorError("KB_STORE_URL is required when PR Monitor knowledge is enabled")
         url = f"{self._base}/v1{path}"
         if params:
             query = {k: v for k, v in params.items() if v is not None}
@@ -118,11 +120,7 @@ class PRMonitorClient:
         *,
         timeout_sec: float | None = None,
     ) -> Any | None:
-        """GET one endpoint; return None for a normal 404 absence.
-
-        Raises PRContractError on 400/422/non-JSON and PRTransportError on
-        timeouts, connection failures, and 5xx.
-        """
+        """GET one endpoint; return None for a normal 404 absence."""
         if params and "before" in params:
             raise PRMonitorError("pagination is disabled: the server cursor drops same-timestamp rows")
         url = self._url(path, params)
@@ -152,12 +150,7 @@ class PRMonitorClient:
         *,
         budget_sec: float | None = None,
     ) -> list[FetchOutcome]:
-        """Fetch concurrently within one budget and preserve request order.
-
-        Every request that answered inside the budget is kept: waiting on the
-        batch as a whole stops one slow request from discarding the results
-        already sitting next to it.
-        """
+        """Fetch concurrently within one budget and preserve request order."""
         if not requests:
             return []
         budget = self._budget if budget_sec is None else max(0.0, budget_sec)
@@ -233,11 +226,7 @@ class PRMonitorClient:
         return payload
 
     def get_file_patch(self, repo: str, number: int, file_path: str) -> dict | None:
-        """Fetch the diff of one changed file.
-
-        Filters on the PR's current head while ``?file_path=`` reverse lookup
-        does not, so after a force-push a path that matched the PR can 404 here.
-        """
+        """Fetch the diff of one changed file."""
         payload = self.get(f"/repos/{repo}/prs/{number}/files/by-path", {"path": file_path})
         if payload is None:
             return None

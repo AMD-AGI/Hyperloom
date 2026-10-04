@@ -167,6 +167,91 @@ def test_setup_cli_scrubs_stale_workspace_runtime_env_when_dotenv_exists(tmp_pat
         assert key not in env
 
 
+def _credential_functions() -> str:
+    """The credential half of ``install_baremetal.sh``, runnable on its own with stubbed log/die helpers."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    return script_text[script_text.index("read_dotenv_var() {") : script_text.index("\nwrite_runtime_dotenv() {")]
+
+
+def test_baremetal_setup_accepts_a_codex_only_gateway(tmp_path: Path):
+    """Hyperloom's runtime drives both claude and codex, and ``cli/preflight._provider_only_mode`` already treats an
+    OpenAI-only environment as a valid single provider; the bare-metal installer must not be the one place refusing it.
+    """
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
+    runner = tmp_path / "run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "OPENAI_BASE_URL_ARG=",
+                "log() { :; }",
+                "warn() { :; }",
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                _credential_functions(),
+                "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN",
+                "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL",
+                "OPENAI_BASE_URL=https://gw.example.com/api/v1/llm-proxy/v1",
+                "OPENAI_API_KEY=ak-codex-only",
+                "CODEX_MODEL=glm-5-3",
+                "resolve_credentials",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True)
+
+    assert proc.returncode == 0, proc.stderr
+    text = dotenv.read_text(encoding="utf-8")
+    assert "OPENAI_BASE_URL=https://gw.example.com/api/v1/llm-proxy/v1" in text
+    assert "OPENAI_API_KEY=ak-codex-only" in text
+    assert "CODEX_MODEL=glm-5-3" in text
+
+
+def test_baremetal_setup_still_rejects_a_half_configured_openai_side(tmp_path: Path):
+    """A base URL with no key is not a codex deployment; accepting it would trade a clear setup error for a run that
+    fails much later, when the first agent call is made.
+    """
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
+    runner = tmp_path / "run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "OPENAI_BASE_URL_ARG=",
+                "log() { :; }",
+                "warn() { :; }",
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                _credential_functions(),
+                "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN",
+                "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL OPENAI_API_KEY",
+                "OPENAI_BASE_URL=https://gw.example.com/api/v1/llm-proxy/v1",
+                "resolve_credentials",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True)
+
+    assert proc.returncode == 99, proc.stdout + proc.stderr
+
+
 def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_path: Path):
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")
@@ -267,8 +352,8 @@ def test_baremetal_setup_migrates_retired_deepseek_env_to_both_sides(tmp_path: P
             [
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
-                # The credentials in this scenario must come from .env alone, so
-                # don't inherit any provider variable from the pytest process.
+                # The credentials in this scenario must come from .env alone, so don't inherit any provider variable
+                # from the pytest process.
                 "unset OPENAI_BASE_URL OPENAI_API_KEY OPENAI_CUSTOM_HEADERS",
                 "unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN",
                 "unset CLAUDE_MODEL CODEX_MODEL GEAK_CLAUDE_MODEL",
@@ -330,8 +415,8 @@ def _baremetal_credential_functions() -> str:
 _CLEAN_PROVIDER_ENV = [
     "unset OPENAI_BASE_URL OPENAI_API_KEY OPENAI_CUSTOM_HEADERS",
     "unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN",
-    # Now that the shell reads the subscription token too, a developer machine
-    # exporting one would otherwise change what these runs resolve.
+    # Now that the shell reads the subscription token too, a developer machine exporting one would otherwise change
+    # what these runs resolve.
     "unset CLAUDE_CODE_OAUTH_TOKEN",
     "unset CLAUDE_MODEL CODEX_MODEL GEAK_CLAUDE_MODEL",
     "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL",
@@ -339,12 +424,7 @@ _CLEAN_PROVIDER_ENV = [
 
 
 def test_baremetal_setup_keeps_hand_written_dual_protocol_openai_side(tmp_path: Path):
-    """The configuration the docs now recommend must survive a setup run.
-
-    Both sides are on one host, so the OpenAI side is part of the same gateway
-    credential rather than a second provider -- and that has to be decided from
-    the URLs, not from whether a legacy DEEPSEEK_* migration happened to run.
-    """
+    """The configuration the docs now recommend must survive a setup run."""
     dotenv = tmp_path / ".env"
     dotenv.write_text(
         "\n".join(
@@ -389,9 +469,8 @@ def test_baremetal_setup_keeps_hand_written_dual_protocol_openai_side(tmp_path: 
     assert "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic" in text
     assert "OPENAI_BASE_URL=https://api.deepseek.com/v1" in text
     assert "OPENAI_API_KEY=deepseek-test-key" in text
-    # A gateway that authenticates on a header needs both sides' headers to
-    # survive: this deployment shape is exactly the one that cannot re-derive
-    # them from the keys.
+    # A gateway that authenticates on a header needs both sides' headers to survive: this deployment shape is exactly
+    # the one that cannot re-derive them from the keys.
     assert 'ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: deepseek-test-key"' in text
     assert 'OPENAI_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: deepseek-test-key"' in text
 
@@ -512,10 +591,9 @@ _SHIM_CASES = {
         "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
         "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
     },
-    # A subscription token is a configured Anthropic side, so a stale DEEPSEEK_*
-    # leftover must be ignored whole rather than pointing the run at DeepSeek's
-    # host -- where the migrated API key would also outrank the token and move
-    # the run onto API billing.
+    # A subscription token is a configured Anthropic side, so a stale DEEPSEEK_* leftover must be ignored whole rather
+    # than pointing the run at DeepSeek's host -- where the migrated API key would also outrank the token and move the
+    # run onto API billing.
     "subscription token already configured": {
         "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
         "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")): "sk-ant-oat01-fake",
@@ -532,9 +610,7 @@ def _optimizer_shim() -> tuple[str, str]:
 
 
 def _baremetal_shim() -> tuple[str, str]:
-    # Carries read_dotenv_var along, which this shim consults for each retired
-    # key. DOTENV points at a missing file below, so the .env lookups come back
-    # empty and only the exported values drive the comparison.
+    # Carries read_dotenv_var along, which this shim consults for each retired key.
     return _baremetal_credential_functions(), "migrate_legacy_deepseek_env"
 
 
@@ -547,17 +623,7 @@ _SHIM_INSTALLERS = {
 @pytest.mark.parametrize("installer", sorted(_SHIM_INSTALLERS))
 @pytest.mark.parametrize("case", sorted(_SHIM_CASES))
 def test_shell_shim_matches_python_deepseek_compat_env(tmp_path: Path, case: str, installer: str):
-    """Every shell shim and ``deepseek_compat_env`` must resolve identically.
-
-    Three copies of this translation exist (Python plus the two installers that
-    own an entrypoint); a divergence would send credentials to a different
-    endpoint depending on which one the operator happened to use.
-
-    ``ANTHROPIC_AUTH_TOKEN`` is excluded from the compared set on purpose and
-    pinned separately below: an installer's job ends at a ``.env``, which only
-    ever carries the API-key spelling, while the Python shim resolves in-process
-    where offering the bearer spelling as well costs nothing.
-    """
+    """Every shell shim and ``deepseek_compat_env`` must resolve identically."""
     env = _SHIM_CASES[case]
     shim_text, entry_point = _SHIM_INSTALLERS[installer]()
 
@@ -567,8 +633,8 @@ def test_shell_shim_matches_python_deepseek_compat_env(tmp_path: Path, case: str
             [
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
-                # The Python side is given an explicit mapping, so the shell has
-                # to start from the same blank slate rather than inherit pytest's.
+                # The Python side is given an explicit mapping, so the shell has to start from the same blank slate
+                # rather than inherit pytest's.
                 *_CLEAN_PROVIDER_ENV,
                 "warn() { :; }",
                 "log() { :; }",
@@ -592,8 +658,8 @@ def test_shell_shim_matches_python_deepseek_compat_env(tmp_path: Path, case: str
 
     for name in _SHIM_REPORTED_VARS:
         assert from_shell.get(name, "") == from_python.get(name, ""), name
-    # The documented exception, asserted rather than assumed: no installer may
-    # start writing the bearer spelling without this test being updated.
+    # The documented exception, asserted rather than assumed: no installer may start writing the bearer spelling
+    # without this test being updated.
     assert from_shell.get("ANTHROPIC_AUTH_TOKEN", "") == env.get("ANTHROPIC_AUTH_TOKEN", "")
 
 
@@ -602,8 +668,8 @@ def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
         (
             "install",
             Path(setup.__file__).resolve().parent / "assets" / "install.sh",
-            # The gate is what's under test here; the legacy shim has its own
-            # coverage and is defined outside the extracted slice.
+            # The gate is what's under test here; the legacy shim has its own coverage and is defined outside the
+            # extracted slice.
             ["preflight_load_dotenv() { :; }", "normalize_legacy_deepseek_env() { :; }"],
         ),
         (
@@ -614,8 +680,8 @@ def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
     ]
     for name, script_path, stubs in script_paths:
         script_text = script_path.read_text(encoding="utf-8")
-        # Start at the cross-provider check so the extracted slice is the whole
-        # credential preflight, including the rejection helper it calls.
+        # Start at the cross-provider check so the extracted slice is the whole credential preflight, including the
+        # rejection helper it calls.
         start = script_text.index("preflight_reject_cross_provider() {")
         end = script_text.index(
             "\npreflight_validate_credentials", script_text.index("preflight_validate_credentials() {")
@@ -699,8 +765,7 @@ def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
 
 
 def test_baremetal_setup_rejects_cross_provider_pairing(tmp_path: Path):
-    """install_baremetal.sh rejects a mispaired config during setup, like the CLI
-    preflight and the other two installers."""
+    """install_baremetal.sh rejects a mispaired config during setup, like the CLI preflight and the other two installers."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")
     start = script_text.index("read_dotenv_var() {")
@@ -838,8 +903,7 @@ def test_baremetal_setup_accepts_oauth_only_without_mirroring_it(tmp_path: Path)
 
 
 def test_install_preflights_accept_oauth_alongside_bare_openai_key(tmp_path: Path):
-    """Mirrors the CLI: both keys imply their own official endpoint, so neither
-    borrows the other's and the pair is legal."""
+    """Mirrors the CLI: both keys imply their own official endpoint, so neither borrows the other's and the pair is legal."""
     script_paths = [
         (
             "install",
@@ -887,8 +951,7 @@ def test_install_preflights_accept_oauth_alongside_bare_openai_key(tmp_path: Pat
 
 
 def test_install_preflights_still_reject_gateway_url_with_bare_openai_key(tmp_path: Path):
-    """An explicit ANTHROPIC_BASE_URL keeps flagging an OpenAI key that lost its
-    own base URL."""
+    """An explicit ANTHROPIC_BASE_URL keeps flagging an OpenAI key that lost its own base URL."""
     script_paths = [
         (
             "install",
@@ -1057,12 +1120,7 @@ def _runtime_dep_loop(install_script: Path) -> str:
 
 
 def test_baremetal_runtime_deps_skip_sgl_kernel_without_sglang(tmp_path: Path):
-    """An atom-only host must not be told sgl_kernel is missing.
-
-    atom images ship neither SGLang nor its sgl_kernel companion, so probing for
-    it there only produces a scary 'missing' line about a dependency the run
-    will never use.
-    """
+    """An atom-only host must not be told sgl_kernel is missing."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
 
     host_py = tmp_path / "host-python"
@@ -1100,12 +1158,7 @@ def test_baremetal_runtime_deps_skip_sgl_kernel_without_sglang(tmp_path: Path):
 
 
 def test_baremetal_preflight_probes_atom_by_default():
-    """Phase 1 must accept an atom-only host without extra flags.
-
-    The default probe list gated on sglang/vllm alone, so setup inside an
-    atom-only image died with 'no serving framework importable' even though
-    atom was installed and is a registered framework.
-    """
+    """Phase 1 must accept an atom-only host without extra flags."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     text = install_script.read_text(encoding="utf-8")
 
@@ -1117,13 +1170,7 @@ def test_baremetal_preflight_probes_atom_by_default():
 
 
 def test_baremetal_triton_pin_is_advisory_when_installing_nothing():
-    """A prebuilt image may carry its own triton.
-
-    The torch/triton pin exists to protect a framework build. When
-    --install-framework is none there is nothing to build, so a drifting triton
-    must warn rather than fail the whole preflight -- rocm/atom:latest ships a
-    triton newer than torch's pin.
-    """
+    """A prebuilt image may carry its own triton."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     text = install_script.read_text(encoding="utf-8")
 
@@ -1141,17 +1188,12 @@ def test_baremetal_triton_pin_is_advisory_when_installing_nothing():
 
 
 def _sourceable_installer(install_script: Path, tmp_path: Path) -> Path:
-    """The real installer with its ``main`` invocation stripped.
-
-    Lets a test source the script and drive its actual functions against a fake
-    host, so behaviour is asserted end to end rather than by matching source
-    text.
-    """
+    """The real installer with its ``main`` invocation stripped."""
     text = install_script.read_text(encoding="utf-8")
     marker = '\nmain "$@"\n'
     assert marker in text, "install_baremetal.sh must end by invoking main"
     lib = tmp_path / "installer_lib.sh"
-    lib.write_text(text.replace(marker, "\n"), encoding="utf-8")
+    lib.write_text(text.replace(marker, "\n"), encoding="utf-8", newline="\n")
     return lib
 
 
@@ -1173,6 +1215,7 @@ def _fake_python(tmp_path: Path, importable: set[str], hip: str = "7.2.0") -> Pa
         )
         + "\n",
         encoding="utf-8",
+        newline="\n",
     )
     stub.chmod(0o755)
     return stub
@@ -1185,6 +1228,7 @@ def _drive_installer(
     dotenv: Path,
     body: str,
     install_framework: str = "none",
+    args: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess:
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)
@@ -1194,40 +1238,485 @@ def _drive_installer(
         "\n".join(
             [
                 "#!/usr/bin/env bash",
-                f"source {lib}",
-                f'DOTENV="{dotenv}"',
-                f'USER_DATA_PATH="{tmp_path}/data"',
+                f'source "{lib.as_posix()}"',
+                f'DOTENV="{dotenv.as_posix()}"',
+                f'USER_DATA_PATH="{tmp_path.as_posix()}/data"',
                 f'INSTALL_FRAMEWORK="{install_framework}"',
                 "FRAMEWORK_ENV=shared",
-                f'VLLM_VENV_ROOT="{tmp_path}/absent"',
+                f'VLLM_VENV_ROOT="{tmp_path.as_posix()}/absent"',
                 "DRY_RUN=0",
                 "CHECK_ONLY=0",
-                f'resolve_python() {{ printf "%s" "{py}"; }}',
+                f'resolve_python() {{ printf "%s" "{py.as_posix()}"; }}',
                 body,
             ]
         )
         + "\n",
         encoding="utf-8",
+        newline="\n",
     )
-    return subprocess.run(["bash", str(runner)], text=True, capture_output=True)
+    return subprocess.run(["bash", runner.as_posix(), *args], text=True, capture_output=True)
 
 
 def _dotenv_lines(dotenv: Path) -> list[str]:
     return dotenv.read_text(encoding="utf-8").splitlines()
 
 
-def test_baremetal_atom_only_host_writes_framework_atom(tmp_path: Path):
-    """The whole point of probing atom: the .env downstream skills read must say so.
+@pytest.mark.parametrize(
+    ("importable", "args", "expected_framework"),
+    [
+        pytest.param({"atom"}, (), "atom", id="atom-only"),
+        pytest.param({"sglang", "atom"}, (), "sglang", id="sglang-before-atom"),
+        pytest.param({"vllm", "atom"}, (), "vllm", id="vllm-before-atom"),
+        pytest.param({"sglang", "vllm", "atom"}, ("--frameworks", "atom"), "atom", id="explicit-atom"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("in_dotenv", "in_env", "expected"),
+    [
+        pytest.param(None, None, None, id="unset"),
+        pytest.param(None, "", None, id="empty-env"),
+        pytest.param("", None, "", id="empty-dotenv"),
+        pytest.param("", "", "", id="both-empty"),
+        pytest.param(None, "geak", "geak", id="env-geak"),
+        pytest.param(None, "forge", "forge", id="env-forge"),
+        pytest.param(None, "forge,geak", "forge,geak", id="env-ordered"),
+        pytest.param("geak", None, "geak", id="existing-geak"),
+        pytest.param("forge", None, "forge", id="dotenv-forge"),
+        pytest.param("forge,geak", None, "forge,geak", id="dotenv-ordered"),
+        pytest.param("forge", "geak", "geak", id="env-over-dotenv"),
+        pytest.param("geak", "forge", "forge", id="env-replaces-geak"),
+        pytest.param("forge", "", "forge", id="empty-env-uses-dotenv"),
+    ],
+)
+def test_baremetal_main_persists_only_explicit_backend_selection(
+    tmp_path: Path,
+    monkeypatch,
+    importable: set[str],
+    args: tuple[str, ...],
+    expected_framework: str,
+    in_dotenv: str | None,
+    in_env: str | None,
+    expected: str | None,
+):
+    """Setup records the framework without turning an omitted backend into an explicit choice."""
+    monkeypatch.setenv("REPO_ROOT", tmp_path.as_posix())
+    monkeypatch.delenv("FRAMEWORKS", raising=False)
+    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+    if in_env is not None:
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", in_env)
+    dotenv = tmp_path / ".env"
+    content = "KEEP_ME=1\n"
+    if in_dotenv is not None:
+        content += f"KERNEL_OPT_BACKEND_ORDER={in_dotenv}\n"
+    dotenv.write_text(content, encoding="utf-8", newline="\n")
 
-    Preflight accepting atom is not enough — resolution used to return only
-    sglang/vllm, so an atom-only host finished setup with no FRAMEWORK at all
-    and every downstream skill defaulted to the wrong engine.
-    """
+    res = _drive_installer(
+        tmp_path,
+        importable=importable,
+        dotenv=dotenv,
+        args=args,
+        body="\n".join(
+            [
+                "base_preflight() { DETECTED_GPU=MI300X; }",
+                "install_requested_framework() { :; }",
+                "apply_rocm_profiler_hotfix() { :; }",
+                "resolve_credentials() { :; }",
+                "main",
+            ]
+        ),
+    )
+
+    assert res.returncode == 0, res.stderr
+    lines = _dotenv_lines(dotenv)
+    assert f"FRAMEWORK={expected_framework}" in lines
+    assert "KEEP_ME=1" in lines
+    backend_lines = [line for line in lines if line.startswith("KERNEL_OPT_BACKEND_ORDER=")]
+    assert backend_lines == ([] if expected is None else [f"KERNEL_OPT_BACKEND_ORDER={expected}"])
+
+
+def test_baremetal_atom_only_host_writes_framework_atom(tmp_path: Path):
+    """The whole point of probing atom: the .env downstream skills read must say so."""
     dotenv = tmp_path / ".env"
     res = _drive_installer(tmp_path, importable={"atom"}, dotenv=dotenv, body="write_runtime_dotenv")
 
     assert res.returncode == 0, res.stderr
     assert "FRAMEWORK=atom" in _dotenv_lines(dotenv)
+
+
+_ATOM_DEV_IMAGE_COMMIT = "fe1099b15ddc52e6873e1932935f722864cdeee0"
+
+
+def _logging_python(
+    tmp_path: Path,
+    *,
+    atom_importable: bool,
+    atom_import_after_install: bool = True,
+    server_module_imports: bool = True,
+) -> Path:
+    """A python stub that records every invocation and answers the ATOM probes."""
+    log = tmp_path / "python-calls.log"
+    stub = tmp_path / "logging-python"
+    stub.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f'printf "%s\\n" "$*" >> "{log.as_posix()}"',
+                'case "$*" in',
+                f"""  *"find_spec('atom')"*) exit {0 if atom_importable else 1} ;;""",
+                "  *find_spec*) exit 1 ;;",
+                f'  "-c import atom") exit {0 if atom_import_after_install else 1} ;;',
+                f'  "-c import atom.entrypoints.openai.api_server") exit {0 if server_module_imports else 1} ;;',
+                # ATOM's own --help crashes: its argparse help text carries an unescaped "%".
+                '  *"atom.entrypoints.openai_server --help"*) exit 1 ;;',
+                "esac",
+                "exit 0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def _drive_atom_installer(tmp_path: Path, python: Path, body: str) -> subprocess.CompletedProcess:
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+    runner = tmp_path / "atom-runner.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f'source "{lib.as_posix()}"',
+                f'REPO_ROOT="{tmp_path.as_posix()}"',
+                f'HYPERLOOM_CACHE_DIR="{tmp_path.as_posix()}/deps"',
+                "INSTALL_FRAMEWORK=atom",
+                "FRAMEWORK_ENV=shared",
+                f'VLLM_VENV_ROOT="{tmp_path.as_posix()}/absent"',
+                "DRY_RUN=0",
+                "CHECK_ONLY=0",
+                f'resolve_python() {{ printf "%s" "{python.as_posix()}"; }}',
+                body,
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    return subprocess.run(["bash", runner.as_posix()], text=True, capture_output=True)
+
+
+def test_installer_accepts_install_framework_atom():
+    """Argument parsing must not reject atom before --help is reached."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+
+    res = subprocess.run(
+        ["bash", install_script.as_posix(), "--install-framework", "atom", "--help"],
+        text=True,
+        capture_output=True,
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "none, sglang, vllm, atom" in res.stdout
+
+
+def test_install_requested_framework_dispatches_atom(tmp_path: Path):
+    res = _drive_installer(
+        tmp_path,
+        importable=set(),
+        dotenv=tmp_path / ".env",
+        install_framework="atom",
+        body="install_atom_framework() { echo ATOM_INSTALLER_CALLED; }\ninstall_requested_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "ATOM_INSTALLER_CALLED" in res.stdout
+
+
+def test_atom_install_defaults_to_the_atom_dev_image_commit(tmp_path: Path):
+    """The default ATOM source is the commit rocm/atom-dev:v0.1.7-rc0 was built from."""
+    python = _logging_python(tmp_path, atom_importable=False)
+
+    res = _drive_atom_installer(tmp_path, python, "DRY_RUN=1\ninstall_atom_framework")
+
+    assert res.returncode == 0, res.stderr
+    assert f"https://github.com/ROCm/ATOM.git@{_ATOM_DEV_IMAGE_COMMIT}" in res.stdout
+    assert "AITER" in res.stdout
+
+
+def test_atom_check_only_reports_a_missing_atom_without_installing(tmp_path: Path):
+    python = _logging_python(tmp_path, atom_importable=False)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "CHECK_ONLY=1\n"
+        "ensure_aiter_for_python() { echo STEP aiter; }\n"
+        "install_atom_from_source() { echo STEP atom-source; }\n"
+        "install_atom_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "STEP" not in res.stdout
+    assert "atom missing" in res.stderr
+
+
+def test_atom_install_puts_aiter_first_and_verifies_the_server(tmp_path: Path):
+    python = _logging_python(tmp_path, atom_importable=False)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "ensure_aiter_for_python() { echo STEP aiter; }\n"
+        "install_atom_from_source() { echo STEP atom-source; }\n"
+        "install_atom_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    steps = [line for line in res.stdout.splitlines() if line.startswith("STEP ")]
+    assert steps == ["STEP aiter", "STEP atom-source"]
+    calls = (tmp_path / "python-calls.log").read_text(encoding="utf-8")
+    assert "-c import atom.entrypoints.openai.api_server" in calls
+
+
+def test_atom_install_does_not_depend_on_atom_help_rendering(tmp_path: Path):
+    """ATOM fe1099b15 crashes printing --help, yet its server imports and serves."""
+    python = _logging_python(tmp_path, atom_importable=False)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "ensure_aiter_for_python() { :; }\ninstall_atom_from_source() { :; }\ninstall_atom_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "ATOM framework install complete" in res.stdout
+
+
+def test_atom_install_fails_when_the_server_module_does_not_import(tmp_path: Path):
+    python = _logging_python(tmp_path, atom_importable=False, server_module_imports=False)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "ensure_aiter_for_python() { :; }\ninstall_atom_from_source() { :; }\ninstall_atom_framework",
+    )
+
+    assert res.returncode != 0
+    assert "atom.entrypoints.openai.api_server" in res.stderr
+
+
+def test_atom_install_fails_when_atom_still_does_not_import(tmp_path: Path):
+    python = _logging_python(tmp_path, atom_importable=False, atom_import_after_install=False)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "ensure_aiter_for_python() { :; }\ninstall_atom_from_source() { :; }\ninstall_atom_framework",
+    )
+
+    assert res.returncode != 0
+    assert "atom not importable after install" in res.stderr
+
+
+def test_atom_install_skips_the_source_build_when_atom_already_imports(tmp_path: Path):
+    python = _logging_python(tmp_path, atom_importable=True)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "ensure_aiter_for_python() { echo STEP aiter; }\n"
+        "install_atom_from_source() { echo STEP atom-source; }\n"
+        "install_atom_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "STEP atom-source" not in res.stdout
+
+
+def test_atom_source_install_fetches_the_pinned_commit_under_rocm_torch_constraints(tmp_path: Path):
+    """Without the constraint file pip is free to replace ROCm torch with a PyPI CUDA build."""
+    python = _logging_python(tmp_path, atom_importable=False)
+    git_log = tmp_path / "git-calls.log"
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "\n".join(
+            [
+                f'git() {{ printf "%s\\n" "$*" >> "{git_log.as_posix()}"; }}',
+                "write_rocm_torch_constraints() { printf 'torch==2.11.0\\n' > \"$2\"; }",
+                f'install_atom_from_source "{python.as_posix()}" "{tmp_path.as_posix()}/deps"',
+            ]
+        ),
+    )
+
+    assert res.returncode == 0, res.stderr
+    git_calls = git_log.read_text(encoding="utf-8")
+    assert f"fetch --depth 1 origin {_ATOM_DEV_IMAGE_COMMIT}" in git_calls
+    pip_calls = [
+        line
+        for line in (tmp_path / "python-calls.log").read_text(encoding="utf-8").splitlines()
+        if "pip install" in line
+    ]
+    atom_install = [line for line in pip_calls if f"{tmp_path.as_posix()}/deps/atom" in line]
+    assert atom_install, pip_calls
+    assert "--constraint" in atom_install[0]
+    assert " -e " in f" {atom_install[0]} "
+
+
+def test_atom_install_records_framework_atom_when_frameworks_omits_it(tmp_path: Path):
+    """The engine the operator asked setup to install is the one downstream skills must use."""
+    dotenv = tmp_path / ".env"
+
+    res = _drive_installer(
+        tmp_path,
+        importable={"atom"},
+        dotenv=dotenv,
+        install_framework="atom",
+        body="FRAMEWORKS=sglang,vllm\nwrite_runtime_dotenv",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "FRAMEWORK=atom" in _dotenv_lines(dotenv)
+
+
+def test_atom_install_rejects_an_isolated_framework_env(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", tmp_path.as_posix())
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+
+    res = subprocess.run(
+        [
+            "bash",
+            install_script.as_posix(),
+            "--install-framework",
+            "atom",
+            "--framework-env",
+            "isolated",
+            "--dry-run",
+            "--yes",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert res.returncode != 0
+    assert "isolated is currently supported for vLLM only" in res.stderr
+
+
+def _vllm_venv(tmp_path: Path, *, system_site_packages: bool) -> Path:
+    """A VLLM_VENV_ROOT whose python imports vllm; an overlay also sees the base site-packages."""
+    root = tmp_path / "vllm-venv"
+    (root / "bin").mkdir(parents=True)
+    _fake_python(root / "bin", {"vllm"}).rename(root / "bin" / "python")
+    (root / "pyvenv.cfg").write_text(
+        f"include-system-site-packages = {'true' if system_site_packages else 'false'}\n", encoding="utf-8"
+    )
+    return root
+
+
+_ATOM_INSTALL_STEPS = (
+    "ensure_aiter_for_python() { echo STEP aiter; }\ninstall_atom_from_source() { echo STEP atom-source; }\n"
+)
+
+
+@pytest.mark.parametrize("engine", ["sglang", "vllm"])
+def test_atom_install_refuses_a_python_that_serves_vllm_or_sglang(tmp_path: Path, engine: str):
+    """vLLM and SGLang load ATOM's entry-point plugins by default, so a shared Python would serve ATOM code."""
+    res = _drive_installer(
+        tmp_path,
+        importable={engine},
+        dotenv=tmp_path / ".env",
+        install_framework="atom",
+        body=f"DRY_RUN=1\n{_ATOM_INSTALL_STEPS}install_atom_framework",
+    )
+
+    assert res.returncode != 0
+    assert "would install" not in res.stdout
+    assert f"ATOM cannot share {tmp_path.as_posix()}/fake-python with {engine}" in res.stderr
+
+
+def test_atom_install_refuses_a_base_python_under_a_vllm_overlay(tmp_path: Path):
+    """The ROCm 10 vLLM overlay imports the base site-packages, and with them ATOM's plugins."""
+    overlay = _vllm_venv(tmp_path, system_site_packages=True)
+
+    res = _drive_installer(
+        tmp_path,
+        importable=set(),
+        dotenv=tmp_path / ".env",
+        install_framework="atom",
+        body=f'VLLM_VENV_ROOT="{overlay.as_posix()}"\n{_ATOM_INSTALL_STEPS}install_atom_framework',
+    )
+
+    assert res.returncode != 0
+    assert "STEP" not in res.stdout
+    assert f"ATOM cannot share {overlay.as_posix()}/bin/python with vllm" in res.stderr
+
+
+def test_atom_install_proceeds_beside_a_self_contained_vllm_venv(tmp_path: Path):
+    venv = _vllm_venv(tmp_path, system_site_packages=False)
+
+    res = _drive_installer(
+        tmp_path,
+        importable=set(),
+        dotenv=tmp_path / ".env",
+        install_framework="atom",
+        body=f'VLLM_VENV_ROOT="{venv.as_posix()}"\n{_ATOM_INSTALL_STEPS}install_atom_framework',
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert [line for line in res.stdout.splitlines() if line.startswith("STEP ")] == ["STEP aiter", "STEP atom-source"]
+
+
+_VLLM_ROUTE_STUBS = "assert_vllm_glibc_compatible() { :; }\nensure_openmpi_runtime() { :; }\n"
+
+
+@pytest.mark.parametrize(
+    ("installer", "framework"),
+    [
+        pytest.param("install_sglang_framework", "sglang", id="sglang"),
+        pytest.param(
+            f"{_VLLM_ROUTE_STUBS}route_vllm_install_method() {{ VLLM_INSTALL_METHOD=wheel; }}\ninstall_vllm_framework",
+            "vllm",
+            id="vllm-shared",
+        ),
+        pytest.param(
+            "FRAMEWORK_ENV=isolated\n"
+            f"{_VLLM_ROUTE_STUBS}route_vllm_install_method() {{ VLLM_INSTALL_METHOD=source; }}\ninstall_vllm_framework",
+            "vllm",
+            id="vllm-source-overlay",
+        ),
+    ],
+)
+def test_engine_install_refuses_a_python_that_imports_atom(tmp_path: Path, installer: str, framework: str):
+    """ATOM installed first must not end up inside the interpreter a later vLLM/SGLang serves from."""
+    res = _drive_installer(
+        tmp_path,
+        importable={"atom"},
+        dotenv=tmp_path / ".env",
+        install_framework=framework,
+        body=f"DRY_RUN=1\n{installer}",
+    )
+
+    assert res.returncode != 0
+    assert "would " not in res.stdout
+    assert f"ATOM cannot share {tmp_path.as_posix()}/fake-python with {framework}" in res.stderr
+
+
+def test_isolated_vllm_wheel_install_proceeds_on_an_atom_host(tmp_path: Path):
+    """The wheel venv is created without the system site-packages, so it never sees ATOM."""
+    res = _drive_installer(
+        tmp_path,
+        importable={"atom"},
+        dotenv=tmp_path / ".env",
+        install_framework="vllm",
+        body="DRY_RUN=1\nFRAMEWORK_ENV=isolated\n"
+        f"{_VLLM_ROUTE_STUBS}route_vllm_install_method() {{ VLLM_INSTALL_METHOD=wheel; }}\ninstall_vllm_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "would create/update isolated vLLM venv" in res.stdout
 
 
 def test_baremetal_clears_stale_framework_when_none_importable(tmp_path: Path):
@@ -1267,11 +1756,13 @@ def test_baremetal_next_steps_names_the_detected_framework(tmp_path: Path):
 
 def test_baremetal_profiler_hotfix_accepts_an_atom_only_host(tmp_path: Path):
     """The hotfix patches ROCm profiler libs, which torch.profiler uses on any engine."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
     res = _drive_installer(
         tmp_path,
         importable={"atom"},
-        dotenv=tmp_path / ".env",
-        body="rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE",
+        dotenv=dotenv,
+        body=("running_in_container() { return 1; }\nrocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE"),
     )
 
     assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
@@ -1354,11 +1845,7 @@ _FAKE_SONAMES = {
 
 
 def _fake_elf_tools(tmp_path: Path, sonames: dict[str, str] = _FAKE_SONAMES) -> Path:
-    """A readelf/ldconfig stub so the fake libraries report a DT_SONAME.
-
-    Real hosts read the soname off an ELF header; the fixtures here are plain
-    files, so without this the soname half of the hotfix is silently skipped.
-    """
+    """A readelf/ldconfig stub so the fake libraries report a DT_SONAME."""
     bin_dir = tmp_path / "fake-elf-tools"
     bin_dir.mkdir(exist_ok=True)
     cases = "\n".join(
@@ -1425,8 +1912,7 @@ _SYNC_BODY_SOFT = f"{_SYNC_BODY} || true"
 
 
 def test_baremetal_hotfix_syncs_resolved_libs_into_torch_lib(tmp_path: Path):
-    """torch/lib copies carry DT_RPATH=$ORIGIN, so a /opt/rocm-only overlay is
-    invisible to torch.profiler and decode traces stay empty."""
+    """torch/lib copies carry DT_RPATH=$ORIGIN, so a /opt/rocm-only overlay is invisible to torch.profiler and decode traces stay empty."""
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
         body=_SYNC_BODY,
@@ -1443,8 +1929,7 @@ def test_baremetal_hotfix_syncs_resolved_libs_into_torch_lib(tmp_path: Path):
 
 
 def test_hotfix_torch_lib_sync_skips_a_second_run(tmp_path: Path):
-    """Re-running used to re-copy unconditionally and stamp a fresh backup dir
-    holding the already-hotfixed copy, piling large .so files into site-packages."""
+    """Re-running used to re-copy unconditionally and stamp a fresh backup dir holding the already-hotfixed copy, piling large .so files into site-packages."""
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
         body=f"{_SYNC_BODY}\n{_SYNC_BODY}",
@@ -1461,8 +1946,7 @@ def test_hotfix_torch_lib_sync_skips_a_second_run(tmp_path: Path):
 
 
 def test_hotfix_torch_lib_sync_rolls_back_when_torch_breaks(tmp_path: Path):
-    """cmp only proves the bytes landed; the new libamdhip64 still has to work
-    against the other ROCm libs torch bundles under $ORIGIN."""
+    """cmp only proves the bytes landed; the new libamdhip64 still has to work against the other ROCm libs torch bundles under $ORIGIN."""
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
         body=_SYNC_BODY_SOFT,
@@ -1478,9 +1962,7 @@ def test_hotfix_torch_lib_sync_rolls_back_when_torch_breaks(tmp_path: Path):
 
 
 def test_hotfix_torch_lib_sync_refreshes_a_snapshot_after_a_torch_upgrade(tmp_path: Path):
-    """A torch upgrade between runs left the snapshot describing the previous
-    install, so the new vendor libs were overwritten with no copy kept and a
-    rollback would have pushed the old ABI into the new torch."""
+    """A torch upgrade between runs left the snapshot describing the previous install, so the new vendor libs were overwritten with no copy kept and a rollback would have pushed the old ABI into the new torch."""
     torch_lib = tmp_path / "torch" / "lib"
     res, _rocm_lib, _torch_lib = _drive_torch_lib_sync(
         tmp_path,
@@ -1552,8 +2034,7 @@ def test_hotfix_asset_change_keeps_the_vendor_backup(tmp_path: Path):
 
 
 def test_partial_hotfix_asset_update_with_absent_tracer_keeps_vendor_backup(tmp_path: Path):
-    """When torch never shipped libroctracer64.so, a single-library hotfix bump
-    must not treat the injected tracer as a vendor refresh trigger."""
+    """When torch never shipped libroctracer64.so, a single-library hotfix bump must not treat the injected tracer as a vendor refresh trigger."""
     hotfix_hip = tmp_path / "rocm" / "lib" / _HOTFIX_HIP_SONAME
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
@@ -1571,8 +2052,7 @@ def test_partial_hotfix_asset_update_with_absent_tracer_keeps_vendor_backup(tmp_
 
 
 def test_refresh_preserves_vendor_when_torch_still_carries_hotfix(tmp_path: Path):
-    """A truncated fingerprint can force a refresh, but the rebuild must not
-    promote hotfix bytes already sitting in torch/lib into the vendor snapshot."""
+    """A truncated fingerprint can force a refresh, but the rebuild must not promote hotfix bytes already sitting in torch/lib into the vendor snapshot."""
     fp = f'"{tmp_path}/torch/lib/{_BACKUP_DIRNAME}/.fingerprint"'
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
@@ -1589,8 +2069,7 @@ def test_refresh_preserves_vendor_when_torch_still_carries_hotfix(tmp_path: Path
 
 
 def test_torch_lib_sync_links_versioned_soname_aliases(tmp_path: Path):
-    """torch resolves the versioned soname first, so copying the bytes under the
-    unversioned name alone left the profiler on the vendor library."""
+    """torch resolves the versioned soname first, so copying the bytes under the unversioned name alone left the profiler on the vendor library."""
     bin_dir = _fake_elf_tools(tmp_path)
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
@@ -1612,8 +2091,7 @@ def test_torch_lib_sync_links_versioned_soname_aliases(tmp_path: Path):
 
 
 def test_torch_lib_sync_relinks_a_soname_alias_that_went_missing(tmp_path: Path):
-    """Matching bytes are not enough to call the sync done: a pip reinstall can
-    drop the alias and leave the versioned lookup back on the vendor library."""
+    """Matching bytes are not enough to call the sync done: a pip reinstall can drop the alias and leave the versioned lookup back on the vendor library."""
     bin_dir = _fake_elf_tools(tmp_path)
     alias = tmp_path / "torch" / "lib" / "libamdhip64.so.7"
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
@@ -1645,8 +2123,7 @@ def test_torch_lib_sync_skips_a_second_run_once_aliases_exist(tmp_path: Path):
 
 
 def test_runtime_failure_restores_a_real_vendor_soname_file(tmp_path: Path):
-    """A torch that ships a real file under the versioned name must get it back
-    byte for byte, not the symlink the sync put there."""
+    """A torch that ships a real file under the versioned name must get it back byte for byte, not the symlink the sync put there."""
     bin_dir = _fake_elf_tools(tmp_path)
     vendor_alias = tmp_path / "torch" / "lib" / "libamdhip64.so.7"
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
@@ -1669,8 +2146,7 @@ def test_runtime_failure_restores_a_real_vendor_soname_file(tmp_path: Path):
 
 
 def test_verify_hotfix_only_fails_when_no_hotfix_is_installed(tmp_path: Path):
-    """--verify-hotfix is a standalone check, so it has to report a bad state
-    instead of exiting clean on a host that never applied the hotfix."""
+    """--verify-hotfix is a standalone check, so it has to report a bad state instead of exiting clean on a host that never applied the hotfix."""
     bin_dir = _fake_elf_tools(tmp_path)
     res, _rocm_lib, _torch_lib = _drive_torch_lib_sync(
         tmp_path,
@@ -1714,8 +2190,7 @@ def test_sync_warns_when_framework_imports_but_torch_lib_is_missing(tmp_path: Pa
 
 
 def test_hotfix_survives_a_runtime_probe_failing_for_unrelated_reasons(tmp_path: Path):
-    """A busy GPU or HIP OOM fails the probe both before and after the restore.
-    Once the vendor bytes are back, that must degrade to "not applied", not die."""
+    """A busy GPU or HIP OOM fails the probe both before and after the restore."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)
     rocm_lib = _fake_rocm_lib(tmp_path)
@@ -1754,8 +2229,7 @@ def test_hotfix_survives_a_runtime_probe_failing_for_unrelated_reasons(tmp_path:
 
 
 def test_hotfix_phase_survives_a_failed_torch_lib_sync(tmp_path: Path):
-    """The installer runs under set -e: a bare sync call would end setup instead
-    of degrading to "hotfix not applied"."""
+    """The installer runs under set -e: a bare sync call would end setup instead of degrading to "hotfix not applied"."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)
     rocm_lib = _fake_rocm_lib(tmp_path)
@@ -1801,9 +2275,7 @@ def test_hotfix_phase_survives_a_failed_torch_lib_sync(tmp_path: Path):
 
 
 def test_hotfix_syncs_the_isolated_vllm_venv_torch_not_the_shared_one(tmp_path: Path):
-    """vLLM defaults to FRAMEWORK_ENV=isolated with its own ROCm torch under
-    $VLLM_VENV_ROOT, so a shared-interpreter lookup patched a torch that never
-    runs the benchmark and left the profiler unfixed."""
+    """vLLM defaults to FRAMEWORK_ENV=isolated with its own ROCm torch under $VLLM_VENV_ROOT, so a shared-interpreter lookup patched a torch that never runs the benchmark and left the profiler unfixed."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)
     rocm_lib = _fake_rocm_lib(tmp_path)
@@ -1900,8 +2372,7 @@ def test_restore_persisted_framework_env_without_vllm_venv_root(
 
 
 def test_hotfix_rerun_restores_isolated_vllm_from_dotenv(tmp_path: Path):
-    """A re-run with --install-framework none must reuse .env's isolated vLLM
-    env so torch/lib sync still targets the venv that runs benchmarks."""
+    """A re-run with --install-framework none must reuse .env's isolated vLLM env so torch/lib sync still targets the venv that runs benchmarks."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)
     rocm_lib = _fake_rocm_lib(tmp_path)
@@ -2016,8 +2487,7 @@ def _drive_hotfix_gate(
         importable=importable,
         dotenv=dotenv,
         body=(
-            # Pinned so the result does not depend on whether the test host
-            # itself is a container.
+            # Pinned so the result does not depend on whether the test host itself is a container.
             f"running_in_container() {{ return {0 if in_container else 1}; }}\n"
             "rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE"
         ),
@@ -2025,8 +2495,7 @@ def _drive_hotfix_gate(
 
 
 def test_docker_run_mode_skips_the_hotfix_for_a_vllm_image(tmp_path: Path):
-    """vLLM ROCm images carry their own kineto profiler workaround, so overlaying
-    /opt/rocm into their torch/lib trades a vendor-validated pair for an untested one."""
+    """vLLM ROCm images carry their own kineto profiler workaround, so overlaying /opt/rocm into their torch/lib trades a vendor-validated pair for an untested one."""
     res = _drive_hotfix_gate(tmp_path, run_mode="docker", importable={"vllm"})
 
     assert "HOTFIX_ELIGIBLE" not in res.stdout
@@ -2039,9 +2508,49 @@ def test_docker_run_mode_applies_the_hotfix_for_an_sglang_image(tmp_path: Path):
     assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
 
 
+def _drive_vllm_glibc_gate(
+    tmp_path: Path,
+    *,
+    glibc: str,
+    vllm_version: str = "0.29.0",
+    check_only: bool = True,
+) -> subprocess.CompletedProcess:
+    return _drive_installer(
+        tmp_path,
+        importable=set(),
+        dotenv=tmp_path / ".env",
+        body="\n".join(
+            [
+                f'host_glibc_version() {{ echo "{glibc}"; }}',
+                f'VLLM_VERSION="{vllm_version}"',
+                f"CHECK_ONLY={1 if check_only else 0}",
+                "install_vllm_framework",
+            ]
+        ),
+    )
+
+
+def test_vllm_install_rejects_glibc_235_for_028(tmp_path: Path):
+    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.35", vllm_version="0.29.0")
+
+    assert res.returncode != 0
+    assert "glibc >= 2.39" in res.stderr
+
+
+def test_vllm_install_accepts_glibc_239_for_028(tmp_path: Path):
+    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.39", vllm_version="0.29.0")
+
+    assert res.returncode == 0, res.stderr
+
+
+def test_vllm_install_allows_pre_028_override_on_glibc_235(tmp_path: Path):
+    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.35", vllm_version="0.27.1")
+
+    assert res.returncode == 0, res.stderr
+
+
 def test_baremetal_run_mode_keeps_the_hotfix_for_vllm(tmp_path: Path):
-    """The framework split is docker-only: a bare-metal vLLM host profiles through
-    the same ROCm libs the overlay fixes, so gating it there would lose profiling."""
+    """The framework split is docker-only: a bare-metal vLLM host profiles through the same ROCm libs the overlay fixes, so gating it there would lose profiling."""
     res = _drive_hotfix_gate(tmp_path, run_mode="baremetal", importable={"vllm"})
 
     assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
@@ -2155,6 +2664,9 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
     start = script_text.index("install_sglang_framework() {")
     end = script_text.index("\n}\n\n# Verify that the installed vLLM package resolves", start) + 3
     install_sglang_framework = script_text[start:end]
+    # The import probe that decides whether to install lives in this helper, shared with the vLLM route.
+    aiter_start = script_text.index("ensure_aiter_for_python() {")
+    ensure_aiter_for_python = script_text[aiter_start : script_text.index("\n}\n", aiter_start) + 3]
 
     fake_py = tmp_path / "python"
     calls_file = tmp_path / "calls.txt"
@@ -2199,9 +2711,14 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
                 "warn() { :; }",
                 'die() { echo "$*" >&2; exit 99; }',
                 '_py_has() { [ "$2" = aiter ] && return 0; return 0; }',
+                "refuse_atom_beside_vllm_or_sglang() { :; }",
                 "install_sglang_from_wheel() { :; }",
                 "install_sglang_from_source() { :; }",
+                "sglang_rocm_extra_for_torch() { printf 'rocm724\\n'; }",
+                "sglang_pypi_version_for_extra() { printf '7.2.4\\n'; }",
+                "ensure_rocm_devel_headers() { :; }",
                 f'install_compatible_aiter() {{ printf \'install_compatible_aiter %s %s\\n\' "$1" "$2" >> "$CALLS_FILE"; touch {import_flag}; }}',
+                ensure_aiter_for_python,
                 install_sglang_framework,
                 "install_sglang_framework",
             ]
@@ -2226,20 +2743,18 @@ def test_kernel_install_no_longer_exports_openai_safe_credentials():
     assert "_OPENAI_KEY_VAL" not in script_text
     assert "_snap_safe" not in script_text
     assert "_snap_openai" not in script_text
-    # The kernel-agent drives Claude Code, so kernel-agent.env.sh stays
-    # Anthropic-only regardless of what the gateway serves.
+    # The kernel-agent drives Claude Code, so kernel-agent.env.sh stays Anthropic-only regardless of what the gateway
+    # serves.
     assert "export OPENAI_BASE_URL" not in write_text
     assert "export OPENAI_API_KEY" not in write_text
 
-    # The gateway credentials may be *read* in memory -- the single-gateway
-    # branch derives ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY from
-    # OPENAI_BASE_URL + OPENAI_API_KEY, mirroring the CLI's
-    # _resolve_llm_endpoints(). What must never happen is persisting them:
-    # neither exported into kernel-agent.env.sh nor written back to .env.
+    # The gateway credentials may be *read* in memory -- the single-gateway branch derives
+    # ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY from OPENAI_BASE_URL + OPENAI_API_KEY, mirroring the CLI's
+    # _resolve_llm_endpoints().
     assert "export OPENAI_API_KEY" not in write_text
     assert "upsert_dotenv_var OPENAI_API_KEY" not in write_text
-    # The legacy gateway key is never read, exported or persisted -- but a stale
-    # value left in a migrating .env is still scrubbed.
+    # The legacy gateway key is never read, exported or persisted -- but a stale value left in a migrating .env is
+    # still scrubbed.
     assert "export SAFE_API_KEY" not in script_text
     assert "upsert_dotenv_var SAFE_API_KEY" not in script_text
     assert "remove_dotenv_var SAFE_API_KEY" in write_text
@@ -2300,12 +2815,10 @@ def test_packaged_install_sh_resolves_target_workspace_root(tmp_path: Path):
 def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")
-    start = script_text.index("setup_dotenv_is_authoritative() {")
-    end = script_text.index("\nload_dotenv_no_clobber() {", start)
+    start = script_text.index("scrub_stale_workspace_env_for_setup_dotenv() {")
+    end = script_text.index("\n# Load .env before deriving", start)
     helpers = script_text[start:end]
-    load_start = script_text.index("load_dotenv_no_clobber() {")
-    load_end = script_text.index("\n# Load .env before deriving", load_start)
-    loader = script_text[load_start:load_end]
+    loader = install_script.with_name("runtime_env.sh")
 
     workspace = tmp_path / "target"
     workspace.mkdir()
@@ -2326,9 +2839,9 @@ def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
             [
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
-                f"REPO_ROOT={workspace}",
+                f'REPO_ROOT="{workspace.as_posix()}"',
+                f'. "{loader.as_posix()}"',
                 helpers,
-                loader,
                 "USER_DATA_PATH=/old/workspace/session",
                 "HYPERLOOM_RUNTIME_DIR=/old/workspace/session/runtime",
                 "KERNEL_AGENT_ENV=/old/workspace/session/runtime/kernel-agent.env.sh",
@@ -2350,10 +2863,11 @@ def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
         )
         + "\n",
         encoding="utf-8",
+        newline="\n",
     )
 
     out = subprocess.run(
-        ["bash", str(runner)],
+        ["bash", runner.as_posix()],
         check=True,
         text=True,
         stdout=subprocess.PIPE,
@@ -2459,9 +2973,7 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
 
 
 def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
-    """Writing kernel-agent env must NOT wipe the Anthropic creds the operator
-    put in .env (an Anthropic-only setup must keep ANTHROPIC_API_KEY /
-    ANTHROPIC_BASE_URL after install)."""
+    """Writing kernel-agent env must NOT wipe the Anthropic creds the operator put in .env (an Anthropic-only setup must keep ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL after install)."""
     install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
@@ -2543,16 +3055,15 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
     # kernel-agent env mirrors the same Anthropic values and no OpenAI leak.
     assert "export ANTHROPIC_API_KEY='anthropic-real-key'" in kernel_text
     assert "export ANTHROPIC_BASE_URL='https://api.anthropic.com'" in kernel_text
-    # A header-authenticated gateway needs its header here too, and the single
-    # quotes must keep ${VAR} intact for parse_custom_headers to expand.
+    # A header-authenticated gateway needs its header here too, and the single quotes must keep ${VAR} intact for
+    # parse_custom_headers to expand.
     assert "export ANTHROPIC_CUSTOM_HEADERS='Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}'" in kernel_text
     assert "export OPENAI_API_KEY=" not in kernel_text
     assert "OPENAI_API_KEY=" not in dotenv_text
 
 
 def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
-    """Fresh-shell CLI starts from .env, so GEAK_CLAUDE_MODEL must be persisted
-    there in addition to kernel-agent.env.sh."""
+    """Fresh-shell CLI starts from .env, so GEAK_CLAUDE_MODEL must be persisted there in addition to kernel-agent.env.sh."""
 
     def bash_path(path: Path) -> str:
         text = str(path)

@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the context-window preflight.
-
-Policy: do NOT stretch a small model context; when ISL+OSL+headroom exceeds
-max_position_embeddings, fail fast with a persisted stop reason.
-"""
+"""Tests for the context-window preflight."""
 
 from __future__ import annotations
 
@@ -91,7 +87,7 @@ def test_preflight_fails_for_2048_model(tmp_path, monkeypatch):
     assert state["stop_reason"] == "model_context_window_too_small"
     # Fail-fast emits session_breakdown.json itself (exits before coordinator.run's try/finally).
     breakdown = json.loads((sd / "session_breakdown.json").read_text(encoding="utf-8"))
-    assert breakdown["session"]["stop_reason"] == "model_context_window_too_small"
+    assert breakdown["outcome"]["stop_reason"] == "model_context_window_too_small"
 
 
 def test_preflight_passes_for_4096_model(tmp_path, monkeypatch):
@@ -154,7 +150,7 @@ def test_max_model_len_fallback_when_maxpos_unknown(tmp_path):
 
 # The preflight stop_reason must be a canonical STOP_REASON_VOCAB term.
 def test_context_window_stop_reason_is_canonical_vocab():
-    from hyperloom.orchestrator.phases.machine_state import (
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import (
         STOP_REASON_VOCAB,
         is_valid_stop_reason,
     )
@@ -177,16 +173,6 @@ def test_preflight_persists_stop_reason_under_strict_env(tmp_path, monkeypatch):
     assert state["stop_reason"] == "model_context_window_too_small"
     final = json.loads((sd / "reports" / "final.json").read_text())
     assert final["stop_reason"] == "model_context_window_too_small"
-
-
-def test_monitor_offline_vocab_includes_context_window():
-    """The robustness monitor's offline STOP_REASON_VOCAB fallback must list the preflight stop_reason so it's treated as terminal."""
-    from hyperloom import inference_optimizer
-
-    package_root = Path(inference_optimizer.__file__).resolve().parent
-    monitor = package_root / "tools" / "robustness_monitor.sh.example"
-    text = monitor.read_text(encoding="utf-8")
-    assert "model_context_window_too_small" in text
 
 
 def test_preflight_reason_suggests_lowering_headroom(tmp_path, monkeypatch):

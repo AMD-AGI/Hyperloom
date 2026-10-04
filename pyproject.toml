@@ -6,8 +6,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperloom-inference_optimizer"
-version = "1.0.0"
-description = "Agentic AMD GPU LLM inference optimization runtime with KernelForge kernel optimization. Experimental RX 9070 XT (GFX1201) identity, detection, and target routing are included; end-to-end RX/Windows support remains unvalidated."
+version = "1.1.3"
+description = "Inference Optimizer — two-role (Orchestration/Critic) autonomous LLM inference optimization runtime for AMD GPU platforms with KernelForge. This fork includes experimental RX 9070 XT (GFX1201) identity and target routing; end-to-end RX/Windows support remains unvalidated."
 readme = "README.md"
 requires-python = ">=3.10"
 # PEP 639 SPDX expression. The former ``{ text = "MIT" }`` table is deprecated
@@ -23,7 +23,7 @@ dependencies = []
 Homepage = "https://github.com/AMD-AGI/Hyperloom"
 Source = "https://github.com/AMD-AGI/Hyperloom"
 Issues = "https://github.com/AMD-AGI/Hyperloom/issues"
-Changelog = "https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/AMD-AGI/Hyperloom/releases"
 Security = "https://github.com/AMD-AGI/Hyperloom/security/policy"
 
 [project.optional-dependencies]
@@ -89,8 +89,12 @@ forge-profiling = [
 ]
 test = [
     "hyperloom-inference_optimizer[runtime]",
+    "hyperloom-inference_optimizer[ci]",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
+    "jsonschema>=4.18",
+    # Property-based tests over the bring-up ladder.
+    "hypothesis>=6.0",
     "respx>=0.21",
     "requests>=2.28",
     # psutil-based live-compiler probe in _aiter_jit.
@@ -133,18 +137,10 @@ dev = [
 [project.scripts]
 inference_optimizer = "hyperloom.inference_optimizer.cli:main"
 hyperloom = "hyperloom.inference_optimizer.setup:main"
-# Console scripts for interactive / manual use; the orchestrator invokes the
-# ``python -m hyperloom.agents.*`` module paths directly instead.
-framework-agent = "hyperloom.agents.framework.runtime.cli:main"
-fa = "hyperloom.agents.framework.runtime.cli:main"
-robustness-agent = "hyperloom.agents.robustness.main:main"
 quantization-agent = "hyperloom.agents.quantization.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
-# ``python -m kernelforge.cli`` directly; these are for interactive use.
+# ``python -m kernelforge.cli`` directly; this is for interactive use.
 kernelforge = "kernelforge.cli:main"
-# Deprecated alias kept for one release: the standalone ``kernel-agents``
-# distribution is gone, and operator scripts still reference this name.
-kernel-agents = "kernelforge.cli:main"
 
 [tool.setuptools]
 # setuptools defaults this to true for pyproject-based config, which makes
@@ -187,6 +183,12 @@ exclude = [
     # importable top-level modules. They ship as package-data instead.
     "kernelforge.data",
     "kernelforge.data.*",
+    # Scripted launch/specialist backends and a virtual clock: scaffolding a
+    # test drives, not a runtime component. Nothing in the shipped tree imports
+    # it, and the production launch boundary it substitutes
+    # (``actions/executors/launch_backend.py``) ships as normal.
+    "hyperloom.orchestrator.rehearsal",
+    "hyperloom.orchestrator.rehearsal.*",
 ]
 
 [tool.setuptools.data-files]
@@ -208,6 +210,9 @@ exclude = [
 ".agents/skills/hyperloom-qwen3-14b-fp8-12h" = ["examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-14b-fp8-12h" = ["examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md"]
 ".cursor/skills/hyperloom-qwen3-14b-fp8-12h" = ["examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md"]
+".agents/skills/hyperloom-qwen3-14b-fp8-12h-forge" = ["examples/hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md"]
+".claude/skills/hyperloom-qwen3-14b-fp8-12h-forge" = ["examples/hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md"]
+".cursor/skills/hyperloom-qwen3-14b-fp8-12h-forge" = ["examples/hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md"]
 ".agents/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 ".claude/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 ".cursor/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
@@ -225,6 +230,8 @@ hyperloom = [
     "assets/*.sh",
     "assets/*.example",
     "assets/configs/*.yaml",
+    "assets/agentx/*.sh",
+    "assets/agentx/*.py",
     # Host-side evidence probe, injected into the benchmark process via a
     # PYTHONPATH prefix (see _framework_rewrite_evidence). Shipped so wheel
     # installs can arm it.
@@ -238,7 +245,6 @@ hyperloom = [
     # so it has to ship alongside the .sbatch that references it.
     "assets/slurm/*.sh.in",
     "references/*.md",
-    "tools/*.sh.example",
 ]
 # Critic LLM skill assets, mounted by the A2A / Codex chat server host.
 "hyperloom.agents.critic" = [
@@ -246,16 +252,6 @@ hyperloom = [
     "README.md",
     "actions/*.md",
     "references/*.md",
-]
-"hyperloom.agents.robustness" = [
-    "SKILL.md",
-    "prompts/*.md",
-]
-"hyperloom.agents.framework" = [
-    "SKILL.md",
-    "README.md",
-    "examples/*.json",
-    "examples/*.py",
 ]
 "hyperloom.agents.quantization" = [
     "SKILL.md",
@@ -267,7 +263,7 @@ hyperloom = [
     "scripts/*.sh",
 ]
 # Vendor-operator-playbook registry (see tools/_vendor_operator_playbooks.py):
-# read at runtime by classify_patchability()/forge_submit.py, so it must ship.
+# read at runtime by classify_patchability(), so it must ship.
 "hyperloom.agents.kernel.tools" = [
     "vendor_operator_playbooks.json",
 ]
@@ -279,6 +275,7 @@ hyperloom = [
 # Breakdown skill assets; the only SKILL.md under src/ that did not ship.
 "hyperloom.inference_optimizer.breakdown" = [
     "*.md",
+    "contracts/*.json",
 ]
 "hyperloom.inference_optimizer.multi_node" = [
     "SKILL.md",
@@ -309,10 +306,9 @@ testpaths = [
     "src/**/tests",
     "scripts/tests",
 ]
-pythonpath = ["src", "."]
+pythonpath = ["src", ".", "scripts"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
-    "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
     "targeted_build_e2e: end-to-end tests that run a real AITER compile on a ROCm host; skip with '-m \"not targeted_build_e2e\"' in CI.",
 ]
 
@@ -324,7 +320,7 @@ relative_files = true
 source = [
     "src/hyperloom",
     "src/kernelforge",
-    "OOB",  # optional component; not always present in a clone (see CLAUDE.md)
+    "OOB",  # optional component; not always present in a clone
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and
 # live-serving plumbing that is covered end-to-end rather than by unit tests.
@@ -353,16 +349,12 @@ omit = [
     "src/hyperloom/orchestrator/actions/executors/_multi_node_env.py",
     # Breakdown LLM HTTP client.
     "src/hyperloom/inference_optimizer/breakdown/reporters/llm_client.py",
-    # Robustness-agent standalone reactor CLI wrapper.
-    "src/hyperloom/agents/robustness/main.py",
     # Stand-alone kernel-agent CLI tools.
-    "src/hyperloom/agents/kernel/tools/kernel_optimization.py",
     "src/hyperloom/agents/kernel/tools/tracelens_analysis.py",
     "src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py",
     "src/hyperloom/agents/kernel/tools/apply_kernel_patch.py",
     # Kernel-agent tool backends (subprocess submit).
     "src/hyperloom/agents/kernel/tools/backends/*",
-    "src/hyperloom/agents/kernel/tools/_collective_names.py",
     # quantization_agent CLI driver (argparse entrypoint).
     "src/hyperloom/agents/quantization/cli.py",
     # OOB server-side runtime (CLI, HTTP server, scheduler, auth proxy, agent
@@ -373,7 +365,6 @@ omit = [
     "OOB/auth_proxy.py",
     "OOB/backends/*",
     # Local-host metrics probes (rocm-smi / nvidia-smi / ps / df / ray status).
-    "src/hyperloom/agents/robustness/sources/local_probe.py",
     # InferenceX shell-script patcher (fcntl locking + benchmark_lib.sh rewrite).
     "src/hyperloom/orchestrator/actions/executors/_inferencex_patcher.py",
     # TraceLens server patcher (git apply / patch --fuzz subprocess pipeline).
@@ -382,8 +373,6 @@ omit = [
     "src/hyperloom/inference_optimizer/breakdown/collectors/*",
     # Operator CLIs, not library code.
     "src/hyperloom/inference_optimizer/tools/*",
-    # Subprocess transports for the robustness / critic sub-agent runtimes.
-    "src/hyperloom/orchestrator/roles/robustness_agent.py",
     "src/hyperloom/orchestrator/roles/critic_agent.py",
     # Subprocess-heavy benchmark drivers.
     "src/hyperloom/orchestrator/actions/executors/profile.py",
@@ -440,14 +429,14 @@ fail_under = 90
 # Base trailing argv for ``pytest`` in CI; the workflow appends sharding
 # (``--splits``/``--group``) and ``-n`` from the values below.
 pytest_ci_args = [
-    "-m", "not critic_agent_e2e and not robustness_agent_e2e and not targeted_build_e2e",
-    "--cov=.", "--cov-report=term",
+    "-m", "not critic_agent_e2e and not targeted_build_e2e",
+    "--cov=.", "--cov-report=",
 ]
 # In-runner pytest-xdist workers per shard job (``-n auto`` yields 1 on the
 # 2-vCPU GitHub runner, so pin it).
 xdist_workers = 2
 # GitHub matrix shards the suite is split across (pytest-split).
-total_shards = 4
+total_shards = 6
 # Repository variable name: when truthy, CI skips fail_under enforcement.
 relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
 
@@ -473,19 +462,29 @@ extend-exclude = [
     ".venv",
     "TraceLens-internal",
     "InferenceX",
+    "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/kb_store_client.py",
     # Knowledge base / examples / serving patches, not source we own the style
     # of. The example drivers are .py and would otherwise be reformatted.
     "src/kernelforge/data",
+    "src/kernelforge/knowledge/remote_exp/kb_store_client.py",
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "W"]
+select = ["E", "F", "W", "BLE", "RUF100"]
 # E501 is owned by ``ruff format``; E741 would only cause churn-only renames in
 # math / parsing helpers where single-letter locals are idiomatic.
 ignore = ["E501", "E741"]
 
 # Future-proofing -- uncomment once the current findings are at zero.
 # extend-select = ["B", "I", "UP", "SIM", "RUF"]
+
+# C901 (mccabe) is the complexity trigger in the style guide's "Size and
+# complexity" table. It stays off rather than on-and-ignored: the tree carries a
+# backlog above the default max of 10, so selecting it would red the tree instead
+# of gating new code. Measure on demand -- no config edit needed:
+#   ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
+# [tool.ruff.lint.mccabe]
+# max-complexity = 10
 
 [tool.ruff.lint.per-file-ignores]
 # Tests re-import inside function bodies (E402), redefine fixtures (F811), and
@@ -499,7 +498,7 @@ ignore = ["E501", "E741"]
 "src/hyperloom/inference_optimizer/multi_node/cli.py" = ["E402"]
 "src/hyperloom/inference_optimizer/multi_node/commands/infera.py" = ["E402"]
 "src/hyperloom/orchestrator/specialists/runner.py" = ["E402"]
-"src/hyperloom/orchestrator/kernel/roofline_ceiling.py" = ["E402"]
+"src/hyperloom/inference_optimizer/roofline_ceiling.py" = ["E402"]
 "src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
 "src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
 # The import sits under the comment block explaining why the attribute name is

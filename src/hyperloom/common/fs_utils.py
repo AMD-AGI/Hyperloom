@@ -7,9 +7,8 @@ from __future__ import annotations
 
 import os
 
-# Mounts that can be revoked mid-run: a process whose cwd lives on one sees
-# relative-path writes fail with ENOENT after a flap, so callers place anything
-# they must keep writing to on local disk instead.
+# Mounts that can be revoked mid-run: a process whose cwd lives on one sees relative-path writes fail with ENOENT
+# after a flap, so callers place anything they must keep writing to on local disk instead.
 _NETWORK_FS_TYPES: frozenset[str] = frozenset(
     {
         "nfs",
@@ -31,12 +30,7 @@ _NETWORK_FS_TYPES: frozenset[str] = frozenset(
 
 
 def _path_fstype(path: str) -> str:
-    """Return the filesystem type backing ``path`` per ``/proc/mounts``.
-
-    Picks the longest mountpoint that is a prefix of the resolved path, and
-    ``""`` when it cannot be determined (non-Linux, unreadable
-    ``/proc/mounts``), which reads as "assume local".
-    """
+    """Return the filesystem type backing ``path`` per ``/proc/mounts``."""
     try:
         rp = os.path.realpath(path)
     except OSError:

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ClaudeBackend pure helpers (no real SDK): prompt composition,
-usage coercion, block iteration/classification, tool-use parsing, text
-extraction, and conversation-session accessors."""
+"""Coverage for ClaudeBackend pure helpers (no real SDK): prompt composition, usage coercion, block
+iteration/classification, tool-use parsing, text extraction, and conversation-session accessors.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+from hyperloom.common.llm_config import CLAUDE_GATEWAY_SIGNAL_KEYS, LEGACY_DEEPSEEK_ENV_KEYS
 from hyperloom.orchestrator.roles import (
     ClaudeBackend,
     EMIT_INTENT_TOOL_NAME,
@@ -83,13 +84,6 @@ def test_set_context_provider_none_clears() -> None:
     assert b._context_server_config is None
 
 
-def test_reset_conversation_clears_session_id() -> None:
-    b = _backend(conversational=True)
-    b._session_id = "sess-1"
-    b.reset_conversation()
-    assert b._session_id is None
-
-
 def test_build_options_pins_gateway_env_and_ignores_global_settings(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
@@ -109,13 +103,8 @@ def test_build_options_pins_gateway_env_and_ignores_global_settings(monkeypatch)
 
 
 def test_build_options_leaves_settings_sources_unset_without_gateway_env(monkeypatch) -> None:
-    for key in (
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_CUSTOM_HEADERS",
-        "LLM_GATEWAY_KEY",
-    ):
+    # Taken from the product's signal set so a newly recognised gateway variable cannot leak in from the shell.
+    for key in (*CLAUDE_GATEWAY_SIGNAL_KEYS, *LEGACY_DEEPSEEK_ENV_KEYS, "LLM_GATEWAY_KEY"):
         monkeypatch.delenv(key, raising=False)
     b = _backend(model="claude-opus-4-6")
 
@@ -126,8 +115,7 @@ def test_build_options_leaves_settings_sources_unset_without_gateway_env(monkeyp
 
 
 def test_build_options_never_maps_openai_key_onto_the_anthropic_side(monkeypatch) -> None:
-    """An OpenAI-only environment produces no Anthropic credentials for the Claude
-    child process."""
+    """An OpenAI-only environment produces no Anthropic credentials for the Claude child process."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
@@ -181,6 +169,47 @@ def test_parse_tool_use_block_valid_and_invalid() -> None:
     assert intent is not None
     # invalid envelope -> None (validation failure swallowed)
     bad = ToolUseBlock(name=EMIT_INTENT_TOOL_NAME, input={"intent_type": "not_a_real_type"})
+    assert b._parse_tool_use_block(bad) is None
+
+
+def test_parse_tool_use_block_prefers_native_intent_type() -> None:
+    b = _backend()
+    block = ToolUseBlock(
+        name=EMIT_INTENT_TOOL_NAME,
+        input={
+            "intent_type": "send_message",
+            "payload": {"topic": "heartbeat", "body_md": "native"},
+            "__unparsedToolInput": {
+                "raw": '{"intent_type": "alert", "payload": {"severity": "high", "summary": "x"}}',
+                "len": 1,
+            },
+        },
+    )
+    intent = b._parse_tool_use_block(block)
+    assert intent is not None
+    assert intent.type.value == "send_message"
+    assert intent.payload["body_md"] == "native"
+
+
+def test_parse_tool_use_block_unwraps_claude_code_wrapper() -> None:
+    b = _backend()
+    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}}'
+    wrapped = ToolUseBlock(
+        name=EMIT_INTENT_TOOL_NAME,
+        input={"__unparsedToolInput": {"raw": raw, "len": len(raw)}},
+    )
+    intent = b._parse_tool_use_block(wrapped)
+    assert intent is not None
+    assert intent.type.value == "send_message"
+    assert intent.payload["topic"] == "heartbeat"
+
+
+def test_parse_tool_use_block_unparsed_malformed_json_returns_none() -> None:
+    b = _backend()
+    bad = ToolUseBlock(
+        name=EMIT_INTENT_TOOL_NAME,
+        input={"__unparsedToolInput": {"raw": "{not-json", "len": 9}},
+    )
     assert b._parse_tool_use_block(bad) is None
 
 

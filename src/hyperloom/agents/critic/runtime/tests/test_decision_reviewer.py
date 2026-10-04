@@ -81,6 +81,23 @@ def test_prepare_review_for_coordinator_inbox_extracts_proposals(reviewer):
     assert by_cls["framework_op"] == []
 
 
+def test_prepare_review_ignores_retired_robustness_findings(reviewer, tmp_path, monkeypatch):
+    rev, _, _ = reviewer
+    findings = tmp_path / "agents" / "robustness" / "findings"
+    findings.mkdir(parents=True)
+    (findings / "sess_a.jsonl").write_text(
+        json.dumps({"severity": "high", "summary": "Historical finding", "rca_text": "Do not inject"}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ROBUSTNESS_AGENT_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("CRITIC_ROBUSTNESS_FINDINGS_DIR", str(findings))
+    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS))
+    assert "robustness_priors" not in bundle.to_dict()
+    assert bundle.merged_context["model"] == "Qwen3-14B"
+    assert bundle.kb_priors_trace["configured"] is True
+    assert sorted(bundle.kb_priors_by_proposal) == ["aaa1", "bbb2"]
+
+
 def test_prepare_review_propagates_known_actions(reviewer):
     rev, kb, sm = reviewer
     bundle = rev.prepare_review(
@@ -184,14 +201,7 @@ def test_prepare_review_framework_op_emits_empty_approve_requires(reviewer):
 
 
 def test_classify_candidate_prescreen_is_framework_op():
-    """A pre-screen classifies as framework_op; the same action landing a patch does not.
-
-    Both arrive as ``integrate_patch`` -- one action lands every patch source
-    now -- so the top-level candidate id is the only thing separating "is this
-    candidate worth a bench" from "this patch is applied and measured". Reading
-    the action name alone would drop the patch-landing evidence bar for every
-    real patch.
-    """
+    """A pre-screen classifies as framework_op; the same action landing a patch does not."""
     from hyperloom.agents.critic.runtime.decision_reviewer import (
         _APPROVE_REQUIRES_BY_CLASS,
         ACTION_CLASS_FRAMEWORK_OP,
@@ -219,16 +229,16 @@ def test_classify_enablement_integrate_patch_is_enablement_landing():
     # Plain integrate_patch (no enablement marker) stays strict.
     assert classify_proposal_action("integrate_patch", {"params": {}}) == ACTION_CLASS_PATCH_LANDING
     assert classify_proposal_action("integrate_patch", None) == ACTION_CLASS_PATCH_LANDING
-    # enablement=True or framework_agent_authoring=True downgrades the class.
+    # Only enablement=True downgrades the class; framework_agent_authoring alone does not.
     assert (
         classify_proposal_action("integrate_patch", {"params": {"enablement": True}}) == ACTION_CLASS_ENABLEMENT_LANDING
     )
+    # FRAMEWORK authoring patches (no enablement key) stay in the strict PATCH_LANDING class.
     assert (
-        classify_proposal_action("integrate", {"params": {"framework_agent_authoring": True}})
-        == ACTION_CLASS_ENABLEMENT_LANDING
+        classify_proposal_action("integrate_patch", {"params": {"framework_agent_authoring": True}})
+        == ACTION_CLASS_PATCH_LANDING
     )
-    # The lighter bar excludes the pre-boot-impossible production evidence
-    # and the redundant rollback restatement.
+    # The lighter bar excludes the pre-boot-impossible production evidence and the redundant rollback restatement.
     reqs = _APPROVE_REQUIRES_BY_CLASS[ACTION_CLASS_ENABLEMENT_LANDING]
     assert "comparable_before_after_benchmark" not in reqs
     assert "accuracy_gate_or_waiver" not in reqs
@@ -246,7 +256,7 @@ def test_prepare_review_enablement_integrate_relaxes_approve_requires(reviewer):
         "=== Inbox for critic ===\n"
         "  seq=1 msg_id=enA from=orchestration topic=proposal payload="
         "{'action_name': 'integrate_patch', 'provenance': 'specialist', "
-        "'params': {'enablement': True, 'framework_agent_authoring': True}}\n"
+        "'params': {'enablement': True}}\n"
     )
     bundle = rev.prepare_review(_coordinator_request(prompt, "sess_enable"))
     constraints = bundle.review_constraints
@@ -428,8 +438,7 @@ def _verdict_intent_for(intents: list[dict], target: str) -> dict:
 
 
 def test_commit_review_carries_the_cited_rule_into_the_intent(reviewer):
-    """The Coordinator holds a reject to the verdict its rule declared, and it
-    can only do that if the code the Critic cited survives the commit path."""
+    """The Coordinator holds a reject to the verdict its rule declared, and it can only do that if the code the Critic cited survives the commit path."""
     rev, _kb, sm = reviewer
     rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_code"))
     review = {
@@ -600,7 +609,7 @@ def test_commit_review_kb_draft_non_list_raises(reviewer):
         rev.commit_review(request, {"kb_drafts": {"not": "a list"}})
 
 
-def test_commit_review_no_proposals_emits_heartbeat(reviewer):
+def test_commit_review_no_proposals_emits_idle_observation(reviewer):
     rev, kb, sm = reviewer
     prompt = (
         "=== Shared session state ===\nmodel=qwen3-14b framework=sglang\n=== Inbox for critic ===\n(no new messages)\n"
@@ -613,7 +622,7 @@ def test_commit_review_no_proposals_emits_heartbeat(reviewer):
     intents = outcome.intent_envelope["intents"]
     assert len(intents) == 1
     assert intents[0]["intent_type"] == "send_message"
-    assert intents[0]["payload"]["topic"] == "heartbeat"
+    assert intents[0]["payload"]["topic"] == "observation"
 
 
 def test_commit_review_persists_to_kb_when_flagged(reviewer):

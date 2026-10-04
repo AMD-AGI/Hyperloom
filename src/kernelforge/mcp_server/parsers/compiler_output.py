@@ -26,8 +26,7 @@ class RegisterInfo:
 
     @property
     def occupancy_analysis(self) -> str:
-        """Occupancy heuristic for CDNA3/CDNA4 (gfx942/gfx950): 256-VGPR and
-        ~80KB-LDS dual-occupancy thresholds hold for both."""
+        """Occupancy heuristic for CDNA3/CDNA4 (gfx942/gfx950): 256-VGPR and ~80KB-LDS dual-occupancy thresholds hold for both."""
         parts = []
         if self.vgpr > 0:
             if self.vgpr <= 256:

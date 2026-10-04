@@ -18,9 +18,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
+from hyperloom.inference_optimizer.framework_paths import framework_import_name
+from .agentx_context import corpus_lines, grading_lines
 
 from ..specialists.domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
@@ -62,7 +66,7 @@ _TASK_KIND_BRIEFS: dict[str, str] = {
     ),
     "framework_local_explore": (
         "No upstream PR was found. Author the best throughput win directly from"
-        " the live source + profiling evidence. Read ``framework_source_roots``"
+        " the live source + profiling evidence. Read the source trees in Section 7"
         " and the roofline (Section 4a) to locate the hot path."
         " You MAY use WebSearch / WebFetch to compare the local checkout against"
         " the latest upstream code and port a newer optimisation when behind."
@@ -72,12 +76,6 @@ _TASK_KIND_BRIEFS: dict[str, str] = {
     "explore_apply_retry": (
         "A previous patch failed to apply against the live source tree."
         " Study the apply errors in the notes, produce a corrected patch."
-    ),
-    "framework_config_generation": (
-        "Propose a GRID of runtime config variants (server flags and/or env vars)"
-        " that may raise throughput WITHOUT changing source. Return a"
-        " ``proposal_set`` — each entry with ``name``, ``extra_args`` or"
-        " ``extra_envs``, and a one-line ``reason``. You do not benchmark."
     ),
 }
 
@@ -107,6 +105,18 @@ def _is_atom(inp: SpecialistPromptInputs) -> bool:
         True when the framework is ``atom``.
     """
     return (inp.framework or "").strip().lower() == "atom"
+
+
+def _is_agentx(inp: SpecialistPromptInputs) -> bool:
+    """True when the session replays the AgentX agentic trace corpus.
+
+    Args:
+        inp: The specialist prompt inputs.
+
+    Returns:
+        True when ``benchmark_mode`` names the agentic workload.
+    """
+    return is_agentx_mode(inp.benchmark_mode)
 
 
 def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
@@ -241,7 +251,7 @@ def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
             + "`atom/model_ops/` + shared `aiter/` instead.",
             "- Mixing aiter overrides with `--enforce-eager` invalidates " + "atom's cudagraph captures silently.",
         ]
-    return [
+    base = [
         "You target **aiter / SGLang kernels / triton** code (attention,",
         "MoE, GEMM, fused-attention paths).",
         "",
@@ -270,6 +280,16 @@ def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
         "  cuda graphs silently.",
         "- Trying triton fp4 paths on CDNA3 without `AMDGCN_USE_BUFFER_OPS=1`.",
     ]
+    if _is_agentx(inp):
+        base += [
+            "",
+            "**The short-OSL advice above does not apply to this workload.** See the",
+            "corpus shape in Section 2: outputs run long and the prefill is mostly a",
+            "cache hit, so tile-size shrink and MLA-overhead avoidance target the",
+            "wrong regime. Aim at long-KV decode GEMMs, MoE expert dispatch, and",
+            "attention backends that amortise TTFT over a long output.",
+        ]
+    return base
 
 
 def _focus_comm_specialist(inp: SpecialistPromptInputs) -> list[str]:
@@ -577,31 +597,27 @@ def _focus_static_recon_specialist(
     model_info_line = ""
     shared_expert_advisory: list[str] = []
     if inp.model_info:
-        try:
-            attn = str(inp.model_info.get("attention_type") or "").strip()
-            is_moe = bool(inp.model_info.get("is_moe"))
-            quant = str(inp.model_info.get("quantization") or "").strip()
-            has_shared = bool(inp.model_info.get("has_shared_expert"))
-            num_shared = inp.model_info.get("num_shared_experts")
-            features = f"attention={attn or '?'} moe={is_moe}"
-            if has_shared:
-                n_str = str(int(num_shared)) if num_shared is not None else "?"
-                features += f" shared_expert=True n_shared={n_str}"
-            features += f" quant={quant or '?'}."
-            model_info_line = f"Model features: {features}"
-            if has_shared:
-                shared_expert_advisory = [
-                    "**Shared-expert fusion advisory**: this model has always-on shared "
-                    + "experts. Confirm whether the shared expert still runs as a separate "
-                    + "dense MLP per layer. If yes, investigate folding it into the routed "
-                    + "grouped-GEMM path as an always-selected extra expert slot (code-path "
-                    + "bridge, not just an env flag). Known caveat: expert parallelism (EP) "
-                    + "is unsupported until the expert-map behaviour is explicitly handled.",
-                    "",
-                ]
-        except Exception:  # noqa: BLE001 — advisory rendering only
-            model_info_line = ""
-            shared_expert_advisory = []
+        attn = str(inp.model_info.get("attention_type") or "").strip()
+        is_moe = bool(inp.model_info.get("is_moe"))
+        quant = str(inp.model_info.get("quantization") or "").strip()
+        has_shared = bool(inp.model_info.get("has_shared_expert"))
+        num_shared = inp.model_info.get("num_shared_experts")
+        features = f"attention={attn or '?'} moe={is_moe}"
+        if has_shared:
+            n_str = str(int(num_shared)) if num_shared is not None else "?"
+            features += f" shared_expert=True n_shared={n_str}"
+        features += f" quant={quant or '?'}."
+        model_info_line = f"Model features: {features}"
+        if has_shared:
+            shared_expert_advisory = [
+                "**Shared-expert fusion advisory**: this model has always-on shared "
+                + "experts. Confirm whether the shared expert still runs as a separate "
+                + "dense MLP per layer. If yes, investigate folding it into the routed "
+                + "grouped-GEMM path as an always-selected extra expert slot (code-path "
+                + "bridge, not just an env flag). Known caveat: expert parallelism (EP) "
+                + "is unsupported until the expert-map behaviour is explicitly handled.",
+                "",
+            ]
     return [
         "You are the **static-recon specialist** — a read-only reconnaissance",
         "agent. You do NOT benchmark, apply patches, build a worktree, or",
@@ -856,6 +872,14 @@ class SpecialistPromptInputs:
     # ``framework_version`` is the precise install version (empty => no note).
     framework: str = ""
     framework_version: str = ""
+    # ``"agentx"`` for agentic trace replay, else synthetic; selects the
+    # workload and grading blocks. ``agentx_corpus_shape`` supplies their
+    # numbers, mirrored from SharedState so the prompt describes the corpus the
+    # session actually replayed.
+    benchmark_mode: str = ""
+    agentx_corpus_shape: dict[str, Any] = field(default_factory=dict)
+    agentx_grading: dict[str, Any] = field(default_factory=dict)
+    agentx_backend: str = ""
 
     # Gap statement
     gap_canonical_id: str = ""
@@ -884,9 +908,15 @@ class SpecialistPromptInputs:
     # Extra knowledge-domain tags; each contributes a focus block to Section 1.
     extra_focus_tags: tuple[str, ...] = ()
 
-    # Local source navigation hint
+    # Local source navigation hint. ``worktree_base`` is the tree the worktree
+    # stands for -- the checkout it was cut from, or the installed tree it holds
+    # a snapshot of -- and is empty when the specialist has no worktree.
+    session_framework_tree: str = ""
     framework_source_roots: tuple[str, ...] = ()
+    worktree_base: str = ""
     source_hint_directories: tuple[str, ...] = ()
+    # Framework package directory relative to the worktree; empty without a worktree.
+    worktree_package_dir: str = ""
 
     # Structured model architecture features mirrored from SharedState.model_info;
     # machine-parseable companion to ``arch_notes``. Empty dict => not warmed.
@@ -895,10 +925,13 @@ class SpecialistPromptInputs:
     # the static_recon_specialist dispatch.
     static_recon_checklist: str = ""
 
-    # Enablement dispatch evidence, folded into the §1b mandate. Both are empty
-    # for every non-enablement domain, and the mandate degrades gracefully.
+    # Enablement dispatch evidence, folded into the §1b mandate. Empty for
+    # every non-enablement domain; the mandate omits whichever is empty.
     enablement_source_context: str = ""
     enablement_candidate_refs: tuple[str, ...] = ()
+    # The serialized FailureSignature the round was dispatched on; required for
+    # the enablement domain, empty for every other.
+    enablement_failure_signature: dict[str, Any] = field(default_factory=dict)
     # Env / server-arg layers prior advanced rounds accepted; the bench for this
     # round launches with them, so the mandate has to name them.
     enablement_accepted_config: dict[str, Any] = field(default_factory=dict)
@@ -914,7 +947,6 @@ class SpecialistPromptInputs:
     scope: str = "domain"
     mode: str = MODE_PATCH
     bench: bool = False
-    lane: str = "gpu"
     # Free-form task description (only populated when scope == 'freeform').
     task_description: str = ""
 
@@ -992,14 +1024,16 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         f"Description: {inp.domain.description or '(generic)'}",
         "",
         "You operate **autonomously** inside your domain — no per-step approval",
-        "is needed. You have full authority to read any code under the framework",
-        "source roots (Section 7), search any public GitHub repo or NVIDIA PR,",
+        "is needed. You have full authority to read any code on this host — the",
+        "trees in Section 7 are where to start, not where to stop — search any",
+        "public GitHub repo or NVIDIA PR,",
         capability_line,
         "to be thorough. Be creative. Investigate deeply. One-turn shortcuts",
         "are discouraged when a real bottleneck is on the table — but stop once",
         "rounds stop yielding new findings; the wall clock is not the only stop",
         "signal. Quality over quantity: **2 proposals is the norm, 4 the hard",
-        "cap**. One real beats two padded; ``empty=true`` beats one padded.",
+        "cap**. One real beats two padded; an empty ``proposal_set`` with a",
+        "clear ``summary`` beats one padded.",
         "",
         "Division of labour: the Coordinator owns the serving GPU, runs the E2E",
         "benchmark, and decides KEEP/REVERT — you do not have to validate final",
@@ -1037,6 +1071,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         body.extend(_freeform_block(inp))
     if inp.allocated_gpu_ids:
         body.extend(_gpu_autonomy_block(inp))
+    body.extend(_cpu_selfcheck_block(inp))
     if inp.auto_retry_reason.strip():
         body.extend(_auto_retry_note_block(inp))
     return body
@@ -1118,6 +1153,22 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
         "  It prints a JSON result with ``output_throughput``. It is OPTIONAL "
         + "— you may instead write your own bench/autotune script. Throughput "
         + "does NOT have to come from rebench.",
+    ]
+
+
+def _cpu_selfcheck_block(inp: SpecialistPromptInputs) -> list[str]:
+    """Optional ``selfcheck`` helper for a patch specialist with a worktree and no GPU."""
+    if inp.allocated_gpu_ids or inp.mode != MODE_PATCH or not inp.worktree_package_dir:
+        return []
+    return [
+        "",
+        "Optional helper: ``selfcheck`` installs your worktree's package into a private venv,",
+        "imports it, byte-compiles the files you changed and runs any pytest targets you pass:",
+        "    python -m hyperloom.orchestrator.specialists.selfcheck \\",
+        f"        --worktree {inp.workspace_path} --package-dir {inp.worktree_package_dir} "
+        f"--package {framework_import_name(inp.framework)} [--pytest <target>]",
+        "  It prints a JSON result. A framework with compiled extensions (e.g. vLLM) rebuilds",
+        "  them on install, which can take well over your wall budget.",
     ]
 
 
@@ -1324,10 +1375,15 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         workload_rows.append(f"- precision: {inp.precision}")
     if inp.conc > 0:
         workload_rows.append(f"- concurrency: {inp.conc}")
-    if inp.isl > 0:
-        workload_rows.append(f"- ISL (input seq len): {inp.isl}")
-    if inp.osl > 0:
-        workload_rows.append(f"- OSL (output seq len): {inp.osl}")
+    if _is_agentx(inp):
+        # The corpus fixes the request shape, so ISL/OSL carry no information.
+        workload_rows += corpus_lines(inp.agentx_corpus_shape)
+        workload_rows += grading_lines(inp.agentx_grading, inp.agentx_backend)
+    else:
+        if inp.isl > 0:
+            workload_rows.append(f"- ISL (input seq len): {inp.isl}")
+        if inp.osl > 0:
+            workload_rows.append(f"- OSL (output seq len): {inp.osl}")
     if inp.max_model_len > 0:
         workload_rows.append(f"- max_model_len: {inp.max_model_len}")
     if workload_rows:
@@ -1347,9 +1403,9 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
 def _section_execution_budget(inp: SpecialistPromptInputs) -> list[str]:
     """Render the wall-clock budget block so the specialist can self-throttle.
 
-    Renders the concrete WS1 budget (seconds + minutes) and the dispatch start
-    timestamp. Returns ``[]`` when no budget was supplied (legacy turn-bounded
-    path), so the section is omitted entirely rather than emitting a placeholder.
+    Renders the time left on the dispatch deadline (seconds + minutes) and the
+    dispatch start timestamp. Returns ``[]`` when no budget was supplied, so the
+    section is omitted entirely rather than emitting a placeholder.
 
     Args:
         inp: The specialist prompt inputs (reads ``wall_budget_sec`` /
@@ -1485,7 +1541,7 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
                     + "(Section 3); flag each ``provenance: "
                     + "domain_focus_default`` and call it an unvalidated "
                     + "fallback in the proposal's ``reason``. If none clears "
-                    + "that bar, emit ``empty=true`` and cite in ``summary`` "
+                    + "that bar, emit ``proposal_set=[]`` and cite in ``summary`` "
                     + "which you considered and why each was rejected — a "
                     + "bare empty exit with no rationale reads as a tool "
                     + "failure. Do NOT add a ``confidence`` field: "
@@ -1725,8 +1781,12 @@ def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 5b — Related lessons (positive priors from prior KEEPs)
 def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
-    """Render KB ``kind=lesson`` points from prior KEEPs, compactly
+    """Render the recipe row's ``lessons`` from prior KEEPs, compactly
     (statement + measured_impact).
+
+    Rows are the flat shape ``Recipe.to_dict`` / ``_normalise_lessons`` write —
+    ``{statement, measured_impact, ...}`` — normalised by ``recipe_kb_t0``
+    before they land on ``warm_start_lessons``.
 
     Args:
         inp: The specialist prompt inputs (reads ``warm_start_lessons``).
@@ -1748,29 +1808,28 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
             continue
         if not isinstance(point, dict):
             continue
-        attrs = point.get("attrs") or {}
-        statement = str(attrs.get("statement") or "").strip()
+        statement = str(point.get("statement") or "").strip()
         if not statement:
             continue
-        impact_str = _render_measured_impact(attrs.get("measured_impact"))
+        impact_str = _render_measured_impact(point.get("measured_impact"))
         conf = point.get("confidence")
         meta_bits: list[str] = []
         if isinstance(conf, (int, float)) and conf > 0:
             meta_bits.append(f"conf={float(conf):.2f}")
         # validated_count is the strongest cross-session signal; fall back to source_session_id.
-        vc = attrs.get("validated_count")
+        vc = point.get("validated_count")
         if isinstance(vc, int) and vc > 1:
             meta_bits.append(f"validated={vc}")
-        recent_ids = attrs.get("source_session_ids")
+        recent_ids = point.get("source_session_ids")
         if isinstance(recent_ids, list) and recent_ids:
             meta_bits.append(f"recent={recent_ids[-1]}")
         else:
-            src_sid = str(attrs.get("source_session_id") or "").strip()
+            src_sid = str(point.get("source_session_id") or "").strip()
             if src_sid:
                 meta_bits.append(f"src={src_sid}")
         meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
         # Version-mismatch annotation; the LLM gets the final call.
-        version_note = _format_version_note(inp, attrs)
+        version_note = _format_version_note(inp, point)
         rows.append(f"- **{defang_prompt_structure(statement)}**{meta}{version_note}")
         if impact_str:
             rows.append(f"    impact: {impact_str}")
@@ -1781,21 +1840,21 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
 
 def _format_version_note(
     inp: SpecialistPromptInputs,
-    lesson_attrs: dict[str, Any],
+    row: dict[str, Any],
 ) -> str:
     """Render a ``[from sglang@X.Y, you're on A.B]`` annotation when
-    the lesson's framework_version differs; empty when either side is
+    the row's framework_version differs; empty when either side is
     unknown or they match.
 
     Args:
         inp: The specialist prompt inputs (reads ``framework`` /
             ``framework_version``).
-        lesson_attrs: The lesson's attrs (reads ``framework_version``).
+        row: The lesson or pitfall row (reads ``framework_version``).
 
     Returns:
         The version-mismatch annotation, or "" when unknown or matching.
     """
-    lesson_fv = str(lesson_attrs.get("framework_version") or "").strip()
+    lesson_fv = str(row.get("framework_version") or "").strip()
     current_fv = (inp.framework_version or "").strip()
     if not lesson_fv or not current_fv:
         return ""
@@ -1806,7 +1865,7 @@ def _format_version_note(
 
 
 def _render_measured_impact(raw: Any) -> str:
-    """Back-compat renderer for ``attrs.measured_impact`` (dict, legacy
+    """Back-compat renderer for a row's ``measured_impact`` (dict, legacy
     string, or other).
 
     Args:
@@ -1839,8 +1898,11 @@ def _render_measured_impact(raw: Any) -> str:
 
 # Section 5c — Known pitfalls (anti-priors from prior REVERTs)
 def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
-    """Render KB ``kind=pitfall`` points from prior REVERTs (description +
+    """Render the recipe row's ``pitfalls`` from prior REVERTs (description +
     severity); framed as forbidden paths, not suggestions.
+
+    Rows are the flat ``{description, severity, ...}`` shape ``Recipe.to_dict`` /
+    ``_normalise_str_dicts`` write, normalised by ``recipe_kb_t0``.
 
     Args:
         inp: The specialist prompt inputs (reads ``warm_start_pitfalls``).
@@ -1861,29 +1923,28 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
             continue
         if not isinstance(point, dict):
             continue
-        attrs = point.get("attrs") or {}
-        description = str(attrs.get("description") or "").strip()
+        description = str(point.get("description") or "").strip()
         if not description:
             continue
-        severity = str(attrs.get("severity") or "").strip()
+        severity = str(point.get("severity") or "").strip()
         conf = point.get("confidence")
         meta_bits: list[str] = []
         if severity:
             meta_bits.append(f"severity={severity}")
         if isinstance(conf, (int, float)) and conf > 0:
             meta_bits.append(f"conf={float(conf):.2f}")
-        vc = attrs.get("validated_count")
+        vc = point.get("validated_count")
         if isinstance(vc, int) and vc > 1:
             meta_bits.append(f"observed={vc}")
-        recent_ids = attrs.get("source_session_ids")
+        recent_ids = point.get("source_session_ids")
         if isinstance(recent_ids, list) and recent_ids:
             meta_bits.append(f"recent={recent_ids[-1]}")
         else:
-            src_sid = str(attrs.get("source_session_id") or "").strip()
+            src_sid = str(point.get("source_session_id") or "").strip()
             if src_sid:
                 meta_bits.append(f"src={src_sid}")
         meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
-        version_note = _format_version_note(inp, attrs)
+        version_note = _format_version_note(inp, point)
         rows.append(f"- **{description}**{meta}{version_note}")
     if len(rows) == 2:  # only the header + blank line, all pitfalls filtered out
         rows.append(_NONE_PLACEHOLDER)
@@ -1925,11 +1986,59 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # Section 7 — Local source navigation hint
+def _source_root_row(root: str, *, worktree_base: str) -> str:
+    """Render one source root, annotated with what a patch against it can do.
+
+    Args:
+        root (str): The source root to render.
+        worktree_base (str): The tree the specialist's worktree stands for,
+            when there is one.
+
+    Returns:
+        str: A markdown list row for the root.
+    """
+    base = (worktree_base or "").rstrip("/")
+    if base and Path(root.rstrip("/")).is_relative_to(base):
+        if (Path(base) / ".git").exists():
+            return f"- {root} — git checkout; your worktree was cut from it"
+        return f"- {root} — installed package; your worktree holds a git snapshot of it, so edit its files there"
+    if (Path(root) / ".git").is_dir():
+        return f"- {root} — git checkout"
+    return f"- {root} — installed package, no git tree: re-author upstream diffs against it, never apply them"
+
+
+def _resolve_focus_dir(hint: str, session_tree: str) -> str:
+    """Return ``hint`` as an absolute path under the session tree.
+
+    Checklist directories are repo-relative (``vllm/model_executor/...``), and
+    what that is relative to depends on the tree's shape: a pip-installed tree is
+    the package directory itself (``.../dist-packages/vllm/``) and joins onto its
+    parent, while a checkout (``/sgl-workspace/vllm/``) holds the package one
+    level down and joins directly. The tree decides, not the hint -- matching on
+    the hint's leading segment reads a checkout as a package tree whenever the
+    two share a name, which is every entry in :data:`_DEFAULT_SOURCE_ROOTS`.
+
+    Args:
+        hint (str): The focus directory, repo-relative or absolute.
+        session_tree (str): The tree this session is optimising, or ``""``.
+
+    Returns:
+        str: The hint unchanged when absolute or without a tree, else the
+            resolved absolute form.
+    """
+    if not session_tree or Path(hint).is_absolute():
+        return hint
+    tree = Path(session_tree.rstrip("/"))
+    base = tree.parent if (tree / "__init__.py").is_file() else tree
+    joined = base / hint.lstrip("/")
+    return f"{joined}/" if hint.endswith("/") else str(joined)
+
+
 def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 7 (local source navigation hint) of the prompt.
 
-    Lists the installed source roots and per-domain focus
-    directories, or a ``(none)`` placeholder when neither is supplied.
+    Leads with the tree this session optimises: the root list cannot express it,
+    since its order records only how roots were discovered.
 
     Args:
         inp (SpecialistPromptInputs): The assembled prompt inputs.
@@ -1938,22 +2047,29 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
         list[str]: Markdown lines for the source-hint section.
     """
     rows = ["## 7. LOCAL SOURCE NAVIGATION HINT", ""]
-    if not inp.framework_source_roots and not inp.source_hint_directories:
+    session_tree = (inp.session_framework_tree or "").strip()
+    others = tuple(r for r in inp.framework_source_roots if r.rstrip("/") != session_tree.rstrip("/"))
+    if not session_tree and not others and not inp.source_hint_directories:
         rows.append(_NONE_PLACEHOLDER)
         return rows
-    if inp.framework_source_roots:
-        rows.append("Installed source roots (read-only):")
-        for p in inp.framework_source_roots:
-            rows.append(f"- {p}")
+    if session_tree:
+        rows.append("The tree this session is optimising — start here:")
+        rows.append(_source_root_row(session_tree, worktree_base=inp.worktree_base))
+        rows.append("")
+    if others:
+        rows.append("Other source trees on this host:" if session_tree else "Source trees on this host:")
+        for root in others:
+            rows.append(_source_root_row(root, worktree_base=inp.worktree_base))
     if inp.source_hint_directories:
         rows.append("")
-        rows.append("Focus directories for this domain:")
-        for p in inp.source_hint_directories:
-            rows.append(f"- {p}")
+        rows.append("Where the evidence points — read these first, then widen:")
+        for hint in inp.source_hint_directories:
+            rows.append(f"- {_resolve_focus_dir(hint, session_tree)}")
     rows.append("")
     rows.append(
-        "These trees are read-only. Use Read / Grep / Glob to navigate. "
-        "Do NOT attempt Edit / Write / git apply on these trees."
+        "These are starting points, not a boundary — read anything on the host "
+        "that answers the question. Patches still go through ``integrate_patch`` "
+        "(Section 9), whichever tree they name."
     )
     rows.append("")
     rows.append(
@@ -1994,7 +2110,14 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
 
     if authors_patches:
         patch_fields = [
-            "- ``patches_written`` (PR-A2) lists paths (relative to your",
+            "- ``deliverable`` declares what the round produced and is",
+            "  REQUIRED whenever you changed anything: ``{tree_id, targets,",
+            "  patches, artifacts, envs, server_args, setup_commands}``.",
+            "  ``targets`` lists every file you edited, relative to your",
+            "  worktree — the harvest is scoped to it, so a file you changed",
+            "  and did not declare is not shipped. Do NOT put hashes in it;",
+            "  the harness computes them where your work was validated.",
+            "- ``patches_written`` lists paths (relative to your",
             "  workspace or worktree) of any unified-diff patch files you",
             "  authored this round. Empty list = no patches; downstream",
             "  ``integrate_patch`` action skips when empty.",
@@ -2005,17 +2128,17 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "  path is accepted only if it resolves inside an allowlisted framework",
             "  root. ``integrate_patch`` backs up the target, installs the artifact,",
             "  runs the same E2E gate, and restores the backup on REVERT. A non-diff",
-            "  tuned artifact is a FULL result — set ``empty=false`` when",
-            "  ``artifacts_written`` is non-empty.",
+            "  tuned artifact is a FULL result — keep ``proposal_set`` non-empty or",
+            "  list the artifact in ``artifacts_written``.",
         ]
         no_output = "  AND no ``patches_written``/``artifacts_written``; in that case"
     else:
         patch_fields = []
         no_output = "  and no findings; in that case"
-    empty_rule = [
-        "- ``empty=true`` is legitimate ONLY when you have no actionable proposals",
+    no_proposal_rule = [
+        "- An empty ``proposal_set`` is legitimate ONLY when you have no actionable proposals",
         no_output,
-        "  ``proposal_set=[]`` and you must put the reason in ``summary``.",
+        "  and you must put the reason in ``summary``.",
     ]
 
     return [
@@ -2072,7 +2195,6 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                         }
                     ],
                     **({"patches_written": []} if authors_patches else {}),
-                    "empty": False,
                     "summary": "≤ 500 char overview of what you tried this round",
                     "confidence": 0.6,
                     "new_findings": [],
@@ -2116,7 +2238,8 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "of the first two. Padding is a failure, not thoroughness: each "
             "weak entry costs a Critic reject and a slot on the serial "
             "benchmark queue. One real proposal is a better round than two "
-            "padded ones, and ``empty=true`` is better than one."
+            "padded ones, and an empty ``proposal_set`` with a clear ``summary`` "
+            "is better than one."
         ),
         (
             "- The Critic reviews each surviving variant against the KB "
@@ -2125,7 +2248,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             + "off the same dead-end)."
         ),
         *patch_fields,
-        *empty_rule,
+        *no_proposal_rule,
         "- ``new_findings`` is a list of learned items. Research scouts must",
         "  emit source-backed ``{what, source, expected_impact, accuracy_risk,",
         "  domain_tags[]}`` records.",
@@ -2137,10 +2260,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         '``{"ts": "<iso8601>", "status": "running", "note": "<short>"}``.',
         "Going silent past 5 minutes kills your subprocess.",
         "",
-        (
-            f"Hard cap: at most **{inp.max_turns}** LLM turns. Silence past "
-            "the cap = stale (robustness will synthesize an empty done)."
-        ),
+        (f"Hard cap: at most **{inp.max_turns}** LLM turns. Emit specialist_done before the cap."),
     ]
 
 
@@ -2178,14 +2298,14 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
             "   - Tuned non-diff artifacts (e.g. an autotuned config JSON): write",
             "     under the worktree and list in ``artifacts_written`` as",
             "     ``{source, target, kind, description}``.",
-            "   **NEVER** ``git apply`` / ``git commit`` against the shared",
-            "   ``framework_source_roots`` directly — ``integrate_patch`` is",
-            "   the single integration point.",
+            "   **NEVER** ``git apply`` / ``git commit`` against the shared source",
+            "   trees in Section 7 directly — ``integrate_patch`` is the single",
+            "   integration point, whichever tree the patch names.",
         ]
     else:
         integration_rule = [
             "2. **Read-only dispatch:** you have no worktree and MUST NOT author",
-            "   patches or edit ``framework_source_roots``. Report what you found",
+            "   patches or edit the source trees. Report what you found",
             "   through ``specialist_done``; a patch-capable specialist authors any",
             "   source change you recommend.",
         ]
@@ -2199,11 +2319,11 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "4. You **MUST** finish within ``max_turns`` LLM turns and end with",
         "   exactly one ``specialist_done`` exit signal. Silence past the cap",
         "   synthesizes an empty done.",
-        f"5. Use ``{workspace}/`` for ALL writes. The dispatcher exposes only",
-        "   this directory + read-only access to ``framework_source_roots``",
-        "   and ``SESSION_DIR``.",
+        f"5. Use ``{workspace}/`` for ALL writes. It and ``SESSION_DIR`` are the",
+        "   only directories the dispatcher hands you to write; the source trees",
+        "   are yours to read.",
         "6. On tool error or no useful action left, emit",
-        "   ``specialist_done{empty=true, summary='<why>'}``.",
+        "   ``specialist_done{proposal_set=[], summary='<why>'}``.",
         f"7. {BASH_KILL_SAFETY_PREAMBLE}",
     ]
 
@@ -2212,10 +2332,10 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
 def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     """Render the per-task enablement mandate + ladder book into the user prompt.
 
-    Classifies the failure carried in ``gap_symptom`` / ``gap_evidence`` and
-    renders the mandate's ``task_description`` (which embeds the ladder book) from
-    ``framework_agent.enablement_ops.build_mandate``. Kept in the user prompt so
-    the cached system prompt stays task-independent.
+    Renders the mandate's ``task_description`` (which embeds the ladder book)
+    from the verdict the dispatch was decided on, carried verbatim in
+    ``enablement_failure_signature``. Kept in the user prompt so the cached
+    system prompt stays task-independent.
 
     The dispatch's own evidence — source lines near the offending site (plus the
     checkpoint weight inventory on a weight-init failure) and the ranked bridging
@@ -2229,19 +2349,19 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     Returns:
         list[str]: The enablement-playbook section lines.
     """
-    from hyperloom.agents.framework.enablement import EnablementRequest
-    from hyperloom.agents.framework.enablement_ops import build_mandate
+    from hyperloom.common.failure_signature import EnablementRequest, FailureSignature
+    from hyperloom.orchestrator.enablement.mandate import build_mandate
 
     model = str((inp.gap_evidence or {}).get("model") or "").strip()
     req = EnablementRequest(
         framework=(inp.framework or "").strip().lower(),
         model=model or "(target model)",
         repo_url="",
-        launch_log=inp.gap_symptom or "",
         gpu_type=(inp.gpu_type or "").strip().lower(),
     )
     mandate = build_mandate(
         req,
+        FailureSignature.from_dict(inp.enablement_failure_signature),
         candidate_refs=inp.enablement_candidate_refs,
         source_context=inp.enablement_source_context,
     )
@@ -2281,14 +2401,11 @@ def _section_pd_disaggregation(inp: SpecialistPromptInputs) -> list[str]:
         list[str]: The PD-disaggregation section lines, or ``[]`` when not
         disaggregated.
     """
-    try:
-        from hyperloom.orchestrator.actions.executors._multi_node_env import (
-            pd_topology_from_state,
-        )
+    from hyperloom.orchestrator.actions.executors._multi_node_env import (
+        pd_topology_from_state,
+    )
 
-        pd = pd_topology_from_state()
-    except Exception:
-        return []
+    pd = pd_topology_from_state()
     if not pd:
         return []
     tb = pd.get("transfer_backend") or "the KV transfer backend"
@@ -2310,8 +2427,8 @@ def _section_pd_disaggregation(inp: SpecialistPromptInputs) -> list[str]:
         "decode MoE a2a backend.",
         f"- **KV transfer** (`{tb}`): watch bootstrap / transfer stalls; RDMA/IB "
         "device selection affects decode start latency.",
-        "- **Balance**: tune the prefill:decode node/TP ratio to the ISL:OSL "
-        "shape — a saturated role caps end-to-end throughput.",
+        "- **Balance**: tune the prefill:decode node/TP ratio to the workload shape "
+        + "— a saturated role caps end-to-end throughput.",
         "",
         "Per-role GPU telemetry is in the benchmark report's "
         "`gpu_monitor_by_role` (prefill vs decode util / power / VRAM); use it to "

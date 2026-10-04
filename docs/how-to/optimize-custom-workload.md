@@ -53,10 +53,9 @@ than at the first benchmark.
 
 `--framework-path` is the **code** checkout, which is not the same thing as the
 weights under `--model`. It does more than tell your script where the code
-lives: it registers the tree as a framework source root, and PolicyGate requires
-that registration before any specialist patch against your code can land. The
-source probe discovers pip-installed packages on its own but never a git
-checkout, which is why this must be explicit.
+lives: it registers the tree as the framework source root a session searches and
+patches. The source probe discovers pip-installed packages on its own but never
+a git checkout, which is why this must be explicit.
 
 The equivalent environment variables resolve in this order:
 `<FRAMEWORK>_REPO_PATH` > `<FRAMEWORK>_DIR` > `FRAMEWORK_REPO_PATH`. Prefer the
@@ -211,23 +210,19 @@ auto-detects through `rocm-smi --showproductname`.
 **Pin GPUs with `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.** On the known
 ROCm stack the latter can make `torch.cuda.is_available()` return false.
 
-**Export credentials from the launching shell.** Preflight refuses to load
-`*_CUSTOM_HEADERS` out of `.env`, so a gateway subscription key only reaches the
-SDK if the launching shell exports it. Without it every catalog probe and every
-orchestration turn returns HTTP 401 and the run idles in `PRELUDE` for the whole
-budget. See [Authentication and credentials](../reference/authentication.md).
+**Load workspace settings through the shared loader.** Existing caller values
+remain authoritative, including gateway keys and custom headers. The loader reads
+`.env` as data rather than executing it; never print credential values. See
+[Authentication and credentials](../reference/authentication.md).
 
 ```bash
-# Run from the workspace holding the hyperloom package; no installer exports REPO_ROOT.
 export REPO_ROOT="${REPO_ROOT:-$(pwd -P)}"
-# .env fills gaps only: re-exporting the non-empty pre-source snapshot keeps every
-# value the caller exported. Wider than install.sh, which guards a fixed list.
-_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
-set -a
-. <(grep -E '^(ANTHROPIC|OPENAI)_(CUSTOM_HEADERS|API_KEY|BASE_URL)=' "$REPO_ROOT/.env")
-set +a
-eval "$_dotenv_prev"
-unset _dotenv_prev
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
 ```
 
 **Sessions.** `USER_DATA_PATH` sets the session root, and each `optimize`
@@ -235,6 +230,12 @@ creates a new timestamped subdirectory under it. Use
 `--resume-from <subdir>` to continue an existing session; `--force-resume`
 pushes past the terminal-state guard. Without `--resume-from` you always get a
 fresh session, so an interrupted run is never picked up by accident.
+
+A resumed session keeps the budget it started with. Elapsed time is summed
+forward over every leg, so resuming never hands the run another `--max-hours`,
+however the previous leg ended. To let a run that has spent its budget carry
+on, grant more explicitly with `--extend-hours <n>`; the grant is recorded in
+the session state with its reason.
 
 ## Monitor the run and read the output
 

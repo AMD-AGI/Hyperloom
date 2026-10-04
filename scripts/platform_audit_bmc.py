@@ -2,36 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Audit the BIOS-only EPYC tuning knobs over Redfish on the BMC.
-
-Extends ``platform_audit.py`` to the three knobs the operating system cannot
-see on kernels without ``amd_hsmp``: the platform High Performance profile,
-APBDIS, and DF C-states. It also reconciles a BIOS answer of "Auto" against the
-measured OS state, which is the only way those answers become meaningful.
-
-.. warning::
-
-   **This tool can create a temporary privileged account on the BMC.** Given
-   ``--allow-account-creation`` and no ``--bmc-user``, it mints a sentinel
-   ADMINISTRATOR account over the in-band KCS channel, uses it for a handful of
-   HTTPS GETs, then revokes it and verifies the revocation. Root on the host
-   already carries full BMC authority through KCS, so this is not an escalation
-   -- but many sites prohibit creating service-processor accounts outright, so
-   the flag is required rather than assumed: with neither option the audit
-   refuses to start. Pass ``--bmc-user`` with an existing read-only account to
-   avoid minting entirely.
-
-Failure philosophy: every step that grants access is checked, and the read-back
-that confirms revocation distinguishes "read it, disabled" from "could not read
-it". A tool that cannot verify it cleaned up must say so, not report success.
-
-Exit codes:
-
-    0  every checked knob is on target
-    1  a knob is definitively wrong
-    2  a knob could not be resolved
-    3  a BMC account was left enabled, or its state could not be confirmed
-"""
+"""Audit the BIOS-only EPYC tuning knobs over Redfish on the BMC."""
 
 from __future__ import annotations
 
@@ -158,22 +129,15 @@ def bmc_users() -> dict[int, str]:
         f = line.split()
         if not f or not f[0].isdigit():
             continue
-        # An unnamed slot runs straight from the ID into the boolean columns,
-        # so a boolean in field 1 means the name is blank.
+        # An unnamed slot runs straight from the ID into the boolean columns, so a boolean in field 1 means the name
+        # is blank.
         name = "" if len(f) < 2 or f[1] in ("true", "false") else f[1]
         users[int(f[0])] = name
     return users
 
 
 def account_status(slot: int) -> tuple[str | None, str]:
-    """Return ``(status, detail)`` where status is ``"enabled"``/``"disabled"``/``None``.
-
-    ``None`` means the state could not be read, which is deliberately *not* the
-    same answer as "disabled". This read-back is the trust anchor for the whole
-    revocation: collapsing an unreadable state into "not enabled" would hand
-    back a false confirmation for any BMC that errors, times out, or formats the
-    output differently -- exactly where confirmation matters most.
-    """
+    """Return ``(status, detail)`` where status is ``\"enabled\"``/``\"disabled\"``/``None``."""
     ok, out, err = sudo_run(["ipmitool", "channel", "getaccess", "1", str(slot)])
     if not ok:
         return None, err.strip() or "getaccess failed"
@@ -184,25 +148,7 @@ def account_status(slot: int) -> tuple[str | None, str]:
 
 
 def set_bmc_password(slot: int, password: str) -> tuple[bool, bool]:
-    """Set a BMC account password without exposing it in the process table.
-
-    Passing the password in argv would make it readable through
-    ``/proc/<pid>/cmdline`` to any local user. Omitting it makes ipmitool prompt
-    on stdin instead (twice, for confirmation), keeping it out of argv entirely.
-
-    Returns ``(ok, confirmed)``. The return code is ``ok`` and the primary
-    signal; ``confirmed`` adds whether ipmitool printed its success string,
-    which is corroboration only -- the wording varies across versions and is not
-    stable under a non-English locale, so it is never the sole criterion.
-
-    Deliberately returns no text. The secret is on this command's stdin and
-    ipmitool echoes its input on some failures, while callers print their
-    failures to the console and store them among the account's credential
-    failures -- so handing back stderr here could publish a live password. Callers
-    own the wording. Diagnosing a genuinely broken BMC means running ipmitool by
-    hand, which is a fair price for keeping the secret inside the one function
-    that handles it.
-    """
+    """Set a BMC account password without exposing it in the process table."""
     ok, out, err = sudo_run(
         ["ipmitool", "user", "set", "password", str(slot)],
         stdin=f"{password}\n{password}\n",
@@ -211,12 +157,7 @@ def set_bmc_password(slot: int, password: str) -> tuple[bool, bool]:
 
 
 class TempBmcAccount:
-    """Mint a sentinel BMC account over KCS for one audit, then revoke it.
-
-    The same sentinel slot is reused across runs: Supermicro and others refuse
-    to blank a user name once set, so a fresh slot per run would slowly fill the
-    user table with dead accounts.
-    """
+    """Mint a sentinel BMC account over KCS for one audit, then revoke it."""
 
     def __init__(self, secret_len: int = 16):
         self.slot: int | None = None
@@ -253,21 +194,15 @@ class TempBmcAccount:
             self.note = "no reusable BMC user slot"
             return self
 
-        # Claim the slot BEFORE any mutation, so __exit__ always runs the revoke
-        # path. Revoking a slot that was never enabled is idempotent and costs
-        # nothing; skipping revocation on one that was leaves a live
-        # ADMINISTRATOR account.
+        # Claim the slot BEFORE any mutation, so __exit__ always runs the revoke path.
         self.slot = slot
 
         status, detail = account_status(slot)
         if status is None:
             self.mint_errors.append(f"could not read initial account state ({detail})")
         elif status == "enabled":
-            # __exit__ cannot run if a previous invocation was SIGKILLed or the
-            # box rebooted mid-audit, so a sentinel found enabled is the
-            # fingerprint of exactly that: the account has been reachable over
-            # LAN since then. That is a credential exposure in its own right and
-            # is recorded, not merely printed.
+            # __exit__ cannot run if a previous invocation was SIGKILLed or the box rebooted mid-audit, so a sentinel
+            # found enabled is the fingerprint of exactly that: the account has been reachable over LAN since then.
             msg = (
                 f"BMC account '{SENTINEL_USER}' (slot {slot}) was already enabled from an "
                 f"earlier run that did not shut down cleanly; it has been reachable over "
@@ -278,11 +213,7 @@ class TempBmcAccount:
 
         pw = secrets.token_urlsafe(24)[: self._secret_len]
 
-        # Abort on a failed name step, exactly as the password step does. Every
-        # step after this one grants access, so running them on a slot whose
-        # name is not ours enables an ADMINISTRATOR account that Redfish then
-        # 401s against -- pointing the operator at authentication when the real
-        # cause is a slot the audit never owned.
+        # Abort on a failed name step, exactly as the password step does.
         ok, _, err = sudo_run(["ipmitool", "user", "set", "name", str(slot), self.user])
         if not ok:
             self.mint_errors.append(f"set account name: {err.strip() or 'command failed'}")
@@ -297,10 +228,7 @@ class TempBmcAccount:
         if not confirmed:
             self.mint_errors.append("set password: return code reported success but ipmitool printed no confirmation")
 
-        # Every remaining step grants access, so each is checked. A silent
-        # failure here surfaces as a 401 from Redfish, which reads as an
-        # authentication or OEM-compatibility problem when the real cause is an
-        # account that was never enabled.
+        # Every remaining step grants access, so each is checked.
         for what, cmd in (
             ("grant privilege", ["ipmitool", "user", "priv", str(slot), "4", "1"]),
             ("enable account", ["ipmitool", "user", "enable", str(slot)]),
@@ -325,12 +253,10 @@ class TempBmcAccount:
         s = str(self.slot)
         failures: list[str] = []
 
-        # Channel access must be revoked while the user is still enabled; BMCs
-        # reject setaccess on a disabled account ("not supported in present
-        # state"), which would leave ADMINISTRATOR rights in place.
-        # privilege=15 ("no access") is the right end state, but Supermicro
-        # among others rejects it; CALLBACK is the lowest they accept and still
-        # drops ADMINISTRATOR, so try the strict value first and fall back.
+        # Channel access must be revoked while the user is still enabled; BMCs reject setaccess on a disabled account
+        # ("not supported in present state"), which would leave ADMINISTRATOR rights in place. privilege=15 ("no
+        # access") is the right end state, but Supermicro among others rejects it; CALLBACK is the lowest they accept
+        # and still drops ADMINISTRATOR, so try the strict value first and fall back.
         revoked, last_err = False, ""
         for priv in ("15", "1"):
             revoked, _, last_err = sudo_run(
@@ -373,14 +299,7 @@ class TempBmcAccount:
 
 
 def install_signal_handlers() -> None:
-    """Turn SIGTERM/SIGINT into an exception so ``with`` blocks still unwind.
-
-    Without this the account outlives the process on the most ordinary
-    termination there is. SIGKILL and a power cut remain uncoverable -- which is
-    why a sentinel found already enabled is treated as evidence of exposure --
-    but SIGTERM is what a CI timeout, a job scheduler, or an orchestration layer
-    actually sends, and it is recoverable.
-    """
+    """Turn SIGTERM/SIGINT into an exception so ``with`` blocks still unwind."""
 
     def _raise(signum, _frame):
         raise KeyboardInterrupt(f"received signal {signum}")
@@ -413,9 +332,8 @@ def rf_get(
     except urllib.error.HTTPError as exc:
         return None, f"HTTP {exc.code}"
     except Exception as exc:  # noqa: BLE001 - reported, never swallowed
-        # urlopen wraps a verification failure in URLError, so the useful error
-        # is one level down; without unwrapping, the operator sees a raw OpenSSL
-        # string and no indication of which flag fixes it.
+        # urlopen wraps a verification failure in URLError, so the useful error is one level down; without unwrapping,
+        # the operator sees a raw OpenSSL string and no indication of which flag fixes it.
         cause = getattr(exc, "reason", exc)
         if isinstance(cause, ssl.SSLCertVerificationError):
             detail = getattr(cause, "verify_message", None) or cause
@@ -428,14 +346,7 @@ def rf_get(
 
 
 def probe_reachable(host: str, ctx: ssl.SSLContext) -> str:
-    """Check the service root before minting anything; ``""`` when reachable.
-
-    ``/redfish/v1`` is unauthenticated by specification, so reachability and TLS
-    can both be settled with no credentials at all. Without this the tool minted
-    an ADMINISTRATOR account, opened the LAN channel, failed certificate
-    verification, and revoked -- exposing an admin account on the management
-    network for a request that was never going to succeed.
-    """
+    """Check the service root before minting anything; ``\"\"`` when reachable."""
     doc, err = rf_get(host, "/redfish/v1", "", "", ctx, timeout=15)
     if doc is not None:
         return ""
@@ -492,11 +403,7 @@ EXIT_OK, EXIT_FAIL, EXIT_UNKNOWN, EXIT_CREDENTIAL = 0, 1, 2, 3
 
 
 def exit_code(rows: list[dict], credential_failures: Sequence[str] = ()) -> int:
-    """Worst status. A credential problem outranks every knob verdict.
-
-    ``credential_failures`` is passed in rather than read from module state so
-    that callers cannot compute this before the revocation has been attempted.
-    """
+    """Worst status. A credential problem outranks every knob verdict."""
     if credential_failures:
         return EXIT_CREDENTIAL
     if any(r["verdict"] == "FAIL" for r in rows):
@@ -552,8 +459,6 @@ def main() -> int:
     ctx = tls_context(args.ca_cert, args.insecure)
 
     # The README calls minting "a deliberate choice"; this is what makes it one.
-    # Refusing before any BMC contact means the default invocation cannot create
-    # a privileged account by omission.
     mints_account = not args.bmc_user
     if mints_account and not args.allow_account_creation:
         print(
@@ -564,8 +469,8 @@ def main() -> int:
         )
         return EXIT_UNKNOWN
 
-    # ipmitool is needed to mint an account, not only to discover the address,
-    # so --bmc-host does not excuse it on the minting path.
+    # ipmitool is needed to mint an account, not only to discover the address, so --bmc-host does not excuse it on the
+    # minting path.
     if (mints_account or not args.bmc_host) and not ipmitool_present():
         print(
             "ipmitool is not on PATH, so "
@@ -607,11 +512,7 @@ def main() -> int:
                     "verified. Prefer --ca-cert, or --bmc-user with a read-only account.",
                     file=sys.stderr,
                 )
-            # Bound outside the `with` on purpose. Nothing here may compute the
-            # exit code: __exit__ is what discovers a failed revocation, and it
-            # has not run yet, so a `return` from inside this block would report
-            # a clean audit on the path most likely to have left an
-            # ADMINISTRATOR account enabled.
+            # Bound outside the `with` on purpose.
             acct = TempBmcAccount()
             with acct:
                 if acct.slot is None or not acct.password:
@@ -621,10 +522,7 @@ def main() -> int:
                         print(f"Note: {'; '.join(acct.mint_errors)}", file=sys.stderr)
                     attrs, _, err = redfish_bios(host, acct.user, acct.password, ctx)
     except KeyboardInterrupt:
-        # SIGTERM and SIGINT arrive here as an exception precisely so the `with`
-        # above unwinds and revokes. Letting it escape would end the run in a
-        # traceback and exit 130, discarding the revocation verdict that the
-        # signal handler exists to produce.
+        # SIGTERM and SIGINT arrive here as an exception precisely so the `with` above unwinds and revokes.
         interrupted = True
         print("\nInterrupted; see the credential report below.", file=sys.stderr)
 
@@ -634,8 +532,7 @@ def main() -> int:
 
     if no_access:
         print(f"Could not obtain BMC access: {no_access}", file=sys.stderr)
-    # Never reaching a knob is unresolved, not "every checked knob is on
-    # target". A credential problem still outranks it.
+    # Never reaching a knob is unresolved, not "every checked knob is on target".
     if (no_access or interrupted) and code != EXIT_CREDENTIAL:
         code = EXIT_UNKNOWN
 

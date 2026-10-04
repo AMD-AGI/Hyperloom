@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Supplemental coverage for _grid_runner pure helpers: compatibility filter
-model-class drop, runtime override env branches, report parsing, and
-per-variant yaml env injection."""
+"""Supplemental coverage for _grid_runner pure helpers: compatibility filter model-class drop, runtime override env branches, report parsing, and per-variant yaml env injection."""
 
 from __future__ import annotations
 
@@ -15,9 +13,10 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors import _benchmark_interpreter as bi
 
-# Patch compatibility-filter helpers in the ``_grid_variant_filter`` sibling,
-# where apply_compatibility_filter resolves them (not via the re-export).
+# Patch compatibility-filter helpers in the ``_grid_variant_filter`` sibling, where apply_compatibility_filter
+# resolves them (not via the re-export).
 from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
 
 
@@ -39,7 +38,6 @@ def test_validate_magpie_python_override_requires_python(tmp_path):
 # -- apply_compatibility_filter -------------------------------------------
 def test_compatibility_filter_drops_on_model_class(monkeypatch) -> None:
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (False, False))
-    monkeypatch.setattr(vf, "_probe_server_help_text", lambda fw: "")
     grid = [_variant("mla", "--enable-flashinfer-mla"), _variant("plain", "")]
     kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="meta-llama-3-8b")
     assert [v.name for v in kept] == ["plain"]
@@ -48,17 +46,15 @@ def test_compatibility_filter_drops_on_model_class(monkeypatch) -> None:
     assert "MLA" in dropped[0]["reason"]
 
 
-def test_compatibility_filter_drops_on_missing_help_flag(monkeypatch) -> None:
+def test_compatibility_filter_keeps_a_flag_the_model_class_supports(monkeypatch) -> None:
+    # Whether the installed server accepts the flag is left to its own argparse at launch.
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (True, True))
-    monkeypatch.setattr(vf, "_probe_server_help_text", lambda fw: "--some-other-flag")
     grid = [_variant("moe", "--enable-ep-moe")]
     kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="deepseek-moe")
-    assert kept == []
-    assert "too old" in dropped[0]["reason"]
+    assert [v.name for v in kept] == ["moe"] and dropped == []
 
 
-def test_compatibility_filter_no_model_path_assumes_compatible(monkeypatch) -> None:
-    monkeypatch.setattr(vf, "_probe_server_help_text", lambda fw: "--enable-ep-moe")
+def test_compatibility_filter_no_model_path_assumes_compatible() -> None:
     grid = [_variant("moe", "--enable-ep-moe")]
     kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="")
     assert [v.name for v in kept] == ["moe"] and dropped == []
@@ -158,7 +154,7 @@ def test_probe_swallows_subprocess_error(monkeypatch) -> None:
 # -- _resolve_probe_python / probe interpreter selection ------------------
 def test_resolve_probe_python_prefers_magpie_interpreter(monkeypatch) -> None:
     # The harness interpreter is used directly; no vllm-exe resolution is tried.
-    monkeypatch.setattr(gr, "_resolve_magpie_python", lambda: "/srv/venv/bin/python")
+    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda: "/srv/venv/bin/python")
     monkeypatch.setattr(
         gr.shutil, "which", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("which() should not be called"))
     )
@@ -166,18 +162,16 @@ def test_resolve_probe_python_prefers_magpie_interpreter(monkeypatch) -> None:
 
 
 def test_resolve_probe_python_falls_back_to_vllm_venv(monkeypatch) -> None:
-    # magpie_python is the canonical default -> pin the venv that backs
-    # ``vllm serve``.
-    monkeypatch.setattr(gr, "_resolve_magpie_python", lambda: "/opt/venv/bin/python")
+    # magpie_python is the canonical default -> pin the venv that backs ``vllm serve``.
+    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda: "/opt/venv/bin/python")
     monkeypatch.setattr(gr.shutil, "which", lambda name: "/other/venv/bin/vllm" if name == "vllm" else None)
     monkeypatch.setattr(gr.os.path, "exists", lambda p: p == "/other/venv/bin/python")
     assert gr._resolve_probe_python() == "/other/venv/bin/python"
 
 
 def test_resolve_probe_python_no_bare_python3_fallback(monkeypatch) -> None:
-    # With no resolvable vllm exe, fall back to the canonical magpie default —
-    # never a bare "python3".
-    monkeypatch.setattr(gr, "_resolve_magpie_python", lambda: "/opt/venv/bin/python")
+    # With no resolvable vllm exe, fall back to the canonical magpie default — never a bare "python3".
+    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda: "/opt/venv/bin/python")
     monkeypatch.setattr(gr.shutil, "which", lambda *_a, **_k: None)
     assert gr._resolve_probe_python() == "/opt/venv/bin/python"
 
@@ -299,8 +293,9 @@ def test_build_variant_yaml_injects_extra_envs(tmp_path: Path) -> None:
 
 
 def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
-    """When base YAML + base_extra_args + variant all set the same flag,
-    the materialized YAML must contain each flag only once (last wins)."""
+    """When base YAML + base_extra_args + variant all set the same flag, the materialized YAML must contain each flag
+    only once (last wins).
+    """
     base = tmp_path / "base.yaml"
     base.write_text(
         yaml.safe_dump(
@@ -327,8 +322,7 @@ def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
 
 
 def test_build_variant_yaml_prepends_legit_overlay(tmp_path: Path) -> None:
-    # SWSPLAT-42358: a legitimate overlay is a single existing directory; it is
-    # prepended to PYTHONPATH unchanged.
+    # SWSPLAT-42358: a legitimate overlay is a single existing directory; it is prepended to PYTHONPATH unchanged.
     base = tmp_path / "base.yaml"
     base.write_text(
         yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {}}}),
@@ -344,8 +338,8 @@ def test_build_variant_yaml_prepends_legit_overlay(tmp_path: Path) -> None:
 
 
 def test_build_variant_yaml_drops_unsafe_overlay(tmp_path: Path) -> None:
-    # SWSPLAT-42358: a ``:``-joined / traversal / non-existent overlay is
-    # dropped (would otherwise smuggle extra PYTHONPATH entries or escape).
+    # SWSPLAT-42358: a ``:``-joined / traversal / non-existent overlay is dropped (would otherwise smuggle extra
+    # PYTHONPATH entries or escape).
     base = tmp_path / "base.yaml"
     base.write_text(
         yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {}}}),
@@ -430,15 +424,7 @@ def test_remove_server_args_accepts_multi_flag_string() -> None:
 
 
 def test_remove_server_args_keeps_a_sibling_json_value_parseable() -> None:
-    """Removing one flag must not corrupt a JSON-valued sibling.
-
-    The JSON arrives with no shell wrapper because ``compact_json_server_args``
-    strips it upstream, so the POSIX shlex round-trip used to eat the JSON's own
-    double quotes. The bareword repair could not put them back around atom's
-    ``exclude_layer`` wildcards, and ``strip_benchmark_harness_flags`` puts this
-    call on every launch path, so ``--online_quant_config`` reached the server
-    unparseable and every conc_sweep launch died in ``json.loads``.
-    """
+    """Removing one flag must not corrupt a JSON-valued sibling."""
     args = (
         '--online_quant_config {"global_quant_config":"ptpc_fp8",'
         '"exclude_layer":["*.mlp.gate","*expert*"]} '

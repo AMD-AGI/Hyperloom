@@ -1,29 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The record that decides whether a generated tuner is ever trusted.
-
-A generated script starts as a *candidate*: sandboxed on every use, re-timed on
-every use, and never registered anywhere. Promotion to *trusted* means it may be
-driven like any other tuner -- so it is deliberately hard, and hard in ways that
-match how these scripts fail.
-
-The bar is three independent successes across at least two models, no recorded
-regression, and a human sign-off. Each clause answers a specific failure:
-
-* **Three successes** because one is a coincidence. Timing on a shared box moved
-  2.5x between two readings of the same configuration.
-* **Two models** because a script can encode one checkpoint's shapes and look
-  perfect until it meets another.
-* **No regression, ever** -- a single measured loss demotes it back. A tuner
-  that is usually right is worse than none: it is trusted precisely when nobody
-  is checking.
-* **Human sign-off**, because everything above is a machine agreeing with a
-  machine, and this is the point where the script stops being re-checked.
-
-The ledger holds no code. It records what happened to a script identified by the
-hash of its contents, so an edited script is a different script and starts over.
-"""
+"""The record that decides whether a generated tuner is ever trusted."""
 
 from __future__ import annotations
 
@@ -120,8 +98,7 @@ def record_outcome(
         if model and model not in record.models:
             record.models.append(model)
     else:
-        # Not every non-improvement is a regression: finding nothing is a valid
-        # outcome. Only a measured loss counts against the script.
+        # Not every non-improvement is a regression: finding nothing is a valid outcome.
         if speedup is not None and speedup < 1.0:
             record.regressions += 1
     record.last_speedup = speedup
@@ -149,11 +126,7 @@ def record_outcome(
 
 
 def is_trusted(digest: str) -> bool:
-    """Whether an operator has signed this exact script off.
-
-    Reads a list of digests. Eligibility never grants this: the ledger can say a
-    script has earned a look, and only a person can say it has earned trust.
-    """
+    """Whether an operator has signed this exact script off."""
     raw = os.environ.get(TRUST_ENV, "").strip()
     if not raw or not digest:
         return False

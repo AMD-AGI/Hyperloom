@@ -1,14 +1,4 @@
-"""The implementer session's deadline reaches the backend and the prompt.
-
-Two contracts land together here. Part 2: ``make_agent_fn`` must set the run
-spec's ``timeout_sec`` from the campaign-sized session budget it is handed, NOT
-from ``backend.runtime.timeout_sec`` (whose 1800s default would cut every
-session at 30 min once the claude backend started honouring it). Part 3: the
-session must be TOLD its own deadline and told to hand off its best candidate
-before then, or a bounded session simply gets killed mid-thought with nothing
-submitted. Both are exercised through the real ``agent_fn`` with the SDK and
-backend stubbed out -- no LLM / GPU / gateway.
-"""
+"""The implementer session's deadline reaches the backend and the prompt."""
 
 from __future__ import annotations
 
@@ -93,8 +83,8 @@ def test_prompt_states_the_deadline_and_the_handoff(tmp_path, captured_run_spec)
     prompt = spec.user_prompt
     # The number of minutes the session actually has (5400s == 90 min).
     assert "90" in prompt
-    # And that it must hand off its best candidate before the clock runs out,
-    # via the clean handoff path rather than being killed with nothing.
+    # And that it must hand off its best candidate before the clock runs out, via the clean handoff path rather than
+    # being killed with nothing.
     lowered = prompt.lower()
     assert "candidate_submitted" in prompt or "candidate" in lowered
     assert "deadline" in lowered or "time" in lowered

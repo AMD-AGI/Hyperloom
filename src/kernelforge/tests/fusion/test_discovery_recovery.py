@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Discovery must not turn its own failures into "no fusion opportunity".
-
-Two of them: a response the gateway cut off mid-proposal, and a turn budget so
-small that using the tools discovery was given always ends the session.
-"""
+"""Discovery must not turn its own failures into \"no fusion opportunity\"."""
 
 from __future__ import annotations
 
@@ -129,12 +125,7 @@ PROPOSALS = '```json\n[{"name": "qk_norm_rope", "op_chain": "q_norm -> rope"}]\n
 
 
 def test_proposals_survive_a_session_that_hit_the_turn_ceiling(tmp_path) -> None:
-    """Discovery spends turns by design; brushing the ceiling is not a failure.
-
-    Observed on Qwen3-14B-FP8: five attempts each ended ``turn_cap``, every
-    answer was dropped, and the run published ``llm_unavailable`` having done
-    the analysis five times.
-    """
+    """Discovery spends turns by design; brushing the ceiling is not a failure."""
     calls: list = []
     fn = discover_module.registered_agent_llm_fn(
         _backend_returning([AgentRunResult(text=PROPOSALS, end_reason="turn_cap")], calls),
@@ -162,6 +153,27 @@ def test_a_cut_short_session_with_no_proposals_still_fails(tmp_path) -> None:
     with pytest.raises(discover_module.LlmUnavailableError):
         fn("DISCOVERY PROMPT")
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("end_reason", ["sdk_no_result", "sdk_error_during_execution", "api_error"])
+def test_proposals_from_a_session_the_provider_never_finished_are_not_a_discovery_result(
+    tmp_path, end_reason: str
+) -> None:
+    """Parseable text is not an answer when the provider, not the agent, ended the session."""
+    calls: list = []
+    fn = discover_module.registered_agent_llm_fn(
+        _backend_returning([AgentRunResult(text=PROPOSALS, end_reason=end_reason)], calls),
+        model="m",
+        timeout_s=10,
+        workdir=str(tmp_path),
+        attempts=2,
+        base_delay_sec=0,
+        max_delay_sec=0,
+    )
+
+    with pytest.raises(discover_module.LlmUnavailableError):
+        fn("DISCOVERY PROMPT")
+    assert len(calls) == 2, "an API failure is retried, not accepted"
 
 
 def test_a_failed_discovery_leaves_a_transcript(tmp_path) -> None:

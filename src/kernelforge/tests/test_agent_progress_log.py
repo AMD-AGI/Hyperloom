@@ -1,11 +1,4 @@
-"""The progress sink must survive a cancelled agent run.
-
-A prep attempt that hits its wall-clock cap is cancelled mid-stream, so whatever
-the backend accumulated in locals is lost — a real run left nothing behind but
-``{"status": "timeout", "elapsed_s": 900.132}`` for 900 seconds of agent work.
-``AgentRunSpec.progress_log`` is owned by the caller, so it still holds what the
-agent was doing after the cancellation.
-"""
+"""The progress sink must survive a cancelled agent run."""
 
 from __future__ import annotations
 

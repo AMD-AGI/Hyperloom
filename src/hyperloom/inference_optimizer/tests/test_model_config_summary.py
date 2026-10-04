@@ -209,8 +209,7 @@ def test_summary_llm_config_nesting(tmp_path: Path) -> None:
 
 
 def test_summary_stub_high_priority_scope_backfilled_by_lower(tmp_path: Path) -> None:
-    # text_config is a stub (only model_type); the real decoder lives in
-    # llm_config. Fields absent from the stub must be backfilled from llm_config.
+    # text_config is a stub (only model_type); the real decoder lives in llm_config.
     m = _write_config(
         tmp_path / "m",
         {
@@ -225,8 +224,8 @@ def test_summary_stub_high_priority_scope_backfilled_by_lower(tmp_path: Path) ->
         },
     )
     out = summarize_model_config(str(m))
-    # Nested text_config wins for model_type/family; llm_config backfills the
-    # structural fields the stub text_config omits.
+    # Nested text_config wins for model_type/family; llm_config backfills the structural fields the stub text_config
+    # omits.
     assert out["model_type"] == "qwen2"
     assert out["model_family"] == "qwen2"
     assert out["num_attention_heads"] == 64
@@ -236,8 +235,8 @@ def test_summary_stub_high_priority_scope_backfilled_by_lower(tmp_path: Path) ->
 
 
 def test_wrapper_model_type_reports_nested_decoder(tmp_path: Path) -> None:
-    # An unrecognized top-level wrapper must report the nested decoder for both
-    # model_type and model_family so collectors group by the real LLM.
+    # An unrecognized top-level wrapper must report the nested decoder for both model_type and model_family so
+    # collectors group by the real LLM.
     m = _write_config(
         tmp_path / "wrapper-model",
         {
@@ -255,8 +254,8 @@ def test_wrapper_model_type_reports_nested_decoder(tmp_path: Path) -> None:
 
 
 def test_qwen3_vl_resolves_to_qwen3_family(tmp_path: Path) -> None:
-    # Real Qwen3-VL nests model_type=qwen3_vl_text; merged model_type carries
-    # that internal name but the family still collapses to qwen3.
+    # Real Qwen3-VL nests model_type=qwen3_vl_text; merged model_type carries that internal name but the family still
+    # collapses to qwen3.
     m = _write_config(
         tmp_path / "qwen3-vl",
         {"model_type": "qwen3_vl", "text_config": {"model_type": "qwen3_vl_text"}},
@@ -357,9 +356,7 @@ def test_model_family(tmp_path: Path, model_type, arches, name, expected_family)
     assert out.get("model_family", "") == expected_family
 
 
-# ---------------------------------------------------------------------------
 # Shared-expert detection
-# ---------------------------------------------------------------------------
 
 
 def test_shared_expert_detected_via_n_shared_experts(tmp_path: Path) -> None:
@@ -486,7 +483,6 @@ def test_sparse_kv_block_size_dense_model_is_none(tmp_path: Path) -> None:
 
 
 def test_sparse_kv_block_size_unreadable_config_is_none(tmp_path: Path) -> None:
-    # No config.json (e.g. an uncached hub-id) -> None, so the caller injects
-    # nothing and preserves prior behaviour.
+    # No config.json (e.g. an uncached hub-id) -> None, so the caller injects nothing and preserves prior behaviour.
     assert _sparse_kv_block_size(str(tmp_path / "nope")) is None
     assert _sparse_kv_block_size("") is None

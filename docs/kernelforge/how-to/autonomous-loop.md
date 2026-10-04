@@ -53,8 +53,14 @@ Each iteration:
    direction, fuses the analyses into a single plan instead: Orchestration
    compares their expected value, evidence, feasibility, cost, dependencies and
    risks, and synthesizes one. Concurrent lanes need an agent provider that
-   declares `stop_hooks` and `session_env`; one that does not is refused by name
-   and must be given `--lanes 1`.
+   declares `session_env`; one that does not is refused by name and must be
+   given `--lanes 1`, because lanes sharing one build cache load each other's
+   JIT binaries and nothing downstream can tell that from a real result. A
+   provider that does not declare `stop_hooks` runs and is warned by name: it
+   loses in-session denial of edits to the measurement surface and of driver
+   runs that skip the shared device lock, so a lane can lose its session at the
+   boundary check or leave the round voided for device contention — costs that
+   are reported when they happen, not results that pass for real ones.
 3. For long-horizon sessions (`--max-hours > 2`), an independent read-only
    Critic session using the same resolved backend and model reviews the draft
    once. `ACCEPT` publishes it unchanged; `REVISE`/`REPLACE` allows
@@ -66,8 +72,9 @@ Each iteration:
    Orchestration session timeout, because a round of several plans is several
    times the reading. A turn cap, timeout, SDK truncation, or empty answer is
    never published as a complete plan. Empty or failed Critic calls fail open to
-   the draft. Review diagnostics record duration and whether the verdict was
-   explicit or inferred. Shorter sessions publish the synthesized plan directly.
+   the draft and record the verdict `NOT_REVIEWED`, which is what the artifact,
+   the diagnostics, and the next round are all given. Review diagnostics record
+   duration and whether the verdict was explicit or inferred. Shorter sessions publish the synthesized plan directly.
    A multi-lane round is reviewed once, with its division in view, and the one
    verdict reaches every lane.
 4. How wide the round runs is a separate answer, given per lane, and it is the

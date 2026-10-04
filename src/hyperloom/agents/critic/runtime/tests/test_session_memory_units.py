@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for :mod:`runtime.session_memory` edge cases.
-
-Covers input-validation guards, empty-log reads, malformed-cache handling,
-corrupt-JSON detection, and the MergeResult serialiser.
-"""
+"""Unit tests for :mod:`runtime.session_memory` edge cases."""
 
 from __future__ import annotations
 

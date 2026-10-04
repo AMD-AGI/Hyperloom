@@ -2,12 +2,12 @@
 myst:
     html_meta:
         "description": "Step-by-step migration guide for upgrading Hyperloom. Covers required and recommended changes from 0.5.x to 0.6.0 and the generic upgrade procedure."
-        "keywords": "Hyperloom, upgrade, migration, version, changelog, 0.6.0, USER_DATA_PATH, GEAK, TraceLens, Ray, AMD GPU, ROCm, session, inference optimizer"
+        "keywords": "Hyperloom, upgrade, migration, version, release notes, 0.6.0, USER_DATA_PATH, GEAK, TraceLens, Ray, AMD GPU, ROCm, session, inference optimizer"
 ---
 # Upgrade Hyperloom version
 
 Per-version migration steps. This page is a companion to
-[`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md): the changelog answers *what
+[Releases](https://github.com/AMD-AGI/Hyperloom/releases): a release answers *what
 changed*, this page answers *what you have to do about it*.
 
 If you are starting fresh, skip this page and follow the
@@ -158,12 +158,17 @@ controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
 
 ### Schema compatibility
 
-`session_breakdown.json` emits `hyperloom.session_breakdown.v5.0`. V5 is a
-breaking cutover for optimization results: adopted optimizations are reported
-only through `optimizations`, and the `optimization_stack`, `attribution`, GEAK
-invocation, Forge invocation, and GEMM-tuning projections are no longer
-emitted. Consumers reading archived v2 / v3 / v4 documents need a downstream
-migration, as described in
+`session_breakdown.json` emits `hyperloom.session_breakdown.v6.0`. V6 is a
+breaking cutover for the timeline: each action records its own event as it
+runs, so an event's `start_time` is when the work started rather than when its
+artefacts were written, and the KERNEL and BASELINE projections are no longer
+emitted. Ordering that relied on the old collapsed windows changes as a result.
+
+V5 was the preceding cutover, for optimization results: adopted optimizations
+are reported only through `optimizations`, and the `optimization_stack`,
+`attribution`, GEAK invocation, Forge invocation, and GEMM-tuning projections
+are no longer emitted. Consumers reading archived v2 / v3 / v4 / v5 documents
+need a downstream migration, as described in
 [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 
 ---
@@ -245,7 +250,7 @@ only automatic storage move.
 
 Use these resources for related reference information:
 
-* [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md): Full per-release notes.
+* [Releases](https://github.com/AMD-AGI/Hyperloom/releases): Full per-release notes.
 * [Hyperloom authentication and credentials](authentication.md): Credential and path env reference.
 * [Environment variables](environment-variables.md): Every
   environment variable read by the runtime.

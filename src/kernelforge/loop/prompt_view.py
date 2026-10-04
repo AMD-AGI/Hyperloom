@@ -1,32 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Compact, state-driven prompt view for the long-horizon forge-loop.
-
-Renders a small "Long-Horizon Memory" header from the durable run state and
-recent events, plus explicit pointers to the on-disk detail files. The goal is
-the opposite of stuffing history into context: the prompt carries only the
-overview an implementer needs to pick the next move, and tells it exactly which
-files to Read when it needs the full error, diff, or profile of a past attempt.
-
-This complements (does not replace) the candidate-archive digest: the digest
-still carries curated full diffs, while this header carries the resumable
-control state (best / stall / phase) and the retrieval map.
-"""
+"""Compact, state-driven prompt view for the long-horizon forge-loop."""
 
 from __future__ import annotations
 
 from kernelforge.loop.run_state import RunState
 
-# Canonical on-disk locations, shown to the agent so it can Read detail on
-# demand. Relative to the loop workspace root.
+# Canonical on-disk locations, shown to the agent so it can Read detail on demand.
 _ARCHIVE_REL = "forge_experiments/candidates"
 _HANDOFFS_REL = "forge_experiments/handoffs"
 _STATE_REL = "forge_experiments/run_state.json"
 _EVENTS_REL = "forge_experiments/events.jsonl"
 
-# How many pins the retrieval map names. The state caps the pin list higher, so
-# this is a prompt-budget slice of it rather than the cap itself.
+# How many pins the retrieval map names.
 _MAX_RENDERED_PINS = 6
 
 
@@ -38,18 +25,7 @@ def _fmt_ms(value: float | None) -> str:
 
 
 def _render_pins(state: RunState, result_events: list[dict]) -> list[str]:
-    """Render the pinned iterations the map points at, best lineage first.
-
-    ``run_state.pin_iteration`` holds the iteration behind the current best
-    against eviction by later near-misses, and identifies it as
-    ``state.best.iteration``. That pin is rendered first and marked, so a slice
-    taken for prompt budget cannot drop the one pin held for this map.
-
-    ``RunState.pinned_iterations`` carries iteration numbers only, so a pin's
-    measured mean case speedup comes from the best record or from the supplied
-    outcome events. A pin older than that event window renders as its iteration
-    number alone.
-    """
+    """Render the pinned iterations the map points at, best lineage first."""
     pinned = list(state.pinned_iterations)
     if not pinned:
         return []
@@ -58,8 +34,8 @@ def _render_pins(state: RunState, result_events: list[dict]) -> list[str]:
     holds_best = best in pinned
     head = [best] if holds_best else []
     others = [iteration for iteration in pinned if iteration != best]
-    # Guarded rather than sliced directly: ``others[-0:]`` is the whole list, so
-    # a budget of zero would render every pin instead of none.
+    # Guarded rather than sliced directly: ``others[-0:]`` is the whole list, so a budget of zero would render every
+    # pin instead of none.
     recent_budget = max(0, _MAX_RENDERED_PINS - len(head))
     selected = head + (others[-recent_budget:] if recent_budget else [])
 
@@ -69,8 +45,8 @@ def _render_pins(state: RunState, result_events: list[dict]) -> list[str]:
         if event.get("mean_case_speedup") is not None
     }
     if holds_best and state.best.mean_case_speedup is not None:
-        # The best record carries the authoritative post-decision score, which
-        # outlives the bounded event window the other pins are scored from.
+        # The best record carries the authoritative post-decision score, which outlives the bounded event window the
+        # other pins are scored from.
         speedups[best] = state.best.mean_case_speedup
 
     rendered: list[str] = []
@@ -105,8 +81,7 @@ def _recent_line(event: dict) -> str:
     return " | ".join(parts)
 
 
-# How many recent attempt lines the header renders. Named so the loop can size
-# its outcome window against it without reading this signature back.
+# How many recent attempt lines the header renders.
 MAX_RECENT_ATTEMPT_LINES = 6
 
 
@@ -118,20 +93,9 @@ def render_long_horizon_header(
     max_chars: int = 4000,
     include_handoffs: bool = False,
 ) -> str:
-    """Render the compact long-horizon memory header, or "" when state is empty.
-
-    Args:
-        state: The durable run state (control checkpoint).
-        recent_events: Recent factual events (oldest first); only
-            iteration-result rows are shown.
-        max_recent: Max recent attempt lines to include.
-        max_chars: Target ceiling on the rendered header size. Recent attempts
-            are removed first. The essential control state and retrieval map may
-            exceed an unrealistically small budget rather than being truncated.
-    """
-    # Render nothing until there is substantive history, so the loop's
-    # cold-start prompt (iteration 1, before any result) is unchanged. A bare
-    # baseline/iteration_started marker is not enough to warrant the header.
+    """Render the compact long-horizon memory header, or \"\" when state is empty."""
+    # Render nothing until there is substantive history, so the loop's cold-start prompt (iteration 1, before any
+    # result) is unchanged.
     has_history = (
         state.best.iteration > 0
         or bool(state.best.commit_hash)
@@ -147,8 +111,8 @@ def render_long_horizon_header(
         f"Phase: {state.phase}",
     ]
 
-    # Only claim a "best" once a real KEEP exists; before that, surface the
-    # baseline so the agent still knows the bar to beat.
+    # Only claim a "best" once a real KEEP exists; before that, surface the baseline so the agent still knows the bar
+    # to beat.
     if state.best.iteration > 0 or state.best.commit_hash:
         label = "validated KB warm-start" if state.best.source == "warm_start" else f"iter {state.best.iteration}"
         speedup_text = f"{state.best.mean_case_speedup:.6f}x" if state.best.mean_case_speedup is not None else "?"
@@ -170,8 +134,8 @@ def render_long_horizon_header(
     # Iteration outcomes feed both the pin hint below and the recent attempts.
     result_events = [e for e in recent_events if e.get("type") == "iteration_result"]
 
-    # Retrieval map — always kept, so the agent always knows where the full
-    # detail lives even if the recent list is trimmed for budget.
+    # Retrieval map — always kept, so the agent always knows where the full detail lives even if the recent list is
+    # trimmed for budget.
     pins = _render_pins(state, result_events)
     pin_hint = f" (pinned: {', '.join(pins)})" if pins else ""
     retrieval: list[str] = [
@@ -200,15 +164,12 @@ def render_long_horizon_header(
         parts.extend(retrieval)
         return "\n".join(parts).strip()
 
-    # Enforce the ceiling by dropping the OLDEST recent line first; the lead +
-    # retrieval map are always kept (they are what make the loop resumable).
+    # Enforce the ceiling by dropping the OLDEST recent line first; the lead + retrieval map are always kept (they are
+    # what make the loop resumable).
     header = _assemble(recent_lines)
     while recent_lines and len(header) > max_chars:
         recent_lines.pop(0)
         header = _assemble(recent_lines)
 
-    # The fixed control state + retrieval map is the minimum useful view. A hard
-    # tail slice would remove the paths precisely when the caller supplied a
-    # budget smaller than that minimum, leaving the agent unable to retrieve any
-    # detail. Prefer a small, explicit budget overrun to returning a broken map.
+    # The fixed control state + retrieval map is the minimum useful view.
     return header

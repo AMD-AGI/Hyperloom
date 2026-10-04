@@ -235,14 +235,7 @@ def _jit_cache(root: Path) -> Path:
 
 
 def test_jit_cache_written_during_the_attempt_does_not_block_publish(tmp_path):
-    """A compile during preparation must not invalidate the transaction.
-
-    The driver itself writes the JIT cache every time it compiles a kernel, so
-    treating that cache as transaction state made publish() fail with "external
-    artifact directory changed outside the staging transaction" and discard a
-    perfectly good driver — nondeterministically, depending on whether anything
-    got compiled during the attempt.
-    """
+    """A compile during preparation must not invalidate the transaction."""
     root, workspace, driver, helper, _, program = _make_tree(tmp_path)
     cache = _jit_cache(root)
     transaction = ExternalArtifactTransaction(
@@ -262,8 +255,8 @@ def test_jit_cache_written_during_the_attempt_does_not_block_publish(tmp_path):
         transaction.close()
 
     assert driver.read_text(encoding="utf-8") == "REPAIRED\n"
-    # The cache is neither staged nor reported, and is left exactly as the
-    # compile left it — publish must not roll it back either.
+    # The cache is neither staged nor reported, and is left exactly as the compile left it — publish must not roll it
+    # back either.
     assert all("flydsl_cache" not in path for path in changes.wrote_files)
     assert (cache / "1.pkl").read_bytes() == b"another-kernel-blob"
     assert (cache / "0.pkl").read_bytes() == b"recompiled-kernel-blob"

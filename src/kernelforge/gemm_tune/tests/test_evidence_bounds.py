@@ -1,20 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Parsing a serving log has to be bounded by something other than uptime.
-
-aiter prints a line for every tuned-config miss unconditionally, and hit logging
-is now on for every serving run, so a long production run's server.log is large.
-Deriving demand from it is on the tuning path, and the parser walks it line by
-line while holding one entry per distinct key in memory.
-
-Truncation is reported rather than silent: a demand list that stopped early is
-still the runtime's own shapes, and far better than config-derived ones, but a
-reader has to be able to tell it is a prefix.
-"""
+"""Parsing a serving log has to be bounded by something other than uptime."""
 
 from __future__ import annotations
 
+import pytest
+
+from hyperloom.common.env import EnvValueError
 from kernelforge.gemm_tune import evidence as ev
 
 _MISS = (
@@ -45,8 +38,8 @@ class TestLineBound:
     def test_the_shapes_read_before_the_limit_are_still_usable(self, monkeypatch):
         monkeypatch.setenv(ev._MAX_LINES_ENV, "5")
         entry = ev.demand_for_tuner(ev.parse_log(_log(50)), "sglang_dense_bf16")
-        # bucket=False: this is about which lines were read before the bound,
-        # so it wants the raw M values rather than a padded cover of them.
+        # bucket=False: this is about which lines were read before the bound, so it wants the raw M values rather than
+        # a padded cover of them.
         shapes = ev.demand_shapes(entry, bucket=False)
         assert [s["M"] for s in shapes] == [1, 2, 3, 4, 5]
 
@@ -60,16 +53,16 @@ class TestKeyBound:
         assert report["truncated"]["tables"]["bf16_tuned_gemm.csv"] == 8
 
     def test_the_miss_count_still_counts_everything(self, monkeypatch):
-        # The count is what the apply verdict reads; capping the *list* must not
-        # silently shrink the number of lookups the runtime made.
+        # The count is what the apply verdict reads; capping the *list* must not silently shrink the number of lookups
+        # the runtime made.
         monkeypatch.setenv(ev._MAX_KEYS_ENV, "8")
         report = ev.parse_log(_log(40))
         assert report["apply_verdict"]["miss"] == 40
         assert report["demands"][0]["miss_count"] == 40
 
     def test_repeats_of_a_known_key_are_still_counted_past_the_limit(self, monkeypatch):
-        # Request counts are the only ordering demand_shapes has, so a key
-        # already in the list must keep accruing even once the set is full.
+        # Request counts are the only ordering demand_shapes has, so a key already in the list must keep accruing even
+        # once the set is full.
         monkeypatch.setenv(ev._MAX_KEYS_ENV, "3")
         report = ev.parse_log(_log(10, repeats=4))
         entry = report["demands"][0]
@@ -83,21 +76,20 @@ class TestOverrides:
         monkeypatch.setenv(ev._MAX_LINES_ENV, "100000")
         assert "truncated" not in ev.parse_log(_log(50))
 
-    def test_garbage_and_non_positive_values_fall_back_to_the_default(self, monkeypatch):
-        for bad in ("", "0", "-5", "lots"):
-            monkeypatch.setenv(ev._MAX_KEYS_ENV, bad)
-            assert ev._env_int(ev._MAX_KEYS_ENV, 7) == 7
+    def test_a_blank_override_falls_back_to_the_default(self, monkeypatch):
+        monkeypatch.setenv(ev._MAX_KEYS_ENV, "")
+        assert ev._env_positive_int(ev._MAX_KEYS_ENV, 7) == 7
+
+    @pytest.mark.parametrize("bad", ["0", "-5", "lots"])
+    def test_a_cap_that_cannot_be_read_as_positive_raises(self, monkeypatch, bad):
+        """Truncation tells the operator to raise this variable, so the bound in force has to be the one they set."""
+        monkeypatch.setenv(ev._MAX_KEYS_ENV, bad)
+        with pytest.raises(EnvValueError, match=ev._MAX_KEYS_ENV):
+            ev._env_positive_int(ev._MAX_KEYS_ENV, 7)
 
 
 class TestKeySchemaMatchesInstalledAiter:
-    """Pinned to headers read off two independent MI355X aiter installs.
-
-    A documented claim that blockscale carried a scaling-granularity column,
-    and bpreshuffle a preshuffle marker, went unchallenged for a while because
-    the only thing contradicting it was another document. Neither column
-    exists. Getting this wrong would under-key the generated untuned CSV, and
-    rows tuned under the wrong key are rows the runtime never finds.
-    """
+    """Pinned to headers read off two independent MI355X aiter installs."""
 
     # table -> the untuned CSV header, which *is* the tuner's input key.
     MEASURED = {
@@ -123,7 +115,7 @@ class TestKeySchemaMatchesInstalledAiter:
             )
 
     def test_q_dtype_w_is_a_key_the_log_cannot_supply(self):
-        # Both facts matter together: it belongs in the key, and evidence can
-        # never fill it, so it has to come from the hardware downstream.
+        # Both facts matter together: it belongs in the key, and evidence can never fill it, so it has to come from
+        # the hardware downstream.
         assert "q_dtype_w" in ev.TABLE_KEY_SCHEMA["a8w8_tuned_gemm.csv"]
         assert "q_dtype_w" in ev.UNLOGGABLE_KEY_FIELDS

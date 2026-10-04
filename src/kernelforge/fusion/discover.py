@@ -1,54 +1,23 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Stage 2 (LLM-autonomous discovery): find fusible op chains from trace + source.
-
-Unlike :func:`locate.build_recipes` (pattern-library — capped to known templates),
-this asks the LLM to READ the launch-bound decode profile (the trace's hot kernels)
-plus the model source and PROPOSE fusible op chains itself. It therefore surfaces
-fusions no template encodes — e.g. ZAYA's eager CCA QK chain, whose kernels are
-generic ``elementwise``/``cast``/``mul`` and are thus invisible to category-based
-patterns (``rmsnorm``+``rope`` share was only ~0.02, below the pattern threshold).
-
-Discovery is no longer trace-only. The primary evidence is still the MEASURED
-trace and the REAL source, but a bounded retrieval step over ``local_knowledge``
-may additionally surface names of existing ROCm operators. Its limits matter:
-
-* Ranking uses whole-word overlap between observed kernel/category names and the
-  document text -- never substring or prefix matching, which would let ``add``
-  match ``padding`` and recommend an unrelated operator.
-* Retrieval only proposes names. It confirms nothing about shape, dtype, cache
-  layout, or numerics; every hint carries a ``score`` and the author must verify
-  the operator and record parity before keeping it.
-* A retrieved name is not an answer key. The operator still has to correspond to
-  a chain that this trace shows running back-to-back and that this source
-  actually contains.
-
-The Agent call sits behind an injectable ``llm_fn`` (text prompt -> text), so the
-prompt assembly and JSON parsing are unit-testable without a live provider.
-"""
+"""Stage 2 (LLM-autonomous discovery): find fusible op chains from trace + source."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import gzip
-import inspect
 import json
 import logging
 import os
 import re
 from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
-from kernelforge.llm import (
-    normalize_anthropic_base_url,
-    resolve_anthropic_gateway,
-    resolve_openai_gateway,
-)
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec
+from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.resources import resource_path
 
 from .diagnose import LAUNCH_BOUND_CATEGORIES, categories_in_text, categorize_kernel_name
@@ -58,7 +27,6 @@ from .llm_failure import (
     DEFAULT_BASE_DELAY_SEC,
     DEFAULT_DEADLINE_SEC,
     DEFAULT_MAX_DELAY_SEC,
-    NOT_CONFIGURED,
     RETRYABLE_KINDS,
     LlmUnavailableError,
     classify_llm_error,
@@ -81,31 +49,15 @@ log = logging.getLogger("forge_fusion")
 
 LlmFn = Callable[[str], str]  # prompt -> raw model text (expected to contain JSON)
 
-# Each proposed fusion costs discovery tokens plus one authoring subprocess and
-# validation pass, and that cost is paid before the E2E gate can reject it. Keep
-# the default modest; raise it deliberately via ``FORGE_MAX_FUSIONS``.
+# Each proposed fusion costs discovery tokens plus one authoring subprocess and validation pass, and that cost is paid
+# before the E2E gate can reject it.
 _DEFAULT_MAX_FUSIONS = 4
 
-# Discovery is handed read and search tools, and the first tool call ends the
-# turn. A budget of one therefore guarantees a turn_cap on any session that uses
-# the tools it was given, which is what discovery is for. Retries do not help:
-# each one opens another single-turn session. Read-only exploration is cheap
-# enough to allow a handful of turns; raise it via ``FORGE_FUSION_DISCOVERY_TURNS``.
-#
-# A handful turned out not to be enough on a large model: on DeepSeek-V4-Flash a
-# budget of 12 hit the cap on both attempts it was given, while 60 completed and
-# proposed four fusions on each of three runs. The cap is a ceiling and not a
-# budget -- a session that finishes in eight turns costs eight turns whatever the
-# ceiling is -- so it is set where exploring a large model tree fits under it.
+# Discovery is handed read and search tools, and the first tool call ends the turn.
 DEFAULT_DISCOVERY_TURNS = 60
 
-# A reasoning model spends this budget on thinking before it writes anything, so
-# a small cap does not truncate the answer -- it removes it. Measured against the
-# gateway with claude-opus-5 on a real discovery prompt: at 2400 every one of five
-# attempts came back with an empty completion; at 16000 the response was 5102
-# characters of closed JSON carrying four proposals. Override with
-# ``FORGE_FUSION_LLM_MAX_TOKENS``.
-DEFAULT_LLM_MAX_TOKENS = 16000
+# Heavy kernels a fusible chain runs between; everything else is launch-bound tail.
+COMPUTE_CATEGORIES: frozenset[str] = frozenset({"gemm", "attention", "conv", "moe"})
 
 
 def _resolve_max_fusions(value: Optional[int] = None) -> int:
@@ -121,18 +73,7 @@ def _resolve_max_fusions(value: Optional[int] = None) -> int:
 def hot_kernels_from_trace(
     trace_path: str | Path, *, top_n: int = 15, launch_bound_only: bool = True
 ) -> list[dict[str, Any]]:
-    """Top GPU kernels from a kineto trace by total-duration share.
-
-    Args:
-        trace_path: Path to the ``*.trace.json[.gz]``.
-        top_n: How many kernels to return.
-        launch_bound_only: When True, drop compute-bound categories
-            (gemm/attention/conv/moe) so the list is the fusible launch-bound tail.
-
-    Returns:
-        ``[{"name", "category", "share", "count", "avg_us"}, ...]`` (share of total
-        GPU-kernel time), ordered by descending share.
-    """
+    """Top GPU kernels from a kineto trace by total-duration share."""
     p = Path(trace_path)
     try:
         opener = gzip.open if (p.suffix == ".gz" or p.name.endswith(".json.gz")) else open
@@ -164,10 +105,9 @@ def hot_kernels_from_trace(
         return []
 
     rows: list[dict[str, Any]] = []
-    compute = {"gemm", "attention", "conv", "moe"}
     for name, (dur, count) in agg.items():
         cat = categorize_kernel_name(name)
-        if launch_bound_only and cat in compute:
+        if launch_bound_only and cat in COMPUTE_CATEGORIES:
             continue
         rows.append(
             {
@@ -197,13 +137,7 @@ def _load_trace_events(trace_path: str | Path) -> list[dict[str, Any]]:
 
 
 def kernel_names_from_trace(trace_path: str | Path, *, top_n: int = 40) -> list[str]:
-    """Distinct kernel names ranked by total duration, compute kernels included.
-
-    :func:`hot_kernels_from_trace` deliberately drops GEMM and attention because
-    they are not fusion targets themselves. Operator retrieval still needs them:
-    an epilogue operator is identified by the GEMM it attaches to, so excluding
-    compute names would make a gated-GEMM card unreachable.
-    """
+    """Distinct kernel names ranked by total duration, compute kernels included."""
     totals: dict[str, float] = defaultdict(float)
     for event in _load_trace_events(trace_path):
         if event.get("cat") != "kernel":
@@ -221,19 +155,13 @@ def kernel_names_from_trace(trace_path: str | Path, *, top_n: int = 40) -> list[
     return [name for name, _ in ranked[:top_n]]
 
 
-def ordered_fusion_boundaries_from_trace(
+def stream_ordered_kernels(
     trace_path: str | Path,
-    *,
-    top_n: int = 16,
-    max_chain_len: int = 8,
-    min_repeats: int = 2,
-) -> list[dict[str, Any]]:
-    """Recover repeated compute-to-compute fusion boundaries from stream order.
+) -> tuple[dict[tuple[Any, Any], list[dict[str, Any]]], float]:
+    """Kernel events bucketed by GPU stream, each bucket ordered by timestamp.
 
-    Unlike the launch-bound hot table, this deliberately retains GEMM and
-    attention endpoints. That exposes epilogue/prologue opportunities such as a
-    GEMM followed by one activation, while also preserving longer post-processing
-    runs that end in a cache write before attention.
+    Returns the buckets and the summed kernel duration. Execution order only holds
+    within one stream, so every adjacency question has to be asked per bucket.
     """
     streams: dict[tuple[Any, Any], list[dict[str, Any]]] = defaultdict(list)
     total_kernel_us = 0.0
@@ -262,8 +190,20 @@ def ordered_fusion_boundaries_from_trace(
             }
         )
         total_kernel_us += duration
+    for bucket in streams.values():
+        bucket.sort(key=lambda item: item["ts"])
+    return streams, total_kernel_us
 
-    compute_categories = {"gemm", "attention", "conv", "moe"}
+
+def ordered_fusion_boundaries_from_trace(
+    trace_path: str | Path,
+    *,
+    top_n: int = 16,
+    max_chain_len: int = 8,
+    min_repeats: int = 2,
+) -> list[dict[str, Any]]:
+    """Recover repeated compute-to-compute fusion boundaries from stream order."""
+    streams, total_kernel_us = stream_ordered_kernels(trace_path)
 
     def normalized_name(name: str) -> str:
         value = re.sub(r"0x[0-9a-f]+", "0x*", name.lower())
@@ -282,16 +222,12 @@ def ordered_fusion_boundaries_from_trace(
         interior_count = max(0, len(segment) - 2)
         if len(segment) == 3 and categories[0] == "gemm" and categories[1] in LAUNCH_BOUND_CATEGORIES:
             boundary_kind = "epilogue"
-        elif categories[0] in compute_categories:
+        elif categories[0] in COMPUTE_CATEGORIES:
             boundary_kind = "compute_boundary"
         else:
             boundary_kind = "vertical"
-        # The trailing kernel is the NEXT compute anchor. It is kept as adjacency
-        # evidence but is not part of what can be fused: a native prologue
-        # operator fuses norm/RoPE/cache-write, never the attention kernel it
-        # feeds. The leading anchor is likewise the producer, except that an
-        # ``epilogue`` boundary may absorb it (see boundary_kind).
-        terminal_compute = categories[-1] if categories[-1] in compute_categories else ""
+        # The trailing kernel is the NEXT compute anchor.
+        terminal_compute = categories[-1] if categories[-1] in COMPUTE_CATEGORIES else ""
         fusable_categories = categories[1:-1] if terminal_compute else categories[1:]
         row = aggregated.setdefault(
             key,
@@ -310,11 +246,10 @@ def ordered_fusion_boundaries_from_trace(
         row["count"] += 1
         row["total_us"] += sum(float(item["dur"]) for item in segment)
 
-    for stream_events in streams.values():
-        ordered = sorted(stream_events, key=lambda item: item["ts"])
+    for ordered in streams.values():
         start_index: Optional[int] = None
         for index, event in enumerate(ordered):
-            if event["category"] not in compute_categories:
+            if event["category"] not in COMPUTE_CATEGORIES:
                 continue
             if start_index is not None:
                 record(ordered[start_index : index + 1])
@@ -327,9 +262,8 @@ def ordered_fusion_boundaries_from_trace(
         if int(row["count"]) < min_repeats:
             continue
         row["avg_chain_us"] = row["total_us"] / row["count"]
-        # Ranking heuristic only, NOT a true fraction of GPU time: a kernel that
-        # sits between two compute anchors belongs to two overlapping segments,
-        # so its duration is counted once per segment and shares can sum above 1.
+        # Ranking heuristic only, NOT a true fraction of GPU time: a kernel that sits between two compute anchors
+        # belongs to two overlapping segments, so its duration is counted once per segment and shares can sum above 1.
         row["share_heuristic"] = row["total_us"] / total_kernel_us if total_kernel_us > 0 else 0.0
         rows.append(row)
     rows.sort(
@@ -376,14 +310,7 @@ def _default_knowledge_root() -> Path:
 
 
 def _tokens(text: str) -> set[str]:
-    """Whole-word tokens of ``text``.
-
-    Retrieval matches on these sets rather than on substrings: ``add`` is a
-    substring of ``padding`` and ``norm`` is a prefix of ``normalization``, and
-    neither implies the document describes the observed operation. A false recall
-    is more harmful than a miss, because the author is then instructed to
-    integrate an unrelated operator.
-    """
+    """Whole-word tokens of ``text``."""
     return set(re.findall(r"[a-z0-9]+", text.lower()))
 
 
@@ -400,8 +327,8 @@ _OPERATOR_MARKERS = (
 _OPERATOR_PATTERN = re.compile(r"`([A-Za-z_][A-Za-z0-9_.:]*)`")
 _DECLARED_OPERATOR_PATTERN = re.compile(r"^operator:\s*([A-Za-z_][A-Za-z0-9_.:]*)\s*$", re.MULTILINE)
 
-# Parsed knowledge documents, keyed by (path, mtime_ns, size) so an unchanged
-# knowledge base is not re-read and re-parsed on every discovery run.
+# Parsed knowledge documents, keyed by (path, mtime_ns, size) so an unchanged knowledge base is not re-read and
+# re-parsed on every discovery run.
 _KNOWLEDGE_CACHE: dict[tuple[str, int, int], list[dict[str, Any]]] = {}
 
 
@@ -471,19 +398,7 @@ def existing_operator_hints_from_knowledge(
     fallback_kernel_names: Optional[list[str]] = None,
     min_score_ratio: float = 0.25,
 ) -> list[dict[str, Any]]:
-    """Retrieve existing ROCm operator names using observed runtime semantics.
-
-    This is evidence retrieval, not model-name matching: documents rank by
-    whole-word overlap with the observed operation categories and kernel names,
-    and every hint carries its ``score`` so the author can tell a strong match
-    from a marginal one.
-
-    ``fallback_categories`` / ``fallback_kernel_names`` (typically the diagnosis
-    categories and hot-kernel names) are always folded in as an extra evidence
-    source. Ordered boundaries require ``min_repeats`` occurrences to exist at
-    all, so a short trace can leave them empty while the hot-kernel table still
-    proves a launch-bound chain; without this, retrieval would silently go dark.
-    """
+    """Retrieve existing ROCm operator names using observed runtime semantics."""
     root = Path(knowledge_root) if knowledge_root else _default_knowledge_root()
     if not root.is_dir():
         return []
@@ -540,34 +455,13 @@ def existing_operator_hints_from_knowledge(
     )
     if not ranked:
         return []
-    # Pre-trim marginal matches relative to the best one, so a long tail of weak
-    # hints cannot pad the prompt and inflate downstream authoring attempts.
+    # Pre-trim marginal matches relative to the best one, so a long tail of weak hints cannot pad the prompt and
+    # inflate downstream authoring attempts.
     cutoff = ranked[0][0] * min_score_ratio
     return [row for score, row in ranked[:limit] if score >= cutoff]
 
 
-# Terms a proposal may declare in ``ops``. Two consumers read the result, which
-# is why one list covers both: the op-category vocabulary that forms the KB
-# identity, plus the finer terms the compile-pass table keys on (``mla``,
-# ``quant``, ``qk_norm`` ...) which no category can express.
-#
-# Declaring beats inferring because both consumers used to keyword-match the
-# model's prose, and prose varies per run. Measured against one unchanged trace,
-# a proposal that merely mentioned writing to the KV cache picked up a ``copy``
-# category it did not fuse, and a reworded proposal stopped matching the
-# compile-pass keywords -- which changed which candidate ranked first and thus
-# which key the run looked up.
-# What a fused kernel COMPUTES. This is the fusion's identity, so every term has
-# to answer one question -- "does the kernel carry out this operation?" -- and
-# has to be recognised by ``categories_in_text``, since that is what turns the
-# declaration into the category set the KB keys on.
-#
-# ``cast`` and ``moe`` are absent because they fail that second requirement: the
-# category rules match kernel-name spellings (``_cast``, ``fused_moe``), so a
-# bare declaration of either produces no category and would be silently inert.
-# Named activations (silu/gelu/swiglu) are absent too -- ``activation`` covers
-# them for the compile-pass table, and naming one in a prompt hands the model a
-# specific fusion it was not asked to look for.
+# Terms a proposal may declare in ``ops``.
 FUSION_OP_VOCAB: frozenset[str] = frozenset(
     {
         "activation",
@@ -584,17 +478,7 @@ FUSION_OP_VOCAB: frozenset[str] = frozenset(
     }
 )
 
-# HOW the kernel is built, not what it computes: precision, architecture variant,
-# and where in the model it sits. Separated from the ops on purpose.
-#
-# Two reasons. These terms cannot be judged by the ops question -- a kernel does
-# not "perform fp8" or "perform mla" -- so mixing them into one list left the
-# model applying a rule that fit only half the entries. And they should not move
-# the key: a run that reads the same fusion as fp8 rather than quantized, or is
-# unsure whether the chain counts as attention, must still look up where the
-# previous run stored it. Measured over 20 runs, ``attention`` was the one term
-# that flipped, and it contributes nothing to identity -- nearly every decode
-# fusion sits next to attention or the MLP.
+# HOW the kernel is built, not what it computes: precision, architecture variant, and where in the model it sits.
 FUSION_TRAIT_VOCAB: frozenset[str] = frozenset(
     {
         "attention",
@@ -615,12 +499,7 @@ _TRAIT_VOCAB_FOR_PROMPT = ", ".join(sorted(FUSION_TRAIT_VOCAB))
 
 
 def _declared_terms(item: Any, field: str, vocab: frozenset[str]) -> list[str]:
-    """A proposal's declaration for ``field``, normalized; ``[]`` when unusable.
-
-    Unknown entries are dropped rather than trusted: an invented term would
-    otherwise invent an identity segment, and two runs inventing different ones
-    would split a single fusion across two keys.
-    """
+    """A proposal's declaration for ``field``, normalized; ``[]`` when unusable."""
     raw = item.get(field) if isinstance(item, dict) else None
     if isinstance(raw, str):
         raw = [raw]
@@ -639,6 +518,170 @@ def declared_traits(item: Any) -> list[str]:
     return _declared_terms(item, "traits", FUSION_TRAIT_VOCAB)
 
 
+_SCOPE_SINGLE = """- SCOPE — the single hardest constraint, and the one that wastes a whole run when
+  it is broken. The fusion is delivered by REPLACING one call site in the source
+  file printed below, so the entire chain must live inside THAT file, and every
+  tensor your kernel takes as input must already be a local name at that call
+  site. Do not fuse across a boundary: not into a method defined in another
+  module (an imported `XMLP`, an imported norm class), and not into work the
+  framework performs below the call (in vLLM the KV-cache write happens inside
+  the attention backend, so `key_cache` / `value_cache` / `slot_mapping` are NOT
+  reachable from a model `forward` and a fusion folding them in cannot be wired).
+  Before proposing, name the exact call site you would replace and check that
+  every input is in scope there. A chain that fails this test is worth zero
+  end-to-end even when its microbenchmark is 30x.
+- One patch, one file. If two different modules each hold a fusible chain,
+  propose them as two SEPARATE entries, each self-contained in its own file --
+  never one entry spanning both."""
+
+_SCOPE_REPO = """- SCOPE — the WHOLE repository is in scope and editable, and a fusion may span as
+  many files as it needs. Name the file holding the call site you would replace in
+  "source_file", and every OTHER existing file that has to change in
+  "additional_files". There is no single-file rule here: do not shrink a chain to
+  fit one file.
+- FIND THE CODE, do not guess it. Nothing is embedded in this prompt; you have read
+  and search tools and a repository. The entry point named below is where to START,
+  not the answer: a model file routinely reaches the anchored work through one
+  opaque call (`attn_backend.forward_xxx(...)`, `self.indexer(...)`, a dispatch
+  through an env gate) whose operands are not local names there. Grep for the ops
+  in the anchor evidence, follow the imports and calls until you reach the code that
+  actually issues those kernels, and propose the fusion THERE.
+- Every path you return must be a file that EXISTS in this repository, spelled as it
+  is on disk (repo-relative or absolute). A proposal whose "source_file" does not
+  resolve is discarded rather than retargeted, so open each file before naming it.
+- Name the exact call site you would replace, and account for every tensor your
+  kernel takes as input: each one must be a local name at that call site, or be
+  produced in one of the files you listed in "additional_files". Work the framework
+  performs below your call is reachable ONLY if you list the file performing it.
+- One entry is ONE fusion, delivered as one patch, however many files it touches.
+  Two genuinely independent chains are two entries."""
+
+_FUSION_CONSTRAINTS_TAIL = """- ROCm-native: it will be authored as a Triton kernel; do NOT propose reusing a
+  framework CUDA-only fused op.
+- Existing AITER/CK/HIP/Triton operators listed above are allowed and preferred when
+  their semantics, dtype, shape, and cache layout match.
+- Do NOT change what a library GEMM dispatches to. A tuned GEMM (flydsl / aiter /
+  hipBLASLt / CK) selects its kernel from the (dtype, layout, shape) of the call,
+  so asking that same call for a different output dtype (`out_dtype=`, `otype=`),
+  a transposed operand, or an `out=` buffer of another type drops it off the tuned
+  table onto a different, UNTUNED solution. The displaced kernel is typically
+  several times the size of the elementwise op being fused, so the substitution
+  costs far more than the fusion saves even though the fused call site alone
+  benchmarks faster. When the op you are fusing sits between a library GEMM and
+  its consumer, leave the GEMM call byte-identical and fuse into the PROLOGUE of
+  the CONSUMER instead -- consumers are frequently templated on their input dtype
+  already and upcast on load, which removes the same launch for free. A GEMM
+  epilogue is in scope only when the GEMM is one YOU author.
+- The correctness reference must be the REAL eager op imported from this source
+  (say which symbol to import), never a re-derivation."""
+
+
+def fusion_constraints(repo_scope: bool = False) -> str:
+    """The rules that decide whether a proposal can be wired at all.
+
+    Scope is the only rule that changes with how much source the run offered: with
+    one file the model must stay inside it, and with the whole repository it must
+    go looking for the file that owns the chain.
+    """
+    scope = _SCOPE_REPO if repo_scope else _SCOPE_SINGLE
+    chain_rule = (
+        "- Must be a real contiguous chain in the repository (name the exact files, functions/methods)."
+        if repo_scope
+        else "- Must be a real contiguous chain in this source (name the exact functions/methods)."
+    )
+    return f"""Constraints for each proposed fusion:
+{chain_rule}
+{scope}
+{_FUSION_CONSTRAINTS_TAIL}"""
+
+
+def render_source_files(source_files: Sequence[str], *, model_type: str, framework: str) -> str:
+    """Embed each in-scope file under its own path heading.
+
+    The path is the label the model answers with in ``source_file``, so it is
+    printed exactly as it will have to be matched back.
+    """
+    blocks = [f"### {path}\n```python\n{text}\n```" for path in source_files if (text := _read_source(path))]
+    if not blocks:
+        return ""
+    return f"## Model source (`{model_type}` in {framework})\n" + "\n\n".join(blocks)
+
+
+def render_repo_scope_brief(
+    repo_root: str,
+    entry_files: Sequence[str],
+    *,
+    model_type: str,
+    framework: str,
+) -> str:
+    """Hand discovery the repository instead of one file's embedded text.
+
+    Repo scope exists because the file that owns the fusible chain cannot be
+    derived from the model config: it is reached through a call, not through a
+    naming convention. Embedding a guessed shortlist would only move that guess
+    earlier in the pipeline, so the agent is given the tree and its own read and
+    search tools and is expected to locate the code itself.
+    """
+    lines = [
+        f"## The framework repository (`{model_type}` in {framework})",
+        f"Repository root: {repo_root or '(the working directory of this session)'}",
+        "",
+        "No source is embedded in this prompt. Open whatever you need with your read",
+        "and search tools; every file in this repository is in scope and editable.",
+    ]
+    known = [str(path) for path in entry_files if path]
+    if known:
+        lines += [
+            "",
+            "Entry point(s) resolved for this model -- where to START, not the answer:",
+            *(f"  {path}" for path in known),
+        ]
+    return "\n".join(lines)
+
+
+def _output_schema_block(model_type: str, *, repo_scope: bool = False) -> str:
+    """The JSON contract every discovery prompt asks the model to answer in."""
+    source_field = (
+        (
+            '  "source_file": "<exact on-disk path of the file holding the call site '
+            'you would replace>",\n'
+            '  "additional_files": [<exact on-disk path of every OTHER existing file '
+            "this fusion must also edit; [] when the call-site file is enough. Do NOT "
+            "list the new fused-kernel module here -- it does not exist yet>],\n"
+        )
+        if repo_scope
+        else ""
+    )
+    return f"""## Output — a single JSON array (and nothing after it). Be TERSE to fit the
+## response budget: keep ``fusion_math`` <= 2 sentences and ``rationale`` <= 1
+## sentence. Each element:
+{{"name": "<short_id>", "env_flag": "<{model_type.upper()}_FUSED_...>",
+  "op_chain": "<the eager methods/ops fused, e.g. A + B>",
+  "ops": [<every op YOUR fused kernel computes itself, chosen ONLY from:
+          {_OP_VOCAB_FOR_PROMPT}.
+          This list IS the fusion's identity: two runs proposing the same fusion
+          must produce the same list, so decide by one test rather than by
+          impression. For each candidate ask: does my kernel carry out that
+          computation? If the op runs in the surrounding module, or you only
+          read its result, or you only hand your result to it, then it is NOT
+          yours -- leave it out. Where the kernel sits is irrelevant; only what
+          it computes counts. List every op that passes the test, and nothing
+          else.>],
+  "traits": [<how the kernel is built, chosen ONLY from:
+          {_TRAIT_VOCAB_FOR_PROMPT}.
+          Precision, architecture variant, and which part of the model this sits
+          in. These describe the kernel rather than name an operation it
+          performs, so they do NOT belong in "ops". Omit the field when none
+          apply.>],
+  "source_anchors": ["<symbol/line to grep>", "..."],
+{source_field}  "fusion_math": "<what the fused kernel computes, precisely>",
+  "eager_reference": "<which real symbol(s) to import + call for the parity ref>",
+  "candidate_kind": "<integration|new_fusion|replacement>",
+  "existing_operator": "<operator name when candidate_kind=integration, else empty>",
+  "priority": <0.0-1.0 by expected launch-bound time saved>,
+  "rationale": "<why this chain, tied to the hot kernels above>"}}"""
+
+
 def build_discovery_prompt(
     *,
     model_type: str,
@@ -650,13 +693,29 @@ def build_discovery_prompt(
     max_fusions: int = _DEFAULT_MAX_FUSIONS,
     ordered_boundaries: Optional[list[dict[str, Any]]] = None,
     existing_operator_hints: Optional[list[dict[str, str]]] = None,
+    source_files: Sequence[str] = (),
+    repo_scope: bool = False,
+    repo_root: str = "",
 ) -> str:
     """Assemble the discovery prompt from runtime, source, and operator evidence.
 
-    No model-specific answer is encoded. Existing operator names are included only
-    when semantic retrieval ties their documented operation chain to an observed
-    repeated runtime boundary.
+    ``repo_scope`` embeds no source at all and points the agent at the repository
+    instead, naming ``source_files`` as the entry points to start from.
     """
+    if repo_scope:
+        source_block = render_repo_scope_brief(
+            repo_root,
+            source_files,
+            model_type=model_type,
+            framework=framework,
+        )
+    else:
+        source_block = f"## Model source (`{model_type}` in {framework})\n```python\n{source_text}\n```"
+    read_verb = (
+        "Explore the repository described below and identify"
+        if repo_scope
+        else "Read the model source below and identify"
+    )
     lb = ", ".join(sorted(LAUNCH_BOUND_CATEGORIES))
     hot_lines = "\n".join(
         f"  - {k['category']:11s} {k['share'] * 100:5.1f}%  (n={k['count']}, avg={k['avg_us']:.1f}us)  {k['name'][:90]}"
@@ -677,9 +736,8 @@ def build_discovery_prompt(
             f"kind={boundary['boundary_kind']}, "
             f"removable-launches<={boundary['launches_removed_upper_bound']})"
         )
-        # The trailing compute kernel proves adjacency but is not fusable, so the
-        # fusable span is spelled out to keep the proposed chain from swallowing
-        # the attention (or other compute) kernel it feeds.
+        # The trailing compute kernel proves adjacency but is not fusable, so the fusable span is spelled out to keep
+        # the proposed chain from swallowing the attention (or other compute) kernel it feeds.
         fusable = boundary.get("fusable_categories")
         terminal = str(boundary.get("terminal_compute") or "")
         if fusable:
@@ -727,79 +785,23 @@ the card that shape, dtype, and cache layout actually match.
 {operator_lines or "  - none found"}
 
 ## Your task
-Read the model source below and identify up to {max_fusions} CONTIGUOUS op chains in
+{read_verb} up to {max_fusions} CONTIGUOUS op chains in
 the DECODE forward that are worth fusing. Include GEMM/attention prologue or epilogue
 boundaries when the ordered trace proves adjacency. Treat an existing ROCm operator
 that covers a larger boundary as an `integration` candidate and benchmark/wire it
 before proposing a new kernel. Judge from the SOURCE and ordered trace what actually
 runs back-to-back on the decode path.
 
-Constraints for each proposed fusion:
-- Must be a real contiguous chain in this source (name the exact functions/methods).
-- SCOPE — the single hardest constraint, and the one that wastes a whole run when
-  it is broken. The fusion is delivered by REPLACING one call site in the source
-  file printed below, so the entire chain must live inside THAT file, and every
-  tensor your kernel takes as input must already be a local name at that call
-  site. Do not fuse across a boundary: not into a method defined in another
-  module (an imported `XMLP`, an imported norm class), and not into work the
-  framework performs below the call (in vLLM the KV-cache write happens inside
-  the attention backend, so `key_cache` / `value_cache` / `slot_mapping` are NOT
-  reachable from a model `forward` and a fusion folding them in cannot be wired).
-  Before proposing, name the exact call site you would replace and check that
-  every input is in scope there. A chain that fails this test is worth zero
-  end-to-end even when its microbenchmark is 30x.
-- One patch, one file. If two different modules each hold a fusible chain,
-  propose them as two SEPARATE entries, each self-contained in its own file --
-  never one entry spanning both.
-- ROCm-native: it will be authored as a Triton kernel; do NOT propose reusing a
-  framework CUDA-only fused op.
-- Existing AITER/CK/HIP/Triton operators listed above are allowed and preferred when
-  their semantics, dtype, shape, and cache layout match.
-- The correctness reference must be the REAL eager op imported from this source
-  (say which symbol to import), never a re-derivation.
+{fusion_constraints(repo_scope=repo_scope)}
 
-## Output — a single JSON array (and nothing after it). Be TERSE to fit the
-## response budget: keep ``fusion_math`` <= 2 sentences and ``rationale`` <= 1
-## sentence. Each element:
-{{"name": "<short_id>", "env_flag": "<{model_type.upper()}_FUSED_...>",
-  "op_chain": "<the eager methods/ops fused, e.g. A + B>",
-  "ops": [<every op YOUR fused kernel computes itself, chosen ONLY from:
-          {_OP_VOCAB_FOR_PROMPT}.
-          This list IS the fusion's identity: two runs proposing the same fusion
-          must produce the same list, so decide by one test rather than by
-          impression. For each candidate ask: does my kernel carry out that
-          computation? If the op runs in the surrounding module, or you only
-          read its result, or you only hand your result to it, then it is NOT
-          yours -- leave it out. Where the kernel sits is irrelevant; only what
-          it computes counts. List every op that passes the test, and nothing
-          else.>],
-  "traits": [<how the kernel is built, chosen ONLY from:
-          {_TRAIT_VOCAB_FOR_PROMPT}.
-          Precision, architecture variant, and which part of the model this sits
-          in. These describe the kernel rather than name an operation it
-          performs, so they do NOT belong in "ops". Omit the field when none
-          apply.>],
-  "source_anchors": ["<symbol/line to grep>", "..."],
-  "fusion_math": "<what the fused kernel computes, precisely>",
-  "eager_reference": "<which real symbol(s) to import + call for the parity ref>",
-  "candidate_kind": "<integration|new_fusion|replacement>",
-  "existing_operator": "<operator name when candidate_kind=integration, else empty>",
-  "priority": <0.0-1.0 by expected launch-bound time saved>,
-  "rationale": "<why this chain, tied to the hot kernels above>"}}
+{_output_schema_block(model_type, repo_scope=repo_scope)}
 
-## Model source (`{model_type}` in {framework})
-```python
-{source_text}
-```
+{source_block}
 """
 
 
 def _salvage_objects(text: str) -> list[dict[str, Any]]:
-    """Recover every complete top-level ``{...}`` object from (possibly truncated)
-    text, ignoring braces inside strings. Used when the enclosing JSON array is
-    unclosed because the model response was cut off at ``max_tokens`` — the
-    complete objects before the cut are still usable proposals.
-    """
+    """Recover every complete top-level ``{...}`` object from (possibly truncated) text, ignoring braces inside strings."""
     out: list[dict[str, Any]] = []
     depth = 0
     start = -1
@@ -832,12 +834,7 @@ def _salvage_objects(text: str) -> list[dict[str, Any]]:
 
 
 def _extract_json_array(text: str) -> list[dict[str, Any]]:
-    """Pull JSON fusion proposals out of model text.
-
-    Tries, in order: a fenced ```json [...]``` block, then any balanced top-level
-    ``[...]`` span, then (fallback for a response truncated at ``max_tokens``) the
-    set of complete ``{...}`` objects.
-    """
+    """Pull JSON fusion proposals out of model text."""
     if not text:
         return []
     fences = re.findall(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
@@ -861,9 +858,8 @@ def _extract_json_array(text: str) -> list[dict[str, Any]]:
             continue
         if isinstance(parsed, list) and all(isinstance(x, dict) for x in parsed):
             return parsed
-    # Fallback: salvage complete objects from a truncated/unclosed array, then
-    # the object the cut left half-written -- with three quarters of responses
-    # arriving truncated, that last object is often the only one there is.
+    # Fallback: salvage complete objects from a truncated/unclosed array, then the object the cut left half-written --
+    # with three quarters of responses arriving truncated, that last object is often the only one there is.
     salvaged = _salvage_objects(text)
     repaired = _repair_truncated_object(text)
     if repaired is not None and repaired not in salvaged:
@@ -878,19 +874,11 @@ def _extract_json_array(text: str) -> list[dict[str, Any]]:
 
 
 # A repaired object has to carry enough of the fusion description to act on.
-# A name and an env flag alone would only send the author stage looking for
-# something the model never got round to describing.
 _REPAIRED_REQUIRED_ANY = ("op_chain", "fusion_math")
 
 
 def _repair_truncated_object(text: str) -> dict[str, Any] | None:
-    """Recover the proposal that a cut-off response left half-written.
-
-    Rewinds the trailing unclosed object to its last complete ``"key": value``
-    boundary and closes it there. Returns ``None`` unless the result still
-    describes a fusion, so a response cut inside the very first field is
-    dropped rather than turned into an empty proposal.
-    """
+    """Recover the proposal that a cut-off response left half-written."""
     depth = 0
     start = -1
     in_str = False
@@ -948,6 +936,79 @@ def _norm_env_flag(flag: str, model_type: str) -> str:
     return f
 
 
+def _as_sequence(value: Any) -> list[Any]:
+    """A proposal field that may arrive as one string or a list of them."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def resolve_repo_file(value: Any, repo_root: str) -> str:
+    """Resolve a repo-scope proposal's claimed path to a real file, or ``""``.
+
+    Repo scope removes the offered-file list that
+    :func:`resolve_proposed_source_file` matches against, so existing on disk and
+    living inside the repository is the whole check -- and it is a HARD one.
+    Falling back to the model file the way single-file discovery does would
+    reintroduce the silent retarget that repo scope exists to remove: the caller
+    would get a recipe pointing at a file the model never proposed.
+    """
+    claimed = str(value or "").strip()
+    if not claimed:
+        return ""
+    root: Optional[Path] = None
+    if repo_root:
+        with contextlib.suppress(OSError):
+            root = Path(repo_root).expanduser().resolve()
+    candidates = [Path(claimed).expanduser()]
+    if root is not None and not candidates[0].is_absolute():
+        candidates.insert(0, root / candidates[0])
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if not resolved.is_file():
+            continue
+        if root is not None and not resolved.is_relative_to(root):
+            log.warning("discovery: ignoring %s, which is outside the framework repo %s", resolved, root)
+            continue
+        return str(resolved)
+    return ""
+
+
+def resolve_proposed_source_file(value: Any, in_scope_files: Sequence[str], default: str) -> str:
+    """Map a proposal's claimed call-site file onto one the run actually offered.
+
+    The model is asked to copy a path back verbatim, and mostly does; a trailing
+    component still identifies the file unambiguously when it does not. Anything
+    that matches nothing falls back to the primary file rather than inventing a
+    target the loop cannot track.
+    """
+    claimed = str(value or "").strip()
+    if not claimed or not in_scope_files:
+        return default
+    for path in in_scope_files:
+        if claimed == path:
+            return path
+    claimed_parts = Path(claimed).parts
+    for path in in_scope_files:
+        parts = Path(path).parts
+        if claimed_parts and parts[-len(claimed_parts) :] == claimed_parts:
+            return path
+    for path in in_scope_files:
+        if Path(path).name == Path(claimed).name:
+            return path
+    log.warning(
+        "discovery: proposed source_file %r matches no in-scope file; using %s",
+        claimed[:120],
+        Path(default).name or default,
+    )
+    return default
+
+
 def parse_discovered_recipes(
     text: str,
     *,
@@ -958,27 +1019,32 @@ def parse_discovered_recipes(
     category_shares: dict[str, float] | None = None,
     pass_probe: Optional[Callable[[str], PassState]] = None,
     framework_root: str = "",
+    explicit_target: bool = False,
+    in_scope_files: Sequence[str] = (),
+    repo_scope: bool = False,
+    repo_root: str = "",
 ) -> list[Recipe]:
     """Convert the LLM's JSON proposals into ranked :class:`Recipe` objects.
 
-    ``category_shares`` are the op-category shares the trace actually measured.
-    They are used to drop a proposal whose ops were never observed at all, which
-    is the signature of an LLM inventing a fusion the workload does not perform.
-    They deliberately do NOT filter the categories that identify the fusion: a
-    fusion is the same fusion whatever a given trace happened to sample, and
-    letting run-time sampling into the identity would split one fusion across
-    several pages. This mirrors the pattern route, where the trace decides
-    whether a pattern TRIGGERS while its identity stays the fixed pattern id.
+    ``explicit_target`` marks a run whose target an operator named. The scope gate
+    then warns instead of dropping: it recognizes nine coarse terms, so it can reject
+    a wireable chain, and discarding what was explicitly asked for hides that.
 
-    A proposal vLLM implements as a compile pass is dropped only when that pass is
-    ENABLED; when it exists, is off and is flippable it becomes a ``compile_pass``
-    recipe, and when it is absent / undecidable / pinned off by the optimization
-    level the proposal stays authoring work with ``compile_pass_note`` recording why.
+    ``in_scope_files`` lists every file the prompt embedded. A proposal may name
+    any of them as its call site, and the scope gate judges against all of them --
+    it must see the same source the model did, or it drops chains for being
+    "outside" a file they were never claimed to be in.
+
+    ``repo_scope`` replaces that offered list with the repository: the prompt
+    embedded nothing, so each proposal names its own files and is judged against
+    the files IT named. A proposal whose call site does not resolve is dropped
+    rather than retargeted onto ``source_file``.
     """
     runtime = resolve_target_runtime(framework, framework_root=framework_root)
-    # The same file the prompt embedded, re-read so the scope gate below judges a
-    # proposal against exactly the source the model was shown.
-    source_text = _read_source(source_file)
+    scope_files = [p for p in (in_scope_files or [source_file]) if p]
+    # The same files the prompt embedded, re-read so the scope gate below judges a proposal against exactly the source
+    # the model was shown. Repo scope embedded nothing, so there is no run-wide source text to judge against.
+    source_text = "" if repo_scope else "\n".join(_read_source(path) for path in scope_files)
     out: list[Recipe] = []
     for i, item in enumerate(_extract_json_array(text)):
         name = str(item.get("name") or f"discovered_{i + 1}").strip()
@@ -991,44 +1057,21 @@ def parse_discovered_recipes(
             anchors = [anchors]
         op_chain = str(item.get("op_chain") or "")
         fusion_math = str(item.get("fusion_math") or op_chain or "")
-        # The fusion-DEFINING fields (name / op-chain / math) -- NOT the free-prose
-        # rationale or grep anchors, which can mention an op in passing and would
-        # attach a category the fusion does not actually involve.
+        # The fusion-DEFINING fields (name / op-chain / math) -- NOT the free-prose rationale or grep anchors, which
+        # can mention an op in passing and would attach a category the fusion does not actually involve.
         defining_text = " ".join([name, op_chain, fusion_math])
-        # What this fusion IS, as opposed to how this run described it. Both the
-        # category set below and the compile-pass gate further down read this one
-        # string, so it decides the key -- which is why a declaration from a fixed
-        # vocabulary is preferred over the prose. The prose remains the fallback
-        # for a model that ignores the field, at the cost of that run's identity
-        # depending on its wording.
+        # What this fusion IS, as opposed to how this run described it.
         declared = declared_ops(item)
         traits = declared_traits(item)
         identity_text = " ".join(declared) if declared else defining_text
-        # The gate keys on precision and variant words (quant, fp8, mla, kvcache)
-        # that no op category expresses, so it needs more than ``declared``.
-        # Where that comes from depends on whether the model supplied ``traits``:
-        #
-        # * It did -- use the declarations alone. They say precisely which
-        #   variant this is, and adding prose can only introduce words the model
-        #   did not mean. A wording that happens to mention the KV cache matched
-        #   ``fuse_rope_kvcache`` while its terser twin matched ``qk_norm_rope``,
-        #   and since a claimed pass rewrites the pattern id, that split the key.
-        # * It did not -- fall back to the prose. ``traits`` is the optional
-        #   field, so this is the common case, and without the fallback the gate
-        #   loses every keyword it matches on: the run then hand-writes a kernel
-        #   vLLM already ships, under a different key than a run that declared.
-        #
-        # Either way ``identity_text`` above is untouched, so the key's category
-        # segment still comes from the declaration alone.
+        # The gate keys on precision and variant words (quant, fp8, mla, kvcache) that no op category expresses, so it
+        # needs more than ``declared``.
         gate_text = " ".join([*declared, *traits]) if traits else " ".join([*declared, defining_text])
-        # Recover the op categories: from the declaration when there is one, else
-        # from the prose via the fixed, model-agnostic vocabulary. The KB keys on
-        # this, and ``op_chain`` is not kept on the Recipe, so it has to happen
-        # here while the field is still in scope.
+        # Recover the op categories: from the declaration when there is one, else from the prose via the fixed,
+        # model-agnostic vocabulary.
         matched_categories = categories_in_text(identity_text)
-        # Hallucination gate FIRST: a proposal whose ops the trace never measured
-        # has nothing to remove, and that is true whether we would author it or
-        # claim a framework pass for it.
+        # Hallucination gate FIRST: a proposal whose ops the trace never measured has nothing to remove, and that is
+        # true whether we would author it or claim a framework pass for it.
         if category_shares and matched_categories:
             if not any(float(category_shares.get(c, 0.0)) > 0.0 for c in matched_categories):
                 log.info(
@@ -1037,26 +1080,52 @@ def parse_discovered_recipes(
                     ",".join(matched_categories),
                 )
                 continue
-        # SCOPE gate: a fusion is wired by replacing ONE call site in the file the
-        # model was shown, so a proposal claiming ops that file never performs is
-        # unwireable no matter how good the kernel is. Dropping it here costs one
-        # JSON object; keeping it costs a full authoring campaign that ends in an
-        # orphan module (see ``locate.out_of_scope_terms``).
-        outside = out_of_scope_terms(source_text, [*declared, *traits])
+        # Which file(s) this proposal wires itself into. Resolved BEFORE the scope gate: under repo scope the gate has
+        # no run-wide source text and must read exactly the files this proposal named.
+        extra_files: list[str] = []
+        if repo_scope:
+            proposed_file = resolve_repo_file(item.get("source_file"), repo_root)
+            if not proposed_file:
+                log.warning(
+                    "discovery: dropping %s -- its source_file %r is not a file in %s",
+                    name,
+                    str(item.get("source_file") or "")[:200],
+                    repo_root or "the framework repo",
+                )
+                continue
+            for value in _as_sequence(item.get("additional_files")):
+                resolved = resolve_repo_file(value, repo_root)
+                if not resolved:
+                    log.warning(
+                        "discovery: %s listed an additional file that does not resolve (%r); ignoring it",
+                        name,
+                        str(value)[:200],
+                    )
+                    continue
+                if resolved != proposed_file and resolved not in extra_files:
+                    extra_files.append(resolved)
+            gate_files = [proposed_file, *extra_files]
+            scope_text = "\n".join(_read_source(path) for path in gate_files)
+        else:
+            proposed_file = resolve_proposed_source_file(item.get("source_file"), scope_files, source_file)
+            gate_files = scope_files
+            scope_text = source_text
+        # SCOPE gate: a fusion is wired by replacing a call site in the files the proposal claims, so one claiming ops
+        # that none of those files perform is unwireable no matter how good the kernel is.
+        outside = out_of_scope_terms(scope_text, [*declared, *traits])
         if outside:
-            log.info(
-                "discovery: dropping %s (%s not performed in %s -- the fusion crosses "
+            log.log(
+                logging.WARNING if explicit_target else logging.INFO,
+                "discovery: %s %s (%s not performed in %s -- the fusion crosses "
                 "a module boundary and has no wireable call site there)",
+                "keeping operator-named" if explicit_target else "dropping",
                 name,
                 ",".join(outside),
-                Path(source_file).name or source_file,
+                ", ".join(Path(p).name or p for p in gate_files),
             )
-            continue
+            if not explicit_target:
+                continue
         # Compile-pass gate: never author a chain vLLM fuses at compile time.
-        # Matched keyword-only, because the gate's own vocabulary differs from the
-        # op-category vocabulary derived above. Reads ``identity_text`` for the
-        # same reason that does: claiming a pass rewrites the pattern id, so a
-        # match that flips on a rewording would move the key with it.
         pass_name = covered_by_vllm_compile_pass(
             matched_categories=[],
             text=gate_text,
@@ -1098,8 +1167,8 @@ def parse_discovered_recipes(
                     )
                 )
                 continue
-            # Absent / undecidable / pinned off: the framework is NOT fusing this
-            # for us, so keep the proposal as authoring work and record why.
+            # Absent / undecidable / pinned off: the framework is NOT fusing this for us, so keep the proposal as
+            # authoring work and record why.
             if state is not None:
                 pass_note = _unclaimable_note(state)
                 log.info("compile pass not claimed for %s: %s", name, pass_note)
@@ -1107,18 +1176,24 @@ def parse_discovered_recipes(
         candidate_kind = str(item.get("candidate_kind") or "").strip().lower()
         if candidate_kind not in {"integration", "new_fusion", "replacement"}:
             candidate_kind = "integration" if existing_operator else "new_fusion"
-        # ``integration`` is only meaningful with a named operator: the authoring
-        # prompt injects its "benchmark the existing operator first" block only
-        # when both fields are set, so an operator-less integration would claim
+        # ``integration`` is only meaningful with a named operator: the authoring prompt injects its "benchmark the
+        # existing operator first" block only when both fields are set, so an operator-less integration would claim
         # the kind while silently skipping the constraint.
         if candidate_kind == "integration" and not existing_operator:
             candidate_kind = "new_fusion"
+        if proposed_file != source_file or extra_files:
+            log.info(
+                "discovery: %s wires into %s",
+                name,
+                ", ".join(Path(p).name or p for p in [proposed_file, *extra_files]),
+            )
         out.append(
             Recipe(
                 pattern_id=f"llm:{name}",
                 description=str(item.get("rationale") or op_chain or name)[:300],
                 env_flag=_norm_env_flag(str(item.get("env_flag") or "FUSED"), model_type),
-                source_file=source_file,
+                source_file=proposed_file,
+                extra_files=extra_files,
                 source_hints=[str(a) for a in anchors],
                 fusion_math=fusion_math,
                 eager_reference_hint=str(item.get("eager_reference") or ""),
@@ -1135,95 +1210,6 @@ def parse_discovered_recipes(
         )
     out.sort(key=lambda r: r.trigger_share, reverse=True)
     return rank_recipes(out)
-
-
-def complete_with_retry(
-    client: Any,
-    prompt: str,
-    *,
-    model: str,
-    max_tokens: int,
-    attempts: int = DEFAULT_ATTEMPTS,
-    base_delay_sec: float = DEFAULT_BASE_DELAY_SEC,
-    max_delay_sec: float = DEFAULT_MAX_DELAY_SEC,
-    deadline_sec: float | None = None,
-    sleep: Callable[[float], Any] | None = None,
-    monotonic: Callable[[], float] | None = None,
-) -> str:
-    """Ask the gateway once, retrying only the failures a retry can fix.
-
-    Retryable means :data:`~kernelforge.fusion.llm_failure.RETRYABLE_KINDS`: a generic
-    API error or a timeout. A timeout says the request did not come back THIS
-    time, which is the transient degradation this chain exists for; credentials
-    and an over-long prompt fail the same way forever and stop on the first one.
-
-    ``max_tokens`` stays fixed across attempts. The previous hedge shrank it on
-    every retry, but the gateway's 400s carry no reason and recur at any cap
-    (measured success rates were indistinguishable from 512 to 16384 tokens), so
-    shrinking only truncated the answer we were trying to get; the one failure a
-    smaller request does fix — an over-long prompt — classifies as
-    ``context_length`` and is not retried at all.
-
-    ``deadline_sec`` bounds the wall clock, because the attempt count does not:
-    each attempt can sit on the client's read timeout, so a retried timeout is
-    the one kind that could otherwise hold discovery for over an hour.
-
-    An empty completion counts as a failure, not as an answer: discovery's
-    prompt requires a JSON array, so a model that genuinely found nothing
-    replies ``[]``. Treating "" as "no fusions" is the same conflation this
-    module exists to prevent.
-    """
-    import time as _time
-
-    pause = sleep or _time.sleep
-    clock = monotonic or _time.monotonic
-    budget = float(
-        deadline_sec
-        if deadline_sec is not None
-        else env_setting("FORGE_LLM_RETRY_DEADLINE_SEC", DEFAULT_DEADLINE_SEC, cast=float)
-    )
-    started_at = clock()
-    last_error = ""
-    last_kind = API_ERROR
-    for attempt in range(1, attempts + 1):
-        try:
-            resp = client.chat.completions.create(
-                model=model,
-                temperature=0,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = resp.choices[0].message.content or ""
-            if text.strip():
-                return text
-            last_error = "gateway returned an empty completion"
-            last_kind = API_ERROR
-        except Exception as exc:  # noqa: BLE001 — classified immediately below
-            kind = classify_llm_error(exc)
-            last_error = f"{type(exc).__name__}: {str(exc)[:240]}"
-            last_kind = kind
-            if kind not in RETRYABLE_KINDS:
-                raise LlmUnavailableError(
-                    f"discovery LLM call failed ({kind}): {last_error}",
-                    kind=kind,
-                    attempts=attempt,
-                ) from exc
-        log.warning("discovery llm_fn attempt %d/%d failed: %s", attempt, attempts, last_error)
-        if attempt >= attempts:
-            break
-        if budget > 0 and (clock() - started_at) >= budget:
-            raise LlmUnavailableError(
-                f"discovery LLM unreachable after {attempt} attempt(s) and "
-                f"{clock() - started_at:.0f}s (deadline {budget:.0f}s): {last_error}",
-                kind=last_kind,
-                attempts=attempt,
-            )
-        pause(retry_delay(attempt, base_sec=base_delay_sec, max_sec=max_delay_sec))
-    raise LlmUnavailableError(
-        f"discovery LLM unreachable after {attempts} attempts: {last_error}",
-        kind=last_kind,
-        attempts=attempts,
-    )
 
 
 class DiscoverySafetyError(RuntimeError):
@@ -1329,18 +1315,7 @@ def registered_agent_llm_fn(
     sleep: Optional[Callable[[float], Any]] = None,
     monotonic: Optional[Callable[[], float]] = None,
 ) -> LlmFn:
-    """Adapt one registered Agent backend into discovery's text interface.
-
-    The source is already embedded in the prompt, so the session gets read/search
-    tools but no write or shell tools. ``allow_dirty_baseline`` lets the turn start
-    from a worktree the caller already left dirty, without also claiming the
-    ``read_only_resume`` contract: this is not a resume, and asserting it would opt
-    the session out of the workspace guard's read-only fast path and so demand that
-    ``cwd`` be a git worktree -- which a pip-installed framework never is. A
-    backend's explicit external-sandbox bypass remains an OS-isolation choice,
-    independent from this logical write policy. No provider fallback occurs here;
-    the caller owns runtime resolution.
-    """
+    """Adapt one registered Agent backend into discovery's text interface."""
     import time as _time
 
     selected_model = model.strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
@@ -1397,13 +1372,7 @@ def registered_agent_llm_fn(
     protected = list(protected_files or [])
 
     def _record_transcript(progress: list[str], text: str) -> None:
-        """Persist what the session did, whatever the outcome.
-
-        Written on failure too: the end reason alone cannot tell a session that
-        ran out of turns apart from one the gateway dropped, and without the
-        transcript a discovery that fails every attempt leaves nothing to
-        diagnose from.
-        """
+        """Persist what the session did, whatever the outcome."""
         if not log_path:
             return
         with contextlib.suppress(OSError):
@@ -1418,11 +1387,11 @@ def registered_agent_llm_fn(
             spec = AgentRunSpec(
                 system_prompt=_DISCOVERY_SYSTEM_PROMPT,
                 user_prompt=prompt,
+                role="fusion discovery",
                 cwd=workdir,
                 model=selected_model,
                 writable=False,
                 timeout_sec=max(1, int(timeout_s)),
-                reasoning_effort="high",
                 tool_policy=AgentToolPolicy(
                     read=True,
                     search=True,
@@ -1431,11 +1400,10 @@ def registered_agent_llm_fn(
                     max_turns=resolved_turns,
                 ),
                 protected_globs=["*"],
-                # Not read_only_resume: discovery only needs the "tolerate a dirty
-                # worktree" half of that flag, and claiming the resume contract
-                # disqualifies this session from the guard's read-only fast path
-                # (workspace_guard.is_read_only_session), forcing a git-worktree
-                # requirement on a cwd that is routinely a pip install root.
+                # Not read_only_resume: discovery only needs the "tolerate a dirty worktree" half of that flag, and
+                # claiming the resume contract disqualifies this session from the guard's read-only fast path
+                # (workspace_guard.is_read_only_session), forcing a git-worktree requirement on a cwd that is
+                # routinely a pip install root.
                 allow_dirty_baseline=True,
                 progress_log=progress,
             )
@@ -1447,15 +1415,12 @@ def registered_agent_llm_fn(
                     protected_files=protected,
                 )
                 text = str(getattr(result, "text", "") or "").strip()
-                end_reason = str(getattr(result, "end_reason", "agent_stopped") or "agent_stopped")
+                end_reason = result.end_reason
                 cut_short = end_reason in {"turn_cap", "timeout"}
-                # A cut-short session still answered if it got its proposals out
-                # first, and discovery spends turns by design -- it is handed
-                # read and search tools precisely so it explores. Discarding
-                # parseable proposals because the ceiling was brushed throws away
-                # the work and retries into the same ceiling.
+                # A cut-short session still answered if it got its proposals out first, and discovery spends turns by
+                # design -- it is handed read and search tools precisely so it explores.
                 usable = text and (not cut_short or _extract_json_array(text))
-                if usable and end_reason != "sdk_error":
+                if usable and not is_api_failure(result):
                     if cut_short:
                         log.warning(
                             "discovery Agent ended with %s but its proposals parsed; using them",
@@ -1469,7 +1434,7 @@ def registered_agent_llm_fn(
                 last_kind = API_ERROR
             except DiscoverySafetyError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - classified below
+            except Exception as exc:
                 if is_agent_safety_error(exc):
                     raise DiscoverySafetyError("discovery Agent safety violation: " + str(exc)) from exc
                 last_kind = classify_llm_error(exc)
@@ -1515,233 +1480,6 @@ def registered_agent_llm_fn(
     return _fn
 
 
-@dataclass(frozen=True)
-class _CompletionMessage:
-    """The one field :func:`complete_with_retry` reads off a completion."""
-
-    content: str
-
-
-@dataclass(frozen=True)
-class _CompletionChoice:
-    message: _CompletionMessage
-
-
-@dataclass(frozen=True)
-class _Completion:
-    """A reply in the chat-completions shape, whatever produced it."""
-
-    choices: list[_CompletionChoice]
-
-    @classmethod
-    def of(cls, text: str) -> _Completion:
-        """Wrap plain text so every provider path returns the same shape."""
-        return cls(choices=[_CompletionChoice(_CompletionMessage(text))])
-
-
-def _chat_shaped_client(completions: Any) -> Any:
-    """Wrap a ``.create()`` in the ``client.chat.completions`` attribute path.
-
-    :func:`complete_with_retry` navigates that path, so each provider adapter is
-    reached the same way rather than the retry chain learning about any of them.
-    """
-    chat = type("_Chat", (), {"completions": completions})()
-    return type("_Client", (), {"chat": chat})()
-
-
-def _anthropic_text(message: Any) -> str:
-    """Concatenate the text blocks of a Messages reply, ignoring the rest.
-
-    A thinking-enabled deployment puts a ``thinking`` block first, so reading
-    ``content[0]`` would drop the answer and look like an empty completion.
-    """
-    blocks = getattr(message, "content", None)
-    if not isinstance(blocks, list):
-        return ""
-    return "".join(str(getattr(b, "text", "") or "") for b in blocks if getattr(b, "type", "") == "text")
-
-
-class _AnthropicChatCompletions:
-    """The Messages API behind the chat-completions call shape.
-
-    Discovery's retry chain, failure classification and deadline all live in
-    :func:`complete_with_retry`, which speaks to a client. Adapting the protocol
-    here keeps both provider lines on that one chain instead of growing a
-    second, subtly different one.
-    """
-
-    def __init__(self, client: Any) -> None:
-        self._client = client
-
-    def create(self, *, model: str, temperature: float, max_tokens: int, messages: list[dict[str, str]]) -> Any:
-        # APIStatusError carries status_code, which classify_llm_error reads
-        # before it falls back to scanning the message, so a 401/403/413 stops
-        # on the first attempt instead of consuming the retry budget.
-        #
-        # ``temperature`` is still a Messages API field, but anthropic 1.x
-        # dropped it from create()'s typed signature, and that signature has no
-        # **kwargs -- passing it named is a TypeError. classify_llm_error reads
-        # that as a transient fault, so it burned the whole retry budget on a
-        # call that could never succeed. Send it in the body when the installed
-        # SDK will not name it.
-        payload: dict[str, Any] = {"model": model, "max_tokens": max_tokens, "messages": messages}
-        if _anthropic_create_names_temperature(self._client):
-            payload["temperature"] = temperature
-        else:
-            payload["extra_body"] = {"temperature": temperature}
-        reply = self._client.messages.create(**payload)
-        return _Completion.of(_anthropic_text(reply))
-
-
-def _anthropic_create_names_temperature(client: Any) -> bool:
-    """Whether this SDK's ``messages.create`` takes ``temperature`` by name.
-
-    Defaults to True for anything unintrospectable -- a stub or a ``**kwargs``
-    passthrough is happier with the named form, and the caller only needs the
-    negative answer to be right.
-    """
-    try:
-        params = inspect.signature(client.messages.create).parameters
-    except (AttributeError, TypeError, ValueError):  # pragma: no cover - exotic stubs
-        return True
-    return "temperature" in params or any(pm.kind is inspect.Parameter.VAR_KEYWORD for pm in params.values())
-
-
-def _anthropic_client(*, timeout_s: int, verify: bool) -> Any | None:
-    """A Messages-protocol client for the Anthropic line, or ``None`` if unset.
-
-    Requires both halves: unlike the Claude CLI, which can run on a Max login
-    with neither, this is a direct API call with nowhere to get a default
-    endpoint or credential from.
-
-    The credential travels in the header its own kind requires --
-    ``ANTHROPIC_API_KEY`` as ``x-api-key``, ``ANTHROPIC_AUTH_TOKEN`` as a bearer
-    token -- which the SDK derives from which argument it is passed as. A
-    gateway wanting something else again (APIM's subscription key) adds it
-    through ``ANTHROPIC_CUSTOM_HEADERS``.
-    """
-    gateway = resolve_anthropic_gateway()
-    key = os.environ.get(gateway.key_env, "").strip() if gateway.key_env else ""
-    if not gateway.has_endpoint or not key:
-        return None
-
-    # DefaultHttpxClient, not httpx.Client: the SDK validates http_client
-    # against the httpx flavour it was built on, and anthropic 1.x moved to
-    # httpx2. Handing it the wrong one is a TypeError at construction, which
-    # surfaces as "llm setup failed" on every discovery call.
-    from anthropic import Anthropic, DefaultHttpxClient
-
-    credential = {"auth_token": key} if gateway.key_env == "ANTHROPIC_AUTH_TOKEN" else {"api_key": key}
-    sdk = Anthropic(
-        base_url=normalize_anthropic_base_url(gateway.base_url),
-        default_headers=gateway.headers or None,
-        http_client=DefaultHttpxClient(verify=verify, timeout=timeout_s),
-        # Discovery owns the retry policy: complete_with_retry classifies each
-        # failure and enforces a wall-clock deadline, and a second silent layer
-        # underneath it would multiply the attempts and blow through that bound.
-        max_retries=0,
-        **credential,
-    )
-    return _chat_shaped_client(_AnthropicChatCompletions(sdk))
-
-
-def default_llm_fn(
-    *,
-    model: str = "claude-opus-4-7",
-    timeout_s: int = 900,
-    log_path: str = "",
-    max_tokens: Optional[int] = None,
-    gpu: str = "",  # gpu unused (text call); kept for call-site compat
-) -> LlmFn:
-    """Legacy bare-completion adapter retained for direct API compatibility.
-
-    The forge-fuse CLI does not use this path: it constructs one registered
-    Agent backend and injects :func:`registered_agent_llm_fn`. Existing callers
-    that import this helper continue to get the historical OpenAI-compatible
-    completion behavior.
-
-    Discovery only READS (the source and retrieved operator evidence are embedded
-    in the prompt) and RETURNS JSON, so a single chat completion suffices.
-    Endpoint, credential and headers come from the OpenAI line via
-    :func:`~kernelforge.llm.resolve_openai_gateway`, and ``ANTHROPIC_SKIP_TLS_VERIFY``
-    / ``NODE_TLS_REJECT_UNAUTHORIZED`` are honored for the gateway's
-    self-signed cert.
-
-    Raises :class:`~kernelforge.fusion.llm_failure.LlmUnavailableError` when the model
-    was never reached — an unconfigured gateway, an unusable client, or a
-    gateway that kept failing. It must never return ``""`` for those, because
-    the caller cannot tell that apart from the model proposing nothing, and the
-    run would publish ``no_opportunity`` for a model it never analyzed.
-
-    Retry budget is tunable without a redeploy via ``FORGE_FUSION_LLM_ATTEMPTS``,
-    ``FORGE_FUSION_LLM_RETRY_BASE_SEC`` and ``FORGE_FUSION_LLM_RETRY_MAX_SEC``.
-    """
-
-    resolved_max_tokens = (
-        int(max_tokens)
-        if max_tokens is not None
-        else int(env_setting("FORGE_FUSION_LLM_MAX_TOKENS", DEFAULT_LLM_MAX_TOKENS, cast=int))
-    )
-
-    def _fn(prompt: str) -> str:
-        skip_tls = (
-            os.environ.get("ANTHROPIC_SKIP_TLS_VERIFY", "").strip().lower() in ("1", "true", "yes")
-            or os.environ.get("NODE_TLS_REJECT_UNAUTHORIZED", "").strip() == "0"
-        )
-        gateway = resolve_openai_gateway()
-        key = os.environ.get(gateway.key_env, "").strip() if gateway.key_env else ""
-        try:
-            if gateway.is_complete() and key:
-                # APIM gateways (e.g. AMD) enforce an Ocp-Apim-Subscription-Key
-                # header the OpenAI SDK never sends from api_key; without
-                # default_headers the gateway 401s "missing subscription key".
-                # These come from the resolved provider, so the other side's
-                # headers can never leak onto this endpoint.
-                # DefaultHttpxClient for the same reason as the Anthropic leg
-                # above: the SDK type-checks http_client against its own httpx.
-                from openai import DefaultHttpxClient, OpenAI
-
-                client_kwargs: dict[str, Any] = {
-                    "base_url": gateway.base_url,
-                    "api_key": key,
-                    "http_client": DefaultHttpxClient(verify=not skip_tls, timeout=timeout_s),
-                }
-                if gateway.headers:
-                    client_kwargs["default_headers"] = gateway.headers
-                client: Any = OpenAI(**client_kwargs)
-            else:
-                client = _anthropic_client(timeout_s=timeout_s, verify=not skip_tls)
-        except Exception as exc:  # noqa: BLE001 — client construction failure.
-            raise LlmUnavailableError(
-                f"discovery llm_fn setup failed: {type(exc).__name__}: {str(exc)[:240]}",
-                kind=classify_llm_error(exc),
-            ) from exc
-        if client is None:
-            raise LlmUnavailableError(
-                "discovery llm_fn: no LLM gateway configured (needs either "
-                "OPENAI_BASE_URL + OPENAI_API_KEY for the OpenAI-compatible "
-                "protocol, or ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY for the "
-                "Anthropic Messages protocol)",
-                kind=NOT_CONFIGURED,
-            )
-
-        out = complete_with_retry(
-            client,
-            prompt,
-            model=model,
-            max_tokens=resolved_max_tokens,
-            attempts=int(env_setting("FORGE_FUSION_LLM_ATTEMPTS", DEFAULT_ATTEMPTS, cast=int)),
-            base_delay_sec=float(env_setting("FORGE_FUSION_LLM_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, cast=float)),
-            max_delay_sec=float(env_setting("FORGE_FUSION_LLM_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, cast=float)),
-        )
-        if log_path:
-            with contextlib.suppress(OSError):
-                Path(log_path).write_text(out, encoding="utf-8")
-        return out
-
-    return _fn
-
-
 def discover_recipes(
     diagnosis: Diagnosis,
     *,
@@ -1750,39 +1488,29 @@ def discover_recipes(
     source_file: str,
     shapes: dict[str, Any],
     trace_path: str,
-    llm_fn: Optional[LlmFn] = None,
+    llm_fn: LlmFn,
     max_fusions: Optional[int] = None,
     top_kernels: int = 15,
     knowledge_root: str | Path | None = None,
     pass_probe: Optional[Callable[[str], PassState]] = None,
     framework_root: str = "",
+    repo_scope: bool = False,
+    repo_root: str = "",
 ) -> list[Recipe]:
-    """LLM-autonomous discovery: propose fusible chains from the trace + source.
-
-    Returns an empty list when the diagnosis is not a candidate, the source cannot
-    be read, or the LLM proposes nothing parseable. The CLI injects
-    :func:`registered_agent_llm_fn`; the legacy default remains only for direct
-    callers that omit ``llm_fn``.
-
-    An empty list means discovery looked and found nothing. When it could not
-    look at all, ``llm_fn`` raises
-    :class:`~kernelforge.fusion.llm_failure.LlmUnavailableError` and that propagates:
-    the caller has to record an unreachable model as such, not as a verdict.
-    """
+    """LLM-autonomous discovery: propose fusible chains from the trace + source."""
     if not diagnosis.is_candidate:
         return []
     try:
         source_text = Path(source_file).read_text(encoding="utf-8") if source_file else ""
     except OSError:
         source_text = ""
-    if not source_text:
+    if not source_text and not repo_scope:
         log.warning("discovery: model source unreadable (%s); cannot self-discover", source_file)
         return []
     hot = hot_kernels_from_trace(trace_path, top_n=top_kernels)
     ordered_boundaries = ordered_fusion_boundaries_from_trace(trace_path)
-    # Hot kernels and the diagnosis categories are folded in as a second evidence
-    # source: ordered boundaries need repeats to exist, so a short trace would
-    # otherwise leave retrieval with nothing to match against.
+    # Hot kernels and the diagnosis categories are folded in as a second evidence source: ordered boundaries need
+    # repeats to exist, so a short trace would otherwise leave retrieval with nothing to match against.
     existing_operator_hints = existing_operator_hints_from_knowledge(
         knowledge_root,
         ordered_boundaries,
@@ -1799,9 +1527,11 @@ def discover_recipes(
         max_fusions=_resolve_max_fusions(max_fusions),
         ordered_boundaries=ordered_boundaries,
         existing_operator_hints=existing_operator_hints,
+        source_files=[source_file] if (repo_scope and source_file) else (),
+        repo_scope=repo_scope,
+        repo_root=repo_root,
     )
-    fn = llm_fn or default_llm_fn()
-    raw = fn(prompt)
+    raw = llm_fn(prompt)
     recipes = parse_discovered_recipes(
         raw,
         model_type=model_type,
@@ -1811,6 +1541,8 @@ def discover_recipes(
         category_shares=diagnosis.category_shares,
         pass_probe=pass_probe,
         framework_root=framework_root,
+        repo_scope=repo_scope,
+        repo_root=repo_root,
     )
     log.info(
         "discovery proposed %d fusion(s): %s",

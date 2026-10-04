@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Concurrency sweep over the CONC ladder.
-
-Runs the Magpie grid over CONC values for baseline vs ``current_best``,
-producing JSON/CSV curves. Auto-enqueued by the Coordinator as a SWEEP-phase
-action on SWEEP entry (opt out via ``--no-enable-conc-sweep``); never
-LLM-proposable.
-"""
+"""Concurrency sweep over the CONC ladder."""
 
 from __future__ import annotations
 
@@ -16,77 +10,117 @@ import json
 import logging
 import os
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom.common import io as _common_io
 from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
-from hyperloom.common.timeutil import utc_now_compact
+from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, is_agentx_mode
+from hyperloom.common.timeutil import now_iso, utc_now_compact
+from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
+    GRID_MODE_DEFAULT,
+    GRID_REQUESTED,
+    STAGE_BOOT,
+    STAGE_BOOT_ATTEMPT,
+    STAGE_BUDGET_SKIP,
+    STAGE_REUSE,
+    STAGE_SERVER_RESTART,
+    STRATEGY_SERVER_RESTART,
+    STRATEGY_SINGLE_SERVER,
+)
+from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
     run_grid,
+    session_grid_bounds,
+    variant_conc,
 )
+from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts, session_deadline_to_remaining_sec
+from ..actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN, StoppedByTheRun
 from ..actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
 )
-from .roofline_ceiling import (
+from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
+from hyperloom.inference_optimizer.roofline_ceiling import (
     compute_compute_bound_ceiling_tok_per_sec,
     compute_theoretical_peak_output_tok_per_sec,
     load_model_meta,
     select_peak_and_bound,
 )
 from ..state.shared_state import SharedState
+from ..loop.coordinator_helpers import baseline_benchmark_script
 
 
 log = logging.getLogger(__name__)
 
 
+def _grading_of(state: Any) -> tuple[str, float | None]:
+    """The axis this sweep draws its speedups on, and the noise band its guard reads.
+
+    Resolved through ``resolved_grading`` so the curve and the promotions in one session cannot end up on
+    different axes. The environment-derived ``graded_metric_key`` diverges two ways: it never sees the axis
+    recorded at seed, so a resume whose shell lost ``HYPERLOOM_PERF_METRIC`` redraws the curve on output; and it
+    has no scriptable carve-out, so an image framework -- which reports no interactivity axis at all -- would
+    compare every rung on a field it never measures and report the whole sweep as failed.
+    """
+    on_intvty, noise_pct = resolved_grading(state)
+    return (GRADED_INTVTY if on_intvty else GRADED_OUTPUT), noise_pct
+
+
 SCHEMA_VERSION = "1.0"
 
-# Default ladder (override via ``--conc-sweep-concs``).
+# Default ladders, one per workload (override via ``--conc-sweep-concs``).
 DEFAULT_CONCS: list[int] = [256, 128, 64, 32, 16, 8, 4, 2]
+AGENTX_DEFAULT_CONCS: list[int] = [1, 4, 8, 10, 14, 20, 28]
+
+
+def default_concs_for_mode(benchmark_mode: Any = "") -> list[int]:
+    """The ladder a mode sweeps when the operator names none."""
+    return list(AGENTX_DEFAULT_CONCS if is_agentx_mode(benchmark_mode) else DEFAULT_CONCS)
+
 
 # Multiplier applied to each CONC for NUM_PROMPTS.
 DEFAULT_NUM_PROMPTS_FACTOR = 5
 
-# Per-variant timeout (seconds); override via ``--conc-sweep-timeout-sec``.
-DEFAULT_VARIANT_TIMEOUT_SEC = 1800
-
 # Total wall-clock budget (seconds); override via ``--conc-sweep-total-budget-sec``.
-# ``None`` disables the gate; ``<=0`` means no time is left to spend.
 DEFAULT_TOTAL_BUDGET_SEC = 9000
 
 
-def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
-    """Return ``(has_opt, args, envs)`` from ``state.current_best`` (either non-empty side counts as optimized).
+@dataclass(frozen=True)
+class _Arm:
+    """One side of the comparison: the launch recipe every rung of its ladder runs with."""
 
-    Args:
-        state: Shared run state whose ``current_best`` is inspected.
+    name: str
+    args: str = ""
+    envs: dict[str, str] = field(default_factory=dict)
+    overlay: str = ""
+    controls: Mapping[str, Any] = field(default_factory=dict)
 
-    Returns:
-        A tuple of ``(has_optimization, extra_server_args, extra_envs)``.
-    """
+
+def _optimized_arm(state: SharedState) -> _Arm | None:
+    """The arm for the retained config or kernel overlay, or ``None`` when there is nothing to compare."""
     cb = state.current_best or {}
-    args = str(cb.get("extra_server_args") or "").strip()
-    envs_raw = cb.get("extra_envs") or {}
-    envs = {str(k): str(v) for k, v in envs_raw.items()}
-    return (bool(args) or bool(envs)), args, envs
+    config = normalize_proposal(cb)
+    overlay = str(cb.get("final_overlay") or "").strip()
+    if not (is_executable(config) or overlay):
+        return None
+    return _Arm(
+        name="optimized",
+        args=config["extra_args"],
+        envs=config["extra_envs"],
+        overlay=overlay,
+        controls=controls_of(config),
+    )
 
 
 def _budget_skip_result(variant: GridVariant) -> VariantResult:
-    """Synthetic VariantResult for a budget-exhausted variant; ``skipped`` status distinguishes "out of time" from "Magpie crashed".
-
-    Args:
-        variant: The grid variant that did not get to run.
-
-    Returns:
-        A ``VariantResult`` marked ``skipped`` with a budget-exhausted error.
-    """
+    """Synthetic VariantResult for a budget-exhausted variant; ``skipped`` status distinguishes \"out of time\" from \"Magpie crashed\"."""
     return VariantResult(
         name=variant.name,
         extra_server_args=variant.extra_server_args,
@@ -101,28 +135,49 @@ def _budget_skip_result(variant: GridVariant) -> VariantResult:
     )
 
 
+_SWEEP_BUDGET_STOP = StoppedByTheRun(
+    error_class="budget_exhausted",
+    interrupted="conc_sweep total budget exhausted while this round was running",
+    never_started="conc_sweep total budget exhausted before this round ran",
+    ends_the_batch=True,
+)
+
+
+def _deadline_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> VariantResult:
+    """Keep the owner of the deadline on every rung that never ran."""
+    return VariantResult(
+        name=variant.name,
+        extra_server_args=variant.extra_server_args,
+        extra_envs=dict(variant.extra_envs),
+        status="skipped",
+        error=stopped.never_started,
+        error_class=stopped.error_class,
+        note=variant.note,
+    )
+
+
 def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
-    """Flatten a ``VariantResult`` into one row of the curve.
-
-    Args:
-        v: The variant result to flatten.
-        arm: The arm label (e.g. ``baseline`` or ``optimized``) for the row.
-
-    Returns:
-        A dict of the variant's metrics keyed for the curve row.
-    """
+    """Flatten a ``VariantResult`` into one row of the curve."""
     envs = v.extra_envs or {}
-    try:
-        conc = int(envs.get("CONC", "0"))
-    except (TypeError, ValueError):
-        conc = 0
+    # The grid sets CONC from an int, and a curve is only readable if every
+    # rung names the concurrency it was measured at -- so a value that will not
+    # parse is a bug to surface, not a rung to file under zero.
+    conc = int(envs.get("CONC", "0"))
+    # aiperf reports the total; the other parsers pass through whatever the framework named, leaving it null on a run
+    # that measured both halves.
+    total = v.total_token_throughput
+    if total is None and v.input_throughput is not None and v.output_throughput is not None:
+        total = v.input_throughput + v.output_throughput
     return {
         "arm": arm,
         "conc": conc,
         "status": v.status,
         "output_throughput": v.output_throughput,
         "request_throughput": v.request_throughput,
-        "total_token_throughput": v.total_token_throughput,
+        "total_token_throughput": total,
+        "input_throughput": v.input_throughput,
+        "e2e_norm_intvty_p90": v.intvty_p90,
+        "tpot_p90_ms": v.tpot_p90_ms,
         "ttft_mean_ms": v.ttft_mean_ms,
         "e2el_mean_ms": v.e2el_mean_ms,
         "duration_seconds": v.duration_seconds,
@@ -153,7 +208,7 @@ def _budget_limited_without_valid_pair(
     for point in points:
         status = str(point.get("status") or "").lower()
         error_class = str(point.get("error_class") or "")
-        if error_class == "budget_exhausted":
+        if error_class in {"budget_exhausted", SESSION_TIME_EXHAUSTED_CLASS}:
             saw_budget_skip = True
             continue
         if status not in ("succeeded", "skipped"):
@@ -162,12 +217,7 @@ def _budget_limited_without_valid_pair(
 
 
 def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
-    """One row per (arm, conc) — flat columns for spreadsheet pivots.
-
-    Args:
-        csv_path: Destination CSV path (parent dirs are created).
-        points: Curve rows to write, one per (arm, conc).
-    """
+    """One row per (arm, conc) — flat columns for spreadsheet pivots."""
     columns = [
         "arm",
         "conc",
@@ -175,6 +225,9 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
         "output_throughput",
         "request_throughput",
         "total_token_throughput",
+        "input_throughput",
+        "e2e_norm_intvty_p90",
+        "tpot_p90_ms",
         "ttft_mean_ms",
         "e2el_mean_ms",
         "duration_seconds",
@@ -199,23 +252,7 @@ def _build_roofline_ceiling(
     baseline_points: list[dict[str, Any]],
     optimized_points: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Per-conc decode roofline alongside the measured curves.
-
-    T_cmp is computed once, T_mem per CONC; MBU% = measured/T_peak×100. Returns
-    ``None`` when model meta / GPU spec is unavailable.
-
-    Args:
-        state: Shared run state providing model path, precision, GPU type, TP.
-        concs: Concurrency values to compute ceilings for.
-        isl: Input sequence length.
-        osl: Output sequence length.
-        baseline_points: Measured baseline curve rows (for MBU%).
-        optimized_points: Measured optimized curve rows (for MBU%).
-
-    Returns:
-        A roofline ceiling payload dict, or ``None`` when model meta or GPU
-        spec is unavailable.
-    """
+    """Per-conc decode roofline alongside the measured curves."""
     model_path = str(getattr(state, "model_path", "") or "")
     precision = str(getattr(state, "precision", "") or "") or "bf16"
     meta = load_model_meta(model_path, precision_hint=precision)
@@ -258,22 +295,17 @@ def _build_roofline_ceiling(
         )
         t_peak, bound_kind = select_peak_and_bound(t_mem, t_cmp)
         # Local import avoids a module-level import cycle.
-        from .roofline_snapshot import within_roofline_pct
+        from hyperloom.inference_optimizer.roofline_snapshot import within_roofline_pct
 
         def _mbu_pct(measured: Any) -> float | None:
-            """Express a measured throughput as a percent of peak.
-
-            Args:
-                measured: Measured throughput value.
-
-            Returns:
-                The ratio to ``t_peak`` as a percentage, or ``None`` when
-                inputs are non-positive or invalid.
-            """
+            """Express a measured throughput as a percent of peak."""
             if not isinstance(measured, (int, float)) or measured <= 0:
                 return None
             return within_roofline_pct(peak=float(t_peak), achieved=float(measured))
 
+        # Output throughput on both arms regardless of the graded axis, and not a bug to be aligned with it: the
+        # peak above is a memory-bandwidth-derived ceiling on output tokens per second, so MBU is only meaningful
+        # against the same quantity.
         bt = (by_conc_b.get(c) or {}).get("output_throughput")
         ot = (by_conc_o.get(c) or {}).get("output_throughput")
         rows.append(
@@ -311,50 +343,41 @@ def _build_roofline_ceiling(
     }
 
 
-def _order_concs_desc(concs: list[int]) -> list[int]:
-    """Return a strictly descending, deduplicated copy of the CONC ladder.
+def _arm_status(results: list[VariantResult]) -> str:
+    """The status an arm reports from the rungs it actually ran.
 
-    Descending order is required for single-server arm sweeps: the server is
-    booted with the highest (most demanding) concurrency first so it can handle
-    all lower values without restart.
-
-    Args:
-        concs: Requested concurrency ladder (any order, may contain duplicates).
-
-    Returns:
-        A deduplicated list sorted in strictly descending order.
+    An arm that measured some rungs and lost others is ``degraded`` rather
+    than either extreme: the curve it produced is real and shorter than the
+    ladder it was asked for.
     """
+    statuses = {str(result.status or "").lower() for result in results}
+    if not statuses:
+        return "skipped"
+    if "succeeded" in statuses:
+        return "degraded" if statuses - {"succeeded"} else "succeeded"
+    if statuses <= {"skipped"}:
+        return "skipped"
+    return "failed"
+
+
+def _order_concs_desc(concs: list[int]) -> list[int]:
+    """Return a strictly descending, deduplicated copy of the CONC ladder."""
     return sorted(set(concs), reverse=True)
 
 
 def _build_arm_grid(
-    arm_name: str,
+    arm: _Arm,
     concs_desc: list[int],
     *,
     isl: int,
     osl: int,
     num_prompts_factor: int,
-    arm_args: str,
-    arm_envs: dict[str, str],
 ) -> list[GridVariant]:
-    """Build a single-arm grid in descending CONC order.
-
-    Args:
-        arm_name: Arm label (e.g. ``baseline`` or ``optimized``).
-        concs_desc: Concurrency values in strictly descending order.
-        isl: Input sequence length.
-        osl: Output sequence length.
-        num_prompts_factor: Multiplier applied to each CONC for NUM_PROMPTS.
-        arm_args: Extra server args for this arm.
-        arm_envs: Extra environment variables for this arm.
-
-    Returns:
-        List of grid variants for the arm, one per CONC in descending order.
-    """
+    """Build a single-arm grid in descending CONC order."""
     out: list[GridVariant] = []
     for conc in concs_desc:
         num_prompts = max(int(conc) * int(num_prompts_factor), int(conc))
-        envs = dict(arm_envs)
+        envs = dict(arm.envs)
         envs.update(
             {
                 "CONC": str(conc),
@@ -364,91 +387,278 @@ def _build_arm_grid(
             }
         )
         envs["RUN_EVAL"] = "false"
-        out.append(
-            GridVariant(
-                name=f"{arm_name}_conc{conc}",
-                extra_server_args=arm_args,
-                extra_envs=envs,
-                note=f"arm={arm_name} conc={conc} isl={isl} osl={osl}",
-            )
+        variant = GridVariant(
+            name=f"{arm.name}_conc{conc}",
+            extra_server_args=arm.args,
+            extra_envs=envs,
+            note=f"arm={arm.name} conc={conc} isl={isl} osl={osl}",
+            **arm.controls,
         )
+        variant.overlay_pythonpath = arm.overlay  # type: ignore[attr-defined]
+        out.append(variant)
     return out
 
 
-async def _sweep_one_arm_single_server(  # noqa: PLR0913
-    arm_name: str,
-    concs_desc: list[int],
-    *,
-    isl: int,
-    osl: int,
-    num_prompts_factor: int,
-    arm_args: str,
-    arm_envs: dict[str, str],
-    base_yaml_path: Path,
-    workspace: Path,
-    model_path: str,
-    gpu_type: str,
-    variant_timeout_sec: int,
-    soft_deadline_sec: float | None,
-    deadline: float | None,
-    state: SharedState,
-    session_dir: Path,
-    json_path: Path,
-    csv_path: Path,
-    started_at: float,
-    total_budget_sec: int | None,
-    has_budget: bool,
-    opt_args: str,
-    opt_envs: dict[str, str],
-    _all_results_ref: list[VariantResult],
-    _budget_state: dict[str, Any],
-) -> list[VariantResult]:
+_SESSION_RESERVE = "session_deadline_reserve"
+
+
+@dataclass
+class _Budget:
+    """Whether the sweep's time has run out, and why."""
+
+    skip_reason: str = ""
+    remaining_sec: float = 0.0
+
+    @property
+    def exhausted(self) -> bool:
+        return bool(self.skip_reason)
+
+    def exhaust(self, reason: str, remaining_sec: float) -> None:
+        self.skip_reason = reason
+        self.remaining_sec = remaining_sec
+
+    def spend_on_session_reserve(self) -> None:
+        self.exhaust(_SESSION_RESERVE, 0.0)
+
+    def refuses_next_arm(self) -> bool:
+        """A deadline stop refuses the next arm; the session reserve leaves each arm to skip its own rungs."""
+        return self.exhausted and self.skip_reason != _SESSION_RESERVE
+
+
+@dataclass
+class _SweepRun:
+    """One conc sweep's fixed inputs, and the progress both of its arms add to.
+
+    ``results`` and ``budget`` are shared across arms on purpose: every incremental flush reports the whole sweep so
+    far, and a budget stop inside one arm has to refuse the next. ``session_deadline_sec`` is the earlier monotonic
+    sweep/session boundary, named by ``deadline_stop`` and distinct from the fixed per-spawn ``benchmark_timeout_sec``.
+    """
+
+    state: SharedState
+    session_dir: Path
+    workspace: Path
+    base_yaml_path: Path
+    model_path: str
+    gpu_type: str
+    benchmark_script: str | None
+    isl: int
+    osl: int
+    concs: list[int]
+    num_prompts_factor: int
+    optimized: _Arm
+    baseline: _Arm
+    benchmark_timeout_sec: float
+    session_deadline_sec: float | None
+    variant_expected_sec: float | None
+    deadline_stop: StoppedByTheRun
+    started_at: float
+    total_budget_sec: int | None
+    json_path: Path
+    csv_path: Path
+    recorder: Any = None
+    results: list[VariantResult] = field(default_factory=list)
+    budget: _Budget = field(default_factory=_Budget)
+
+    @property
+    def concs_desc(self) -> list[int]:
+        return _order_concs_desc(self.concs)
+
+    def arm_grid(self, arm: _Arm) -> list[GridVariant]:
+        return _build_arm_grid(
+            arm, self.concs_desc, isl=self.isl, osl=self.osl, num_prompts_factor=self.num_prompts_factor
+        )
+
+    def arm_results(self, arm_name: str) -> list[VariantResult]:
+        prefix = f"{arm_name}_"
+        return [result for result in self.results if result.name.startswith(prefix)]
+
+    def record_rung(
+        self,
+        arm_name: str,
+        result: VariantResult,
+        *,
+        stage: str,
+        committed: bool = True,
+        start_time: str = "",
+        wall_duration_sec: float | None = None,
+        budget_remaining_sec: float | None = None,
+    ) -> None:
+        """Record one rung on the sweep's event, if the sweep is being recorded.
+
+        The result is flattened into the same point the report writes, so the
+        recorded curve and the written one cannot differ. ``stage`` is a
+        ``STAGE_*`` value naming how the rung came to run, ``committed`` says
+        whether it is part of the published curve, and the seconds fields are
+        wall clock.
+        """
+        if self.recorder is None:
+            return
+        point = _point_from_variant(result, arm=arm_name)
+        self.recorder.record_variant(
+            arm_name,
+            stage=stage,
+            conc=point.get("conc"),
+            point=point,
+            committed=committed,
+            num_prompts=(result.extra_envs or {}).get("NUM_PROMPTS"),
+            start_time=start_time,
+            wall_duration_sec=wall_duration_sec,
+            granted_cap_sec=self.benchmark_timeout_sec,
+            budget_remaining_sec=budget_remaining_sec,
+        )
+
+    def commit_failed_boots(self, arm_name: str, boots: list[VariantResult]) -> None:
+        """Publish the boot attempts a lower rung's outcome has settled as part of the curve."""
+        for failed in boots:
+            self.results.append(failed)
+            if self.recorder is not None:
+                self.recorder.commit_variant(
+                    arm_name,
+                    stage=STAGE_BOOT_ATTEMPT,
+                    conc=variant_conc(failed),
+                    point=_point_from_variant(failed, arm=arm_name),
+                )
+
+    def close_arm(self, arm_name: str, exc: BaseException | None) -> None:
+        """Close one arm's row, whichever of its ladder's paths it leaves by.
+
+        An arm leaves by three: the restart ladder it was delegated to, the restart
+        retry after every boot failed, and the reuse ladder. Closing here means an
+        arm that raised mid-ladder says so once, rather than each path reporting a
+        ladder it never finished as the status its own results happen to add up to.
+        """
+        if self.recorder is None:
+            return
+        if exc is None:
+            self.recorder.finish_arm(arm_name, status=_arm_status(self.arm_results(arm_name)))
+        else:
+            self.recorder.fail_arm(arm_name, exc)
+
+    async def run_rung(
+        self,
+        variant: GridVariant,
+        *,
+        serving_lease: Any,
+        base_extra_envs: dict[str, str] | None = None,
+        server_lifecycle: dict[str, Any] | None = None,
+        server_already_ready: bool = False,
+        warmup_before_measure: bool | None = None,
+        lifecycle_boot_only: bool = False,
+    ) -> list[VariantResult]:
+        """Run one rung from the sweep's base config; a deadline stop inside it exhausts the sweep's budget."""
+        if self.budget.exhausted:
+            return [_deadline_skip_result(variant, self.deadline_stop)]
+        results = await run_grid(
+            base_yaml_path=self.base_yaml_path,
+            base_extra_args="",
+            grid=[variant],
+            output_root=self.workspace,
+            model_path=self.model_path,
+            gpu_type=self.gpu_type,
+            benchmark_script=self.benchmark_script,
+            server_lifecycle=server_lifecycle,
+            base_extra_envs=base_extra_envs,
+            warmup_before_measure=warmup_before_measure,
+            server_already_ready=server_already_ready,
+            serving_lease=serving_lease,
+            session_deadline_sec=self.session_deadline_sec,
+            variant_expected_sec=self.variant_expected_sec,
+            deadline_stop=self.deadline_stop,
+            lifecycle_boot_only=lifecycle_boot_only,
+        )
+        if any(result.error_class == self.deadline_stop.error_class for result in results):
+            remaining = session_deadline_to_remaining_sec(self.session_deadline_sec)
+            reason = self.deadline_stop.error_class
+            if self.deadline_stop == _SWEEP_BUDGET_STOP:
+                reason = (
+                    "total_budget_exhausted"
+                    if remaining is not None and remaining <= 0
+                    else "insufficient_remaining_for_variant"
+                )
+            self.budget.exhaust(reason, max(0.0, remaining) if remaining is not None else 0.0)
+        return results
+
+    def session_closing(self) -> bool:
+        return bool(self.state.closing_phase or self.state.stop_reason)
+
+    def _arm_section(self, arm: _Arm) -> dict[str, Any]:
+        points = [_point_from_variant(result, arm=arm.name) for result in self.arm_results(arm.name)]
+        points.sort(key=lambda p: p["conc"])
+        return {"extra_server_args": arm.args, "extra_envs": arm.envs, "points": points}
+
+    def payload(self, *, in_progress: bool) -> dict[str, Any]:
+        """The ``conc_sweep_summary.json`` body for every rung recorded so far.
+
+        An in-progress payload is the one rewritten between rungs; a final one settles its status from the pairs.
+        """
+        state = self.state
+        baseline = self._arm_section(self.baseline)
+        optimized = self._arm_section(self.optimized)
+        metric_key, guard_noise_pct = _grading_of(state)
+        comparison, summary = conc_pair_comparison(
+            baseline["points"], optimized["points"], metric_key=metric_key, guard_noise_pct=guard_noise_pct
+        )
+        budget_limited_no_pair = not in_progress and _budget_limited_without_valid_pair(
+            budget_exhausted=self.budget.exhausted,
+            summary=summary,
+            baseline_points=baseline["points"],
+            optimized_points=optimized["points"],
+        )
+        if in_progress:
+            status = "in_progress"
+        elif summary["successful_pairs"]:
+            status = "succeeded"
+        else:
+            status = "skipped" if budget_limited_no_pair else "failed"
+        payload: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "status": status,
+            "session_id": str(getattr(state, "session_id", "") or self.session_dir.name),
+            "isl": self.isl,
+            "osl": self.osl,
+            "tp": int(getattr(state, "tp", 0) or 0),
+            # Names the axis pair the points are drawn on, so a reader never has to infer it from whether
+            # e2e_norm_intvty_p90 happens to be null.
+            "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
+            "concs_requested": list(self.concs),
+            "baseline": baseline,
+            "optimized": optimized,
+            "comparison": comparison,
+            "summary": summary,
+            "workspace": self.workspace.as_posix(),
+            "elapsed_sec": round(time.time() - self.started_at, 2),
+            "total_budget_sec": self.total_budget_sec,
+            "budget_exhausted": self.budget.exhausted,
+        }
+        if budget_limited_no_pair:
+            payload["was_skipped"] = True
+            payload["skip_reason"] = "budget_exhausted_no_successful_pairs"
+        if self.budget.exhausted:
+            payload["budget_skip_reason"] = self.budget.skip_reason
+            payload["budget_remaining_sec"] = round(self.budget.remaining_sec, 2)
+        return payload
+
+    def write(self, payload: dict[str, Any]) -> Exception | None:
+        """Write ``payload`` as the sweep's report, carrying the paths it is written to."""
+        payload["report_json_path"] = self.json_path.as_posix()
+        payload["report_csv_path"] = self.csv_path.as_posix()
+        return _flush_conc_sweep_report(payload, self.session_dir)
+
+    def flush_progress(self) -> None:
+        """Rewrite the report from the rungs so far, recording the pairs measured so far on the same beat."""
+        payload = self.payload(in_progress=True)
+        if self.recorder is not None:
+            self.recorder.record_progress(comparison=payload["comparison"], summary=payload["summary"])
+        self.write(payload)
+
+
+async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
     """Sweep one arm across all CONC values reusing a single persistent server.
 
     Boots the server on the highest CONC (Option A), then reuses it for all
     lower CONCs.  If boot fails, retries with the next lower CONC
     (boot-retry-descend).  Falls back to the legacy per-variant server-restart
     path (Option B) when all boot retries are exhausted.
-
-    The shared ``_all_results_ref`` list is mutated in place so incremental
-    checkpoints always see the latest cross-arm view.
-
-    Args:
-        arm_name: Label for this arm (``baseline`` or ``optimized``).
-        concs_desc: Concurrency ladder in strictly descending order.
-        isl: Input sequence length.
-        osl: Output sequence length.
-        num_prompts_factor: CONC multiplier for NUM_PROMPTS.
-        arm_args: Extra server args for this arm.
-        arm_envs: Extra environment variables for this arm.
-        base_yaml_path: Materialized base Magpie YAML path.
-        workspace: Per-sweep workspace root.
-        model_path: Resolved model path string.
-        gpu_type: Resolved GPU type string.
-        variant_timeout_sec: Per-variant hard timeout in seconds.
-        soft_deadline_sec: Session-clamped soft deadline in seconds, or None.
-        deadline: Absolute wall-clock epoch (``time.time()`` basis) at which the
-            total conc-sweep budget expires, or None when unbounded. Distinct
-            from ``soft_deadline_sec``, which is a duration.
-        state: Shared run state (for incremental checkpoint metadata).
-        session_dir: Session directory (for incremental checkpoints).
-        json_path: Pre-resolved JSON report path.
-        csv_path: Pre-resolved CSV report path.
-        started_at: Wall-clock start of the overall sweep (for elapsed_sec).
-        total_budget_sec: Configured total budget in seconds (``None`` when
-            the budget gate is off).
-        has_budget: Whether budget tracking is active.
-        opt_args: Optimized server args (for payload metadata).
-        opt_envs: Optimized server env vars (for payload metadata).
-        _all_results_ref: Shared list of all results collected across arms;
-            mutated in place so incremental flushes have the full cross-arm
-            picture.
-        _budget_state: Mutable dict carrying budget flags (``budget_exhausted``,
-            ``budget_skip_reason``, ``budget_remaining_sec``) shared with the
-            caller so the main function can inspect the final budget status.
-
-    Returns:
-        List of VariantResult for this arm (one per CONC).
     """
     from ..actions.executors._grid_runner import _num_gpus_for_config
     from ..actions.executors._ray_serving import maybe_serving_lease
@@ -457,85 +667,93 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         teardown_lifecycle_server,
     )
 
-    arm_results: list[VariantResult] = []
-    grid = _build_arm_grid(
-        arm_name,
-        concs_desc,
-        isl=isl,
-        osl=osl,
-        num_prompts_factor=num_prompts_factor,
-        arm_args=arm_args,
-        arm_envs=arm_envs,
-    )
+    recorder = run.recorder
+    arm_name = arm.name
+    grid = run.arm_grid(arm)
     if not grid:
-        return arm_results
+        return
+    if recorder is not None:
+        recorder.record_arm_grid(
+            arm_name,
+            rungs=[
+                {
+                    "name": variant.name,
+                    "conc": variant.extra_envs.get("CONC"),
+                    "num_prompts": variant.extra_envs.get("NUM_PROMPTS"),
+                }
+                for variant in grid
+            ],
+        )
 
-    # Ray-managed GPU execution: one held Ray lease (``num_gpus=TP``)
-    # spans this arm's persistent server — boot + every CONC reuse round, or the
-    # Option B per-variant restarts — so the shared server's whole lifetime is
-    # covered by a single lease and no GPU process outlives it. ``None`` on the
-    # local path (multi-node / RAY_EXEC off / tests) keeps the legacy behaviour.
-    arm_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(base_yaml_path))
+    # Ray-managed GPU execution: one held Ray lease (``num_gpus=TP``) spans this arm's persistent server — boot +
+    # every CONC reuse round, or the Option B per-variant restarts — so the shared server's whole lifetime is covered
+    # by a single lease and no GPU process outlives it.
+    arm_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(run.base_yaml_path))
 
     # Shared pid_dir for server reuse across all CONC variants in this arm.
-    pid_dir = workspace / f"server_{arm_name}"
+    pid_dir = run.workspace / f"server_{arm_name}"
     pid_dir.mkdir(parents=True, exist_ok=True)
 
     # Resolve lifecycle params (port, framework) from the materialized config.
     lc_reason = "resolve_failed"
     try:
-        lc_params = resolve_lifecycle_params(base_yaml_path)
+        lc_params = resolve_lifecycle_params(run.base_yaml_path)
         port = int(lc_params.get("port") or 8888)
         framework = str(lc_params.get("framework") or "")
         lc_eligible = bool(lc_params.get("eligible"))
         lc_reason = str(lc_params.get("reason") or "")
-    except Exception:  # noqa: BLE001
-        log.debug("conc_sweep single-server: resolve_lifecycle_params failed", exc_info=True)
+    except Exception as exc:
+        log.warning("conc_sweep single-server: resolve_lifecycle_params failed", exc_info=True)
+        if recorder is not None:
+            # Named per arm: both arms resolve, and two faults reading alike
+            # would collapse into one row.
+            recorder.record_fault(stage=f"resolve_lifecycle_params:{arm_name}", exc=exc)
         lc_eligible = False
         port = 8888
         framework = ""
 
+    if recorder is not None:
+        recorder.record_arm_strategy(
+            arm_name,
+            strategy=STRATEGY_SINGLE_SERVER if lc_eligible else STRATEGY_SERVER_RESTART,
+            reason=None if lc_eligible else "framework_not_lifecycle_eligible",
+            lifecycle_eligible=lc_eligible,
+            lifecycle_reason=lc_reason,
+            port=port,
+            framework=framework,
+            serving_lease_held=arm_lease is not None,
+        )
+
+    async def _sweep_ladder_by_restart() -> None:
+        """Run the whole ladder with a server restart per rung.
+
+        The arm whose framework cannot hold a server across rungs and the arm
+        whose every boot failed both run the ladder this way, and it is the
+        same run for both.
+        """
+        arm_failure: BaseException | None = None
+        try:
+            await _sweep_arm_option_b(run, arm_name, grid, serving_lease=arm_lease)
+        except BaseException as exc:
+            arm_failure = exc
+            raise
+        finally:
+            if arm_lease is not None:
+                arm_lease.close()
+            run.close_arm(arm_name, arm_failure)
+
     if not lc_eligible:
-        # Framework does not support server_lifecycle — fall through to
-        # Option B (per-variant server restart via normal run_grid).
+        # Framework does not support server_lifecycle — fall through to Option B (per-variant server restart via
+        # normal run_grid).
         log.info(
             "conc_sweep single-server: arm=%s not lifecycle-eligible (%s); using per-variant server restart (Option B)",
             arm_name,
             lc_reason,
         )
-        try:
-            return await _sweep_arm_option_b(
-                arm_name=arm_name,
-                grid=grid,
-                base_yaml_path=base_yaml_path,
-                workspace=workspace,
-                model_path=model_path,
-                gpu_type=gpu_type,
-                variant_timeout_sec=variant_timeout_sec,
-                soft_deadline_sec=soft_deadline_sec,
-                deadline=deadline,
-                state=state,
-                session_dir=session_dir,
-                json_path=json_path,
-                csv_path=csv_path,
-                started_at=started_at,
-                total_budget_sec=total_budget_sec,
-                has_budget=has_budget,
-                opt_args=opt_args,
-                opt_envs=opt_envs,
-                _all_results_ref=_all_results_ref,
-                _budget_state=_budget_state,
-                serving_lease=arm_lease,
-            )
-        finally:
-            if arm_lease is not None:
-                arm_lease.close()
+        await _sweep_ladder_by_restart()
+        return
 
     # Boot-retry-descend: try each CONC from highest to lowest until boot succeeds.
-    # Failed higher-CONC boots are tracked locally; they are only committed to the
-    # permanent results when a *lower* CONC eventually boots (they represent genuine
-    # capacity failures, e.g. OOM at that CONC). If every CONC fails to boot, the
-    # whole grid is retried via Option B instead so nothing is double-counted.
     failed_boots: list[VariantResult] = []
     boot_idx = 0
     boot_succeeded = False
@@ -553,21 +771,17 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             "pid_dir": str(pid_dir),
             "port": port,
         }
+        boot_started_iso = now_iso("seconds")
+        boot_started_at = time.time()
         try:
-            boot_results = await run_grid(
-                base_yaml_path=base_yaml_path,
-                base_extra_args="",
-                grid=[boot_variant],
-                output_root=workspace,
-                variant_timeout_sec=variant_timeout_sec,
-                model_path=model_path,
-                gpu_type=gpu_type,
+            boot_results = await run.run_rung(
+                boot_variant,
+                serving_lease=arm_lease,
+                base_extra_envs={"MAGPIE_RUN_PHASE": "server"},
                 server_lifecycle=server_lifecycle_boot,
                 server_already_ready=False,
-                preclean_before_run=True,
                 warmup_before_measure=False,
-                soft_deadline_sec=soft_deadline_sec,
-                serving_lease=arm_lease,
+                lifecycle_boot_only=True,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -582,13 +796,30 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     extra_server_args=boot_variant.extra_server_args,
                     extra_envs=dict(boot_variant.extra_envs),
                     status="failed",
-                    error=f"single_server_boot_exception: {exc}",
-                    error_class="single_server_boot_exception",
+                    error=f"single_server_boot: {exc}",
+                    error_class=type(exc).__name__,
                 )
             ]
 
         br = boot_results[0] if boot_results else None
         boot_failed = br is None or br.status in {"failed", "skipped"}
+        boot_elapsed = round(time.time() - boot_started_at, 3)
+
+        if br is not None and br.error_class == run.deadline_stop.error_class:
+            run.commit_failed_boots(arm_name, failed_boots)
+            stopped_results = [br, *[_deadline_skip_result(v, run.deadline_stop) for v in grid[boot_idx + 1 :]]]
+            for stopped in stopped_results:
+                run.results.append(stopped)
+                run.record_rung(
+                    arm_name, stopped, stage=STAGE_BUDGET_SKIP, budget_remaining_sec=run.budget.remaining_sec
+                )
+            try:
+                teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
+            finally:
+                if arm_lease is not None:
+                    arm_lease.close()
+                run.close_arm(arm_name, None)
+            return
 
         if boot_failed:
             # Ensure server is torn down before retrying at a lower CONC.
@@ -596,16 +827,25 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
             except Exception:  # noqa: BLE001
                 pass
-            failed_boots.append(
-                br
-                or VariantResult(
-                    name=boot_variant.name,
-                    extra_server_args=boot_variant.extra_server_args,
-                    extra_envs=dict(boot_variant.extra_envs),
-                    status="failed",
-                    error="single_server_boot_failed",
-                    error_class="single_server_boot_failed",
-                )
+            failed = br or VariantResult(
+                name=boot_variant.name,
+                extra_server_args=boot_variant.extra_server_args,
+                extra_envs=dict(boot_variant.extra_envs),
+                status="failed",
+                error="single_server_boot_failed",
+                error_class="single_server_boot_failed",
+            )
+            failed_boots.append(failed)
+            # Recorded now and uncommitted: a concurrency the server would not
+            # come up at is the finding, and whether it counts toward the curve
+            # is not known until a lower rung either boots or does not.
+            run.record_rung(
+                arm_name,
+                failed,
+                stage=STAGE_BOOT_ATTEMPT,
+                committed=False,
+                start_time=boot_started_iso,
+                wall_duration_sec=boot_elapsed,
             )
             boot_idx += 1
             continue
@@ -613,127 +853,89 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         # Boot succeeded (br is not None here — boot_failed guarded above).
         assert br is not None
         boot_succeeded = True
+        boot_only = str(getattr(br, "note", "") or "") == "server_lifecycle_boot_only"
         # Commit the higher-CONC failed boots (genuine capacity failures) first.
-        for fb in failed_boots:
-            arm_results.append(fb)
-            _all_results_ref.append(fb)
-        arm_results.append(br)
-        _all_results_ref.append(br)
+        run.commit_failed_boots(arm_name, failed_boots)
+        if not boot_only:
+            run.results.append(br)
+        run.record_rung(arm_name, br, stage=STAGE_BOOT, start_time=boot_started_iso, wall_duration_sec=boot_elapsed)
+        if recorder is not None:
+            recorder.record_arm_boot(
+                arm_name,
+                succeeded=True,
+                booted_conc=variant_conc(boot_variant),
+                attempted_concs=[variant_conc(variant) for variant in grid[: boot_idx + 1]],
+                failed_concs=[variant_conc(fb) for fb in failed_boots],
+            )
         # Incremental flush after boot point.
-        _maybe_flush(
-            state=state,
-            session_dir=session_dir,
-            json_path=json_path,
-            csv_path=csv_path,
-            all_results=_all_results_ref,
-            concs=list(concs_desc),
-            isl=isl,
-            osl=osl,
-            opt_args=opt_args,
-            opt_envs=opt_envs,
-            workspace=workspace,
-            started_at=started_at,
-            total_budget_sec=total_budget_sec,
-            has_budget=has_budget,
-            budget_exhausted=_budget_state.get("budget_exhausted", False),
-            budget_skip_reason=_budget_state.get("budget_skip_reason", ""),
-            budget_remaining_sec=_budget_state.get("budget_remaining_sec"),
-        )
+        run.flush_progress()
         break
 
     if not boot_succeeded:
-        # Every CONC failed to boot the persistent server — retry the full grid
-        # via Option B (per-variant restart, no lifecycle) which may succeed where
-        # persistent reuse could not. Its results supersede the failed boot attempts.
+        # Every CONC failed to boot the persistent server — retry the full grid via Option B (per-variant restart, no
+        # lifecycle) which may succeed where persistent reuse could not.
         log.warning(
             "conc_sweep single-server: arm=%s all boot attempts failed; "
             "falling back to Option B (per-variant restart) for the full ladder",
             arm_name,
         )
-        ob_results = await _sweep_arm_option_b(
-            arm_name=arm_name,
-            grid=grid,
-            base_yaml_path=base_yaml_path,
-            workspace=workspace,
-            model_path=model_path,
-            gpu_type=gpu_type,
-            variant_timeout_sec=variant_timeout_sec,
-            soft_deadline_sec=soft_deadline_sec,
-            deadline=deadline,
-            state=state,
-            session_dir=session_dir,
-            json_path=json_path,
-            csv_path=csv_path,
-            started_at=started_at,
-            total_budget_sec=total_budget_sec,
-            has_budget=has_budget,
-            opt_args=opt_args,
-            opt_envs=opt_envs,
-            _all_results_ref=_all_results_ref,
-            _budget_state=_budget_state,
-            serving_lease=arm_lease,
-        )
-        arm_results.extend(ob_results)
-        if arm_lease is not None:
-            arm_lease.close()
-        return arm_results
+        if recorder is not None:
+            recorder.record_arm_boot(
+                arm_name,
+                succeeded=False,
+                attempted_concs=[variant_conc(variant) for variant in grid],
+                failed_concs=[variant_conc(fb) for fb in failed_boots],
+            )
+            # The whole ladder is retried per-rung, and those results supersede
+            # the boot attempts rather than adding to them -- which is why the
+            # attempts above stay uncommitted.
+            recorder.record_arm_strategy(
+                arm_name,
+                strategy=STRATEGY_SERVER_RESTART,
+                reason="all_boot_attempts_failed",
+                lifecycle_eligible=lc_eligible,
+                lifecycle_reason=lc_reason,
+                port=port,
+                framework=framework,
+                serving_lease_held=arm_lease is not None,
+            )
+        await _sweep_ladder_by_restart()
+        return
 
     # Server is up: sweep remaining CONCs by reuse.
+    reuse_failure: BaseException | None = None
     try:
-        reuse_grid = grid[boot_idx + 1 :]
+        reuse_grid = (
+            grid[boot_idx:]
+            if str(getattr(br, "note", "") or "") == "server_lifecycle_boot_only"
+            else grid[boot_idx + 1 :]
+        )
         for r_idx, variant in enumerate(reuse_grid):
-            # Check task-level budget before each reuse point.
-            _reuse_remaining = (deadline - time.time()) if has_budget and deadline is not None else None
-            if has_budget and _reuse_remaining is not None and _reuse_remaining <= 0:
-                _budget_state["budget_exhausted"] = True
-                _budget_state["budget_skip_reason"] = "total_budget_exhausted"
-                _budget_state["budget_remaining_sec"] = max(0.0, float(_reuse_remaining))
-                for v in reuse_grid[r_idx:]:
-                    skip_r = _budget_skip_result(v)
-                    arm_results.append(skip_r)
-                    _all_results_ref.append(skip_r)
-                break
-            if has_budget and _reuse_remaining is not None and _reuse_remaining < float(variant_timeout_sec):
-                _budget_state["budget_exhausted"] = True
-                _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
-                _budget_state["budget_remaining_sec"] = max(0.0, float(_reuse_remaining))
-                for v in reuse_grid[r_idx:]:
-                    skip_r = _budget_skip_result(v)
-                    arm_results.append(skip_r)
-                    _all_results_ref.append(skip_r)
-                break
+            _reuse_remaining = session_deadline_to_remaining_sec(run.session_deadline_sec)
             # Check session deadline before each reuse point.
-            if getattr(state, "closing_phase", False) or getattr(state, "stop_reason", ""):
-                _budget_state["budget_exhausted"] = True
-                _budget_state["budget_skip_reason"] = "session_deadline_reserve"
-                _budget_state["budget_remaining_sec"] = 0.0
+            if run.session_closing():
+                run.budget.spend_on_session_reserve()
                 for v in reuse_grid[r_idx:]:
                     skip_r = _budget_skip_result(v)
-                    arm_results.append(skip_r)
-                    _all_results_ref.append(skip_r)
+                    run.results.append(skip_r)
+                    run.record_rung(arm_name, skip_r, stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0)
                 break
 
             is_last = r_idx == len(reuse_grid) - 1
+            reuse_started_iso = now_iso("seconds")
+            reuse_started_at = time.time()
             server_lifecycle_reuse = {
                 "cleanup": is_last,
                 "pid_dir": str(pid_dir),
                 "port": port,
             }
             try:
-                reuse_results = await run_grid(
-                    base_yaml_path=base_yaml_path,
-                    base_extra_args="",
-                    grid=[variant],
-                    output_root=workspace,
-                    variant_timeout_sec=variant_timeout_sec,
-                    model_path=model_path,
-                    gpu_type=gpu_type,
+                reuse_results = await run.run_rung(
+                    variant,
+                    serving_lease=arm_lease,
                     server_lifecycle=server_lifecycle_reuse,
                     server_already_ready=True,
-                    preclean_before_run=False,
                     warmup_before_measure=False,
-                    soft_deadline_sec=soft_deadline_sec,
-                    serving_lease=arm_lease,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning(
@@ -748,144 +950,68 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                         extra_server_args=variant.extra_server_args,
                         extra_envs=dict(variant.extra_envs),
                         status="failed",
-                        error=f"single_server_reuse_exception: {exc}",
-                        error_class="single_server_reuse_exception",
+                        error=f"single_server_reuse: {exc}",
+                        error_class=type(exc).__name__,
                     )
                 ]
+            reuse_elapsed = round(time.time() - reuse_started_at, 3)
             for rr in reuse_results:
-                arm_results.append(rr)
-                _all_results_ref.append(rr)
+                run.results.append(rr)
+                stopped = rr.error_class == run.deadline_stop.error_class
+                run.record_rung(
+                    arm_name,
+                    rr,
+                    stage=STAGE_BUDGET_SKIP if stopped else STAGE_REUSE,
+                    start_time=reuse_started_iso,
+                    wall_duration_sec=reuse_elapsed,
+                    budget_remaining_sec=run.budget.remaining_sec if stopped else _reuse_remaining,
+                )
             # Incremental flush after each reuse point.
-            _maybe_flush(
-                state=state,
-                session_dir=session_dir,
-                json_path=json_path,
-                csv_path=csv_path,
-                all_results=_all_results_ref,
-                concs=list(concs_desc),
-                isl=isl,
-                osl=osl,
-                opt_args=opt_args,
-                opt_envs=opt_envs,
-                workspace=workspace,
-                started_at=started_at,
-                total_budget_sec=total_budget_sec,
-                has_budget=has_budget,
-                budget_exhausted=_budget_state.get("budget_exhausted", False),
-                budget_skip_reason=_budget_state.get("budget_skip_reason", ""),
-                budget_remaining_sec=_budget_state.get("budget_remaining_sec"),
-            )
+            run.flush_progress()
+    except BaseException as exc:
+        reuse_failure = exc
+        raise
     finally:
-        # Safety teardown — idempotent, no-op if already torn down. Reap the
-        # server BEFORE releasing the Ray lease so no GPU process outlives it.
+        # Safety teardown — idempotent, no-op if already torn down.
         try:
             teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:
+            # The last word on this arm's server: a teardown that failed here
+            # leaves it alive past the arm that owned it.
+            log.warning("conc_sweep single-server: arm=%s teardown failed", arm_name, exc_info=True)
+            if recorder is not None:
+                recorder.record_fault(stage=f"teardown_lifecycle_server:{arm_name}", exc=exc)
         if arm_lease is not None:
             arm_lease.close()
+        run.close_arm(arm_name, reuse_failure)
 
-    return arm_results
 
-
-async def _sweep_arm_option_b(  # noqa: PLR0913
+async def _sweep_arm_option_b(
+    run: _SweepRun,
     arm_name: str,
     grid: list[GridVariant],
     *,
-    base_yaml_path: Path,
-    workspace: Path,
-    model_path: str,
-    gpu_type: str,
-    variant_timeout_sec: int,
-    soft_deadline_sec: float | None,
-    deadline: float | None,
-    state: SharedState,
-    session_dir: Path,
-    json_path: Path,
-    csv_path: Path,
-    started_at: float,
-    total_budget_sec: int | None,
-    has_budget: bool,
-    opt_args: str,
-    opt_envs: dict[str, str],
-    _all_results_ref: list[VariantResult],
-    _budget_state: dict[str, Any],
     serving_lease: Any = None,
-) -> list[VariantResult]:
+) -> None:
     """Option B fallback: run each variant with its own server (legacy behaviour).
 
     Used when ``_sweep_one_arm_single_server`` detects the framework is not
-    lifecycle-eligible or all boot retries are exhausted.
-
-    Args:
-        arm_name: Label for this arm (``baseline`` or ``optimized``).
-        grid: Pre-built grid for this arm.
-        base_yaml_path: Materialized base Magpie YAML path.
-        workspace: Per-sweep workspace root.
-        model_path: Resolved model path string.
-        gpu_type: Resolved GPU type string.
-        variant_timeout_sec: Per-variant hard timeout in seconds.
-        soft_deadline_sec: Session-clamped soft deadline in seconds, or None.
-        deadline: Absolute epoch (``time.time()``) at which the total budget
-            expires, or None when budget tracking is off (``has_budget`` False).
-        state: Shared run state.
-        session_dir: Session directory.
-        json_path: Pre-resolved JSON report path.
-        csv_path: Pre-resolved CSV report path.
-        started_at: Wall-clock start of the overall sweep.
-        total_budget_sec: Configured total budget in seconds (``None`` when
-            the budget gate is off).
-        has_budget: Whether budget tracking is active.
-        opt_args: Optimized server args.
-        opt_envs: Optimized server env vars.
-        _all_results_ref: Shared results list (mutated in place).
-        _budget_state: Shared budget-status dict (mutated in place).
-        serving_lease: Caller-owned Ray serving lease forwarded to ``run_grid``;
-            None when the arm runs on the local (non-Ray) path.
-
-    Returns:
-        List of VariantResult for the arm (one per CONC).
+    lifecycle-eligible or all boot retries are exhausted. The same monotonic
+    deadline covers both arms and all retries. ``serving_lease`` is ``None``
+    when the arm runs on the local (non-Ray) path.
     """
-    arm_results: list[VariantResult] = []
     for variant in grid:
-        # Task-level budget checks.
-        _ob_rem = (deadline - time.time()) if has_budget and deadline is not None else None
-        if has_budget and _ob_rem is not None and _ob_rem <= 0:
-            _budget_state["budget_exhausted"] = True
-            _budget_state["budget_skip_reason"] = "total_budget_exhausted"
-            _budget_state["budget_remaining_sec"] = max(0.0, float(_ob_rem))
+        _ob_rem = session_deadline_to_remaining_sec(run.session_deadline_sec)
+        if run.session_closing():
+            run.budget.spend_on_session_reserve()
             skip_r = _budget_skip_result(variant)
-            arm_results.append(skip_r)
-            _all_results_ref.append(skip_r)
+            run.results.append(skip_r)
+            run.record_rung(arm_name, skip_r, stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0)
             continue
-        if has_budget and _ob_rem is not None and _ob_rem < float(variant_timeout_sec):
-            _budget_state["budget_exhausted"] = True
-            _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
-            _budget_state["budget_remaining_sec"] = max(0.0, float(_ob_rem))
-            skip_r = _budget_skip_result(variant)
-            arm_results.append(skip_r)
-            _all_results_ref.append(skip_r)
-            continue
-        if getattr(state, "closing_phase", False) or getattr(state, "stop_reason", ""):
-            _budget_state["budget_exhausted"] = True
-            _budget_state["budget_skip_reason"] = "session_deadline_reserve"
-            _budget_state["budget_remaining_sec"] = 0.0
-            skip_r = _budget_skip_result(variant)
-            arm_results.append(skip_r)
-            _all_results_ref.append(skip_r)
-            continue
+        rung_started_iso = now_iso("seconds")
+        rung_started_at = time.time()
         try:
-            sub = await run_grid(
-                base_yaml_path=base_yaml_path,
-                base_extra_args="",
-                grid=[variant],
-                output_root=workspace,
-                variant_timeout_sec=variant_timeout_sec,
-                model_path=model_path,
-                gpu_type=gpu_type,
-                soft_deadline_sec=soft_deadline_sec,
-                serving_lease=serving_lease,
-            )
+            sub = await run.run_rung(variant, serving_lease=serving_lease)
         except Exception as exc:  # noqa: BLE001
             sub = [
                 VariantResult(
@@ -893,116 +1019,30 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
                     extra_server_args=variant.extra_server_args,
                     extra_envs=dict(variant.extra_envs),
                     status="failed",
-                    error=f"option_b_exception: {exc}",
-                    error_class="option_b_exception",
+                    error=f"option_b: {exc}",
+                    error_class=type(exc).__name__,
                 )
             ]
+        rung_elapsed = round(time.time() - rung_started_at, 3)
         for r in sub:
-            arm_results.append(r)
-            _all_results_ref.append(r)
-        _concs = [int(v.extra_envs["CONC"]) for v in grid if v.extra_envs.get("CONC")]
-        _isl = int(next((v.extra_envs["ISL"] for v in grid if v.extra_envs.get("ISL")), "0"))
-        _osl = int(next((v.extra_envs["OSL"] for v in grid if v.extra_envs.get("OSL")), "0"))
-        _maybe_flush(
-            state=state,
-            session_dir=session_dir,
-            json_path=json_path,
-            csv_path=csv_path,
-            all_results=_all_results_ref,
-            concs=_concs,
-            isl=_isl,
-            osl=_osl,
-            opt_args=opt_args,
-            opt_envs=opt_envs,
-            workspace=workspace,
-            started_at=started_at,
-            total_budget_sec=total_budget_sec,
-            has_budget=has_budget,
-            budget_exhausted=_budget_state.get("budget_exhausted", False),
-            budget_skip_reason=_budget_state.get("budget_skip_reason", ""),
-            budget_remaining_sec=_budget_state.get("budget_remaining_sec"),
-        )
-    return arm_results
+            run.results.append(r)
+            stopped = r.error_class == run.deadline_stop.error_class
+            run.record_rung(
+                arm_name,
+                r,
+                stage=STAGE_BUDGET_SKIP if stopped else STAGE_SERVER_RESTART,
+                start_time=rung_started_iso,
+                wall_duration_sec=rung_elapsed,
+                budget_remaining_sec=run.budget.remaining_sec if stopped else _ob_rem,
+            )
+        run.flush_progress()
 
 
-def _maybe_flush(  # noqa: PLR0913
-    *,
-    state: SharedState,
-    session_dir: Path,
-    json_path: Path,
-    csv_path: Path,
-    all_results: list[VariantResult],
-    concs: list[int],
-    isl: int,
-    osl: int,
-    opt_args: str,
-    opt_envs: dict[str, str],
-    workspace: Path,
-    started_at: float,
-    total_budget_sec: int | None,
-    has_budget: bool,
-    budget_exhausted: bool,
-    budget_skip_reason: str,
-    budget_remaining_sec: float | None,
-) -> None:
-    """Build a partial payload from *all_results* and flush it via :func:`_flush_partial_conc_sweep_report`.
-
-    A thin convenience wrapper that avoids repeating the argument list at every
-    call site.
-
-    Args:
-        state: Shared run state (metadata fields).
-        session_dir: Session directory.
-        json_path: Pre-resolved JSON report path.
-        csv_path: Pre-resolved CSV report path.
-        all_results: All results collected so far (cross-arm).
-        concs: Full requested concurrency ladder (informational).
-        isl: Input sequence length.
-        osl: Output sequence length.
-        opt_args: Optimized server args.
-        opt_envs: Optimized server env vars.
-        workspace: Per-sweep workspace root.
-        started_at: Wall-clock start of the sweep.
-        total_budget_sec: Configured total budget in seconds (``None`` when
-            the budget gate is off).
-        has_budget: Whether budget tracking is active.
-        budget_exhausted: Whether the budget has been exhausted.
-        budget_skip_reason: Reason string when budget was exhausted.
-        budget_remaining_sec: Remaining budget seconds when exhausted.
-    """
-    _flush_partial_conc_sweep_report(
-        results=list(all_results),
-        state=state,
-        session_dir=session_dir,
-        json_path=json_path,
-        csv_path=csv_path,
-        concs=concs,
-        isl=isl,
-        osl=osl,
-        opt_args=opt_args,
-        opt_envs=opt_envs,
-        workspace=workspace,
-        started_at=started_at,
-        total_budget_sec=total_budget_sec,
-        has_budget=has_budget,
-        budget_exhausted=budget_exhausted,
-        budget_skip_reason=budget_skip_reason,
-        budget_remaining_sec=budget_remaining_sec,
-    )
-
-
-def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> None:
+def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> Exception | None:
     """Atomically write the conc-sweep summary JSON + CSV to the reports dir.
 
-    Safe to call after each concurrency point: uses an atomic rename so a
-    hard kill between write and rename never leaves a partial/corrupt file.
-    Internal errors are logged at DEBUG level and swallowed so the sweep loop
-    is never interrupted by an IO failure.
-
-    Args:
-        payload: The current (possibly partial) sweep payload dict.  Must
-            already carry ``report_json_path`` and ``report_csv_path`` keys.
-        session_dir: Session directory used to locate the reports sub-dir.
+    Returns what stopped the write, so a caller that recorded the paths can say
+    they are where the report was meant to go rather than where it is.
     """
     try:
         rdir = reports_dir(session_dir)
@@ -1017,120 +1057,14 @@ def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> None
             (payload.get("optimized") or {}).get("points") or []
         )
         _write_csv(csv_path, all_points)
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            instrument.record_singleton_section(
-                session_dir,
-                "conc_sweep_summary",
-                payload,
-                producer="conc_sweep",
-            )
-        except Exception:  # noqa: BLE001 — capture must never break the sweep
-            log.debug("conc_sweep breakdown capture failed", exc_info=True)
-    except Exception:  # noqa: BLE001
-        log.debug("conc_sweep: _flush_conc_sweep_report failed", exc_info=True)
-
-
-def _flush_partial_conc_sweep_report(  # noqa: PLR0913
-    *,
-    results: list[VariantResult],
-    state: SharedState,
-    session_dir: Path,
-    json_path: Path,
-    csv_path: Path,
-    concs: list[int],
-    isl: int,
-    osl: int,
-    opt_args: str,
-    opt_envs: dict[str, str],
-    workspace: Path,
-    started_at: float,
-    total_budget_sec: int | None,
-    has_budget: bool,
-    budget_exhausted: bool,
-    budget_skip_reason: str,
-    budget_remaining_sec: float | None,
-    partial: bool = True,
-) -> None:
-    """Build and flush an incremental payload from the results collected so far.
-
-    Extracts partial baseline/optimized points from *results*, builds a minimal
-    in-progress payload, sets ``report_json_path`` / ``report_csv_path``, and
-    delegates to :func:`_flush_conc_sweep_report`.
-
-    Args:
-        results: Variant results collected so far (may be partial).
-        state: Shared run state (used for metadata fields).
-        session_dir: Session directory for report output.
-        json_path: Destination JSON path (already resolved).
-        csv_path: Destination CSV path (already resolved).
-        concs: Full requested concurrency ladder.
-        isl: Input sequence length.
-        osl: Output sequence length.
-        opt_args: Optimized server args.
-        opt_envs: Optimized server env vars.
-        workspace: Workspace directory for this sweep run.
-        started_at: Wall-clock start time of the sweep.
-        total_budget_sec: Total budget in seconds.
-        has_budget: Whether budget tracking is active.
-        budget_exhausted: Whether the budget has been exhausted.
-        budget_skip_reason: Reason string when budget was exhausted.
-        budget_remaining_sec: Remaining budget seconds when exhausted.
-        partial: When ``True`` the status is set to ``"in_progress"`` rather
-            than a terminal status; this makes it easy to distinguish an
-            incremental checkpoint from a final write.
-    """
-    try:
-        b_pts: list[dict[str, Any]] = []
-        o_pts: list[dict[str, Any]] = []
-        for v in results:
-            if v.name.startswith("baseline_"):
-                b_pts.append(_point_from_variant(v, arm="baseline"))
-            elif v.name.startswith("optimized_"):
-                o_pts.append(_point_from_variant(v, arm="optimized"))
-        b_pts.sort(key=lambda p: p["conc"])
-        o_pts.sort(key=lambda p: p["conc"])
-
-        comparison, summary = conc_pair_comparison(b_pts, o_pts)
-        p: dict[str, Any] = {
-            "schema_version": SCHEMA_VERSION,
-            "status": "in_progress" if partial else "unknown",
-            "session_id": str(getattr(state, "session_id", "") or session_dir.name),
-            "isl": isl,
-            "osl": osl,
-            "tp": int(getattr(state, "tp", 0) or 0),
-            "concs_requested": concs,
-            "baseline": {"extra_server_args": "", "extra_envs": {}, "points": b_pts},
-            "optimized": {"extra_server_args": opt_args, "extra_envs": opt_envs, "points": o_pts},
-            "comparison": comparison,
-            "summary": summary,
-            "workspace": workspace.as_posix(),
-            "elapsed_sec": round(time.time() - started_at, 2),
-            "total_budget_sec": total_budget_sec if has_budget else None,
-            "budget_exhausted": budget_exhausted,
-            "report_json_path": json_path.as_posix(),
-            "report_csv_path": csv_path.as_posix(),
-        }
-        if budget_exhausted:
-            p["budget_skip_reason"] = budget_skip_reason
-            if budget_remaining_sec is not None:
-                p["budget_remaining_sec"] = round(float(budget_remaining_sec), 2)
-        _flush_conc_sweep_report(p, session_dir)
-    except Exception:  # noqa: BLE001
-        log.debug("conc_sweep: _flush_partial_conc_sweep_report failed", exc_info=True)
+    except Exception as exc:
+        log.warning("conc_sweep: _flush_conc_sweep_report failed", exc_info=True)
+        return exc
+    return None
 
 
 def _skip(reason: str, **extras: Any) -> dict[str, Any]:
-    """Build a non-fatal skip envelope. Reason is operator-readable.
-
-    Args:
-        reason: Operator-readable reason for skipping.
-        **extras: Additional key/value fields to merge into the envelope.
-
-    Returns:
-        A skip-status payload dict.
-    """
+    """Build a non-fatal skip envelope. Reason is operator-readable."""
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": "skipped",
@@ -1140,24 +1074,21 @@ def _skip(reason: str, **extras: Any) -> dict[str, Any]:
     return payload
 
 
-def conc_sweep_declined_to_run(record: Mapping[str, Any] | None) -> bool:
-    """Whether a conc-sweep record is one that never started a variant.
+def _declined(recorder: Any, reason: str, **extras: Any) -> dict[str, Any]:
+    """Build a skip envelope and close the sweep's event on it.
 
-    ``was_skipped`` covers two different outcomes: the pre-flight envelope
-    from :func:`_skip`, which declines before a server boots, and a sweep that
-    ran its whole ladder but exhausted its budget before producing a
-    comparable pair (see :func:`_budget_limited_without_valid_pair`). Only the
-    second can set ``budget_exhausted``, which separates them without reading
-    ``skip_reason``. Any future skip raised after variants start must set it
-    too, or it will be misread as a sweep that declined.
-
-    Args:
-        record (Mapping[str, Any] | None): A conc-sweep payload or the
-            ``last_conc_sweep`` record persisted from one.
-
-    Returns:
-        bool: ``True`` when the sweep declined before running anything.
+    A sweep that declines is still a sweep that was dispatched. Routing every
+    pre-flight refusal through here means none can be added later without the
+    event learning about it.
     """
+    payload = _skip(reason, **extras)
+    if recorder is not None:
+        recorder.record_declined(payload)
+    return payload
+
+
+def conc_sweep_declined_to_run(record: Mapping[str, Any] | None) -> bool:
+    """Whether a conc-sweep record is one that never started a variant."""
     rec = record or {}
     return bool(rec.get("was_skipped")) and not rec.get("budget_exhausted")
 
@@ -1167,56 +1098,59 @@ async def run_conc_sweep(
     session_dir: Path,
     *,
     concs: list[int] | None = None,
-    variant_timeout_sec: int = DEFAULT_VARIANT_TIMEOUT_SEC,
     total_budget_sec: int | None = DEFAULT_TOTAL_BUDGET_SEC,
     num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
-    write_reports: bool = True,
+    recorder: Any = None,
 ) -> dict[str, Any]:
     """Run the full conc-sweep SWEEP-phase action end-to-end (always returns a dict; never raises; no files written when skipped).
 
-    Args:
-        state: Shared run state (baseline, current_best, workload shape).
-        session_dir: Session directory for workspace and report outputs.
-        concs: Concurrency ladder to sweep; ``None`` uses the default ladder.
-        variant_timeout_sec: Per-variant timeout in seconds.
-        total_budget_sec: Total wall-clock budget in seconds. ``None`` runs the
-            ladder unbounded; ``<=0`` means the caller's clamp left no time and
-            the sweep skips immediately rather than running unbounded.
-        num_prompts_factor: Multiplier applied to each CONC for NUM_PROMPTS.
-        write_reports: When ``True``, write the JSON/CSV reports to disk.
-
-    Returns:
-        The sweep payload dict (a skip envelope when prerequisites are unmet).
+    ``concs`` of ``None`` uses the default ladder. ``total_budget_sec`` of
+    ``None`` removes only the sweep budget, not the session deadline; ``<=0`` means the caller's clamp
+    left no time and the sweep skips immediately. A ``None`` recorder records
+    nothing, which is what a direct caller with no session bound wants.
+    Returns a skip envelope when prerequisites are unmet.
     """
+    _, benchmark_timeout_sec = resolve_benchmark_timeouts()
+    session_deadline_sec, variant_expected_sec = session_grid_bounds(state)
     session_dir = Path(session_dir)
+    # Whether the ladder was handed to the sweep or picked for the workload --
+    # a distinction only this line can still see, since the two are the same
+    # list one statement later.
+    grid_source = GRID_REQUESTED if concs is not None else GRID_MODE_DEFAULT
     # ``None`` → default ladder; an explicit empty list short-circuits below.
-    concs = list(concs) if concs is not None else list(DEFAULT_CONCS)
+    concs = list(concs) if concs is not None else default_concs_for_mode(getattr(state, "benchmark_mode", ""))
     isl = int(getattr(state, "isl", 0) or 0)
     osl = int(getattr(state, "osl", 0) or 0)
     baseline_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
 
-    has_opt, opt_args, opt_envs = _has_optimization(state)
+    optimized = _optimized_arm(state)
 
     if baseline_tput <= 0:
-        return _skip("no_baseline_tput")
+        return _declined(recorder, "no_baseline_tput")
     if isl <= 0 or osl <= 0:
-        return _skip("missing_workload_shape", isl=isl, osl=osl)
-    if not has_opt:
-        return _skip("no_optimization_to_compare")
+        return _declined(recorder, "missing_workload_shape", isl=isl, osl=osl)
+    if optimized is None:
+        return _declined(recorder, "no_optimization_to_compare")
+    if optimized.overlay:
+        from ..actions.executors._grid_runner import _is_safe_path_entry
+        from ..loop.coordinator_helpers import _geak_overlay_is_loadable
+
+        if not _is_safe_path_entry(optimized.overlay) or not _geak_overlay_is_loadable(optimized.overlay):
+            return _declined(recorder, "optimized_overlay_unavailable", final_overlay=optimized.overlay)
     if not concs:
-        return _skip("empty_conc_list")
+        return _declined(recorder, "empty_conc_list")
     # A non-positive budget is "no time left", not "budget gate off": running the
     # ladder here would spend wall-clock the caller already accounted as gone.
     # No variant started, so this is a decline (see conc_sweep_declined_to_run)
     # and must not stamp ``budget_exhausted``.
     if total_budget_sec is not None and int(total_budget_sec) <= 0:
-        return _skip("no_time_budget_remaining", total_budget_sec=int(total_budget_sec))
+        return _declined(recorder, "no_time_budget_remaining", total_budget_sec=int(total_budget_sec))
 
     # Prefer the materialized baseline config; fall back to the shipped asset.
     base_yaml_raw = str(getattr(state, "baseline_config_path", "") or "").strip() or str(default_baseline_config())
     base_yaml_path = Path(base_yaml_raw)
     if not base_yaml_path.exists():
-        return _skip("baseline_config_missing", config_path=base_yaml_raw)
+        return _declined(recorder, "baseline_config_missing", config_path=base_yaml_raw)
 
     task_id = f"conc_sweep_{utc_now_compact()}"
     workspace = runs_root(session_dir) / "conc_sweep" / task_id
@@ -1227,34 +1161,69 @@ async def run_conc_sweep(
         state_model_path=str(getattr(state, "model_path", "") or ""),
         for_serving=True,
     )
-    # Mirror the main flow (baseline/sweep/...): prefer $GPU_TYPE (cli.py
-    # canonicalizes mi325x/mi308x -> mi300x), fall back to state.gpu_type, then
-    # canonicalize through _gpu_runner_type so the selected Magpie script is a
-    # shipped runner (sglang_mi300x.sh), never the unshipped sglang_mi325x.sh.
+    # Mirror the main flow (baseline/sweep/...): prefer $GPU_TYPE (cli.py canonicalizes mi325x/mi308x -> mi300x), fall
+    # back to state.gpu_type, then canonicalize through _gpu_runner_type so the selected Magpie script is a shipped
+    # runner (sglang_mi300x.sh), never the unshipped sglang_mi325x.sh.
     from hyperloom.inference_optimizer.gpu_types import _gpu_runner_type
 
     resolved_gpu = _gpu_runner_type(
         os.environ.get("GPU_TYPE", "").strip().lower() or str(getattr(state, "gpu_type", "") or "").strip().lower()
     )
+    benchmark_script = baseline_benchmark_script(state)
     try:
         base_yaml_path = materialize_config_with_envs(
             base_yaml_path,
             workspace,
             model_path=resolved_model or None,
             gpu_type=resolved_gpu or None,
+            benchmark_script=benchmark_script,
             out_name="conc_sweep_base.with_envs.yaml",
+            grading=getattr(state, "grading", None),
         )
     except FrameworkScriptMismatchError as exc:
-        return _skip(
+        return _declined(
+            recorder,
             "framework_script_mismatch",
             error_class="framework_script_mismatch",
             error=str(exc),
             workspace=str(workspace),
         )
 
-    has_budget = total_budget_sec is not None
+    if recorder is not None:
+        cb = state.current_best if isinstance(getattr(state, "current_best", None), dict) else {}
+        recorder.record_workload(
+            session_id=getattr(state, "session_id", "") or session_dir.name,
+            isl=isl,
+            osl=osl,
+            tp=getattr(state, "tp", 0),
+            benchmark_mode=getattr(state, "benchmark_mode", ""),
+        )
+        recorder.record_anchor(
+            baseline_tput=baseline_tput,
+            anchor_tput=cb.get("tput"),
+            tp=getattr(state, "tp", 0),
+            variant_id=cb.get("variant_name"),
+            action=cb.get("action"),
+            extra_server_args=optimized.args,
+            extra_envs=optimized.envs,
+        )
+        recorder.record_environment(
+            sweep_task_id=task_id,
+            workspace=workspace.as_posix(),
+            model_path=resolved_model,
+            gpu_type=resolved_gpu,
+            base_config_path=base_yaml_path.as_posix(),
+            report_json_path=(reports_dir(session_dir) / "conc_sweep_summary.json").as_posix(),
+            report_csv_path=(reports_dir(session_dir) / "conc_sweep_raw.csv").as_posix(),
+        )
+
     started_at = time.time()
-    deadline = started_at + total_budget_sec if has_budget else None
+    deadline_stop = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
+    if total_budget_sec is not None:
+        sweep_deadline_sec = time.monotonic() + total_budget_sec
+        if session_deadline_sec is None or sweep_deadline_sec < session_deadline_sec:
+            session_deadline_sec = sweep_deadline_sec
+            deadline_stop = _SWEEP_BUDGET_STOP
 
     # Pre-compute report paths so incremental checkpoints carry them.
     rdir = reports_dir(session_dir)
@@ -1262,180 +1231,96 @@ async def run_conc_sweep(
     json_path = rdir / "conc_sweep_summary.json"
     csv_path = rdir / "conc_sweep_raw.csv"
 
-    # Compute session soft_deadline once (used in both paths).
-    _SESSION_CLOSE_RESERVE_SEC = 120.0
-    _session_soft_dl: float | None = None
-    _session_rem_fn = getattr(state, "remaining_minutes", None)
-    if callable(_session_rem_fn):
-        _sr = _session_rem_fn()
-        if _sr is not None:
-            _sr_sec = _sr * 60.0
-            _clamped = max(0.0, _sr_sec - _SESSION_CLOSE_RESERVE_SEC)
-            _session_soft_dl = min(float(variant_timeout_sec), _clamped) if _clamped > 0 else None
+    if recorder is not None:
+        recorder.record_budget(
+            declared_total_sec=total_budget_sec,
+            granted_total_sec=total_budget_sec,
+            rung_cost_sec=variant_expected_sec,
+            raised=False,
+            gate_active=total_budget_sec is not None,
+            deadline=started_at + total_budget_sec if total_budget_sec is not None else None,
+        )
 
-    results: list[VariantResult] = []
-    budget_exhausted = False
-    budget_skip_reason = ""
-    budget_remaining_sec: float | None = None
-
-    # Arm-major single-server path.
-    # Order: optimized first (more informative for decision-making), then baseline.
-    # Within each arm: descending CONC so the server is booted at max capacity.
-    concs_desc = _order_concs_desc(concs)
+    run = _SweepRun(
+        state=state,
+        session_dir=session_dir,
+        workspace=workspace,
+        base_yaml_path=base_yaml_path,
+        model_path=resolved_model,
+        gpu_type=resolved_gpu,
+        benchmark_script=benchmark_script,
+        isl=isl,
+        osl=osl,
+        concs=concs,
+        num_prompts_factor=num_prompts_factor,
+        optimized=optimized,
+        baseline=_Arm(name="baseline"),
+        benchmark_timeout_sec=benchmark_timeout_sec,
+        session_deadline_sec=session_deadline_sec,
+        variant_expected_sec=variant_expected_sec,
+        deadline_stop=deadline_stop,
+        started_at=started_at,
+        total_budget_sec=total_budget_sec,
+        json_path=json_path,
+        csv_path=csv_path,
+        recorder=recorder,
+    )
     log.info(
         "conc_sweep (single-server): arms=optimized,baseline concs=%s isl=%d osl=%d total_budget=%s",
-        concs_desc,
+        run.concs_desc,
         isl,
         osl,
-        f"{total_budget_sec}s" if has_budget else "unbounded",
+        f"{total_budget_sec}s" if total_budget_sec is not None else "unbounded",
     )
-    _budget_state: dict[str, Any] = {
-        "budget_exhausted": budget_exhausted,
-        "budget_skip_reason": budget_skip_reason,
-        "budget_remaining_sec": budget_remaining_sec,
-    }
-    arms_order = [
-        ("optimized", opt_args, dict(opt_envs)),
-        ("baseline", "", {}),
-    ]
-    for arm_name, arm_args, arm_envs in arms_order:
-        skip_grid_fn = lambda _an=arm_name, _aa=arm_args, _ae=arm_envs: _build_arm_grid(  # noqa: E731
-            _an,
-            concs_desc,
-            isl=isl,
-            osl=osl,
+    arms_order = [run.optimized, run.baseline]
+    if recorder is not None:
+        recorder.record_plan(
+            concs_requested=concs,
+            concs_ordered=run.concs_desc,
+            grid_source=grid_source,
             num_prompts_factor=num_prompts_factor,
-            arm_args=_aa,
-            arm_envs=_ae,
+            variant_timeout_sec=benchmark_timeout_sec,
+            arms_order=[arm.name for arm in arms_order],
         )
-
-        # Check overall budget before starting each arm.
-        _arm_remaining = (deadline - time.time()) if has_budget and deadline is not None else None
-        if has_budget and _arm_remaining is not None and _arm_remaining <= 0:
-            _budget_state["budget_exhausted"] = True
-            _budget_state["budget_skip_reason"] = "total_budget_exhausted"
-            _budget_state["budget_remaining_sec"] = max(0.0, float(_arm_remaining))
-            for v in skip_grid_fn():
-                results.append(_budget_skip_result(v))
+    for arm in arms_order:
+        if run.budget.refuses_next_arm():
+            run.results.extend(_deadline_skip_result(v, deadline_stop) for v in run.arm_grid(arm))
+            if recorder is not None:
+                recorder.record_arm_refused(
+                    arm.name, reason=run.budget.skip_reason, remaining_sec=run.budget.remaining_sec
+                )
             continue
-        if has_budget and _arm_remaining is not None and _arm_remaining < float(variant_timeout_sec):
-            _budget_state["budget_exhausted"] = True
-            _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
-            _budget_state["budget_remaining_sec"] = max(0.0, float(_arm_remaining))
-            for v in skip_grid_fn():
-                results.append(_budget_skip_result(v))
-            continue
-        if getattr(state, "closing_phase", False) or getattr(state, "stop_reason", ""):
-            _budget_state["budget_exhausted"] = True
-            _budget_state["budget_skip_reason"] = "session_deadline_reserve"
-            _budget_state["budget_remaining_sec"] = 0.0
-            for v in skip_grid_fn():
-                results.append(_budget_skip_result(v))
+        if run.session_closing():
+            run.budget.spend_on_session_reserve()
+            run.results.extend(_budget_skip_result(v) for v in run.arm_grid(arm))
+            if recorder is not None:
+                recorder.record_arm_refused(arm.name, reason=_SESSION_RESERVE, remaining_sec=0.0)
             continue
 
-        await _sweep_one_arm_single_server(
-            arm_name,
-            concs_desc,
-            isl=isl,
-            osl=osl,
-            num_prompts_factor=num_prompts_factor,
-            arm_args=arm_args,
-            arm_envs=arm_envs,
-            base_yaml_path=base_yaml_path,
-            workspace=workspace,
-            model_path=resolved_model,
-            gpu_type=resolved_gpu,
-            variant_timeout_sec=variant_timeout_sec,
-            soft_deadline_sec=_session_soft_dl,
-            deadline=deadline,
-            state=state,
-            session_dir=session_dir,
-            json_path=json_path,
-            csv_path=csv_path,
-            started_at=started_at,
-            total_budget_sec=total_budget_sec,
-            has_budget=has_budget,
-            opt_args=opt_args,
-            opt_envs=opt_envs,
-            _all_results_ref=results,
-            _budget_state=_budget_state,
-        )
-        # Results are added to `results` in place by _all_results_ref.
+        if recorder is not None:
+            recorder.open_arm(arm.name, extra_server_args=arm.args, extra_envs=arm.envs)
+        await _sweep_one_arm_single_server(run, arm)
 
-    budget_exhausted = _budget_state["budget_exhausted"]
-    budget_skip_reason = _budget_state["budget_skip_reason"]
-    budget_remaining_sec = _budget_state["budget_remaining_sec"]
-
-    elapsed_sec = time.time() - started_at
-
-    # Split by arm via the variant name prefix.
-    baseline_points: list[dict[str, Any]] = []
-    optimized_points: list[dict[str, Any]] = []
-    for vres in results:
-        if vres.name.startswith("baseline_"):
-            baseline_points.append(_point_from_variant(vres, arm="baseline"))
-        elif vres.name.startswith("optimized_"):
-            optimized_points.append(_point_from_variant(vres, arm="optimized"))
-    baseline_points.sort(key=lambda p: p["conc"])
-    optimized_points.sort(key=lambda p: p["conc"])
-
-    comparison, summary = conc_pair_comparison(baseline_points, optimized_points)
-    budget_limited_no_pair = _budget_limited_without_valid_pair(
-        budget_exhausted=budget_exhausted,
-        summary=summary,
-        baseline_points=baseline_points,
-        optimized_points=optimized_points,
-    )
-    status = "succeeded" if summary["successful_pairs"] else ("skipped" if budget_limited_no_pair else "failed")
-
+    payload = run.payload(in_progress=False)
+    comparison, summary = payload["comparison"], payload["summary"]
     ceiling = _build_roofline_ceiling(
         state,
         concs=concs,
         isl=isl,
         osl=osl,
-        baseline_points=baseline_points,
-        optimized_points=optimized_points,
+        baseline_points=payload["baseline"]["points"],
+        optimized_points=payload["optimized"]["points"],
     )
-
-    payload: dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
-        "status": status,
-        "session_id": str(getattr(state, "session_id", "") or session_dir.name),
-        "isl": isl,
-        "osl": osl,
-        "tp": int(getattr(state, "tp", 0) or 0),
-        "concs_requested": concs,
-        "baseline": {
-            "extra_server_args": "",
-            "extra_envs": {},
-            "points": baseline_points,
-        },
-        "optimized": {
-            "extra_server_args": opt_args,
-            "extra_envs": opt_envs,
-            "points": optimized_points,
-        },
-        "comparison": comparison,
-        "summary": summary,
-        "workspace": workspace.as_posix(),
-        "elapsed_sec": round(elapsed_sec, 2),
-        "total_budget_sec": total_budget_sec if has_budget else None,
-        "budget_exhausted": budget_exhausted,
-    }
-    if budget_limited_no_pair:
-        payload["was_skipped"] = True
-        payload["skip_reason"] = "budget_exhausted_no_successful_pairs"
-    if budget_exhausted:
-        payload["budget_skip_reason"] = budget_skip_reason
-        payload["budget_remaining_sec"] = round(float(budget_remaining_sec or 0.0), 2)
     if ceiling is not None:
         payload["roofline_ceiling"] = ceiling
 
-    if write_reports:
-        # Set self-referential paths before the dump so the JSON carries them.
-        payload["report_json_path"] = json_path.as_posix()
-        payload["report_csv_path"] = csv_path.as_posix()
-        _flush_conc_sweep_report(payload, session_dir)
+    report_error = run.write(payload)
+
+    if recorder is not None:
+        if report_error is not None:
+            recorder.record_fault(stage="report_write", exc=report_error)
+        recorder.record_progress(comparison=comparison, summary=summary)
+        recorder.finish(payload, stop_reason=getattr(state, "stop_reason", ""))
 
     log.info(
         "conc_sweep: done — successful_pairs=%d failed_pairs=%d best_speedup=%s",
@@ -1447,15 +1332,15 @@ async def run_conc_sweep(
 
 
 __all__ = [
+    "AGENTX_DEFAULT_CONCS",
     "DEFAULT_CONCS",
     "DEFAULT_NUM_PROMPTS_FACTOR",
     "DEFAULT_TOTAL_BUDGET_SEC",
-    "DEFAULT_VARIANT_TIMEOUT_SEC",
     "SCHEMA_VERSION",
     "_build_arm_grid",
     "_flush_conc_sweep_report",
-    "_flush_partial_conc_sweep_report",
     "_order_concs_desc",
     "conc_sweep_declined_to_run",
+    "default_concs_for_mode",
     "run_conc_sweep",
 ]

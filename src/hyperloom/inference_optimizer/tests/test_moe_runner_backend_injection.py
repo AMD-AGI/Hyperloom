@@ -1,11 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""sglang ``--moe-runner-backend`` injection tests.
+"""sglang ``--moe-runner-backend`` tests.
 
-Hyperloom injects ``--moe-runner-backend triton`` for MoE sglang models on AMD
-unless the operator already pinned one. Exercised at both the pure-helper and
-``materialize_config_with_envs`` layers.
+Hyperloom does NOT force a ``--moe-runner-backend`` for MoE sglang models on
+AMD: sglang's own ``auto`` resolution already follows ``SGLANG_USE_AITER``
+correctly on current sglang/ROCm images. What remains is the aiter-only quant
+scheme detection (``moe_runner_requires_aiter``), used elsewhere to strip an
+*inherited* ``--moe-runner-backend`` that would crash such a checkpoint (grid
+variants, baseline retries), and ``materialize_config_with_envs`` never adding
+the flag on its own.
 """
 
 from __future__ import annotations
@@ -16,12 +20,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.inference_optimizer import model_config_utils
+from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
-from hyperloom.orchestrator.actions.executors._grid_runner import (
-    DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND,
-    HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV,
-    inject_sglang_moe_runner_backend,
-)
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     _remove_moe_runner_backend_arg,
     materialize_config_with_envs,
@@ -33,11 +34,10 @@ _AMD = "mi300x"
 @pytest.fixture(autouse=True)
 def _hermetic_env(monkeypatch):
     """Neutralise host GPU autodetect + env so AMD-gating is deterministic."""
-    monkeypatch.delenv(HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV, raising=False)
     monkeypatch.delenv("GPU_TYPE", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     # Pin autodetect OFF so non-AMD test cases never see real hardware.
-    monkeypatch.setattr(cli_model_gate, "_autodetect_gpu_type", lambda: None)
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: None)
     for key in (
         "CONC",
         "ISL",
@@ -134,7 +134,7 @@ def quark_mxfp4_moe_model(tmp_path) -> str:
 )
 def test_model_is_moe_true(tmp_path, config):
     path = _write_model_config(tmp_path / "m", config)
-    assert cli_model_gate._model_is_moe(path) is True
+    assert model_config_utils._model_is_moe(path) is True
 
 
 @pytest.mark.parametrize(
@@ -148,11 +148,11 @@ def test_model_is_moe_true(tmp_path, config):
 )
 def test_model_is_moe_false(tmp_path, config):
     path = _write_model_config(tmp_path / "m", config)
-    assert cli_model_gate._model_is_moe(path) is False
+    assert model_config_utils._model_is_moe(path) is False
 
 
 def test_model_is_moe_missing_config_is_false(tmp_path):
-    assert cli_model_gate._model_is_moe(str(tmp_path / "does-not-exist")) is False
+    assert model_config_utils._model_is_moe(str(tmp_path / "does-not-exist")) is False
 
 
 # _model_moe_runner_requires_aiter detection
@@ -189,8 +189,8 @@ def test_moe_runner_requires_aiter_true(tmp_path, quant_config):
         },
         # fp4 with a non-MX group size.
         {"quant_method": "quark", "global_quant_config": _mx_fp4_entry(weight=_mx_fp4_spec(group_size=16))},
-        # Keep exact parity with sglang: its _is_mx_fp4 compares against integer
-        # 32, so a string value is not a valid MX-FP4 config either.
+        # Keep exact parity with sglang: its _is_mx_fp4 compares against integer 32, so a string value is not a valid
+        # MX-FP4 config either.
         {"quant_method": "quark", "global_quant_config": _mx_fp4_entry(weight=_mx_fp4_spec(group_size="32"))},
         # Statically quantized activations are not the W4A4 dynamic scheme.
         {
@@ -225,101 +225,6 @@ def test_moe_runner_requires_aiter_reads_nested_text_config(tmp_path):
 
 def test_moe_runner_requires_aiter_missing_config_is_false(tmp_path):
     assert cli_model_gate._model_moe_runner_requires_aiter(str(tmp_path / "nope")) is False
-
-
-# inject_sglang_moe_runner_backend (pure helper)
-def test_inject_appends_triton_for_moe_on_amd(moe_model):
-    out = inject_sglang_moe_runner_backend("--foo bar", "sglang", moe_model, _AMD)
-    assert out == "--foo bar --moe-runner-backend triton"
-    assert DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND == "triton"
-
-
-def test_inject_appends_when_args_empty(moe_model):
-    assert inject_sglang_moe_runner_backend("", "sglang", moe_model, _AMD) == "--moe-runner-backend triton"
-    assert inject_sglang_moe_runner_backend(None, "sglang", moe_model, _AMD) == "--moe-runner-backend triton"
-
-
-def test_inject_honors_env_override(moe_model, monkeypatch):
-    monkeypatch.setenv(HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV, "ck")
-    assert inject_sglang_moe_runner_backend("", "sglang", moe_model, _AMD) == "--moe-runner-backend ck"
-
-
-@pytest.mark.parametrize(
-    "existing",
-    [
-        "--moe-runner-backend ck",
-        "--moe-runner-backend=ck",
-        "--foo 1 --moe-runner-backend ck --bar 2",
-    ],
-)
-def test_inject_does_not_double_user_value(moe_model, existing):
-    out = inject_sglang_moe_runner_backend(existing, "sglang", moe_model, _AMD)
-    assert out == existing
-    assert out.count("--moe-runner-backend") == 1
-    assert "triton" not in out
-
-
-def test_inject_noop_for_dense_model(dense_model):
-    assert inject_sglang_moe_runner_backend("--foo", "sglang", dense_model, _AMD) == "--foo"
-    assert "--moe-runner-backend" not in inject_sglang_moe_runner_backend(
-        "",
-        "sglang",
-        dense_model,
-        _AMD,
-    )
-
-
-def test_inject_noop_for_quark_mxfp4_moe(quark_mxfp4_moe_model):
-    # sglang's QuarkW4A4MXFp4MoE only initialises its runner on the aiter path;
-    # forcing triton crashes the server on the first forward pass.
-    assert inject_sglang_moe_runner_backend("--foo", "sglang", quark_mxfp4_moe_model, _AMD) == "--foo"
-    assert inject_sglang_moe_runner_backend("", "sglang", quark_mxfp4_moe_model, _AMD) == ""
-
-
-def test_inject_env_override_does_not_resurrect_quark_injection(quark_mxfp4_moe_model, monkeypatch):
-    monkeypatch.setenv(HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV, "triton")
-    assert inject_sglang_moe_runner_backend("", "sglang", quark_mxfp4_moe_model, _AMD) == ""
-
-
-# Online --quantization schemes that are equally aiter-only in sglang.
-@pytest.mark.parametrize(
-    "args",
-    [
-        "--quantization quark_int4fp8_moe",
-        "--quantization=quark_int4fp8_moe",
-        "--foo 1 --quantization quark_int4fp8_moe --bar 2",
-    ],
-)
-def test_inject_noop_for_online_int4fp8_moe(moe_model, args):
-    assert inject_sglang_moe_runner_backend(args, "sglang", moe_model, _AMD) == args
-
-
-def test_inject_noop_for_online_mxfp4_dynamic_quant(moe_model):
-    # An unserialized checkpoint + --quantization mxfp4 routes to sglang's
-    # dynamic-quant MoE method, which only builds an aiter runner.
-    args = "--quantization mxfp4"
-    assert inject_sglang_moe_runner_backend(args, "sglang", moe_model, _AMD) == args
-
-
-def test_inject_still_applies_for_serialized_mxfp4_checkpoint(tmp_path):
-    # A serialized mxfp4 checkpoint uses the backend-flexible MoE method.
-    model = _write_model_config(
-        tmp_path / "gpt-oss-mxfp4",
-        {"num_experts": 128, "quantization_config": {"quant_method": "mxfp4"}},
-    )
-    out = inject_sglang_moe_runner_backend("--quantization mxfp4", "sglang", model, _AMD)
-    assert out == "--quantization mxfp4 --moe-runner-backend triton"
-
-
-def test_inject_noop_on_non_amd_gpu(moe_model):
-    # Explicit non-AMD gpu + autodetect pinned off (fixture) -> no injection.
-    assert inject_sglang_moe_runner_backend("--foo", "sglang", moe_model, "h100") == "--foo"
-
-
-@pytest.mark.parametrize("framework", ["vllm", "atom"])
-def test_inject_noop_for_non_sglang(moe_model, framework):
-    assert inject_sglang_moe_runner_backend("--foo", framework, moe_model, _AMD) == "--foo"
-    assert inject_sglang_moe_runner_backend("", framework, moe_model, _AMD) == ""
 
 
 # materialize_config_with_envs (the production choke point)
@@ -365,10 +270,12 @@ def _materialize_envs(
     return yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
 
-def test_materialize_injects_triton_for_moe_on_amd(tmp_path, moe_model, monkeypatch):
+def test_materialize_never_injects_moe_runner_backend_on_amd(tmp_path, moe_model, monkeypatch):
+    # sglang's own --moe-runner-backend auto already picks the right backend;
+    # Hyperloom leaves it alone even for a MoE model on AMD/ROCm.
     monkeypatch.setenv("GPU_TYPE", _AMD)
     envs = _materialize_envs(tmp_path, model=moe_model)
-    assert "--moe-runner-backend triton" in envs["EXTRA_SGLANG_ARGS"]
+    assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
 
 
 def test_materialize_noop_for_dense_model_on_amd(tmp_path, dense_model, monkeypatch):
@@ -383,7 +290,7 @@ def test_materialize_noop_for_quark_mxfp4_moe_on_amd(tmp_path, quark_mxfp4_moe_m
     assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
 
 
-def test_materialize_drop_skips_injection(tmp_path, moe_model, monkeypatch):
+def test_materialize_drop_flag_is_noop_without_pin(tmp_path, moe_model, monkeypatch):
     monkeypatch.setenv("GPU_TYPE", _AMD)
     envs = _materialize_envs(tmp_path, model=moe_model, drop_moe_runner_backend=True)
     assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
@@ -449,18 +356,18 @@ def test_aiter_ck_fused_moe_needs_128_aligned_partition(tmp_path, tp, supported)
             "moe_intermediate_size": 768,
         },
     )
-    assert cli_model_gate.model_supports_aiter_ck_fused_moe(model, tp) is supported
+    assert model_config_utils.model_supports_aiter_ck_fused_moe(model, tp) is supported
 
 
 def test_aiter_ck_fused_moe_support_defaults_open(tmp_path, dense_model) -> None:
     """Dense models and unreadable configs leave the choice to sglang."""
     # Never reaches the MoE kernel, so nothing to gate.
-    assert cli_model_gate.model_supports_aiter_ck_fused_moe(dense_model, 8) is True
+    assert model_config_utils.model_supports_aiter_ck_fused_moe(dense_model, 8) is True
     # No config to judge by: do not skip work on a guess.
-    assert cli_model_gate.model_supports_aiter_ck_fused_moe(str(tmp_path / "absent"), 8) is True
+    assert model_config_utils.model_supports_aiter_ck_fused_moe(str(tmp_path / "absent"), 8) is True
     # MoE without a declared intermediate size is equally undecidable.
     moe_no_size = _write_model_config(
         tmp_path / "moe-no-size",
         {"architectures": ["Qwen3MoeForCausalLM"], "model_type": "qwen3_moe", "num_experts": 128},
     )
-    assert cli_model_gate.model_supports_aiter_ck_fused_moe(moe_no_size, 8) is True
+    assert model_config_utils.model_supports_aiter_ck_fused_moe(moe_no_size, 8) is True

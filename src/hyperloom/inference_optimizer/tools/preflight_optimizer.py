@@ -17,25 +17,34 @@ import sys
 from hyperloom.common import rocm_smi
 
 
+#: Command-line fragments that identify a leftover optimizer or serving
+#: process. vLLM and SGLang are matched twice over: by the module path an older
+#: launch used, and by the ``setproctitle`` name the current one rewrites argv
+#: to. Magpie launches the server as ``vllm serve``, and vLLM then renames its
+#: own processes to ``VLLM::APIServer`` / ``VLLM::EngineCore`` /
+#: ``VLLM::Worker_TP<n>``, so a scan for ``vllm.entrypoints`` alone sees
+#: nothing. That blind spot is not covered by the VRAM check either: an orphan
+#: that is still reading weights holds no VRAM yet and reads as idle. ATOM is
+#: matched on its entrypoint alone: its per-rank workers are
+#: ``multiprocessing.spawn`` children carrying no identifying argv, so only
+#: descent from the wrapper reaches them, which is teardown's job and not this
+#: scan's.
 STALE_PROCESS_PATTERNS = (
     "hyperloom.inference_optimizer.cli",
     "Magpie",
+    "atom.entrypoints",
     "sglang.launch_server",
+    "sglang::",
     "vllm.entrypoints",
+    "vllm serve",
+    "VLLM::",
 )
 
 VRAM_BUSY_FRACTION = 0.01
 
 
 def _read_cmdline(pid: str) -> str:
-    """Read and decode the ``/proc/<pid>/cmdline`` for the given pid.
-
-    Args:
-        pid: The process id (as a string) whose command line to read.
-
-    Returns:
-        The space-joined command line, or ``""`` when it cannot be read.
-    """
+    """Read and decode the ``/proc/<pid>/cmdline`` for the given pid."""
     try:
         raw = pathlib.Path("/proc", pid, "cmdline").read_bytes()
     except OSError:
@@ -43,16 +52,37 @@ def _read_cmdline(pid: str) -> str:
     return raw.replace(b"\0", b" ").decode("utf-8", "ignore")
 
 
-def _print_torch_visibility() -> bool:
-    """Print torch CUDA visibility and report whether a device is usable.
+def _parent_pid(pid: int) -> int:
+    """Return the parent pid from ``/proc/<pid>/status``, or 0 when it is gone."""
+    try:
+        status = pathlib.Path("/proc", str(pid), "status").read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    for line in status.splitlines():
+        if line.startswith("PPid:"):
+            return int(line.split()[1])
+    return 0
 
-    Returns:
-        ``True`` when torch imports and reports at least one available CUDA
-        device, ``False`` otherwise (including on import failure).
+
+def _own_process_chain() -> set[int]:
+    """Return this process and every ancestor up to init.
+
+    The launcher shell carries the whole command text in its own argv, so it and
+    everything above it match the patterns without a leftover run existing.
     """
+    chain: set[int] = set()
+    pid = os.getpid()
+    while pid > 1 and pid not in chain:
+        chain.add(pid)
+        pid = _parent_pid(pid)
+    return chain
+
+
+def _print_torch_visibility() -> bool:
+    """Print torch CUDA visibility and report whether a device is usable."""
     try:
         import torch  # type: ignore[import-not-found]
-    except Exception as exc:
+    except ImportError as exc:
         print("torch_check_error=", type(exc).__name__, str(exc)[:300])
         return False
 
@@ -64,15 +94,7 @@ def _print_torch_visibility() -> bool:
 
 
 def _check_gpu_occupancy() -> bool:
-    """Print per-GPU VRAM usage and report whether every GPU is idle.
-
-    A GPU is busy once its used VRAM exceeds :data:`VRAM_BUSY_FRACTION` of its
-    own capacity. An unreadable GPU state counts as a failure, so an
-    unverifiable launch aborts instead of proceeding.
-
-    Returns:
-        ``True`` when every GPU is under the fraction, ``False`` otherwise.
-    """
+    """Print per-GPU VRAM usage and report whether every GPU is idle."""
     snapshots = rocm_smi.gpu_vram_usage()
     if snapshots is None:
         print("gpu_vram=unreadable")
@@ -90,15 +112,11 @@ def _check_gpu_occupancy() -> bool:
 
 
 def _find_stale_processes() -> list[tuple[str, str]]:
-    """Scan ``/proc`` for running processes matching known stale patterns.
-
-    Returns:
-        A list of ``(pid, cmdline)`` tuples for processes (other than this one)
-        whose command line matches one of :data:`STALE_PROCESS_PATTERNS`.
-    """
+    """Scan ``/proc`` for running processes matching known stale patterns."""
     matches: list[tuple[str, str]] = []
+    own = _own_process_chain()
     for pid in filter(str.isdigit, os.listdir("/proc")):
-        if int(pid) == os.getpid():
+        if int(pid) in own:
             continue
         text = _read_cmdline(pid)
         if text and any(pattern in text for pattern in STALE_PROCESS_PATTERNS):
@@ -107,15 +125,7 @@ def _find_stale_processes() -> list[tuple[str, str]]:
 
 
 def main() -> int:
-    """Run launcher preflight checks and return a process exit code.
-
-    Validates the model path, checks torch/ROCm visibility, verifies GPU VRAM
-    occupancy is below the allowed threshold, and reports any stale
-    optimizer/server processes.
-
-    Returns:
-        ``0`` when every check passes, otherwise ``2``.
-    """
+    """Run launcher preflight checks and return a process exit code."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model_path", help="Model directory to optimize.")
     args = parser.parse_args()
@@ -144,5 +154,21 @@ def main() -> int:
     return 0 if ok else 2
 
 
+def _exit(code: int) -> None:
+    """Leave the process with ``code`` without going through interpreter teardown.
+
+    This exit status is the IR-1 gate the launcher branches on, so nothing
+    in-process may override it. ``import torch`` does exactly that on the ROCm
+    build shipped in these pods: its teardown forces status 0, which silently
+    turned every violation this tool detects into a pass.
+
+    Args:
+        code: The status to leave the process with.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _exit(main())

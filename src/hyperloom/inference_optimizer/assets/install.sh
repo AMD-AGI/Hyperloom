@@ -13,10 +13,10 @@
 #      pyproject `[test]` extra)
 #   2. Magpie (benchmark engine) pip-installed from MAGPIE_PACKAGE_SPEC,
 #      pinned to MAGPIE_REF (a commit SHA or tag)
-#   2b. Atomic-write patch for Magpie._prepare_benchmark_scripts
-#       (root-cause fix for the Hyperloom #C1 script-tearing race;
-#       fail-soft — a no-op when the MAGPIE_REF target already has
-#       upstream atomic copying)
+#   2b. Magpie compatibility patches (SGLang custom-tokenizer trust +
+#       eval-concurrency flag scrub); idempotent no-ops on re-run. The
+#       default MAGPIE_REF already copies benchmark scripts atomically
+#       upstream, so no benchmarker.py rewrite is applied here.
 #   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
 #      (a commit SHA), sets INFERENCEX_PATH for runtime
 #   4. Delegates to src/hyperloom/agents/kernel/scripts/install.sh for ray, ray-head
@@ -76,16 +76,14 @@ resolve_repo_root() {
 }
 
 REPO_ROOT="$(resolve_repo_root)"
-DOTENV_LOADED_COUNT=0
-
-setup_dotenv_is_authoritative() {
-  [ -f "$REPO_ROOT/.env" ] || return 1
-  grep -q '^HYPERLOOM_RUN_MODE=' "$REPO_ROOT/.env" 2>/dev/null
-}
+# shellcheck source=runtime_env.sh
+. "${_script_dir}/runtime_env.sh"
 
 scrub_stale_workspace_env_for_setup_dotenv() {
   setup_dotenv_is_authoritative || return 0
-  unset USER_DATA_PATH
+  if ! runtime_env_var_is_readonly USER_DATA_PATH; then
+    unset USER_DATA_PATH
+  fi
   unset HYPERLOOM_RUNTIME_DIR
   unset KERNEL_AGENT_ENV
   unset HYPERLOOM_ROOT
@@ -94,37 +92,6 @@ scrub_stale_workspace_env_for_setup_dotenv() {
   unset FRAMEWORK_AGENT_ROOT
   unset HYPERLOOM_SKILL_PATH
   unset PYTHONPATH
-}
-
-load_dotenv_no_clobber() {
-  DOTENV_LOADED_COUNT=0
-  [ -f "$REPO_ROOT/.env" ] || return 0
-  local loaded=0
-  local raw key value
-  while IFS= read -r raw || [ -n "$raw" ]; do
-    raw="${raw#"${raw%%[![:space:]]*}"}"
-    raw="${raw%"${raw##*[![:space:]]}"}"
-    [ -z "$raw" ] && continue
-    case "$raw" in \#*) continue ;; esac
-    case "$raw" in export\ *) raw="${raw#export }" ;; esac
-    case "$raw" in *=*) ;; *) continue ;; esac
-    key="${raw%%=*}"
-    value="${raw#*=}"
-    key="${key%"${key##*[![:space:]]}"}"
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-    case "$value" in
-      \"*\") value="${value#\"}"; value="${value%\"}" ;;
-      \'*\') value="${value#\'}"; value="${value%\'}" ;;
-    esac
-    [ -z "$key" ] && continue
-    if [ -z "${!key:-}" ]; then
-      export "$key=$value"
-      loaded=$((loaded + 1))
-    fi
-  done < "$REPO_ROOT/.env"
-  DOTENV_LOADED_COUNT="$loaded"
-  return 0
 }
 
 # Load .env before deriving USER_DATA_PATH / HYPERLOOM_RUNTIME_DIR so a
@@ -145,35 +112,37 @@ _default_workspace_root() {
   while [ ! -e "$_ws_probe" ] && [ "$_ws_probe" != / ]; do _ws_probe=$(dirname "$_ws_probe"); done
   if [ -w "$_ws_probe" ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
 }
-USER_DATA_PATH="${USER_DATA_PATH:-$(_default_workspace_root)}"
+if [ -z "${USER_DATA_PATH:-}" ]; then
+  if runtime_env_var_is_readonly USER_DATA_PATH; then
+    printf '%s\n' '[install ERROR] readonly USER_DATA_PATH is empty; cannot select a workspace root' >&2
+    exit 1
+  fi
+  USER_DATA_PATH="$(_default_workspace_root)"
+fi
 if [ -z "${_user_data_was_set}" ]; then
   echo "[install WARN] USER_DATA_PATH not set; defaulting to ${USER_DATA_PATH}. Set USER_DATA_PATH to persist artifacts under your data root." >&2
 fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
+VLLM_IMAGE_SOURCE_ROOT="/app/vllm"
+VLLM_IMAGE_SOURCE_COMMIT="f46a9dfe2c5f57bebbd29556cbbb25eabd874226"
+VLLM_IMAGE_REPO="${VLLM_IMAGE_REPO:-https://github.com/vllm-project/vllm.git}"
+VLLM_IMAGE_SOURCE_ACTIVE=0
 # Legacy variable kept for compatibility; open-source checkouts use _open_source_root.
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # Writable, repo-local base for auto-cloned deps: $HYPERLOOM_CACHE_DIR else
 # $REPO_ROOT/.cache, cloned per revision (<name>@<sha>). Not /tmp (a reaper can
 # wipe it mid-run, leaving TRACELENS_ROOT dangling — #722).
 _open_source_root="${HYPERLOOM_CACHE_DIR:-${REPO_ROOT}/.cache}"
-# tree-reform.MD P2.5: kernel-agent/framework-agent live under the hyperloom
-# package tree in both source and pip-installed layouts. A missing pyproject at
-# REPO_ROOT means setup is running from a pip --target workspace rather than a
-# source checkout, so the editable self-install step below is skipped.
+# kernel-agent and other sub-agents live under the hyperloom package tree.
+# A missing pyproject at REPO_ROOT means setup is running from a pip --target
+# workspace rather than a source checkout, so the editable self-install step below is skipped.
 _hyperloom_pkg_root="$(cd "${_script_dir}/../.." && pwd)"
 HYPERLOOM_PACKAGED_INSTALL=0
 if [ ! -f "${REPO_ROOT}/pyproject.toml" ] && [ -d "${_hyperloom_pkg_root}/agents/kernel" ]; then
   HYPERLOOM_PACKAGED_INSTALL=1
 fi
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/kernel}"
-FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/framework}"
-# tree-reform.MD P2.5: framework-agent was promoted from a sibling
-# ``framework-agent/`` checkout into the in-tree ``hyperloom`` src-layout
-# namespace (``src/hyperloom/agents/framework``); it no longer has its own
-# installer/venv, so FRAMEWORK_AGENT_ROOT now just points at that in-tree
-# package (still overridable) and the old chain_framework_agent() delegation
-# below is a no-op.
 # Resolve a git ref to a commit SHA: 7-40 hex passes through; branch/tag via
 # ls-remote (falls back to the raw ref). The SHA keys the per-revision cache.
 _resolve_ref_sha() {
@@ -216,7 +185,10 @@ EOF
 
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # Pin Magpie to a release commit/tag instead of the default branch. Operators can
-# re-pin with MAGPIE_REF=<tag|sha>.
+# re-pin with MAGPIE_REF=<tag|sha>. Must stay at or above e6833b8183c6c41adf6038252337550876ca0433
+# (Magpie v0.2.0), which copies benchmark scripts via ``_copy_benchmark_script_atomic``.
+# ``ensure_magpie()`` skips pip when ``import Magpie`` already succeeds, so a pre-existing
+# tree on disk is NOT upgraded to this ref — only fresh installs and explicit reinstalls are.
 MAGPIE_REF="${MAGPIE_REF:-e6833b8183c6c41adf6038252337550876ca0433}"
 MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
 
@@ -232,6 +204,12 @@ MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${M
 AIPERF_REPO="${AIPERF_REPO:-https://github.com/SemiAnalysisAI/aiperf.git}"
 AIPERF_REF="${AIPERF_REF:-754356e9a39acc6cc6afb242d123bb57c3fb6f75}"
 AIPERF_PACKAGE_SPEC="${AIPERF_PACKAGE_SPEC:-aiperf @ git+${AIPERF_REPO}@${AIPERF_REF}}"
+# The AgentX client + mapper this build ships. Its presence is what makes the
+# aiperf install unconditional below: a build that carries the client is a build
+# whose boxes may be asked to run AgentX, and that is knowable at install time —
+# unlike the runtime mode flag, which is not. Resolved from this script rather
+# than $REPO_ROOT so a wheel install reads the assets it actually shipped with.
+AGENTX_ASSET_DIR="${AGENTX_ASSET_DIR:-${_script_dir}/agentx}"
 # MAGPIE_PATH points install.sh AND the Python optimizer (cli.py /
 # _grid_runner.py / manifest.py) at Magpie's import root. When unset by the
 # operator, ensure_magpie resolves it from the pip-installed package; explicit
@@ -256,6 +234,16 @@ INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/Inference
 DRY_RUN=0
 CHECK_ONLY=0
 SKIP_KERNEL_AGENT=0
+# `--only-aiperf`: run ensure_aiperf and nothing else. The runtime repair path
+# (src/hyperloom/inference_optimizer/agentx/repair.py) needs the pinned aiperf
+# install without re-cloning Magpie/InferenceX or chaining the kernel-agent
+# installer, which is what a full run would do mid-session.
+ONLY_AIPERF=0
+# 1 when the caller explicitly asked for AgentX, which makes a failed aiperf
+# install fatal instead of fail-soft. Set by the opt-in gate and by
+# --only-aiperf; never on a default install, so the synthetic path still grows
+# no AgentX-only dependency it can be blocked by.
+AIPERF_REQUIRED=0
 
 usage() {
   cat <<'EOF'
@@ -269,18 +257,21 @@ Installs:
   - Clones InferenceX pinned to INFERENCEX_REF and exports INFERENCEX_PATH
   - Chains to src/hyperloom/agents/kernel/scripts/install.sh for Ray + ray-head start,
     TraceLens, GEAK, and LLM gateway env.
-  - The `fa` CLI is provided by this same editable install; framework-agent
-    lives in src/hyperloom/agents/framework/ and has no separate
-    installer/venv to chain to.
+  - src/hyperloom/agents/framework/ is part of this editable install (PR discovery, isolation helpers).
 
 Options:
   --check-only           Verify only, do not install
   --dry-run              Print actions without running them
   --skip-kernel-agent    Skip the chained kernel-agent installer
+  --only-aiperf          Install ONLY the pinned aiperf (AgentX client) and
+                         exit. Treats a failed install as fatal. Used by the
+                         runtime AgentX preflight to supply a dependency the
+                         mode declares for itself; also usable by hand to add
+                         AgentX support to a box provisioned without it.
   -h, --help             Show this help
 
 Env overrides:
-  REPO_ROOT, KERNEL_AGENT_ROOT, FRAMEWORK_AGENT_ROOT, MAGPIE_REPO,
+  REPO_ROOT, KERNEL_AGENT_ROOT, MAGPIE_REPO,
   MAGPIE_REF (commit SHA / tag / branch the Magpie package is pinned to;
     default is a commit that already copies benchmark scripts atomically),
   MAGPIE_PACKAGE_SPEC, MAGPIE_PATH, INFERENCEX_REPO,
@@ -292,8 +283,8 @@ Env overrides:
     unset => open-source-only),
   USER_DATA_PATH,
   HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV, HYPERLOOM_ROOT,
-  PATCH_MAGPIE (=1; set 0 only if upstream Magpie atomic-write
-  PR is already merged into your clone),
+  PATCH_MAGPIE (=1; set 0 to skip the SGLang trust and eval-concurrency
+  compatibility patches in step 2b),
   MAGPIE_EVAL_FLAG_STRICT (=1; abort when the redundant
     --concurrent-requests eval flag cannot be removed from a Magpie
     benchmark script. Set 0 only when GSM8K accuracy eval is not
@@ -306,6 +297,7 @@ while [ "$#" -gt 0 ]; do
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --skip-kernel-agent) SKIP_KERNEL_AGENT=1 ;;
+    --only-aiperf) ONLY_AIPERF=1; AIPERF_REQUIRED=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[inference-optimizer] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
@@ -318,7 +310,7 @@ die() { echo "[inference-optimizer ERROR] $*" >&2; exit 1; }
 
 # Truthy/falsy test for boolean-ish env vars. Numeric `-eq` comparisons choke on
 # string values (`[ false -eq 0 ]` errors and reads as true under set -e), so a
-# user writing MAGPIE_PATCH_STRICT=false would get the OPPOSITE of intent. Accept
+# user writing MAGPIE_EVAL_FLAG_STRICT=false would get the OPPOSITE of intent. Accept
 # the common spellings case-insensitively; returns success (0) when falsy.
 is_falsy() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
@@ -356,6 +348,210 @@ git_fetch_pinned() {
     run git clone --depth 1 --branch "$ref" "$repo" "$dir" || return 1
   fi
   return 0
+}
+
+probe_vllm_image_wheel() {
+  "$PYTHON" - <<'PY'
+import re
+from importlib import metadata
+from pathlib import Path
+
+try:
+    dist = metadata.distribution("vllm")
+except metadata.PackageNotFoundError:
+    raise SystemExit(1)
+version = dist.version.lower()
+match = re.search(r"(?:^|[.+])g([0-9a-f]{7,40})(?=$|[.+])", version)
+if match is None:
+    raise SystemExit(2)
+print(f"{version}\t{match.group(1)}\t{Path(dist.locate_file('vllm')).resolve()}")
+PY
+}
+
+prepare_vllm_image_git_tree() {
+  local root="$1" origin="" head="" parent="" subject="" baseline_ref="" upstream_ref=""
+  local index_tmp git_dir tree baseline commit_date
+  [[ "$VLLM_IMAGE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+    { die "VLLM image source commit must be a full SHA"; return 1; }
+  if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
+    head="$(git -C "$root" rev-parse --verify HEAD 2>/dev/null || true)"
+    if [ -n "$head" ] &&
+       { ! git -C "$root" diff --quiet --ignore-submodules=all ||
+         ! git -C "$root" diff --cached --quiet --ignore-submodules=all; }; then
+      die "vLLM image source has tracked or staged user changes: ${root}"; return 1
+    fi
+  else
+    [ ! -e "$root/.git" ] ||
+      { die "vLLM image source has invalid Git metadata: ${root}"; return 1; }
+    git init -q "$root" || { die "failed to initialize Git metadata in ${root}"; return 1; }
+  fi
+  origin="$(git -C "$root" remote get-url origin 2>/dev/null || true)"
+  if [ -z "$origin" ]; then
+    git -C "$root" remote add origin "$VLLM_IMAGE_REPO" ||
+      { die "failed to add vLLM image source remote"; return 1; }
+  elif [ "$origin" != "$VLLM_IMAGE_REPO" ]; then
+    die "vLLM image source origin mismatch: ${origin}"; return 1
+  fi
+  if [ -n "$head" ]; then
+    parent="$(git -C "$root" rev-parse "${head}^" 2>/dev/null || true)"
+    subject="$(git -C "$root" show -s --format=%s "$head" 2>/dev/null || true)"
+    baseline_ref="$(git -C "$root" rev-parse refs/hyperloom/image-baseline 2>/dev/null || true)"
+    upstream_ref="$(git -C "$root" rev-parse refs/hyperloom/upstream 2>/dev/null || true)"
+    if [ "$parent" != "$VLLM_IMAGE_SOURCE_COMMIT" ] ||
+       [ "$subject" != "Hyperloom prebuilt vLLM image baseline" ] ||
+       [ "$baseline_ref" != "$head" ] ||
+       [ "$upstream_ref" != "$VLLM_IMAGE_SOURCE_COMMIT" ]; then
+      die "vLLM image source HEAD is not the managed synthetic baseline: ${root}"; return 1
+    fi
+    export VLLM_IMAGE_UPSTREAM_SHA="$VLLM_IMAGE_SOURCE_COMMIT"
+    export VLLM_IMAGE_BASELINE_SHA="$head"
+    return 0
+  fi
+  git -C "$root" fetch --quiet origin "$VLLM_IMAGE_SOURCE_COMMIT" ||
+    { die "failed to fetch vLLM image source commit ${VLLM_IMAGE_SOURCE_COMMIT}"; return 1; }
+  index_tmp="$(mktemp)"
+  if ! GIT_INDEX_FILE="$index_tmp" git -C "$root" read-tree "$VLLM_IMAGE_SOURCE_COMMIT" ||
+     ! GIT_INDEX_FILE="$index_tmp" git -C "$root" add -u -- .; then
+    rm -f "$index_tmp"; die "failed to capture vLLM image tracked deltas"; return 1
+  fi
+  tree="$(GIT_INDEX_FILE="$index_tmp" git -C "$root" write-tree)" ||
+    { rm -f "$index_tmp"; die "failed to write vLLM image baseline tree"; return 1; }
+  commit_date="$(git -C "$root" show -s --format=%cI "$VLLM_IMAGE_SOURCE_COMMIT")"
+  baseline="$(
+    printf '%s\n' "Hyperloom prebuilt vLLM image baseline" |
+      GIT_AUTHOR_NAME=Hyperloom GIT_AUTHOR_EMAIL=hyperloom@amd.com GIT_AUTHOR_DATE="$commit_date" \
+      GIT_COMMITTER_NAME=Hyperloom GIT_COMMITTER_EMAIL=hyperloom@amd.com GIT_COMMITTER_DATE="$commit_date" \
+      git -C "$root" commit-tree "$tree" -p "$VLLM_IMAGE_SOURCE_COMMIT"
+  )" || { rm -f "$index_tmp"; die "failed to commit vLLM image baseline tree"; return 1; }
+  git_dir="$(git -C "$root" rev-parse --absolute-git-dir)"
+  mv "$index_tmp" "$git_dir/index"
+  git -C "$root" update-ref refs/hyperloom/upstream "$VLLM_IMAGE_SOURCE_COMMIT" &&
+    git -C "$root" update-ref refs/hyperloom/image-baseline "$baseline" &&
+    git -C "$root" update-ref --no-deref HEAD "$baseline" ||
+    { die "failed to pin vLLM image source HEAD"; return 1; }
+  git -C "$root" diff-index --quiet "$baseline" -- ||
+    { die "vLLM image source verification changed after pinning"; return 1; }
+  export VLLM_IMAGE_UPSTREAM_SHA="$VLLM_IMAGE_SOURCE_COMMIT"
+  export VLLM_IMAGE_BASELINE_SHA="$baseline"
+}
+
+copy_missing_vllm_wheel_artifacts() {
+  local root="$1" wheel_package="$2"
+  "$PYTHON" - "$root" "$wheel_package" <<'PY'
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+root, wheel = map(Path, sys.argv[1:])
+source = root / "vllm"
+tracked = set(subprocess.check_output(["git", "-C", str(root), "ls-files"], text=True).splitlines())
+overlay = []
+for path in wheel.rglob("*"):
+    rel = path.relative_to(wheel)
+    native = path.name.endswith((".so", ".pyd", ".dll", ".dylib")) or ".so." in path.name
+    if path.name != "_version.py" and not native:
+        continue
+    destination = source / rel
+    relative = Path("vllm") / rel
+    if os.path.lexists(destination):
+        if relative.as_posix() not in tracked:
+            overlay.append(relative)
+        continue
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        destination.symlink_to(os.readlink(path))
+    elif path.is_file():
+        shutil.copy2(path, destination)
+    else:
+        continue
+    overlay.append(relative)
+
+info = root / ".git" / "info"
+info.mkdir(parents=True, exist_ok=True)
+exclude = info / "exclude"
+existing = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
+entries = [f"/{path.as_posix()}" for path in overlay]
+if entries:
+    with exclude.open("a", encoding="utf-8") as stream:
+        for entry in entries:
+            if entry not in existing:
+                stream.write(entry + "\n")
+    (info / "hyperloom-wheel-overlay").write_text("".join(f"{path.as_posix()}\n" for path in overlay), encoding="utf-8")
+print(len(overlay))
+PY
+}
+
+verify_vllm_image_source_import() {
+  local root="$1" wheel_package="$2"
+  PYTHONPATH="${root}${PYTHONPATH:+:${PYTHONPATH}}" "$PYTHON" - "$root" "$wheel_package" <<'PY'
+import importlib
+import sys
+from pathlib import Path
+
+root, wheel = map(Path, sys.argv[1:])
+import vllm
+
+loaded = Path(vllm.__file__).resolve()
+expected = (root / "vllm").resolve()
+if expected not in loaded.parents:
+    raise SystemExit(f"vLLM loaded from {loaded}, expected {expected}")
+modules = [name for name in ("_C", "_rocm_C") if (wheel / f"{name}.so").exists() or list(wheel.glob(f"{name}*.so"))]
+if not modules:
+    raise SystemExit("wheel exposes neither vllm._C nor vllm._rocm_C")
+for name in modules:
+    importlib.import_module(f"vllm.{name}")
+PY
+}
+
+activate_vllm_image_source() {
+  local info runtime_version runtime_commit wheel_package
+  [ -d "$VLLM_IMAGE_SOURCE_ROOT/vllm" ] || return 0
+  if ! info="$(probe_vllm_image_wheel 2>/dev/null)"; then
+    log "vLLM image source skipped: installed wheel has no commit-qualified version"
+    return 0
+  fi
+  IFS=$'\t' read -r runtime_version runtime_commit wheel_package <<<"$info"
+  case "$VLLM_IMAGE_SOURCE_COMMIT" in
+    "$runtime_commit"*) ;;
+    *) log "vLLM image source skipped: runtime ${runtime_version} is not ${VLLM_IMAGE_SOURCE_COMMIT}"; return 0 ;;
+  esac
+  if [ "${DRY_RUN:-0}" -eq 1 ] || [ "${CHECK_ONLY:-0}" -eq 1 ]; then
+    log "would activate ${VLLM_IMAGE_SOURCE_ROOT} for runtime ${runtime_version}"
+    return 0
+  fi
+  prepare_vllm_image_git_tree "$VLLM_IMAGE_SOURCE_ROOT" || return 1
+  copy_missing_vllm_wheel_artifacts "$VLLM_IMAGE_SOURCE_ROOT" "$wheel_package" >/dev/null ||
+    { die "failed to overlay vLLM wheel artifacts"; return 1; }
+  verify_vllm_image_source_import "$VLLM_IMAGE_SOURCE_ROOT" "$wheel_package" ||
+    { die "vLLM image source import verification failed"; return 1; }
+  export FRAMEWORK_REPO_PATH="$VLLM_IMAGE_SOURCE_ROOT"
+  export VLLM_REPO_PATH="$VLLM_IMAGE_SOURCE_ROOT"
+  export VLLM_DIR="$VLLM_IMAGE_SOURCE_ROOT"
+  export HYPERLOOM_VLLM_IMAGE_SOURCE=1
+  VLLM_IMAGE_SOURCE_ACTIVE=1
+  log "activated exact vLLM image source at ${VLLM_IMAGE_SOURCE_ROOT}"
+}
+
+persist_vllm_image_source_env() {
+  [ "$VLLM_IMAGE_SOURCE_ACTIVE" -eq 1 ] || return 0
+  local pair name value
+  for pair in \
+    "FRAMEWORK_REPO_PATH=${VLLM_IMAGE_SOURCE_ROOT}" \
+    "VLLM_REPO_PATH=${VLLM_IMAGE_SOURCE_ROOT}" \
+    "VLLM_DIR=${VLLM_IMAGE_SOURCE_ROOT}" \
+    "HYPERLOOM_VLLM_IMAGE_SOURCE=1" \
+    "VLLM_IMAGE_UPSTREAM_SHA=${VLLM_IMAGE_UPSTREAM_SHA}" \
+    "VLLM_IMAGE_BASELINE_SHA=${VLLM_IMAGE_BASELINE_SHA}"; do
+    name="${pair%%=*}"
+    value="${pair#*=}"
+    if grep -q "^export ${name}=" "$KERNEL_AGENT_ENV" 2>/dev/null; then
+      sed -i "s|^export ${name}=.*|export ${name}='${value}'|" "$KERNEL_AGENT_ENV"
+    else
+      printf "export %s='%s'\n" "$name" "$value" >> "$KERNEL_AGENT_ENV"
+    fi
+  done
 }
 
 # Serialize concurrent installs that share one open-source checkout root
@@ -490,6 +686,18 @@ EOF
 }
 
 preflight_validate_credentials() {
+  # --only-aiperf installs one pinned pip package. It needs no LLM provider, and
+  # the runtime repair that invokes it is handed the BENCHMARK child env, which
+  # has had ANTHROPIC_API_KEY and every sibling scrubbed by
+  # scrub_benchmark_process_env. Gating the aiperf install on credentials that
+  # were deliberately removed would fail the repair on every deployment that
+  # supplies them by env var rather than $REPO_ROOT/.env.
+  # Defaulted, not bare: test_setup_cli.py runs these preflights by slicing the
+  # function out of this file into a standalone script under `set -u`, where a
+  # variable assigned at the top of install.sh does not exist.
+  if [ "${ONLY_AIPERF:-0}" -eq 1 ]; then
+    return 0
+  fi
   preflight_load_dotenv
   normalize_legacy_deepseek_env
   local missing=()
@@ -564,7 +772,14 @@ preflight_validate_credentials
 # Gated by apt-get present, not --check-only / --dry-run, and
 # INFERENCE_OPTIMIZER_SKIP_APT_BOOTSTRAP unset.
 resolve_python() {
-  if [ -x "/opt/venv/bin/python" ] && [ "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-0}" != "1" ]; then
+  if [ "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-0}" = "1" ]; then
+    if [ -n "${PYTHON:-}" ] && [ -f "$PYTHON" ] && [ -x "$PYTHON" ]; then
+      return 0
+    fi
+    die "INFERENCE_OPTIMIZER_FORCE_PYTHON=1 requires an executable PYTHON; refusing interpreter fallback"
+    return 1
+  fi
+  if [ -x "/opt/venv/bin/python" ]; then
     if [ -n "${PYTHON:-}" ] && [ "${PYTHON}" != "/opt/venv/bin/python" ]; then
       log "preferring /opt/venv/bin/python over PYTHON=${PYTHON} (canonical ROCm stack)"
       log "  set INFERENCE_OPTIMIZER_FORCE_PYTHON=1 to honor PYTHON verbatim"
@@ -583,6 +798,7 @@ resolve_python() {
   # Bare-image bootstrap (Debian/Ubuntu only). Skipped silently when
   # apt-get is missing (RHEL/Alpine/etc.) or the operator opted out.
   if command -v apt-get >/dev/null 2>&1 \
+      && [ "${ONLY_AIPERF:-0}" -eq 0 ] \
       && [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ] \
       && [ -z "${INFERENCE_OPTIMIZER_SKIP_APT_BOOTSTRAP:-}" ]; then
     log "no python3 found; attempting bare-image apt bootstrap " \
@@ -623,14 +839,47 @@ export PATH
 #      -- the chained RAG-index step auto-detects device=cuda and crashes
 #      at torch._C._cuda_init() with "Found no NVIDIA driver".
 ensure_torch_compatible_with_gpu() {
+  # Same reasoning as the credential preflight: aiperf is a benchmark client
+  # that imports no torch, so a targeted install must not die on a $PYTHON whose
+  # torch is missing or CUDA-built. A full install still gates on it.
+  # Defaulted for the same reason as there.
+  if [ "${ONLY_AIPERF:-0}" -eq 1 ]; then
+    return 0
+  fi
   if ! command -v rocm-smi >/dev/null 2>&1; then
     return 0
   fi
-  if ! rocm-smi --showid >/dev/null 2>&1; then
+  # Both probes below touch the GPU, so both hang forever on a wedged driver --
+  # and this gate runs before the session directory exists, so a hang here leaves
+  # no state.json, no breakdown and nothing for the caller to time out on: the
+  # workload just holds its nodes until the scheduler's wall clock kills it
+  # (observed: 14h on 8xMI355X, job 174683, only `PYTHON=` in the log).
+  #
+  # A timeout is fatal rather than a skip. It is the strongest "this node's GPU
+  # is wedged" signal install.sh gets, and the default path below this gate keeps
+  # touching the driver with no time-box of its own -- `import lpips` in
+  # ensure_scriptable_quality_deps, _torch_hip_version, and kernel-agent's
+  # ensure_ray_started, which calls torch.cuda.device_count() and so initialises
+  # the HIP runtime. Falling through would only move the same hang a minute or
+  # two later and point the next reader at Ray. Dying here releases the
+  # allocation and names the cause; SKIP_TORCH_GATE covers a node that is merely
+  # slow, the same way it already covers this gate's other verdicts.
+  local smi_rc=0
+  timeout 60 rocm-smi --showid >/dev/null 2>&1 || smi_rc=$?
+  if [ "$smi_rc" -eq 124 ]; then
+    warn "rocm-smi --showid did not answer within 60s -- the GPU driver on this node looks wedged"
+    if [ "${INFERENCE_OPTIMIZER_SKIP_TORCH_GATE:-0}" != "1" ]; then
+      die "refusing to install on a node whose GPU probe hangs (INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 to continue anyway)"
+    fi
+    warn "INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 set; continuing despite the hanging GPU probe"
     return 0
   fi
+  [ "$smi_rc" -eq 0 ] || return 0
+  # `local` stays on its own line: folding it into the assignment would mask the
+  # command's exit status behind `local`'s own.
   local probe
-  probe="$("$PYTHON" - <<'PY' 2>/dev/null || true
+  local probe_rc=0
+  probe="$(timeout 180 "$PYTHON" - <<'PY' 2>/dev/null
 import json, sys
 out = {"rc": 0}
 try:
@@ -643,7 +892,15 @@ except Exception as exc:
     out["error"] = type(exc).__name__ + ": " + str(exc)[:200]
 print(json.dumps(out))
 PY
-)"
+)" || probe_rc=$?
+  if [ "$probe_rc" -eq 124 ]; then
+    warn "import torch did not finish within 180s (PYTHON=${PYTHON}) -- a wedged GPU driver or a stalled shared mount"
+    if [ "${INFERENCE_OPTIMIZER_SKIP_TORCH_GATE:-0}" != "1" ]; then
+      die "refusing to install: the torch probe hangs on this node (INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 to continue anyway)"
+    fi
+    warn "INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 set; continuing despite the hanging torch probe"
+    return 0
+  fi
   if [ -z "$probe" ]; then
     warn "torch probe produced no output (PYTHON=${PYTHON})"
     return 0
@@ -710,7 +967,7 @@ fi
 # in pip 23.0.1; older pips reject it as an unknown option, so we probe
 # `pip install --break-system-packages --help` before adopting it.
 PIP_EXTRA=()
-if "$PYTHON" - <<'PY' 2>/dev/null
+if [ "$ONLY_AIPERF" -eq 0 ] && "$PYTHON" - <<'PY' 2>/dev/null
 import sys
 raise SystemExit(0 if sys.prefix == sys.base_prefix else 1)
 PY
@@ -756,7 +1013,10 @@ PY
       # holding the old one. pip resolves `[llm,forge]` against the already
       # installed distribution -- verified to need no index for the top-level
       # package -- so this is a metadata read, not a reinstall.
-      "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
+      # REPO_ROOT is the `pip install --target` dir, which is not on the default
+      # sys.path; without it pip misses the wheel and resolves it off the index.
+      env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+        "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
         "hyperloom-inference_optimizer[llm,forge]"
       # web extra only when critic web tools are enabled (off by default).
       if [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "true" ] || [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "1" ]; then
@@ -892,6 +1152,130 @@ sys.exit(0 if "gemm-tune" in getattr(main, "commands", {}) else 1)
 #
 # Fail-soft: a pin failure must NOT abort the install — forge still runs on PMC.
 
+# Echo rocprof-compute's libexec dir, or non-zero if the tool is not installed.
+# Two layouts exist: the classic ROCm tree under $ROCM_PATH, and TheRock's pip
+# ROCm, which ships the profiler as its own `_rocm_profiler` wheel while
+# $ROCM_PATH points at the separate `_rocm_sdk_devel` package.
+_rocpc_libexec_dir() {
+  local root dir
+  for root in "${ROCM_PATH:-}" /opt/rocm; do
+    [ -n "$root" ] || continue
+    dir="${root%/}/libexec/rocprofiler-compute"
+    if [ -f "${dir}/rocprof_compute_base.py" ]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+  done
+  dir="$("$PYTHON" - <<'PY' 2>/dev/null
+import importlib.util, os
+try:
+    spec = importlib.util.find_spec("_rocm_profiler")
+except Exception:
+    spec = None
+for root in list(getattr(spec, "submodule_search_locations", None) or []):
+    path = os.path.join(root, "libexec", "rocprofiler-compute")
+    if os.path.isfile(os.path.join(path, "rocprof_compute_base.py")):
+        print(path)
+        break
+PY
+  )" || dir=""
+  [ -n "$dir" ] || return 1
+  printf '%s\n' "$dir"
+}
+
+# Echo the installed `rocm` distribution version, or non-zero when ROCm is not
+# pip-packaged. Non-empty means TheRock's wheels, where the profiler is itself a
+# wheel and apt carries no such package at all, so apt can only ever fail there.
+_rocm_wheel_version() {
+  "$PYTHON" - <<'PY' 2>/dev/null
+import importlib.metadata
+print(importlib.metadata.version("rocm"))
+PY
+}
+
+# Echo the ROCm tree carrying rocprofiler-sdk, or non-zero when there is none.
+# Pip-packaged ROCm splits this across wheels and $ROCM_PATH does not always
+# point at the one that has it.
+_rocm_sdk_runtime_root() {
+  local root
+  root="$("$PYTHON" - <<'PY' 2>/dev/null
+import importlib.util, os
+for pkg in ("_rocm_sdk_devel", "_rocm_sdk_core"):
+    try:
+        spec = importlib.util.find_spec(pkg)
+    except Exception:
+        continue
+    for root in list(getattr(spec, "submodule_search_locations", None) or []):
+        if os.path.isdir(os.path.join(root, "lib", "rocprofiler-sdk")):
+            print(root)
+            raise SystemExit(0)
+PY
+  )" || root=""
+  [ -n "$root" ] || return 1
+  printf '%s\n' "$root"
+}
+
+# rocprofiler-sdk dlopens aqlprofile by its unversioned soname, which the
+# rocm-sdk-core wheel omits while shipping the versioned file. Without the link
+# the sdk aborts on SIGABRT mid-profile and hangs instead of reporting. Images
+# that do ship the soname are left alone.
+_ensure_aqlprofile_soname() {
+  local root lib
+  root="$(_rocm_sdk_runtime_root)" || return 0
+  lib="${root%/}/lib"
+  [ -e "${lib}/libhsa-amd-aqlprofile64.so" ] && return 0
+  [ -f "${lib}/libhsa-amd-aqlprofile64.so.1" ] || return 0
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    log "would link libhsa-amd-aqlprofile64.so -> libhsa-amd-aqlprofile64.so.1 in ${lib}"
+    return 0
+  fi
+  if ln -s libhsa-amd-aqlprofile64.so.1 "${lib}/libhsa-amd-aqlprofile64.so" 2>/dev/null; then
+    log "rocprof-compute: linked the missing libhsa-amd-aqlprofile64.so soname in ${lib}"
+  else
+    warn "rocprof-compute: could not link libhsa-amd-aqlprofile64.so in ${lib}; profiling will abort in rocprofiler-sdk"
+  fi
+}
+
+# Home of the private venv analyze mode runs in. rocpc_profile.py derives the
+# same path, so the two sides need no handshake.
+_rocpc_venv_dir() {
+  printf '%s\n' "${ROCPC_VENV:-/opt/rocprof-compute-venv}"
+}
+
+# rocprof-compute's analyze mode refuses to run unless the exact pins in its own
+# requirements.txt are installed. Meeting them in the serving image would pull
+# numpy and pandas out from under torch, so they get a venv of their own. The
+# tool's file is the only source of truth: a copy kept here goes stale the next
+# ROCm release, which is how analyze broke in the first place.
+# Fail-soft: without the venv, analyze degrades, profiling still collects.
+_ensure_rocpc_analyze_venv() {
+  local libexec="$1" reqs venv venv_py
+  reqs="${libexec}/requirements.txt"
+  if [ ! -f "$reqs" ]; then
+    log "rocprof-compute: no ${reqs}; analyze needs no private venv here"
+    return 0
+  fi
+  venv="$(_rocpc_venv_dir)"
+  venv_py="${venv}/bin/python"
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    log "would provision the rocprof-compute analyze venv at ${venv} from ${reqs}"
+    return 0
+  fi
+  if [ -x "$venv_py" ]; then
+    log "rocprof-compute: analyze venv already present at ${venv}"
+    return 0
+  fi
+  if ! "$PYTHON" -m venv "$venv" >/dev/null 2>&1; then
+    warn "rocprof-compute: could not create the analyze venv at ${venv}; analyze will degrade to the PMC path (profiling still collects counters)"
+    return 0
+  fi
+  if ! "$venv_py" -m pip install --quiet "${PIP_EXTRA[@]}" -r "$reqs"; then
+    warn "rocprof-compute: analyze venv deps from ${reqs} failed to install; analyze will degrade to the PMC path (profiling still collects counters)"
+    return 0
+  fi
+  log "rocprof-compute: analyze venv ready at ${venv}"
+}
+
 # Echo the interpreter resolve_rocpc() will run rocprof-compute under: the first
 # of $PYTHON (install-time sys.executable), /usr/bin/python3, PATH python3 that
 # can run `<libexec>/rocprof-compute --help`. Non-zero + no output if none do.
@@ -981,9 +1365,9 @@ ensure_rocprof_compute() {
   # permanent skip: roofline profiling silently uninstalled on every pod.
   log "rocprof-compute: ensuring roofline profiling deps (KERNEL_OPT_BACKEND_ORDER='${KERNEL_OPT_BACKEND_ORDER:-}')"
 
-  local rocm_root base
+  local rocm_root libexec rocm_ver
   rocm_root="${ROCM_PATH:-/opt/rocm}"
-  base="${rocm_root%/}/libexec/rocprofiler-compute/rocprof_compute_base.py"
+  libexec="$(_rocpc_libexec_dir)" || libexec=""
 
   # --- Step 0: the profiler's Python dependencies ---
   # The tool is a Python program: without dash/kaleido/matplotlib/plotille/tqdm
@@ -1046,14 +1430,34 @@ for spec in specs:
   fi
 
   # --- Step 1: ensure the rocprof-compute tool exists ---
-  # It is a ROCm system package (pip cannot provide it). Idempotent: skip the apt
-  # install when the file KernelForge's resolve_rocpc() checks is already present.
-  if [ -f "$base" ]; then
-    log "rocprof-compute already present at ${base}"
+  # Idempotent: skip the install when the tool is already present in either layout.
+  if [ -n "$libexec" ]; then
+    log "rocprof-compute already present at ${libexec}"
   elif [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "rocprof-compute not found at ${base} (check-only; would apt-get install rocprofiler-compute). Forge profiling would degrade to the PMC path."
+    warn "rocprof-compute not found under ${rocm_root} or the _rocm_profiler wheel (check-only; would install rocprofiler-compute). Forge profiling would degrade to the PMC path."
   elif [ "$DRY_RUN" -eq 1 ]; then
-    log "would run: apt-get install -y --no-install-recommends rocprofiler-compute"
+    if rocm_ver="$(_rocm_wheel_version)" && [ -n "$rocm_ver" ]; then
+      log "would run: ${PYTHON} -m pip install --extra-index-url https://stable.repo.amd.com/rocm/whl-next 'rocm-profiler==${rocm_ver}'"
+    else
+      log "would run: apt-get install -y --no-install-recommends rocprofiler-compute"
+    fi
+  elif rocm_ver="$(_rocm_wheel_version)" && [ -n "$rocm_ver" ]; then
+    # Wheel-ROCm stack. Pin the profiler to the SDK version already installed:
+    # asking for the `rocm` metapackage instead lets pip re-resolve the whole
+    # SDK and, on the py3.12 images, silently reinstall rocm-sdk-core at an
+    # older version than the one torch is built against. --extra-index-url,
+    # never --index-url: that would replace the image's own configuration,
+    # which on some images is the only route to this package.
+    log "installing rocprofiler-compute (forge profiling backend) via pip: rocm-profiler==${rocm_ver}"
+    "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
+      --extra-index-url https://stable.repo.amd.com/rocm/whl-next "rocm-profiler==${rocm_ver}" \
+      || warn "rocprof-compute: pip install 'rocm-profiler==${rocm_ver}' failed; forge profiling will degrade to the PMC path. Check pip/network access to the ROCm index."
+    libexec="$(_rocpc_libexec_dir)" || libexec=""
+    if [ -n "$libexec" ]; then
+      log "rocprof-compute installed OK: ${libexec} present"
+    else
+      warn "rocprof-compute: pip install produced no ${rocm_root} or _rocm_profiler layout; forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO)."
+    fi
   elif ! command -v apt-get >/dev/null 2>&1; then
     # No apt (RHEL/Alpine/etc.): cannot install the system package here.
     warn "rocprof-compute: apt-get unavailable; cannot install rocprofiler-compute. Forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO). Bake rocprofiler-compute into the image to enable roofline profiling."
@@ -1069,10 +1473,11 @@ for spec in specs:
       apt-get install -y --no-install-recommends rocprofiler-compute >>"$apt_log" 2>&1 || true
     fi
     # Verify against the SAME path KernelForge's resolve_rocpc() checks.
-    if [ -f "$base" ]; then
-      log "rocprof-compute installed OK: ${base} present"
+    libexec="$(_rocpc_libexec_dir)" || libexec=""
+    if [ -n "$libexec" ]; then
+      log "rocprof-compute installed OK: ${libexec} present"
     else
-      warn "rocprof-compute install did not produce ${base}; forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO). apt output tail (check ROCm repo access / package name for this ROCm version):"
+      warn "rocprof-compute install did not produce a rocprofiler-compute layout under ${rocm_root}; forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO). apt output tail (check ROCm repo access / package name for this ROCm version):"
       # Guard BOTH the missing-file case and pipefail: if the redirect above never
       # created $apt_log (e.g. an unwritable TMPDIR), a bare `tail | while` exits
       # non-zero and set -euo pipefail would abort install.sh — the very
@@ -1089,9 +1494,11 @@ for spec in specs:
   # Pin in the interpreter resolve_rocpc() will actually run the tool under (probe
   # mirrors KernelForge). Runs when the tool is present; in check/dry-run we
   # surface the plan against $PYTHON even before the tool exists.
-  if [ -f "$base" ]; then
+  if [ -n "$libexec" ]; then
+    _ensure_aqlprofile_soname
+    _ensure_rocpc_analyze_venv "$libexec"
     local rocpc_py
-    if rocpc_py="$(_rocpc_effective_python "$(dirname "$base")")"; then
+    if rocpc_py="$(_rocpc_effective_python "$libexec")"; then
       [ "$rocpc_py" = "$PYTHON" ] \
         || log "rocprof-compute: resolve_rocpc will run under ${rocpc_py} (not \$PYTHON=${PYTHON}); pinning pandas there"
     else
@@ -1150,89 +1557,201 @@ PY
   fi
 }
 
-# --- 2a. aiperf (AgentX benchmark client) — fail-soft, AgentX-only ---
-# Installs the pinned aiperf for HYPERLOOM_AGENTX; only reached when the caller
-# opts in (see the INSTALL_AIPERF / HYPERLOOM_AGENTX gate at the call site). A
-# failure here is NON-fatal: it only warns and leaves aiperf absent, so the
-# default synthetic path is never blocked by an AgentX-only dependency. Skipped
-# when the operator points AIPERF_BIN at their own build.
+# --- 2a. aiperf (AgentX benchmark client) ---
+# The client owns a separate Python environment; never pip into the GPU stack.
+_aiperf_clean_env() (
+  unset PYTHONHOME PYTHONPATH PYTHONUSERBASE PYTHONPLATLIBDIR __PYVENV_LAUNCHER__ VIRTUAL_ENV CONDA_PREFIX
+  unset PIP_TARGET PIP_PREFIX PIP_ROOT PIP_USER
+  unset UV_PYTHON UV_SYSTEM_PYTHON UV_TARGET UV_PREFIX UV_PROJECT_ENVIRONMENT
+  unset UV_MANAGED_PYTHON UV_NO_MANAGED_PYTHON UV_PYTHON_PREFERENCE
+  "$@"
+)
+
+_aiperf_check_owned_dir() {
+  local dir="$1" marker="$1/.hyperloom-${1##*/}"
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    if [ -L "$dir" ] || [ ! -d "$dir" ] || [ ! -f "$marker" ] || [ -L "$marker" ] \
+        || [ "$(cat "$marker")" != hyperloom-aiperf-v1 ]; then
+      warn "refusing to modify unowned aiperf directory: $dir"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+_aiperf_healthy() {
+  local venv="$1" help_text ref="$AIPERF_REF"
+  # A package-spec override chooses its own source; the default must match our pin.
+  [ "$AIPERF_PACKAGE_SPEC" = "aiperf @ git+${AIPERF_REPO}@${AIPERF_REF}" ] || ref=""
+  [ -x "$venv/bin/python" ] && [ -x "$venv/bin/aiperf" ] || return 1
+  _aiperf_clean_env timeout 60 "$venv/bin/python" -I - "$ref" <<'PY' >/dev/null 2>&1 || return 1
+import json
+import re
+import sys
+from importlib.metadata import PackageNotFoundError, distribution
+try:
+    source = json.loads(distribution("aiperf").read_text("direct_url.json") or "{}")
+except (PackageNotFoundError, ValueError, OSError):
+    raise SystemExit(1)
+vcs = source.get("vcs_info", {})
+ref = sys.argv[1]
+if not ref:
+    matches = True
+elif re.fullmatch(r"[0-9a-fA-F]{7,40}", ref):
+    matches = (vcs.get("commit_id") or "").lower().startswith(ref.lower())
+else:
+    matches = vcs.get("requested_revision") == ref
+raise SystemExit(0 if matches and (3, 11) <= sys.version_info[:2] < (3, 14) else 1)
+PY
+  help_text="$(_aiperf_clean_env timeout 60 "$venv/bin/aiperf" profile --help)" || return 1
+  case "$help_text" in *weka-trace*--scenario*|*--scenario*weka-trace*) ;; *) return 1 ;; esac
+  [[ "$help_text" == *--benchmark-duration* ]]
+}
+
+_aiperf_uv() (
+  local no_index="${PIP_NO_INDEX:-}"
+  # uv does not read pip's network environment variables.
+  if [ -n "${PIP_INDEX_URL:-}" ] && [ -z "${UV_DEFAULT_INDEX:-}${UV_INDEX_URL:-}" ]; then
+    export UV_DEFAULT_INDEX="$PIP_INDEX_URL"
+  fi
+  if [ -n "${PIP_EXTRA_INDEX_URL:-}" ] && [ -z "${UV_INDEX:-}${UV_EXTRA_INDEX_URL:-}" ]; then
+    export UV_EXTRA_INDEX_URL="$PIP_EXTRA_INDEX_URL"
+  fi
+  if [ -n "${PIP_FIND_LINKS:-}" ] && [ -z "${UV_FIND_LINKS:-}" ]; then
+    export UV_FIND_LINKS="$PIP_FIND_LINKS"
+  fi
+  if [ "${1:-} ${2:-}" = "pip install" ]; then
+    case "${no_index,,}" in 1|true|yes|on) set -- "$@" --no-index ;; esac
+  fi
+  _aiperf_clean_env env \
+    UV_PYTHON_INSTALL_DIR="$state/aiperf-python" \
+    UV_PYTHON_BIN_DIR="$state/aiperf-python-bin" \
+    UV_CACHE_DIR="$state/aiperf-cache" \
+    "$uv" --no-config "$@"
+)
+
+_install_aiperf() (
+  local state="${HYPERLOOM_STATE_DIR:-}" home="${HOME:-}" venv stamp install_id uv tools candidate aiperf_python=""
+  local offline="${UV_OFFLINE:-}"
+  if [ -z "$state" ]; then
+    if [ -z "$home" ]; then
+      home="$(_aiperf_clean_env "$PYTHON" -I -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')" || return 1
+    fi
+    state="${home}/.hyperloom"
+  fi
+  case "$state" in /*) ;; *) warn "HYPERLOOM_STATE_DIR must be an absolute path: $state"; return 1 ;; esac
+  venv="$state/aiperf-venv"
+  stamp="$state/aiperf_installed_ref"
+  install_id="$(printf '%s\n%s' "$AIPERF_REF" "$AIPERF_PACKAGE_SPEC")"
+  tools="$state/aiperf-tools"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would install ${AIPERF_PACKAGE_SPEC} into ${venv} using Python >=3.11,<3.14 (managed 3.11 if needed)"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    if _aiperf_healthy "$venv"; then log "aiperf ready: $venv/bin/aiperf"; else warn "aiperf missing or unhealthy at $venv (check-only)"; fi
+    return 0
+  fi
+
+  # The checkout lock is acquired by the caller, before this shared state lock.
+  mkdir -p "$state" || return 1
+  exec 8>"$state/aiperf-install.lock" || return 1
+  if command -v flock >/dev/null 2>&1; then
+    flock 8 || return 1
+  else
+    warn "flock not available; concurrent aiperf installs may race"
+  fi
+  if [ "$(cat "$stamp" 2>/dev/null)" = "$install_id" ] && _aiperf_healthy "$venv"; then
+    log "aiperf at $venv/bin/aiperf is healthy at ref ${AIPERF_REF:0:8}; skipping install"
+    return 0
+  fi
+  _aiperf_check_owned_dir "$venv" || return 1
+  rm -f -- "$stamp" || return 1
+
+  uv="$(command -v uv 2>/dev/null || true)"
+  if [ -z "$uv" ]; then
+    _aiperf_check_owned_dir "$tools" || return 1
+    uv="$tools/bin/uv"
+    if [ ! -x "$uv" ]; then
+      case "${offline,,}" in
+        1|true|yes|on) warn "aiperf: UV_OFFLINE forbids bootstrapping uv with pip; provide uv on PATH"; return 1 ;;
+      esac
+      if ! _aiperf_clean_env "$PYTHON" -I -m pip --version >/dev/null 2>&1; then
+        warn "aiperf needs uv, but uv and pip in $PYTHON are unavailable; install uv on PATH or provide AIPERF_BIN"
+        return 1
+      fi
+      mkdir -p "$tools" || return 1
+      printf '%s\n' hyperloom-aiperf-v1 > "$tools/.hyperloom-aiperf-tools" || return 1
+      log "installing private uv==0.12.3 into $tools"
+      _aiperf_clean_env env PIP_REQUIRE_VIRTUALENV=false "$PYTHON" -I -m pip install --disable-pip-version-check \
+        --no-cache-dir --no-deps --only-binary=:all: --upgrade --target "$tools" uv==0.12.3 \
+        || { warn "aiperf: private uv bootstrap failed; check the pip/download error above"; return 1; }
+    fi
+  fi
+  for candidate in "$PYTHON" python3.11 python3.12 python3.13; do
+    if [ "$candidate" != "$PYTHON" ]; then
+      candidate="$(command -v "$candidate" 2>/dev/null)" || continue
+    fi
+    if _aiperf_clean_env "$candidate" -I -c 'import sys; sys.exit(not ((3, 11) <= sys.version_info[:2] < (3, 14)))'; then
+      aiperf_python="$candidate"
+      break
+    fi
+  done
+  if [ -z "$aiperf_python" ]; then
+    log "aiperf requires Python >=3.11,<3.14; preparing private managed Python 3.11"
+    _aiperf_uv python install --no-bin 3.11 \
+      || { warn "aiperf: managed Python 3.11 download failed; check network access and the uv error above"; return 1; }
+    aiperf_python="$(_aiperf_uv python find --managed-python --no-python-downloads 3.11)" || return 1
+  fi
+
+  # Only an environment bearing our marker can be removed, including partial builds.
+  if [ -d "$venv" ]; then rm -rf -- "$venv" || return 1; fi
+  mkdir -p "$venv" || return 1
+  printf '%s\n' hyperloom-aiperf-v1 > "$venv/.hyperloom-aiperf-venv" || return 1
+  _aiperf_uv venv --allow-existing --python "$aiperf_python" "$venv" || return 1
+  log "installing aiperf (AgentX) into $venv: ${AIPERF_PACKAGE_SPEC}"
+  _aiperf_uv pip install --python "$venv/bin/python" "$AIPERF_PACKAGE_SPEC" || return 1
+  _aiperf_healthy "$venv" || { warn "aiperf installed but failed its pinned-build health check at $venv"; return 1; }
+  printf '%s\n' "$install_id" > "$stamp" || return 1
+  log "aiperf installed OK: $venv/bin/aiperf"
+)
+
 ensure_aiperf() {
   if [ -n "${AIPERF_BIN:-}" ]; then
     log "AIPERF_BIN set (${AIPERF_BIN}); skipping aiperf install"
     return 0
   fi
-  if [ "$CHECK_ONLY" -eq 1 ]; then
-    if command -v aiperf >/dev/null 2>&1; then log "aiperf on PATH"; else warn "aiperf not found (check-only)"; fi
+  if _install_aiperf; then
     return 0
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would pip install aiperf (AgentX): ${AIPERF_PACKAGE_SPEC}"
-    return 0
-  fi
-  # Presence is not enough. Measured: the previous pin (aiperf 0.8.0) carries
-  # weka-trace, --scenario and --benchmark-duration, and defines a scenario by
-  # the same name -- but with different invariants and an allowlist that predates
-  # the current corpus. A presence-only skip therefore left every already
-  # provisioned box on the old build after a pin bump, silently, while the
-  # preflight's own advice ("install via install.sh") pointed back at this no-op.
-  # Record what we installed and reinstall when it no longer matches.
-  local stamp="${HYPERLOOM_STATE_DIR:-${HOME}/.hyperloom}/aiperf_installed_ref"
-  local -a pip_args=("${PIP_EXTRA[@]}")
-  if command -v aiperf >/dev/null 2>&1; then
-    if [ "$(cat "$stamp" 2>/dev/null)" = "$AIPERF_REF" ]; then
-      log "aiperf on PATH is the pinned ref ${AIPERF_REF:0:8}; skipping install"
-      return 0
-    fi
-    log "aiperf on PATH is not the pinned ref ${AIPERF_REF:0:8} (recorded: $(cat "$stamp" 2>/dev/null || echo none)); reinstalling"
-    # Deliberately NOT --no-deps: a newer aiperf may need dependencies the old
-    # one did not, and installing the package without them is a worse failure
-    # than the stale build we are replacing.
-    pip_args+=(--force-reinstall)
-  fi
-  log "installing aiperf (AgentX): ${AIPERF_PACKAGE_SPEC}"
-  if "$PYTHON" -m pip install --quiet "${pip_args[@]}" "$AIPERF_PACKAGE_SPEC"; then
-    log "aiperf installed OK"
-    # Stamp only after a success, so a failed upgrade retries next run instead
-    # of recording a ref that is not what is on disk. Best-effort: an unwritable
-    # state dir costs a redundant reinstall, never a wrong skip.
-    mkdir -p "$(dirname "$stamp")" 2>/dev/null && printf '%s\n' "$AIPERF_REF" > "$stamp" 2>/dev/null || \
-      warn "could not record the installed aiperf ref at ${stamp}; the next run will reinstall"
+  elif [ "$AIPERF_REQUIRED" -eq 1 ]; then
+    die "aiperf install failed (${AIPERF_PACKAGE_SPEC}); AgentX was explicitly requested. Fix the error above or provide AIPERF_BIN."
   else
-    warn "aiperf install failed (${AIPERF_PACKAGE_SPEC}); AgentX mode (HYPERLOOM_AGENTX) stays unavailable until aiperf is installed or AIPERF_BIN is set. Default synthetic path is unaffected."
+    warn "aiperf install failed (${AIPERF_PACKAGE_SPEC}); AgentX remains unavailable. Default synthetic path is unaffected."
   fi
 }
 
-# --- 2b. Atomic-write patch for Magpie._prepare_benchmark_scripts ---
-# The Hyperloom #C1 script-tearing race (vllm_mi300x.sh / sglang_mi300x.sh
-# sourced by a leaked bash while a new Magpie subprocess is mid-`shutil.copy2` →
-# `syntax error near unexpected token 'fi'`). Magpie is invoked as a
-# subprocess, so monkey-patching from the Coordinator process does not
-# reach it; we patch the cloned source in place at install time. The
-# patcher itself is idempotent + flock-serialised + atomic-rename
-# (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
+# --- 2b. Atomic-write patch for Magpie._prepare_benchmark_scripts (compat patches only) ---
+# Two gaps between the pinned Magpie/InferenceX revision and what Hyperloom
+# needs: SGLang custom-tokenizer trust gating for MAGPIE_TRUST_REMOTE_CODE=1
+# (Magpie's client call sites never forward the `trust` flag upstream), and
+# the redundant `--concurrent-requests` flag InferenceX's `run_lm_eval`
+# rejects. Magpie is invoked as a subprocess, so monkey-patching from the
+# Coordinator process does not reach it; we patch the cloned source in place
+# at install time. The patcher itself is idempotent + flock-serialised +
+# atomic-rename (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
 #
-# Fail-soft (was fail-loud): a `False` return means the legacy
-# `shutil.copy2` block was not found. With MAGPIE_REF now pinned to an
-# upstream commit that already copies scripts atomically
-# (`_copy_benchmark_script_atomic`), that is the EXPECTED no-op state —
-# the #C1 race is already mitigated upstream, so we `warn` and continue
-# instead of aborting every install. (A sibling branch makes the patcher
-# itself upstream-aware; this warn is the defense-in-depth complement.) If
-# you re-pin MAGPIE_REF to a pre-refactor commit and the patch still cannot
-# apply, the script-tearing race is genuinely unpatched — review the
-# warning. Override the gate via PATCH_MAGPIE=0 to skip the step entirely.
-ensure_magpie_atomic_scripts_patch() {
+# Override the gate via PATCH_MAGPIE=0 to skip the step entirely.
+ensure_magpie_compat_patches() {
   if is_falsy "${PATCH_MAGPIE:-1}"; then
-    log "PATCH_MAGPIE is falsy — skipping Magpie atomic-write patch (caller asserts upstream already fixed)"
+    log "PATCH_MAGPIE is falsy — skipping Magpie compatibility patches"
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "would apply Hyperloom #C1 atomic-write patch to ${MAGPIE_PATH}/Magpie/modes/benchmark/benchmarker.py"
+    log "would apply Magpie SGLang trust + eval-concurrency compatibility patches under ${MAGPIE_PATH}"
     return 0
   fi
-  log "applying Hyperloom #C1 atomic-write patch to Magpie._prepare_benchmark_scripts"
-  # Exit-code contract (read below): 0 ok · 2 remote-trust drift only ·
-  # 4 GENUINE atomic failure (race unmitigated) · 1 benign atomic no-op.
+  log "applying Magpie SGLang trust + eval-concurrency compatibility patches"
+  # Exit-code contract (read below): 0 ok · 2 remote-trust drift · 5 eval-flag survives.
   # INFERENCEX_PATH is passed explicitly: the patcher also has to scrub the
   # InferenceX ``benchmarks/`` copies Magpie executes and teach
   # ``benchmark_lib.sh::run_lm_eval`` to tolerate the flag. This step therefore
@@ -1247,19 +1766,11 @@ status = magpie_scripts_patch_status(
     os.environ["MAGPIE_PATH"],
     os.environ.get("INFERENCEX_PATH") or None,
 )
-print(f"_magpie_patcher: atomic_reason={status.atomic_reason} "
-      f"atomic_ok={status.atomic_ok} remote_trust_ok={status.remote_trust_ok} "
+print(f"_magpie_patcher: remote_trust_ok={status.remote_trust_ok} "
       f"eval_flag_ok={status.eval_flag_ok}",
       file=sys.stderr)
 if status.ok:
     sys.exit(0)
-# A GENUINE atomic failure (unrecognized shape / I/O error) means the
-# script-tearing race is actually unmitigated — distinct exit so a strict
-# install can fail-loud instead of swallowing it as an expected no-op.
-if status.atomic_genuine_failure:
-    sys.exit(4)
-if not status.atomic_ok:
-    sys.exit(1)
 if not status.remote_trust_ok:
     sys.exit(2)
 # eval_flag_ok is False ONLY when a live `run_eval --concurrent-requests`
@@ -1271,26 +1782,13 @@ if not status.remote_trust_ok:
 # install can name the failure mode.
 if not status.eval_flag_ok:
     sys.exit(5)
-# Defensive catch-all: a not-ok status with none of the bits above set should
-# never happen, but exit non-zero so we never fall through to exit 0.
-sys.exit(3)
+sys.exit(1)
 PY
   then
-    log "Magpie #C1 patch OK"
+    log "Magpie compatibility patches OK"
   else
     rc=$?
-    if [ "$rc" -eq 4 ]; then
-      # GENUINE failure: the legacy block is gone AND upstream is not atomic
-      # (or a read/write error). The Hyperloom #C1 script-tearing race is NOT
-      # mitigated — `profile`/`baseline` can hit `syntax error near unexpected
-      # token 'fi'`. Strict mode (default) aborts; a falsy MAGPIE_PATCH_STRICT
-      # (0/false/no/off) keeps the legacy fail-soft behaviour and only warns.
-      if is_falsy "${MAGPIE_PATCH_STRICT:-1}"; then
-        warn "Magpie atomic-write patch GENUINELY failed (race unmitigated); MAGPIE_PATCH_STRICT=${MAGPIE_PATCH_STRICT:-} (falsy), continuing anyway — review _magpie_patcher.py."
-      else
-        die "Magpie atomic-write patch GENUINELY failed: neither the legacy shutil.copy2 block nor an upstream atomic copy was found in benchmarker.py. The Hyperloom #C1 script-tearing race is unmitigated. Re-pin MAGPIE_REF to a supported commit, review _magpie_patcher.py, or set MAGPIE_PATCH_STRICT=0 to downgrade to a warning (or PATCH_MAGPIE=0 to skip entirely)."
-      fi
-    elif [ "$rc" -eq 2 ]; then
+    if [ "$rc" -eq 2 ]; then
       warn "Magpie SGLang remote trust patch did not apply. If MAGPIE_TRUST_REMOTE_CODE=1 is required for custom-code models (for example Kimi/Qwen tokenizer paths), remote benchmark clients may still fail to pass trust; review _magpie_patcher.py or set PATCH_MAGPIE=0 only if this is intentional."
     elif [ "$rc" -eq 5 ]; then
       # Fail-loud by default: a surviving --concurrent-requests aborts EVERY
@@ -1307,11 +1805,7 @@ PY
         die "Magpie redundant --concurrent-requests eval flag could not be stripped from a generic benchmark script (unrecognised run_eval line), and InferenceX's run_lm_eval could not be taught to tolerate it. Every RUN_EVAL=true baseline will abort with 'Unknown parameter: --concurrent-requests' and the run will stop with baseline_accuracy_failed. Concurrency must flow via EVAL_CONCURRENT_REQUESTS (fallback CONC), not the flag — fix the script's run_eval line or review _magpie_patcher.py. Set MAGPIE_EVAL_FLAG_STRICT=0 to downgrade to a warning if accuracy eval is not required."
       fi
     else
-      # Benign no-op (rc=1): MAGPIE_PATH unset / benchmarker.py missing. With
-      # MAGPIE_REF pinned to an upstream-atomic commit the patcher reports
-      # ``upstream_atomic`` (exit 0) instead, so this branch is just the
-      # missing-tree case — warn and continue. PATCH_MAGPIE=0 skips the step.
-      warn "Magpie atomic-write patch skipped (no benchmarker.py under MAGPIE_PATH). Fine for tests/dry-runs; otherwise check MAGPIE_PATH or set PATCH_MAGPIE=0."
+      die "Magpie compatibility patch step failed (rc=$rc): the patcher process exited before reporting remote_trust_ok/eval_flag_ok. Check MAGPIE_PATH/INFERENCEX_PATH and review _magpie_patcher.py."
     fi
   fi
 }
@@ -1323,12 +1817,10 @@ PY
 # etc.) and pointed every install at whichever it found first. That
 # multi-install / shared-checkout layout is the upstream source of the
 # concurrent-write races behind the Hyperloom #C1 script-tearing race —
-# every fresh Magpie subprocess `shutil.copy2`'d its scripts on top of
-# the same shared files, while bash interpreters from neighbouring
-# installs were `source`-ing them. Cloning a per-install copy here
-# eliminates the cross-install fan-in (Magpie's in-place atomic-write patch then
-# closes the intra-install race window — both fixes are needed; this
-# one alone is not sufficient).
+# every fresh Magpie subprocess copied its scripts on top of the same shared
+# files, while bash interpreters from neighbouring installs were `source`-ing
+# them. Cloning a per-install copy here eliminates the cross-install fan-in;
+# the pinned Magpie ref copies scripts atomically upstream.
 #
 # Policy:
 #   * INFERENCEX_PATH set and exists -> preserve verbatim. This is the
@@ -1657,6 +2149,16 @@ chain_kernel_agent() {
   bash "$script" "${args[@]}"
 }
 
+# --- targeted entry point: aiperf only -------------------------------------
+# Both entry points acquire the checkout lock before the aiperf state lock.
+if [ "$ONLY_AIPERF" -eq 1 ]; then
+  log "--only-aiperf: installing just the pinned AgentX client"
+  acquire_install_lock
+  ensure_aiperf
+  log "--only-aiperf: done"
+  exit 0
+fi
+
 ensure_inference_optimizer
 ensure_forge_gemm_tune
 ensure_langfuse_when_enabled
@@ -1675,7 +2177,7 @@ acquire_install_lock
 # ALL whitespace would wrongly collapse "by pass" -> "bypass" and diverge.
 HYPERLOOM_BENCHMARK_BACKEND_LC="$(printf '%s' "${HYPERLOOM_BENCHMARK_BACKEND:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
 if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" = "bypass" ]; then
-  log "benchmark backend is bypass; skipping ensure_magpie + ensure_magpie_atomic_scripts_patch"
+  log "benchmark backend is bypass; skipping ensure_magpie + ensure_magpie_compat_patches"
 else
   ensure_magpie
 fi
@@ -1687,15 +2189,30 @@ ensure_inferencex
 # — running the patch before it silently skipped those targets and left
 # RUN_EVAL=true baselines aborting on 'Unknown parameter'.
 if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
-  ensure_magpie_atomic_scripts_patch
+  ensure_magpie_compat_patches
 fi
 
-# aiperf (AgentX client) is an OPT-IN Magpie-path add-on: installed only when the
-# operator explicitly asks (INSTALL_AIPERF or HYPERLOOM_AGENTX truthy), so a
-# default install grows no extra network/build dependency. If AgentX is turned on
-# at runtime without aiperf present, the runtime preflight fails loud with
-# guidance (install it, or point AIPERF_BIN at an existing build). Fail-soft
-# inside ensure_aiperf. Never for the bypass backend.
+# aiperf (AgentX client) installs whenever this build ships the AgentX assets.
+#
+# It used to be gated on INSTALL_AIPERF / HYPERLOOM_AGENTX being truthy HERE, in
+# the installer's process -- but those answer "is THIS RUN using AgentX", and the
+# question at provisioning time is "will this box ever be asked to". Nobody knows
+# that yet: the mode is chosen later, per session, by whoever dispatches the run.
+# Measured on the incident cluster: 11 of 13 provisioning runs logged
+# "aiperf (AgentX) skipped" and left a box that could not run AgentX at all.
+#
+# The presence of assets/agentx/ is the honest install-time signal -- a build
+# that ships the AgentX client is a build whose boxes may be asked to run it.
+#
+# Failure handling stays asymmetric, and deliberately so:
+#   * nobody asked  -> attempt it, but a failure only warns. This is a
+#     pre-warm, and an interpreter or network that cannot supply aiperf must not
+#     block a provision that was never going to use it.
+#   * asked by name -> AIPERF_REQUIRED=1, and a failure is FATAL (see
+#     ensure_aiperf). The caller named the dependency; leaving it absent with a
+#     warning in a log nobody reads is what produced the incident.
+# Either way the runtime preflight repairs a still-missing client and stops the
+# run if it cannot. Never for the bypass backend.
 if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
   # Strip surrounding whitespace then lowercase, so the installer
   # parses these flags identically to the Python runtime's agentx_enabled()
@@ -1704,15 +2221,32 @@ if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
   _agx_sw="$(printf '%s' "${HYPERLOOM_AGENTX:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
   case "${_agx_want}:${_agx_sw}" in
     1:*|true:*|yes:*|on:*|*:1|*:true|*:yes|*:on)
+      # Asked for by name => a failed install is fatal, not a warning.
+      AIPERF_REQUIRED=1
       ensure_aiperf ;;
+    0:*|false:*|no:*|off:*|*:0|*:false|*:no|*:off)
+      # Declined by name. Before the pre-warm existed, a falsy INSTALL_AIPERF
+      # landed in the skip branch simply because nothing matched the truthy
+      # patterns; with the pre-warm as the default it would have started
+      # installing instead, taking away the only way to say no.
+      log "aiperf (AgentX) skipped: declined by INSTALL_AIPERF / HYPERLOOM_AGENTX." ;;
     *)
-      log "aiperf (AgentX) skipped: set INSTALL_AIPERF=1 or HYPERLOOM_AGENTX=1 to install it (or point AIPERF_BIN at an existing build)." ;;
+      # Nobody asked either way. Install when this build carries the client, so
+      # the box is ready for a mode that gets chosen after provisioning ends.
+      if [ -d "${AGENTX_ASSET_DIR}" ]; then
+        log "aiperf (AgentX): pre-warming the pinned client because this build ships ${AGENTX_ASSET_DIR}; a failure here only warns"
+        ensure_aiperf
+      else
+        log "aiperf (AgentX) skipped: this build ships no ${AGENTX_ASSET_DIR}; set INSTALL_AIPERF=1 to install it anyway (or point AIPERF_BIN at an existing build)."
+      fi ;;
   esac
 fi
 ensure_bench_serving_deps
 ensure_scriptable_quality_deps
+activate_vllm_image_source
 ensure_framework_deps
 chain_kernel_agent
+persist_vllm_image_source_env
 # rocprof-compute + pandas<3 pin runs LAST — strictly AFTER every pip-installing
 # step (chain_kernel_agent included; nothing below installs packages). This makes
 # the pandas<3 pin the final word (no later `pip install` can re-pull pandas>=3)
@@ -1720,10 +2254,6 @@ chain_kernel_agent
 # Unconditional (not gated on the backend): the default-geak install a later
 # forge session inherits still gets rocprof-compute + pandas<3.
 ensure_rocprof_compute
-# tree-reform.MD P2.5: framework-agent was promoted into
-# src/hyperloom/agents/framework/ (single hyperloom distribution), so the
-# `fa` CLI is already installed by ensure_inference_optimizer() above; no
-# more separate chain_framework_agent() delegation to a standalone installer.
 
 _write_specialist_secret_env_opt_in() {
   if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
@@ -1746,7 +2276,7 @@ _probe_framework_source_roots() {
   log "probing framework source roots for INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"
   local roots
   roots="$("$PYTHON" - <<'PY'
-from hyperloom.orchestrator.framework.paths import probe_framework_source_roots_for_env
+from hyperloom.inference_optimizer.framework_paths import probe_framework_source_roots_for_env
 print(probe_framework_source_roots_for_env())
 PY
 )"
@@ -1760,7 +2290,7 @@ PY
   local roots_summary
   roots_summary="$(ROOTS_INPUT="$roots" "$PYTHON" - <<'PY'
 import os
-from hyperloom.orchestrator.framework.paths import summarise_framework_root_discovery
+from hyperloom.inference_optimizer.framework_paths import summarise_framework_root_discovery
 print(summarise_framework_root_discovery(os.environ.get("ROOTS_INPUT", "")))
 PY
 )"

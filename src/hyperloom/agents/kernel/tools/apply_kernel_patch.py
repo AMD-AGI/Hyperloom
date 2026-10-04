@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import logging
 import os
@@ -25,9 +24,14 @@ from typing import Any, Iterable
 
 # Sibling import works whether run as a script or via importlib.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _io_utils import source_text_looks_complete, utc_now  # noqa: E402
+from _io_utils import source_text_looks_complete, utc_now
 
 sys.path.pop(0)
+sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+try:
+    from hyperloom.common import aiter_jit_cache
+finally:
+    sys.path.pop(0)
 
 log = logging.getLogger(__name__)
 
@@ -103,7 +107,7 @@ def _coerce_rebuild_command(rebuild_command: "list[str] | str | None") -> list[s
 
 
 def known_target_roots() -> tuple[str, ...]:
-    """Resolved framework roots (importlib/glob when orchestrator is importable).
+    """Advisory framework roots used to recognise a reusable patch target.
 
     Resolves once and caches the result. Falls back to
     :data:`_FALLBACK_KNOWN_TARGET_ROOTS` plus the FlyDSL roots when the
@@ -117,11 +121,11 @@ def known_target_roots() -> tuple[str, ...]:
     if _CACHED_KNOWN_TARGET_ROOTS is not None:
         return _CACHED_KNOWN_TARGET_ROOTS
     try:
-        from hyperloom.orchestrator.framework.paths import (
-            resolve_patch_target_roots,
+        from hyperloom.inference_optimizer.framework_paths import (
+            resolve_known_source_prefixes,
         )
 
-        _CACHED_KNOWN_TARGET_ROOTS = resolve_patch_target_roots()
+        _CACHED_KNOWN_TARGET_ROOTS = resolve_known_source_prefixes()
     except ImportError:
         _CACHED_KNOWN_TARGET_ROOTS = _FALLBACK_KNOWN_TARGET_ROOTS + _fallback_flydsl_roots()
     return _CACHED_KNOWN_TARGET_ROOTS
@@ -893,21 +897,12 @@ _AITER_CSRC_MARKERS = ("/aiter/csrc/", "/aiter_meta/csrc/")
 _REBUILD_MODE_COMMAND = "command"
 _REBUILD_MODE_NONE = "none"
 _REBUILD_MODE_RUNTIME_JIT = "runtime_jit"
+_REBUILD_MODE_CONTENT_ADDRESSED_JIT = "content_addressed_jit"
 
-
-def _isolated_aiter_pkg_root() -> Path | None:
-    """Locate aiter inside the isolated vLLM venv when it is not importable here."""
-    vllm_venv = os.environ.get("VLLM_VENV_ROOT", "").strip()
-    if not vllm_venv:
-        return None
-    lib = Path(vllm_venv) / "lib"
-    if not lib.is_dir():
-        return None
-    for package_dir in ("site-packages", "dist-packages"):
-        for match in sorted(lib.glob(f"python*/{package_dir}/aiter")):
-            if match.is_dir():
-                return match
-    return None
+# SGLang's in-tree JIT kernels are compiled by tvm-ffi on first import into a
+# cache directory keyed on a hash of the source closure, so a patched source
+# builds under a new key instead of colliding with the baseline module.
+_SGLANG_JIT_SOURCE_MARKER = "/sglang/kernels/jit/"
 
 
 def _flydsl_root_for(target_file: Path) -> Path | None:
@@ -969,43 +964,76 @@ def _installed_aiter_runtime_root(target_file: Path) -> Path | None:
     return installed[0]
 
 
+def _aiter_checkout_root(target_file: Path) -> Path | None:
+    """Identify a source checkout through the installed runtime, not its basename."""
+    package = aiter_jit_cache.resolve_package_root()
+    if package is None or package.parent.name in {"site-packages", "dist-packages"}:
+        return None
+    if not (package / "__init__.py").is_file() or not (package / "jit" / "__init__.py").is_file():
+        return None
+    meta = os.environ.get("AITER_META_DIR", "").strip()
+    source_root = Path(meta).absolute() if meta else package.parent
+    if not (source_root / "csrc").is_dir():
+        source_root = package.parent
+    if (source_root / "csrc").is_dir() and _within_root(target_file, source_root):
+        return source_root
+    if _within_root(target_file, package):
+        return package.parent
+    return None
+
+
 def _target_is_in_aiter_csrc(target_file: Path) -> bool:
-    """Report whether a file resides under an ``aiter/csrc/`` tree.
+    """Report whether a file belongs to AITER device sources or codegen.
 
     Args:
         target_file: The file path to test.
 
     Returns:
-        ``True`` if the path is under an ``aiter/csrc/`` (in-tree) or
-        ``aiter_meta/csrc/`` (split-wheel) directory.
+        ``True`` under ``aiter/csrc/``, ``aiter_meta/csrc/``, or the ``csrc/``
+        tree of the checkout identified by the installed runtime package.
     """
     norm = str(target_file).replace(os.sep, "/")
-    return any(marker in norm for marker in _AITER_CSRC_MARKERS)
+    checkout = _aiter_checkout_root(target_file)
+    return any(marker in norm for marker in _AITER_CSRC_MARKERS) or (
+        checkout is not None and _within_root(target_file, checkout / "csrc")
+    )
+
+
+def _target_is_sglang_jit_source(target_file: Path) -> bool:
+    """Report whether a file lives under SGLang's in-tree JIT source tree.
+
+    Matches both the editable checkout
+    (``/sgl-workspace/sglang/python/sglang/kernels/jit/...``) and an installed
+    wheel (``.../site-packages/sglang/kernels/jit/...``).
+
+    Args:
+        target_file: The file path to test.
+
+    Returns:
+        ``True`` if the path is under a ``sglang/kernels/jit/`` directory.
+    """
+    norm = str(target_file).replace(os.sep, "/").lower()
+    return _SGLANG_JIT_SOURCE_MARKER in norm
 
 
 def _target_uses_aiter_jit(target_file: Path) -> bool:
     """Return whether a source belongs to an installed/editable AITER runtime."""
     normalized = str(target_file).replace(os.sep, "/")
-    return _installed_aiter_runtime_root(target_file) is not None or "/sgl-workspace/aiter/" in normalized
+    return (
+        _installed_aiter_runtime_root(target_file) is not None
+        or "/sgl-workspace/aiter/" in normalized
+        or _aiter_checkout_root(target_file) is not None
+    )
 
 
 def _aiter_jit_build_dir() -> Path | None:
-    """Locate the importable aiter package's ``jit/build`` directory.
+    """Resolve AITER's build directory through the shared runtime resolver.
 
     Returns:
-        The ``<aiter>/jit/build`` path, or ``None`` when aiter is not
-        importable.
+        The build path under ``AITER_JIT_DIR``, the package JIT directory, or
+        the initialized user cache; ``None`` when the package/cache is unavailable.
     """
-    try:
-        spec = importlib.util.find_spec("aiter")
-    except (ImportError, ValueError):
-        isolated = _isolated_aiter_pkg_root()
-        return isolated / "jit" / "build" if isolated is not None else None
-    if spec is None or not spec.submodule_search_locations:
-        isolated = _isolated_aiter_pkg_root()
-        return isolated / "jit" / "build" if isolated is not None else None
-    aiter_pkg = Path(list(spec.submodule_search_locations)[0])
-    return aiter_pkg / "jit" / "build"
+    return aiter_jit_cache.resolve_jit_build_dir(aiter_jit_cache.resolve_package_root())
 
 
 def _invalidate_aiter_jit_build(
@@ -1014,18 +1042,17 @@ def _invalidate_aiter_jit_build(
     *,
     jit_build_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Move aiter ``jit/build/`` aside so a post-rebuild import re-JITs.
+    """Back up AITER's build tree and all serving modules for a source patch.
 
     Args:
         target_file: The file being patched (gates the operation).
-        backup_dir: Directory to move the ``jit/build`` tree into.
+        backup_dir: Parent of the build-tree and serving-module backups.
         jit_build_dir: Authoritative JIT build path from the apply strategy.
             Falls back to runtime discovery for non-runtime-JIT strategies.
 
     Returns:
-        A status dict with ``status`` of ``ok`` (cache moved), ``clean``
-        (authoritative cache absent/empty), ``skipped``, or ``failed`` and
-        supporting fields.
+        The shared transaction record: ``ok`` when cache state was moved,
+        ``clean`` when neither build nor modules existed, ``skipped``, or ``failed``.
     """
     if jit_build_dir is None and not _target_is_in_aiter_csrc(target_file):
         return {
@@ -1034,50 +1061,11 @@ def _invalidate_aiter_jit_build(
         }
     jit_build = jit_build_dir or _aiter_jit_build_dir()
     if jit_build is None:
-        return {"status": "skipped", "reason": "aiter package not importable"}
-    if not jit_build.exists():
         return {
-            "status": "clean",
-            "reason": "aiter jit/build/ does not exist",
-            "src": str(jit_build),
+            "status": "skipped",
+            "reason": "AITER runtime JIT directory unavailable; correct AITER_JIT_DIR and initialize the runtime cache before applying patches",
         }
-    try:
-        is_empty = not any(jit_build.iterdir())
-    except OSError as exc:
-        return {
-            "status": "failed",
-            "error": f"failed to scan {jit_build}: {exc}",
-            "src": str(jit_build),
-        }
-    if is_empty:
-        return {
-            "status": "clean",
-            "reason": "aiter jit/build/ is empty",
-            "src": str(jit_build),
-        }
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_path = backup_dir / f"jit_build_{time.time_ns()}"
-    if backup_path.exists():
-        return {
-            "status": "failed",
-            "error": f"jit/build backup path already exists: {backup_path}",
-            "src": str(jit_build),
-        }
-    try:
-        shutil.move(str(jit_build), str(backup_path))
-    except (OSError, shutil.Error) as exc:
-        return {
-            "status": "failed",
-            "error": f"shutil.move failed: {exc}",
-            "src": str(jit_build),
-            "backup_path": str(backup_path),
-        }
-    return {
-        "status": "ok",
-        "src": str(jit_build),
-        "backup_path": str(backup_path),
-        "moved_at": utc_now(),
-    }
+    return aiter_jit_cache.invalidate_jit_cache(jit_build, backup_dir)
 
 
 def _trusted_aiter_jit_build_dir(path: Path) -> bool:
@@ -1086,17 +1074,19 @@ def _trusted_aiter_jit_build_dir(path: Path) -> bool:
     Accepts both shapes apply can pin: a wheel install under site-packages and
     the editable checkout :data:`_EDITABLE_AITER_ROOT`.
     """
-    # A manifest path is untrusted: an unresolvable one reads as not trusted.
-    try:
-        resolved = path.resolve()
-    except (OSError, RuntimeError):
-        return False
-    # Classify on the lexical path: site-packages is commonly a symlink, and the
-    # resolved spelling no longer carries that marker.
     root = _installed_aiter_runtime_root(path) or _EDITABLE_AITER_ROOT
-    if resolved != (root / "aiter" / "jit" / "build").resolve():
-        return False
-    return (root / "aiter" / "__init__.py").is_file() and (root / "aiter" / "jit" / "__init__.py").is_file()
+    package = root / "aiter"
+    if aiter_jit_cache.trusted_jit_build_dir(path, package / "jit" / "build"):
+        return (package / "__init__.py").is_file() and (package / "jit" / "__init__.py").is_file()
+    package = aiter_jit_cache.resolve_package_root()
+    expected = aiter_jit_cache.resolve_jit_build_dir(package)
+    return (
+        package is not None
+        and expected is not None
+        and aiter_jit_cache.trusted_jit_build_dir(path, expected)
+        and (package / "__init__.py").is_file()
+        and (package / "jit" / "__init__.py").is_file()
+    )
 
 
 def _restore_aiter_jit_build(
@@ -1105,9 +1095,10 @@ def _restore_aiter_jit_build(
     expected_jit_build_dir: str | Path | None = None,
     backup_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Restore an aiter ``jit/build`` backup, reversing the invalidation.
+    """Restore AITER build and serving-module state within the recorded scope.
 
-    Any regenerated ``jit/build`` directory is removed first.
+    The shared transaction validates backups before removing candidate artifacts.
+    Legacy build-only records leave serving modules untouched.
 
     Args:
         jit_build_backup: The backup record returned by
@@ -1120,68 +1111,12 @@ def _restore_aiter_jit_build(
     Returns:
         A status dict with ``status`` of ``ok``, ``skipped``, or ``failed``.
     """
-    if not isinstance(jit_build_backup, dict) or jit_build_backup.get("status") != "ok":
+    if not isinstance(jit_build_backup, dict) or jit_build_backup.get("status") not in {"ok", "clean"}:
         return {"status": "skipped", "reason": "no backup recorded"}
-    src_raw = str(jit_build_backup.get("src") or "").strip()
-    backup_raw = str(jit_build_backup.get("backup_path") or "").strip()
-    if not src_raw or not backup_raw:
-        return {"status": "skipped", "reason": "incomplete backup record"}
-    src = Path(src_raw)
-    backup_path = Path(backup_raw)
-    if backup_root is not None and not _within_root(
-        backup_path,
-        Path(backup_root),
-    ):
-        return {
-            "status": "failed",
-            "error": f"untrusted jit/build backup path: {backup_path}",
-        }
-    # The manifest is untrusted at revert time; ``src`` is an ``rmtree`` target.
-    # Only the strategy-pinned or importable aiter jit/build dir is legitimate.
-    expected_raw = str(expected_jit_build_dir or "").strip()
-    expected = Path(expected_raw) if expected_raw else _aiter_jit_build_dir()
-    if expected_raw and not _trusted_aiter_jit_build_dir(expected):
-        return {
-            "status": "failed",
-            "error": f"untrusted strategy jit/build dir: {expected}",
-        }
-    if expected is None or src.resolve() != expected.resolve():
-        log.warning(
-            "revert: skipping jit/build restore; recorded src %s does not match the "
-            "strategy/import aiter jit/build dir %s (aiter reinstalled/relocated "
-            "or a forged manifest). jit/build left invalidated; next import re-JITs.",
-            src,
-            expected,
-        )
-        return {
-            "status": "failed",
-            "error": f"jit/build src {src} does not match expected dir {expected}",
-        }
-    if not backup_path.exists():
-        return {
-            "status": "failed",
-            "error": f"backup path missing: {backup_path}",
-        }
-    if src.exists():
-        try:
-            shutil.rmtree(src)
-        except OSError as exc:
-            return {
-                "status": "failed",
-                "error": f"failed to clear regenerated jit/build/: {exc}",
-                "src": str(src),
-            }
-    try:
-        src.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(backup_path), str(src))
-    except (OSError, shutil.Error) as exc:
-        return {
-            "status": "failed",
-            "error": f"shutil.move failed during restore: {exc}",
-            "src": str(src),
-            "backup_path": str(backup_path),
-        }
-    return {"status": "ok", "restored_to": str(src)}
+    expected = Path(expected_jit_build_dir) if expected_jit_build_dir else _aiter_jit_build_dir()
+    if expected is None or not _trusted_aiter_jit_build_dir(expected):
+        return {"status": "failed", "error": f"untrusted strategy jit/build dir: {expected}"}
+    return aiter_jit_cache.restore_jit_cache(jit_build_backup, expected, backup_root)
 
 
 # aiter cpp_itfs kernels are runtime-compiled into parameter-keyed caches.
@@ -1207,7 +1142,10 @@ def _target_is_in_aiter_cpp_itfs(target_file: Path) -> bool:
         ``True`` if the path is under an ``aiter/csrc/cpp_itfs/`` directory.
     """
     norm = str(target_file).replace(os.sep, "/")
-    return any(marker in norm for marker in _AITER_CPP_ITFS_MARKERS)
+    checkout = _aiter_checkout_root(target_file)
+    return any(marker in norm for marker in _AITER_CPP_ITFS_MARKERS) or (
+        checkout is not None and _within_root(target_file, checkout / "csrc" / "cpp_itfs")
+    )
 
 
 def _aiter_cpp_itfs_build_dir() -> Path:
@@ -1446,10 +1384,19 @@ def verify_cpp_itfs_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:
     """
     if not isinstance(cache_backup, dict) or not cache_backup.get("is_cpp_itfs"):
         return {"verified": True, "status": "skipped", "reason": "non-cpp_itfs target"}
-    build_dir = Path(cache_backup.get("build_dir", ""))
+    build_dir_raw = cache_backup.get("build_dir", "")
     since = float(cache_backup.get("invalidated_unix") or 0.0)
     module_names = list(cache_backup.get("module_names") or [])
-    if not str(build_dir) or not build_dir.exists():
+    # Path("") is Path("."), so an empty/missing build_dir must be rejected
+    # before globbing — otherwise verify walks the process CWD.
+    if not str(build_dir_raw).strip():
+        return {
+            "verified": False,
+            "status": "stale",
+            "reason": f"cpp_itfs build dir absent after re-baseline: {build_dir_raw}",
+        }
+    build_dir = Path(build_dir_raw)
+    if not build_dir.exists():
         return {
             "verified": False,
             "status": "stale",
@@ -1477,34 +1424,29 @@ def verify_cpp_itfs_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[str, Any]:
+def _detect_strategy(target_file: Path) -> dict[str, Any]:
     """Determine the rebuild strategy for a patch target.
 
-    Matches the target against the known framework roots (aiter / sglang /
-    vllm) to pick the rebuild command and artifact roots, and decides whether
-    the target feeds a compiled runtime. Python codegen under AITER ``csrc``
-    requires the same rebuild/JIT invalidation as a native source.
+    Matches known framework roots and the installed AITER runtime's checkout
+    to select rebuild commands and artifact roots. Python codegen under AITER
+    ``csrc`` invalidates build state and serving modules like native source in
+    every AITER layout, and recompiles on the next runtime import instead of
+    through a framework reinstall. Python patches elsewhere stay source-only.
+    Native SGLang ``kernels/jit`` sources use a source-hashed cache, deferring
+    compilation to the runtime instead of rebuilding.
 
     Args:
         target_file (Path): The file being patched.
-        allow_unknown_target (bool): When ``True``, targets outside the known
-            roots are accepted (rooted at the target's parent) instead of
-            raising.
 
     Returns:
         dict[str, Any]: A strategy dict with ``compiled`` (bool), ``root``
             (str), ``rebuild_mode`` (str), ``rebuild_command`` (list[str]) and
             ``artifact_roots`` (list[Path]). Runtime-JIT strategies also carry
-            the authoritative ``jit_build_dir``.
-
-    Raises:
-        ValueError: When the target is outside the known roots and
-            ``allow_unknown_target`` is ``False``.
+            the authoritative ``jit_build_dir``; strategies whose rebuild
+            reinstalls the framework carry the ``import_probes`` that must
+            still resolve afterwards.
     """
     lower = str(target_file).lower()
-    if not allow_unknown_target and not any(_within_root(target_file, Path(root)) for root in known_target_roots()):
-        raise ValueError(f"target_file is outside known reusable source roots: {target_file}")
-
     suffix = target_file.suffix.lower()
     compiled = suffix in COMPILED_SOURCE_SUFFIXES
     root = None
@@ -1513,8 +1455,10 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
     artifact_roots: list[Path] = []
     deploy_roots: list[Path] = []
     jit_build_dir = ""
+    import_probes: list[str] = []
     installed_kernel = _installed_kernel_package(target_file)
     installed_aiter_root = _installed_aiter_runtime_root(target_file)
+    checkout_root = _aiter_checkout_root(target_file) if installed_aiter_root is None else None
 
     if "/sgl-workspace/aiter/" in lower:
         root = _EDITABLE_AITER_ROOT
@@ -1523,24 +1467,31 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         jit_build_dir = str(_EDITABLE_AITER_ROOT / "aiter" / "jit" / "build")
         rebuild_command = ["/opt/venv/bin/python", "setup.py", "develop"]
         artifact_roots = [root]
+        import_probes = ["aiter"]
     elif "/sgl-workspace/sglang/sgl-kernel/" in lower:
         root = Path("/sgl-workspace/sglang/sgl-kernel")
         deploy_roots = _editable_kernel_deploy_roots()
         rebuild_mode = _REBUILD_MODE_COMMAND
         rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "."]
         artifact_roots = [root]
+        import_probes = ["sgl_kernel"]
     elif "/sgl-workspace/sglang/" in lower:
         root = Path("/sgl-workspace/sglang")
         deploy_roots = _editable_kernel_deploy_roots()
-        rebuild_mode = _REBUILD_MODE_COMMAND
-        rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "python"]
-        artifact_roots = [root]
+        if _target_is_sglang_jit_source(target_file):
+            rebuild_mode = _REBUILD_MODE_CONTENT_ADDRESSED_JIT
+        else:
+            rebuild_mode = _REBUILD_MODE_COMMAND
+            rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "python"]
+            artifact_roots = [root]
+            import_probes = ["sglang", "sglang.srt.server_args"]
     elif "/sgl-workspace/vllm/" in lower:
         root = Path("/sgl-workspace/vllm")
         deploy_roots = _editable_kernel_deploy_roots()
         rebuild_mode = _REBUILD_MODE_COMMAND
         rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "."]
         artifact_roots = [root]
+        import_probes = ["vllm"]
     elif flydsl_root := _flydsl_root_for(target_file):
         # FlyDSL compiles at import time, so there is nothing to rebuild; the
         # root only has to be right for cache invalidation and rebuild cwd.
@@ -1549,26 +1500,43 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         root = installed_aiter_root
         deploy_roots = _installed_kernel_deploy_roots(installed_aiter_root)
         rebuild_mode = _REBUILD_MODE_RUNTIME_JIT
-        jit_build_dir = str(installed_aiter_root / "aiter" / "jit" / "build")
-        # Runtime-JIT artifacts live under jit/build and are moved aside as one
-        # tree below. Recursively copying wheel .so/.co files here is redundant
-        # and can consume gigabytes per integration attempt.
+        jit_build_dir = str(aiter_jit_cache.resolve_jit_build_dir(installed_aiter_root / "aiter") or "")
+        # The shared JIT transaction backs up build/ and sibling serving .so files.
+        # Recursively copying package artifacts here would duplicate that work.
         artifact_roots = []
+    elif checkout_root is not None:
+        root = checkout_root
+        rebuild_mode = _REBUILD_MODE_RUNTIME_JIT
+        jit_build_dir = str(_aiter_jit_build_dir() or "")
     elif installed_kernel:
         root = installed_kernel[0]
         deploy_roots = _installed_kernel_deploy_roots(installed_kernel[0])
-    elif allow_unknown_target:
-        root = target_file.parent
-        deploy_roots = [root]
+        if _target_is_sglang_jit_source(target_file):
+            rebuild_mode = _REBUILD_MODE_CONTENT_ADDRESSED_JIT
+    # An unrecognised layout leaves ``root`` unset: snapshot mode resolves
+    # repo-relative descriptors against it, so a guessed parent writes the
+    # optimized bytes beside the target instead of into it.
 
-    if suffix in PYTHON_SOURCE_SUFFIXES and installed_aiter_root is not None and _target_is_in_aiter_csrc(target_file):
+    # Codegen under AITER csrc feeds the JIT compile, so every strategy owning an
+    # AITER JIT build invalidates it and lets the runtime recompile; no reinstall
+    # republishes a generated kernel, so there is nothing to run or import-probe.
+    if (
+        suffix in PYTHON_SOURCE_SUFFIXES
+        and (rebuild_mode == _REBUILD_MODE_RUNTIME_JIT or jit_build_dir)
+        and _target_is_in_aiter_csrc(target_file)
+    ):
         compiled = True
+        rebuild_mode = _REBUILD_MODE_RUNTIME_JIT
+        rebuild_command = []
+        artifact_roots = []
+        import_probes = []
     elif suffix in PYTHON_SOURCE_SUFFIXES:
         compiled = False
         rebuild_mode = _REBUILD_MODE_NONE
         rebuild_command = []
         artifact_roots = []
         jit_build_dir = ""
+        import_probes = []
     if not deploy_roots and root is not None:
         deploy_roots = [root]
 
@@ -1580,6 +1548,7 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         "artifact_roots": artifact_roots,
         "deploy_roots": deploy_roots,
         "jit_build_dir": jit_build_dir,
+        "import_probes": import_probes,
     }
 
 
@@ -1657,6 +1626,111 @@ def _run_rebuild(command: list[str], cwd: Path, timeout_sec: int) -> dict[str, A
     }
 
 
+_IMPORT_PROBE_TIMEOUT_SEC = 600
+
+_IMPORT_PROBE_SCRIPT = """\
+import importlib.util
+import json
+import sys
+
+report = {}
+for name in sys.argv[1:]:
+    try:
+        spec = importlib.util.find_spec(name)
+    except BaseException as exc:  # noqa: BLE001 - a half-installed parent raises anything
+        report[name] = {"importable": False, "error": f"{type(exc).__name__}: {exc}"}
+        continue
+    if spec is None:
+        report[name] = {"importable": False, "error": "no module spec"}
+    else:
+        report[name] = {"importable": True, "origin": spec.origin or ""}
+json.dump({"modules": report, "sys_path": sys.path}, sys.stdout)
+"""
+
+
+def _verify_rebuild_imports(
+    probes: list[str],
+    interpreter: str,
+    *,
+    timeout_sec: int = _IMPORT_PROBE_TIMEOUT_SEC,
+) -> dict[str, Any]:
+    """Prove the rebuilt framework is still importable before benchmarking it.
+
+    An eager rebuild is a package (re)install: pip drops the old distribution
+    and writes fresh metadata plus a new editable import hook, so a returncode
+    of ``0`` says nothing about whether a new interpreter can still resolve the
+    modules the server loads first. Resolving the probes in a fresh interpreter
+    (the one that ran the rebuild, so the probe sees the install that was just
+    written) turns that into a checked precondition, and records each resolved
+    ``origin`` + ``sys.path`` so a later disagreement between baseline and
+    candidate has the import metadata to explain it.
+
+    Args:
+        probes: Module names that must resolve after the rebuild.
+        interpreter: The rebuild command's interpreter, whose install the
+            probes must observe.
+        timeout_sec: Probe subprocess timeout in seconds.
+
+    Returns:
+        A dict with ``status`` (``ok`` / ``failed`` / ``skipped``), the
+        per-module ``modules`` report and the probed ``sys_path``.
+    """
+    if not probes:
+        return {"status": "skipped", "reason": "strategy declares no import probes"}
+    if not Path(interpreter).name.lower().startswith("python"):
+        # An override can rebuild via make/cmake/sh; probing the wrong
+        # interpreter would report on an unrelated environment.
+        return {
+            "status": "skipped",
+            "reason": f"rebuild command is not interpreter-led: {interpreter}",
+        }
+    # Probe from a neutral cwd: `python -c` puts the working directory on
+    # sys.path, and a framework checkout root can shadow its own package.
+    try:
+        proc = subprocess.run(
+            [interpreter, "-c", _IMPORT_PROBE_SCRIPT, *probes],
+            cwd=tempfile.gettempdir(),
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            env={**os.environ, "PATH": f"/opt/venv/bin:{os.environ.get('PATH', '')}"},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "status": "failed",
+            "error": f"import probe could not run: {type(exc).__name__}: {exc}",
+            "probes": probes,
+        }
+    if proc.returncode != 0:
+        return {
+            "status": "failed",
+            "error": f"import probe exited {proc.returncode}",
+            "probes": probes,
+            "stderr_tail": (proc.stderr or "")[-4000:],
+        }
+    try:
+        report = json.loads(proc.stdout or "{}")
+    except ValueError as exc:
+        return {
+            "status": "failed",
+            "error": f"unparseable import probe output: {exc}",
+            "probes": probes,
+            "stdout_tail": (proc.stdout or "")[-4000:],
+        }
+    modules = dict(report.get("modules") or {})
+    broken = {name: entry for name, entry in modules.items() if not entry.get("importable")}
+    result: dict[str, Any] = {
+        "status": "failed" if broken else "ok",
+        "probes": probes,
+        "modules": modules,
+        "sys_path": list(report.get("sys_path") or []),
+        "interpreter": interpreter,
+    }
+    if broken:
+        result["error"] = "; ".join(f"{name}: {entry.get('error')}" for name, entry in sorted(broken.items()))
+    return result
+
+
 def _run_strategy_rebuild(
     strategy: dict[str, Any],
     *,
@@ -1669,7 +1743,18 @@ def _run_strategy_rebuild(
     strategy_root = str(strategy.get("root") or "").strip()
     cwd = Path(strategy_root) if strategy_root else fallback_cwd
     if command:
-        return _run_rebuild(command, cwd, timeout_sec)
+        result = _run_rebuild(command, cwd, timeout_sec)
+        if result.get("status") != "ok":
+            return result
+        import_check = _verify_rebuild_imports(
+            [str(name) for name in strategy.get("import_probes") or []],
+            command[0],
+        )
+        result["import_check"] = import_check
+        if import_check.get("status") == "failed":
+            result["status"] = "failed"
+            result["error"] = f"rebuild returned 0 but the framework is not importable: {import_check.get('error')}"
+        return result
     if strategy.get("rebuild_mode") == _REBUILD_MODE_RUNTIME_JIT:
         return {
             "status": "deferred",
@@ -1677,20 +1762,31 @@ def _run_strategy_rebuild(
             "reason": ("installed AITER sources compile on runtime import after JIT cache invalidation"),
             "cwd": str(cwd),
         }
+    if strategy.get("rebuild_mode") == _REBUILD_MODE_CONTENT_ADDRESSED_JIT:
+        return {
+            "status": "deferred",
+            "mode": _REBUILD_MODE_CONTENT_ADDRESSED_JIT,
+            "reason": ("SGLang in-tree JIT sources compile on runtime import under a source-hashed cache key"),
+            "cwd": str(cwd),
+        }
     return _run_rebuild([], cwd, timeout_sec)
 
 
 def _runtime_jit_invalidation_error(
     strategy: dict[str, Any],
-    result: dict[str, Any],
+    result: dict[str, Any] | None = None,
 ) -> str:
-    """Return why a runtime-JIT strategy cannot safely defer compilation."""
+    """Validate restore trust before mutation and cache invalidation afterwards."""
     if strategy.get("rebuild_mode") != _REBUILD_MODE_RUNTIME_JIT:
         return ""
     expected_raw = str(strategy.get("jit_build_dir") or "").strip()
-    actual_raw = str(result.get("src") or "").strip()
     if not expected_raw:
-        return "runtime-JIT strategy has no authoritative jit_build_dir"
+        return "runtime-JIT strategy has no authoritative jit_build_dir; correct AITER_JIT_DIR and initialize the runtime cache before applying patches"
+    if not _trusted_aiter_jit_build_dir(Path(expected_raw)):
+        return f"untrusted strategy jit/build dir: {expected_raw}"
+    if result is None:
+        return ""
+    actual_raw = str(result.get("src") or "").strip()
     if not actual_raw or Path(actual_raw).resolve() != Path(expected_raw).resolve():
         return f"JIT invalidation did not inspect the strategy-pinned build dir {expected_raw}"
     if result.get("status") not in {"ok", "clean"}:
@@ -1723,9 +1819,9 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     """Revert a previously applied kernel patch from its manifest.
 
     Restores backed-up artifacts and source, clears Python caches when the
-    target is Python, restores any aiter ``jit/build`` backup, and fans out a
-    best-effort revert to multi-node pods. The manifest is updated in place
-    with the reverted status.
+    target is Python, restores recorded AITER build state and serving modules,
+    and fans out a best-effort revert to multi-node pods. The manifest is updated
+    in place with the reverted status.
 
     Args:
         manifest_path (str | Path): Path to the apply manifest JSON file.
@@ -1739,6 +1835,19 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
         raise ValueError(f"manifest is not a JSON object: {manifest_file}")
+    if str(manifest.get("status") or "") == "reverted":
+        # A completed revert already moved each backup back into place, so
+        # restoring from them again fails -- on a tree that is in fact clean.
+        # An apply that reverted itself (failed JIT invalidation) and is then
+        # unwound again by the stack would otherwise report that failure as an
+        # unfinished teardown, and every retry would repeat it.
+        return {
+            "status": "skipped",
+            "manifest_path": str(manifest_file),
+            "restored_paths": list(manifest.get("restored_paths") or []),
+            "reverted_at": manifest.get("reverted_at"),
+            "already_reverted": True,
+        }
     # The manifest is untrusted at revert time: confine every copy source to
     # the apply-time backup tree (this manifest's own directory).
     backup_root = manifest_file.resolve().parent
@@ -1814,10 +1923,10 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
             if dst.suffix.lower() in PYTHON_SOURCE_SUFFIXES:
                 manifest["revert_cache_clear"] = _clear_python_kernel_caches(dst)
 
-    # Restore aiter jit/build/ (before multi-node fan-out) if apply moved it aside.
+    # Restore local AITER build state and serving modules before multi-node fan-out.
     jit_build_backup = manifest.get("jit_build_backup") or {}
     jit_build_restore: dict[str, Any] = {}
-    if jit_build_backup.get("status") == "ok":
+    if jit_build_backup.get("status") in {"ok", "clean"}:
         strategy = manifest.get("strategy") or {}
         # Singular key is retained for manifests created by earlier releases.
         expected_jit_build_dir = str(strategy.get("jit_build_dir") or "").strip()
@@ -1938,6 +2047,7 @@ def finalize_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     for key in ("jit_build_backup", "cpp_itfs_cache_backup"):
         record = manifest.get(key) or {}
         candidates.add(str(record.get("backup_path") or ""))
+        candidates.add(str(record.get("modules_backup_path") or ""))
 
     for raw in sorted(path for path in candidates if path):
         path = Path(raw)
@@ -1988,11 +2098,7 @@ def finalize_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     }
 
 
-def _multi_root_strategies(
-    live_paths: Iterable[Path],
-    *,
-    allow_unknown_target: bool,
-) -> list[dict[str, Any]]:
+def _multi_root_strategies(live_paths: Iterable[Path]) -> list[dict[str, Any]]:
     """Compute the set of distinct rebuild strategies across edited files.
 
     A multi-file patch can touch files in several framework roots (e.g. a
@@ -2000,25 +2106,30 @@ def _multi_root_strategies(
     primary target alone would skip compilation for companion compiled files, so
     derive ``compiled``/rebuild from the **whole** edited set.
 
+    One root can yield several rebuild modes -- SGLang's ``kernels/jit``
+    sources defer to the runtime while its ``kernels/aot/csrc`` sources still
+    need the editable install -- so the identity of a rebuild is the root
+    *and* the mode. Deduplicating on the root alone would keep whichever file
+    the patch happened to list first and silently skip the other's rebuild.
+
     Args:
         live_paths (Iterable[Path]): The live target paths the patch writes.
-        allow_unknown_target (bool): Passed through to :func:`_detect_strategy`.
 
     Returns:
-        list[dict[str, Any]]: One strategy dict per distinct root that needs a
-            rebuild (compiled roots only), each as returned by
-            :func:`_detect_strategy`.
+        list[dict[str, Any]]: One strategy dict per distinct root and rebuild
+            mode that needs a rebuild (compiled roots only), each as returned
+            by :func:`_detect_strategy`.
     """
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     strategies: list[dict[str, Any]] = []
     for p in live_paths:
         try:
-            strat = _detect_strategy(p, allow_unknown_target=allow_unknown_target)
+            strat = _detect_strategy(p)
         except ValueError:
             continue
         if not strat["compiled"]:
             continue
-        key = strat["root"] or str(p.parent)
+        key = (strat["root"] or str(p.parent), strat["rebuild_mode"])
         if key in seen:
             continue
         seen.add(key)
@@ -2036,7 +2147,6 @@ def apply_kernel_patch(
     rebuild_command: list[str] | str | None = None,
     rebuild_timeout_sec: int = 1800,
     skip_rebuild: bool = False,
-    allow_unknown_target: bool = False,
     dry_run: bool = False,
     snapshot_dir: str | Path | None = None,
     repo_root: str | Path | None = None,
@@ -2073,7 +2183,6 @@ def apply_kernel_patch(
             with ``error_class='invalid_rebuild_command'``.
         rebuild_timeout_sec (int): Rebuild subprocess timeout in seconds.
         skip_rebuild (bool): When ``True``, skip the rebuild step.
-        allow_unknown_target (bool): Allow targets outside the known roots.
         dry_run (bool): Prepare backups/manifest only, without applying.
         snapshot_dir (str | Path | None): When set, enables snapshot mode and
             holds byte-exact final contents mirrored at each write path.
@@ -2097,7 +2206,6 @@ def apply_kernel_patch(
             rebuild_command=rebuild_command,
             rebuild_timeout_sec=rebuild_timeout_sec,
             skip_rebuild=skip_rebuild,
-            allow_unknown_target=allow_unknown_target,
             dry_run=dry_run,
             repo_root=repo_root,
             producer_manifest=producer_manifest,
@@ -2110,7 +2218,7 @@ def apply_kernel_patch(
         return {"status": "failed", "error": f"target_file does not exist: {target}"}
 
     try:
-        strategy = _detect_strategy(target, allow_unknown_target=allow_unknown_target)
+        strategy = _detect_strategy(target)
         _validate_patch_source(patch, target)
     except Exception as exc:  # noqa: BLE001
         return {"status": "failed", "error": str(exc)}
@@ -2122,6 +2230,11 @@ def apply_kernel_patch(
         coerced_rebuild_command = _coerce_rebuild_command(rebuild_command) if rebuild_command else []
     except ValueError as exc:
         return {"status": "failed", "error_class": "invalid_rebuild_command", "error": str(exc)}
+
+    if not skip_rebuild and not _is_multi_node():
+        invalidation_error = _runtime_jit_invalidation_error(strategy)
+        if invalidation_error:
+            return {"status": "failed", "error_class": "aiter_jit_invalidation_failed", "error": invalidation_error}
 
     backup_dir = _claim_backup_dir(Path(backup_root), kernel_id, target)
     manifest_path = backup_dir / "manifest.json"
@@ -2229,7 +2342,7 @@ def apply_kernel_patch(
         "is_cpp_itfs": False,
     }
     if strategy["compiled"] and not skip_rebuild:
-        # Move aiter jit/build/ aside so post-rebuild import re-JITs cleanly.
+        # Back up AITER build state and serving modules so the next import re-JITs.
         if _is_multi_node() and remote_jit_dir:
             remote_records = list(multinode_info.get("per_node") or [])
             invalid = [
@@ -2279,7 +2392,7 @@ def apply_kernel_patch(
             return {
                 "status": "failed",
                 "error_class": "aiter_jit_invalidation_failed",
-                "error": f"aiter jit/build/ invalidation failed: {detail}",
+                "error": f"AITER JIT cache invalidation failed: {detail}",
                 "manifest_path": str(manifest_path),
                 "jit_build_backup": jit_build_backup,
                 "revert": revert,
@@ -2365,7 +2478,6 @@ def _apply_kernel_patch_snapshot(
     rebuild_command: list[str] | str | None,
     rebuild_timeout_sec: int,
     skip_rebuild: bool,
-    allow_unknown_target: bool,
     dry_run: bool,
     repo_root: str | Path | None = None,
     producer_manifest: str | Path | None = None,
@@ -2396,7 +2508,7 @@ def _apply_kernel_patch_snapshot(
         return {"status": "failed", "error": "patch has no file operations"}
 
     try:
-        primary_strategy = _detect_strategy(target, allow_unknown_target=allow_unknown_target)
+        primary_strategy = _detect_strategy(target)
     except ValueError as exc:
         return {"status": "failed", "error": str(exc)}
 
@@ -2420,10 +2532,8 @@ def _apply_kernel_patch_snapshot(
     repo_root = Path(resolved_root)
     deploy_roots = [Path(path) for path in primary_strategy.get("deploy_roots") or []]
     if not deploy_roots:
-        return {
-            "status": "failed",
-            "error": (f"snapshot mode requires at least one authorized framework deploy root for target: {target}"),
-        }
+        # A caller-named repo is a declaration, not the guess rejected above.
+        deploy_roots = [repo_root]
     backup_dir = _claim_backup_dir(Path(backup_root), kernel_id, target)
     backup_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = backup_dir / "manifest.json"
@@ -2442,14 +2552,24 @@ def _apply_kernel_patch_snapshot(
         if desc["op"] == "write":
             write_paths.append(dest)
 
-    rebuild_strategies = _multi_root_strategies(write_paths, allow_unknown_target=allow_unknown_target)
+    rebuild_strategies = _multi_root_strategies(write_paths)
     compiled = bool(rebuild_strategies)
-    jit_strategies = [strategy for strategy in rebuild_strategies if strategy.get("jit_build_dir")]
+    jit_strategies = [
+        strategy
+        for strategy in rebuild_strategies
+        if strategy.get("jit_build_dir") or strategy.get("rebuild_mode") == _REBUILD_MODE_RUNTIME_JIT
+    ]
     if len(jit_strategies) > 1:
         return {
             "status": "failed",
             "error": "snapshot spans multiple AITER JIT roots",
         }
+
+    if not skip_rebuild and not _is_multi_node():
+        for strategy in jit_strategies:
+            invalidation_error = _runtime_jit_invalidation_error(strategy)
+            if invalidation_error:
+                return {"status": "failed", "error_class": "aiter_jit_invalidation_failed", "error": invalidation_error}
 
     artifacts: list[dict[str, str]] = []
     if compiled:
@@ -2671,7 +2791,7 @@ def _apply_kernel_patch_snapshot(
             return {
                 "status": "failed",
                 "error_class": "aiter_jit_invalidation_failed",
-                "error": f"aiter jit/build/ invalidation failed: {detail}",
+                "error": f"AITER JIT cache invalidation failed: {detail}",
                 "manifest_path": str(manifest_path),
                 "jit_build_backup": jit_build_backup,
                 "revert": revert,
@@ -2767,7 +2887,6 @@ def main() -> int:
     apply_p.add_argument("--rebuild-command", default="")
     apply_p.add_argument("--rebuild-timeout-sec", type=int, default=1800)
     apply_p.add_argument("--skip-rebuild", action="store_true")
-    apply_p.add_argument("--allow-unknown-target", action="store_true")
     apply_p.add_argument("--dry-run", action="store_true")
 
     revert_p = sub.add_parser("revert")
@@ -2786,7 +2905,6 @@ def main() -> int:
             rebuild_command=args.rebuild_command or None,
             rebuild_timeout_sec=args.rebuild_timeout_sec,
             skip_rebuild=args.skip_rebuild,
-            allow_unknown_target=args.allow_unknown_target,
             dry_run=args.dry_run,
         )
     print(json.dumps(result, indent=2, sort_keys=True))

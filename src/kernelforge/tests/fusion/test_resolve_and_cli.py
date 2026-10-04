@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,9 +16,11 @@ import pytest
 from click.testing import CliRunner
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
+    AgentProviderUnavailableError,
     AgentRunResult,
     AgentRuntimeConfig,
 )
+from kernelforge.agent_backends.registry import get_agent_provider, register_agent_provider
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
 
 from kernelforge.fusion import discover as discover_module
@@ -51,7 +54,6 @@ _AGENT_ENV = (
     "CODEX_MODEL",
     "FORGE_API_KEY",
     "FORGE_AGENT_SANDBOX_MODE",
-    "HYPERLOOM_CODEX_EXTERNAL_SANDBOX",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "SAFE_API_KEY",
@@ -62,6 +64,23 @@ _AGENT_ENV = (
 def clean_agent_env(monkeypatch):
     for name in _AGENT_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def installed_sdks():
+    """Pin which optional Agent SDKs the registry reports as installed."""
+    originals = {name: get_agent_provider(name) for name in ("claude", "codex")}
+
+    def _pin(*, claude: bool, codex: bool) -> None:
+        for name, installed in (("claude", claude), ("codex", codex)):
+            register_agent_provider(
+                replace(originals[name], availability=lambda installed=installed: installed),
+                replace_existing=True,
+            )
+
+    yield _pin
+    for provider in originals.values():
+        register_agent_provider(provider, replace_existing=True)
 
 
 @pytest.mark.parametrize(
@@ -94,26 +113,78 @@ def clean_agent_env(monkeypatch):
 )
 def test_auto_agent_backend_uses_credential_shape(
     clean_agent_env,
+    installed_sdks,
     monkeypatch,
     env,
     expected,
 ):
+    # Both extras present, so the credential shape is the only key left to decide.
+    installed_sdks(claude=True, codex=True)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     provider, _model = _resolve_agent_choice("auto", None)
     assert provider == expected
 
 
-def test_auto_agent_backend_rejects_unconfigured_environment(clean_agent_env):
-    with pytest.raises(click.UsageError, match="no OpenAI or Anthropic credentials"):
+def test_auto_agent_backend_keeps_the_configured_side_over_an_installed_sdk(
+    clean_agent_env,
+    installed_sdks,
+    monkeypatch,
+):
+    """Credentials outrank the SDK -- the pair that used to be the other way round."""
+    installed_sdks(claude=True, codex=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    provider, _model = _resolve_agent_choice("auto", None)
+    assert provider == "codex"
+
+
+def test_auto_agent_backend_falls_back_to_the_installed_sdk(clean_agent_env, installed_sdks):
+    """With no credential to read, the installed runtime decides."""
+    installed_sdks(claude=False, codex=True)
+    provider, _model = _resolve_agent_choice("auto", None)
+    assert provider == "codex"
+
+
+def test_auto_agent_backend_defaults_an_unconfigured_environment_to_claude(clean_agent_env, installed_sdks):
+    """A runtime logged in by other means carries no credential this can see."""
+    installed_sdks(claude=True, codex=True)
+    provider, _model = _resolve_agent_choice("auto", None)
+    assert provider == "claude"
+
+
+def test_auto_agent_backend_rejects_neither_credentials_nor_sdk(clean_agent_env, installed_sdks):
+    installed_sdks(claude=False, codex=False)
+    with pytest.raises(AgentProviderUnavailableError, match="no Agent provider is configured or installed"):
         _resolve_agent_choice("auto", None)
+
+
+@pytest.mark.parametrize("retired", ["SAFE_API_KEY", "FORGE_API_KEY"])
+def test_a_retired_key_does_not_configure_a_provider(clean_agent_env, installed_sdks, monkeypatch, retired):
+    """A key the gateway rejects must not make its side look configured."""
+    installed_sdks(claude=True, codex=True)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+    monkeypatch.setenv(retired, "retired-value")
+
+    provider, _model = _resolve_agent_choice("auto", None)
+    assert provider == "claude"
+
+
+def test_auto_agent_backend_ignores_a_bare_openai_base_url(clean_agent_env, installed_sdks, monkeypatch):
+    """A gateway pointer without OPENAI_API_KEY is not a Codex credential."""
+    installed_sdks(claude=True, codex=True)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+
+    provider, _model = _resolve_agent_choice("auto", None)
+    assert provider == "claude"
 
 
 def test_explicit_agent_backend_wins_over_credential_shape(clean_agent_env, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
     provider, model = _resolve_agent_choice("codex", None)
     assert provider == "codex"
-    assert model == "gpt-5.6"
+    assert model == "gpt-5.6-sol"
 
 
 def test_explicit_claude_wins_over_openai_credentials(clean_agent_env, monkeypatch):
@@ -177,23 +248,7 @@ def test_explicit_secure_sandbox_mode_is_wired(
     assert captured["sandbox_mode"] == mode
 
 
-def test_unconfirmed_bypass_is_rejected_before_backend_construction(
-    clean_agent_env,
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        cli_module,
-        "resolve_agent_runtime",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("runtime must not be resolved before bypass confirmation")
-        ),
-    )
-    with pytest.raises(click.UsageError, match="HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1"):
-        _create_agent_backend("codex", "gpt-explicit", "bypass")
-
-
-def test_confirmed_bypass_is_wired(clean_agent_env, monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
+def test_bypass_is_wired(clean_agent_env, monkeypatch):
     captured = {}
 
     def fake_resolve(provider, **kwargs):
@@ -209,6 +264,32 @@ def test_confirmed_bypass_is_wired(clean_agent_env, monkeypatch):
 
     assert _create_agent_backend("codex", "gpt-explicit", "bypass") is backend
     assert captured["sandbox_mode"] == "bypass"
+
+
+def test_bypass_is_wired_without_retired_external_sandbox_env(clean_agent_env, monkeypatch):
+    """forge-fuse bypass no longer gates on HYPERLOOM_CODEX_EXTERNAL_SANDBOX."""
+    monkeypatch.delenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", raising=False)
+    captured = {}
+
+    def fake_resolve(provider, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(provider=provider, model=kwargs["model"], sandbox_mode="bypass")
+
+    backend = SimpleNamespace(
+        name="codex",
+        runtime=SimpleNamespace(provider="codex", model="gpt-explicit", sandbox_mode="bypass"),
+    )
+    monkeypatch.setattr(cli_module, "resolve_agent_runtime", fake_resolve)
+    monkeypatch.setattr(cli_module, "create_registered_backend", lambda runtime: backend)
+
+    assert _create_agent_backend("codex", "gpt-explicit", "bypass") is backend
+    assert captured["sandbox_mode"] == "bypass"
+
+
+def test_retired_external_sandbox_env_does_not_confirm_bypass(clean_agent_env, monkeypatch):
+    """Legacy HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1 must not substitute bypass mode."""
+    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
+    assert cli_module._resolve_agent_sandbox_mode(None) == "workspace-write"
 
 
 def test_sandbox_mode_explicit_value_wins_over_environment(clean_agent_env, monkeypatch):
@@ -249,15 +330,7 @@ def test_author_harness_is_staged_inside_worktree_then_published(tmp_path):
 
 
 def test_author_harness_staging_survives_running_the_harness(tmp_path):
-    """Let the interpreter's own bytecode cache go with the staging directory.
-
-    Staging exists so the harness can be run from inside the worktree, and
-    running it makes the interpreter write __pycache__ beside the module. That
-    byproduct then blocked the rmdir, so an authoring turn that had produced a
-    working fusion was failed by its own cleanup -- and failed identically on
-    every retry, because each retry ran the harness again. Five attempts, ~25
-    minutes each, the whole kernel budget.
-    """
+    """Let the interpreter's own bytecode cache go with the staging directory."""
     repo = tmp_path / "repo"
     repo.mkdir()
     out = tmp_path / "out"
@@ -286,14 +359,7 @@ def test_author_harness_staging_survives_running_the_harness(tmp_path):
 
 
 def test_author_harness_staging_tolerates_another_harness(tmp_path):
-    """Share the staging directory without one harness failing another's run.
-
-    The directory is per-repo while the digest in the file name is per-output
-    dir, so a second run -- or the author writing its own validation harness --
-    leaves a sibling ``kernel_harness_*.py`` behind. That sibling blocked the
-    rmdir and turned a wired, 1.81x fusion into AUTHOR FAILED. Deleting it is not
-    an option either: a concurrent run may still be using it.
-    """
+    """Share the staging directory without one harness failing another's run."""
     repo = tmp_path / "repo"
     repo.mkdir()
     out = tmp_path / "out"
@@ -399,13 +465,6 @@ def test_registered_discovery_returns_final_text_without_bare_openai(
             captured["spec"] = spec
             return AgentRunResult(text='[{"name":"fused"}]')
 
-    monkeypatch.setattr(
-        discover_module,
-        "default_llm_fn",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("registered discovery must not construct a bare OpenAI client")
-        ),
-    )
     fn = discover_module.registered_agent_llm_fn(
         Backend(),
         model="gpt-test",
@@ -422,11 +481,8 @@ def test_registered_discovery_returns_final_text_without_bare_openai(
     assert spec.tool_policy.read is True and spec.tool_policy.search is True
     assert spec.tool_policy.write is False and spec.tool_policy.shell is False
     assert spec.protected_globs == ["*"]
-    # Discovery tolerates a dirty worktree, but must NOT claim the read-only-resume
-    # contract: that flag disqualifies the session from the workspace guard's
-    # read-only fast path, which then demands cwd be a git worktree. Discovery's cwd
-    # is the framework repo root, routinely a pip install root with no .git, so the
-    # guard rejected every LLM discovery against a pip-installed framework.
+    # Discovery tolerates a dirty worktree, but must NOT claim the read-only-resume contract: that flag disqualifies
+    # the session from the workspace guard's read-only fast path, which then demands cwd be a git worktree.
     assert spec.read_only_resume is False
     assert spec.allow_dirty_baseline is True
     assert WorkspaceGuard.is_read_only_session(spec) is True
@@ -640,10 +696,7 @@ def _autoloop_recipe(source: Path):
 
 
 def _autoloop_result(tmp_path, monkeypatch, *, source: Path, author: bool = True):
-    """Run ``_run_fusion_autoloop`` end to end and return its LoopResult.
-
-    Harness authoring is stubbed out; what these tests are about starts after it.
-    """
+    """Run ``_run_fusion_autoloop`` end to end and return its LoopResult."""
     monkeypatch.setattr(cli_module, "_author_baseline_harness", lambda *a, **k: (True, ""))
     return cli_module._run_fusion_autoloop(
         [_autoloop_recipe(source)],
@@ -662,15 +715,10 @@ def _autoloop_result(tmp_path, monkeypatch, *, source: Path, author: bool = True
 
 
 def _autoloop_campaign_fn(tmp_path, monkeypatch, *, source: Path, author: bool = True, experience: str = ""):
-    """Drive ``_run_fusion_autoloop`` for one recipe and report what it did.
-
-    The campaign_fn is invoked INSIDE the loop rather than handed back, because
-    it restores the shadow repository before every campaign and the autoloop
-    disposes of that repository as soon as the loop returns.
-    """
+    """Drive ``_run_fusion_autoloop`` for one recipe and report what it did."""
     captured: dict[str, object] = {}
 
-    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config):
+    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config, on_keep=None):
         captured["config"] = config
         captured["verdict"] = campaign_fn(recipes[0], experience)
         return cli_module.LoopResult(kept=False, best=None, best_recipe=None)
@@ -707,13 +755,12 @@ def test_autoloop_runs_one_forge_loop_campaign_per_recipe(tmp_path, monkeypatch)
     assert seen[0]["harness_path"].endswith(".py")
     assert seen[0]["experience"] == "prior experience"
     assert seen[0]["target_speedup"] == 1.03
-    # The shadow repository is visible through the .git pointer file in the tree,
-    # so shadow_env may be empty (pointer case) or carry GIT_DIR (env fallback).
-    # Either way, the workspace is the shadow root.
+    # The shadow repository is visible through the .git pointer file in the tree, so shadow_env may be empty (pointer
+    # case) or carry GIT_DIR (env fallback).
     shadow_env = seen[0]["shadow_env"]
     assert isinstance(shadow_env, dict)
-    # The author is given a module that is already tracked, not left to create
-    # one that ``git add -u`` could never commit.
+    # The author is given a module that is already tracked, not left to create one that ``git add -u`` could never
+    # commit.
     assert seen[0]["fused_module"].endswith("qwen3_fused_residual_add_rmsnorm.py")
 
 
@@ -732,8 +779,8 @@ def test_autoloop_gives_the_loop_a_git_workspace(tmp_path, monkeypatch):
     _recipe, captured = _autoloop_campaign_fn(tmp_path, monkeypatch, source=source)
 
     assert "verdict" in captured, "the loop must have been reached"
-    # The repository lives under the run's output directory, never in the
-    # framework tree, and is disposed of once the loop returns.
+    # The repository lives under the run's output directory, never in the framework tree, and is disposed of once the
+    # loop returns.
     assert not (model_dir / ".git").exists()
     assert not (model_dir / ".gitignore").exists()
     assert not (tmp_path / "shadow.git").exists()
@@ -753,8 +800,7 @@ def test_autoloop_restores_the_baseline_before_every_campaign(tmp_path, monkeypa
     def fake_campaign(recipe, **kwargs):
         fused = Path(kwargs["fused_module"])
         on_entry.append((source.read_text(encoding="utf-8"), fused.read_text(encoding="utf-8")))
-        # Stand in for what the loop commits on its own smaller margin, which
-        # fusion then judges a miss.
+        # Stand in for what the loop commits on its own smaller margin, which fusion then judges a miss.
         fused.write_text("FUSED = 1\n", encoding="utf-8")
         source.write_text("SOURCE = 'fused'\n", encoding="utf-8")
         return SimpleNamespace(
@@ -762,9 +808,9 @@ def test_autoloop_restores_the_baseline_before_every_campaign(tmp_path, monkeypa
             experiment_id="exp-1",
         )
 
-    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config):
-        # Two recipes in sequence is the only shape where the leak was visible:
-        # the loop returns the instant one KEEPs.
+    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config, on_keep=None):
+        # Two recipes in sequence is the only shape where the leak was visible: the loop returns the instant one
+        # KEEPs.
         campaign_fn(recipes[0], "")
         campaign_fn(recipes[0], "")
         return cli_module.LoopResult(kept=False, best=None, best_recipe=None)
@@ -774,20 +820,12 @@ def test_autoloop_restores_the_baseline_before_every_campaign(tmp_path, monkeypa
 
     _autoloop_result(tmp_path, monkeypatch, source=source)
 
-    # Both campaigns opened on the pristine tree. Without the reset the second
-    # would have measured its baseline on the first one's rejected fusion.
+    # Both campaigns opened on the pristine tree.
     assert on_entry == [("SOURCE = 'baseline'\n", ""), ("SOURCE = 'baseline'\n", "")]
 
 
 def test_autoloop_refuses_to_run_without_the_harness_the_loop_benches(tmp_path, monkeypatch):
-    """The harness anchors the speedup benchmark; failure aborts the whole run.
-
-    Harness authoring happens inside campaign_fn (after reset_to_base, before
-    run_recipe_campaign) so the harness bench runs on the unfused baseline.
-    A failed author raises FusionAbort, which _run_fusion_autoloop catches and
-    converts into termination_reason="harness_author_failed" without recording
-    a per-recipe history entry.
-    """
+    """The harness anchors the speedup benchmark; failure aborts the whole run."""
     model_dir = tmp_path / "models"
     model_dir.mkdir()
     source = model_dir / "qwen3.py"
@@ -841,11 +879,7 @@ def test_autoloop_fails_a_recipe_whose_baseline_could_not_be_restored(tmp_path, 
 
 
 def test_autoloop_clears_the_loop_state_that_would_reject_the_next_recipe(tmp_path, monkeypatch):
-    """The loop anchors its campaign store to the workspace, not to --experiments-dir.
-
-    It refuses to start where a campaign already left state, so without this the
-    second recipe is rejected outright rather than run.
-    """
+    """The loop anchors its campaign store to the workspace, not to --experiments-dir."""
     model_dir = tmp_path / "models"
     model_dir.mkdir()
     source = model_dir / "qwen3.py"
@@ -863,7 +897,7 @@ def test_autoloop_clears_the_loop_state_that_would_reject_the_next_recipe(tmp_pa
             experiment_id="exp-1",
         )
 
-    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config):
+    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config, on_keep=None):
         campaign_fn(recipes[0], "")
         campaign_fn(recipes[0], "")
         return cli_module.LoopResult(kept=False, best=None, best_recipe=None)
@@ -892,7 +926,7 @@ def test_autoloop_records_which_forge_loop_run_answered_each_recipe(tmp_path, mo
             experiment_id="exp-42",
         )
 
-    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config):
+    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config, on_keep=None):
         recipe = recipes[0]
         campaign_fn(recipe, "")
         return cli_module.LoopResult(
@@ -925,11 +959,7 @@ def test_autoloop_records_which_forge_loop_run_answered_each_recipe(tmp_path, mo
 
 
 def test_autoloop_without_author_leaves_the_fusion_it_is_scoring(tmp_path, monkeypatch):
-    """--no-author scores what is on disk, so nothing may be staged over it.
-
-    There is no campaign to keep or revert either, so the shadow repository and
-    its empty placeholders have no reason to exist on this path.
-    """
+    """--no-author scores what is on disk, so nothing may be staged over it."""
     model_dir = tmp_path / "models"
     model_dir.mkdir()
     source = model_dir / "qwen3.py"
@@ -1012,10 +1042,7 @@ class TestAgentTimeoutSetting:
 
 
 def _venv_in_git_layout(tmp_path):
-    """A git project whose UNTRACKED pip vLLM lives under .venv/site-packages.
-
-    Returns (site_packages_root, source_file). The source file is not git-tracked.
-    """
+    """A git project whose UNTRACKED pip vLLM lives under .venv/site-packages."""
     import subprocess
 
     project = tmp_path / "myproj"
@@ -1062,8 +1089,8 @@ class TestNonGitRepoRoot:
         assert _package_root(str(src)) == str(site.resolve())
 
     def test_framework_repo_root_nongit_falls_back_to_package_root(self, tmp_path):
-        # A non-git framework (pip install) must yield a NON-EMPTY root so the
-        # caller runs the snapshot-based export instead of skipping it.
+        # A non-git framework (pip install) must yield a NON-EMPTY root so the caller runs the snapshot-based export
+        # instead of skipping it.
         site = tmp_path / "site"
         d = site / "vllm" / "model_executor" / "models"
         d.mkdir(parents=True)
@@ -1075,13 +1102,7 @@ class TestNonGitRepoRoot:
         assert root == str(site.resolve()), "non-git must fall back to package install root"
 
     def test_framework_repo_root_venv_inside_git_uses_package_root(self, tmp_path):
-        """Repro: a pip framework under a git project's .venv is UNTRACKED.
-
-        `git rev-parse --show-toplevel` returns the project root, but git diff of
-        that untracked file is empty -> patch=null. The root must instead be the
-        package install dir (site-packages) so export takes the snapshot path and
-        emits package-relative paths that apply at site-packages.
-        """
+        """Repro: a pip framework under a git project's .venv is UNTRACKED."""
         import subprocess
 
         project = tmp_path / "myproj"
@@ -1122,8 +1143,7 @@ class TestNonGitRepoRoot:
         assert root == str(site.resolve()), "venv-in-git must use the package root, not the git project toplevel"
 
     def test_reset_venv_in_git_restores_from_pristine(self, tmp_path):
-        """Repro: an UNTRACKED pip source under a git work tree must be reset from the
-        pristine snapshot (git checkout is a no-op on untracked files)."""
+        """Repro: an UNTRACKED pip source under a git work tree must be reset from the pristine snapshot (git checkout is a no-op on untracked files)."""
         site, src = _venv_in_git_layout(tmp_path)
         pristine_text = src.read_text()
         out = tmp_path / "out"
@@ -1135,8 +1155,7 @@ class TestNonGitRepoRoot:
         assert src.read_text() == pristine_text, "untracked venv source must be reverted via pristine snapshot"
 
     def test_export_venv_in_git_produces_patch(self, tmp_path):
-        """End-to-end: venv-in-git layout must still yield a non-empty, package-relative
-        patch (not fall into the empty git-diff path)."""
+        """End-to-end: venv-in-git layout must still yield a non-empty, package-relative patch (not fall into the empty git-diff path)."""
         site, src = _venv_in_git_layout(tmp_path)
         out = tmp_path / "out"
         pdir = _snapshot_fusion_source(str(site), str(src), out)
@@ -1316,15 +1335,7 @@ class TestCliDryRun:
         assert manifest["fusion"] is None
 
     def test_discovery_targets_the_framework_root_it_was_given(self, tmp_path, monkeypatch):
-        """``--framework-root`` pins WHICH install is being optimized.
-
-        Discovery reaches it too, because a proposal is checked against that
-        install's compile-pass config to decide whether the framework already
-        fuses the chain. Left unset, that check probes whichever vLLM happens to
-        be importable, and its verdict rewrites the pattern id -- so the run can
-        both judge the wrong install and store under a different key than a run
-        that passed the flag. The pattern route has always forwarded it.
-        """
+        """``--framework-root`` pins WHICH install is being optimized."""
         from kernelforge.fusion import command as cli_module
 
         seen: dict[str, object] = {}
@@ -1379,11 +1390,7 @@ class TestCliDryRun:
         assert seen.get("framework_root") == str(root)
 
     def test_unreachable_llm_is_not_written_as_no_opportunity(self, tmp_path, monkeypatch):
-        """The incident, end to end: launch-bound trace + a dead gateway.
-
-        The old code wrote ``no_opportunity`` and exited 0 here, publishing a
-        wrong optimization conclusion about a model it never analyzed.
-        """
+        """The incident, end to end: launch-bound trace + a dead gateway."""
         from kernelforge.fusion import command as cli_module
         from kernelforge.fusion.llm_failure import API_ERROR, LlmUnavailableError
 
@@ -1548,8 +1555,8 @@ class TestCliDryRun:
         assert manifest["agent_sandbox_mode"] == "workspace-write"
 
     def test_non_dry_run_no_author_no_validate(self, tmp_path):
-        # Non-dry-run with author+validate disabled must NOT invoke the LLM/GPU;
-        # it just emits the manifest (validation null).
+        # Non-dry-run with author+validate disabled must NOT invoke the LLM/GPU; it just emits the manifest
+        # (validation null).
         trace = tmp_path / "decode.trace.json"
         _write_trace(trace, _launch_bound_events())
         model = tmp_path / "model"
@@ -1590,15 +1597,7 @@ class TestCliDryRun:
     ],
 )
 def test_a_failed_harness_finalization_keeps_a_safety_verdict(rc, expected):
-    """Fold a harness failure into the code without erasing a verdict.
-
-    The fold is retryable on purpose: the bucket mixes an author that rewrote the
-    inherited harness with a plain OSError while publishing it, and only the
-    first is deterministic. A safety stop is neither -- the author already
-    decided, identically on every attempt, so replacing it with a retryable code
-    sends the loop back to re-run a recipe that is rejected the same way and
-    spends the budget proving it.
-    """
+    """Fold a harness failure into the code without erasing a verdict."""
     assert cli_module._author_rc_after_harness(rc, harness_ok=False) == expected
 
 

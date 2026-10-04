@@ -25,6 +25,7 @@ def test_parse_blocked_outcome() -> None:
     assert A._parse_blocked_outcome(None) is None
     assert A._parse_blocked_outcome("nothing here") is None
     assert A._parse_blocked_outcome("outcome_id: eval_oom") == OutcomeId.eval_oom
+    assert A._parse_blocked_outcome("outcome_id: eval_gap_accepted") is None
     assert A._parse_blocked_outcome("outcome_id: not_a_real_outcome") is None
 
 

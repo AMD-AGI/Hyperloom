@@ -72,16 +72,16 @@ def test_empty_mask_yields_empty_pool(monkeypatch) -> None:
     assert resolve_gpu_specialist_devices(4) == []
 
 
-# Serving holds the first ``serving_tp`` cards; they are carved off the
-# specialist pool so a specialist never co-resides on a serving card.
+# Serving holds the first ``serving_tp`` cards; they are carved off the specialist pool so a specialist never
+# co-resides on a serving card.
 def test_serving_tp_carves_whole_machine_pool(monkeypatch) -> None:
     # No mask + 8-card box, TP=4 serving → specialist pool {4,5,6,7}.
     assert resolve_gpu_specialist_devices(8, serving_tp=4) == [4, 5, 6, 7]
 
 
 def test_serving_tp_carves_rocr_mask_pool(monkeypatch) -> None:
-    # A ROCR-pinned 8-card mask with TP=4 serving carves the serving cards off
-    # the front and keeps the specialist on the remaining masked (absolute) ids.
+    # A ROCR-pinned 8-card mask with TP=4 serving carves the serving cards off the front and keeps the specialist on
+    # the remaining masked (absolute) ids.
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
     assert resolve_gpu_specialist_devices(8, serving_tp=4) == [4, 5, 6, 7]
 

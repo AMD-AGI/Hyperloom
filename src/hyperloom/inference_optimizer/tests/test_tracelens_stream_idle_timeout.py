@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The TraceLens SDK stream watchdog must not kill a running tool call.
-
-Session 20260803T091144Z lost its roofline to this. The transcript shows the
-agent announcing the trace size, issuing a ``Bash`` ``ToolUseBlock`` for
-``TraceLens_generate_perf_report_pytorch``, then a ``TaskStartedMessage`` — and
-nothing more, because the SDK is silent while a tool runs. The 300s
-between-messages bound fired exactly 300s after the tool started and the failure
-was reported as ``(gateway stall)``, though the gateway answered every probe and
-the same command run by hand was still working 25 minutes later.
-
-The fakes below mirror only what the runner reads: the message/block class names
-and ``message.content``.
-"""
+"""The TraceLens SDK stream watchdog must not kill a running tool call."""
 
 from __future__ import annotations
 
@@ -40,7 +28,20 @@ class AssistantMessage:
 
 
 class TaskStartedMessage:
-    pass
+    def __init__(self, task_id: str = "") -> None:
+        self.task_id = task_id
+
+
+class TaskNotificationMessage:
+    def __init__(self, task_id: str, status: str = "completed") -> None:
+        self.task_id = task_id
+        self.status = status
+
+
+class TaskUpdatedMessage:
+    def __init__(self, task_id: str, status: str) -> None:
+        self.task_id = task_id
+        self.patch = {"status": status}
 
 
 class ResultMessage:
@@ -98,6 +99,59 @@ class TestToolCallTransition:
     def test_silence_before_any_tool_stays_tightly_bounded(self):
         """A real gateway stall must still be caught by the tight bound."""
         assert not _drive([AssistantMessage(TextBlock("reading the skill file"))])
+
+
+def _busy_after(messages: list[object]) -> bool:
+    in_flight = tr._InFlight()
+    for msg in messages:
+        in_flight.observe(msg)
+    return in_flight.busy
+
+
+class TestBackgroundTasks:
+    def test_async_agents_still_running_keep_the_run_busy(self):
+        """Launch returns at once while the analyzer keeps running; the killed roofline sat exactly here."""
+        assert _busy_after(
+            [
+                AssistantMessage(ToolUseBlock("Agent")),
+                TaskStartedMessage("gemm"),
+                AssistantMessage(ToolResultBlock()),
+                AssistantMessage(TextBlock("10 of 11 subagents complete. Only the gemm analyzer is still running.")),
+            ]
+        )
+
+    def test_notification_releases_the_task(self):
+        assert not _busy_after(
+            [
+                AssistantMessage(ToolUseBlock("Agent")),
+                TaskStartedMessage("gemm"),
+                AssistantMessage(ToolResultBlock()),
+                TaskNotificationMessage("gemm", "completed"),
+            ]
+        )
+
+    def test_terminal_update_releases_the_task(self):
+        assert not _busy_after(
+            [TaskStartedMessage("gemm"), AssistantMessage(ToolResultBlock()), TaskUpdatedMessage("gemm", "completed")]
+        )
+
+    def test_non_terminal_update_keeps_the_task(self):
+        assert _busy_after(
+            [TaskStartedMessage("gemm"), AssistantMessage(ToolResultBlock()), TaskUpdatedMessage("gemm", "running")]
+        )
+
+    def test_one_of_two_tasks_finishing_stays_busy(self):
+        assert _busy_after(
+            [
+                TaskStartedMessage("a"),
+                TaskStartedMessage("b"),
+                AssistantMessage(ToolResultBlock()),
+                TaskNotificationMessage("a"),
+            ]
+        )
+
+    def test_silence_with_nothing_in_flight_stays_tightly_bounded(self):
+        assert not _busy_after([AssistantMessage(TextBlock("reading the skill file"))])
 
 
 class TestToolIdleTimeoutResolution:

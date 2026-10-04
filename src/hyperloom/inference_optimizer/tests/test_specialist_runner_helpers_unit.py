@@ -8,8 +8,14 @@ the prompt/transcript/heartbeat/done writers."""
 from __future__ import annotations
 
 import json
+import threading
 from types import SimpleNamespace
 
+import pytest
+
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.specialists import runner as sr
 from hyperloom.orchestrator.specialists.runner import (
     SpecialistFailureType,
@@ -17,6 +23,7 @@ from hyperloom.orchestrator.specialists.runner import (
     build_empty_specialist_done,
     classify_specialist_failure,
 )
+from hyperloom.orchestrator.state.task_registry import Task
 
 
 def _runner(**over):
@@ -25,8 +32,20 @@ def _runner(**over):
     return SpecialistRunner(**kwargs)
 
 
-def test_now_iso():
-    assert "T" in sr._now_iso()
+def _checkout(path, *files):
+    """A git checkout tracking ``files``."""
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    for rel in files:
+        target = path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"], check=True
+    )
+    return path
 
 
 def test_safe_redact():
@@ -36,6 +55,7 @@ def test_safe_redact():
     assert "GITHUB_TOKEN=[REDACTED]" in out
     assert "redact_me" not in out
     assert "redact_me_too" not in out
+    assert "[REDACTED]]" not in out
     assert sr._safe_redact("plain line") == "plain line"
 
 
@@ -54,6 +74,19 @@ def test_safe_redact_bare_gateway_token_shapes():
     assert "pk-lf-98765" not in out
     assert "sk-zyx987" not in out
     assert out.count("[REDACTED]") == 3
+
+
+def test_safe_redact_aws_and_custom_headers():
+    line = (
+        "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY "
+        "AWS_SESSION_TOKEN=FwoGZXIvYXdzEHsaDNEXAMPLETOKEN "
+        "ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: deadbeefsecret"
+    )
+    out = sr._safe_redact(line)
+    assert "wJalrXUtnFEMI" not in out
+    assert "FwoGZXIvYXdzEHsaDNEXAMPLETOKEN" not in out
+    assert "deadbeefsecret" not in out
+    assert "[REDACTED]" in out
 
 
 def test_extra_focus_tags(monkeypatch):
@@ -91,7 +124,7 @@ def test_classify_unknown():
 
 def test_build_empty_specialist_done():
     out = build_empty_specialist_done(gap_canonical_id="g1", domain="kernel_agent", reason="no idea", confidence=2.0)
-    assert out["empty"] is True
+    assert out["proposal_set"] == []
     assert out["proposal_set"] == []
     assert out["confidence"] == 1.0
     assert out["summary"] == "no idea"
@@ -194,17 +227,17 @@ def test_write_heartbeat(tmp_path):
 
 def test_write_specialist_done(tmp_path):
     r = _runner()
-    r._write_specialist_done(tmp_path, {"empty": True})
+    r._write_specialist_done(tmp_path, {"proposal_set": []})
     payload = json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
-    assert payload["empty"] is True and "ts" in payload
+    assert payload["proposal_set"] == [] and "ts" in payload
 
 
 def test_write_specialist_done_atomic_leaves_no_tmp(tmp_path):
     # Final write goes through temp + os.replace; no .tmp residue, valid JSON.
     r = _runner()
-    r._write_specialist_done(tmp_path, {"empty": True})
+    r._write_specialist_done(tmp_path, {"proposal_set": []})
     assert not list(tmp_path.glob("*.tmp"))
-    assert json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))["empty"] is True
+    assert json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))["proposal_set"] == []
 
 
 def test_write_specialist_done_partial(tmp_path):
@@ -273,6 +306,49 @@ def test_finalize_keeps_the_round_level_confidence_the_audit_records(tmp_path):
     assert written["confidence"] == 0.6
 
 
+@pytest.mark.asyncio
+async def test_patch_vetting_runs_off_the_event_loop_thread(tmp_path, monkeypatch):
+    """In-process ``run`` wraps ``_finalize`` in ``to_thread``; vetting must not freeze the loop."""
+    seen: dict[str, int] = {}
+    loop_ident = threading.get_ident()
+    orig = sr._patch_safety.vet_patches
+
+    def _spy_vet(*args, **kwargs):
+        seen["ident"] = threading.get_ident()
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(sr._patch_safety, "vet_patches", _spy_vet)
+    done = {
+        "gap_canonical_id": "gap-1",
+        "domain": "serving_specialist",
+        "proposal_set": [{"name": "v1"}],
+        "summary": "s",
+        "reason": "test",
+        "confidence": 0.0,
+        "new_findings": [],
+        "residual_questions": [],
+    }
+    plan = ScriptedPlan(
+        turns=[MockTurn(intents=[Intent(type=IntentType.SPECIALIST_DONE, payload=done)])],
+    )
+    runner = SpecialistRunner(
+        backend_factory=lambda d: MockBackend(plan, name="mock"),
+        session_dir=tmp_path,
+        default_max_turns=2,
+    )
+    task = Task(
+        task_id="t1",
+        kind="specialist",
+        state="queued",
+        params={"domain": "serving_specialist", "gap_canonical_id": "gap-1", "max_turns": 1},
+        idempotency_key="t1",
+        requires_lanes=tuple(),
+    )
+    await runner.run(RunnerContext(task=task, lease=None, extra={}))
+    assert "ident" in seen
+    assert seen["ident"] != loop_ident
+
+
 def test_write_specialist_done_partial_noop_none_workspace():
     _runner()._write_specialist_done_partial(None, {"a": 1})  # must not raise
 
@@ -305,20 +381,16 @@ def test_maybe_setup_worktree_research_mode_skips_worktree(tmp_path):
 def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, monkeypatch):
     """A framework specialist must get a worktree of the framework it patches.
 
-    ``framework_source_roots`` is the source-file allowlist, and its order is
-    arbitrary with respect to the session: on a pod that ships aiter as a git
+    ``framework_source_roots`` lists the framework search roots, and its order
+    is arbitrary with respect to the session: on a pod that ships aiter as a git
     checkout, aiter sorts first. A WorldPlay session then handed its specialist
     an aiter worktree, the specialist authored correct patches against
-    ``hyvideo/`` paths that are absent from it, and patch-safety dropped every
+    ``hyvideo/`` paths that are absent from it, and patch-safety flagged every
     one as ``missing_target`` — leaving an env-only proposal that toggled a
     switch with no code behind it and measured 0.0% five rounds running.
     """
-    aiter = tmp_path / "aiter"
-    aiter.mkdir()
-    (aiter / ".git").mkdir()
-    worldplay = tmp_path / "HY-WorldPlay"
-    worldplay.mkdir()
-    (worldplay / ".git").mkdir()
+    aiter = _checkout(tmp_path / "aiter", "aiter/__init__.py")
+    worldplay = _checkout(tmp_path / "HY-WorldPlay", "hyvideo/__init__.py")
     monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(worldplay))
 
     cfg = sr.SpecialistSubprocessConfig(
@@ -339,28 +411,54 @@ def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, m
         )
     )
 
-    _wt, base, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
+    _wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
 
     assert err == ""
-    assert base == worldplay, f"specialist would patch {seen.get('base')}, not the framework"
+    assert source.root == worldplay and seen["base"] == worldplay, f"specialist would patch {seen.get('base')}"
 
 
-def test_maybe_setup_worktree_falls_back_when_the_framework_is_not_a_checkout(tmp_path, monkeypatch):
-    """A pip-installed framework must not cost the specialist its isolation."""
-    aiter = tmp_path / "aiter"
-    aiter.mkdir()
-    (aiter / ".git").mkdir()
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(tmp_path / "not-a-checkout"))
+def test_maybe_setup_worktree_snapshots_a_framework_that_is_not_a_checkout(tmp_path, monkeypatch):
+    """A pip-installed framework keeps its isolation without borrowing whatever checkout sorts first."""
+    aiter = _checkout(tmp_path / "aiter", "aiter/__init__.py")
+    package = tmp_path / "site-packages" / "worldplay"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(package))
+
+    cfg = sr.SpecialistSubprocessConfig(framework_source_roots=(str(aiter),))
+    r = _runner(backend_factory=None, subprocess_config=cfg, session_dir=tmp_path / "session")
+    seen: dict = {}
+
+    def _fake_setup(base, worktree_path, branch):
+        seen["base"] = base
+        return worktree_path, ""
+
+    monkeypatch.setattr(sr, "_setup_worktree", _fake_setup)
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"framework": "worldplay"}))
+
+    _wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
+
+    assert err == ""
+    assert source.root == package and not source.checkout
+    assert seen["base"].parent == tmp_path / "session" / "tree_snapshots"
+    assert not (package / ".git").exists()
+
+
+def test_maybe_setup_worktree_has_nothing_to_isolate_without_a_named_tree(tmp_path, monkeypatch):
+    aiter = _checkout(tmp_path / "aiter", "aiter/__init__.py")
+    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(tmp_path / "absent"))
+    monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+    monkeypatch.setattr(sr, "resolve_framework_tree", lambda framework: "")
 
     cfg = sr.SpecialistSubprocessConfig(framework_source_roots=(str(aiter),))
     r = _runner(backend_factory=None, subprocess_config=cfg)
-    monkeypatch.setattr(sr, "_setup_worktree", lambda base, path, branch: (path, ""))
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"framework": "worldplay"}))
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(task_id="t", params={"framework": "worldplay", "domain": "framework_rewrite_specialist"})
+    )
 
-    _wt, base, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
+    wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
 
-    assert err == ""
-    assert base == aiter
+    assert (wt, source, err) == (None, None, sr.NO_GIT_FRAMEWORK_SOURCE_ROOT)
 
 
 def test_patch_path_within_bases_accepts_sandbox_paths(tmp_path):

@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the small env/server-args helpers in ``roofline_ceiling``.
-
-These are pure dict/attr readers used to resolve runtime server args and
-benchmark geometry; the larger ceiling tests do not cover them directly.
-"""
+"""Unit tests for the small env/server-args helpers in ``roofline_ceiling``."""
 
 from __future__ import annotations
 
@@ -14,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.kernel import roofline_ceiling as rc
+from hyperloom.inference_optimizer import roofline_ceiling as rc
 
 
 def test_benchmark_envs():

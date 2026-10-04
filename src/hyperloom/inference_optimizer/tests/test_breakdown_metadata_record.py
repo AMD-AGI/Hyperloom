@@ -1,0 +1,359 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Author-time recording of the v6 ``metadata`` section.
+
+Each producer writes only the keys it owns, the singleton deep-merges rather than replaces, and the
+exporter prefers a recorded leaf over a projected one without losing the projection's fallbacks -- so
+the exporting process never has to re-probe an environment the launching process already knew.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_metadata
+from hyperloom.inference_optimizer.breakdown.recorder import (
+    assemble_parts,
+    record_metadata_identity,
+    record_metadata_langfuse,
+    recorder_for,
+    section_shape,
+    snapshot_metadata,
+)
+from hyperloom.inference_optimizer.breakdown.recorder.session_metadata import SECTION
+
+_MANIFEST = {
+    "session_id": "sess-1",
+    "claw_session_id": "claw-9",
+    "created_at_utc": "2026-09-01T00:00:00+00:00",
+    "session_dir": "/data/sess-1",
+    "user_data_path": "/data",
+    "code_revision": "abc1234",
+    "host": "node-7",
+    "pid": 4242,
+    "image": "registry.example.com/team/hyperloom:v3",
+    "max_minutes": 120,
+    "model_name": "DeepSeek-V3",
+    "model_path": "/models/dsv3",
+    "framework": "sglang",
+    "framework_version": "0.4.6",
+    "gpu_type": "MI300X",
+    "tp": 8,
+    "workload": {"conc": 64, "isl": 1024, "osl": 512, "precision": "fp8", "max_model_len": 4096},
+    "objective": {"kind": "time_only", "value": None},
+}
+
+
+def _state(**overrides):
+    base = dict(
+        session_id="sess-1",
+        start_ts="2026-09-01T00:00:00+00:00",
+        stop_ts="2026-09-01T02:00:00+00:00",
+        stop_reason="target_reached",
+        max_minutes=120,
+        tick=37,
+        model_name="DeepSeek-V3",
+        model_path="/models/dsv3",
+        model_class="moe",
+        framework="sglang",
+        gpu_type="MI300X",
+        tp=8,
+        conc=64,
+        isl=1024,
+        osl=512,
+        precision="fp8",
+        max_model_len=4096,
+        operator_extra_env={"HSA_NO_SCRATCH_RECLAIM": "1"},
+        operator_server_args="--enable-torch-compile",
+        server_args="",
+        crash_count=0,
+        crash_timestamps=[],
+        degraded_mode=False,
+        resume_pending_revalidation=False,
+        last_tick_exception=None,
+        model_info={
+            "model_type": "deepseek_v3",
+            "hidden_size": 7168,
+            "num_hidden_layers": 61,
+            "is_moe": True,
+            "num_experts": 256,
+            "torch_dtype": "bfloat16",
+        },
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_metadata_is_a_registered_singleton():
+    assert section_shape(SECTION) == "singleton"
+
+
+def test_the_manifest_stamp_records_identity_and_image(tmp_path):
+    record_metadata_identity(tmp_path, _MANIFEST)
+    session = assemble_parts(tmp_path)[SECTION]["session"]
+    assert session["session_id"] == "sess-1"
+    assert session["host"] == "node-7"
+    assert session["pid"] == 4242
+    assert session["image"] == "registry.example.com/team/hyperloom:v3"
+    assert session["image_id"] == "hyperloom:v3"
+
+
+def test_identity_carries_the_launch_shape(tmp_path):
+    record_metadata_identity(tmp_path, _MANIFEST)
+    task_config = assemble_parts(tmp_path)[SECTION]["task_config"]
+    assert task_config["model_name"] == "DeepSeek-V3"
+    assert task_config["framework_name"] == "sglang"
+    assert task_config["framework_version"] == "0.4.6"
+    assert (task_config["tp"], task_config["conc"], task_config["isl"]) == (8, 64, 1024)
+
+
+def test_a_save_does_not_erase_the_framework_version_from_launch(tmp_path):
+    record_metadata_identity(tmp_path, _MANIFEST)
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state(framework_version=""))
+    assert assemble_parts(tmp_path)[SECTION]["task_config"]["framework_version"] == "0.4.6"
+
+
+def test_a_detected_framework_version_wins_over_the_launch_one(tmp_path):
+    record_metadata_identity(tmp_path, _MANIFEST)
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state(framework_version="0.4.9"))
+    assert assemble_parts(tmp_path)[SECTION]["task_config"]["framework_version"] == "0.4.9"
+
+
+def test_an_empty_manifest_records_nothing(tmp_path):
+    record_metadata_identity(tmp_path, {})
+    assert SECTION not in assemble_parts(tmp_path)
+
+
+def test_the_workload_contract_is_digested_once_for_the_session(tmp_path):
+    record_metadata_identity(tmp_path, _MANIFEST)
+    from_manifest = assemble_parts(tmp_path)[SECTION]["task_config"]["workload_signature"]
+    assert from_manifest
+
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state())
+    # Same contract from the other writer, so the singleton merge is a no-op.
+    assert assemble_parts(tmp_path)[SECTION]["task_config"]["workload_signature"] == from_manifest
+
+
+def test_a_different_concurrency_is_a_different_contract(tmp_path):
+    record_metadata_identity(tmp_path, _MANIFEST)
+    baseline = assemble_parts(tmp_path)[SECTION]["task_config"]["workload_signature"]
+
+    other = dict(_MANIFEST, workload=dict(_MANIFEST["workload"], conc=128))
+    record_metadata_identity(tmp_path / "other", other)
+    assert assemble_parts(tmp_path / "other")[SECTION]["task_config"]["workload_signature"] != baseline
+
+
+def test_an_unknown_contract_records_no_signature(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state(tp=None, conc=None, isl=None, osl=None, precision=""))
+    assert "workload_signature" not in assemble_parts(tmp_path)[SECTION]["task_config"]
+
+
+def test_a_state_snapshot_carries_the_budget_anchor_and_its_end(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state())
+    session = assemble_parts(tmp_path)[SECTION]["session"]
+    assert session["start_ts"] == "2026-09-01T00:00:00+00:00"
+    assert session["ended_at_utc"].startswith("2026-09-01T02:00:00")
+    assert session["tick_count"] == 37
+
+
+def test_a_running_session_records_no_end(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state(stop_reason=""))
+    assert assemble_parts(tmp_path)[SECTION]["session"]["ended_at_utc"] == ""
+
+
+def test_a_stopped_session_records_the_time_it_ran(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state())
+    session = assemble_parts(tmp_path)[SECTION]["session"]
+    assert session["elapsed_minutes"] == 120.0
+    assert session["total_elapsed_minutes"] == 120.0
+
+
+def test_a_resumed_leg_is_measured_from_its_own_start(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state(resumed_ts="2026-09-01T01:00:00+00:00"))
+    assert assemble_parts(tmp_path)[SECTION]["session"]["elapsed_minutes"] == 60.0
+
+
+def test_the_total_reports_the_budget_the_session_was_charged(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(
+        rec,
+        _state(resumed_ts="2026-09-01T01:00:00+00:00", elapsed_charged_sec=5400.0),
+    )
+    session = assemble_parts(tmp_path)[SECTION]["session"]
+    assert session["elapsed_minutes"] == 60.0
+    assert session["total_elapsed_minutes"] == 90.0
+
+
+def test_a_stale_stop_stamp_does_not_zero_a_live_leg(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    # ``stop_ts`` predates the resume, so it is the previous leg's end.
+    snapshot_metadata(rec, _state(resumed_ts="2026-09-01T03:00:00+00:00"))
+    assert assemble_parts(tmp_path)[SECTION]["session"]["elapsed_minutes"] > 0.0
+
+
+def test_the_snapshot_carries_the_whole_architecture_not_a_digest(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state())
+    architecture = assemble_parts(tmp_path)[SECTION]["task_config"]["architecture"]
+    assert architecture["model_class"] == "moe"
+    assert architecture["hidden_size"] == 7168
+    assert architecture["torch_dtype"] == "bfloat16"
+    assert architecture["num_experts"] == 256
+
+
+def test_a_non_transformers_model_records_only_the_derived_class(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state(model_info={}, model_class=""))
+    task_config = assemble_parts(tmp_path)[SECTION]["task_config"]
+    assert "architecture" not in task_config
+
+
+def test_crash_timestamps_are_recorded_as_iso(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state(crash_count=2, crash_timestamps=[1_788_220_800.0, "bogus"]))
+    recovery = assemble_parts(tmp_path)[SECTION]["session"]["recovery"]
+    assert recovery["recovered"] is True
+    assert recovery["crash_count"] == 2
+    # The unparseable entry is skipped rather than failing the whole snapshot.
+    assert recovery["crash_timestamps"] == ["2026-09-01T00:00:00+00:00"]
+
+
+def test_a_tick_exception_keeps_the_header_and_drops_the_traceback(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(
+        rec,
+        _state(last_tick_exception={"tick": 12, "stage": "dispatch", "message": "x" * 900, "traceback": "y" * 5000}),
+    )
+    recorded = assemble_parts(tmp_path)[SECTION]["session"]["recovery"]["last_tick_exception"]
+    assert recorded["tick"] == 12
+    assert recorded["stage"] == "dispatch"
+    assert len(recorded["message"]) == 500
+    assert "traceback" not in recorded
+
+
+def test_a_state_without_a_session_id_records_nothing(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state(session_id=""))
+    assert SECTION not in assemble_parts(tmp_path)
+
+
+def test_a_disabled_emitter_still_records_why(tmp_path):
+    record_metadata_langfuse(tmp_path, {"enabled": False, "disabled_reason": "no_credentials"})
+    langfuse = assemble_parts(tmp_path)[SECTION]["langfuse"]
+    assert langfuse["enabled"] is False
+    assert langfuse["disabled_reason"] == "no_credentials"
+
+
+def test_the_trace_url_is_resolved_from_host_and_trace_id(tmp_path):
+    record_metadata_langfuse(
+        tmp_path,
+        {"enabled": True, "trace_id": "tr-1", "config": {"host": "https://lf.example.com/"}, "counts": {"spans": 12}},
+    )
+    langfuse = assemble_parts(tmp_path)[SECTION]["langfuse"]
+    assert langfuse["trace_url"] == "https://lf.example.com/trace/tr-1"
+    assert langfuse["counts"] == {"spans": 12}
+
+
+def test_each_producer_contributes_only_its_own_keys(tmp_path):
+    record_metadata_identity(tmp_path, _MANIFEST)
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state())
+    record_metadata_langfuse(tmp_path, {"enabled": True, "trace_id": "tr-1"})
+    metadata = assemble_parts(tmp_path)[SECTION]
+    # Identity-only, lifecycle-only, and langfuse-only facts all survive.
+    assert metadata["session"]["image_id"] == "hyperloom:v3"
+    assert metadata["session"]["tick_count"] == 37
+    assert metadata["langfuse"]["trace_id"] == "tr-1"
+
+
+def _collect(recorded=None, **overrides):
+    kwargs = dict(
+        exported_at_utc="2026-09-01T02:00:05+00:00",
+        session={"session_id": "sess-1", "code_revision": "abc1234", "pid": 1, "image": "collected:v1"},
+        workload={"framework_name": "sglang", "model_class": "moe"},
+        model_info={"model_type": "deepseek_v3", "hidden_size": 7168},
+        langfuse={"enabled": False},
+        state={},
+        warnings=["w"],
+        recorded=recorded,
+    )
+    kwargs.update(overrides)
+    return collect_v6_metadata(**kwargs)
+
+
+def test_a_recorded_leaf_beats_the_projection(tmp_path):
+    metadata = _collect(recorded={"session": {"pid": 4242, "image": "recorded:v2"}})
+    assert metadata["session"]["pid"] == 4242
+    assert metadata["session"]["image"] == "recorded:v2"
+
+
+def test_an_empty_recorded_leaf_does_not_erase_a_projected_one():
+    metadata = _collect(recorded={"session": {"pid": 0, "code_revision": ""}})
+    assert metadata["session"]["pid"] == 1
+    assert metadata["session"]["code_revision"] == "abc1234"
+
+
+def test_the_projection_supplies_blocks_the_fragment_never_wrote():
+    metadata = _collect(recorded={"langfuse": {"enabled": True}})
+    assert metadata["task_config"]["framework_name"] == "sglang"
+    assert metadata["versions"]["framework"] == "sglang"
+
+
+def test_versions_does_not_restate_the_envelope():
+    versions = _collect()["versions"]
+    assert "schema_version" not in versions
+    assert "hyperloom" not in versions
+
+
+def test_tool_provenance_keeps_commit_and_root_dir():
+    recorded = {"versions": {"tools": {"geak": {"tool": "geak", "commit": "dead", "root_dir": "/opt/geak"}}}}
+    tools = _collect(recorded=recorded)["versions"]["tools"]
+    assert tools["geak"]["commit"] == "dead"
+    assert tools["geak"]["root_dir"] == "/opt/geak"
+
+
+def test_export_facts_are_never_taken_from_a_fragment():
+    metadata = _collect(recorded={"exported_at_utc": "1999-01-01T00:00:00+00:00", "warnings": ["stale"]})
+    assert metadata["exported_at_utc"] == "2026-09-01T02:00:05+00:00"
+    assert metadata["warnings"] == ["w"]
+
+
+def test_recorded_elapsed_is_taken_verbatim():
+    metadata = _collect(recorded={"session": {"elapsed_minutes": 90.0, "total_elapsed_minutes": 150.0}})
+    assert metadata["session"]["elapsed_minutes"] == 90.0
+    assert metadata["session"]["total_elapsed_minutes"] == 150.0
+
+
+def test_elapsed_falls_back_to_the_collected_window():
+    metadata = _collect(session={"session_id": "sess-1", "elapsed_minutes": 42.0})
+    assert metadata["session"]["elapsed_minutes"] == 42.0
+    # No per-leg history to add up, so the total can only be the one window.
+    assert metadata["session"]["total_elapsed_minutes"] == 42.0
+
+
+def test_the_recovery_block_is_carried_whole():
+    metadata = _collect(
+        session={
+            "session_id": "sess-1",
+            "recovery": {
+                "recovered": True,
+                "crash_count": 1,
+                "crash_timestamps": ["2026-09-01T00:10:00+00:00"],
+                "resume_pending_revalidation": True,
+                "last_tick_exception": {"tick": 4},
+            },
+        }
+    )
+    recovery = metadata["session"]["recovery"]
+    assert recovery["crash_timestamps"] == ["2026-09-01T00:10:00+00:00"]
+    assert recovery["resume_pending_revalidation"] is True
+    assert recovery["last_tick_exception"] == {"tick": 4}

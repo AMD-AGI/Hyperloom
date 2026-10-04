@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import subprocess
 import sys
@@ -17,12 +18,10 @@ from typing import TYPE_CHECKING, Iterable
 
 import click
 
+from hyperloom.common.env import env_bool
 from kernelforge.llm.git import git
 from kernelforge.config import Config
-from kernelforge.knowledge.experience_store import (
-    REMOTE_BACKEND_KB_STORE,
-    KnowledgeConfig,
-)
+from kernelforge.knowledge.experience_store import KnowledgeConfig
 from kernelforge.knowledge.experience_integration import (
     WarmStartRollbackError,
     kb_reference_program_md,
@@ -33,6 +32,7 @@ from kernelforge.knowledge.experience_integration import (
 )
 from kernelforge.loop.recovery import (
     atomic_write_json,
+    load_published_best,
     publish_warm_start_recovery,
     rollback_unpublished_warm_start,
 )
@@ -45,33 +45,17 @@ if TYPE_CHECKING:
 
 MIN_MAX_HOURS = 1.0  # a run shorter than this can't complete a productive campaign
 LONG_HORIZON_THRESHOLD_HOURS = 2.0
-# A high runaway backstop, not a time bound. The turn cap never bounded wall
-# clock -- it fired on only 2.2% of sessions and a session could spend hours
-# well under it -- so the wall-clock budget below is what ends a long session.
-# This ceiling exists only to stop a truly pathological loop (an agent stuck
-# retrying the same edit forever) from spending without limit; a healthy session
-# hands off long before reaching it.
+# A high runaway backstop, not a time bound.
 FORGE_IMPLEMENTER_TURN_BACKSTOP = 2000
-# One implementer session's wall-clock budget is a FUNCTION of the campaign, not
-# a fixed number. The fraction caps a single session at a slice of the campaign
-# so one stuck session cannot eat a whole short run; the floor keeps even a 1h
-# run's session long enough to read+edit+build+bench; the ceiling keeps a long
-# overnight campaign admitting many sessions instead of a few marathons. Sized
-# off the TOTAL budget, not what remains, because the worst runaways are the
-# earliest iterations. See :func:`_forge_session_timeout_sec`.
+# One implementer session's wall-clock budget is a FUNCTION of the campaign, not a fixed number.
 FORGE_SESSION_BUDGET_FRACTION = 0.15
 FORGE_SESSION_BUDGET_MIN_MINUTES = 90
 FORGE_SESSION_BUDGET_MAX_MINUTES = 210
-# End-to-end wall clock for every PR reference lookup of one run: preflight,
-# repository listing, path probing, discovery, and detail enrichment.
+# End-to-end wall clock for every PR reference lookup of one run: preflight, repository listing, path probing,
+# discovery, and detail enrichment.
 PR_KB_BUDGET_SEC = 45.0
 ANALYSIS_TIMEOUT_SEC = 7200
-# Suffix naming one lane's private AITER build cache, placed beside the lane copy
-# rather than inside it. Beside, because the campaign cache a lane reads today is
-# outside the lane copy too: moving it inside would put every compiled artifact
-# into the lane's own worktree, where a backend that requires a session to create
-# no untracked files rejects the whole lane. The round's fan-out removes the
-# directory holding the lane copies, and the cache with it.
+# Suffix naming one lane's private AITER build cache, placed beside the lane copy rather than inside it.
 _LANE_AITER_CACHE_SUFFIX = ".aiter-cache"
 
 
@@ -136,10 +120,12 @@ def _record_remote_publication_result(
         state["solution_slug"] = str(result.get("solution") or "")
         return
     reason = str(result.get("reason") or "error")
+    # Settled outcomes: the store reached a decision, so retrying cannot change
+    # it. Everything else is treated as transient and stays pending.
     if reason in {
         "not_configured",
         "missing_gpu_type",
-        "no_improvement",
+        "no_improvement_over_reuse",
         "empty_diff",
         "not_better_than_kb",
     }:
@@ -173,19 +159,7 @@ def _remote_publication_view(state: dict, best_commit: str) -> dict:
 
 
 def _persist_declared_spec(invocation_spec_file: str, driver: str) -> None:
-    """Place the declared invocation spec beside the driver that reads it.
-
-    Preparation does this for a driver it authors, and a driver that already
-    conforms skips preparation entirely -- so without this the spec stays only
-    wherever the operator passed it from. A driver that derives its cases from
-    the task reads the spec while benchmarking, so it would be reading a path on
-    a machine and at a time nobody controls: edited later, the measured suite
-    changes silently, and a resumed campaign measures something its own baseline
-    never did.
-
-    Failing to place it is not fatal -- ``_materialize_invocation_spec`` refuses
-    a destination the caller already owns, and the driver conformed without it.
-    """
+    """Place the declared invocation spec beside the driver that reads it."""
     if not invocation_spec_file:
         return
     from kernelforge.loop.task_preparer import _materialize_invocation_spec
@@ -202,13 +176,7 @@ def _persist_declared_spec(invocation_spec_file: str, driver: str) -> None:
 
 
 def _validate_max_hours(ctx, param, value):
-    """Reject a runtime budget below the minimum a real campaign needs.
-
-    The loop refuses to START an iteration once less than its configured
-    ``IterationConfig.budget_reserve_sec`` remains, so a sub-floor budget leaves
-    a uselessly small iteration window: the campaign would finalize after little
-    or no work and still exit 0. Applied to the `forge-loop` command.
-    """
+    """Reject a runtime budget below the minimum a real campaign needs."""
     if value is not None and value < MIN_MAX_HOURS:
         raise click.BadParameter(
             f"must be >= {MIN_MAX_HOURS} (a forge run needs at least {MIN_MAX_HOURS:g} hour to be productive)"
@@ -217,13 +185,7 @@ def _validate_max_hours(ctx, param, value):
 
 
 def _normalize_gpu_type(_ctx, _param, value):
-    """Canonicalize the hardware SKU used in KB identities.
-
-    An omitted option keeps the stable default so a campaign resumes the same
-    way whatever the process environment says. An explicitly empty one is a
-    caller reporting that it cannot name the card, and is passed through so the
-    KB layer refuses rather than filing the run under a guess.
-    """
+    """Canonicalize the hardware SKU used in KB identities."""
     if value is None:
         return "mi355x"
     return str(value).strip().lower()
@@ -233,12 +195,7 @@ def _pr_kb_enabled(flag: bool | None) -> bool:
     """Resolve the PR KB switch: CLI flag wins, env is the fallback, default off."""
     if flag is not None:
         return bool(flag)
-    return os.environ.get("PR_KB_ENABLE", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return env_bool("PR_KB_ENABLE")
 
 
 def _git_remote_url(workspace: Path) -> str:
@@ -288,11 +245,7 @@ def _collect_pr_references(
     target_functions: Iterable[str],
     budget_sec: float,
 ) -> PRRefsResult | None:
-    """Run position A, absorbing every recoverable failure into a warning.
-
-    Returns None when the lookup could not run, so the campaign proceeds with
-    no upstream references instead of inheriting this subsystem's failure.
-    """
+    """Run position A, absorbing every recoverable failure into a warning."""
     from kernelforge.knowledge.pr_monitor_refs import (
         PR_KB_RECOVERABLE,
         collect_references,
@@ -307,8 +260,8 @@ def _collect_pr_references(
             operator_name=operator_name,
             target_functions=target_functions,
             budget_sec=budget_sec,
-            # The campaign freshness guard runs inside the loop; until it passes
-            # this invocation may not modify the workspace it was pointed at.
+            # The campaign freshness guard runs inside the loop; until it passes this invocation may not modify the
+            # workspace it was pointed at.
             persist=False,
         )
     except PR_KB_RECOVERABLE as error:
@@ -323,12 +276,7 @@ def _write_pr_provenance(
     winning_iteration: int,
     experiment_id: str = "",
 ) -> None:
-    """Write exposure data for the references injected into this run.
-
-    Runs after the result sentinel, so every failure degrades to a warning
-    rather than changing the exit status of a finished run. Free-form lesson
-    text is deliberately not parsed into adoption classifications.
-    """
+    """Write exposure data for the references injected into this run."""
     if not surfaced:
         return
 
@@ -352,12 +300,7 @@ def _write_pr_provenance(
 
 
 def _forge_session_timeout_sec(max_hours: float, override_sec: int | None) -> int:
-    """Wall-clock budget for one implementer session, in seconds.
-
-    ``--session-timeout-sec`` (``override_sec``) wins when given; otherwise the
-    budget is sized from the campaign per the constants above:
-    ``min(MAX, max(MIN, FRACTION * total_campaign_minutes))``.
-    """
+    """Wall-clock budget for one implementer session, in seconds."""
     if override_sec is not None:
         return int(override_sec)
     total_min = float(max_hours) * 60.0
@@ -374,6 +317,39 @@ def _forge_session_timeout_sec(max_hours: float, override_sec: int | None) -> in
 def _is_long_horizon(max_hours: float) -> bool:
     """Whether one campaign session enables expensive long-horizon agents."""
     return float(max_hours) > LONG_HORIZON_THRESHOLD_HOURS
+
+
+def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
+    """Read the ``--baseline-json`` scoring anchor, rejecting one that cannot anchor a speedup.
+
+    Every number the run publishes divides by these per-case times, so a malformed or non-positive entry is refused
+    here rather than silently producing ratios no consumer can interpret.
+    """
+    try:
+        payload = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as error:
+        raise click.BadParameter(f"--baseline-json could not be read as JSON: {error}")
+    if not isinstance(payload, dict):
+        raise click.BadParameter("--baseline-json must hold a JSON object")
+    try:
+        wall_ms = float(payload.get("wall_ms"))
+    except (TypeError, ValueError):
+        raise click.BadParameter("--baseline-json needs a numeric 'wall_ms'")
+    if not math.isfinite(wall_ms) or wall_ms <= 0.0:
+        raise click.BadParameter("--baseline-json 'wall_ms' must be finite and positive")
+    raw_cases = payload.get("case_times")
+    if not isinstance(raw_cases, dict) or not raw_cases:
+        raise click.BadParameter("--baseline-json needs a non-empty 'case_times' object")
+    case_times: dict[str, float] = {}
+    for case_id, value in raw_cases.items():
+        try:
+            ms = float(value)
+        except (TypeError, ValueError):
+            raise click.BadParameter(f"--baseline-json case {case_id!r} has a non-numeric time")
+        if not math.isfinite(ms) or ms <= 0.0:
+            raise click.BadParameter(f"--baseline-json case {case_id!r} must be finite and positive")
+        case_times[str(case_id)] = ms
+    return wall_ms, case_times
 
 
 def _validate_agent_provider(ctx, param, value):
@@ -504,18 +480,7 @@ def main():
 
 
 def _lane_workspace_path(value: str, *, lane_dir: str, workspace_dir: str, label: str) -> str:
-    """Rebind one canonical workspace path onto a lane's own copy of it.
-
-    A lane is handed paths in order to edit them, so a canonical path handed to a
-    lane is an edit into the campaign workspace that the lane's own diff will
-    never report. A path that cannot be rebound is refused rather than passed
-    through as it is.
-
-    A relative path is read against the campaign workspace, which is what it
-    names. Resolving it against the process cwd instead would silently rebind
-    whatever happens to sit at the same relative position under wherever forge
-    was launched from -- or, more often, refuse a path that was perfectly valid.
-    """
+    """Rebind one canonical workspace path onto a lane's own copy of it."""
     workspace_root = Path(workspace_dir).resolve()
     value_path = Path(value)
     resolved = value_path.resolve() if value_path.is_absolute() else (workspace_root / value_path).resolve()
@@ -530,18 +495,7 @@ def _lane_workspace_path(value: str, *, lane_dir: str, workspace_dir: str, label
 
 
 def _assert_lane_session_cwd(*, kernel_path: str, workspace: str, lane_dir: str) -> None:
-    """Fail unless every directory the session could start in is inside the lane.
-
-    An Implementer session runs in the kernel file's directory, or in
-    ``config.workspace`` when the resolved provider requires the workspace as its
-    cwd -- the codex provider does. Which of the two it takes is decided inside
-    the session from the backend it ends up with, so both are checked here from
-    the same two inputs the session reads.
-
-    A session that starts outside its lane writes its edits and runs its shell
-    commands in the canonical workspace, where the lane's own diff will never
-    report them and the tree every lane shares is measured instead.
-    """
+    """Fail unless every directory the session could start in is inside the lane."""
     lane_root = Path(lane_dir).resolve()
     candidates = {"kernel directory": Path(kernel_path).resolve().parent}
     if workspace:
@@ -555,17 +509,15 @@ def _assert_lane_session_cwd(*, kernel_path: str, workspace: str, lane_dir: str)
         raise ValueError(f"lane session would run outside its lane {lane_root}: " + "; ".join(outside))
 
 
-# What a lane needs its provider to do, and what a provider that does not do it
-# costs. Both are guarantees the lane code arranges but cannot itself enforce:
-# it builds the hooks and the environment overlay, and the provider decides
-# whether either one reaches the session.
+# What a lane needs its provider to do, and what a provider that does not do it costs.
+#
+# Refusal is reserved for a guarantee whose absence makes a lane's own
+# measurement meaningless. Every lane compiles a different edit of one kernel,
+# and aiter loads a JIT module by name without checking the binary against the
+# source it was built from, so lanes sharing one build cache measure each
+# other's binaries. Nothing downstream can tell that apart from a real result,
+# which is what makes it a refusal rather than a warning.
 _LANE_PROVIDER_REQUIREMENTS = (
-    (
-        "stop_hooks",
-        "run the callbacks in AgentRunSpec.hooks, which is what denies a lane "
-        "an edit to the driver, harness or oracle while its session can still "
-        "be saved",
-    ),
     (
         "session_env",
         "apply AgentRunSpec.env to the session it spawns, which is what gives "
@@ -574,24 +526,54 @@ _LANE_PROVIDER_REQUIREMENTS = (
     ),
 )
 
+# Guarantees a lane is better off with and can still run without.
+#
+# What ``stop_hooks`` buys a lane is in-session denial: the PreToolUse
+# callbacks refuse an edit to the driver, harness or oracle, and refuse a driver
+# run that skips the shared device lock. A provider that ignores
+# ``AgentRunSpec.hooks`` gets neither.
+#
+# It is an advisory rather than a refusal because a campaign's published
+# numbers do not rest on it. A lane candidate that touches the measurement
+# surface is refused by ``IterationRunner._lane_rejection`` on its patch paths,
+# the canonical driver is re-checked byte-for-byte by
+# ``_validate_driver_integrity`` after the patch applies, and every candidate is
+# re-measured one at a time in the canonical tree -- a lane's own timings never
+# decide a KEEP. Unlocked concurrent benchmarking is caught after the fact too,
+# by the lane teardown's contention report, which voids the round out loud.
+#
+# So the cost of running without it is wasted budget, reported when it happens,
+# rather than a result nobody can distinguish from a real one.
+_LANE_PROVIDER_ADVISORIES = (
+    (
+        "stop_hooks",
+        "run the callbacks in AgentRunSpec.hooks, which is what denies a lane "
+        "an edit to the driver, harness or oracle while its session can still "
+        "be saved, and denies a driver run that skips the device lock its "
+        "siblings are queueing on. Without them a lane can lose its whole "
+        "session at the boundary check, and concurrent unlocked benchmarks can "
+        "corrupt their own and their siblings' timings -- the round is voided "
+        "rather than trusted when that happens",
+    ),
+)
+
 
 def _require_lane_provider_capabilities(provider: str, lanes: int) -> None:
-    """Refuse concurrent lanes on a provider that cannot keep a lane's promises.
-
-    Raising is the point. A safety property that holds on one backend and not
-    another is not a property, and running fewer lanes than were asked for would
-    answer the operator's request with a different one, so they are told which
-    provider is missing what and choose for themselves.
-
-    One lane is never refused: it is the whole campaign, with nothing to be
-    isolated from and no sibling to be confused with, and it is what a refusal
-    offers as the way forward.
-    """
+    """Refuse concurrent lanes a provider cannot measure, warn about the rest."""
     if lanes < 2:
         return
     from kernelforge.agent_backends.registry import get_agent_provider
 
     capabilities = get_agent_provider(provider).capabilities
+    # Warned before any refusal below, so one re-run is still enough: an
+    # operator who switches to a provider that clears the refusal has already
+    # been told what that provider will and will not do for a lane. Each is
+    # named so a voided round is a known cost of this provider rather than a
+    # mystery found in the logs months later.
+    for name, detail in _LANE_PROVIDER_ADVISORIES:
+        if getattr(capabilities, name, False):
+            continue
+        print(f"  [lanes] WARNING: agent provider {provider!r} does not declare {name}; it cannot {detail}")
     missing = [
         f"{name} (it must {detail})"
         for name, detail in _LANE_PROVIDER_REQUIREMENTS
@@ -615,35 +597,13 @@ def _make_lane_agent_factory(
     source_files: Iterable[str],
     session_kwargs: dict,
 ):
-    """Build the factory that binds one Implementer session to one lane.
-
-    ``session_kwargs`` are the inputs a lane shares with the canonical session
-    (prompt context, budgets, backend). Everything that names a path is rebound
-    onto the lane's own copy of the workspace, because a lane is handed those
-    paths in order to edit them.
-
-    The lane's serialized driver is the second factory argument. It is handed to
-    the session as the command to run the driver through, because the device
-    lock lives in that wrapper and a session that runs the driver beside it
-    takes no lock at all.
-
-    A lane runs the in-session gate for its protection hooks alone. They deny an
-    edit or a shell write to the measurement surface while the session is still
-    running, which is the last point at which the rest of that session can be
-    saved: a lane diff that touches the driver, harness or oracle is refused at
-    the boundary, and the implementation work in the same diff is refused with
-    it. The gate's Stop hook is left out because it benchmarks, and lanes run
-    concurrently while the device times one thing at a time. Each lane's
-    candidate is measured once by the loop instead, under the ordinary KEEP
-    protocol.
-    """
+    """Build the factory that binds one Implementer session to one lane."""
     from kernelforge.agent_backends.base import session_environment
     from kernelforge.loop.aiter_cache import child_cache_environment
 
     def factory(lane_dir: str, serialized_driver: str | None):
-        # Each lane gets its own Config: a provider that requires the workspace
-        # as its cwd would otherwise start every lane's session in the shared
-        # canonical workspace.
+        # Each lane gets its own Config: a provider that requires the workspace as its cwd would otherwise start every
+        # lane's session in the shared canonical workspace.
         lane_root = Path(lane_dir).resolve()
         lane_config = replace(config, workspace=str(lane_root))
         lane_agent = make_agent(
@@ -656,10 +616,7 @@ def _make_lane_agent_factory(
                 workspace_dir=workspace_dir,
                 label="driver",
             ),
-            # The lock-taking wrapper the round installed for this lane. The
-            # protected file stays the driver above; this only changes what the
-            # session is told to execute, which is the only thing that makes the
-            # lock more than advisory.
+            # The lock-taking wrapper the round installed for this lane.
             interposed_driver_path=serialized_driver,
             source_files=[
                 _lane_workspace_path(
@@ -673,14 +630,9 @@ def _make_lane_agent_factory(
             profiling_enabled=False,
             **session_kwargs,
         )
-        # Each lane compiles a different edit of the same kernel. aiter imports a
-        # JIT module by name and never checks the .so against the source it was
-        # built from, so lanes sharing one build cache load each other's binaries
-        # and each one measures a kernel it did not write. The cache cannot be
-        # selected by writing os.environ -- every lane is in this process, so the
-        # last write would be every lane's -- so it is handed to the lane's own
-        # provider subprocess instead. Raises rather than returning a lane that
-        # would compile into the shared cache.
+        # Each lane compiles a different edit of the same kernel. aiter imports a JIT module by name and never checks
+        # the .so against the source it was built from, so lanes sharing one build cache load each other's binaries
+        # and each one measures a kernel it did not write.
         lane_env = child_cache_environment(lane_root.with_name(lane_root.name + _LANE_AITER_CACHE_SUFFIX))
 
         async def session(kernel_path: str, plan: str) -> str:
@@ -708,10 +660,10 @@ def _make_lane_agent_factory(
     "--snr-threshold",
     default=DEFAULT_SNR_THRESHOLD_DB,
     type=float,
-    help="Fresh campaign: SNR pre-filter threshold in dB (stored "
-    "immutably in the campaign config; ignored on --resume). A "
-    "KEEP is decided by the task's own correctness_command, not "
-    "by this value.",
+    help="Fresh campaign: threshold in dB the driver's correctness "
+    "suite must clear (stored immutably in the campaign config; "
+    "ignored on --resume). A KEEP needs this and a measured gain "
+    "over the incumbent; assembly adds the task's own suite.",
 )
 @click.option(
     "--max-hours",
@@ -839,8 +791,9 @@ def _make_lane_agent_factory(
     "of the round's wall clock, and three is what the three "
     "specialist analyses can be divided into. The partition "
     "returns fewer when the evidence supports fewer. Above 1 "
-    "needs a provider that declares stop_hooks and session_env, "
-    "and is refused on one that does not.",
+    "needs a provider that declares session_env and is refused on "
+    "one that does not; a provider without stop_hooks runs and is "
+    "warned, because it can waste a round but not misreport one.",
 )
 @click.option(
     "--merge-stacking/--no-merge-stacking",
@@ -957,8 +910,8 @@ def _make_lane_agent_factory(
 @click.option(
     "--pr-kb/--no-pr-kb",
     default=None,
-    help="Inject upstream pull-request references from the Primus Cortex PR "
-    "Monitor as Implementer prior knowledge (default off). Falls back to "
+    help="Inject upstream pull-request references from the PR Monitor "
+    "as Implementer prior knowledge (default off). Falls back to "
     "PR_KB_ENABLE when unset.",
 )
 @click.option(
@@ -997,6 +950,18 @@ def _make_lane_agent_factory(
     "outside the workspace. Default: <experiments-dir>/specialist_probe, "
     "or a sibling of the workspace when that would land inside it. Falls "
     "back to FORGE_SPECIALIST_PROBE_SCRATCH_ROOT when unset.",
+)
+@click.option(
+    "--baseline-json",
+    default="",
+    help="JSON file holding a scoring anchor measured outside this loop: "
+    '{"wall_ms": <float>, "case_times": {"<case id>": <ms>}}. Every speedup '
+    "this run reports then divides by those per-case times instead of by the "
+    "kernel the run starts from, which is what a caller wants when that "
+    "kernel already replaced something else (a rewrite's port replacing its "
+    "source). The loop still benches the starting kernel, but as the search "
+    "start rather than the anchor. Omit it and the loop anchors on its own "
+    "first bench, as it always has.",
 )
 @click.option("--resume", is_flag=True, help="Resume the campaign stored in the exact workspace")
 def forge_loop(
@@ -1052,21 +1017,9 @@ def forge_loop(
     specialist_probe_budget_sec,
     specialist_probe_scratch_root,
     commit_new_paths,
+    baseline_json,
 ):
-    """Run ONE Forge IterationLoop as a standalone subprocess (CLI-ized kernel backend).
-
-    This is the subprocess entry the Hyperloom forge backend shells out to, so
-    the LLM-driven loop runs in an isolated, hard-killable process (like GEAK)
-    instead of in-process. Hyperloom owns worktree/in-place prep + export +
-    restore; this command owns only baseline -> agent -> validate -> bench -> keep.
-    Emits a JSON result dict (baseline_ms / best_ms / mean_case_speedup /
-    improved / experiment_id / iteration_count) to stdout, sentinel-wrapped for
-    mixed-output parsing.
-
-    The campaign is resumable: its immutable inputs are snapshotted into
-    <workspace>/forge_experiments/campaign_config.json and each session's control
-    state into run_state.json, so --resume continues an interrupted campaign.
-    """
+    """Run ONE Forge IterationLoop as a standalone subprocess (CLI-ized kernel backend)."""
     long_horizon = _is_long_horizon(max_hours)
     critic_enabled = bool(long_horizon)
     try:
@@ -1077,6 +1030,8 @@ def forge_loop(
     import dataclasses as _dataclasses
     import hashlib as _hashlib
 
+    if return_after_read_kb and kernel_backend == "assembly":
+        raise click.UsageError("--return-after-read-kb is incompatible with assembly preparation")
     if return_after_read_kb and not experience_kb:
         raise click.UsageError("--return-after-read-kb cannot be used with --no-experience-kb")
     if return_after_read_kb and not kb_warmstart_enabled:
@@ -1094,11 +1049,7 @@ def forge_loop(
     )
     from kernelforge.loop.run_state import WorkspaceLock, WorkspaceLockError
 
-    # Absolute deadline shared by task preparation and optimization. Derived from
-    # --max-hours when the caller does not pass one, so the same time-budget
-    # bookkeeping applies to standalone runs. The loop itself is also time-driven
-    # (max_time_hours) and finalizes gracefully within budget, so this is a shared
-    # clock for the pre-loop phases rather than a hard cancellation of the loop.
+    # Absolute deadline shared by task preparation and optimization.
     if deadline_unix <= 0:
         deadline_unix = time.time() + max_hours * 3600.0
     finalize_reserve_sec = max(
@@ -1171,11 +1122,8 @@ def forge_loop(
     program_text = resolution.program_text
     campaign_save_deferred = resolution.save_deferred
 
-    # Resume tooling may override the complete Analysis workflow deadline via
-    # FORGE_PROFILE_TIMEOUT_SEC; --profile-timeout-sec is the default
-    # when the env is unset. Validated AFTER the campaign config is persisted so
-    # a config-only run still leaves a resumable pending config on a malformed
-    # value (the caller can fix the env and retry without re-supplying inputs).
+    # Resume tooling may override the complete Analysis workflow deadline via FORGE_PROFILE_TIMEOUT_SEC;
+    # --profile-timeout-sec is the default when the env is unset.
     _env_timeout = os.environ.get("FORGE_PROFILE_TIMEOUT_SEC")
     if _env_timeout is not None and _env_timeout.strip() != "":
         try:
@@ -1198,24 +1146,19 @@ def forge_loop(
     framework = campaign.framework
     operator_name = campaign.operator_name
     producer = campaign.producer
-    # Measurement semantics come from the campaign, never from this invocation's
-    # defaults. A resumed TP4 run that fell back to nproc=1 / single-shot would
-    # compare its candidates against an incumbent measured
-    # under different rules, and would profile the launcher instead of the ranks.
+    # Measurement semantics come from the campaign, never from this invocation's defaults.
     nproc_per_node = campaign.nproc_per_node
     bench_repeat = campaign.bench_repeat
-    # From the campaign for the same reason: a resumed session that fell back
-    # to an empty allowlist could neither ship nor remove the new file an
-    # earlier session was configured to.
+    # From the campaign for the same reason: a resumed session that fell back to an empty allowlist could neither ship
+    # nor remove the new file an earlier session was configured to.
     commit_new_paths = list(campaign.commit_new_paths)
     profiling_enabled = bool(profiling and long_horizon)
 
     overrides = {"gpu_target": gpu_target}
     overrides["gpu_type"] = gpu_type
     overrides["producer"] = producer
-    # Only what was actually asked for: an override present with a None value
-    # still wins over ``Config.from_env``'s environment lookup, which is what
-    # made the FORGE_SPECIALIST_PROBE* variables dead on this path.
+    # Only what was actually asked for: an override present with a None value still wins over ``Config.from_env``'s
+    # environment lookup, which is what made the FORGE_SPECIALIST_PROBE* variables dead on this path.
     for _name, _value in (
         ("specialist_probe", specialist_probe),
         ("specialist_probe_max", specialist_probe_max),
@@ -1244,15 +1187,14 @@ def forge_loop(
         knowledge_config=knowledge_config,
         **overrides,
     )
-    # Two roots by design: resume artifacts (run_state/candidates/best) always
-    # live under <workspace>/forge_experiments (campaign_root); diagnostics and
-    # the external-recovery checkpoint go to --experiments-dir when the caller
-    # supplies a distinct one (e.g. Hyperloom's output dir), else campaign_root.
+    # Two roots by design: resume artifacts (run_state/candidates/best) always live under
+    # <workspace>/forge_experiments (campaign_root); diagnostics and the external-recovery checkpoint go to
+    # --experiments-dir when the caller supplies a distinct one (e.g. Hyperloom's output dir), else campaign_root.
     config.experiments_dir = Path(experiments_dir).resolve() if experiments_dir else campaign_root
     config.experiments_dir.mkdir(parents=True, exist_ok=True)
 
-    # AITER cache isolation: give this attempt its own runtime-build cache so
-    # parallel forge processes never share/evict each other's kernels.
+    # AITER cache isolation: give this attempt its own runtime-build cache so parallel forge processes never
+    # share/evict each other's kernels.
     from kernelforge.loop.aiter_cache import (
         activate_aiter_cache_for_sources,
         configure_aiter_cache_isolation,
@@ -1266,13 +1208,9 @@ def forge_loop(
     print(f"  [aiter-cache] isolated runtime builds under {aiter_cache.cache_root}")
     baseline_cache = activate_aiter_cache_for_sources(source_files_list)
 
-    # Seed the pristine BASELINE shard with the package's prebuilt .so so the
-    # task-preparation preflight imports warm modules instead of cold-compiling
-    # the CK instance-factory TU (>26 min on gfx950, which blows the preflight
-    # timeout and leaves the driver stuck as a placeholder). Safe here only
-    # because this shard holds pristine source; once the loop edits a source it
-    # re-activates a fresh content-keyed shard that is never seeded and compiles
-    # normally, so an edit is never measured against a stale prebuilt module.
+    # Seed the pristine BASELINE shard with the package's prebuilt .so so the task-preparation preflight imports warm
+    # modules instead of cold-compiling the CK instance-factory TU (>26 min on gfx950, which blows the preflight
+    # timeout and leaves the driver stuck as a placeholder).
     if baseline_cache is not None:
         seed_stats = seed_prebuilt_modules(baseline_cache.aiter_jit_dir)
         print(
@@ -1287,7 +1225,7 @@ def forge_loop(
         aggregate_regression_detail,
         warm_start_improvement_flags,
     )
-    from kernelforge.tracker import ExperimentTracker, UsageAccumulator
+    from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.orchestrator.agent import make_agent_fn
 
     iter_config = IterationConfig(
@@ -1319,16 +1257,23 @@ def forge_loop(
         # New files a KEEP may carry; a REVERT removes exactly the same set.
         commit_new_paths=commit_new_paths,
     )
+    if baseline_json:
+        # The anchor every speedup divides by, and the wall time published beside it, both come from the caller's
+        # measurement. ``baseline_wall_ms`` is deliberately left unset so the loop still benches the kernel it starts
+        # from -- that bench is the search start and the first incumbent, not the anchor.
+        external_baseline_ms, external_baseline_case_times = _load_external_baseline(baseline_json)
+        iter_config.baseline_case_times = dict(external_baseline_case_times)
+        iter_config.pristine_baseline_wall_ms = external_baseline_ms
     tracker = ExperimentTracker(config.experiments_dir)
-    usage = UsageAccumulator()
+    # Published at a fixed path from the first call onwards, so a caller that never asked for --result-json, or that
+    # loses this process outright, can still read what the run spent.
+    usage_ledger = UsageLedgerFile(config.experiments_dir)
+    usage = UsageAccumulator(on_update=usage_ledger.publish)
+    usage_ledger.publish(usage.totals())
 
-    # The caller-owned experiment ID is an EXTERNAL recovery channel, deliberately
-    # independent of the internal per-segment experiment identity (each resume
-    # segment gets a fresh ID so the campaign parent/child chain stays intact).
-    # An external caller that hard-kills this process on its own wall clock reads
-    # <experiments-dir>/<experiment-id>.json to salvage the last validated best,
-    # so the record must exist before the first KEEP -- set_checkpoint raises
-    # FileNotFoundError on an unknown ID.
+    # The caller-owned experiment ID is an EXTERNAL recovery channel, deliberately independent of the internal
+    # per-segment experiment identity (each resume segment gets a fresh ID so the campaign parent/child chain stays
+    # intact).
     caller_experiment_id = (experiment_id or "").strip()
     if caller_experiment_id:
         try:
@@ -1341,9 +1286,8 @@ def forge_loop(
             )
 
     if campaign_save_deferred:
-        # The immutable config (and its program.md) is not on disk yet; use the
-        # in-memory program text captured from --program-md-file (matching
-        # read_program_md's "" for a campaign without program context).
+        # The immutable config (and its program.md) is not on disk yet; use the in-memory program text captured from
+        # --program-md-file (matching read_program_md's "" for a campaign without program context).
         program_md = program_text or ""
     else:
         try:
@@ -1355,11 +1299,9 @@ def forge_loop(
         if reference_pointer:
             program_md = program_md + "\n\n" + reference_pointer
 
-    # Pre-loop task preparation (fresh campaigns only): ensure the driver conforms
-    # to the loop's stdout contract BEFORE base_sha is captured, so any scaffolding
-    # the prep step commits becomes part of pristine (never the solution diff).
-    # Skipped on --resume, whose pristine base and driver contract are already
-    # fixed by the immutable campaign; re-preparing would corrupt the resumed base.
+    # Pre-loop task preparation (fresh campaigns only): ensure the driver conforms to the loop's stdout contract
+    # BEFORE base_sha is captured, so any scaffolding the prep step commits becomes part of pristine (never the
+    # solution diff).
     if prepare_task and not resume:
         from kernelforge.loop.task_preparer import (
             declared_case_ids,
@@ -1367,34 +1309,28 @@ def forge_loop(
             prepare_task_sync,
         )
 
-        # Preparation runs the driver, so it needs the rank count before the
-        # loop that normally exports it exists. Without this a TP4 campaign on
-        # an 8-GPU node is prepared and probed at 8 ranks and only then switched
-        # to 4, so the contract is verified against a configuration the campaign
-        # never measures.
+        # Preparation runs the driver, so it needs the rank count before the loop that normally exports it exists.
         if nproc_per_node > 1:
             os.environ["FORGE_NPROC_PER_NODE"] = str(nproc_per_node)
         else:
             os.environ.pop("FORGE_NPROC_PER_NODE", None)
 
         _require_time("task preparation", 10.0)
-        # The spec's declared suite gates this too: a driver that times a subset
-        # of the task's cases is not "already conforming", it just measures less
-        # than the task asks for, and accepting it here skips the only step that
-        # would have repaired it. Derived once, here, and handed to preparation as
-        # well: derived twice, the two copies agreed only while preparation's own
-        # materialization of the spec kept succeeding.
+        # The spec's declared suite gates this too: a driver that times a subset of the task's cases is not "already
+        # conforming", it just measures less than the task asks for, and accepting it here skips the only step that
+        # would have repaired it.
         try:
             expected_case_ids = declared_case_ids(invocation_spec_file)
         except ValueError as exc:
-            # Continuing would switch the driver's case check off and spend the
-            # whole run measuring a suite the operator never got to state.
+            # Continuing would switch the driver's case check off and spend the whole run measuring a suite the
+            # operator never got to state.
             raise click.ClickException(str(exc)) from exc
         pf = preflight_task(
             driver=driver,
             snr_threshold=snr_threshold,
             require_graph=True,
             require_profile=True,
+            require_ranks=max(1, int(nproc_per_node or 1)),
             deadline_unix=deadline_unix - finalize_reserve_sec,
             expected_case_ids=expected_case_ids,
         )
@@ -1403,10 +1339,8 @@ def forge_loop(
             _persist_declared_spec(invocation_spec_file or "", driver)
         else:
             print(f"  [prepare] task does not conform ({pf.summary()}); invoking prep agent...")
-            # The budget that actually applies is min(wall, what the per-kernel
-            # deadline leaves), and it decides how many attempts ever start.
-            # Without it in the log, diagnosing "FAILED after 2 attempt(s)"
-            # meant reverse-engineering the wall from audit timestamps.
+            # The budget that actually applies is min(wall, what the per-kernel deadline leaves), and it decides how
+            # many attempts ever start.
             from kernelforge.loop import task_preparer as _tp
 
             _prep_wall = min(
@@ -1431,21 +1365,18 @@ def forge_loop(
                 preflight=pf,
                 invocation_spec_file=invocation_spec_file or "",
                 expected_case_ids=expected_case_ids,
-                # Let the default PREPARE_MAX_WALL_SEC (3000s, sized for a cold-JIT
-                # preflight) apply; prepare_task clamps it to the per-kernel
-                # deadline_unix below. A local min(1200, ...) here silently defeated
-                # that raised budget, timing out slow cold preflights.
+                # Let the default PREPARE_MAX_WALL_SEC (3000s, sized for a cold-JIT preflight) apply; prepare_task
+                # clamps it to the per-kernel deadline_unix below.
                 deadline_unix=deadline_unix - finalize_reserve_sec,
-                # A collective task needs a driver that launches its own ranks;
-                # the preparer cannot infer that from the kernel source.
+                # A collective task needs a driver that launches its own ranks; the preparer cannot infer that from
+                # the kernel source.
                 nproc_per_node=nproc_per_node,
                 read_only_files=[path for path in (program_md_file, invocation_spec_file) if path],
                 usage=usage,
             )
             if prep.ok:
-                # Cap the file list: an external driver bundle can legitimately
-                # publish dozens of files, and one run scrolled ~700 cache paths
-                # through the operator's log for a 3-file change.
+                # Cap the file list: an external driver bundle can legitimately publish dozens of files, and one run
+                # scrolled ~700 cache paths through the operator's log for a 3-file change.
                 _shown = prep.wrote_files[:12]
                 _extra = len(prep.wrote_files) - len(_shown)
                 print(
@@ -1464,10 +1395,9 @@ def forge_loop(
                 if prep.audit_dir:
                     print(f"  [prepare] audit: {prep.audit_dir}")
             else:
-                # prep.message carries the real failure reason (e.g. "driver
-                # conformed but commit didn't land"); the preflight summary can
-                # read "ok" even when prep failed downstream, so lead with
-                # prep.message and append the preflight summary as extra context.
+                # prep.message carries the real failure reason (e.g. "driver conformed but commit didn't land"); the
+                # preflight summary can read "ok" even when prep failed downstream, so lead with prep.message and
+                # append the preflight summary as extra context.
                 detail = prep.message or (prep.final_preflight.summary() if prep.final_preflight else "")
                 if prep.message and prep.final_preflight:
                     detail = f"{prep.message} | preflight: {prep.final_preflight.summary()}"
@@ -1488,13 +1418,8 @@ def forge_loop(
                 click.echo(f"__FORGE_RESULT__{err_payload}__FORGE_RESULT__")
                 sys.exit(2)
 
-    # Fix the fresh campaign's canonical driver digest and pristine base_commit
-    # from the POST-preparation state and persist the immutable config now. Task
-    # preparation above may have repaired the driver (new digest) and committed
-    # its scaffolding (new HEAD); anchoring the digest and base here keeps the
-    # campaign consistent with the driver the loop validates and the pristine base
-    # its solution diff is measured against. When prep made no changes, the digest
-    # and base are simply re-confirmed.
+    # Fix the fresh campaign's canonical driver digest and pristine base_commit from the POST-preparation state and
+    # persist the immutable config now.
     if campaign_save_deferred:
         prepared_driver_sha256 = _hashlib.sha256(Path(driver).read_bytes()).hexdigest()
         prepared_base_commit = git_head(str(workspace)) or campaign.base_commit
@@ -1521,8 +1446,40 @@ def forge_loop(
         except (OSError, ValueError) as error:
             raise click.ClickException(str(error)) from error
 
-    # Construct the loop only after task preparation has resolved the profiling
-    # contract; IterationLoop snapshots that readiness in its runtime state.
+    assembly_preparation = None
+    if kernel_backend == "assembly":
+        from kernelforge.assembly.prepare import prepare_assembly, seed_source_baseline
+
+        try:
+            assembly_preparation = asyncio.run(
+                prepare_assembly(
+                    config=config,
+                    kernel=kernel,
+                    driver=driver,
+                    sources=source_files_list,
+                    base_commit=campaign.base_commit,
+                    threshold=snr_threshold,
+                    deadline=deadline_unix - finalize_reserve_sec,
+                    resume=resume,
+                )
+            )
+            if not resume:
+                seed_source_baseline(iter_config, assembly_preparation)
+        except (ValueError, OSError, subprocess.SubprocessError, asyncio.TimeoutError) as error:
+            raise click.ClickException(f"assembly preparation failed; optimization was not started: {error}") from error
+        source_files_list = [str(workspace / assembly_preparation["assembly"])]
+        iter_config.source_files = source_files_list
+        iter_config.commit_new_paths = []
+        # A cached whole-implementation patch could replace the launcher preparation just verified.
+        kb_warmstart_enabled = False
+        program_md += (
+            "\n\nAssembly preparation is complete. Optimize only "
+            + source_files_list[0]
+            + ". The Python launcher, original reference, driver, ABI and specialization are frozen."
+        )
+
+    # Construct the loop only after task preparation has resolved the profiling contract; IterationLoop snapshots that
+    # readiness in its runtime state.
     loop_runner = IterationLoop(iter_config, tracker, config, resume=resume)
 
     if resume:
@@ -1532,13 +1489,10 @@ def forge_loop(
             raise click.ClickException(str(error)) from error
 
     # Pristine HEAD — anchors the cumulative solution diff written back at the end.
-    # Persisted from the fresh campaign so resume publications remain cumulative.
     base_sha = campaign.base_commit
 
-    # KB warm-start: apply the best prior solution as the starting point and inject
-    # its experience into the prompt, so the agent continues from the best-known
-    # state instead of from scratch. Fresh campaigns only; fully best-effort —
-    # cold-starts if gbrain is unconfigured/unreachable or anything errors.
+    # KB warm-start: apply the best prior solution as the starting point and inject its experience into the prompt, so
+    # the agent continues from the best-known state instead of from scratch.
     kb_pristine_baseline_ms = None
     kb_reused_speedup = None
     warm = {
@@ -1561,7 +1515,6 @@ def forge_loop(
                 source_files=source_files_list,
                 operator_name=operator_name,
                 bench_repeat=bench_repeat,
-                canonical_timeout_cap_sec=(iter_config.validate_stage_timeout_sec),
             )
         except WarmStartRollbackError as error:
             failure = click.ClickException(f"warm-start rollback failed; workspace may be inconsistent: {error}")
@@ -1580,8 +1533,7 @@ def forge_loop(
     if warm.get("candidate"):
         kb_pristine_baseline_ms = warm.get("pristine_ms")
         if warm.get("applied"):
-            # The floor this campaign starts from. Ending here means the run
-            # reproduced a recorded solution rather than finding one.
+            # The floor this campaign starts from.
             kb_reused_speedup = warm.get("mean_case_speedup")
             iter_config.publication_baseline_wall_ms = warm.get("pristine_ms")
             try:
@@ -1607,7 +1559,7 @@ def forge_loop(
                     "  [warm-start] published recoverable best before iteration 1",
                     flush=True,
                 )
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - translated into a rollback below
                 try:
                     rollback_unpublished_warm_start(
                         workspace_dir,
@@ -1643,8 +1595,7 @@ def forge_loop(
                 )
         if warm.get("program_md_addition"):
             program_md = program_md + "\n\n" + warm["program_md_addition"]
-        # Keep the pristine raw baseline immutable. Warm-start performance is a
-        # separate mean case speedup anchor, never an overloaded wall-time scalar.
+        # Keep the pristine raw baseline immutable.
         if warm.get("pristine_ms"):
             iter_config.baseline_wall_ms = warm["pristine_ms"]
         if warm.get("baseline_case_times"):
@@ -1684,10 +1635,7 @@ def forge_loop(
             "search_start_ms": best_ms,
             "mean_case_speedup": mean_case_speedup,
             "search_start_mean_case_speedup": mean_case_speedup,
-            # The published manifest already withholds the badge when the wall
-            # times contradict the score; this result JSON used to assert the
-            # improvement outright, so the same run answered differently
-            # depending on which artifact a reader picked.
+            # Like the published manifest's badge, ``improved`` is withheld when the wall times contradict the score.
             **warm_start_improvement_flags(
                 pristine_ms=pristine_ms,
                 best_ms=best_ms,
@@ -1712,32 +1660,23 @@ def forge_loop(
         click.echo(f"__FORGE_RESULT__{payload}__FORGE_RESULT__")
         return
 
-    # Source mapping, profiling, profile analysis, and potential analysis are
-    # produced together by the commit-bound Analysis Agent.
+    # Source mapping, profiling, profile analysis, and potential analysis are produced together by the commit-bound
+    # Analysis Agent.
     iter_config.program_md = program_md
 
-    # Hook-capable providers gate before stop; resumable providers apply the same
-    # canonical gate between turns. The outer loop remains final authority.
+    # Hook-capable providers gate before stop; resumable providers apply the same canonical gate between turns.
     gate_on = True
-    # No hard edit budget: a session making steady progress must not be cut off
-    # for editing a lot. The sole budget is block-based (``max_blocks``): after
-    # that many BLOCKed non-converging stops the gate cleanly allows the stop, so
-    # the session ends resumable and the summarizer can write a full lesson. The
-    # provider turn ceiling remains only a high runaway backstop.
+    # No hard edit budget: a session making steady progress must not be cut off for editing a lot.
     max_blocks = 10
-    # A turn cap never bounded time: it fired on 2.2% of sessions, so a session
-    # that neither converged nor capped ran until something outside killed it.
-    # The wall-clock deadline below is the real per-session budget; the turn cap
-    # is now only a fixed high backstop against a pathological loop.
+    # A turn cap never bounded time: it fired on 2.2% of sessions, so a session that neither converged nor capped ran
+    # until something outside killed it.
     config.max_turns = FORGE_IMPLEMENTER_TURN_BACKSTOP
     session_timeout_sec = _forge_session_timeout_sec(max_hours, session_timeout_sec)
     print(
         f"  Implementer session budget: {session_timeout_sec}s "
         f"(campaign budget {max_hours:g}h; turn backstop {config.max_turns})"
     )
-    # PR references are independent of the experience-KB lifecycle. Keep them
-    # out of program_md so commit-bound Analysis and specialist orchestration
-    # remain grounded in measured evidence rather than external reference text.
+    # PR references are independent of the experience-KB lifecycle.
     pr_task_context = ""
     pr_kb_repo = ""
     if _pr_kb_enabled(pr_kb):
@@ -1806,6 +1745,7 @@ def forge_loop(
         target_functions=target_functions_list,
         profiling_enabled=profiling_enabled,
         agent_backend=selected_runtime.provider,
+        commit_new_paths=iter_config.commit_new_paths,
         usage=usage,
     )
     effective_implementer = getattr(
@@ -1820,11 +1760,9 @@ def forge_loop(
     )
     print(f"  Implementer: {effective_implementer} / {effective_implementer_model}")
 
-    # Checked against the backend a lane actually resolves to, not the one that
-    # was asked for: a lane repeats the canonical session's resolution from the
-    # same runtime, so a fallback that moved the canonical session moved the
-    # lanes with it. Raised here, before the campaign spends anything on a round
-    # that could not have been measured honestly.
+    # Checked against the backend a lane actually resolves to, not the one that was asked for: a lane repeats the
+    # canonical session's resolution from the same runtime, so a fallback that moved the canonical session moved the
+    # lanes with it.
     _require_lane_provider_capabilities(effective_implementer, lanes)
 
     _lane_agent_factory = _make_lane_agent_factory(
@@ -1846,6 +1784,7 @@ def forge_loop(
             "bench_repeat": bench_repeat,
             "permission_mode": permission_mode,
             "task_type": task_type,
+            "commit_new_paths": iter_config.commit_new_paths,
             # Function names, not paths: nothing to rebind onto a lane.
             "target_functions": target_functions_list,
             "agent_backend": selected_runtime.provider,
@@ -1882,10 +1821,7 @@ def forge_loop(
         + ("enabled (long-horizon, same backend/model)" if critic_enabled else "disabled (requires --max-hours > 2)")
     )
 
-    # AVO supervisor (always on): reviews the trajectory on a stall and injects
-    # fresh directions. It follows the effectively resolved Implementer backend so one
-    # --agent-backend value controls every local agent; --supervisor-backend stays
-    # available for callers that need a heterogeneous reviewer.
+    # AVO supervisor (always on): reviews the trajectory on a stall and injects fresh directions.
     from kernelforge.orchestrator.supervisor import make_supervisor_fn
 
     sup_backend = supervisor_backend or effective_implementer
@@ -1909,16 +1845,15 @@ def forge_loop(
     remote_publication = _initial_remote_publication_state(warm)
 
     def _build_result(kb_experience) -> dict:
-        """Assemble the loop result dict from live runner state.
-
-        Shared by the per-new-best interim snapshot (kb_experience=None) and the
-        final write (full kb_experience). Reading live state means an interim call
-        always reflects the latest VERIFIED best.
-        """
+        """Assemble the loop result dict from live runner state."""
         search_start_ms = getattr(loop_runner.ic, "warm_start_wall_ms", None) or getattr(
             loop_runner.ic, "baseline_wall_ms", None
         )
-        search_start_mean_case_speedup = getattr(loop_runner.ic, "warm_start_mean_case_speedup", None) or 1.0
+        search_start_mean_case_speedup = (
+            getattr(loop_runner.ic, "warm_start_mean_case_speedup", None)
+            or getattr(loop_runner, "search_start_mean_case_speedup", None)
+            or 1.0
+        )
         pristine_ms = (
             getattr(loop_runner.ic, "pristine_baseline_wall_ms", None)
             or getattr(loop_runner.ic, "publication_baseline_wall_ms", None)
@@ -1936,15 +1871,10 @@ def forge_loop(
         state_best = loop_runner.run_state.best
         best_iteration = getattr(state_best, "iteration", 0)
         best_commit = getattr(state_best, "commit_hash", "")
-        # A validated warm-start is published before IterationLoop creates a
-        # run-state best. Preserve that stronger pristine->warm result until an
-        # iteration KEEP supersedes it.
+        # A validated warm-start is published before IterationLoop creates a run-state best.
         if not best_commit:
-            try:
-                published = json.loads((campaign_root / "best_result.json").read_text())
-            except Exception:
-                published = {}
-            if published.get("correctness_passed") is True and int(published.get("iteration", -1)) == 0:
+            published = load_published_best(workspace_dir) or {}
+            if int(published.get("iteration", -1)) == 0:
                 pristine_ms = published.get("pristine_baseline_ms") or published.get("baseline_wall_ms") or pristine_ms
                 search_start_ms = published.get("search_start_ms") or published.get("best_wall_ms") or search_start_ms
                 best = published.get("best_wall_ms")
@@ -1955,10 +1885,8 @@ def forge_loop(
                 incremental_speedup = 1.0
                 best_iteration = 0
                 best_commit = str(published.get("commit_hash") or "")
-        # KEEP is decided on the mean of per-case speedups while these are
-        # aggregate wall times, so the two can legitimately disagree by a hair.
-        # A claimed improvement that is not actually faster overall is recorded
-        # by name and withdrawn from `improved` instead of carrying a PASS badge.
+        # KEEP is decided on the mean of per-case speedups while these are aggregate wall times, so the two can
+        # legitimately disagree by a hair.
         aggregate_regression = aggregate_regression_detail(
             baseline_ms=pristine_ms,
             best_ms=best,
@@ -1976,8 +1904,8 @@ def forge_loop(
             "total_improved": bool(total_speedup and total_speedup > 1.0) and not aggregate_regression,
             "incremental_improved": bool(total_speedup and total_speedup > search_start_mean_case_speedup),
             "improved_during_search": bool(total_speedup and total_speedup > search_start_mean_case_speedup),
-            # Reported so a consumer can tell a faster transfer from a cheaper
-            # barrier; wall time alone cannot say which one a kept kernel bought.
+            # Reported so a consumer can tell a faster transfer from a cheaper barrier; wall time alone cannot say
+            # which one a kept kernel bought.
             "case_bandwidth": dict(getattr(loop_runner, "last_case_bandwidth", {}) or {}),
             "total_speedup": total_speedup,
             "incremental_speedup": incremental_speedup,
@@ -2003,15 +1931,18 @@ def forge_loop(
             "agent_model": effective_implementer_model,
             "llm_usage": getattr(loop_runner, "llm_usage", {}) or {},
         }
+        if assembly_preparation is not None:
+            from kernelforge.assembly.prepare import select_result
+
+            select_result(result, assembly_preparation)
         if exp_id:
             try:
                 completed_experiment = tracker.get(exp_id)
-                result["iteration_count"] = len(completed_experiment.iterations)
-                result["checkpoint"] = completed_experiment.checkpoint
-            except Exception:
-                # Tracker metadata is optional on incomplete runs; final result
-                # emission must remain available so callers can reject it cleanly.
-                pass
+            except FileNotFoundError:
+                # An incomplete run has no tracker record; the result must still be emitted so callers can reject it.
+                return result
+            result["iteration_count"] = len(completed_experiment.iterations)
+            result["checkpoint"] = completed_experiment.checkpoint
         return result
 
     def _write_result_json(result: dict) -> None:
@@ -2031,6 +1962,8 @@ def forge_loop(
         snr_db_override: float | None = None,
     ) -> dict:
         """Publish the current durable best idempotently within this process."""
+        if assembly_preparation is not None and not _build_result(None)["improved"]:
+            return {"written": False, "reason": "no_assembly_source_win"}
         if not experience_kb:
             return {"written": False, "reason": "disabled"}
         if _warm_start_publication_covers(remote_publication, commit):
@@ -2080,8 +2013,8 @@ def forge_loop(
         )
         return status
 
-    # The runner invokes this after the KEEP commit, run state, event, and local
-    # best artifact are durable, but before post-KEEP profiling.
+    # The runner invokes this after the KEEP commit, run state, event, and local best artifact are durable, but before
+    # post-KEEP profiling.
     def _publish_remote_best(result) -> None:
         if not getattr(result, "kept", False):
             return
@@ -2100,11 +2033,7 @@ def forge_loop(
         _write_result_json(_build_result(kb_experience=None))
 
     def _checkpoint_on_best_committed(result) -> None:
-        """Persist the durable best (external recovery) before optional post-KEEP profiling.
-
-        Written onto the live campaign-segment experiment record; the campaign's
-        own run_state.json remains the primary resume mechanism.
-        """
+        """Persist the durable best (external recovery) before optional post-KEEP profiling."""
         if not getattr(result, "kept", False):
             return
         experiment = loop_runner.experiment
@@ -2112,7 +2041,11 @@ def forge_loop(
         search_start_ms = getattr(loop_runner.ic, "warm_start_wall_ms", None) or getattr(
             loop_runner.ic, "baseline_wall_ms", None
         )
-        search_start_mean_case_speedup = getattr(loop_runner.ic, "warm_start_mean_case_speedup", None) or 1.0
+        search_start_mean_case_speedup = (
+            getattr(loop_runner.ic, "warm_start_mean_case_speedup", None)
+            or getattr(loop_runner, "search_start_mean_case_speedup", None)
+            or 1.0
+        )
         baseline_ms = (
             getattr(loop_runner.ic, "pristine_baseline_wall_ms", None)
             or getattr(loop_runner.ic, "publication_baseline_wall_ms", None)
@@ -2158,8 +2091,8 @@ def forge_loop(
             try:
                 if experiment is not None:
                     tracker.set_checkpoint(experiment.experiment_id, checkpoint)
-                # Mirror onto the caller-owned record so an external hard kill can
-                # still recover this KEEP; refreshed on every resumed segment.
+                # Mirror onto the caller-owned record so an external hard kill can still recover this KEEP; refreshed
+                # on every resumed segment.
                 if caller_experiment_id:
                     tracker.set_checkpoint(caller_experiment_id, checkpoint)
             except Exception as e:  # noqa: BLE001 - never break the loop
@@ -2180,9 +2113,8 @@ def forge_loop(
         )
     )
 
-    # Final graceful write: upgrade the (possibly interim) per-run solution page
-    # with the precise LLM-generated summary. Always attempted; fully best-effort
-    # (never affects the run's result or exit code).
+    # Final graceful write: upgrade the (possibly interim) per-run solution page with the precise LLM-generated
+    # summary.
     final_best_commit = str(getattr(loop_runner.run_state.best, "commit_hash", "") or "")
     kb_write = _attempt_remote_publication(
         commit=final_best_commit,
@@ -2208,21 +2140,20 @@ def forge_loop(
         try:
             if loop_runner.llm_usage.get("calls"):
                 tracker.set_llm_usage(experiment_id, loop_runner.llm_usage)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - usage accounting must not fail the run
             click.echo(
                 f"Warning: failed to record LLM usage for experiment {experiment_id}: {exc}",
                 err=True,
             )
         try:
             tracker.set_kb_experience(experiment_id, kb_experience)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - KB accounting must not fail the run
             click.echo(
                 f"Warning: failed to record KB experience for experiment {experiment_id}: {exc}",
                 err=True,
             )
 
-    # Final result: full kb_experience. On a clean exit this overwrites any
-    # per-new-best interim snapshot written during the loop above.
+    # Final result: full kb_experience.
     result = _build_result(kb_experience=kb_experience)
     payload = json.dumps(result)
     if result_json:
@@ -2361,9 +2292,18 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
     show_default=True,
     help="Read and publish rewrite recipes.",
 )
-@click.option("--model", default=None, help="LLM model (overrides KERNEL_AGENTS_MODEL)")
+@click.option("--model", default=None, help="LLM model (overrides CLAUDE_MODEL / CODEX_MODEL)")
 @click.option("--permission-mode", default=None, help="Claude permission mode (default: acceptEdits)")
 @click.option("--max-port-attempts", default=3, type=int, help="Max correctness-only port sessions before giving up")
+@click.option(
+    "--applyback/--no-applyback",
+    default=True,
+    show_default=True,
+    help="Integrate the optimized kernel back into the framework repository and "
+    "publish the patch. Disable it to deliver only the standalone kernel: the "
+    "stage is skipped, its 20-minute reserve returns to the search, and the "
+    "run's success no longer depends on a patch the caller did not ask for.",
+)
 @click.option(
     "--max-applyback-attempts",
     default=2,
@@ -2430,6 +2370,7 @@ def forge_rewrite(
     model,
     permission_mode,
     max_port_attempts,
+    applyback,
     max_applyback_attempts,
     max_hours,
     deadline_unix,
@@ -2440,28 +2381,7 @@ def forge_rewrite(
     profile_timeout_sec,
     result_json,
 ):
-    """Rewrite a source kernel into FlyDSL and optimize it via forge-loop.
-
-    Ports the source kernel (Triton, HIP, CUDA or C++) into an equivalent FlyDSL kernel
-    (correctness-only PORT phase), then hands the FlyDSL kernel to forge-loop for
-    optimization. With an existing framework git base, the final 20 minutes are
-    reserved for one agent session that converts the verified best FlyDSL kernel
-    into a cumulative framework apply-back patch. A conforming task driver is
-    reused unchanged; otherwise the rewrite-specific preparation stage authors
-    or repairs it from source and optional invocation evidence. The driver uses
-    the ORIGINAL kernel as a live oracle + baseline and defines the operator's
-    I/O, so this works for any operator (not just rowwise). Emits a
-    JSON result (source_ms / flydsl_best_ms / speedup / correct), using the same
-    __FORGE_RESULT__ patch-consumer contract as forge-loop.
-
-    Example:
-        kernelforge forge-rewrite-by-flydsl --source-kernel softmax.py \\
-            --logical-op-name softmax \\
-            --driver rewrite_driver.py --source-entry softmax \\
-            --target-functions softmax_kernel_online \\
-            --workspace /ws --experiments-dir /ws/forge_experiments \\
-            --shapes-json '[{"M":8192,"N":8192,"dtype":"fp16"}]' --gpu-target gfx942
-    """
+    """Rewrite a source kernel into FlyDSL and optimize it via forge-loop."""
     import os
     import re as _re
 
@@ -2477,16 +2397,13 @@ def forge_rewrite(
         os.environ["GPU_TARGET"] = gpu_target
     overrides["gpu_type"] = gpu_type
     if model:
-        # Config exposes the model as ``agent_model`` (from_env keys on it); a
-        # bare ``model`` override is silently ignored.
+        # Config exposes the model as ``agent_model`` (from_env keys on it); a bare ``model`` override is silently
+        # ignored.
         overrides["agent_model"] = model
     rewrite_kb_enabled = bool(rewrite_kb)
     # A disabled KB must not validate ambient remote credentials.
     try:
-        rewrite_knowledge_config = KnowledgeConfig.from_env(
-            mode="local" if not rewrite_kb_enabled else None,
-            remote_backend=REMOTE_BACKEND_KB_STORE,
-        )
+        rewrite_knowledge_config = KnowledgeConfig.from_env(mode="local" if not rewrite_kb_enabled else None)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     config = Config.from_env(
@@ -2533,22 +2450,31 @@ def forge_rewrite(
         invocation_spec_file=invocation_spec_file,
         applyback_import_modules=applyback_import_modules,
         max_applyback_attempts=max_applyback_attempts,
+        applyback_enabled=bool(applyback),
         rewrite_kb_enabled=rewrite_kb_enabled,
     )
     # The structured result and sentinel were already emitted for callers to parse.
-    # Also exit non-zero on a FAILED rewrite so pure shell/CI (which checks $?, not
-    # the sentinel) cannot misread failure as success. A correct-but-not-faster port
-    # is still a SUCCESS (speedup is a separate metric) -> key off port_ok.
     if not (result or {}).get("success"):
         raise SystemExit(1)
 
 
-def _register_forge_fuse() -> None:
-    """Attach the fusion pipeline's own Click command under `forge-fuse`.
+def _register_kernel_rewrite_controller() -> None:
+    """Attach the autonomous kernel rewrite controller command."""
+    from kernelforge.kernel_rewrite_controller.command import (
+        kernel_rewrite_controller_command,
+    )
 
-    Importing it lazily keeps `kernelforge --help` free of the fusion
-    pipeline's import cost, which pulls in the trace and validation stack.
-    """
+    main.add_command(
+        kernel_rewrite_controller_command,
+        name="kernel-rewrite-controller",
+    )
+
+
+_register_kernel_rewrite_controller()
+
+
+def _register_forge_fuse() -> None:
+    """Attach the fusion pipeline's own Click command under `forge-fuse`."""
     from kernelforge.fusion.command import run as forge_fuse
 
     main.add_command(forge_fuse, name="forge-fuse")
@@ -2558,12 +2484,7 @@ _register_forge_fuse()
 
 
 def _register_gemm_tune() -> None:
-    """Attach the deterministic GEMM tuner under `gemm-tune`.
-
-    It used to be a separate distribution with its own `forge-gemm-tune`
-    console script; folding it in means forge ships exactly one CLI, and this
-    is where its subcommands (`run`, `plan`, `evidence`) join it.
-    """
+    """Attach the deterministic GEMM tuner under `gemm-tune`."""
     from kernelforge.gemm_tune.cli import gemm_tune
 
     main.add_command(gemm_tune, name="gemm-tune")

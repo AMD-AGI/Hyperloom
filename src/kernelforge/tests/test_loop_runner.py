@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -90,11 +91,6 @@ from kernelforge.orchestrator.specialists import (
 from kernelforge.tracker import ExperimentTracker
 
 
-class _NoopEvolver:
-    def on_experiment_complete(self, experiment):
-        return {}
-
-
 # The stand-in for "budget is not what this test is about". It has to clear the
 # round admission guard, which prices a whole round -- planning, a session worth
 # starting, the canonical measurement and the finalize reserve -- so a value near
@@ -154,8 +150,7 @@ def _make_loop(
     loop = IterationLoop(
         config,
         tracker,
-        config=object(),
-        evolver=_NoopEvolver(),
+        config=SimpleNamespace(gpu_target="gfx942"),
         resume=resume,
     )
     monkeypatch.setattr(
@@ -223,6 +218,11 @@ def test_reuses_only_measurement_for_exact_candidate(tmp_path, monkeypatch):
         measurement,
         attempt_diff=attempt_diff,
     )
+    loop.ic = replace(loop.ic, commit_new_paths=["*.s"])
+    assembly = workspace / "kernel.s"
+    assembly.write_text("s_endpgm\n")
+    assert not loop._can_reuse_insession_benchmark(measurement, attempt_diff=attempt_diff)
+    assembly.unlink()
     measurement["candidate_diff_sha256"] = hashlib.sha256(b"").hexdigest()
     assert not loop._can_reuse_insession_benchmark(
         measurement,
@@ -283,6 +283,65 @@ def test_pending_keep_publication_patch_is_cumulative(tmp_path, monkeypatch):
     assert pending["search_control"] == {
         "diversification_cycle_completed": True,
     }
+
+
+@pytest.mark.parametrize("assembly_source", ["s_endpgm\n", "s_endpgm\n\n", "s_endpgm"])
+def test_pending_keep_includes_new_assembly_in_recovery_and_publication(tmp_path, monkeypatch, assembly_source):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.ic = replace(loop.ic, commit_new_paths=["*.s"])
+    loop.run_state = RunState(campaign_id="new-source", session_index=1)
+    kernel = workspace / "kernel.py"
+    kernel.write_text("def kernel():\n    return 2\n")
+    (workspace / "kernel.s").write_text(assembly_source)
+    (workspace / "notes.txt").write_text("not a candidate\n")
+    result = IterationResult(
+        iteration=1,
+        duration_sec=0.1,
+        validation_passed=True,
+        validation_summary="passed",
+        wall_ms=0.8,
+        mean_case_speedup=1.25,
+        kept=True,
+    )
+    pending = loop._build_pending_keep(
+        result, plan="assembly route", best_before=1.0, rationale="assembly route", kernel_source=kernel.read_text()
+    )
+    assert loop._git("diff", "--cached", "--name-only") == ""
+    commit = loop._git_commit(pending["commit_message"])
+    committed_patch = loop._git("diff", pending["base_head"], commit, "--", ".")
+
+    assert set(pending["changed_files"]) == {"kernel.py", "kernel.s"}
+    assert set(pending["publication_changed_files"]) == {"kernel.py", "kernel.s"}
+    assert pending["patch"] == committed_patch
+    assert pending["publication_patch"].strip() == committed_patch
+    assert pending["patch_sha256"] == hashlib.sha256(committed_patch.encode()).hexdigest()
+    assert "notes.txt" not in committed_patch
+
+    restored = tmp_path / "restored"
+    subprocess.run(["git", "clone", str(workspace), str(restored)], check=True, capture_output=True)
+    subprocess.run(["git", "checkout", pending["base_head"]], cwd=restored, check=True, capture_output=True)
+    for patch in [pending["publication_patch"], loop._publication_patch(commit)]:
+        subprocess.run(["git", "apply", "--check", "-"], cwd=restored, input=patch, text=True, check=True)
+    subprocess.run(["git", "apply", "-"], cwd=restored, input=pending["publication_patch"], text=True, check=True)
+    assert (restored / "kernel.py").read_bytes() == kernel.read_bytes()
+    assert (restored / "kernel.s").read_bytes() == (workspace / "kernel.s").read_bytes()
+
+
+def test_candidate_snapshot_preserves_racy_git_index_detection(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.ic = replace(loop.ic, commit_new_paths=["*.s"])
+    kernel = workspace / "kernel.py"
+    stamp = kernel.stat().st_mtime_ns - 2_000_000_000
+    subprocess.run(["git", "config", "core.trustctime", "false"], cwd=workspace, check=True)
+    os.utime(kernel, ns=(stamp, stamp))
+    subprocess.run(["git", "update-index", "--refresh"], cwd=workspace, check=True)
+    os.utime(workspace / ".git/index", ns=(stamp, stamp))
+    kernel.write_text("def kernel():\n    return 2\n")
+    os.utime(kernel, ns=(stamp, stamp))
+    (workspace / "kernel.s").write_text("s_endpgm\n")
+    patch, changed = loop._candidate_changes(loop._git("rev-parse", "HEAD"))
+    assert set(changed) == {"kernel.py", "kernel.s"}
+    assert "return 2" in patch
 
 
 def test_resume_replays_nonkeep_event_ahead_of_state(tmp_path, monkeypatch):
@@ -2263,6 +2322,7 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
         nproc_per_node=1,
         build_dir=None,
         baseline_wall_ms=5.0,
+        kernel_backend="",
         kernel_file="kernel.py",
         source_files=[],
         target_functions=[],
@@ -2276,7 +2336,6 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     loop._case_times = {}
     loop._last_pmc_diagnosis = ""
     loop._last_pmc_full = ""
-    loop.evolver = SimpleNamespace(on_benchmark=lambda **_kwargs: None)
     loop.config = SimpleNamespace(gpu_target="gfx942")
     # No round is open around these iterations, so the measurement they run is
     # charged to nothing -- which is also what a drain iteration does.
@@ -2341,9 +2400,22 @@ def _faster_bench(candidate_ms=1.0 / 1.05):
     }
 
 
+def _git_workspace(path: Path) -> Path:
+    """The loop commits every iteration and diffs against HEAD, so a workspace is a repo that has one."""
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
 def _canonical_workspace(tmp_path, command: str) -> Path:
-    # The arena fails a task that declares no compile_command, so the gate needs
-    # a Step 1 that passes before it reaches the correctness command under test.
+    # A task config shaped the way the arena's evaluator reads one. Only the
+    # assembly backend asks the engine to run it; for every other backend its
+    # presence must not move a verdict the driver has already reached.
     tmp_path.joinpath("config.yaml").write_text(
         yaml.safe_dump(
             {
@@ -2356,18 +2428,66 @@ def _canonical_workspace(tmp_path, command: str) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_snr_pass_with_failing_canonical_suite_is_reverted(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("ships_a_config", [True, False])
+async def test_a_non_assembly_keep_rests_on_the_driver_not_on_the_task_config(
+    tmp_path, monkeypatch, capsys, ships_a_config
+):
+    """The driver judged this candidate in Step 4 and has measured it ever since.
+
+    Re-running that verdict here would ask the same question of the same command
+    through a configuration file whose shape the engine has no business knowing,
+    and a consumer that declares evaluation differently could never earn a keep.
+    Shipping a task config -- even one whose suite would reject -- must therefore
+    change nothing, and no canonical verdict may reach the operator's log.
+    """
+    if ships_a_config:
+        _canonical_workspace(tmp_path, "raise AssertionError('the engine must not run this')")
+    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=_git_workspace(tmp_path))
+
+    result = await loop.run_one_iteration(1)
+
+    assert result.kept is True
+    assert result.validation_passed is True
+    assert "[canonical]" not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["missing", "unstable", "valid"])
+async def test_assembly_keep_requires_fresh_source_relative_numerics(tmp_path, monkeypatch, kind):
+    from kernelforge.tests.test_numerical_contract import _task, evidence
+
+    if kind != "missing":
+        _task(tmp_path, evidence(candidate_repeat_db=27 if kind == "unstable" else 45))
+    loop, _ = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=_git_workspace(tmp_path))
+    loop.ic.kernel_backend = "assembly"
+    loop.ic.pristine_baseline_wall_ms = 1.0
+
+    result = await loop.run_one_iteration(1)
+
+    assert result.kept is (kind == "valid")
+    assert result.validation_passed is (kind == "valid")
+    if kind != "missing":
+        assert result.bench_detail["numerical_validation"]["contract_sha256"]
+    if kind == "unstable":
+        assert result.validation_outcome == "numerical_correctness_failure"
+        assert "repeat_errors" in result.validation_summary
+
+
+@pytest.mark.asyncio
+async def test_snr_pass_with_failing_assembly_acceptance_is_reverted(tmp_path, monkeypatch, capsys):
     """The mla-decode run: 33.4 dB cleared forge's gate, 0.02468 broke the task's.
 
-    The SNR probe passes, the candidate is 5% faster, and the task's own suite
-    rejects it. That candidate must not be kept, and the tolerance it broke --
-    not the dB figure -- has to reach the agent.
+    The SNR probe passes, the candidate is 5% faster, and the suite the assembly
+    backend declares rejects it. That candidate must not be kept, and the
+    tolerance it broke -- not the dB figure -- has to reach the agent.
     """
-    workspace = _canonical_workspace(
-        tmp_path,
-        "raise AssertionError('normalized max err 0.02468 too high')",
-    )
-    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=workspace)
+    from kernelforge.tests.test_numerical_contract import _task, evidence
+
+    _task(tmp_path, evidence())
+    tmp_path.joinpath("driver.py").write_text("raise AssertionError('normalized max err 0.02468 too high')\n")
+    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=_git_workspace(tmp_path))
+    loop.ic.kernel_backend = "assembly"
+    loop.ic.pristine_baseline_wall_ms = 1.0
 
     result = await loop.run_one_iteration(1)
 
@@ -2379,58 +2499,12 @@ async def test_snr_pass_with_failing_canonical_suite_is_reverted(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_canonical_suite_passing_keeps_the_faster_candidate(tmp_path, monkeypatch):
-    workspace = _canonical_workspace(tmp_path, "print('all cases PASS')")
-    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=workspace)
-
-    result = await loop.run_one_iteration(1)
-
-    assert result.kept is True
-    assert result.validation_passed is True
-
-
-@pytest.mark.asyncio
-async def test_canonical_suite_output_reporting_failure_reverts(tmp_path, monkeypatch):
-    workspace = _canonical_workspace(tmp_path, "print('mla-decode-bs64-kv8192: FAILED')")
-    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=workspace)
-
-    result = await loop.run_one_iteration(1)
-
-    assert result.kept is False
-    assert "mla-decode-bs64-kv8192" in result.error_output
-
-
-@pytest.mark.asyncio
-async def test_workspace_declaring_no_correctness_command_cannot_keep(tmp_path, monkeypatch):
-    tmp_path.joinpath("config.yaml").write_text('compile_command:\n  - "true"\n')
-    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=tmp_path)
-
-    result = await loop.run_one_iteration(1)
-
-    assert result.kept is False
-    assert "declares no 'correctness_command'" in result.validation_summary
-
-
-@pytest.mark.asyncio
-async def test_workspace_without_a_config_keeps_on_the_snr_verdict_alone(tmp_path, monkeypatch, capsys):
-    """Non-arena runs (flydsl, fusion, the examples) must keep working.
-
-    There is no canonical suite to consult, so the SNR verdict still decides --
-    but the operator is told the KEEP carries nothing else behind it.
-    """
-    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=tmp_path)
-
-    result = await loop.run_one_iteration(1)
-
-    assert result.kept is True
-    assert "[canonical] UNVERIFIED" in capsys.readouterr().out
-
-
-@pytest.mark.asyncio
-async def test_canonical_suite_is_skipped_for_a_candidate_that_is_not_faster(tmp_path, monkeypatch):
+async def test_assembly_acceptance_is_skipped_for_a_candidate_that_is_not_faster(tmp_path, monkeypatch):
     """The suite is the expensive check; a slower candidate is reverted anyway."""
-    workspace = _canonical_workspace(tmp_path, "raise AssertionError('this must never run')")
+    workspace = _git_workspace(_canonical_workspace(tmp_path, "raise AssertionError('this must never run')"))
     loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(candidate_ms=2.0), workspace_dir=workspace)
+    loop.ic.kernel_backend = "assembly"
+    loop.ic.pristine_baseline_wall_ms = 1.0
 
     result = await loop.run_one_iteration(1)
 
@@ -2440,7 +2514,8 @@ async def test_canonical_suite_is_skipped_for_a_candidate_that_is_not_faster(tmp
 
 
 @pytest.mark.asyncio
-async def test_iteration_keeps_winning_mean_despite_one_regressed_case(monkeypatch):
+@pytest.mark.parametrize("kernel_backend,expected_keep", [("", True), ("assembly", False)])
+async def test_iteration_keeps_winning_mean_despite_one_regressed_case(monkeypatch, kernel_backend, expected_keep):
     loop, _benchmark_calls = _measurement_loop(
         monkeypatch,
         {
@@ -2461,9 +2536,11 @@ async def test_iteration_keeps_winning_mean_despite_one_regressed_case(monkeypat
         },
     )
 
+    loop.ic.kernel_backend = kernel_backend
+    loop.ic.pristine_baseline_wall_ms = 1.0
     result = await loop.run_one_iteration(1)
 
-    assert result.kept is True
+    assert result.kept is expected_keep
     assert result.bench_detail["mean_case_speedup"] == pytest.approx((2.0 + 2.0 / 3.0) / 2.0)
 
 
@@ -4099,6 +4176,56 @@ def test_orchestration_persists_critic_draft_review_and_final_paths(
     }
 
 
+def test_a_round_the_critic_could_not_review_is_carried_as_unreviewed(
+    tmp_path,
+    monkeypatch,
+):
+    """The next round is told the review never happened, not that it passed."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    head = loop._git("rev-parse", "HEAD").splitlines()[0]
+    loop.run_state = RunState(head_commit=head)
+    loop.config = SimpleNamespace(
+        experiments_dir=workspace / "forge_experiments",
+        gpu_target="gfx942",
+    )
+    critic = PlanCriticOutcome(
+        verdict="NOT_REVIEWED",
+        error="TimeoutError: plan critic exceeded 600s",
+        verdict_source="error",
+    )
+    result = SimpleNamespace(
+        optimization_plans=("# Draft plan\nVectorize global loads.",),
+        optimization_plan_draft="# Draft plan\nVectorize global loads.",
+        optimization_plan_executable=True,
+        dispatch_plan=None,
+        specialist_outcomes=(),
+        structured_output_diagnostics={"plan_critic": critic.to_dict()},
+        plan_critic=critic,
+        plan_revised=False,
+    )
+
+    class OrchestrationService:
+        async def run(self, _context, **_kwargs):
+            return result
+
+    plan_path, error = asyncio.run(
+        loop._run_orchestration(
+            iteration=1,
+            orchestration_service=OrchestrationService(),
+        )
+    )
+    root = workspace / "forge_experiments" / "orchestration" / "iter_001"
+
+    assert error == ""
+    assert plan_path is not None
+    # The plan still publishes -- an outage costs this round its review, not its round.
+    assert plan_path.read_text().startswith("# Draft plan")
+    assert loop._last_critic_verdict == "NOT_REVIEWED"
+    assert (root / "critic_review.md").read_text().startswith("STATUS: CRITIC_ERROR")
+    # No review exists to resume, so a later process inherits no ruling at all.
+    assert loop.run_state.last_critic.verdict == ""
+
+
 def test_framework_fallback_plan_does_not_complete_diversify_cycle(
     tmp_path,
     monkeypatch,
@@ -4307,6 +4434,9 @@ def test_keep_defers_incremental_analysis_until_next_request(
             analysis_calls.append(context.analysis_commit)
             incrementals.append(incremental)
             return Bundle(context.analysis_commit)
+
+        def apply_checkpoint(self, context):
+            return context
 
     async def editing_agent(kernel_path, _history, session_sink):
         session_sink["plan"] = "keep one candidate"
@@ -5795,7 +5925,6 @@ def test_orchestration_failed_resume_allows_one_half_open_probe(
         first.ic,
         first.tracker,
         config=runtime_config,
-        evolver=_NoopEvolver(),
         resume=True,
     )
     monkeypatch.setattr(
@@ -5823,7 +5952,6 @@ def test_orchestration_failed_resume_allows_one_half_open_probe(
         first.ic,
         first.tracker,
         config=runtime_config,
-        evolver=_NoopEvolver(),
         resume=True,
     )
     monkeypatch.setattr(
@@ -5880,7 +6008,6 @@ def test_two_loop_instances_resume_global_iteration_and_fresh_budget(tmp_path, m
         first.ic,
         first.tracker,
         config=object(),
-        evolver=_NoopEvolver(),
         resume=True,
     )
     monkeypatch.setattr(
@@ -5924,7 +6051,6 @@ def test_resume_advances_past_abruptly_started_event(tmp_path, monkeypatch):
         first.ic,
         first.tracker,
         config=object(),
-        evolver=_NoopEvolver(),
         resume=True,
     )
     monkeypatch.setattr(
@@ -6196,7 +6322,6 @@ def test_fresh_run_rejects_existing_campaign_without_modifying_state(tmp_path, m
         first.ic,
         first.tracker,
         config=object(),
-        evolver=_NoopEvolver(),
     )
     with pytest.raises(ValueError, match="--resume"):
         asyncio.run(
@@ -6231,7 +6356,6 @@ def test_a_rejected_fresh_run_persists_no_pr_references(tmp_path, monkeypatch):
         ),
         first.tracker,
         config=object(),
-        evolver=_NoopEvolver(),
     )
     with pytest.raises(ValueError, match="--resume"):
         asyncio.run(
@@ -6319,7 +6443,6 @@ def test_resume_rejects_identity_mismatch_without_modifying_state(
         bad_config,
         first.tracker,
         config=object(),
-        evolver=_NoopEvolver(),
         resume=True,
     )
     with pytest.raises(ValueError, match=error):
@@ -6353,7 +6476,6 @@ def test_resume_rejects_head_mismatch_without_modifying_state(tmp_path, monkeypa
         first.ic,
         first.tracker,
         config=object(),
-        evolver=_NoopEvolver(),
         resume=True,
     )
     with pytest.raises(ValueError, match="HEAD mismatch"):
@@ -6454,7 +6576,6 @@ def test_case_metric_fails_closed_on_incomplete_candidate_coverage():
         ),
         tracker=object(),
         config=object(),
-        evolver=object(),
     )
     loop._baseline_case_times = {"small": 2.0, "large": 8.0}
     bench = {
@@ -6488,7 +6609,6 @@ def test_mean_case_speedup_metric_preserves_raw_mean_for_diagnostics():
         ),
         tracker=object(),
         config=object(),
-        evolver=object(),
     )
     loop._baseline_case_times = {"small": 1.0, "large": 9.0}
     bench = {

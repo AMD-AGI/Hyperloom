@@ -96,15 +96,15 @@ def test_ask_retryable_subset_of_ask():
         "must_have_weights_missing",
         "fuzzy_check_failed",
     }
-    # checkpoint_aborted and eval_gap_exceeded are Ask but NOT retryable —
-    # retrying them won't synthesize missing info / shrink the gap.
+    # checkpoint_aborted and eval_gap_exceeded are Ask but NOT retryable — retrying them won't synthesize missing info
+    # / shrink the gap.
     assert OutcomeId.checkpoint_aborted not in ASK_RETRYABLE
     assert OutcomeId.eval_gap_exceeded not in ASK_RETRYABLE
 
 
 def test_enum_is_string_valued():
-    # StrEnum members compare equal to their string values — important for
-    # blocked.md parsing and JSON round-trips through Assessment.to_dict().
+    # StrEnum members compare equal to their string values — important for blocked.md parsing and JSON round-trips
+    # through Assessment.to_dict().
     assert OutcomeId.exec_oom == "exec_oom"
     assert str(OutcomeId.exec_oom) == "exec_oom"
 

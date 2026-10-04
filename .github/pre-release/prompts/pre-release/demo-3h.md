@@ -16,7 +16,7 @@ exact default flags.
 
   ```
   --tp 1 --conc 64 --isl 1024 --osl 1024 --precision bf16 --max-hours 3
-  --max-minutes-framework-pct 0.90 --max-minutes-sweep-pct 0.01
+  --max-minutes-framework-pct 0.50 --max-minutes-sweep-pct 0.01
   --no-kernel --no-enable-conc-sweep --no-enable-roofline
   ```
 
@@ -39,6 +39,9 @@ asking. Load LLM API keys/base URLs and `FRAMEWORK` from `.env`.
   skill's docker mode). Do **not** start a new container and do **not** change its
   device/isolation flags. Otherwise (baremetal) run directly and do not run `docker`.
 - Do **not** modify `USER_DATA_PATH`.
+- Do **not** start a background watchdog or automatic resume loop. Launch the optimizer
+  itself detached, preserve its logs and launch-info JSON, and let the release harness
+  read persisted state and terminal artifacts without relaunching the session.
 - Do **not** print or copy secret values into output, reports, or logs.
 
 ## Termination — do not end this turn until the run is launched
@@ -47,11 +50,11 @@ This is a **single non-interactive turn**, and anything still running as a child
 killed the moment the turn ends. So:
 
 1. Finish the install and the launch **inside this turn**. Do **not** end the turn with a
-   progress note such as "install started", "waiting on the pull", or "waiting on the
-   monitor" — that kills the work you just started and the leg ends up with nothing
-   running at all.
-2. Start `optimize` **detached** with `setsid nohup` (as the demo skill does) so it
-   survives the end of this turn.
+   progress note such as "install started" or "waiting on the pull" — that kills the
+   work you just started and the leg ends up with nothing running at all.
+2. Start `optimize` **detached** the way the demo skill does — `run_in_background=true`
+   when `$CLAW_SESSION_ID` is set and the bash tool offers it, `setsid nohup` otherwise —
+   so it survives the end of this turn.
 3. Before you finish, confirm the run is really live and report the paths: the nested
    session run dir exists, `state.json` is present in it, and the optimizer PID is alive.
 

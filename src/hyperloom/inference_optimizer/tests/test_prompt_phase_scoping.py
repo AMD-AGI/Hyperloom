@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Phase scoping of the orchestration system prompt and the Critic judge bundle.
-
-Locks both halves of the contract: a phase receives only the modules whose
-behaviour it can reach, and the cross-phase planning facts a ``skip_to_*``
-decision needs survive every phase.
-"""
+"""Phase scoping of the orchestration system prompt and the Critic judge bundle."""
 
 from __future__ import annotations
 
@@ -28,7 +23,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 KERNEL_REQUEST_REF = "## 6. KERNEL-OPT REQUEST REFERENCE"
 IDEA_GENERATION = "### IDEA GENERATION"
 BASELINE_FINGERPRINT = "eight params fields"  # now in the reference doc, not in the prompt
-SPECIALIST_DIALS = "### One specialist, four dials"
+SPECIALIST_DIALS = "### One specialist, three dials"
 SPECIALIST_WATCH = "### Watching a running specialist"
 SPECIALIST_DOMAIN = "### Choosing specialist domain"
 WEB_SEARCH = "### Web search"
@@ -38,6 +33,7 @@ ROOFLINE_BLOCK = "### Roofline / profile analysis"
 # One goal block per phase.
 PHASE_GOAL_BLOCKS = {
     _ps.PHASE_PRELUDE: "### PRELUDE — phase goal",
+    _ps.PHASE_ENABLEMENT: "### ENABLEMENT — phase goal",
     _ps.PHASE_FRAMEWORK_AGENT: "### OPTIMIZE — phase goal",
     _ps.PHASE_KERNEL_AGENT: "### KERNEL — phase goal",
     _ps.PHASE_SWEEP: "### SWEEP — phase goal",
@@ -47,12 +43,13 @@ PHASE_GOAL_BLOCKS = {
 # Analysis-driven targeting is unreachable once the levers are gone.
 ROOFLINE_PHASES = {
     _ps.PHASE_PRELUDE,
+    _ps.PHASE_ENABLEMENT,
     _ps.PHASE_FRAMEWORK_AGENT,
     _ps.PHASE_KERNEL_AGENT,
 }
 
-# Only EXPLORE lets the LLM emit `delegate{specialist}`; FRAMEWORK_AGENT
-# specialists come from the Coordinator's authoring pump but stay steerable.
+# Only EXPLORE lets the LLM emit `delegate{specialist}`; FRAMEWORK_AGENT specialists come from the Coordinator's
+# authoring pump but stay steerable.
 SPECIALIST_DISPATCH_OPS = (SPECIALIST_DIALS, SPECIALIST_DOMAIN, WEB_SEARCH)
 ALL_SPECIALIST_OPS = (*SPECIALIST_DISPATCH_OPS, SPECIALIST_WATCH)
 
@@ -66,7 +63,7 @@ ALWAYS_ON = (
     "## 7. RULES & OUTPUT PROTOCOL",
     "### Phase awareness",
     "### Hard rules",
-    "### Pulling context on a delta turn",
+    "### Pulling what the projection does not carry",
     "### SESSION_DIR contract",
     "### Output protocol",
     "RULE F3",
@@ -94,9 +91,7 @@ def _build(registry: dict, phase: str) -> str:
     )
 
 
-# ---------------------------------------------------------------------------
 # Phase-scoped modules render only where the behaviour exists
-# ---------------------------------------------------------------------------
 def test_kernel_request_reference_only_in_kernel_phase(registry):
     """Kernel REQUEST payload templates are legal only in KERNEL_AGENT."""
     for phase in _ps.PHASE_NAMES:
@@ -118,13 +113,13 @@ def test_idea_generation_only_in_explore_phase(registry):
 
 
 def test_baseline_recovery_detail_only_in_prelude(registry):
-    """Only PRELUDE can re-propose baseline, so F1/F2 rules render only there."""
+    """PRELUDE and ENABLEMENT render F1/F2 (the phases where baselines keep failing)."""
     refs_dir = asset_prompt_references_dir()
     for phase in _ps.PHASE_NAMES:
         text = _build(registry, phase)
         # Detailed fingerprint text lives in the reference doc, not in any prompt.
         assert BASELINE_FINGERPRINT not in text, f"baseline fingerprint detail leaked into {phase} prompt"
-        if phase == _ps.PHASE_PRELUDE:
+        if phase in (_ps.PHASE_PRELUDE, _ps.PHASE_ENABLEMENT):
             assert "RULE F1" in text
             assert "RULE F2" in text
         else:
@@ -189,23 +184,14 @@ def test_roofline_targeting_drops_out_of_sweep_and_close(registry):
             assert ROOFLINE_BLOCK not in text, f"{ROOFLINE_BLOCK} leaked into {phase}"
 
 
-def test_payload_contracts_are_scoped_to_the_proposable_set(registry):
-    """A phase gets payload templates only for the actions it can propose."""
+def test_payload_contracts_render_in_every_phase(registry):
+    """Payload templates are no longer phase-scoped, so every phase carries them."""
     for phase in _ps.PHASE_NAMES:
         text = _build(registry, phase)
-        proposable = set(_ps.llm_proposable_actions_for(phase))
-        if "explore" in proposable:
-            assert "GRID INPUT (REQUIRED)" in text
-        else:
-            assert "GRID INPUT (REQUIRED)" not in text, f"explore grid schema leaked into {phase}"
-        if "specialist" in proposable:
-            assert "EMIT: delegate{action_name='specialist'" in text
-        else:
-            assert "EMIT: delegate{action_name='specialist'" not in text, f"specialist payload leaked into {phase}"
-        # Descriptions survive so a skip_to_* decision can still compare phases.
+        assert "GRID INPUT (REQUIRED)" in text
+        assert "EMIT: delegate{action_name='specialist'" in text
         assert "- **explore** —" in text
         assert "- **specialist** —" in text
-        assert "- **sweep** —" in text
 
 
 @pytest.mark.parametrize("phase", _ps.PHASE_NAMES)
@@ -223,9 +209,7 @@ def test_generic_recovery_survives_outside_prelude(registry):
     assert "last_action_failures" in text
 
 
-# ---------------------------------------------------------------------------
 # Back-compat: an unscoped build is a superset
-# ---------------------------------------------------------------------------
 def test_unscoped_build_renders_every_module(registry):
     """A caller that does not track phases keeps the pre-scoping prompt."""
     text = _build(registry, "")
@@ -257,9 +241,7 @@ def test_maintainer_header_never_reaches_the_model(registry):
         assert "rules fragment** consumed by" not in _build(registry, phase)
 
 
-# ---------------------------------------------------------------------------
 # Rules-fragment tag filtering
-# ---------------------------------------------------------------------------
 FRAGMENT = """\
 > maintainer note, stripped
 
@@ -308,17 +290,9 @@ def test_phase_argument_is_case_insensitive(registry):
     assert _build(registry, "kernel_agent") == _build(registry, _ps.PHASE_KERNEL_AGENT)
 
 
-# ---------------------------------------------------------------------------
 # Coordinator re-scopes the override at the phase seam
-# ---------------------------------------------------------------------------
 def _machine_with_stub_coordinator(session_dir, *, user_supplied: bool = False):
-    """Build a MachinePhase over a minimal coordinator stub.
-
-    Returns ``(phase_handler, coord, rebuild_calls)`` where ``rebuild_calls``
-    records the kwargs handed to the stubbed prompt rebuilder.
-    """
-    from types import SimpleNamespace
-
+    """Build a MachinePhase over a minimal coordinator stub."""
     from hyperloom.orchestrator.phases.machine import MachinePhase
     from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -330,21 +304,22 @@ def _machine_with_stub_coordinator(session_dir, *, user_supplied: bool = False):
         rebuild_calls.append(kwargs)
         return f"PROMPT[phase={kwargs.get('phase')}]"
 
-    coord = SimpleNamespace(
+    handler = MachinePhase()
+    vars(handler).update(
         shared_state=state,
         session_dir=session_dir,
         system_prompt_overrides={"orchestration": "ORIGINAL"},
         _rebuild_orch_prompt=_rebuild,
         _orch_prompt_is_user_supplied=user_supplied,
     )
-    return MachinePhase(coord), coord, rebuild_calls
+    return handler, rebuild_calls
 
 
 def test_phase_seam_rescopes_the_override_and_keeps_the_cycle_directive(tmp_path):
-    handler, coord, calls = _machine_with_stub_coordinator(tmp_path)
+    handler, calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("kernel_agent") is True
-    assert coord.system_prompt_overrides["orchestration"] == "PROMPT[phase=KERNEL_AGENT]"
+    assert handler.system_prompt_overrides["orchestration"] == "PROMPT[phase=KERNEL_AGENT]"
     assert calls == [
         {
             "macro_cycle": 3,
@@ -355,24 +330,24 @@ def test_phase_seam_rescopes_the_override_and_keeps_the_cycle_directive(tmp_path
 
 
 def test_phase_seam_never_clobbers_a_user_supplied_prompt(tmp_path):
-    handler, coord, calls = _machine_with_stub_coordinator(tmp_path, user_supplied=True)
+    handler, calls = _machine_with_stub_coordinator(tmp_path, user_supplied=True)
 
     assert handler._reseed_orch_prompt_for_phase("EXPLORE") is False
-    assert coord.system_prompt_overrides["orchestration"] == "ORIGINAL"
+    assert handler.system_prompt_overrides["orchestration"] == "ORIGINAL"
     assert calls == []
 
 
 def test_phase_seam_ignores_a_blank_phase(tmp_path):
-    handler, coord, calls = _machine_with_stub_coordinator(tmp_path)
+    handler, calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("") is False
-    assert coord.system_prompt_overrides["orchestration"] == "ORIGINAL"
+    assert handler.system_prompt_overrides["orchestration"] == "ORIGINAL"
     assert calls == []
 
 
 def test_phase_seam_snapshots_the_scope_it_installed(tmp_path):
     """Each scope the model actually ran under must leave its own artefact."""
-    handler, _coord, _calls = _machine_with_stub_coordinator(tmp_path)
+    handler, _calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("EXPLORE") is True
 
@@ -385,7 +360,7 @@ def test_phase_seam_snapshot_never_overwrites_the_boot_file(tmp_path):
     boot = tmp_path / "agents" / "orchestration" / "system_prompt.snapshot.md"
     boot.parent.mkdir(parents=True, exist_ok=True)
     boot.write_text("BOOT", encoding="utf-8")
-    handler, _coord, _calls = _machine_with_stub_coordinator(tmp_path)
+    handler, _calls = _machine_with_stub_coordinator(tmp_path)
 
     handler._reseed_orch_prompt_for_phase("CLOSE")
 
@@ -396,23 +371,13 @@ def test_phase_seam_survives_an_unwritable_session_dir(tmp_path):
     """A failed snapshot must not abort the phase transition."""
     blocker = tmp_path / "agents"
     blocker.write_text("not a directory", encoding="utf-8")
-    handler, coord, _calls = _machine_with_stub_coordinator(tmp_path)
+    handler, _calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("SWEEP") is True
-    assert coord.system_prompt_overrides["orchestration"] == "PROMPT[phase=SWEEP]"
+    assert handler.system_prompt_overrides["orchestration"] == "PROMPT[phase=SWEEP]"
 
 
-def test_reseed_for_phase_is_reachable_through_the_coordinator_delegation_map():
-    """The collaborator method must be routed, or the seam hook is a no-op."""
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    assert Coordinator._DELEGATED.get("_reseed_orch_prompt_for_phase") == "phase_machine"
-    assert "phase_machine" in Coordinator._COLLAB_MODULES
-
-
-# ---------------------------------------------------------------------------
 # Snapshot paths: one artefact per scope the model ran under
-# ---------------------------------------------------------------------------
 def test_prompt_snapshot_path_is_phase_suffixed(tmp_path):
     from hyperloom.inference_optimizer.session.session_paths import agent_prompt_snapshot
 
@@ -452,9 +417,7 @@ def test_boot_snapshot_without_a_phase_keeps_the_legacy_layout(tmp_path):
     assert list(orch.glob("system_prompt.*.snapshot.md")) == []
 
 
-# ---------------------------------------------------------------------------
 # Critic: phase is structurally deliverable and injected one phase at a time
-# ---------------------------------------------------------------------------
 def test_judge_bundle_to_dict_carries_phase():
     """The on-disk bundle records the phase, so audits are not misled."""
     from hyperloom.agents.critic.runtime.decision_reviewer import JudgeBundle
@@ -503,7 +466,7 @@ def _render_state(phase: str, max_minutes: float = 120.0):
 
 
 def _reloop_line(phase: str) -> str | None:
-    out = _render_state(phase).to_phase_status_summary()
+    out = _ps.phase_status_summary(_render_state(phase))
     return next((line for line in out.splitlines() if line.startswith("reloop")), None)
 
 
@@ -527,30 +490,26 @@ def test_reloop_is_a_projection_before_sweep():
     assert "(projected)" not in (_reloop_line(_ps.PHASE_SWEEP) or "")
 
 
-def test_reloop_feasibility_matches_the_transition_decision():
+def test_reloop_feasibility_at_sweep_is_the_transition_decision():
     s = _render_state(_ps.PHASE_SWEEP)
-    reloop, _ = _ps.should_reloop_to_explore(s)
-    expected = "true" if reloop else "false"
-    assert f"cycle_reloop_feasible={expected}" in (_reloop_line(_ps.PHASE_SWEEP) or "")
+    s.last_conc_sweep = {"status": "succeeded"}
+    s.target_reached_at = " "
+    now = datetime.now(timezone.utc).timestamp()
+    target, _reason, _evidence = _ps.compute_next_phase(s, now_unix=now)
+    expected = "true" if target == _ps.PHASE_FRAMEWORK_AGENT else "false"
+    line = next(line for line in _ps.phase_status_summary(s, now_unix=now).splitlines() if line.startswith("reloop"))
+    assert f"cycle_reloop_feasible={expected}" in line
 
 
 def test_reloop_infeasible_when_the_target_phase_is_disabled():
     s = _render_state(_ps.PHASE_SWEEP)
     s.framework_agent_phase_enabled = False
-    line = next(line for line in s.to_phase_status_summary().splitlines() if line.startswith("reloop"))
+    line = next(line for line in _ps.phase_status_summary(s).splitlines() if line.startswith("reloop"))
     assert "cycle_reloop_feasible=false" in line
 
 
 def test_the_payload_contract_lists_only_required_keys():
-    """Required keys and value constraints are different claims.
-
-    The notes were appended to the generated required-field list, under a label
-    that says "Required keys". That printed `alert:{severity,summary,severity ∈
-    low|medium|high}` -- severity twice -- and presented `prune_branch.scope`
-    and `extend_lease.reason` as required when validate_envelope requires none
-    of them. The same string is the description of Claude's emit_intent tool,
-    so the drift this contract exists to prevent was introduced into it.
-    """
+    """Required keys and value constraints are different claims."""
     from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.roles.mcp_emit_intent import (
         _PAYLOAD_REQUIRED,
@@ -596,15 +555,7 @@ def test_both_provider_descriptions_carry_the_constraints():
 
 
 def test_an_unknown_transport_is_refused_not_rendered_empty(registry):
-    """A transport nobody declares must not quietly delete the output protocol.
-
-    Every `<!-- transport: ... -->` block is dropped when the requested
-    transport is not among the ones it names, and both Output protocol blocks
-    are scoped that way. A misspelled or renamed transport therefore produced a
-    prompt telling the model nothing about how to answer -- the exact shape of
-    silent degradation this contract is built to prevent, and TRANSPORTS was
-    imported here without ever being consulted.
-    """
+    """A transport nobody declares must not quietly delete the output protocol."""
     from hyperloom.orchestrator.prompts.transport import TRANSPORTS
 
     with pytest.raises(ValueError, match="carrier-pigeon"):
@@ -644,15 +595,7 @@ def test_every_declared_transport_still_renders(registry, transport):
 
 
 def test_a_role_with_no_constraints_gets_no_constraints_line():
-    """Say nothing rather than an empty clause.
-
-    ``payload_constraints`` returns an empty string for an intent set where no
-    type carries a note, and both callers embedded it unconditionally -- so such
-    a role was told "Constraints: ." The orchestration role always has notes and
-    Claude's tool takes every intent type, so production does not reach it today;
-    these are public functions taking any role's intent set, and assuming the
-    current configuration is the habit this whole contract exists to break.
-    """
+    """Say nothing rather than an empty clause."""
     from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.roles.codex import build_output_instructions
     from hyperloom.orchestrator.roles.mcp_emit_intent import build_intent_envelope_schema

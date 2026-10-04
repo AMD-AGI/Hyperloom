@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the forge-loop warm-start read.
-
-These run against the KB Store's on-disk backend and seed it through the real
-write path, so a read is only ever asserted against something a run could
-actually have recorded.
-"""
+"""Tests for the forge-loop warm-start read."""
 
 from __future__ import annotations
 
@@ -23,11 +18,10 @@ from kernelforge.knowledge.experience_sink import (
     hash_implementation_identity,
     write_run_experience,
 )
-from kernelforge.knowledge.experience_store import (
-    REMOTE_BACKEND_GBRAIN,
-    KnowledgeConfig,
-)
+from kernelforge.knowledge.experience_store import KnowledgeConfig, KnowledgeStoreMode
+from kernelforge.rewrite_by_flydsl import identity as rewrite_identity
 from kernelforge.rewrite_by_flydsl import record_store
+from kernelforge.tests.test_rewrite_by_flydsl_kb import InMemoryKBStore
 
 DIFF = "diff --git a/kernel.py b/kernel.py\n--- a/kernel.py\n+++ b/kernel.py\n@@ -1 +1 @@\n-old\n+new\n"
 KERNEL_SOURCE = "import triton\n\n\n@triton.jit\ndef my_kernel(x):\n    return x\n"
@@ -96,14 +90,8 @@ def _read_args(config, workspace, **overrides):
 
 # --- the paths that yield no candidate ------------------------------------- #
 def test_read_none_when_the_store_is_not_configured(tmp_path, workspace):
-    knowledge = KnowledgeConfig.from_env(
-        {},
-        mode="remote",
-        local_root=tmp_path / "knowledge",
-        gbrain_base_url="https://gbrain.invalid",
-        gbrain_token="secret",
-        remote_backend=REMOTE_BACKEND_GBRAIN,
-    )
+    # Built directly: from_env refuses remote mode without KB Store credentials.
+    knowledge = KnowledgeConfig(mode=KnowledgeStoreMode.REMOTE, local_root=tmp_path / "knowledge")
     config = Config.from_env(
         workspace=str(workspace),
         gpu_target="gfx942",
@@ -118,8 +106,8 @@ def test_read_none_when_the_store_is_not_configured(tmp_path, workspace):
 
 
 def test_read_none_without_required_gpu_type(config, workspace):
-    # Reading without the model would resolve a GPU-less address that no write
-    # ever reached, and the empty result would look like an honest cold start.
+    # Reading without the model would resolve a GPU-less address that no write ever reached, and the empty result
+    # would look like an honest cold start.
     config.gpu_type = ""
     status: dict[str, str] = {}
 
@@ -176,6 +164,56 @@ def test_read_returns_the_champion_with_its_patch(config, workspace):
     assert best["patch_content"] == DIFF
     assert best["kernel_slug"].startswith("kernel:forge-loop:my:")
     assert solutions[0]["solution_slug"] == best["solution_slug"]
+
+
+def test_remote_read_falls_back_across_known_framework_version_and_gpu(
+    tmp_path,
+    workspace,
+    monkeypatch,
+):
+    store = InMemoryKBStore()
+    monkeypatch.setattr(record_store, "KBStoreClient", lambda *args, **kwargs: store)
+    knowledge = KnowledgeConfig.from_env(
+        {},
+        mode="remote",
+        local_root=tmp_path / "knowledge",
+        kb_store_url="http://in-memory",
+        kb_store_token="token",
+    )
+    config = Config.from_env(
+        workspace=str(workspace),
+        gpu_target="gfx942",
+        gpu_type="mi300x",
+        knowledge_config=knowledge,
+        agent_precheck=False,
+    )
+    monkeypatch.setattr(
+        rewrite_identity,
+        "framework_version",
+        lambda _framework: "1.0.0",
+    )
+    _seed(config, workspace, framework="vllm")
+
+    config.gpu_type = "mi355x"
+    config.gpu_target = "gfx950"
+    monkeypatch.setattr(
+        rewrite_identity,
+        "framework_version",
+        lambda _framework: "2.0.0",
+    )
+    status: dict[str, str] = {}
+
+    solutions = read_top_solutions(
+        **_read_args(config, workspace, framework="vllm"),
+        read_status=status,
+    )
+
+    assert len(solutions) == 1
+    assert solutions[0]["kernel_slug"].endswith(":vllm:1.0.0:triton:mi300x")
+    assert status["read_reason"] == "hit"
+    assert status["match_tier"] == "fuzzy"
+    assert status["requested_canonical_id"].endswith(":vllm:2.0.0:triton:mi355x")
+    assert status["selected_canonical_id"] == solutions[0]["kernel_slug"]
 
 
 def test_the_same_tree_matches_its_own_implementation_signature(config, workspace):
@@ -305,3 +343,29 @@ def test_read_error_is_sanitized_and_bounded():
     assert "user:pw@" not in message
     assert "[REDACTED]" in message
     assert len(message) <= 500
+
+
+def test_a_failed_read_does_not_leak_the_kb_store_token(tmp_path, workspace, monkeypatch):
+    knowledge = KnowledgeConfig.from_env(
+        {},
+        mode="remote",
+        local_root=tmp_path / "knowledge",
+        kb_store_url="http://in-memory",
+        kb_store_token="kb-secret-value",
+    )
+    config = Config.from_env(
+        workspace=str(workspace),
+        gpu_target="gfx942",
+        gpu_type="mi300x",
+        knowledge_config=knowledge,
+        agent_precheck=False,
+    )
+
+    def _fail(**_kwargs):
+        raise RuntimeError("store rejected kb-secret-value")
+
+    monkeypatch.setattr(reader, "_read_top_solutions_impl", _fail)
+    status: dict[str, str] = {}
+
+    assert read_top_solutions(**_read_args(config, workspace), read_status=status) == []
+    assert "kb-secret-value" not in status["read_error"]

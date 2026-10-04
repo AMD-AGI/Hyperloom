@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for aiter compare-report lookup when stdout has no Pre/Post table.
-
-When aiter tunes >30 shapes it writes the --compare table to
-``/tmp/aiter_compare/tuned_<tuner>.<pid>.compare.txt`` instead of stdout.
-"""
+"""Tests for aiter compare-report lookup when stdout has no Pre/Post table."""
 
 from __future__ import annotations
 

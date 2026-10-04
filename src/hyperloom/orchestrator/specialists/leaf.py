@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Thin leaf sub-agent definition for single-layer specialist fan-out.
-
-A specialist may ``Task(subagent_type="hyperloom-leaf")`` to parallelize a
-focused, single-shot sub-task. The leaf has bash + read tools but no ``Task``,
-so fan-out depth is fixed at one. Leaves run inside the specialist subprocess
-and inherit its ``VISIBLE_DEVICES``, sharing the parent's GPU lease.
-"""
+"""Thin leaf sub-agent definition for single-layer specialist fan-out."""
 
 from __future__ import annotations
 

@@ -23,6 +23,26 @@ def atomic_write_json(path: str | Path, payload: dict) -> None:
     atomic_write_text(path, json.dumps(payload))
 
 
+def load_published_best(workspace_dir: str) -> dict | None:
+    """Return the published best result, or ``None`` when the campaign has no authoritative one.
+
+    ``best_result.json`` is the commit point: every consumer of a campaign's outcome reads it
+    through here so that one verdict on what counts as published governs them all.
+    """
+    path = Path(workspace_dir) / "forge_experiments" / "best_result.json"
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != MANIFEST_SCHEMA_VERSION
+        or payload.get("correctness_passed") is not True
+    ):
+        return None
+    return payload
+
+
 def _validated_warm_start_result(
     workspace_dir: str,
     *,
@@ -32,18 +52,8 @@ def _validated_warm_start_result(
     mean_case_speedup: float,
 ) -> dict | None:
     """Return the published warm-start commit point when it is authoritative."""
-    path = Path(workspace_dir) / "forge_experiments" / "best_result.json"
-    try:
-        payload = json.loads(path.read_text())
-    except Exception:
-        return None
-    if (
-        not isinstance(payload, dict)
-        or payload.get("schema_version") != MANIFEST_SCHEMA_VERSION
-        or payload.get("correctness_passed") is not True
-        or payload.get("commit_hash") != commit_hash
-        or int(payload.get("iteration", -1)) != 0
-    ):
+    payload = load_published_best(workspace_dir)
+    if payload is None or payload.get("commit_hash") != commit_hash or int(payload.get("iteration", -1)) != 0:
         return None
     try:
         published_baseline = float(payload.get("baseline_wall_ms"))
@@ -158,9 +168,7 @@ def publish_warm_start_recovery(
     try:
         manifest = publisher.publish(**publish_kwargs)
     except Exception as error:
-        # A derived view can fail after best_result.json is already durable. In
-        # that case the external recovery contract is satisfied and the run may
-        # continue; otherwise the caller must rollback to the pristine base.
+        # A derived view can fail after best_result.json is already durable.
         manifest = _validated_warm_start_result(
             workspace_dir,
             commit_hash=head,
@@ -171,11 +179,8 @@ def publish_warm_start_recovery(
         if manifest is None:
             raise
         publication_errors.append(f"derived-best-view: {error}")
-    # The manifest publish() just wrote withholds the improvement badge when the
-    # aggregate wall times contradict the score. The checkpoint and the caller's
-    # result are written from the same adoption and used to assert an
-    # improvement outright, so a reader's conclusion depended on which of the
-    # three artifacts it happened to open.
+    # The manifest publish() just wrote withholds the improvement badge when the aggregate wall times contradict the
+    # score.
     improvement = warm_start_improvement_flags(
         pristine_ms=float(baseline_ms),
         best_ms=float(best_ms),
@@ -228,7 +233,7 @@ def publish_warm_start_recovery(
     if caller_experiment_id:
         try:
             tracker.set_checkpoint(caller_experiment_id, checkpoint)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - collected into persistence_errors
             persistence_errors.append(f"checkpoint: {error}")
     if persistence_errors:
         result["persistence_degraded"] = True
@@ -236,7 +241,7 @@ def publish_warm_start_recovery(
     if result_json:
         try:
             atomic_write_json(result_json, result)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - collected into persistence_errors
             persistence_errors.append(f"result-json: {error}")
     if persistence_errors:
         result["persistence_degraded"] = True

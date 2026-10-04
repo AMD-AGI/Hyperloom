@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the Infera multi-node SSH control plane (``ssh_client``).
-
-These guard the command-construction / credential-forwarding logic that is the
-sole channel for reaching the Infera idle pods: argv shape, base64 script
-shipping, per-variant env injection (e.g. MORI_* MoE-dispatch tuning), and the
-stdin-only secret path. All tests stub ``subprocess.run`` so nothing is spawned.
-"""
+"""Unit tests for the Infera multi-node SSH control plane (``ssh_client``)."""
 
 from __future__ import annotations
 
@@ -41,19 +35,7 @@ def key_file(tmp_path):
 
 
 def test_ssh_identity_is_the_on_disk_path(key_file):
-    """The identity handed to ``ssh -i`` must be the key's own path.
-
-    Regression guard. This used to be a ``/dev/fd/N`` anonymous pipe so the key
-    was never a discoverable path on argv, but ssh closes every inherited fd
-    above stderr before opening the identity file, so it always reported
-
-        Warning: Identity file /dev/fd/N not accessible: No such file or directory
-
-    and fell through to ``Permission denied (publickey)`` -- which broke every
-    Infera restart-server SSH fan-out. Reproduced against OpenSSH_8.9p1 with a
-    regular-file fd, a pipe fd, and both the /dev/fd and /proc/self/fd
-    spellings: all fail identically, only the plain path authenticates.
-    """
+    """The identity handed to ``ssh -i`` must be the key's own path."""
     assert ssh_client._ssh_identity(key_file) == str(key_file)
     assert not ssh_client._ssh_identity(key_file).startswith("/dev/fd/")
 

@@ -42,7 +42,7 @@ from kernelforge.orchestrator.analysis_session import (
     MAX_ANALYSIS_SESSION_ATTEMPTS,
     SESSION_SCHEMA_VERSION,
 )
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.durable_io import atomic_write_text, fsync_directory, fsync_tree
 from kernelforge.resources import assert_sandbox_grant
 
 
@@ -914,8 +914,6 @@ class AnalysisAgentService:
             expected_parent = incremental.parent_bundle.resolve()
             if parent_root is None or parent_root != expected_parent or not parent_root.is_dir():
                 # The current canonical can still be analyzed from scratch.
-                # A missing or superseded parent must not permanently block
-                # this commit's two durable Analysis session attempts.
                 incremental = None
                 parent_reuse_commit = ""
         if incremental is not None:
@@ -1358,13 +1356,7 @@ class AnalysisAgentService:
         *,
         evidence_commit: str,
     ) -> OrchestrationContext:
-        """Restore one published bundle as stale-safe planning evidence.
-
-        Validation cross-checks the bundle's immutable request and manifest
-        digests rather than comparing stale evidence with the current canonical
-        source digest. Current case latencies remain authoritative while
-        bottlenecks and per-case profile paths come from the evidence commit.
-        """
+        """Restore one published bundle as stale-safe planning evidence."""
         commit = str(evidence_commit or "").strip()
         if not commit:
             return context
@@ -1530,10 +1522,10 @@ class AnalysisAgentService:
                     AgentRunSpec(
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
+                        role="analysis",
                         cwd=str(work_root),
                         writable=True,
                         timeout_sec=timeout_sec,
-                        reasoning_effort="high",
                         additional_directories=[
                             context.workspace,
                             str(assert_sandbox_grant(self.config.local_knowledge_dir, what="local_knowledge_dir")),
@@ -2060,15 +2052,7 @@ Update analysis incrementally:
         """Publish one immutable analysis generation without moving prior bundles."""
         commit_root.mkdir(parents=True, exist_ok=True)
         generation_root = AnalysisAgentService._next_generation_root(commit_root)
-        for path in sorted(staging_root.rglob("*")):
-            if path.is_file():
-                with path.open("rb") as stream:
-                    os.fsync(stream.fileno())
-        directory_fd = os.open(str(staging_root), os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        fsync_tree(staging_root)
         temporary = Path(
             tempfile.mkdtemp(
                 dir=str(commit_root),
@@ -2077,13 +2061,9 @@ Update analysis incrementally:
         )
         try:
             shutil.copytree(staging_root, temporary, dirs_exist_ok=True)
-            AnalysisAgentService._fsync_tree(temporary)
+            fsync_tree(temporary)
             os.replace(temporary, generation_root)
-            parent_fd = os.open(str(commit_root), os.O_RDONLY)
-            try:
-                os.fsync(parent_fd)
-            finally:
-                os.close(parent_fd)
+            fsync_directory(commit_root)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
@@ -2096,21 +2076,6 @@ Update analysis incrementally:
             },
         )
         return generation_root
-
-    @staticmethod
-    def _fsync_tree(root: Path) -> None:
-        for path in sorted(root.rglob("*")):
-            if path.is_file():
-                fd = os.open(str(path), os.O_RDONLY)
-                try:
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
-        directory_fd = os.open(str(root), os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
 
     @staticmethod
     def _tier_label(*, profiling_enabled: bool, profiled: bool) -> str:
