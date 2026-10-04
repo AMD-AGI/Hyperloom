@@ -597,6 +597,7 @@ _GPU_ISA_BY_SKU = {
     "mi308x": "gfx942",
     "mi325x": "gfx942",
     "mi355x": "gfx950",
+    "rx9070xt": "gfx1201",
 }
 _TOPOLOGY_SUFFIX_RE = re.compile(
     r"_ws[1-9]\d*(?:_pd[1-9]\d*p[1-9]\d*d)?"

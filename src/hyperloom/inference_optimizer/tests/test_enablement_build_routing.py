@@ -81,6 +81,10 @@ def test_derive_gpu_arch_mi355x():
     assert _derive_gpu_arch("mi355x") == "gfx950"
 
 
+def test_derive_gpu_arch_rx9070xt():
+    assert _derive_gpu_arch("rx9070xt") == "gfx1201"
+
+
 def test_derive_gpu_arch_mi300x():
     assert _derive_gpu_arch("mi300x") == "gfx942"
 

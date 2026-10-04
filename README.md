@@ -1,5 +1,5 @@
 # ROCm Hyperloom-RX9000series
-This fork is intended to explore the reworking of Hyperloom's core functions and optimizations to localized inference on RX 9000 series cards. While the original Readme will remain intact as a fork, all updates for this specific fork will be added to the front of the original description.
+This fork is adding RX 9000 support, starting with RX 9070 XT (GFX1201). AMD lists the card for Windows 11 in ROCm 7.2.0; Hyperloom's managed serving and optimization workflow remains Linux-oriented and is not yet validated end to end on this GPU. See the [compatibility notes](docs/compatibility.rst#rx-9070-xt).
 
 # ROCm Hyperloom
 
@@ -48,9 +48,9 @@ Hyperloom combines:
 | Feature | Options |
 |------|-------|
 | Workload | Inference serving |
-| Platform | MI300X, MI325X, MI355X |
-| Framework | SGLang, vLLM |
-| Kernel Language | HIP, Triton, FlyDSL |
+| Platform | MI300X, MI325X, MI355X; RX 9070 XT (GFX1201, experimental) |
+| Framework | SGLang, vLLM (Linux workflow; RX 9070 XT not yet validated) |
+| Kernel Language | HIP, Triton (RX 9070 XT); FlyDSL on validated platforms |
 | LLM Backend | Claude |
 
 ## Get Started

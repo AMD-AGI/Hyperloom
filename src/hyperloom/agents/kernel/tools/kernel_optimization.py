@@ -534,6 +534,14 @@ _GPU_HW: dict[str, dict[str, Any]] = {
         "mem": "HBM3E (~8.0 TB/s peak)",
         "build_flag": "--offload-arch=gfx950",
     },
+    "rx9070xt": {
+        "name": "Radeon RX 9070 XT",
+        "arch": "gfx1201",
+        "uarch": "RDNA4",
+        "cus": 64,
+        "mem": "16 GB GDDR6 (~640 GB/s peak), 64 MB Infinity Cache",
+        "build_flag": "--offload-arch=gfx1201",
+    },
 }
 
 

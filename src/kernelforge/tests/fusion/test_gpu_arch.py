@@ -32,6 +32,7 @@ def test_canon_arch_folds_marketing_names_and_rejects_unknown():
     assert canon_arch("GFX950") == "gfx950"
     assert canon_arch("MI300X") == "gfx942"
     assert canon_arch("mi355x") == "gfx950"
+    assert canon_arch("AMD Radeon RX 9070 XT") == "gfx1201"
     assert canon_arch("AMD Instinct MI355X") == "gfx950"
     # Unresolvable arch must be empty: naming the wrong ISA is worse than
     # naming none at all.

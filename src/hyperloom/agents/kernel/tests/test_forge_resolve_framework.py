@@ -150,6 +150,12 @@ def test_direct_triton_uses_concrete_symbols_not_logical_operator(tmp_path):
 def test_gpu_target_normalization_extracts_canonical_gfx_arch():
     assert forge_submit._normalize_gpu_target("GFX942:sramecc+:xnack-") == "gfx942"
     assert forge_submit._normalize_gpu_target("MI355X") == "gfx950"
+    assert forge_submit._normalize_gpu_target("RX9070XT") == "gfx1201"
+
+
+def test_gpu_model_resolution_keeps_rx9070xt_distinct_from_its_arch():
+    assert forge_submit._resolve_gpu_type({"platform": "RX9070XT"}) == "rx9070xt"
+    assert forge_submit._resolve_gpu_type({"arch": "gfx1201"}) == ""
 
 
 def test_rewrite_candidate_identity_reuses_the_shared_resolvers(tmp_path, monkeypatch):

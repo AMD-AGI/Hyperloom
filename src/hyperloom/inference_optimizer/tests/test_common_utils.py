@@ -1666,6 +1666,32 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch: pytest.MonkeyP
     assert gpu_types._autodetect_gpu_type() is None
 
 
+def test_gpu_type_autodetect_windows_rx9070xt_product_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer import gpu_types
+
+    class _Completed:
+        stdout = "AMD Radeon RX 9070 XT"
+
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: _Completed())
+    assert gpu_types._autodetect_gpu_type() == "rx9070xt"
+
+
+def test_gpu_type_torch_name_disambiguates_gfx1201_skus(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer import gpu_types
+
+    def _rocm_missing(*_args, **_kwargs):
+        raise FileNotFoundError("rocm-smi")
+
+    properties = SimpleNamespace(name="AMD Radeon RX 9070 XT", gcnArchName="gfx1201")
+    fake_torch = SimpleNamespace(cuda=SimpleNamespace(get_device_properties=lambda _idx: properties))
+    monkeypatch.setattr(subprocess, "run", _rocm_missing)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    assert gpu_types._autodetect_gpu_type() == "rx9070xt"
+
+    properties.name = "AMD Radeon AI PRO R9700"
+    assert gpu_types._autodetect_gpu_type() is None
+
+
 # ---------------------------------------------------------------------------
 # breakdown.recorder.section_shape / breakdown.reporters
 # ---------------------------------------------------------------------------

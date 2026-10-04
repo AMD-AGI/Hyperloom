@@ -27,6 +27,7 @@ _ARCH_ALIASES = {
     "mi308x": "gfx942",
     "mi325x": "gfx942",
     "mi355x": "gfx950",
+    "rx9070xt": "gfx1201",
 }
 _GFX_RE = re.compile(r"\bgfx[0-9a-f]+\b", re.IGNORECASE)
 
@@ -36,13 +37,14 @@ def canon_arch(value: str) -> str:
     raw = str(value or "").strip().lower()
     if not raw:
         return ""
-    if raw in _ARCH_ALIASES:
-        return _ARCH_ALIASES[raw]
     match = _GFX_RE.search(raw)
     if match:
         return match.group(0).lower()
+    normalized = re.sub(r"[^a-z0-9]", "", raw)
+    if normalized in _ARCH_ALIASES:
+        return _ARCH_ALIASES[normalized]
     for alias, canonical in _ARCH_ALIASES.items():
-        if alias in raw:
+        if alias in normalized:
             return canonical
     return ""
 

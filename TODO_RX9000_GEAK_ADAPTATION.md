@@ -2,7 +2,9 @@
 
 ## Overview
 
-Adapt Hyperloom to support AMD Radeon RX 9000 series cards (RDNA4, GFX1201) with full GEAK kernel optimization support. Key insight: RDNA4 and CDNA3 share unified WMMA (Wave Matrix Multiply Accumulate) matrix cores and ISA, differing primarily in **scale** (core count, bandwidth, compute throughput) rather than architecture.
+Adapt Hyperloom to support AMD Radeon RX 9000 series cards, beginning with the RX 9070 XT (RDNA4, GFX1201). AMD lists the RX 9070 XT for Windows 11 in ROCm 7.2.0. Runtime/compiler support does not by itself establish Hyperloom workflow support or prove that CDNA tuning assumptions transfer; validate serving, profiling, and kernel optimization on the card.
+
+**Status (2026-10-04)**: RX 9070 XT identity, product-name detection, and GFX1201 routing are implemented. Native Windows Hyperloom operation, RX-specific managed benchmarking, calibrated roofline data, and end-to-end hardware validation remain incomplete. See [the compatibility notes](docs/compatibility.rst#rx-9070-xt).
 
 **Effort estimate**: 7-10 weeks  
 **Risk level**: Low-to-medium (high code reuse, architecture-unified)  
@@ -15,20 +17,17 @@ Adapt Hyperloom to support AMD Radeon RX 9000 series cards (RDNA4, GFX1201) with
 ### A1: Extend GPU Architecture Detection
 **File**: `src/hyperloom/common/gpu_identity.py`
 
-- [ ] Add GFX1201 ISA variant to `AMD_GPU_DISPATCH_IDENTITIES` dictionary
+- [x] Add the RX 9070 XT SKU and GFX1201 identity to `AMD_GPU_DISPATCH_IDENTITIES`
   ```python
   AMD_GPU_DISPATCH_IDENTITIES = {
-      # ... existing CDNA
-      "gfx942": "mi300x",
-      "gfx950": "mi325x",
-      # Add RDNA4
-      "gfx1200": "rx9000_base",
-      "gfx1201": "rx9070xt",
+      # gpu_type: (gfx_arch, compute_units)
+      "rx9070xt": ("gfx1201", 64),
   }
   ```
 
-- [ ] Verify `rocminfo` parsing correctly identifies GFX1201 from `rocm-smi --showid`
-- [ ] Add RDNA4 architecture identifier to provenance logs (`gfx_arch` field in session state)
+- [x] Normalize local and remote product names and resolve the RX SKU before falling back to architecture-only detection
+- [ ] Verify product/architecture detection on RX 9070 XT hardware under Windows 11 ROCm 7.2.0
+- [ ] Confirm session provenance records `gfx_arch=gfx1201` on a hardware run
 
 ### A2: Create Hardware Profile for RX 9070 XT
 **File**: `src/hyperloom/orchestrator/kernel/hardware_targets.py` (new or extend)
@@ -140,16 +139,8 @@ Adapt Hyperloom to support AMD Radeon RX 9000 series cards (RDNA4, GFX1201) with
 ### C2: Optimization Pass Compatibility
 **File**: `src/hyperloom/orchestrator/kernel/tools/` (GEAK optimization passes)
 
-- [ ] Verify optimization passes work identically on GFX1201:
-  - **Vectorization** (load/store coalescing): Works same on both (128-bit coalescing)
-  - **WMMA fusion** (double-K for double memory throughput): Applies to both
-  - **LDS optimization** (shared memory usage): Both have 128 KB LDS
-  - **Cache tiling** (L1/L2 optimization): Both have L1/L2; strategy transfers
-  - **Register pressure** (occupancy tuning): Both support 256 VGPRs per wavefront
-  - **Wavefront scheduling**: Both benefit from occupancy maximization
-
-- [ ] **Expected result**: All passes are architecture-agnostic and transfer to GFX1201
-- [ ] Document any GFX1201-specific adjustments (e.g., smaller register file per CU may affect initial occupancy estimates)
+- [ ] Validate vectorization, matrix instructions, LDS usage, cache tiling, register pressure, and wave scheduling independently on GFX1201
+- [ ] Accept a pass only after it compiles, passes correctness checks, and shows a measured benefit; record unsupported techniques and tuning differences
 
 ### C3: Conditional Phase Skip for KERNEL_AGENT (Optional Simplification)
 **File**: `src/hyperloom/orchestrator/coordinator.py` or phase control logic
@@ -240,7 +231,7 @@ Adapt Hyperloom to support AMD Radeon RX 9000 series cards (RDNA4, GFX1201) with
   - Baseline: unoptimized Qwen3-8B INT8
   - Apply GEAK optimizations, measure delta
   - Confirm optimization strategies from MI300X transfer to RX 9070 XT
-  - Typical expected gain: 10-20% (in line with MI300X gains)
+  - Record measured baseline and candidate performance; do not assume MI300X gains transfer
 
 ### E2: Empirical Tuning Checklist
 - [ ] **Qwen3-8B INT8** on RX 9070 XT
@@ -342,26 +333,21 @@ Adapt Hyperloom to support AMD Radeon RX 9000 series cards (RDNA4, GFX1201) with
 7. **Examples**: `examples/hyperloom-qwen3-8b-rx9070xt/SKILL.md` (new)
 8. **Documentation**: `docs/`, `README.md`, new `docs/rx9000-guide.md`
 
-### Files Likely NOT Changed:
-- Optimization pass logic (transfer to GFX1201 as-is)
-- WMMA backend code (Triton/HIP already support GFX1201)
-- Multi-backend orchestration (works identically)
-- Critic/validation (architecture-agnostic)
+### Potentially Reusable After Testing
+- Generic optimization orchestration and critic/validation logic
+- Kernel backend and tuning behavior require GFX1201 hardware validation
 
 ---
 
 ## Key Assumptions & Unknowns
 
-### Confirmed:
-✅ WMMA instruction set is unified (GFX942 and GFX1201 both use `v_wmma_f32_16x16x16_*`)  
-✅ Triton and HIP compilers support GFX1201 natively  
-✅ Optimization strategy (maximize memory throughput) applies to both architectures  
-
-### To Verify (Phase B onward):
-⚠️ FlyDSL backend support for GFX1201 (internal AMD tool, status unknown)  
-⚠️ Exact occupancy/register allocation on GFX1201 wavefront sizes (32-bit vs 64-bit)  
-⚠️ Empirical validation that optimization gains transfer from MI300X to RX 9070 XT  
-⚠️ Whether GEAK v3/v4 already has GFX1201 in upstream (check GitHub/ROCm docs)  
+AMD's ROCm 7.2.0 Windows documentation lists the RX 9070 XT/GFX1201, and the
+PyTorch/HIP and Triton paths have been reported working on this card. Hyperloom
+SKU and compiler-target routing is now covered by unit tests. Still unverified
+are native Windows operation of Hyperloom's orchestration, the managed serving
+runner, GEAK compile-and-run on hardware, calibrated roofline limits, and the
+transferability of CDNA optimization recipes. Do not publish predicted gains
+until measured on the RX 9070 XT.
 
 ---
 
@@ -371,7 +357,7 @@ Adapt Hyperloom to support AMD Radeon RX 9000 series cards (RDNA4, GFX1201) with
 - [ ] **Phase B**: Roofline model parameterized; no hardcoded MI300X assumptions
 - [ ] **Phase C**: WMMA kernels compile and run on GFX1201; optimization passes verified
 - [ ] **Phase D**: CLI rejects invalid RX 9070 XT configurations; sensible defaults set
-- [ ] **Phase E**: Empirical validation shows 10-20% optimization gain on RX 9070 XT
+- [ ] **Phase E**: Record empirical RX 9070 XT baseline and candidate results
 - [ ] **Phase F**: E2E test passes; no regressions on MI300X
 - [ ] **Phase G**: RX 9070 XT demo skill works; documentation complete
 
@@ -399,7 +385,9 @@ Adapt Hyperloom to support AMD Radeon RX 9000 series cards (RDNA4, GFX1201) with
 
 ## Notes
 
-This TODO reflects the architectural insight that **CDNA3 and RDNA4 share unified WMMA cores and optimization strategies; the primary differences are scale (throughput, bandwidth) rather than fundamental design**. Adaptation requires **scaling and parameterization**, not architectural redesign.
+Runtime support is not equivalent to Hyperloom support. Keep the RX 9070 XT
+identified as its own SKU, retain GFX1201 as the compile target, and derive
+roofline and optimization guidance from measured RX data rather than CDNA
+assumptions.
 
-**Last updated**: 2025-01-XX  
-**Status**: Initial planning phase
+**Last updated**: 2026-10-04

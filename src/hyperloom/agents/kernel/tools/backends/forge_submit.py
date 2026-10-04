@@ -160,6 +160,7 @@ _PLATFORM_TO_GFX = {
     "mi308x": "gfx942",
     "mi325x": "gfx942",
     "mi355x": "gfx950",
+    "rx9070xt": "gfx1201",
 }
 
 # Triton/python source maps to the triton kernel_backend.

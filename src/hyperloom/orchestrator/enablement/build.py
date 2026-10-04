@@ -24,6 +24,7 @@ def _derive_gpu_arch(gpu_type: str) -> str:
     """Map a gpu_type label to an explicit GFX arch (never silent fallback)."""
     _MAP = {
         "mi355x": "gfx950",
+        "rx9070xt": "gfx1201",
         "mi300x": "gfx942",
         "mi308x": "gfx942",
         "mi300": "gfx942",

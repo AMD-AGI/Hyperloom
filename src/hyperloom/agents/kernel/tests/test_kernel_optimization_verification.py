@@ -1624,6 +1624,7 @@ def _prompt_args(target_platform: str):
         ("mi300x", "AMD Instinct MI300X", "gfx942", "--offload-arch=gfx942"),
         ("mi325x", "AMD Instinct MI325X", "gfx942", "--offload-arch=gfx942"),
         ("mi355x", "AMD Instinct MI355X", "gfx950", "--offload-arch=gfx950"),
+        ("rx9070xt", "Radeon RX 9070 XT", "gfx1201", "--offload-arch=gfx1201"),
     ],
 )
 def test_build_prompt_uses_target_platform_hardware_notes(

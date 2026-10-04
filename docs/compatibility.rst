@@ -1,6 +1,6 @@
 .. meta::
    :description: Compatibility matrix for Hyperloom: supported AMD Instinct GPUs, inference frameworks (SGLang, vLLM, Atom, xDiT), container images, and component dependencies.
-   :keywords: Hyperloom, compatibility, AMD Instinct, MI300X, MI325X, MI355X, SGLang, vLLM, Atom, xDiT, ROCm, container images, GPU support
+  :keywords: Hyperloom, compatibility, AMD Instinct, AMD Radeon RX 9070 XT, GFX1201, Windows 11, ROCm, MI300X, MI325X, MI355X, SGLang, vLLM
 
 ******************************
 Hyperloom compatibility matrix
@@ -58,6 +58,27 @@ The following table lists the minimum requirements for running Hyperloom.
 +---------------------+--------------------------------------------------------+
 | Kernel Languages    | HIP, Triton, FlyDSL                                    |
 +---------------------+--------------------------------------------------------+
+
+RX 9070 XT
+-----------------------
+
+AMD's current Windows ROCm release is 7.2.0. Its Windows system-requirements
+matrix lists Windows 11 and the Radeon RX 9070 XT (``gfx1201``). AMD's Windows
+HIP SDK supports the device; the project has also exercised PyTorch/HIP and
+Triton on it. These are GPU runtime/toolchain capabilities, not a claim that
+Hyperloom's full serving and optimization loop is supported on native Windows.
+
+Hyperloom's installers and managed benchmark lifecycle are Linux-oriented
+(Bash, Linux ROCm paths, Ray and Magpie). Native Windows end-to-end support is
+not yet validated. Foundational RX 9070 XT SKU and GFX1201 routing are in place,
+but an RX-specific managed benchmark runner, calibrated roofline data and a
+real-hardware optimization campaign remain outstanding.
+
+See AMD's `ROCm on Windows system requirements`_ and `ROCm on Windows 7.2.0
+release notes`_.
+
+.. _ROCm on Windows system requirements: https://rocm.docs.amd.com/projects/install-on-windows/en/latest/reference/system-requirements.html
+.. _ROCm on Windows 7.2.0 release notes: https://rocm.docs.amd.com/projects/install-on-windows/en/latest/about/releasenotes.html
 
 Component support matrix
 ========================
