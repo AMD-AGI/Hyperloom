@@ -217,3 +217,92 @@ def test_only_a_boolean_false_kernel_toggle_disables_the_kernel_phase(tmp_path, 
     preflight._pin_resumed_session_args(args)
 
     assert args.no_kernel is False
+
+
+def _session_without_state(tmp_path: Path, manifest: object) -> Path:
+    """A session whose first launch wrote ``manifest.json`` and stopped before the Coordinator wrote ``state.json``."""
+    session_dir = tmp_path / "workspace" / "model" / "session"
+    session_dir.mkdir(parents=True)
+    text = manifest if isinstance(manifest, str) else json.dumps(manifest)
+    (session_dir / "manifest.json").write_text(text, encoding="utf-8")
+    return session_dir
+
+
+def _refuse_any_install(monkeypatch) -> None:
+    from hyperloom.inference_optimizer import framework_deps
+
+    def began_checking(_args):
+        raise AssertionError("preflight started its install steps for a session it cannot resume")
+
+    def installed(*_a, **_kw):
+        raise AssertionError("preflight reached dependency installation for a session it cannot resume")
+
+    monkeypatch.setattr(preflight, "_begin_install_event", began_checking)
+    monkeypatch.setattr(framework_deps, "ensure", installed)
+    monkeypatch.setattr(framework_deps, "manifest_path", installed)
+    monkeypatch.setattr(preflight, "_resolve_framework_build", installed)
+
+
+@pytest.mark.parametrize("environment_framework", [None, "sglang"])
+def test_resume_of_a_session_without_state_is_refused_before_preflight_checks_any_framework(
+    monkeypatch, tmp_path, capsys, environment_framework
+):
+    monkeypatch.delenv("FRAMEWORK", raising=False)
+    if environment_framework is not None:
+        monkeypatch.setenv("FRAMEWORK", environment_framework)
+    _refuse_any_install(monkeypatch)
+    session_dir = _session_without_state(tmp_path, {"session_id": "s", "framework": "vllm"})
+    args = _args(resume_from=str(session_dir))
+
+    with pytest.raises(SystemExit) as excinfo:
+        preflight._preflight(args)
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "cannot resume this session" in err
+    assert f"{session_dir}/state.json missing" in err
+    assert "Start a fresh session with --framework vllm" in err
+    assert "sglang" not in err
+    assert args.framework is None
+
+
+@pytest.mark.parametrize("recorded", ["../x", "/tmp/sidecar/evil", "no-such-framework", 7, ["vllm"]])
+def test_a_stateless_session_with_an_unregistered_manifest_framework_is_refused_without_naming_it_as_a_flag(
+    monkeypatch, tmp_path, capsys, recorded
+):
+    _refuse_any_install(monkeypatch)
+    args = _args(resume_from=str(_session_without_state(tmp_path, {"framework": recorded})))
+
+    with pytest.raises(SystemExit) as excinfo:
+        preflight._preflight(args)
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "state.json missing" in err
+    assert "not a supported framework" in err
+    assert "Start a fresh session with --framework" not in err
+    assert args.framework is None
+
+
+@pytest.mark.parametrize("manifest", ["{not json", {"session_id": "s"}, []])
+def test_a_stateless_session_with_an_unusable_manifest_is_still_refused(monkeypatch, tmp_path, capsys, manifest):
+    _refuse_any_install(monkeypatch)
+    args = _args(resume_from=str(_session_without_state(tmp_path, manifest)))
+
+    with pytest.raises(SystemExit) as excinfo:
+        preflight._preflight(args)
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "state.json missing" in err
+    assert "Start a fresh session instead." in err
+
+
+def test_a_session_dir_without_a_manifest_is_left_to_the_resume_block(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    args = _args(framework="vllm", resume_from=str(session_dir))
+
+    preflight._pin_resumed_session_args(args)
+
+    assert args.framework == "vllm"

@@ -1253,6 +1253,45 @@ def _supported_framework_names() -> tuple[str, ...]:
     return tuple(framework_registry.names())
 
 
+def _refuse_resume_without_state(args: argparse.Namespace) -> None:
+    """Refuse, before any install step, a resume of a session whose first launch never wrote ``state.json``.
+
+    The resume block refuses such a session ("Coordinator never wrote SharedState"), but it runs after preflight, which
+    would otherwise check the default framework and fail on that instead of on the real reason. The framework the
+    session was created with is read from ``manifest.json`` only to name it in the refusal, and only if it is a
+    registered framework name (the manifest lives on shared storage too). A missing session directory or manifest is
+    left to the resume block, which reports those itself.
+    """
+    raw = str(getattr(args, "resume_from", "") or "").strip()
+    if not raw:
+        return
+    session_dir = Path(raw).expanduser()
+    if not (session_dir / "manifest.json").is_file() or (session_dir / "state.json").exists():
+        return
+    try:
+        manifest = json.loads((session_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        manifest = None
+    raw_framework = manifest.get("framework") if isinstance(manifest, dict) else None
+    framework = raw_framework.strip().lower() if isinstance(raw_framework, str) else ""
+    supported = _supported_framework_names()
+    if framework in supported:
+        hint = f"Start a fresh session with --framework {framework} instead."
+    elif raw_framework not in (None, ""):
+        hint = (
+            f"Its manifest.json records --framework {raw_framework!r}, which is not a supported framework "
+            f"({', '.join(supported)}). Start a fresh session instead."
+        )
+    else:
+        hint = "Start a fresh session instead."
+    print(
+        f"ERROR: cannot resume this session -- {session_dir}/state.json missing (manifest exists but Coordinator "
+        f"never wrote SharedState; the first launch stopped before the session had any state to resume). {hint}",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
 def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
     """Apply the resumed session's pinned settings to ``args`` before any preflight check reads them.
 
@@ -1266,6 +1305,7 @@ def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
         return
     state = _resumed_session_state(args)
     if not state:
+        _refuse_resume_without_state(args)
         return
     raw_persisted = state.get("framework")
     persisted = raw_persisted.strip().lower() if isinstance(raw_persisted, str) else ""
