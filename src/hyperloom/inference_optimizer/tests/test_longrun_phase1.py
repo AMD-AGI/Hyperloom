@@ -175,14 +175,15 @@ def test_skip_to_close_without_baseline_is_baseline_failed(phase, started_hours_
     assert evidence["min_remaining_sec_effective"] == 5400.0
 
 
-def test_skip_to_close_without_baseline_sets_failed_outcome():
-    """The terminal the machine mirrors onto state maps to a failed outcome, not completed."""
-    from hyperloom.inference_optimizer.breakdown.stop_reasons import outcome_status
+def test_skip_to_close_without_baseline_is_not_a_success_terminal():
+    """Consumers that read the stop_reason alone must not see a normal closeout."""
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import SUCCESS_STOP_REASONS, outcome_status
 
     st = _framework_state(max_minutes=180, started_hours_ago=1.9, baseline_tput=0.0)
     st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
     _target, reason, _evidence = ps.compute_next_phase(st)
     assert ps.is_valid_stop_reason(reason)
+    assert reason not in SUCCESS_STOP_REASONS
     assert outcome_status(reason, 0.0) == "failed"
 
 
