@@ -73,7 +73,10 @@ class _StallingSdk:
                     raise OSError("CLI exited") from None
             n = 0
             busy_until = time.monotonic() + 5.0
-            while True:  # "retrying": a message well inside the idle budget, forever
+            # "retrying": a message well inside the idle budget, well past every bound a test sets; then the stream
+            # ends, so one that a regression leaves running cannot outlive the test's event loop as well.
+            frames_until = time.monotonic() + 25.0
+            while time.monotonic() < frames_until:
                 n += 1
                 yield _ApiRetry(n)
                 # "busy": back to back for a few seconds, so a cancellation lands as a message does. Before Python
