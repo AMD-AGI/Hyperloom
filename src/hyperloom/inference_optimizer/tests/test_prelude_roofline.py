@@ -264,6 +264,32 @@ async def test_watermark_gate_reopens_exactly_when_the_roofline_it_names_finishe
     assert (state.auto_roofline_pending_task_id != named.task_id) is reopens
 
 
+@pytest.mark.asyncio
+async def test_a_second_watermark_crossing_in_a_cycle_runs_a_fresh_roofline(coord: Coordinator):
+    """Each crossing shares its reason; resolving the second onto the first's finished task left KERNEL working from
+    an analysis of a stack the session had already left behind.
+    """
+    state = coord.shared_state
+    state.baseline_tput = 100.0
+    state.auto_roofline_pending_task_id = ""
+    state.last_roofline_tput = 100.0
+    state.cumulative_gain_validated = 20.0
+
+    assert await coord._maybe_enqueue_watermark_roofline(reason="explore_keep_watermark") is True
+    first = state.auto_roofline_pending_task_id
+    coord.tasks._tasks[first].state = "succeeded"
+    state.last_roofline_tput = 120.0
+    state.cumulative_gain_validated = 150.0
+
+    assert await coord._maybe_enqueue_watermark_roofline(reason="explore_keep_watermark") is True
+    second = state.auto_roofline_pending_task_id
+    assert second != first
+
+    state.auto_roofline_pending_task_id = ""
+    assert await coord._maybe_enqueue_watermark_roofline(reason="explore_keep_watermark") is True
+    assert state.auto_roofline_pending_task_id == second
+
+
 def test_watermark_stops_re_arming_once_retries_are_spent(coord: Coordinator):
     """A roofline leg costs the better part of an hour, so a collector that is broken rather than flaky must not be allowed to spend the session on it."""
     from hyperloom.orchestrator.loop.coordinator_helpers import (

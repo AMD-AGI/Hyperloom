@@ -200,12 +200,31 @@ def test_plan_framework_layer_has_no_bridge_repos() -> None:
     assert plan.repos == (_SGLANG,)
 
 
+def test_plan_for_a_fork_also_searches_its_upstream() -> None:
+    """A fork's PR list rarely carries Day-1 model support, so its upstream is searched after it."""
+    sig = classify_failure("ValueError: Model architecture 'FooForCausalLM' is not supported")
+    plan = build_search_plan(sig, framework_repo_url="https://github.com/ROCm/vllm.git")
+    assert plan.repos == ("https://github.com/ROCm/vllm.git", "https://github.com/vllm-project/vllm.git")
+
+
 def test_plan_keywords_include_arch_tokens_and_model() -> None:
     """Offending arch name is tokenized (CamelCase) into ranking keywords."""
     sig = classify_failure("ValueError: Model architecture 'Glm5ForCausalLM' is not supported")
     plan = build_search_plan(sig, framework_repo_url=_SGLANG, model="zai-org/GLM-5")
     assert "glm" in plan.keywords
     assert "causal" in plan.keywords
+
+
+def test_plan_keywords_lead_with_the_symbol_and_skip_the_model_directory() -> None:
+    """The offending symbol leads the keywords; only the model's name, not its directory, is mined."""
+    sig = classify_failure(
+        "Value error, The checkpoint you are trying to load has model type `glm5_next` "
+        "but Transformers does not recognize this architecture."
+    )
+    plan = build_search_plan(sig, framework_repo_url=_SGLANG, model="/root/models/GLM-5.3-Flash")
+    assert plan.keywords[:2] == ("glm5", "next")
+    assert {"glm", "flash"} <= set(plan.keywords)
+    assert not {"root", "models"} & set(plan.keywords)
 
 
 def test_ranking_prefers_enablement_intent() -> None:

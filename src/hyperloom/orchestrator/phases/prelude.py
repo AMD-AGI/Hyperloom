@@ -2616,9 +2616,12 @@ class PreludePhase(CoordinatorCollaborator):
             streak = 0
         return f"-a{streak}" if streak > 0 else ""
 
-    async def _enqueue_internal_analysis_task(self, *, reason: str, inline_event: str = "") -> "Task | None":
+    async def _enqueue_internal_analysis_task(
+        self, *, reason: str, inline_event: str = "", idem_scope: str = ""
+    ) -> "Task | None":
         """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key
-        internal-analysis-<reason>. Returns None when the stack cannot produce a GPU trace for it to analyze.
+        internal-analysis-<reason><idem_scope>; ``idem_scope`` separates repeated triggers that share a reason.
+        Returns None when the stack cannot produce a GPU trace for it to analyze.
         """
         params = self._internal_analysis_params(reason=reason, inline_event=inline_event)
         if params is None:
@@ -2629,7 +2632,8 @@ class PreludePhase(CoordinatorCollaborator):
             kind=kind,
             params=params,
             idempotency_key=(
-                f"internal-analysis-{reason}{self._cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}"
+                f"internal-analysis-{reason}{idem_scope}"
+                f"{self._cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}"
             ),
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
