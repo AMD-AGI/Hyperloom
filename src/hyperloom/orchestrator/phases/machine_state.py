@@ -1651,6 +1651,9 @@ def _base_workflow_predicate_inputs(
             "cycle_reloop_min_remaining_sec": (
                 _cycle_reloop_min_remaining_sec(state) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else 0.0
             ),
+            "baseline_tput": (
+                (_number(getattr(state, "baseline_tput", 0.0)) or 0.0) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None
+            ),
         },
         "baseline": None,
         "pending_work": None,
@@ -2107,6 +2110,15 @@ def replay_next_phase(inputs: dict[str, Any]) -> tuple[str, str, dict[str, Any]]
             if remaining is not None:
                 evidence["session_remaining_seconds"] = round(remaining, 2)
             reason = "time_exhausted" if remaining is not None and remaining < floor else "global_converged"
+            # Both of those read as a normal closeout. A session that never
+            # measured a baseline optimized nothing, so closing it early is a
+            # baseline failure whatever budget is left. A record frozen before
+            # this fact existed carries no value and replays as it was decided.
+            baseline_tput = _number(global_inputs.get("baseline_tput"))
+            if baseline_tput is not None and baseline_tput <= 0.0:
+                evidence["baseline_tput"] = baseline_tput
+                evidence["unmeasured_close_reason"] = reason
+                reason = "baseline_failed"
             return _transition_result(PHASE_CLOSE, reason, {"terminal": True, **evidence}, inputs)
         stop_reason = str(global_inputs.get("stop_reason") or "")
         if stop_reason:
