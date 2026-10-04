@@ -116,15 +116,16 @@ def test_resume_with_the_matching_framework_checks_it(monkeypatch, tmp_path):
 
 
 def test_resume_with_a_different_framework_is_refused_before_any_check(monkeypatch, tmp_path, capsys):
-    began: list[object] = []
-    monkeypatch.setattr(preflight, "_begin_install_event", lambda args: began.append(args) or {})
+    def began_checking(_args):
+        raise AssertionError("preflight started its checks for a resume it should refuse")
+
+    monkeypatch.setattr(preflight, "_begin_install_event", began_checking)
     args = _args(framework="sglang", resume_from=str(_session(tmp_path, framework="vllm")))
 
     with pytest.raises(SystemExit) as excinfo:
         preflight._preflight(args)
 
     assert excinfo.value.code == 2
-    assert began == []
     err = capsys.readouterr().err
     assert "created with --framework vllm" in err
     assert "passes --framework sglang" in err
