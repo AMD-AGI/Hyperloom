@@ -66,10 +66,14 @@ class _StallingSdk:
             if self.mode == "silent":
                 await asyncio.sleep(3600)
             n = 0
+            busy_until = time.monotonic() + 5.0
             while True:  # "retrying": a message well inside the idle budget, forever
                 n += 1
                 yield _ApiRetry(n)
-                await asyncio.sleep(0.01)
+                # "busy": back to back for a few seconds, so a cancellation lands as a message does. Before Python
+                # 3.12 ``asyncio.wait_for`` swallows such a cancellation, and the turn runs on.
+                busy = self.mode == "busy" and time.monotonic() < busy_until
+                await asyncio.sleep(0 if busy else 0.01)
         finally:
             if self.mode == "wedged_close":
                 # A close that ignores cancellation, as a transport.close() that never returns would.
@@ -105,8 +109,10 @@ def _backend(sdk: _StallingSdk, *, turn_timeout_s: float, call_timeout_s: float 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["retrying", "silent"])
-async def test_a_stalled_turn_ends_at_its_wall_clock_bound_and_closes_the_stream(mode: str, caplog):
+@pytest.mark.parametrize("mode", ["retrying", "busy", "silent"])
+async def test_a_stalled_turn_ends_at_its_wall_clock_bound_and_closes_the_stream(mode: str, caplog, monkeypatch):
+    # A grace well inside the guard: a stop that is not taken shows as an abandoned close, not as a guard timeout.
+    monkeypatch.setattr(claude_mod, "_TURN_CLEANUP_GRACE_SEC", 5.0)
     sdk = _StallingSdk(mode)
     backend = _backend(sdk, turn_timeout_s=0.3)
 
@@ -173,7 +179,7 @@ async def test_the_cli_left_behind_by_a_timed_out_turn_is_killed_and_nothing_els
             await _guarded(backend.run("hi", allow_no_intent=True))
 
         (cli,) = sdk.children
-        assert cli.wait(timeout=10) == -9
+        assert await asyncio.to_thread(cli.wait, 10) == -9
         assert "killed 1 leftover CLI process(es)" in str(raised.value)
         assert bystander.poll() is None
     finally:
@@ -201,7 +207,8 @@ async def test_a_turn_cancelled_by_its_caller_still_kills_its_cli():
             await asyncio.sleep(0.01)
 
         (cli,) = sdk.children
-        assert cli.wait(timeout=10) == -9
+        # Waited off the loop: the kill runs on it, after the SDK call has closed.
+        assert await asyncio.to_thread(cli.wait, 10) == -9
         assert sdk.closed == 1
     finally:
         for child in sdk.children:
@@ -233,8 +240,10 @@ def _heartbeat() -> Intent:
 
 
 @pytest.mark.asyncio
-async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(session_dir):
-    sdk = _StallingSdk("retrying")
+@pytest.mark.parametrize("mode", ["retrying", "busy"])
+async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(mode: str, session_dir, monkeypatch):
+    monkeypatch.setattr(claude_mod, "_TURN_CLEANUP_GRACE_SEC", 5.0)
+    sdk = _StallingSdk(mode)
     orchestration = _backend(sdk, turn_timeout_s=0.3)
     critic = MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="critic")
     coord = Coordinator(session_dir, backends={"orchestration": orchestration, "critic": critic})
@@ -258,7 +267,7 @@ async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(sessio
     assert (sdk.started, sdk.closed) == (2, 2)
     errors = [o for o in observations if o.get("kind") == "backend_error" and o.get("agent") == "orchestration"]
     assert len(errors) == 2
-    assert all("wall-clock bound" in o["error"] for o in errors)
+    assert all("wall-clock bound" in o["error"] and "SDK closed the CLI" in o["error"] for o in errors)
 
 
 @pytest.mark.asyncio
