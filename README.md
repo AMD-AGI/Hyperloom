@@ -1,5 +1,15 @@
 # ROCm Hyperloom-RX9000series
-This fork is adding RX 9000 support, starting with RX 9070 XT (GFX1201). AMD lists the card for Windows 11 in ROCm 7.2.0; Hyperloom's managed serving and optimization workflow remains Linux-oriented and is not yet validated end to end on this GPU. See the [compatibility notes](docs/compatibility.rst#rx-9070-xt).
+This fork adds experimental RX 9070 XT (GFX1201) support. AMD lists the card for Windows 11 in ROCm 7.2.0; Hyperloom's managed serving and optimization workflow remains Linux-oriented and is not yet validated end to end on this GPU. See the [compatibility notes](docs/compatibility.rst#rx-9070-xt).
+
+## RX 9070 XT Update
+
+- Added the `rx9070xt` GPU identity (`gfx1201`, 64 CUs) to CLI, provenance, KernelForge, and targeted-build routing.
+- Normalized local and remote GPU product-name detection, including Windows-style names such as `AMD Radeon RX 9070 XT`; architecture-only `gfx1201` detection does not guess a board SKU.
+- Added RX 9070 XT hardware notes and `--offload-arch=gfx1201` to the GEAK kernel optimization prompt path.
+- Added regression coverage for GPU discovery, SKU disambiguation, KernelForge routing, and build targets.
+- Updated compatibility and adaptation documentation with AMD's Windows ROCm 7.2.0 availability and the current Hyperloom support boundary.
+
+**Still outstanding:** native Windows orchestration, an RX-specific managed benchmark runner, calibrated roofline data, and end-to-end validation on RX 9070 XT hardware.
 
 # ROCm Hyperloom
 

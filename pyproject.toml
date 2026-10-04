@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hyperloom-inference_optimizer"
 version = "1.0.0"
-description = "Inference Optimizer — three-role (Orchestration/Critic/Robustness) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
+description = "Agentic AMD GPU LLM inference optimization runtime with KernelForge kernel optimization. Experimental RX 9070 XT (GFX1201) identity, detection, and target routing are included; end-to-end RX/Windows support remains unvalidated."
 readme = "README.md"
 requires-python = ">=3.10"
 # PEP 639 SPDX expression. The former ``{ text = "MIT" }`` table is deprecated
