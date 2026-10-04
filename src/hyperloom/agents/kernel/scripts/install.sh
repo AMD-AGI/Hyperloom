@@ -908,6 +908,29 @@ finally:
 PY
 }
 
+# Run ``ray start`` so the daemons it leaves behind (gcs_server, raylet,
+# dashboard, ...) are detached from this installer: a new session (so they are
+# not in the caller's process group) and no stdio of the caller's. A shell that
+# tracks a background job by its process group (an agent's sandbox bash) would
+# otherwise see the installer as running for as long as Ray lives, and an
+# inherited stderr pipe keeps that shell's output stream open. ray start's own
+# stderr is relayed to ours after it exits; its stdout is discarded as before.
+_ray_start_detached() {
+  local err_file rc=0
+  err_file="$(mktemp "${TMPDIR:-/tmp}/hl-ray-start.XXXXXX")" || err_file=/dev/null
+  if command -v setsid >/dev/null 2>&1 && setsid -w true </dev/null >/dev/null 2>&1; then
+    setsid -w ray start "$@" </dev/null >/dev/null 2>"$err_file" || rc=$?
+  else
+    warn "setsid -w unavailable; Ray daemons stay in this shell's process group"
+    ray start "$@" </dev/null >/dev/null 2>"$err_file" || rc=$?
+  fi
+  if [ "$err_file" != /dev/null ]; then
+    cat "$err_file" >&2 || true
+    rm -f "$err_file"
+  fi
+  return "$rc"
+}
+
 ensure_ray_started() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
@@ -965,10 +988,10 @@ PY
   # GPU work. Without it those tasks request an undeclared resource and deadlock
   # PENDING forever, since ensure_ray_cluster connects to this existing head
   # instead of starting its own with the resource.
-  if ! ray start --head --disable-usage-stats \
+  if ! _ray_start_detached --head --disable-usage-stats \
        "${ray_port_args[@]}" \
        --num-gpus="$num_gpus" --include-dashboard=false \
-       --resources='{"serving_slot": 1}' >/dev/null; then
+       --resources='{"serving_slot": 1}'; then
     warn "ray start failed; kernel optimization will hang. Check ROCm visibility."
     return 0
   fi
