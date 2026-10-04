@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 import sys
 import types
@@ -222,8 +223,7 @@ def test_ray_start_real_daemon_leaves_the_launcher_group(monkeypatch, tmp_path):
         assert os.getsid(pid) != os.getsid(0)
     finally:
         if pid_file.is_file():
-            try:
+            # The stand-in daemon may already have exited; only a live one needs killing.
+            with contextlib.suppress(ProcessLookupError):
                 os.kill(int(pid_file.read_text(encoding="utf-8").strip()), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
         worker.join(timeout=5)

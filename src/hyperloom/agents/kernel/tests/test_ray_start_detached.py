@@ -12,6 +12,7 @@ inherits ray start's session, group and stdio exactly as a careless daemon would
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
@@ -80,10 +81,9 @@ def _kill_daemon(state: Path) -> None:
     if not path.is_file():
         return
     pid = int(path.read_text(encoding="utf-8").strip())
-    try:
+    # The daemon may already have exited; only a live one needs killing.
+    with contextlib.suppress(ProcessLookupError):
         os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
 
 
 def _extract_shell_function(name: str) -> str:
