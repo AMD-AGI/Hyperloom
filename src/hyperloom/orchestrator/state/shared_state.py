@@ -1974,22 +1974,36 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return first_positive_tput(self.current_best)
 
     def _locate_diffusion_roofline_sidecar(self, kernel_roofline_path: Any) -> Path | None:
-        """Locate the ``diffusion_roofline.json`` sidecar for the latest trace run."""
+        """Locate the ``diffusion_roofline.json`` sidecar for the latest trace run.
+
+        The sidecar is written at ``<session_dir>/kernel-agent/runs/<cycle>/<run_id>/diffusion_roofline.json``
+        (see ``tracelens_analysis.py``'s ``_is_scriptable_framework`` block), never directly under
+        ``session_dir`` itself. ``kernel_roofline_path`` is ``<session_dir>/reports/<filename>``
+        (``kernel_roofline_path_for_run``), so two ``.parent``s recovers ``session_dir`` correctly --
+        but a prior version of this method then checked for the sidecar *directly inside* that
+        directory instead of glob-searching the nested ``kernel-agent/runs/`` tree the same way the
+        ``self._session_dir`` branch below does. That candidate could never exist, so every lookup
+        silently fell through to the ``self._session_dir`` branch; both roots are searched the same
+        way here instead.
+        """
+        # Order matters when the two roots diverge (e.g. a resumed/forked session, or a stale
+        # ``self._session_dir`` on a long-lived state object): the artifact-specific root derived
+        # from this call's own ``kernel_roofline_path`` is checked first, matching the original
+        # precedence, before falling back to the broader ``self._session_dir`` glob.
+        roots: list[Path] = []
         krp = str(kernel_roofline_path or "").strip()
         if krp:
-            cand = Path(krp).parent.parent / "diffusion_roofline.json"
-            if cand.is_file():
-                return cand
+            roots.append(Path(krp).parent.parent)
         session_dir = getattr(self, "_session_dir", None)
-        if session_dir:
+        if session_dir and Path(session_dir) not in roots:
+            roots.append(Path(session_dir))
+        for root in roots:
             try:
-                sidecars = [
-                    p for p in Path(session_dir).glob("kernel-agent/runs/**/diffusion_roofline.json") if p.is_file()
-                ]
-                if sidecars:
-                    return max(sidecars, key=lambda p: p.stat().st_mtime)
+                sidecars = [p for p in root.glob("kernel-agent/runs/**/diffusion_roofline.json") if p.is_file()]
             except OSError:
-                return None
+                continue
+            if sidecars:
+                return max(sidecars, key=lambda p: p.stat().st_mtime)
         return None
 
     def _scriptable_latency_roofline(
