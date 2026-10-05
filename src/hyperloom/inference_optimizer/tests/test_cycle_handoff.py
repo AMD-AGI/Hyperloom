@@ -125,6 +125,25 @@ async def test_a_failed_transition_save_still_enters_the_next_cycle_and_then_rai
 
 
 @pytest.mark.asyncio
+async def test_a_failed_handoff_turn_records_the_error_and_leaves_no_directive(session_dir, monkeypatch):
+    from hyperloom.orchestrator.roles.base import LLMCallFailed
+
+    coord, orchestration = _sweep_coordinator(session_dir, replies=[])
+
+    async def _timed_out(**_kwargs):
+        raise LLMCallFailed("Claude backend timed out: turn exceeded its 1500s wall-clock bound")
+
+    monkeypatch.setattr(orchestration, "run", _timed_out)
+
+    await coord.phase_sweep.pump()
+
+    assert coord.shared_state.orchestration_memory["for_cycle"] == 0
+    assert coord.shared_state.orchestration_memory["next_cycle_directive"] == ""
+    observations = await coord.bus.tail(n=50, topic="observation")
+    assert any((o.payload or {}).get("kind") == "backend_error" for o in observations)
+
+
+@pytest.mark.asyncio
 async def test_no_handoff_is_requested_when_no_further_cycle_is_feasible(session_dir):
     coord, orchestration = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
     coord.shared_state.macro_cycle = ps.DEFAULT_MAX_MACRO_CYCLES - 1

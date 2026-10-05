@@ -10,6 +10,7 @@ import os
 import resource
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from typing import Optional, Tuple
@@ -193,6 +194,13 @@ def _stop_ray_force(log_path: Optional[Path] = None, *, reason: str = "") -> Non
         pass
 
 
+#: ``ray start`` leaves its daemons (gcs_server, raylet, dashboard, ...) running after it exits, and they inherit its
+#: session, process group and stdio. Left in the caller's group they make a shell that tracks background jobs by
+#: process group (an agent's sandbox bash) see the caller as still running long after it returned, and an inherited
+#: pipe keeps that shell's output stream open. A new session plus non-pipe stdio detaches them the way a daemon is.
+_RAY_START_DETACH_KWARGS = {"stdin": subprocess.DEVNULL, "start_new_session": True}
+
+
 def _ray_start_evidence(log_path: Optional[Path], captured: str) -> str:
     """Name the log sink, or carry the output itself when there is no sink."""
     if log_path is not None:
@@ -221,12 +229,15 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as log:
             log.write(f"$ {' '.join(cmd)}\n")
-            proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
+            proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, text=True, **_RAY_START_DETACH_KWARGS)
             log.write(f"\n[ray_start_exit_code] {proc.returncode}\n")
     else:
-        # Without a log sink to name, this output is the only evidence a failure leaves.
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        captured = f"{proc.stdout or ''}{proc.stderr or ''}".strip()
+        # Without a log sink to name, this output is the only evidence a failure leaves. It is captured through an
+        # anonymous file, not a pipe: a daemon that inherits a pipe holds it open and a pipe reader waits on it forever.
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as sink:
+            proc = subprocess.run(cmd, stdout=sink, stderr=subprocess.STDOUT, text=True, **_RAY_START_DETACH_KWARGS)
+            sink.seek(0)
+            captured = sink.read().strip()
     if proc.returncode != 0:
         raise RuntimeError(f"failed to start Ray (rc={proc.returncode}); {_ray_start_evidence(log_path, captured)}")
     if not ray_status_ok():
@@ -257,10 +268,14 @@ def force_restart_local_cluster(
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as log:
             log.write(f"$ {' '.join(start_cmd)}\n")
-            proc = subprocess.run(start_cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
+            proc = subprocess.run(
+                start_cmd, stdout=log, stderr=subprocess.STDOUT, text=True, **_RAY_START_DETACH_KWARGS
+            )
             log.write(f"\n[ray_restart_exit_code] {proc.returncode}\n")
     else:
-        proc = subprocess.run(start_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
+        proc = subprocess.run(
+            start_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True, **_RAY_START_DETACH_KWARGS
+        )
     if proc.returncode != 0:
         raise RuntimeError(f"failed to restart local Ray after version mismatch; see {log_path}")
 

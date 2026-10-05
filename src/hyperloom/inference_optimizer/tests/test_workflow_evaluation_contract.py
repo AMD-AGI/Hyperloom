@@ -32,8 +32,12 @@ from hyperloom.inference_optimizer.breakdown.workflow_contract import (
 )
 from hyperloom.inference_optimizer.session.manifest import write_manifest
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.phases.machine_state import record_phase_transition, workflow_predicate_inputs
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.phases.machine_state import (
+    compute_next_phase,
+    record_phase_transition,
+    workflow_predicate_inputs,
+)
+from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE, SharedState
 
 
 def _writer_fixture(tmp_path, *, denied: bool) -> dict:
@@ -217,6 +221,45 @@ def test_legacy_manifest_keeps_v1_identity_on_export(tmp_path, explicit: bool):
     assert refreshed["metadata"]["workflow"]["workflow_contract_version"] == WORKFLOW_CONTRACT_V1
     assert refreshed["outcome"]["stage_reached_recorded"] == "prelude"
     validate(instance=refreshed, schema=workflow_schema(WORKFLOW_CONTRACT_V1))
+
+
+@pytest.mark.parametrize("legacy", [True, False], ids=["v1", "v2"])
+def test_skip_to_close_without_baseline_exports_under_session_contract(tmp_path, legacy: bool):
+    """A v1 session resumed on this code still validates, and still closes as baseline_failed."""
+    manifest = write_manifest(tmp_path, session_id="skip-to-close-contract")
+    version = WORKFLOW_CONTRACT_V1 if legacy else manifest["workflow_contract_version"]
+    if legacy:
+        manifest = {
+            key: value
+            for key, value in manifest.items()
+            if key not in {"workflow_contract_version", "workflow_contract_digest"}
+        }
+        (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        record_metadata_identity(tmp_path, manifest)
+    state = SharedState(session_id="skip-to-close-contract", phase="ENABLEMENT", baseline_tput=0.0)
+    with session_scope(tmp_path):
+        # Open the segment whose exit evidence carries the frozen inputs.
+        record_phase_transition(state, to_phase="ENABLEMENT", reason="phase_entered")
+        state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
+        target, reason, evidence = compute_next_phase(state, enablement_enabled=True)
+        assert (target, reason) == ("CLOSE", "baseline_failed")
+        assert evidence["baseline_tput"] == 0.0
+        frozen = evidence["predicate_inputs"]["global"]
+        assert ("baseline_tput" in frozen) is not legacy
+        record_phase_transition(state, to_phase=target, reason=reason, evidence=evidence)
+    state.save(tmp_path)
+
+    exported = build(tmp_path)
+    assert exported["metadata"]["workflow"]["workflow_contract_version"] == version
+    exits = [
+        segment["exit_evidence"]
+        for event in exported["timeline"]
+        if event.get("type") == "phase"
+        for segment in event["ext"]["segments"]
+        if segment.get("exit_reason") == "baseline_failed"
+    ]
+    assert [row["predicate_inputs"]["global"] for row in exits] == [frozen]
+    validate(instance=exported, schema=workflow_schema(version))
 
 
 def test_authored_milestones_survive_sbd_export(tmp_path):
