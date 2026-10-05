@@ -132,6 +132,18 @@ def _write_capture(workspace, evidence, *, profiles=2, num_steps=20):
     return report
 
 
+def _write_step_trace(path, num_steps):
+    events = []
+    for index in range(num_steps):
+        events.extend(
+            [
+                {"ph": "X", "cat": "user_annotation", "name": "step[DECODE bs=8]", "ts": index * 10, "dur": 10},
+                {"ph": "X", "cat": "kernel", "name": "fixture_kernel", "ts": index * 10 + 1, "dur": 5},
+            ]
+        )
+    path.write_text(json.dumps({"traceEvents": events}))
+
+
 def test_profile_derivation_keeps_accepted_candidate_and_structured_profiler_options(tmp_path, monkeypatch):
     monkeypatch.setattr(identity, "_validate_managed_receipt", lambda *args: [])
     config, _, state = _accepted(tmp_path)
@@ -325,11 +337,16 @@ async def test_managed_profile_executor_runs_native_materialization_and_diagnost
             {k: v for k, v in launched.items() if k != "evidence_sha256"}
         )
         workspace = Path(cmd[cmd.index("--output-dir") + 1]) / "benchmark_sglang_profile"
-        _write_capture(workspace, launched, num_steps=bench["profiler"]["torch_profiler"]["num_steps"])
+        report = _write_capture(workspace, launched, num_steps=bench["profiler"]["torch_profiler"]["num_steps"])
+        for capture in report["agentx_metrics"]["profile_capture"]["profiles"]:
+            directory = Path(capture["trace_dir"])
+            # A misplaced neighbouring config must not override the verified materialized workload.
+            (directory.parent / "config.yaml").write_text("framework: vllm\n  num_steps: 999\n  CONC: 99\n")
+            for trace in capture["trace_files"]:
+                _write_step_trace(Path(trace), 20)
         return subprocess.CompletedProcess(cmd, returncode, "", "runtime failed" if returncode else "")
 
     monkeypatch.setattr(baseline, "run_with_session_kill", run)
-    monkeypatch.setattr(profile, "_certify_trace_dir", lambda *args: {})
     executor = profile.ProfileExecutor(magpie_python="python3", session_dir=tmp_path)
     executor.shared_state = state
     ctx = SimpleNamespace(
@@ -338,7 +355,7 @@ async def test_managed_profile_executor_runs_native_materialization_and_diagnost
             task_id="native-profile",
             params={
                 "output_dir": str(tmp_path / "run"),
-                "num_steps": 12,
+                "num_steps": 20,
                 "num_profiles": 99,
             },
         ),
@@ -357,3 +374,38 @@ async def test_managed_profile_executor_runs_native_materialization_and_diagnost
         assert result["valid_measurement"] is False
         assert "trace_validate" in result
         assert all("trace_validate" in item for item in result["profile_rounds"])
+        for capture in result["profile_rounds"]:
+            assert Path(capture["trace_dir"]).name == f"profile_{capture['profile_index']:03d}"
+            validation = capture["trace_validate"]
+            assert validation["probe_status"] == "ok"
+            assert validation["workload_params"] == {
+                "source": result["materialized_config"],
+                "framework": "sglang",
+                "num_steps": 20,
+                "conc": 8,
+                "osl": None,
+                "r": 1.0,
+            }
+            assert validation["rank_level"][0]["split_forecast"]["num_steps_param"] == 20
+            assert any(check["status"] == "failed" for check in validation["checks"])
+            assert json.loads(Path(capture["trace_validate_path"]).read_text()) == validation
+
+
+def test_legacy_profile_certification_keeps_adjacent_config_context(tmp_path):
+    directory = tmp_path / "torch_trace"
+    directory.mkdir()
+    _write_step_trace(directory / "rank0.trace.json", 20)
+    (tmp_path / "config.yaml").write_text(
+        "framework: sglang\nprofiler:\n  torch_profiler:\n    num_steps: 12\n"
+        "envs:\n  CONC: 3\n  OSL: 256\n  RANDOM_RANGE_RATIO: 0.5\n"
+    )
+    certificate = profile._certify_trace_dir(directory, "sglang")
+    assert certificate["workload_params"] == {
+        "source": str(tmp_path / "config.yaml"),
+        "framework": "sglang",
+        "num_steps": 12,
+        "conc": 3,
+        "osl": 256.0,
+        "r": 0.5,
+    }
+    assert certificate["rank_level"][0]["split_forecast"]["num_steps_param"] == 12

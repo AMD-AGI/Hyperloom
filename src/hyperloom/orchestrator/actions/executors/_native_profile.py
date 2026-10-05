@@ -34,6 +34,19 @@ def managed_profile_benchmark(benchmark: Mapping[str, Any]) -> bool:
     )
 
 
+def managed_profile_workload_params(
+    benchmark: Mapping[str, Any], *, config_path: Path, capture: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Bind diagnostic certification to its verified workload and capture settings."""
+    envs = benchmark.get("envs") or {}
+    return {
+        "source": str(config_path.resolve()),
+        "num_steps": capture["num_steps"],
+        "conc": benchmark["workload_spec"]["resolved_topology"]["conc"],
+        **{field: envs[name] for field, name in (("osl", "OSL"), ("r", "RANDOM_RANGE_RATIO")) if name in envs},
+    }
+
+
 def materialize_managed_profile(
     config: dict[str, Any],
     output_dir: Path,

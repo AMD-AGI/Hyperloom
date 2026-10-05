@@ -306,6 +306,7 @@ def _build_trace_validate(
         "probe_version": certificate.get("probe_version"),
         "probe_status": probe_status,
         "probe_error": str(probe_error or ""),
+        "workload_params": certificate.get("workload_params") or {},
         "checked_at": now_iso(timespec="seconds"),
         "trace_dir": str(trace_dir),
         "framework": str(framework or ""),
@@ -337,7 +338,9 @@ def _write_trace_certificate(trace_dir: Path, validate: dict[str, Any]) -> str:
     return str(target)
 
 
-def _certify_trace_dir(trace_dir: Path, framework: str) -> dict[str, Any]:
+def _certify_trace_dir(
+    trace_dir: Path, framework: str, *, workload_params: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     """Run the capture-time self-certification probe over a profile trace."""
     import sys
 
@@ -351,15 +354,21 @@ def _certify_trace_dir(trace_dir: Path, framework: str) -> dict[str, Any]:
 
     # The workload parameters shape the split forecast, and reading them from the benchmark config keeps the
     # certificate independent of any analysis having run -- the point of certifying at capture time.
-    params = trace_selfcert.read_workload_params(trace_dir)
-    return trace_selfcert.certify_trace_dir(
+    params = trace_selfcert.read_workload_params(trace_dir) if workload_params is None else workload_params
+    settings = {
+        "num_steps": int(params.get("num_steps", trace_selfcert.DEFAULT_NUM_STEPS)),
+        "conc": int(params["conc"]) if params.get("conc") is not None else None,
+        "osl": float(params["osl"]) if params.get("osl") is not None else None,
+        "r": float(params.get("r", trace_selfcert.DEFAULT_R)),
+    }
+    resolved_framework = framework or str(params.get("framework") or "")
+    certificate = trace_selfcert.certify_trace_dir(
         trace_dir,
-        framework=framework or str(params.get("framework") or ""),
-        num_steps=params.get("num_steps", trace_selfcert.DEFAULT_NUM_STEPS),
-        conc=params.get("conc"),
-        osl=params.get("osl"),
-        r=params.get("r", trace_selfcert.DEFAULT_R),
+        framework=resolved_framework,
+        **settings,
     )
+    certificate["workload_params"] = {"source": params.get("source"), "framework": resolved_framework, **settings}
+    return certificate
 
 
 def _validate_trace_structure(
@@ -1925,7 +1934,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
 
     async def _managed_profile(self, ctx, state: Any) -> dict[str, Any]:
         """Keep Magpie's accepted server and validate each independent trace window."""
-        from ._native_profile import prepare_managed_profile
+        from ._native_profile import managed_profile_workload_params, prepare_managed_profile
 
         params = ctx.task.params
         if params is None:
@@ -1953,7 +1962,15 @@ class ProfileExecutor(BenchmarkRunExecutor):
             certificate: dict[str, Any] = {}
             probe_error = ""
             try:
-                certificate = _certify_trace_dir(directory, framework)
+                certificate = _certify_trace_dir(
+                    directory,
+                    framework,
+                    workload_params=managed_profile_workload_params(
+                        config["benchmark"],
+                        config_path=Path(result["materialized_config"]),
+                        capture=capture,
+                    ),
+                )
             except (OSError, ValueError, TypeError, KeyError, ImportError) as exc:
                 probe_error = f"{type(exc).__name__}: {exc}"
             validation = _build_trace_validate(
