@@ -327,12 +327,12 @@ SENSITIVE_ENV_NAME_MARKERS: tuple[str, ...] = (
     "CUSTOM_HEADERS",
 )
 
-# As a substring TOKEN also hits tuning knobs (``MAX_NUM_BATCHED_TOKENS``, ``SGLANG_USE_AITER_FP8_PER_TOKEN``), so a
-# record of launch knobs treats it as a credential only as the last name segment, the shape the ``NAME=value`` text
-# pattern above uses.
+# As a substring TOKEN also hits tuning knobs (``MAX_NUM_BATCHED_TOKENS``, ``TOKENIZERS_PARALLELISM``), so a record of
+# launch knobs treats it as a credential only as a whole name segment (``HF_TOKEN``, ``HF_TOKEN_2``,
+# ``GITHUB_TOKEN_BACKUP``), and never in ``PER_TOKEN`` (``SGLANG_USE_AITER_FP8_PER_TOKEN``).
 _SUBSTRING_MARKERS_EXCEPT_TOKEN: tuple[str, ...] = tuple(m for m in SENSITIVE_ENV_NAME_MARKERS if m != "TOKEN")
-_TOKEN_NAME_RE = re.compile(r"^(?:[A-Z0-9_]+_)?TOKEN(?:_\d+)?$")
-_PER_TOKEN_NAME_RE = re.compile(r"(?:^|_)PER_TOKEN(?:_\d+)?$")
+_TOKEN_SEGMENT_RE = re.compile(r"(?:^|_)TOKEN(?=_|$)")
+_PER_TOKEN_SEGMENT_RE = re.compile(r"(?:^|_)PER_TOKEN(?=_|$)")
 
 
 def _is_credential_env_name(key: object) -> bool:
@@ -341,7 +341,7 @@ def _is_credential_env_name(key: object) -> bool:
         return True
     if any(marker in upper for marker in _SUBSTRING_MARKERS_EXCEPT_TOKEN):
         return True
-    return bool(_TOKEN_NAME_RE.match(upper)) and not _PER_TOKEN_NAME_RE.search(upper)
+    return bool(_TOKEN_SEGMENT_RE.search(_PER_TOKEN_SEGMENT_RE.sub("", upper)))
 
 
 def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, object]:

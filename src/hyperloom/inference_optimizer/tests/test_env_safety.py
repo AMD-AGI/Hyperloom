@@ -157,14 +157,14 @@ def test_redact_secret_env_values_masks_credentials_and_keeps_knobs():
 
 
 def test_redact_secret_env_values_keeps_token_count_knobs_visible():
-    # TOKEN is a credential only as the last name segment, and never as PER_TOKEN.
+    # TOKEN is a credential only as a whole name segment, and never as PER_TOKEN.
     knobs = {
         "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
         "AITER_PER_TOKEN_2": "1",
         "MAX_NUM_BATCHED_TOKENS": "8192",
         "VLLM_MAX_NUM_BATCHED_TOKENS": "8192",
         "SGLANG_MAX_PREFILL_TOKENS": "16384",
-        "VLLM_TOKEN_BUDGET_RATIO": "0.5",
+        "SGLANG_USE_AITER_PER_TOKEN_GROUP_QUANT": "1",
         "TOKENIZERS_PARALLELISM": "false",
         "TOKENIZER_MODE": "auto",
     }
@@ -178,6 +178,8 @@ def test_redact_secret_env_values_masks_every_langfuse_marker_and_scrubs_kept_va
         "GITHUB_TOKEN": "plaintext",
         "HUGGING_FACE_HUB_TOKEN": "plaintext",
         "SERVICE_TOKEN_2": "plaintext",
+        "HF_TOKEN_BACKUP": "plaintext",
+        "PER_TOKEN_SCALE_TOKEN": "plaintext",
         "TOKEN": "plaintext",
         "TOKENIZER_API_KEY": "plaintext",
         "MY_SERVICE_API_KEY": "plaintext",
