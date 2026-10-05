@@ -16,8 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.perf_metric import agentx_active
-from hyperloom.inference_optimizer.experience_collect import mapping_schema_ref
-from hyperloom.inference_optimizer.experience_kb_service import REQUEST_TIMEOUT_SECONDS
+from hyperloom.inference_optimizer.experience_kb_service import REQUEST_TIMEOUT_SECONDS, mapping_schema_ref
 from hyperloom_kb import ConfigurationError, RemoteClient, RemoteClientError, RemoteConfig
 from hyperloom_kb.collect import MappingError
 

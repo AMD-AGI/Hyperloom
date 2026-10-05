@@ -110,8 +110,8 @@ def _unexpected_collect(*_args: Any, **_kwargs: Any) -> Any:
     raise AssertionError("an unconfigured Experience KB must not be contacted")
 
 
-def _configured_kb(monkeypatch, *, collect: Any) -> SimpleNamespace:
-    target = SimpleNamespace(schema_ref=experience_collect.mapping_schema_ref())
+def _configured_kb(monkeypatch, *, collect: Any, schema_ref: str | None = None) -> SimpleNamespace:
+    target = SimpleNamespace(schema_ref=schema_ref or experience_kb_service.mapping_schema_ref())
     monkeypatch.setattr(experience_collect, "collect", collect)
     monkeypatch.setattr(experience_collect, "experience_kb_from_env", lambda **_kwargs: target)
     monkeypatch.setenv("HYPERLOOM_KB_URL", "http://kb.invalid")
@@ -456,7 +456,7 @@ def test_an_auto_pushed_run_reaches_another_workspace_that_pulls(
 def test_recorded_framework_attempts_satisfy_the_packaged_mapping(session_dir: Path) -> None:
     breakdown = _breakdown(session_dir)
 
-    report = kb_collect.collect(experience_collect.MAPPING, breakdown, dry_run=True).to_dict()
+    report = kb_collect.collect(experience_kb_service.MAPPING, breakdown, dry_run=True).to_dict()
 
     assert report["skipped"] == []
     experiences = {row["unit_id"]: row["experience"] for row in report["collected"]}
@@ -524,7 +524,7 @@ def test_an_auto_benched_specialist_proposal_publishes_its_reasoning_citations_a
     coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
     timeline = [event for event in read_timeline_events(session_dir) if event.get("type") == "framework_agent"]
 
-    report = kb_collect.collect(experience_collect.MAPPING, _document(timeline), dry_run=True).to_dict()
+    report = kb_collect.collect(experience_kb_service.MAPPING, _document(timeline), dry_run=True).to_dict()
 
     assert report["skipped"] == []
     [row] = report["collected"]
@@ -600,7 +600,7 @@ def test_a_specialists_config_only_deliverable_is_published_as_a_config_experien
     coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
     timeline = [event for event in read_timeline_events(session_dir) if event.get("type") == "framework_agent"]
 
-    report = kb_collect.collect(experience_collect.MAPPING, _document(timeline), dry_run=True).to_dict()
+    report = kb_collect.collect(experience_kb_service.MAPPING, _document(timeline), dry_run=True).to_dict()
 
     assert report["skipped"] == []
     [row] = report["collected"]

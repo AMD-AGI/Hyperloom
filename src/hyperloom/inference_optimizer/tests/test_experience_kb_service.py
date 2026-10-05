@@ -340,9 +340,10 @@ def test_workspace_labels_restores_and_exclusions_act_on_the_schema_its_runs_wri
         service.process.terminate()
         service.process.wait(timeout=10)
 
-    assert label["schema_ref"] == labels["schema_ref"] == experience_collect.mapping_schema_ref()
+    assert label["schema_ref"] == labels["schema_ref"] == experience_kb_service.mapping_schema_ref()
     assert (
-        ExperienceDeclaration.from_dict(exported["declaration"]).schema_ref == experience_collect.mapping_schema_ref()
+        ExperienceDeclaration.from_dict(exported["declaration"]).schema_ref
+        == experience_kb_service.mapping_schema_ref()
     )
     assert [entry["label_id"] for entry in labels["labels"]] == [label["label_id"]]
     assert (restored["restored"]["label_id"], restored["saved"]) == (label["label_id"], None)
