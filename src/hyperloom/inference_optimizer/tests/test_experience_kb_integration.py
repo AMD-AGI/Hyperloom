@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.inference_optimizer.experience_collect import mapping_schema_ref
+from hyperloom.inference_optimizer.experience_kb_service import mapping_schema_ref
 from hyperloom.inference_optimizer.experience_kb import (
     CONTENT_INLINE_LIMIT,
     RENDER_BUDGET_CHARS,

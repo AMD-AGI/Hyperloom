@@ -17,7 +17,6 @@ from typing import Any
 
 import pytest
 
-import hyperloom_kb
 from hyperloom_kb import (
     Change,
     Experience,
@@ -190,7 +189,7 @@ def test_a_tool_embeds_every_command_with_its_own_schema_and_its_own_versions(tm
 
 
 def test_the_skill_describes_every_command_by_how_it_is_run() -> None:
-    skill = (Path(hyperloom_kb.__file__).parent / "skills/hyperloom-kb/SKILL.md").read_text(encoding="utf-8")
+    skill = (Path(__file__).resolve().parents[1] / "skills/hyperloom-kb/SKILL.md").read_text(encoding="utf-8")
     commands = argparse.ArgumentParser().add_subparsers(dest="command")
     add_commands(commands)
 

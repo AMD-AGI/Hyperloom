@@ -31,6 +31,7 @@ from hyperloom_kb import (
     is_loopback,
 )
 from hyperloom_kb.cli import add_commands, run_command
+from hyperloom_kb.collect import load_mapping
 from hyperloom_kb.schema import JsonValue
 
 log = logging.getLogger(__name__)
@@ -45,9 +46,18 @@ SERVICE_DIR = "experience-kb"
 # Names the service's data home instead of $USER_DATA_PATH/experience-kb. One home serves one service at a time, so
 # runs on other hosts that share a session root each need their own.
 HOME_ENV = "HYPERLOOM_KB_HOME"
+# The packaged mapping a session's Experiences are collected through; its declaration is the schema this workspace
+# writes, reads, and syncs.
+MAPPING = "hyperloom-sbd-v6"
 AUTO_PUSH_ENV = "HYPERLOOM_KB_AUTO_PUSH"
 _PLACEHOLDER = "<PLEASE_FILL_IN>"
 _PLANNER_MODEL_KEYS = ("LOCAL_KB_PLANNER_MODEL", "CLAUDE_MODEL", "ANTHROPIC_MODEL")
+
+
+def mapping_schema_ref() -> str:
+    """Return the declaration the packaged mapping produces, proving the mapping loads."""
+
+    return load_mapping(MAPPING).declaration.schema_ref
 
 
 def service_home() -> Path:
@@ -151,8 +161,6 @@ def sync_with_global(direction: str) -> dict[str, JsonValue]:
         raise SyncUnavailable(f"{GLOBAL_URL_ENV} is not configured")
     client = _workspace_client(direction)
     if direction == "pull":
-        from hyperloom.inference_optimizer.experience_collect import mapping_schema_ref
-
         return client.pull(mapping_schema_ref())
     # Writes spooled while the service was down belong to this workspace too; deliver them before pushing.
     client.flush_spool()
@@ -200,8 +208,6 @@ def _summary(direction: str, report: dict[str, JsonValue]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from hyperloom.inference_optimizer.experience_collect import mapping_schema_ref
-
     parser = argparse.ArgumentParser(prog="python -m hyperloom.inference_optimizer.experience_kb_service")
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init-env", help="Write the local service URL and a generated token into .env.")
@@ -258,12 +264,14 @@ __all__ = [
     "AUTO_PUSH_ENV",
     "HOME_ENV",
     "LOCAL_PORTS",
+    "MAPPING",
     "SERVICE_DIR",
     "auto_push",
     "ensure_service",
     "init_env",
     "local_url",
     "main",
+    "mapping_schema_ref",
     "service_home",
     "spool_root",
     "check_auto_push",

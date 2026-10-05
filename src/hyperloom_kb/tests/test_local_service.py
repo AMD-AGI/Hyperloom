@@ -20,7 +20,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-import hyperloom_kb
 from hyperloom_kb import (
     PACKAGED_DECLARATION,
     ExperienceDeclaration,
@@ -233,7 +232,7 @@ def test_a_service_started_from_other_code_is_restarted_by_a_launch_and_kept_by_
 ) -> None:
     older_code = tmp_path / "older"
     shutil.copytree(
-        Path(hyperloom_kb.__file__).parent,
+        Path(__file__).resolve().parents[1],
         older_code / "hyperloom_kb",
         ignore=shutil.ignore_patterns("tests", "__pycache__"),
     )
