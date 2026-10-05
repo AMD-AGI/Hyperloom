@@ -1142,6 +1142,42 @@ def test_scriptable_run_timeout_writes_stderr_log(tmp_path, monkeypatch):
     assert "scriptable benchmark timed out" in (workspace / "scriptable_stderr.log").read_text(encoding="utf-8")
 
 
+def test_build_scriptable_env_sets_all_three_profiler_dir_vars(tmp_path):
+    """``profile_dir`` must reach the script under all three names when profiling is on.
+
+    ``VLLM_TORCH_PROFILER_DIR``/``SGLANG_TORCH_PROFILER_DIR`` are the legacy pair xDiT's scripts
+    read (kept for backward compatibility); ``HYPERLOOM_PROFILE_TRACE_DIR`` is the
+    framework/tool-neutral name a "custom" script (not vLLM, SGLang, or necessarily even
+    torch-based) should actually be documented to use.
+    """
+    from hyperloom.orchestrator.actions.executors import bypass_scriptable as bs
+
+    workspace = tmp_path / "ws"
+    profile_dir = str(workspace / "torch_trace")
+    env = bs.build_scriptable_env(
+        {"model": "/models/vjepa2"},
+        "radeon8060s",
+        workspace,
+        profile=True,
+        profile_dir=profile_dir,
+    )
+    assert env["PROFILE"] == "1"
+    assert env["VLLM_TORCH_PROFILER_DIR"] == profile_dir
+    assert env["SGLANG_TORCH_PROFILER_DIR"] == profile_dir
+    assert env["HYPERLOOM_PROFILE_TRACE_DIR"] == profile_dir
+
+
+def test_build_scriptable_env_omits_profiler_dir_vars_when_not_profiling(tmp_path):
+    from hyperloom.orchestrator.actions.executors import bypass_scriptable as bs
+
+    workspace = tmp_path / "ws"
+    env = bs.build_scriptable_env({"model": "/models/vjepa2"}, "radeon8060s", workspace, profile=False)
+    assert "PROFILE" not in env
+    assert "VLLM_TORCH_PROFILER_DIR" not in env
+    assert "SGLANG_TORCH_PROFILER_DIR" not in env
+    assert "HYPERLOOM_PROFILE_TRACE_DIR" not in env
+
+
 def test_scriptable_run_end_to_end(tmp_path, monkeypatch):
     """xdit scriptable run produces a report carrying quality_gate; eval maps it."""
     import yaml
