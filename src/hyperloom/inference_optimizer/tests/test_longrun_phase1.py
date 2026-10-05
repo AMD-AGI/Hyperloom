@@ -44,6 +44,7 @@ def _sweep_state(
         cumulative_gain_validated=validated_gain,
         gain_at_cycle_start=gain_at_cycle_start,
         no_gain_cycle_streak=no_gain_streak,
+        baseline_tput=1000.0,
     )
     # sweep_done trigger: the concurrency ladder is the phase's sweep.
     st.last_conc_sweep = {"status": "succeeded"}
@@ -129,15 +130,87 @@ def test_sweep_skip_to_close_still_escalates_when_conc_sweep_never_settled():
     assert reason == "global_converged"
 
 
-def _framework_state(*, max_minutes: int = 180, started_hours_ago: float = 1.0) -> SharedState:
+def _framework_state(
+    *,
+    max_minutes: int = 180,
+    started_hours_ago: float = 1.0,
+    baseline_tput: float = 1000.0,
+    phase: str = ps.PHASE_FRAMEWORK_AGENT,
+) -> SharedState:
     now = datetime.now(timezone.utc)
     return SharedState(
         session_id="t",
-        phase=ps.PHASE_FRAMEWORK_AGENT,
+        phase=phase,
         start_ts=(now - timedelta(hours=started_hours_ago)).isoformat(),
         max_minutes=max_minutes,
         cumulative_gain_validated=5.0,
+        baseline_tput=baseline_tput,
     )
+
+
+@pytest.mark.parametrize(
+    ("phase", "started_hours_ago", "budget_reason"),
+    [
+        # 3h budget, ~1h54m spent: ~66 min left, under the 5400s reloop floor.
+        (ps.PHASE_ENABLEMENT, 1.9, "time_exhausted"),
+        (ps.PHASE_FRAMEWORK_AGENT, 1.9, "time_exhausted"),
+        # Ample budget left.
+        (ps.PHASE_ENABLEMENT, 0.5, "global_converged"),
+        (ps.PHASE_FRAMEWORK_AGENT, 0.5, "global_converged"),
+    ],
+)
+def test_skip_to_close_without_baseline_is_baseline_failed(phase, started_hours_ago, budget_reason):
+    """An early close that never measured a baseline must not read as a normal closeout."""
+    st = _framework_state(max_minutes=180, started_hours_ago=started_hours_ago, baseline_tput=0.0, phase=phase)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
+    nxt = ps.compute_next_phase(st)
+    assert nxt is not None
+    target, reason, evidence = nxt
+    assert target == ps.PHASE_CLOSE
+    assert reason == "baseline_failed"
+    assert evidence["terminal"] is True
+    assert evidence["baseline_tput"] == 0.0
+    # The budget verdict the close would otherwise have carried stays visible.
+    assert evidence["unmeasured_close_reason"] == budget_reason
+    assert evidence["min_remaining_sec_effective"] == 5400.0
+
+
+def test_skip_to_close_without_baseline_is_not_a_success_terminal():
+    """Consumers that read the stop_reason alone must not see a normal closeout."""
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import SUCCESS_STOP_REASONS, outcome_status
+
+    st = _framework_state(max_minutes=180, started_hours_ago=1.9, baseline_tput=0.0)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
+    _target, reason, _evidence = ps.compute_next_phase(st)
+    assert ps.is_valid_stop_reason(reason)
+    assert reason not in SUCCESS_STOP_REASONS
+    assert outcome_status(reason, 0.0) == "failed"
+
+
+def test_skip_to_close_replay_of_record_without_baseline_fact_is_unchanged():
+    """A decision frozen before the baseline fact existed replays to what it decided."""
+    st = _framework_state(max_minutes=180, started_hours_ago=1.9, baseline_tput=0.0)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
+    inputs = ps.workflow_predicate_inputs(st)
+    assert inputs["global"]["baseline_tput"] == 0.0
+    del inputs["global"]["baseline_tput"]
+    _target, reason, _evidence = ps.replay_next_phase(inputs)
+    assert reason == "time_exhausted"
+
+
+def test_skip_to_close_inputs_validate_against_workflow_schema():
+    """The new baseline fact is declared by the current workflow-evaluation schema."""
+    jsonschema = pytest.importorskip("jsonschema")
+    from hyperloom.inference_optimizer.breakdown.workflow_contract import workflow_schema
+
+    schema = workflow_schema()
+    st = _framework_state(max_minutes=180, started_hours_ago=1.9, baseline_tput=0.0)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
+    global_inputs = ps.workflow_predicate_inputs(st)["global"]
+    validator = jsonschema.Draft202012Validator({"$defs": schema["$defs"], **schema["$defs"]["workflow_global"]})
+    assert list(validator.iter_errors(global_inputs)) == []
+    st.consume_pending_escalate_hint()
+    assert ps.workflow_predicate_inputs(st)["global"]["baseline_tput"] is None
 
 
 def test_framework_skip_to_close_at_budget_end_is_time_exhausted():

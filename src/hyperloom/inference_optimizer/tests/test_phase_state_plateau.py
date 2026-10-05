@@ -427,6 +427,7 @@ def test_compute_next_phase_skip_to_close_routes_to_close():
         optimization_stack=[],
         pending_escalate_hint=ESCALATE_HINT_SKIP_TO_CLOSE,
         stop_reason="",
+        baseline_tput=1000.0,
         plateau_overrides={},
     )
     out = compute_next_phase(state, kernel_enabled=True)

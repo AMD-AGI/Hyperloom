@@ -1357,6 +1357,12 @@
         "cycle_reloop_min_remaining_sec": {
           "type": "number",
           "minimum": 0
+        },
+        "baseline_tput": {
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "additionalProperties": false
