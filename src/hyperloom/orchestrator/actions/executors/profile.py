@@ -33,7 +33,6 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
 )
-from ._xdit_patcher import verify_xdit_profiler_baked
 from .baseline import BaselineExecutor
 
 
@@ -971,10 +970,21 @@ class ProfileExecutor(BaselineExecutor):
         from hyperloom.inference_optimizer import framework_registry
 
         if framework_registry.is_scriptable(framework):
-            # The baked-profiler verifier is xDiT/xfuser-specific (it inspects xfuser's base_model.py).
-            if str(framework or "").strip().lower() == "xdit":
-                # Recorded but still non-fatal: a warning that nothing keeps is a warning nobody reads.
-                patchers["xdit_profiler_baked"] = verify_xdit_profiler_baked()
+            if framework == "xdit":
+                from ._server_patcher import ensure_xdit_patched_for_tracelens
+
+                patched = ensure_xdit_patched_for_tracelens()
+                patchers["xdit_tracelens"] = patched
+                if patched:
+                    extra = "--profile_wait 1 --profile_capture_phase --with_stack"
+                else:
+                    extra = "--profile_wait 1"
+                try:
+                    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+                    cfg.setdefault("benchmark", {}).setdefault("envs", {})["EXTRA_XDIT_ARGS"] = extra
+                    config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+                except OSError as exc:
+                    log.warning("profile_executor: cannot update EXTRA_XDIT_ARGS in %s: %s", config_path, exc)
                 _note_instrumentation()
             return None
         inferencex_path = ""

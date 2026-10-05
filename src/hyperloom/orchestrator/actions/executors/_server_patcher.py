@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Idempotent run-time patcher for vLLM and SGLang server installs."""
+"""Idempotent run-time patcher for vLLM, SGLang, and xDiT installs."""
 
 from __future__ import annotations
 
@@ -44,6 +44,21 @@ _VLLM_PROFILER_SENTINELS: tuple[str, ...] = (
 _VLLM_GRAPH_CAPTURE_MIN_VERSION: tuple[int, ...] = (0, 26)
 _VLLM_GRAPH_CAPTURE_SENTINEL: tuple[str, ...] = ("vllm", "profiler", "graph_capture.py")
 _VLLM_GRAPH_CAPTURE_MARKERS: tuple[str, ...] = ("graph_capture_profiler", "capture_traces")
+
+# xDiT: SHA-based version gating.  ``pip show xfuser`` always reports
+# ``0.4.5`` regardless of the actual commit, so version detection reads
+# ``git rev-parse HEAD`` from the editable install and matches against
+# known image SHAs.
+_XDIT_PATCH_RE = re.compile(r"^config_xdit_v(\d+(?:\.\d+)*)\.patch$")
+_XDIT_PATCHES_LEAF = "xdit_patches"
+_XDIT_DEFAULT_SOURCE_ROOT = Path("/app/xDiT")
+_XDIT_SENTINEL_REL: tuple[str, ...] = ("xfuser", "config", "args.py")
+_XDIT_SENTINEL_MARKERS: tuple[str, ...] = ("profile_capture_phase",)
+# Known image tag → head commit SHA (full 40-char).
+_XDIT_SHA_TO_VERSION: dict[str, str] = {
+    "c30266378c815c2f31f95b9d21d2818276050547": "26.7",
+    "2f74acb12830163d1fe0dd1abb5422f0bff7acf0": "26.8",
+}
 
 # Vendor-shipped manifest filename(s).
 _SUPPORTED_VERSIONS_MANIFEST_NAMES: tuple[str, ...] = (
@@ -321,6 +336,126 @@ def ensure_sglang_patched_for_ck_blockscale(
     if plan is None:
         return False
     return _ensure_patched(plan)
+
+
+def ensure_xdit_patched_for_tracelens(
+    tracelens_root: Path | str | None = None,
+) -> bool:
+    """Apply TraceLens profiling patches to the xDiT installation.
+
+    xDiT is an editable install at ``/app/xDiT`` (no pip version);
+    version detection matches ``git rev-parse HEAD`` against known
+    image SHAs.  Unknown SHAs try the newest available patch via
+    nearest-lower fallback.
+    """
+    plan = _discover_xdit_plan(tracelens_root)
+    if plan is None:
+        return False
+    return _ensure_patched(plan)
+
+
+def _detect_xdit_sha(source_root: Path) -> str | None:
+    """Return the HEAD commit SHA for the xDiT checkout, or ``None``."""
+    git = shutil.which("git")
+    if git is None or not (source_root / ".git").exists():
+        return None
+    try:
+        proc = subprocess.run(
+            [git, "-C", str(source_root), "rev-parse", "HEAD"],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=_GIT_TIMEOUT_SEC,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def _resolve_xdit_patch_file(patches_dir: Path, version: str) -> Path | None:
+    """Pick the TraceLens xDiT patch for ``version`` with nearest-lower fallback."""
+    exact = patches_dir / f"config_xdit_v{version}.patch"
+    if exact.is_file():
+        return exact
+    if not patches_dir.is_dir():
+        return None
+    available: dict[tuple[int, ...], Path] = {}
+    for p in patches_dir.glob("config_xdit_v*.patch"):
+        m = _XDIT_PATCH_RE.match(p.name)
+        if not m:
+            continue
+        vt = _version_tuple(m.group(1))
+        if vt:
+            available[vt] = p
+    if not available:
+        return None
+    running = _version_tuple(version)
+    if running is None:
+        return None
+    not_higher = [vt for vt in available if vt <= running]
+    if not_higher:
+        return available[max(not_higher)]
+    return None
+
+
+def _discover_xdit_plan(arg: Path | str | None) -> _PatchPlan | None:
+    """Build the xDiT patch plan for the installed xDiT version.
+
+    Only attempts patching when the HEAD SHA matches a known image.
+    Unknown SHAs are skipped — no patch is attempted.
+    """
+    source_root = Path(os.environ.get("XDIT_PATH", "").strip() or str(_XDIT_DEFAULT_SOURCE_ROOT))
+    if not source_root.is_dir():
+        log.info("_server_patcher: xDiT source root %s not found; skip patch", source_root)
+        return None
+
+    sha = _detect_xdit_sha(source_root)
+    if sha is None:
+        log.info("_server_patcher: cannot read xDiT HEAD SHA at %s; skip patch", source_root)
+        return None
+
+    version = _XDIT_SHA_TO_VERSION.get(sha)
+    if version is None:
+        log.info(
+            "_server_patcher: xDiT SHA %s not in known image table; skip patch",
+            sha[:12],
+        )
+        return None
+
+    tracelens_root = _resolve_tracelens_root(arg)
+    if tracelens_root is None:
+        log.info("_server_patcher: TRACELENS_ROOT unset/missing — skip xDiT patch")
+        return None
+
+    patches_dir = _patch_tree(tracelens_root, _XDIT_PATCHES_LEAF)
+    patch_file = _resolve_xdit_patch_file(patches_dir, version)
+    if patch_file is None:
+        log.warning(
+            "_server_patcher: no TraceLens patch for xDiT %s "
+            "(searched %s); capture-phase profiling will be unavailable",
+            version,
+            patches_dir,
+        )
+        return None
+
+    sentinel = source_root.joinpath(*_XDIT_SENTINEL_REL)
+    if not sentinel.is_file():
+        log.info(
+            "_server_patcher: xDiT layout unexpected (no %s); skip patch",
+            sentinel,
+        )
+        return None
+
+    return _PatchPlan(
+        framework="xdit",
+        version=version,
+        apply_root=source_root,
+        patches=(patch_file,),
+        sentinel_file=sentinel,
+        sentinel_text=_XDIT_SENTINEL_MARKERS,
+    )
 
 
 # Plan discovery
@@ -1193,4 +1328,5 @@ __all__ = [
     "ensure_vllm_patched_for_tracelens",
     "ensure_sglang_patched_for_tracelens",
     "ensure_sglang_patched_for_ck_blockscale",
+    "ensure_xdit_patched_for_tracelens",
 ]
