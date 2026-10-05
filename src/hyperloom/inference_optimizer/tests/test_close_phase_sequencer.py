@@ -952,7 +952,8 @@ class TestEveryTerminalReachesAWrittenReport:
         "phase,hint,sweep_status,transition_reason",
         [
             ("PRELUDE", "", "", "signal"),
-            ("PRELUDE", "skip_to_close", "", "global_converged"),
+            # No baseline was measured, so an early close is a baseline failure.
+            ("PRELUDE", "skip_to_close", "", "baseline_failed"),
             ("SWEEP", "skip_to_close", "completed", "signal"),
             ("FRAMEWORK_AGENT", "", "", "signal"),
             ("KERNEL_AGENT", "", "", "signal"),
