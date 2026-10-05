@@ -1314,6 +1314,7 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
     return {
         "failure_streak": int(state.baseline_failure_streak or 0),
         "warm_replay_status": warm_status,
+        "initial_analysis_in_flight": bool(str(state.auto_roofline_pending_task_id or "").strip()),
         "measure_round_dropped": bool(state.baseline_measure_round_dropped),
         "tput": _number(state.baseline_tput) or 0.0,
         "session_usable_sec": session_usable_seconds(state),
@@ -1818,6 +1819,7 @@ def replay_next_phase(
             )
         normal = (
             str(baseline.get("warm_replay_status") or "") != "in_flight"
+            and not bool(baseline.get("initial_analysis_in_flight"))
             and not bool(baseline.get("measure_round_dropped"))
             and (_number(baseline.get("tput")) or 0.0) > 0.0
         )
@@ -1828,7 +1830,7 @@ def replay_next_phase(
                 evidence["optimize_skipped"] = True
             return _transition_result(target, "prelude_done", evidence, inputs)
         usable = _number(baseline.get("session_usable_sec"))
-        if usable is not None and usable <= 0.0:
+        if usable is not None and usable <= 0.0 and not bool(baseline.get("initial_analysis_in_flight")):
             return _transition_result(
                 PHASE_CLOSE,
                 "time_exhausted_during_prelude",

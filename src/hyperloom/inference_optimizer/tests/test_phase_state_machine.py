@@ -143,6 +143,22 @@ def test_prelude_blocked_while_warm_replay_in_flight():
     assert out is not None and out[1] == "prelude_done"
 
 
+def test_prelude_blocked_while_initial_analysis_in_flight():
+    """PRELUDE must not leave on baseline throughput while its own roofline is still running."""
+    state = SharedState(
+        phase="PRELUDE",
+        phase_budget_pct={},
+        phase_started_unix=0.0,
+        max_minutes=0,
+        baseline_tput=1234.5,
+        auto_roofline_pending_task_id="009d14af97b0",
+    )
+    assert phase_state.compute_next_phase(state) is None
+    state.auto_roofline_pending_task_id = ""
+    out = phase_state.compute_next_phase(state)
+    assert out is not None and out[1] == "prelude_done"
+
+
 def _prelude_state(
     *,
     max_minutes: int = 180,
@@ -226,6 +242,16 @@ def test_a_landed_baseline_outranks_the_exhausted_clock():
     out = phase_state.compute_next_phase(state, kernel_enabled=True)
     assert out is not None
     assert out[1] == "prelude_done"
+
+
+def test_exhausted_clock_does_not_cancel_an_in_flight_initial_analysis():
+    """A landed baseline with no time left still waits out the roofline it just started."""
+    state = _prelude_state(spent_sec=10_800.0, usable_sec=0.0, baseline_tput=1074.7)
+    state.auto_roofline_pending_task_id = "009d14af97b0"
+    assert phase_state.compute_next_phase(state, kernel_enabled=True) is None
+    state.auto_roofline_pending_task_id = ""
+    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    assert out is not None and out[1] == "prelude_done"
 
 
 def test_prelude_exit_states_whether_one_optimization_round_still_fits():

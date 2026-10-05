@@ -1340,6 +1340,7 @@
       "required": [
         "failure_streak",
         "warm_replay_status",
+        "initial_analysis_in_flight",
         "measure_round_dropped",
         "tput",
         "session_usable_sec",
@@ -1355,6 +1356,9 @@
         },
         "warm_replay_status": {
           "type": "string"
+        },
+        "initial_analysis_in_flight": {
+          "type": "boolean"
         },
         "measure_round_dropped": {
           "type": "boolean"
