@@ -16,8 +16,13 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
+from hyperloom.common.deadline import Deadline
+from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
+from hyperloom.inference_optimizer.breakdown.collectors.v6_close import collect_v6_close
+from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts, phase_event_parts
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import (
@@ -27,43 +32,27 @@ from hyperloom.orchestrator.roles.mock_backend import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases import machine_state
-from hyperloom.orchestrator.state.task_registry import task_dispatch_record
-from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import phase_event_parts
+from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.phases.close import (
     _CLOSE_STEP_WAIT_CEILING_SEC,
     _CLOSE_STEP_WAIT_FLOOR_SEC,
 )
-from hyperloom.orchestrator.state.shared_state import effective_closing_grace_sec
-from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.orchestrator.actions.executors.session_breakdown import session_breakdown_executor
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import task_dispatch_record
+
+from .conftest import make_coordinator
 
 
 @dataclass
-class _BareState:
-    """SharedState stand-in covering every attribute the CLOSE sequencer reads/writes."""
+class _BareState(SharedState):
+    """SharedState in the CLOSE phase that counts saves instead of writing them."""
 
-    closing_report_task_id: str = ""
-    recipe_kb_session_id: str = ""
-    recipe_kb_session_summary: dict[str, Any] = field(default_factory=dict)
-    stop_reason: str = ""
-    close_sequence_done: bool = False
-    recipe_finalize_status: str = ""
-    recipe_finalize_attempts: int = 0
-    recipe_finalize_outcome: dict[str, Any] = field(default_factory=dict)
-    phase_history: list[dict[str, Any]] = field(default_factory=list)
-    max_minutes: int = 0
-    closing_grace_sec: float | None = None
+    phase: str = "CLOSE"
     save_count: int = 0
 
-    def save(self, _session_dir: Path | None) -> None:
+    def save(self, _session_dir: Path | None = None) -> None:
         self.save_count += 1
-
-    def set_stop_reason(self, reason: str) -> None:
-        self.stop_reason = reason
-
-    def closing_reserve_sec(self) -> float:
-        return effective_closing_grace_sec(self.max_minutes, self.closing_grace_sec)
 
 
 @dataclass
@@ -155,6 +144,12 @@ class _StubRecipeKB:
     def update_recipe(self, **kwargs) -> dict:
         return {"status": "auto_accepted"}
 
+    def put_recipe(self, **kwargs) -> dict:
+        return {"status": "written", "canonical_id": kwargs.get("canonical_id", "")}
+
+    def get_authoritative_recipe(self, *, canonical_id: str) -> dict:
+        return {}
+
 
 class _StubSubResult:
     """Minimal sub-agent run result: only ``.state`` is read by the CLOSE sequencer."""
@@ -178,12 +173,11 @@ class _StubSubAgentRunner:
 def coord(tmp_path: Path):
     """Lean Coordinator stub for hook unit tests."""
     c = Coordinator.__new__(Coordinator)
-    c._init_dispatch_state()
     c.session_dir = tmp_path
     c.shared_state = _BareState()
     c.tasks = _StubTaskRegistry()
     c.sub = _StubSubAgentRunner()
-    c.recipe_kb = None
+    c.knowledge_plane = KnowledgePlane(recipe_kb=None)
     c.knowledge_plane = None
     c.role_registry = {}
     return c
@@ -196,7 +190,7 @@ def _close_phase_history_row() -> dict[str, Any]:
 @pytest.mark.asyncio
 async def test_record_close_step_appends_to_evidence_close_steps(coord):
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    await coord._record_close_step("report", status="done", task_id="t-1")
+    await coord.phase_close._record_close_step("report", status="done", task_id="t-1")
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     assert len(rows) == 1
     assert rows[0]["step"] == "report"
@@ -210,7 +204,7 @@ async def test_record_close_step_appends_to_evidence_close_steps(coord):
 @pytest.mark.asyncio
 async def test_record_close_step_optional_detail(coord):
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    await coord._record_close_step(
+    await coord.phase_close._record_close_step(
         "recipe_kb_commit",
         status="failed",
         detail="recipe kb unreachable",
@@ -225,7 +219,7 @@ async def test_record_close_step_creates_missing_evidence_dict(coord):
     coord.shared_state.phase_history = [
         {"to_phase": "CLOSE", "reason": "sweep_done"},
     ]
-    await coord._record_close_step("done", status="done")
+    await coord.phase_close._record_close_step("done", status="done")
     evidence = coord.shared_state.phase_history[-1]["evidence"]
     assert "close_steps" in evidence
 
@@ -239,19 +233,19 @@ async def test_record_close_step_replaces_non_list_close_steps(coord):
             "evidence": {"close_steps": "broken"},
         }
     ]
-    await coord._record_close_step("report", status="done")
+    await coord.phase_close._record_close_step("report", status="done")
     assert isinstance(coord.shared_state.phase_history[-1]["evidence"]["close_steps"], list)
 
 
 @pytest.mark.asyncio
 async def test_record_close_step_no_op_when_history_empty(coord):
     coord.shared_state.phase_history = []
-    await coord._record_close_step("report", status="done")
+    await coord.phase_close._record_close_step("report", status="done")
 
 
 @pytest.mark.asyncio
 async def test_enqueue_internal_report_task_fresh(coord):
-    task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
+    task = await coord.phase_close._enqueue_internal_report_task(reason="close_phase_entry")
     assert task.kind == "report"
     assert task.idempotency_key == "internal-report-close_phase_entry"
     assert task.params["source"] == "coordinator_internal"
@@ -272,7 +266,7 @@ async def test_enqueue_internal_report_task_reuses_existing(coord):
     coord.tasks._by_id["wallclock-report"] = existing
     coord.shared_state.closing_report_task_id = "wallclock-report"
 
-    task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
+    task = await coord.phase_close._enqueue_internal_report_task(reason="close_phase_entry")
     assert task is existing
     assert "internal-report-close_phase_entry" not in coord.tasks._by_key
 
@@ -290,7 +284,7 @@ async def test_enqueue_internal_report_task_replaces_a_cancelled_one(coord):
     coord.tasks._by_id["wallclock-report"] = dead
     coord.shared_state.closing_report_task_id = "wallclock-report"
 
-    task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
+    task = await coord.phase_close._enqueue_internal_report_task(reason="close_phase_entry")
 
     assert task is not dead
     assert task.state == "queued"
@@ -308,7 +302,7 @@ async def test_enqueue_internal_report_task_retries_past_a_dead_idempotent_row(c
         idempotency_key="internal-report-close_phase_entry",
     )
 
-    task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
+    task = await coord.phase_close._enqueue_internal_report_task(reason="close_phase_entry")
 
     assert task.task_id != "dead-idempotent"
     assert task.idempotency_key == "internal-report-close_phase_entry-retry"
@@ -328,7 +322,9 @@ async def test_close_sequencer_still_reports_when_the_first_report_task_was_canc
     )
     coord.shared_state.closing_report_task_id = "wallclock-report"
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
+    )
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     by_step = {r["step"]: r for r in rows}
@@ -347,7 +343,7 @@ async def test_a_terminal_task_is_reported_not_run(coord):
         idempotency_key="internal-report-close_phase_entry",
     )
 
-    state = await coord._run_close_task(done, step="1 (report)")
+    state = await coord.phase_close._run_close_task(done, step="1 (report)")
 
     assert state == "succeeded"
     assert coord.sub.run_calls == []
@@ -406,10 +402,10 @@ def _clock_advancing_by(monkeypatch: pytest.MonkeyPatch, step_sec: float) -> Non
 async def test_a_running_task_is_waited_for_not_re_run(coord, terminal_state: str):
     """``running -> running`` is not a transition the registry has; asking for it kills the step."""
     coord.tasks = _FinishesWhileWaiting(terminal_state)
-    coord._dispatcher_poll_sec = 0.01
+    coord.dispatcher.poll_sec = 0.01
     coord.shared_state.max_minutes = 60
 
-    state = await coord._run_close_task(_running_report_row(coord), step="1 (report)")
+    state = await coord.phase_close._run_close_task(_running_report_row(coord), step="1 (report)")
 
     assert state == terminal_state
     assert coord.sub.run_calls == []
@@ -421,11 +417,11 @@ async def test_a_running_task_that_never_lands_is_reported_not_waited_on_forever
     monkeypatch: pytest.MonkeyPatch,
 ):
     """The wait is patient, not unbounded: a step that never lands is recorded, not awaited forever."""
-    coord._dispatcher_poll_sec = 0.0
+    coord.dispatcher.poll_sec = 0.0
     coord.shared_state.max_minutes = 60
     _clock_advancing_by(monkeypatch, step_sec=30.0)
 
-    state = await coord._run_close_task(_running_report_row(coord), step="1 (report)")
+    state = await coord.phase_close._run_close_task(_running_report_row(coord), step="1 (report)")
 
     assert state == "running"
     assert coord.sub.run_calls == []
@@ -444,7 +440,7 @@ async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
     coord.locks = ResourceLockManager(SqliteLeaseBackend(db))
     coord.sub = SubAgentRunner(coord.locks, coord.tasks)
     coord.shared_state.max_minutes = 60
-    coord._close_step_wait_sec = lambda _task: 0.05  # type: ignore[method-assign]
+    coord.phase_close._close_step_wait_sec = lambda _task: 0.05  # type: ignore[method-assign]
     finish = asyncio.Event()
     calls = []
 
@@ -457,26 +453,26 @@ async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
     queued = await coord.tasks.create(kind="report", params={}, idempotency_key="internal-report-close_phase_entry")
     try:
         started = time.monotonic()
-        state = await coord._run_close_task(queued, step="1 (report)")
+        state = await coord.phase_close._run_close_task(queued, step="1 (report)")
         elapsed = time.monotonic() - started
 
         assert state == "running"
         assert elapsed < 2.0
         assert calls == [queued.task_id]
         assert (await coord.tasks.get(queued.task_id)).state == "running"
-        handle = coord._inflight_actions[queued.task_id]
+        handle = coord.dispatcher._inflight_actions[queued.task_id]
         assert handle.scope.cancelled
         assert handle.scope.reason == "caller_cancelled"
-        assert coord._executions
-        assert all(not execution.done() for execution in coord._executions)
+        assert coord.dispatcher._executions
+        assert all(not execution.done() for execution in coord.dispatcher._executions)
     finally:
-        executions = tuple(coord._executions)
+        executions = tuple(coord.dispatcher._executions)
         finish.set()
         await asyncio.gather(*executions)
     try:
         assert (await coord.tasks.get(queued.task_id)).state == "succeeded"
-        assert not coord._inflight_actions
-        assert not coord._executions
+        assert not coord.dispatcher._inflight_actions
+        assert not coord.dispatcher._executions
     finally:
         db.close()
 
@@ -488,21 +484,21 @@ async def test_the_wait_for_a_running_report_outlives_a_short_session_reserve(
 ):
     """A ten-minute session reserves twelve seconds for CLOSE; no report is written in twelve seconds."""
     coord.tasks = _FinishesWhileWaiting("succeeded", lands_on=5)
-    coord._dispatcher_poll_sec = 0.0
+    coord.dispatcher.poll_sec = 0.0
     coord.shared_state.max_minutes = 10
     assert coord.shared_state.closing_reserve_sec() == pytest.approx(12.0)
     # Five looks at five simulated seconds apiece: past the reserve, inside the two minutes the catalogue prices a
     # report at.
     _clock_advancing_by(monkeypatch, step_sec=5.0)
 
-    state = await coord._run_close_task(_running_report_row(coord), step="1 (report)")
+    state = await coord.phase_close._run_close_task(_running_report_row(coord), step="1 (report)")
 
     assert state == "succeeded"
     assert coord.sub.run_calls == []
 
 
 def test_the_wait_is_the_step_s_own_expected_runtime(coord):
-    bound = coord._close_step_wait_sec(_running_report_row(coord))
+    bound = coord.phase_close._close_step_wait_sec(_running_report_row(coord))
 
     assert bound == pytest.approx(ACTION_CATALOGUE["report"].typical_runtime_min * 60.0)
 
@@ -511,20 +507,20 @@ def test_a_step_the_catalogue_prices_at_almost_nothing_still_gets_the_floor(coor
     """``session_breakdown`` is priced at 12s; giving up on it after 12s is giving up on it."""
     row = _running_report_row(coord, kind="session_breakdown")
 
-    assert coord._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
+    assert coord.phase_close._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
 
 
 def test_an_uncatalogued_step_gets_the_floor_too(coord):
     row = _running_report_row(coord, kind="not_an_action")
 
-    assert coord._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
+    assert coord.phase_close._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
 
 
 def test_an_extravagantly_priced_step_is_capped(coord):
     """A wedged step must not hold the process open for as long as its action might legitimately run."""
     coord.action_registry = {"report": SimpleNamespace(typical_runtime_min=1000.0)}
 
-    bound = coord._close_step_wait_sec(_running_report_row(coord))
+    bound = coord.phase_close._close_step_wait_sec(_running_report_row(coord))
 
     assert bound == pytest.approx(_CLOSE_STEP_WAIT_CEILING_SEC)
 
@@ -533,13 +529,15 @@ def test_an_extravagantly_priced_step_is_capped(coord):
 async def test_the_sequencer_records_the_state_a_running_report_ended_in(coord):
     """End to end: the waited-for report is reported like any other outcome."""
     coord.tasks = _FinishesWhileWaiting("succeeded")
-    coord._dispatcher_poll_sec = 0.01
+    coord.dispatcher.poll_sec = 0.01
     coord.shared_state.max_minutes = 60
     coord.shared_state.phase_history = [_close_phase_history_row()]
     _running_report_row(coord)
     coord.shared_state.closing_report_task_id = "wallclock-report"
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
+    )
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     report = next(r for r in rows if r["step"] == "report")
@@ -549,7 +547,7 @@ async def test_the_sequencer_records_the_state_a_running_report_ended_in(coord):
 
 @pytest.mark.asyncio
 async def test_enqueue_internal_session_breakdown_task(coord):
-    task = await coord._enqueue_internal_session_breakdown_task(
+    task = await coord.phase_close._enqueue_internal_session_breakdown_task(
         reason="close_phase_entry",
     )
     assert task.kind == "session_breakdown"
@@ -569,7 +567,9 @@ async def test_a_resumed_leg_writes_its_own_report_and_breakdown(coord, tmp_path
         coord.tasks._by_id[row.task_id] = row
     coord.shared_state.resumed_ts = "2026-09-25T09:46:24+00:00"
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
+    )
 
     ran = [(t.kind, t.idempotency_key) for t in coord.sub.run_calls if t.kind in {"report", "session_breakdown"}]
     assert ran == [
@@ -589,17 +589,23 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
         str(tmp_path / "session-packages"),
     )
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.recipe_kb = _StubRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     coord.shared_state.recipe_kb_session_id = "sid-test"
     coord.shared_state.model_name = "model"
     coord.shared_state.gpu_type = "mi300x"
+    # stop_reason is normally set by the phase machine before CLOSE is entered.
+    coord.shared_state.stop_reason = "sweep_done"
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
+    )
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     steps = [r["step"] for r in rows]
     assert steps == [
         "sequencer_started",
+        "stack_revalidation",
+        "post_opt_roofline",
         "fact_finalize",
         "report",
         "session_breakdown",
@@ -609,15 +615,18 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
         "done",
     ]
     by_step = {r["step"]: r for r in rows}
+    assert by_step["stack_revalidation"]["status"] == "done"
+    # No kernel patch in optimization_stack → post-opt roofline is skipped in a param-search session.
+    assert by_step["post_opt_roofline"]["status"] == "skipped"
     assert by_step["report"]["status"] == "done"
     assert by_step["session_breakdown"]["status"] == "done"
-    assert by_step["langfuse_flush"]["status"] == "done"
     # fact_finalize now runs first and writes optimization_journal.json, so the artifact package has a curated file to
     # include.
     assert by_step["artifact_package"]["status"] == "done"
     assert by_step["fact_finalize"]["status"] == "done"
     assert "status=written" in by_step["fact_finalize"]["detail"]
     assert "backend=local" in by_step["fact_finalize"]["detail"]
+    assert by_step["langfuse_flush"]["status"] == "done"
     assert by_step["ndjson_drain"]["status"] == "skipped"
     assert by_step["done"]["status"] == "done"
     assert coord.shared_state.close_sequence_done is True
@@ -641,12 +650,16 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
     """
     monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.recipe_kb = _StubRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     coord.shared_state.recipe_kb_session_id = "sid-test"
     coord.shared_state.model_name = "model"
     coord.shared_state.gpu_type = "mi300x"
+    # stop_reason is normally set by the phase machine before CLOSE is entered.
+    coord.shared_state.stop_reason = "sweep_done"
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
+    )
 
     recorded = assemble_parts(tmp_path, warnings=[])["close"]
     assert recorded["status"] == "succeeded"
@@ -654,6 +667,8 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
     assert recorded["stop_reason"] == "sweep_done"
     assert [row["step"] for row in recorded["steps"]] == [
         "sequencer_started",
+        "stack_revalidation",
+        "post_opt_roofline",
         "fact_finalize",
         "report",
         "session_breakdown",
@@ -665,6 +680,9 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
     # Named by the artifact_package step from the path it was handed, not
     # parsed back out of that step's free-text detail.
     assert recorded["artifacts"]["artifact_package_path"].endswith(".zip")
+    warnings: list[str] = []
+    collect_v6_close(warnings, recorded=recorded)
+    assert warnings == []
 
 
 @pytest.mark.asyncio
@@ -681,12 +699,14 @@ async def test_close_sequencer_records_the_recipe_publication_under_close(
     """
     monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.recipe_kb = _StubRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     coord.shared_state.recipe_kb_session_id = "sid-test"
     coord.shared_state.model_name = "model"
     coord.shared_state.gpu_type = "mi300x"
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
+    )
 
     write_back = assemble_parts(tmp_path, warnings=[])["close"]["kb_write_back"]
     assert write_back["status"] == "written"
@@ -710,7 +730,7 @@ async def test_close_sequencer_records_degraded_when_a_step_fails(
     """``degraded`` now means a step failed, which is what it always read as."""
     monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.recipe_kb = _StubRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     coord.shared_state.recipe_kb_session_id = "sid-test"
 
     class _FailingRunner(_StubSubAgentRunner):
@@ -720,7 +740,9 @@ async def test_close_sequencer_records_degraded_when_a_step_fails(
 
     coord.sub = _FailingRunner()
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
+    )
 
     recorded = assemble_parts(tmp_path, warnings=[])["close"]
     assert recorded["status"] == "degraded"
@@ -738,7 +760,7 @@ async def test_close_sequencer_surfaces_remote_finalize_failure(
 ):
     coord.shared_state.phase_history = [_close_phase_history_row()]
     monkeypatch.setattr(
-        coord,
+        coord.writeback,
         "finalize_recipe_and_journal",
         lambda *, source: {
             "status": "error",
@@ -747,80 +769,14 @@ async def test_close_sequencer_surfaces_remote_finalize_failure(
         },
     )
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
+    )
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     fact = next(row for row in rows if row["step"] == "fact_finalize")
     assert fact["status"] == "failed"
     assert fact["detail"] == ("status=error reason=KBStoreError backend=kb-store")
-
-
-@pytest.mark.asyncio
-async def test_close_sequencer_falls_back_to_time_exhausted(coord):
-    """Falls back to ``stop_reason='time_exhausted'`` when CLOSE had no usable phase-exit reason."""
-    coord.shared_state.phase_history = [
-        {"to_phase": "CLOSE", "reason": "", "evidence": {}},
-    ]
-    assert coord.shared_state.stop_reason == ""
-
-    await coord._on_enter_close(from_phase="SWEEP")
-
-    assert coord.shared_state.stop_reason == "time_exhausted"
-
-
-@pytest.mark.asyncio
-async def test_close_sequencer_derives_sweep_done_from_phase_history(coord):
-    """Regression: sequencer derives the phase_history reason rather than blanket-stamping time_exhausted."""
-    coord.shared_state.phase_history = [
-        {"to_phase": "CLOSE", "reason": "sweep_done", "evidence": {}},
-    ]
-    assert coord.shared_state.stop_reason == ""
-
-    await coord._on_enter_close(from_phase="SWEEP")
-
-    assert coord.shared_state.stop_reason == "sweep_done"
-
-
-@pytest.mark.asyncio
-async def test_close_sequencer_preserves_failed_conc_sweep_reason(coord):
-    """Failed conc_sweep closeout should stay distinguishable in final stop_reason."""
-    coord.shared_state.phase_history = [
-        {"to_phase": "CLOSE", "reason": "sweep_failed", "evidence": {"sweep_status": "failed"}},
-    ]
-    assert coord.shared_state.stop_reason == ""
-
-    await coord._on_enter_close(from_phase="SWEEP")
-
-    assert coord.shared_state.stop_reason == "sweep_failed"
-
-
-@pytest.mark.asyncio
-async def test_close_sequencer_does_not_mark_budgeted_sweep_without_pairs_done(coord):
-    """A sweep that spent its budget without a comparable pair did not validate the sweep objective."""
-    coord.shared_state.last_conc_sweep = {
-        "status": "skipped",
-        "was_skipped": True,
-        "budget_exhausted": True,
-        "skip_reason": "budget_exhausted_no_successful_pairs",
-        "summary": {"successful_pairs": 0},
-    }
-    coord.shared_state.phase_history = [
-        {
-            "to_phase": "CLOSE",
-            "reason": "sweep_done",
-            "evidence": {
-                "sweep_status": "skipped",
-                "sweep_was_skipped": True,
-                "sweep_skip_budget_exhausted": True,
-                "sweep_skip_reason": "budget_exhausted_no_successful_pairs",
-            },
-        },
-    ]
-    assert coord.shared_state.stop_reason == ""
-
-    await coord._on_enter_close(from_phase="SWEEP")
-
-    assert coord.shared_state.stop_reason == "sweep_failed"
 
 
 @pytest.mark.asyncio
@@ -831,7 +787,54 @@ async def test_close_sequencer_does_not_overwrite_caller_set_stop_reason(
     coord.shared_state.phase_history = [_close_phase_history_row()]
     coord.shared_state.stop_reason = "signal"
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
+    )
+
+    assert coord.shared_state.stop_reason == "signal"
+
+
+async def _advance_into_close(coord, monkeypatch, reason: str) -> None:
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
+        return None
+
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    monkeypatch.setattr(
+        machine_state,
+        "compute_next_phase",
+        lambda *_a, **_k: (machine_state.PHASE_CLOSE, reason, {"terminal": True}),
+    )
+    coord.shared_state.phase = machine_state.PHASE_SWEEP
+    await coord.phase_machine.advance_phase_if_needed()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["sweep_budget_exhausted", "sweep_budget_cap"])
+async def test_a_sweep_budget_exit_closes_the_run_as_time_exhausted(tmp_path: Path, monkeypatch, reason: str):
+    coord = make_coordinator(tmp_path)
+
+    await _advance_into_close(coord, monkeypatch, reason)
+
+    assert coord.shared_state.phase == machine_state.PHASE_CLOSE
+    assert coord.shared_state.stop_reason == "time_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_a_close_reason_outside_the_stop_vocabulary_is_refused(tmp_path: Path, monkeypatch):
+    coord = make_coordinator(tmp_path)
+
+    with pytest.raises(ValueError, match="not_a_real_vocab_reason"):
+        await _advance_into_close(coord, monkeypatch, "not_a_real_vocab_reason")
+
+    assert coord.shared_state.phase == machine_state.PHASE_SWEEP
+
+
+@pytest.mark.asyncio
+async def test_entering_close_keeps_the_stop_reason_already_set(tmp_path: Path, monkeypatch):
+    coord = make_coordinator(tmp_path)
+    coord.shared_state.set_stop_reason("signal")
+
+    await _advance_into_close(coord, monkeypatch, "sweep_done")
 
     assert coord.shared_state.stop_reason == "signal"
 
@@ -840,7 +843,9 @@ async def test_close_sequencer_does_not_overwrite_caller_set_stop_reason(
 async def test_close_sequencer_report_before_session_breakdown(coord):
     """Report task MUST be enqueued before session_breakdown."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
+    )
     insertion = coord.tasks.insertion_order
     report_idx = insertion.index("internal-report-close_phase_entry")
     bd_idx = insertion.index("internal-session_breakdown-close_phase_entry")
@@ -851,7 +856,9 @@ async def test_close_sequencer_report_before_session_breakdown(coord):
 async def test_close_sequencer_skips_recipe_kb_steps_when_no_recipe_kb(coord):
     """``--degraded-kb`` runs (recipe_kb=None): NDJSON drain recorded 'skipped', not silent."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
+    )
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     drain_row = next(r for r in rows if r["step"] == "ndjson_drain")
     assert drain_row["status"] == "skipped"
@@ -872,14 +879,13 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=None,
         knowledge_plane=None,
     )
     # Seed state at SWEEP boundary.
     coord.shared_state.phase = "SWEEP"
     coord.shared_state.phase_history = [
         {"to_phase": "EXPLORE", "evidence": {}, "reason": "prelude_done"},
-        {"to_phase": "SWEEP", "evidence": {}, "reason": "plateau_kernel"},
+        {"to_phase": "SWEEP", "evidence": {}, "reason": "kernel_no_more_leverage"},
     ]
     machine_state.record_phase_transition(
         coord.shared_state,
@@ -887,7 +893,7 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
         reason="sweep_done",
         evidence={"trigger": "test_e2e"},
     )
-    await coord._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
+    await coord.phase_machine._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
 
     rows_report = await coord.tasks.db.fetchall(
         "SELECT * FROM tasks WHERE idempotency_key=?",
@@ -925,7 +931,6 @@ class TestEveryTerminalReachesAWrittenReport:
             session_dir=session_dir,
             backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
             role_registry=default_role_registry(),
-            recipe_kb=None,
             knowledge_plane=None,
         )
 
@@ -936,7 +941,7 @@ class TestEveryTerminalReachesAWrittenReport:
         async def _cannot_advance() -> None:
             raise RuntimeError("the phase machine has no next phase")
 
-        monkeypatch.setattr(coord, "_advance_phase_if_needed", _cannot_advance)
+        monkeypatch.setattr(coord.phase_machine, "advance_phase_if_needed", _cannot_advance)
         try:
             reason = await coord.run(max_ticks=1, max_minutes=60, closing_grace_sec=0.0)
         finally:
@@ -952,7 +957,8 @@ class TestEveryTerminalReachesAWrittenReport:
         "phase,hint,sweep_status,transition_reason",
         [
             ("PRELUDE", "", "", "signal"),
-            ("PRELUDE", "skip_to_close", "", "global_converged"),
+            # No baseline was measured, so an early close is a baseline failure.
+            ("PRELUDE", "skip_to_close", "", "baseline_failed"),
             ("SWEEP", "skip_to_close", "completed", "signal"),
             ("FRAMEWORK_AGENT", "", "", "signal"),
             ("KERNEL_AGENT", "", "", "signal"),
@@ -970,12 +976,14 @@ class TestEveryTerminalReachesAWrittenReport:
         if phase == "FRAMEWORK_AGENT":
             coord.phase_framework._open_framework_timeline()
         elif phase == "KERNEL_AGENT":
-            coord._open_kernel_timeline(route="forge", route_reason="kernel_optimizer=forge", from_phase="PRELUDE")
+            coord.phase_kernel._open_kernel_timeline(
+                route="forge", route_reason="kernel_optimizer=forge", from_phase="PRELUDE"
+            )
         state.pending_escalate_hint = hint
         state.last_conc_sweep = {"status": sweep_status}
         state.set_stop_reason("signal")
         try:
-            assert await coord.ensure_close_sequence(reason="signal") is True
+            assert await coord.phase_close.ensure_close_sequence(reason="signal") is True
             assert state.stop_reason == "signal"
             transition = state.phase_history[-1]
             assert (transition["from_phase"], transition["to_phase"], transition["reason"]) == (
@@ -1010,7 +1018,7 @@ class TestEveryTerminalReachesAWrittenReport:
                 assert task_dispatch_record(task)["phase"] == "CLOSE"
                 assert actions[task.task_id]["action"] == step
             history_count = len(state.phase_history)
-            assert await coord.ensure_close_sequence(reason="signal") is False
+            assert await coord.phase_close.ensure_close_sequence(reason="signal") is False
             assert len(state.phase_history) == history_count
         finally:
             await coord.stop()
@@ -1021,13 +1029,13 @@ class TestEveryTerminalReachesAWrittenReport:
         state = coord.shared_state
         machine_state.record_phase_transition(state, to_phase="ENABLEMENT", reason="phase_entered")
         try:
-            holder = await coord._open_authoring_round(params={}, lanes=[], lease_ttl_sec=300)
+            holder = await coord.enablement_lane._open_authoring_round(params={}, lanes=[], lease_ttl_sec=300)
             assert holder
             before = await coord.rounds.held()
             assert before is not None
-            assert await coord._round_has_live_work(holder)
+            assert await coord.enablement_lane._round_has_live_work(holder)
 
-            await coord._enter_closing_phase(grace_sec=30)
+            await coord.phase_close.enter_closing_phase(grace_sec=30)
 
             assert state.phase == "CLOSE"
             assert state.phase_history[-1]["evidence"]["predicate_inputs"]["enablement_in_flight"] is True
@@ -1043,19 +1051,21 @@ class TestEveryTerminalReachesAWrittenReport:
         state = coord.shared_state
         state.max_minutes = 60
         roofline_contexts = []
-        original_roofline = coord._maybe_run_close_post_opt_roofline
+        original_roofline = coord.phase_close._maybe_run_close_post_opt_roofline
 
         async def _roofline():
             roofline_contexts.append(state.closing_phase)
             return await original_roofline()
 
-        monkeypatch.setattr(coord, "_session_integrated_kernel_patch", lambda: True)
-        monkeypatch.setattr(coord, "_maybe_run_close_post_opt_roofline", _roofline)
+        monkeypatch.setattr(coord.phase_close, "_session_integrated_kernel_patch", lambda: True)
+        monkeypatch.setattr(coord.phase_close, "_maybe_run_close_post_opt_roofline", _roofline)
         try:
-            deadline = await coord._enter_closing_phase(grace_sec=30)
+            deadline = await coord.phase_close.enter_closing_phase(grace_sec=30)
             assert deadline.remaining() > 0
             assert state.phase == "CLOSE"
             assert state.close_sequence_done is False
+            # The breakdown written during the sequence derives this from state.json, so it must land on entry.
+            assert state.stop_reason == "time_exhausted"
             transition = state.phase_history[-1]
             assert transition["reason"] == "time_exhausted"
             assert machine_state.replay_next_phase(transition["evidence"]["predicate_inputs"])[:2] == (
@@ -1066,7 +1076,7 @@ class TestEveryTerminalReachesAWrittenReport:
             assert task_dispatch_record(report)["phase"] == "CLOSE"
             history_count = len(state.phase_history)
             coord._closing_deadline = deadline
-            await coord._await_within_session_bound(coord._advance_phase_if_needed, stage="advance_phase")
+            await coord.await_within_session_bound(coord.phase_machine.advance_phase_if_needed, stage="advance_phase")
             assert state.close_sequence_done is True
             assert roofline_contexts == [True]
             receipts = state.phase_history[-1]["evidence"]["close_steps"]
@@ -1080,16 +1090,18 @@ class TestEveryTerminalReachesAWrittenReport:
         coord = self._coordinator(tmp_path / "session")
         cancelled = asyncio.Event()
 
-        async def _slow_close(*, from_phase):
+        async def _slow_close(_transition):
             try:
                 await asyncio.Event().wait()
             finally:
                 cancelled.set()
 
-        monkeypatch.setattr(coord, "_on_enter_close", _slow_close)
+        monkeypatch.setattr(coord.phase_close, "on_enter_close", _slow_close)
         try:
-            coord._closing_deadline = await coord._enter_closing_phase(grace_sec=0.1)
-            await coord._await_within_session_bound(coord._advance_phase_if_needed, stage="advance_phase")
+            await coord.phase_close.enter_closing_phase(grace_sec=0.5)
+            # Measured from here, so the entry's own writes do not spend the window under test.
+            coord._closing_deadline = Deadline.after(0.5)
+            await coord.await_within_session_bound(coord.phase_machine.advance_phase_if_needed, stage="advance_phase")
             assert cancelled.is_set()
             assert coord.shared_state.close_sequence_done is False
         finally:
@@ -1118,10 +1130,10 @@ class TestEveryTerminalReachesAWrittenReport:
             reason="sweep_done",
             evidence={"trigger": "test"},
         )
-        await coord._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
+        await coord.phase_machine._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
         assert coord.shared_state.close_sequence_done is True
 
-        assert await coord.ensure_close_sequence(reason="terminal") is False
+        assert await coord.phase_close.ensure_close_sequence(reason="terminal") is False
 
     @pytest.mark.asyncio
     async def test_a_closing_phase_with_no_report_task_does_not_wait_on_one(self, tmp_path: Path):
@@ -1131,7 +1143,7 @@ class TestEveryTerminalReachesAWrittenReport:
 
         # Absence is finished, not pending: waiting on a task nobody created is
         # how a session sat in CLOSE until its grace ran out with no report.
-        assert await coord._closing_report_terminal() is True
+        assert await coord.phase_close.closing_report_terminal() is True
         await coord.stop()
 
 
@@ -1165,14 +1177,13 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
             "critic": MockBackend(idle_plan),
         },
         role_registry=default_role_registry(),
-        recipe_kb=None,
         knowledge_plane=None,
     )
     coord.shared_state.phase = "SWEEP"
-    coord.shared_state.phase_history = [{"to_phase": "SWEEP", "evidence": {}, "reason": "plateau_kernel"}]
+    coord.shared_state.phase_history = [{"to_phase": "SWEEP", "evidence": {}, "reason": "kernel_no_more_leverage"}]
     machine_state.record_phase_transition(coord.shared_state, to_phase="CLOSE", reason="sweep_done", evidence={})
 
-    await coord._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
+    await coord.phase_machine._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
 
     zips = sorted((dest_root / "hyperloom-session-packages").glob("*.zip"))
     assert len(zips) == 1
@@ -1207,8 +1218,7 @@ async def test_recipe_kb_t4_hook_short_circuits_when_sequencer_done(tmp_path: Pa
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=_StubRecipeKB(),
-        knowledge_plane=None,
+        knowledge_plane=KnowledgePlane(recipe_kb=_StubRecipeKB()),
     )
     coord.shared_state.recipe_kb_session_id = "sid-stop-skip"
     coord.shared_state.close_sequence_done = True
@@ -1232,8 +1242,7 @@ async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Pa
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=_StubRecipeKB(),
-        knowledge_plane=None,
+        knowledge_plane=KnowledgePlane(recipe_kb=_StubRecipeKB()),
     )
     coord.shared_state.recipe_kb_session_id = "sid-fallback"
     coord.shared_state.close_sequence_done = False
@@ -1244,7 +1253,7 @@ async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Pa
         finalize_calls.append(source)
         return {"status": "written"}
 
-    coord.finalize_recipe_and_journal = _spy  # type: ignore[method-assign]
+    coord.writeback.finalize_recipe_and_journal = _spy  # type: ignore[method-assign]
     await coord._recipe_kb_t4_hook()
     assert finalize_calls == ["t4_fallback"]
 
@@ -1268,7 +1277,6 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=None,
         knowledge_plane=None,
     )
     coord.shared_state.recipe_kb_session_id = ""
@@ -1281,7 +1289,7 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
         finalize_calls.append(source)
         return {"status": "written"}
 
-    coord.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
+    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
     coord.shared_state.save = lambda path: save_calls.append(path)  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
@@ -1310,19 +1318,24 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=None,
-        knowledge_plane=SimpleNamespace(config=config),
+        knowledge_plane=KnowledgePlane(config=config),
     )
     coord.shared_state.recipe_kb_session_id = ""
     coord.shared_state.close_sequence_done = True
     coord.shared_state.recipe_finalize_status = "written"
 
-    finalize_calls: list[int] = []
-    coord.finalize_recipe_and_journal = lambda: finalize_calls.append(1)  # type: ignore[method-assign]
+    recipe_finalize_attempts = 0
+
+    def _finalize(*, source: str) -> dict:
+        nonlocal recipe_finalize_attempts
+        recipe_finalize_attempts += 1
+        return {"status": "written"}
+
+    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 
-    assert finalize_calls == []
+    assert recipe_finalize_attempts == 0
 
 
 @pytest.mark.asyncio
@@ -1346,8 +1359,7 @@ async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=None,
-        knowledge_plane=SimpleNamespace(config=config),
+        knowledge_plane=KnowledgePlane(config=config),
     )
     coord.shared_state.close_sequence_done = True
     coord.shared_state.recipe_finalize_status = "failed"
@@ -1358,7 +1370,7 @@ async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
         finalize_calls.append(source)
         return {"status": "written"}
 
-    coord.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
+    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 
@@ -1384,14 +1396,18 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb(tmp_path: Path):
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=None,
-        knowledge_plane=SimpleNamespace(config=config),
+        knowledge_plane=KnowledgePlane(config=config),
     )
     coord.shared_state.recipe_kb_session_id = "local-session"
     coord.shared_state.close_sequence_done = False
 
-    finalize_calls: list[int] = []
-    coord.finalize_recipe_and_journal = lambda: finalize_calls.append(1)  # type: ignore[method-assign]
+    finalize_calls: list[str] = []
+
+    def _finalize(*, source: str) -> dict:
+        finalize_calls.append(source)
+        return {"status": "written"}
+
+    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 
@@ -1415,14 +1431,18 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb_sid(tmp_path: Pat
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=_StubRecipeKB(),
-        knowledge_plane=SimpleNamespace(config=config),
+        knowledge_plane=KnowledgePlane(config=config, recipe_kb=_StubRecipeKB()),
     )
     coord.shared_state.recipe_kb_session_id = "  "
     coord.shared_state.close_sequence_done = False
 
-    finalize_calls: list[int] = []
-    coord.finalize_recipe_and_journal = lambda: finalize_calls.append(1)  # type: ignore[method-assign]
+    finalize_calls: list[str] = []
+
+    def _finalize(*, source: str) -> dict:
+        finalize_calls.append(source)
+        return {"status": "written"}
+
+    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 
@@ -1436,3 +1456,30 @@ async def test_recipe_kb_t4_hook_degraded_is_complete_noop() -> None:
     )
 
     await Coordinator._recipe_kb_t4_hook(coordinator)
+
+
+@pytest.mark.asyncio
+async def test_report_failure_emits_lifecycle_error_and_records_failed_step(tmp_path: Path):
+    coord = make_coordinator(tmp_path)
+    close = coord.phase_close
+    lifecycle: list[dict[str, Any]] = []
+    steps: list[tuple[str, str, str]] = []
+
+    def _emit(**kwargs: Any) -> None:
+        lifecycle.append(kwargs)
+
+    async def _record(step: str, *, status: str, task_id: str = "", detail: str = "") -> None:
+        steps.append((step, status, detail))
+
+    async def _enqueue_fails(*, reason: str) -> None:
+        raise RuntimeError("db down")
+
+    coord.writeback.emit_lifecycle = _emit  # type: ignore[method-assign]
+    close._record_close_step = _record  # type: ignore[method-assign]
+    close._enqueue_internal_report_task = _enqueue_fails  # type: ignore[method-assign]
+
+    await close._run_close_step("report", close._do_report())
+
+    assert [(row["step"], row["status"]) for row in lifecycle] == [("report", "START"), ("report", "ERROR")]
+    assert "db down" in lifecycle[-1]["detail"]
+    assert ("report", "failed") in [(step, status) for step, status, _ in steps]

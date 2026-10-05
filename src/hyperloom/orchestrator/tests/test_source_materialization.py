@@ -509,7 +509,7 @@ async def test_kernel_handoff_prepares_source_or_stops_before_delegation(
     coord.shared_state = SharedState(
         current_best=best, baseline_tput=100.0, model_path="/models/fixture", gpu_type="mi355x", isl=1, osl=1, conc=1
     )
-    coord._record_geak_kernel_journey = lambda _result: None
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
 
     def prepare_source(snapshot: dict, output: Path) -> dict:
         assert source_state != "absent", "no-source handoffs must not assemble source"
@@ -526,7 +526,7 @@ async def test_kernel_handoff_prepares_source_or_stops_before_delegation(
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path", stop_after_handoff
     )
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
     handoff = tmp_path / "geak/handoff.json"
     if source_state in ("unresolved", "changed"):
         assert not handoff.exists()
@@ -542,8 +542,9 @@ async def test_kernel_handoff_prepares_source_or_stops_before_delegation(
 def test_no_source_is_unchanged_and_serializer_keeps_materialization_separate(tmp_path: Path) -> None:
     assert materialize_source_stack({}, tmp_path / "unused") is None
     assert not (tmp_path / "unused").exists()
-    writer = object.__new__(WritebackCollaborator)
-    writer.shared_state = SimpleNamespace(current_best={}, baseline_config_path="")
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    writer = WritebackCollaborator(SimpleNamespace(shared_state=SharedState()))
     original = writer.build_env_spec(server_launch_flags="")
     assert "source_materialization" not in original
     _, best = _stack(tmp_path)

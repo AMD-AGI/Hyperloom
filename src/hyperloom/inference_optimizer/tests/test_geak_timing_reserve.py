@@ -30,9 +30,8 @@ def test_declared_rebench_is_reserved_before_the_runner_margin(
         monkeypatch.setenv("GEAK_REBENCH_RESERVE_S", reserve)
     monkeypatch.setattr(kernel._phase_state, "phase_budget_remaining_seconds", lambda *a, **kw: phase_remaining)
     phase = SimpleNamespace(
-        _run_deadline=SimpleNamespace(remaining=lambda: remaining),
+        _coord=SimpleNamespace(run_deadline=SimpleNamespace(remaining=lambda: remaining)),
         shared_state=SimpleNamespace(closing_reserve_sec=lambda: 120),
-        _phase_budget_pct={},
     )
     assert kernel.KernelPhase._geak_timeouts(phase) == expected
 
@@ -40,5 +39,5 @@ def test_declared_rebench_is_reserved_before_the_runner_margin(
 def test_unbounded_runner_keeps_existing_explicit_timeout(monkeypatch):
     monkeypatch.setenv("GEAK_E2E_TIMEOUT_S", "7200")
     monkeypatch.setenv("GEAK_REBENCH_RESERVE_S", "5400")
-    phase = SimpleNamespace(_run_deadline=None)
+    phase = SimpleNamespace(_coord=SimpleNamespace(run_deadline=None))
     assert kernel.KernelPhase._geak_timeouts(phase) == (7200, 7800, False)

@@ -375,7 +375,7 @@ class V6WarmStartReads(TypedDict, total=False):
     One row per read, recorded as the KB serves it, plus tallies over exactly
     those rows. Omitted when T0 made no read.
 
-    Only T0's own reads are here. ``_kb_amend_recipe`` consults the same store
+    Only T0's own reads are here. ``kb_amend_recipe`` consults the same store
     through the same audit hook in the middle of the session; those reads are
     real but they are not the anchor's, and this block would misreport the
     lookup if it counted them."""
@@ -1981,7 +1981,6 @@ class V6KernelEntry(TypedDict, total=False):
     route: str
     route_reason: str
     resumed: bool
-    code_revision: str | None
     stack_depth_in: int | None
     budget_remaining_sec: float | None
     roofline_snapshot_id: int | None

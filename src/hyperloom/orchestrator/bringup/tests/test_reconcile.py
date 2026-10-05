@@ -76,8 +76,6 @@ class _Pending:
 
     def __init__(self, specialist: str) -> None:
         self.payload = {"params": {"specialist_task_id": specialist}}
-        self.decided = False
-        self.verdict = None
 
 
 @pytest.fixture
@@ -380,8 +378,7 @@ async def test_an_unanswered_review_is_denied_and_a_verdict_that_arrived_is_not_
         ("m-answered", "approve"),
         ("m-late", TIMEOUT_VERDICT),
     ]
-    assert pending["m-late"].verdict == TIMEOUT_VERDICT
-    assert pending["m-late"].decided is True
+    assert list(pending) == ["m-answered"]
 
 
 @pytest.mark.asyncio

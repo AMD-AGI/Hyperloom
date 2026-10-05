@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import dataclasses
-
 import pytest
 
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
@@ -70,7 +68,6 @@ def test_orchestration_permissions():
     assert IntentType.PROPOSE_ACTION in role.allowed_intents
     assert IntentType.DELEGATE in role.allowed_intents
     assert IntentType.REQUEST in role.allowed_intents
-    assert IntentType.UPDATE_STATE in role.allowed_intents
     assert IntentType.PRUNE_BRANCH in role.allowed_intents
     assert IntentType.ESCALATE_STRATEGY_CHANGE in role.allowed_intents
     assert IntentType.REVIEW_VERDICT not in role.allowed_intents
@@ -337,21 +334,6 @@ def test_gate_orchestration_prune_branch_allowed_with_family(gate):
     )
 
 
-@pytest.mark.parametrize(
-    "field_name",
-    sorted({f.name for f in dataclasses.fields(SharedState)} - SharedState.AGENT_UPDATE_FIELDS.keys()),
-)
-def test_update_state_refuses_every_field_outside_the_agent_whitelist(gate, field_name):
-    """Every SharedState field is Coordinator-owned unless AGENT_UPDATE_FIELDS lists it, a new field included."""
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(type=IntentType.UPDATE_STATE, payload={"changes": {field_name: "forged"}}),
-        )
-    assert exc.value.rule == "state_field"
-    assert repr(field_name) in str(exc.value)
-
-
 # allowed_tools_for_agent
 def test_allowed_tools_claude_returns_emit_intent(gate):
     assert gate.allowed_tools_for_agent("robustness") == []
@@ -365,7 +347,7 @@ def test_allowed_tools_claude_returns_emit_intent(gate):
     for name in CONTEXT_TOOL_NAMES:
         assert name in orch
     assert "get_recent_outcomes" in orch
-    assert "run_action_now" in orch
+    assert "run_action_now" not in orch
     assert "WebSearch" in orch
     assert "WebFetch" in orch
 

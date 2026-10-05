@@ -112,9 +112,8 @@ def _queue_kernel_keep(
 ) -> dict[str, Any] | None:
     """Persist one KEEP patch snapshot without coupling it to an ordinal slot."""
     if entry.get("vendor_playbook_deploy_blocked"):
-        # A vendor-playbook KEEP has no deployable artifact -- see Refusing to queue it here means
-        # _auto_enqueue_pending_integrations() never dispatches an integrate for it; integrate_handler() still checks
-        # this flag independently for an LLM-initiated request that names the kernel_id directly.
+        # A vendor-playbook KEEP has no deployable artifact -- refusing to queue it here means
+        # integrate_handler() only runs for an LLM-initiated request that names the kernel_id directly.
         return None
     decision = str(entry.get("last_decision") or "").upper()
     try:

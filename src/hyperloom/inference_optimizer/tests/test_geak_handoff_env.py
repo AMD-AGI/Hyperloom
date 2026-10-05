@@ -37,7 +37,7 @@ async def test_handoff_preserves_environment_values(
         "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         stop_after_handoff,
     )
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["baseline_env_spec"]["config"]["extra_envs"] == expected
@@ -83,7 +83,7 @@ def capture_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
             stop_after_handoff,
         )
-        await coord._run_geak_kernel_phase(from_phase="KERNEL")
+        await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
         return json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
 
     return capture
@@ -133,8 +133,8 @@ async def test_handoff_transports_current_best_launch_controls(
 @pytest.mark.parametrize(
     ("current", "observed_flags", "expected_max_len", "expected_mem"),
     [
-        ({"extra_server_args": "", "args_mode": "replace"}, "", 0, 0.0),
-        ({"remove_args": ["--max-model-len", "--gpu-memory-utilization"]}, "", 0, 0.0),
+        ({"extra_server_args": "", "args_mode": "replace"}, "", None, None),
+        ({"remove_args": ["--max-model-len", "--gpu-memory-utilization"]}, "", None, None),
         (
             {"extra_server_args": "--max-model-len 4096 --gpu-memory-utilization 0.7", "args_mode": "replace"},
             "",
@@ -161,5 +161,9 @@ async def test_handoff_serving_fidelity_respects_current_best_launch_controls(
         observed_flags=observed_flags,
     )
 
-    assert handoff["max_model_len"] == expected_max_len
-    assert handoff["mem_fraction"] == pytest.approx(expected_mem)
+    if expected_max_len is None:
+        assert "max_model_len" not in handoff
+        assert "mem_fraction" not in handoff
+    else:
+        assert handoff["max_model_len"] == expected_max_len
+        assert handoff["mem_fraction"] == pytest.approx(expected_mem)

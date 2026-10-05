@@ -1346,8 +1346,7 @@
         "phase_spent_sec",
         "runtime_sec",
         "post_ready_runtime_sec",
-        "warm_runtime_sec",
-        "double_run"
+        "warm_runtime_sec"
       ],
       "properties": {
         "failure_streak": {
@@ -1390,9 +1389,6 @@
             "number",
             "null"
           ]
-        },
-        "double_run": {
-          "type": "boolean"
         }
       },
       "additionalProperties": false

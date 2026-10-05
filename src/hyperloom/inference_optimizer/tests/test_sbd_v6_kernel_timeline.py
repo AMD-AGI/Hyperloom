@@ -49,7 +49,6 @@ def _forge_recorder():
         macro_cycle=3,
         route=ROUTE_FORGE,
         route_reason="kernel_opt_backend_order=forge",
-        code_revision="abc1234",
     )
     assert recorder is not None
     recorder.begin(
@@ -71,8 +70,10 @@ def _geak_recorder(*, macro_cycle: int = 1):
 
 def _phase_with_recorder(tmp_path: Path, recorder: Any) -> KernelPhase:
     phase = object.__new__(KernelPhase)
-    phase.session_dir = tmp_path
-    phase.shared_state = types.SimpleNamespace(macro_cycle=3)
+    phase._coord = types.SimpleNamespace(
+        session_dir=tmp_path,
+        shared_state=types.SimpleNamespace(macro_cycle=3),
+    )
     phase._kernel_timeline_recorder = recorder
     return phase
 
@@ -1479,6 +1480,7 @@ def test_record_backend_versions_and_timeline_mirrors_each_attempt(tmp_path):
             },
             "proposal": {"decision": "KEEP"},
         },
+        recorder=recorder,
     )
     recorder.finish(tput_after=1000.0)
 

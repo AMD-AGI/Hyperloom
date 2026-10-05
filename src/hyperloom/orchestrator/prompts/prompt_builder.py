@@ -9,8 +9,7 @@ decision framework, cycle directive, optional kernel-opt reference, rules).
 Deterministic for given inputs; the only IO is reading the rules fragment.
 
 Sections are scoped by the ``phase`` argument: a module whose behaviour the
-phase cannot reach is omitted, so the agent is never handed a payload contract
-PolicyGate would deny. A blank phase renders every module.
+phase cannot reach is omitted. A blank phase renders every module.
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
 )
 from hyperloom.common.perf_metric import graded_metric_key, is_agentx_mode
-from ..state.shared_state import SharedState
 from . import read_rules_fragment as _read_rules_fragment
 from .agentx_context import corpus_lines, grading_lines
 from .transport import TRANSPORTS, TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
@@ -248,10 +246,10 @@ def _section_phase_semantics(
             "KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes",
             "to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
-            "'skip_to_kernel' | 'skip_to_sweep'}` directly when you judge the",
-            "current phase exhausted; the Coordinator validates the hint vocab",
-            "and routes the transition on the next tick. `skip_to_close` is not",
-            "in that set — see the exception below for when it applies.",
+            "'skip_to_kernel'}` in EXPLORE or FRAMEWORK_AGENT when you judge",
+            "the current phase exhausted; the Coordinator validates the hint",
+            "vocab and routes the transition on the next tick. `skip_to_close`",
+            "is not in that set — see the exception below for when it applies.",
             "`skip_to_close` is reserved, in EVERY phase, for genuine early",
             "abandonment (e.g. infra is dead and the sweep cannot run at all):",
             "it closes the run instead of advancing a phase. Running low on",
@@ -643,13 +641,12 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   ``budget`` line carries ``remaining_sec`` against the phase's",
             "   ``pct`` share; as it falls, prefer lower-cost / known-good",
             "   actions (explore over kernel_opt).",
-            "   The Plateau advisory block is informational only for KERNEL. In",
-            "   OPTIMIZE it reports each arm separately: BOTH arms dry advances",
-            "   to KERNEL_AGENT (``reason=optimize_no_more_leverage``) at the",
-            "   next phase-compute, while one arm dry means work the other.",
-            "   When you judge the current phase exhausted,",
+            "   In OPTIMIZE the Plateau advisory reports each arm separately: BOTH arms",
+            "   dry advances to KERNEL_AGENT (``reason=optimize_no_more_leverage``) at",
+            "   the next phase-compute, while one arm dry means work the other.",
+            "   When you judge EXPLORE or FRAMEWORK_AGENT exhausted,",
             "   emit ``escalate_strategy_change{next_action_hint=",
-            "   'skip_to_kernel' | 'skip_to_sweep'}``. `skip_to_close` is not a",
+            "   'skip_to_kernel'}``. `skip_to_close` is not a",
             "   phase advance -- see PHASE CONTRACT before emitting it.",
             "",
             "If you cannot move forward, emit",
@@ -778,11 +775,8 @@ Read the optimization lane's outcome before you act: a `state.gaps[]`
 verdict (KEEP→integrate next; REVERT→rejected),
 `rejected_kernel_ids` lists the ids already written off, and
 `last_action_failures` explains a request of your own that failed.
-A KERNEL_AGENT plateau signal (3 REVERTs across distinct kernels, or low
-recent KEEP gain) is rendered as advisory; KERNEL_AGENT → SWEEP advance is
-driven by the phase budget, an `escalate_strategy_change` hint, or a
-terminal stop_reason. Read the advisory and emit `skip_to_sweep` if
-you want to wind down sooner.
+KERNEL_AGENT → SWEEP advance is driven by the phase budget, idle-no-progress,
+agent settled with no pending kernel work, or a terminal stop_reason.
 
 ### `trace_analyze` — read-only candidate analysis
 
@@ -897,32 +891,24 @@ def _section_rules(rules_md: str, *, phase: str = "", transport: str = "") -> li
     body = _filter_rules_fragment(rules_md, phase=phase, transport=transport) or (
         "(orchestration.md rules fragment not found — Coordinator will still enforce PolicyGate hard rules at runtime.)"
     )
-    update_fields = [f"- `{name}`: `{expected.__name__}`" for name, expected in SharedState.AGENT_UPDATE_FIELDS.items()]
     return [
         "## 7. RULES & OUTPUT PROTOCOL",
         "",
         body,
-        "",
-        "### UPDATE_STATE",
-        "",
-        "`update_state.payload.changes` must be a non-empty object. Only these fields are agent-writable:",
-        *update_fields,
-        "Any other key -- a Coordinator-owned field, an unknown name -- and any listed key carrying the",
-        "wrong value type refuses the whole update: nothing is written, and the denial names the key it",
-        "refused. There is no partial apply, so re-send the update carrying only the fields above.",
     ]
 
 
-def _section_cycle_directive(*, macro_cycle: int = 0, cycle_directive: str = "") -> list[str]:
+def _section_cycle_directive(
+    *,
+    macro_cycle: int = 0,
+    cycle_directive: str = "",
+    cycle_strategy: Mapping[str, Any] | None = None,
+) -> list[str]:
     """Build the CYCLE DIRECTIVE section.
 
-    When ``cycle_directive`` is non-empty it carries an LLM-authored focus
-    mandate for this macro-cycle (see ``orchestration_memory.next_cycle_directive``).
-    Otherwise the standing breadth→depth arc is used as the default.
-
-    Args:
-        macro_cycle: Current macro-cycle counter; shown verbatim.
-        cycle_directive: Optional LLM-authored focus text for this cycle.
+    Renders the LLM-authored ``cycle_directive`` when present, the deterministic
+    ``cycle_strategy`` focus/history when provided, or the breadth→depth default
+    when neither is set.
 
     Returns:
         list[str]: Markdown lines for the section.
@@ -939,7 +925,7 @@ def _section_cycle_directive(*, macro_cycle: int = 0, cycle_directive: str = "")
     if cycle_directive and cycle_directive.strip():
         lines.append("Focus for this cycle (LLM-authored at prior cycle boundary):")
         lines.append(cycle_directive.strip())
-    else:
+    elif not cycle_strategy:
         lines.extend(
             [
                 "Default arc (no per-cycle directive yet):",
@@ -950,6 +936,26 @@ def _section_cycle_directive(*, macro_cycle: int = 0, cycle_directive: str = "")
                 "  work that needs a long measure→edit→measure loop.",
             ]
         )
+    if cycle_strategy:
+        focus = str(cycle_strategy.get("focus") or "").strip()
+        score = cycle_strategy.get("score")
+        rationale = str(cycle_strategy.get("rationale") or "").strip()
+        saturated = cycle_strategy.get("saturated_at_start") or []
+        prior_cycles: list[Any] = list(cycle_strategy.get("prior_cycles") or [])
+        lines.append("")
+        lines.append(f"Deterministic focus: focus={focus} score={score}")
+        if rationale:
+            lines.append(f"rationale: {rationale}")
+        if saturated:
+            lines.append(f"saturated_at_start={list(saturated)}")
+        if prior_cycles:
+            lines.append("previous cycles:")
+            for row in prior_cycles[-5:]:
+                lines.append(
+                    f"  - cycle={row.get('cycle')} focus={row.get('focus')} "
+                    f"gain_delta={row.get('gain_delta')} saturated={row.get('saturated_at_start') or []}"
+                )
+        lines.append("Advisory only: use this as a prior, not a dispatch gate.")
     return lines
 
 
@@ -1030,6 +1036,7 @@ def build_orchestration_prompt(
     max_minutes: int = 0,
     macro_cycle: int = 0,
     cycle_directive: str = "",
+    cycle_strategy: Mapping[str, Any] | None = None,
     phase: str = "",
     transport: str = TRANSPORT_TOOLS,
     rules_fragment_path: Path | None = None,
@@ -1061,7 +1068,10 @@ def build_orchestration_prompt(
             section.
         cycle_directive: optional LLM-authored focus text for this cycle
             (from ``orchestration_memory.next_cycle_directive``); empty string
-            renders the standing breadth→depth default.
+            with no ``cycle_strategy`` renders the standing breadth→depth default.
+        cycle_strategy: optional dict from ``plan_cycle_focus`` with deterministic
+            focus, rationale, saturated directions, and prior-cycle history; rendered
+            in the CYCLE DIRECTIVE section after the LLM directive (if any).
         phase: current pipeline phase; omits the modules whose behaviour it
             cannot reach. Empty renders every module. The Coordinator rebuilds
             the prompt at each phase seam.
@@ -1130,7 +1140,9 @@ def build_orchestration_prompt(
         ),
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled, phase=phase_norm, transport=transport),
-        _section_cycle_directive(macro_cycle=macro_cycle, cycle_directive=cycle_directive),
+        _section_cycle_directive(
+            macro_cycle=macro_cycle, cycle_directive=cycle_directive, cycle_strategy=cycle_strategy
+        ),
     ]
     if (
         kernel_enabled

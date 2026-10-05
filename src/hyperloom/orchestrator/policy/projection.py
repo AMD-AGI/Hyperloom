@@ -62,7 +62,7 @@ def gpu_specialist_ceiling(shared_state: Any | None = None) -> int:
 
 
 def serving_tp_for_policy(shared_state: Any | None = None) -> int:
-    """Resolve serving TP the way ``Coordinator._resolve_serving_tp`` does.
+    """Resolve serving TP the way ``DispatcherCollaborator.resolve_serving_tp`` does.
 
     Args:
         shared_state: Optional SharedState carrying ``tp``.

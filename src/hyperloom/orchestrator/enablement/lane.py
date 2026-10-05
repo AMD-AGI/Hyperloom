@@ -21,7 +21,7 @@ from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, is_env_fault, load_boot_observation, observation_summary
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.inference_optimizer.breakdown.round_archive import ROLE_LAUNCH_CONFIG, RoundArchive
-from ..loop.coordinator_helpers import _dedupe_extra_server_args
+from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
 from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from ..loop.offload import offload
 from .params import ENABLEMENT_PARAMS_BUDGET_SEC
@@ -70,7 +70,7 @@ _MIN_LEASE_SEC = 300.0
 class EnablementLane(CoordinatorCollaborator):
     """Owns one enablement round: admit, track in-flight, re-arm on outcome."""
 
-    def _enablement_admitted(self) -> bool:
+    def enablement_admitted(self) -> bool:
         """Whether this run and host admit the enablement lane at all."""
         from ..actions.executors._accuracy_gate import eval_enablement_allowed, launch_enablement_allowed
         from ..actions.executors._multi_node_env import is_multi_node
@@ -85,16 +85,20 @@ class EnablementLane(CoordinatorCollaborator):
     async def _maybe_enqueue_enablement_specialist(self) -> str:
         """Dispatch an enablement_specialist when a baseline cannot launch or its accuracy eval fails."""
         state = self.shared_state
-        if not self._enablement_admitted():
+        if not self.enablement_admitted():
             return ""
         if state.enablement.succeeded:
             return ""
         if state.enablement.validation_pending:
             return ""
-        if await self.rounds.held() is not None:
-            # Renews the open round's lease as a side effect; the reconciler,
-            # which runs ahead of this pump, ends a round nobody is working on.
-            await self._enablement_in_flight()
+        round_row = await self.rounds.held()
+        if round_row is not None:
+            # This pump is the lease's only heartbeat, so that asking whether the lane is in
+            # flight stays free of side effects for the terminal paths that only observe it.
+            # A round nobody is working on is left to expire; the reconciler, which runs
+            # ahead of this pump, is what ends it.
+            if await self._round_has_live_work(round_row.holder_task_id):
+                await self._renew_enablement_round(round_row)
             return ""
         # Each terminal below writes stop_reason, which routes the phase to CLOSE on the
         # next tick; returning keeps a new round from opening in the meantime.
@@ -109,7 +113,7 @@ class EnablementLane(CoordinatorCollaborator):
                 state.save(self.session_dir)
                 # The cap is the lane's own terminal, so the lane event closes
                 # here: no round follows it to close on the lane's behalf.
-                await self._close_enablement_lane(
+                await self.close_lane_event(
                     outcome=enablement_event.OUTCOME_STALLED,
                     reason="enablement_attempts_exhausted",
                 )
@@ -120,11 +124,11 @@ class EnablementLane(CoordinatorCollaborator):
                 )
             return ""
         launch_log = state.enablement.launch_log
-        deadline = self._run_deadline
+        deadline = self._coord.run_deadline
         # Reaches the network and stats a checkout on a network mount, so it
         # runs off the tick; discovery degrades to repos-only at the deadline.
         params = await offload(
-            lambda: self._build_enablement_specialist_params(launch_log, attempt=stalled),
+            lambda: self._coord.enablement_params.build_enablement_specialist_params(launch_log, attempt=stalled),
             deadline=Deadline.after(ENABLEMENT_PARAMS_BUDGET_SEC).tightened_to(deadline),
             label="enablement specialist params",
         )
@@ -138,13 +142,13 @@ class EnablementLane(CoordinatorCollaborator):
         # no-ops when a matching build is already queued or running, and neither
         # may block the authoring dispatch below, which is this method's point.
         try:
-            await self._maybe_enqueue_specialist_requested_build()
-            await self._maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
+            await self._coord.enablement_build.maybe_enqueue_specialist_requested_build()
+            await self._coord.enablement_build.maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
         except Exception:
             log.exception("enablement: build escalation failed")
-        await self._warm_specialist_params(params)
+        await self._coord.specialist_dispatch.warm_specialist_params(params)
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
-        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_tid = await self._open_authoring_round(
             params=params,
             lanes=lanes,
@@ -307,7 +311,7 @@ class EnablementLane(CoordinatorCollaborator):
             return ""
         return holder
 
-    async def _enablement_in_flight(self) -> bool:
+    async def enablement_in_flight(self) -> bool:
         """True while an open round still has work running under it.
 
         Returns:
@@ -316,10 +320,7 @@ class EnablementLane(CoordinatorCollaborator):
         round_row = await self.rounds.held()
         if round_row is None:
             return False
-        if not await self._round_has_live_work(round_row.holder_task_id):
-            return False
-        await self._renew_enablement_round(round_row)
-        return True
+        return await self._round_has_live_work(round_row.holder_task_id)
 
     async def _round_has_live_work(self, holder: str) -> bool:
         """Report whether anything is still running for the round ``holder`` holds.
@@ -341,7 +342,7 @@ class EnablementLane(CoordinatorCollaborator):
         # Undecided proposal keeps the round open; once ruled, approve lands the task matched below and reject rearms
         # directly, so it cannot defer forever.
         for p in self.state.pending_proposals.values():
-            if p.action_name != "integrate_patch" or p.decided:
+            if p.action_name != "integrate_patch":
                 continue
             if (p.payload.get("params") or {}).get("specialist_task_id") == holder:
                 return True
@@ -367,7 +368,7 @@ class EnablementLane(CoordinatorCollaborator):
             request_id=f"renew:{round_row.round_id}:{round_row.fence}:{now:.0f}",
         )
 
-    async def _handoff_enablement_round(self, task: "Task") -> None:
+    async def handoff_enablement_round(self, task: "Task") -> None:
         """Move the open round onto the integrate that consumes its deliverable.
 
         Handoff is the only fence increment, so every task id that takes over an
@@ -404,7 +405,7 @@ class EnablementLane(CoordinatorCollaborator):
                 moved.reason,
             )
 
-    async def _settle_enablement_round(self, outcome: str, *, reason: str = "") -> None:
+    async def settle_enablement_round(self, outcome: str, *, reason: str = "") -> None:
         """End the open round, if one is still open.
 
         Args:
@@ -423,6 +424,24 @@ class EnablementLane(CoordinatorCollaborator):
             now_unix=time.time(),
             request_id=f"settle:{round_row.round_id}:{round_row.fence}",
             evidence={"reason": reason} if reason else {},
+        )
+
+    async def close_lane_event(self, *, outcome: str, reason: str) -> None:
+        """Close the enablement lane's event on the terminal it just reached.
+
+        Args:
+            outcome: One of the ``enablement_event.OUTCOME_*`` constants.
+            reason: Why the lane ended, recorded on the event.
+        """
+        state = self.shared_state
+        lane = state.enablement
+        _finish_lane_event(
+            lane,
+            state,
+            outcome=outcome,
+            reason=reason,
+            session_dir=str(self.session_dir or ""),
+            stall_streak=await self.rounds.consecutive_stalled(),
         )
 
     async def _maybe_record_enablement_human_review(self, launch_log: str) -> None:
@@ -467,7 +486,7 @@ class EnablementLane(CoordinatorCollaborator):
             reason=("baseline launch failure did not match any actionable enablement signature; needs human triage"),
             signature=signature.to_dict(),
         )
-        await self._record_observation(
+        await self._coord.writeback.record_observation(
             "coordinator",
             "observation",
             {
@@ -491,7 +510,7 @@ class EnablementLane(CoordinatorCollaborator):
             signature.kind,
         )
 
-    async def _maybe_rearm_enablement(self, res: dict[str, Any] | None) -> None:
+    async def maybe_rearm_enablement(self, res: dict[str, Any] | None) -> None:
         """Re-arm, advance, or terminate the enablement retry loop.
 
         Called on every ``integrate_patch`` completion. An enablement patch has
@@ -582,7 +601,7 @@ class EnablementLane(CoordinatorCollaborator):
         # A rearm always ends the round; only a KEEP booted and was graded, and
         # an advance is the ledger's record that the cap must not charge it.
         is_advanced = status == "advanced" or bool(res.get("advanced"))
-        await self._settle_enablement_round(
+        await self.settle_enablement_round(
             BOOTED if status == "kept" else ADVANCED if is_advanced else FAILED,
             reason=status,
         )
@@ -608,31 +627,27 @@ class EnablementLane(CoordinatorCollaborator):
             f" stop_reason={stop_set}" if stop_set else "",
         )
 
-    async def _pump_enablement_safely(self, *, caller: str) -> None:
-        """ENABLEMENT phase pump — called every tick while in ENABLEMENT.
-
-        Args:
-            caller: Label identifying the caller ("tick" / "run"), for logs.
-        """
+    async def pump_enablement_safely(self) -> None:
+        """ENABLEMENT phase pump — called every tick while in ENABLEMENT."""
         if (self.shared_state.phase or "").strip().upper() != PHASE_ENABLEMENT:
             return
         # Independently, because a raise in one pump must not skip the rest: the
         # one that dispatches the next authoring round is the last of them.
         for pump in (
-            self._maybe_route_build_outcomes,
-            self._maybe_enqueue_enablement_baseline_revalidation,
+            self._coord.enablement_build.maybe_route_build_outcomes,
+            self._coord.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation,
             self._maybe_enqueue_enablement_specialist,
         ):
             try:
                 await pump()
             except Exception as exc:
-                log.exception("ENABLEMENT %s (%s) failed", pump.__name__, caller)
-                stage = f"enablement_pump:{pump.__name__}:{caller}"
+                log.exception("ENABLEMENT %s failed", pump.__name__)
+                stage = f"enablement_pump:{pump.__name__}"
                 # Named here rather than by the coordinator's generic handler:
                 # the lane's event is open for the whole session, so only the
                 # lane knows which exceptions are its own to answer for.
                 enablement_event.record_fault(stage=stage, exc=exc)
-                self._record_coordinator_exception(stage=stage, exc=exc)
+                self._coord.record_exception(stage=stage, exc=exc)
 
 
 def _stack_patch_roots(state: Any, res: dict[str, Any]) -> None:
@@ -803,7 +818,7 @@ def _rearm_on_advanced(state: Any, res: dict[str, Any]) -> None:
         merged.update({str(k): str(v) for k, v in adv_envs.items()})
         cfg["extra_envs"] = merged
         # Folded by flag keeping the last value, so this round overrides an earlier one.
-        cfg["extra_server_args"] = _dedupe_extra_server_args(
+        cfg["extra_server_args"] = dedupe_extra_server_args(
             merge_server_args(str(cfg.get("extra_server_args") or ""), adv_args)
         )
         cfg.setdefault("args_mode", "append")
@@ -818,6 +833,38 @@ def _rearm_on_advanced(state: Any, res: dict[str, Any]) -> None:
         # The wall this round advanced to: the next round's before half.
         state.enablement.launch_observation_path = str(res.get("enablement_observation_path") or "")
     _reset_baseline_failure_backstop(state)
+
+
+def _finish_lane_event(
+    lane: Any,
+    state: Any,
+    *,
+    outcome: str,
+    reason: str,
+    session_dir: str,
+    stall_streak: int,
+    setting_script: str = "",
+) -> None:
+    """Assemble and emit the terminal enablement_event.finish call."""
+    enablement_event.finish(
+        outcome=outcome,
+        reason=reason,
+        recipe=recipe_for(
+            lane,
+            session_dir=str(session_dir or ""),
+            mode=str(state.enablement_mode or ""),
+        ),
+        kept_patches=lane.kept_patches,
+        kept_artifacts=lane.kept_artifacts,
+        setup_commands=lane.setup_commands,
+        accepted_config=lane.accepted_config,
+        accepted_config_path=str(lane.accepted_config_path or ""),
+        setting_script=setting_script,
+        active_runtime=lane.active_runtime,
+        attempt_runtimes=lane.attempt_runtimes,
+        framework_root=str(lane.framework_root or ""),
+        stall_streak=stall_streak,
+    )
 
 
 def _round_task_id(state: Any, res: dict[str, Any]) -> str:
@@ -865,24 +912,12 @@ def _record_enablement_round(
         outcome, reason = enablement_event.OUTCOME_STALLED, stop_reason
     else:
         return
-    enablement_event.finish(
+    _finish_lane_event(
+        lane,
+        state,
         outcome=outcome,
         reason=reason,
-        kept_patches=lane.kept_patches,
-        kept_artifacts=lane.kept_artifacts,
-        setup_commands=lane.setup_commands,
-        accepted_config=lane.accepted_config,
-        accepted_config_path=str(lane.accepted_config_path or ""),
-        setting_script=setting_script,
-        active_runtime=lane.active_runtime,
-        attempt_runtimes=lane.attempt_runtimes,
-        framework_root=str(lane.framework_root or ""),
+        session_dir=str(session_dir or ""),
         stall_streak=int(stall_streak or 0),
-        # The replay contract is judged at the terminal, which is here: the
-        # accepted stack is complete only once the lane has closed on one.
-        recipe=recipe_for(
-            lane,
-            session_dir=str(session_dir or ""),
-            mode=str(getattr(state, "enablement_mode", "") or ""),
-        ),
+        setting_script=setting_script,
     )

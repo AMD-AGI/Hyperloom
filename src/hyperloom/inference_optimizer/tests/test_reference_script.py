@@ -448,16 +448,15 @@ def test_resolve_no_flag_returns_empty(monkeypatch):
     """No --reference-script → empty tuple, nothing attempted."""
     monkeypatch.setenv("FRAMEWORK", "vllm")
     args = SimpleNamespace(reference_script=None)
-    assert _resolve_reference_recipe(args) == ("", {}, "", "", {})
+    assert _resolve_reference_recipe(args) == ("", {}, "", {})
 
 
 def test_resolve_valid_flag_is_used(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "vllm")
     src = _write(tmp_path, _M3_RECIPE, "explicit.sh")
     args = SimpleNamespace(reference_script=src)
-    server_args, envs, model, source, controls = _resolve_reference_recipe(args)
+    server_args, envs, model, controls = _resolve_reference_recipe(args)
     assert "--block-size 128" in server_args
-    assert source == src
 
 
 def test_resolve_unreadable_flag_raises_system_exit(monkeypatch):

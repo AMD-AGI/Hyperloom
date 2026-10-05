@@ -257,10 +257,10 @@ def test_the_ledger_is_one_event_however_many_phases_adopt_onto_it(tmp_path):
     assert [row["stack_index"] for row in events[0]["ext"]["adoptions"]["rows"]] == [0, 1, 2, 3]
 
 
-def test_rows_are_ordered_by_stack_position_not_by_arrival():
-    _adopt(2, "integrate", 120.0, 130.0)
-    _adopt(0, "explore", 100.0, 110.0)
-    _adopt(1, "explore", 110.0, 120.0)
+def test_rows_are_ordered_by_when_they_were_stacked_not_by_arrival():
+    _adopt(2, "integrate", 120.0, 130.0, ts="2026-01-01T00:00:03.000000+00:00")
+    _adopt(0, "explore", 100.0, 110.0, ts="2026-01-01T00:00:01.000000+00:00")
+    _adopt(1, "explore", 110.0, 120.0, ts="2026-01-01T00:00:02.000000+00:00")
 
     assert [row["stack_index"] for row in _rows()] == [0, 1, 2]
 
