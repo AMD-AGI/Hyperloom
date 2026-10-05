@@ -62,9 +62,12 @@ orchestration agent, per proposal or per written patch for a specialist, each
 another stance, is dropped where the agent's output enters the loop. A grid
 variant that asks for exactly the change a specialist proposed in the same
 macro-cycle also carries that specialist's proposal citations; one that changes
-the proposal carries only the orchestration agent's own. Proposal citations do
-not yet reach an attempt from a multi-node auto-materialized grid or from an
-upstream PR candidate. The
+the proposal carries only the orchestration agent's own. When the Coordinator
+benches untested specialist proposals itself, each grid row carries its
+proposal's whole reasoning and citations, and the grid's one proposal row holds
+every Experience the proposing specialists' reads showed, naming the read when
+a single one fed the grid. Proposal citations do not yet reach an attempt from
+an upstream PR candidate. The
 Experience carries its citations in `provenance.extra.experience_citations`;
 how often a cited Experience worked out is not stored on any record but
 derived by the KB that holds both.

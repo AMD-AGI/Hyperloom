@@ -454,6 +454,68 @@ def test_recorded_framework_attempts_satisfy_the_packaged_mapping(session_dir: P
     assert '"extra_server_args":"--already-kept 1"' in config["preconditions"][2]
 
 
+def test_an_auto_benched_specialist_proposal_publishes_its_reasoning_citations_and_read(session_dir: Path) -> None:
+    import asyncio
+
+    from hyperloom.orchestrator.actions.executors.explore import _decision_fields, _grid_variants_from_payload
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.shared_state.baseline_tput = 100.0
+    coord.phase_framework._open_framework_timeline()
+    shown = {"id": "exp-" + "a" * 32, "purpose": "representative"}
+    citation = {"id": shown["id"], "stance": "adopt", "claim": "FP8 KV cache kept on this model before."}
+    reasoning = "Decode is bandwidth bound at conc 64; an fp8 KV cache halves its traffic. " * 6
+    specialist = SimpleNamespace(
+        task_id="t-spec-1",
+        params={"domain": "serving_specialist", "kb_read_id": "read-specialist", "kb_rendered_refs": [shown]},
+    )
+    proposal = {"name": "fp8-kv", "extra_args": "--kv-cache-dtype fp8", "reason": reasoning}
+    entry = coord.specialist_dispatch.build_specialist_round_entry(
+        task=specialist,
+        done_payload={"proposal_set": [{**proposal, "experience_citations": [citation]}]},
+        source="specialist",
+    )
+    coord.shared_state.record_specialist_round(entry)
+
+    asyncio.run(coord.phase_framework._maybe_bench_untested_proposals())
+    [task] = [task for task in asyncio.run(coord.tasks.queued()) if task.kind == "explore"]
+    [variant] = _grid_variants_from_payload(task.params["grid"])
+    asyncio.run(
+        coord.writeback.fact_write_hook(
+            task=task,
+            result={
+                "round_id": "explore-auto-1",
+                "per_variant_outcomes": [
+                    {
+                        "variant_name": variant.name,
+                        "outcome": "REVERT",
+                        "reason": "gain_below_threshold",
+                        "fingerprint": "fp-auto",
+                        "metrics": {"base_tput": 100.0, "tput": 99.0, "gain_pct": -1.0},
+                        "variant": {"extra_server_args": variant.extra_server_args, **_decision_fields(variant)},
+                        "measured_against": {"throughput": 100.0, "extra_server_args": ""},
+                        "gates": [{"gate": "keep_threshold", "passed": False, "observed": -1.0, "threshold": 3.0}],
+                    }
+                ],
+            },
+            verdict=Verdict.REVERTED,
+        )
+    )
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
+    timeline = [event for event in read_timeline_events(session_dir) if event.get("type") == "framework_agent"]
+
+    report = kb_collect.collect(experience_collect.MAPPING, _document(timeline), dry_run=True).to_dict()
+
+    assert report["skipped"] == []
+    [row] = report["collected"]
+    experience = row["experience"]
+    assert experience["reasoning"] == reasoning.strip()
+    assert experience["rendered_refs"] == [shown]
+    assert experience["provenance"]["extra"]["experience_citations"] == [citation]
+    assert experience["provenance"]["extra"]["kb_read_id"] == "read-specialist"
+
+
 def test_a_specialists_config_only_deliverable_is_published_as_a_config_experience(session_dir: Path) -> None:
     import asyncio
 

@@ -6,6 +6,7 @@
 from __future__ import annotations
 import hashlib
 import logging as _logging
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Collection, Iterable, Mapping
@@ -415,6 +416,21 @@ def _record_kb_exposure(recorder: Any, proposal_id: str, params: Mapping[str, An
     refs = params.get("kb_rendered_refs") or []
     if read_id or refs:
         recorder.record_proposal(proposal_id, kb_read_id=read_id, rendered_refs=refs)
+
+
+def _kb_exposure_of(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """The KB exposure of a grid assembled from several specialists' proposals, for its one proposal row.
+
+    The row holds every Experience any of those reads showed. It names a read only when one read fed every proposal.
+    """
+    rows = list(rows)
+    read_ids = {str(row.get("kb_read_id") or "") for row in rows}
+    refs: dict[str, Any] = {}
+    for row in rows:
+        for ref in row.get("kb_rendered_refs") or []:
+            if isinstance(ref, Mapping) and str(ref.get("id") or "") not in refs:
+                refs[str(ref.get("id") or "")] = dict(ref)
+    return {"kb_read_id": read_ids.pop() if len(read_ids) == 1 else "", "kb_rendered_refs": list(refs.values())}
 
 
 def _record_source_attempt(
@@ -2735,15 +2751,20 @@ class FrameworkPhase(CoordinatorCollaborator):
                 "extra_envs": dict(row["extra_envs"]),
                 **controls_of(row),
                 "provenance": f"specialist:{row['domain']}",
-                "note": row["reason"][:200],
+                # The proposing specialist's whole reasoning and checked citations reach the measured Experience.
+                "reasoning": row["reason"],
+                **({"experience_citations": row["experience_citations"]} if row["experience_citations"] else {}),
             }
             for row in rows
         ]
         fp_hash = sha1(",".join(sorted(row["fingerprint"] for row in rows)).encode(), usedforsecurity=False)
+        # The grid's attempts join their proposal row through this id, as a proposed or delegated grid's do.
+        proposal_id = uuid.uuid4().hex
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": "auto_bench_untested_proposals",
             "grid": grid,
+            "proposal_msg_id": proposal_id,
         }
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path
@@ -2762,8 +2783,14 @@ class FrameworkPhase(CoordinatorCollaborator):
             lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )
-        if not was_existing:
-            log.info("auto_bench: enqueued explore task_id=%s (variants=%d)", etask.task_id, len(grid))
+        if was_existing:
+            return
+        log.info("auto_bench: enqueued explore task_id=%s (variants=%d)", etask.task_id, len(grid))
+        from ..loop.proposals import record_config_proposal
+
+        record_config_proposal(
+            self._coord, proposal_id, "explore", {"params": params, **_kb_exposure_of(rows)}, outcome="auto_bench"
+        )
 
     async def maybe_autosubmit_specialist_patches(
         self,

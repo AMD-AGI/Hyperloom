@@ -714,6 +714,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             "framework_batch_id",
             "reauthor_attempt",
             "apply_retry_attempt",
+            "kb_read_id",
+            "kb_rendered_refs",
         ):
             value = done_payload.get(key)
             if value in (None, "", [], {}):
