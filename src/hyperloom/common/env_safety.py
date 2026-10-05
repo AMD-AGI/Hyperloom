@@ -306,12 +306,53 @@ def is_secret_shaped_env_name(key: object) -> bool:
     return any(fragment in upper for fragment in _SECRET_NAME_FRAGMENTS)
 
 
+# Env-var name fragments whose value is masked before an env snapshot leaves this process. Shared with the Langfuse
+# session_start snapshot, which matches every marker as a substring.
+SENSITIVE_ENV_NAME_MARKERS: tuple[str, ...] = (
+    "SECRET",
+    "TOKEN",
+    "PASSWORD",
+    "PASSWD",
+    "PASSPHRASE",
+    "CREDENTIAL",
+    "PRIVATE_KEY",
+    "PRIVATEKEY",
+    "API_KEY",
+    "APIKEY",
+    "ACCESS_KEY",
+    "SECRET_KEY",
+    "AUTH",
+    "SIGNATURE",
+    "HEADERS",
+    "CUSTOM_HEADERS",
+)
+
+# As a substring TOKEN also hits tuning knobs (``MAX_NUM_BATCHED_TOKENS``, ``SGLANG_USE_AITER_FP8_PER_TOKEN``), so a
+# record of launch knobs treats it as a credential only as the last name segment, the shape the ``NAME=value`` text
+# pattern above uses.
+_SUBSTRING_MARKERS_EXCEPT_TOKEN: tuple[str, ...] = tuple(m for m in SENSITIVE_ENV_NAME_MARKERS if m != "TOKEN")
+_TOKEN_NAME_RE = re.compile(r"^(?:[A-Z0-9_]+_)?TOKEN(?:_\d+)?$")
+_PER_TOKEN_NAME_RE = re.compile(r"(?:^|_)PER_TOKEN(?:_\d+)?$")
+
+
+def _is_credential_env_name(key: object) -> bool:
+    upper = str(key or "").strip().upper()
+    if upper in BENCHMARK_SECRET_ENV_NAMES:
+        return True
+    if any(marker in upper for marker in _SUBSTRING_MARKERS_EXCEPT_TOKEN):
+        return True
+    return bool(_TOKEN_NAME_RE.match(upper)) and not _PER_TOKEN_NAME_RE.search(upper)
+
+
 def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, object]:
-    """Copy ``env`` with every credential's value masked, for a record that leaves this process."""
+    """Copy ``env`` with every credential's value masked, for a record that leaves this process.
+
+    A credential-shaped name is masked whole; any other string value is still scrubbed of recognizable credentials.
+    """
     return {
         key: "[REDACTED]"
-        if is_secret_shaped_env_name(key) or str(key).strip().upper() in BENCHMARK_SECRET_ENV_NAMES
-        else value
+        if _is_credential_env_name(key)
+        else (redact_secret_values(value) if isinstance(value, str) and value else value)
         for key, value in (env or {}).items()
     }
 
@@ -444,6 +485,7 @@ __all__ = [
     "BLOCKED_UNTRUSTED_ENV_NAMES",
     "BLOCKED_VARIANT_ENV_NAMES",
     "GPU_MASK_ENV_NAMES",
+    "SENSITIVE_ENV_NAME_MARKERS",
     "build_benchmark_env",
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",

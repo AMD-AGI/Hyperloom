@@ -171,9 +171,12 @@ treat the `objective.kind` enum as the canonical optimisation goal. Its
 `architecture` sub-object is the structural model summary parsed from the
 model's own `config.json`, and is empty on non-transformers models. Its
 `launch_env` keeps every operator-supplied variable name, but a credential's
-value (an API key, token, secret, password or custom-header variable) is
-written as `[REDACTED]`; replaying a session takes credentials from its own
-environment, never from the breakdown.
+value (an API key, secret, password, passphrase, private or access key, auth,
+signature or header variable, or a name ending in `TOKEN`) is written as
+`[REDACTED]`. Tuning knobs such as `MAX_NUM_BATCHED_TOKENS` or `*_PER_TOKEN`
+keep their values, with any recognizable credential inside a value masked.
+Replaying a session takes credentials from its own environment, never from the
+breakdown.
 
 `metadata.grading` — which axis this session was configured to grade on:
 `benchmark_mode` (`agentx` or `synthetic`), `objective`, and the `tput_guard`

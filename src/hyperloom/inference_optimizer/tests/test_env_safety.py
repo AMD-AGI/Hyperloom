@@ -156,6 +156,64 @@ def test_redact_secret_env_values_masks_credentials_and_keeps_knobs():
     assert common_env_safety.redact_secret_env_values(None) == {}
 
 
+def test_redact_secret_env_values_keeps_token_count_knobs_visible():
+    # TOKEN is a credential only as the last name segment, and never as PER_TOKEN.
+    knobs = {
+        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+        "AITER_PER_TOKEN_2": "1",
+        "MAX_NUM_BATCHED_TOKENS": "8192",
+        "VLLM_MAX_NUM_BATCHED_TOKENS": "8192",
+        "SGLANG_MAX_PREFILL_TOKENS": "16384",
+        "VLLM_TOKEN_BUDGET_RATIO": "0.5",
+        "TOKENIZERS_PARALLELISM": "false",
+        "TOKENIZER_MODE": "auto",
+    }
+
+    assert common_env_safety.redact_secret_env_values(knobs) == knobs
+
+
+def test_redact_secret_env_values_masks_every_langfuse_marker_and_scrubs_kept_values():
+    env = {
+        "HF_TOKEN": "plaintext",
+        "GITHUB_TOKEN": "plaintext",
+        "HUGGING_FACE_HUB_TOKEN": "plaintext",
+        "SERVICE_TOKEN_2": "plaintext",
+        "TOKEN": "plaintext",
+        "TOKENIZER_API_KEY": "plaintext",
+        "MY_SERVICE_API_KEY": "plaintext",
+        "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=plaintext",
+        "SGLANG_CUSTOM_HEADERS": "plaintext",
+        "SSH_PRIVATE_KEY": "plaintext",
+        "MINIO_ACCESS_KEY": "plaintext",
+        "AWS_SECRET_KEY": "plaintext",
+        "BASIC_AUTH": "plaintext",
+        "REQUEST_SIGNATURE": "plaintext",
+        "GPG_PASSPHRASE": "plaintext",
+        "DB_PASSWD": "plaintext",
+        # Kept by name, but a recognizable credential inside the value is still masked.
+        "EXTRA_ARGS": "--header Bearer abcdefghijklmnop",
+        "WORKERS": 4,
+    }
+
+    redacted = common_env_safety.redact_secret_env_values(env)
+
+    for name in env:
+        if name not in {"EXTRA_ARGS", "WORKERS"}:
+            assert redacted[name] == "[REDACTED]", name
+    assert redacted["EXTRA_ARGS"] == "--header Bearer [REDACTED]"
+    assert redacted["WORKERS"] == 4
+
+
+def test_langfuse_redact_env_markers_are_the_shared_list():
+    from hyperloom.inference_optimizer.trace import langfuse_mapping
+
+    assert langfuse_mapping._SENSITIVE_ENV_MARKERS is common_env_safety.SENSITIVE_ENV_NAME_MARKERS
+    # The Langfuse snapshot keeps its wider substring match.
+    assert langfuse_mapping.redact_env({"MAX_NUM_BATCHED_TOKENS": "8192"}) == {
+        "MAX_NUM_BATCHED_TOKENS": "***redacted***"
+    }
+
+
 def test_variant_env_key_allows_workload_pins_and_blocks_hijacks():
     # Sweep, conc-sweep and shape-capture grids set these from code, so an allowlist that dropped them would silently
     # flatten every variant.
