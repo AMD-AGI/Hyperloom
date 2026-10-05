@@ -45,6 +45,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     make_baseline_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+from hyperloom.inference_optimizer.grid_server_args import _repair_unquoted_json, _split_args_preserving_json
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from ...measurement.integrate_performance import assess_integrate_performance
@@ -498,10 +499,11 @@ def _is_insufficient_gpu_memory(*texts: str) -> bool:
     return any(m in blob for m in _GPU_PREOCCUPIED_MARKERS)
 
 
-# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm uses --enforce-eager.
+# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm uses
+# --compilation-config.cudagraph_mode NONE.
 _DISABLE_CUDA_GRAPH_FLAGS = {
     "sglang": "--disable-cuda-graph",
-    "vllm": "--enforce-eager",
+    "vllm": "--compilation-config.cudagraph_mode NONE",
 }
 
 
@@ -694,12 +696,104 @@ def _disable_cuda_graph_flag(framework: str) -> str:
     )
 
 
+def _json_with_field_set(blob: str, field: str, value: str) -> str | None:
+    """``blob`` with ``field`` set to ``value``, compact; ``None`` when it is not a JSON object."""
+    try:
+        config = json.loads(blob)
+    except json.JSONDecodeError:
+        repaired = _repair_unquoted_json(blob)
+        config = json.loads(repaired) if repaired is not None else None
+    if not isinstance(config, dict):
+        return None
+    if config.get(field) == value:
+        return blob
+    config[field] = value
+    return json.dumps(config, separators=(",", ":"))
+
+
+def _with_vllm_capture_disabled(args: str, flag: str) -> str:
+    """``args`` with vLLM's cudagraph mode forced off, keeping every other configured field.
+
+    vLLM collects every dotted ``--compilation-config.<field>`` into one dict and appends that
+    dict to argv LAST, so a dotted arg replaces a JSON-form ``--compilation-config`` outright --
+    every field, in either order, with no warning. Appending is therefore only correct when
+    there is no JSON form to lose; otherwise the field is merged into the existing object here.
+    """
+    option, off_value = flag.split()
+    config_option, field = option.split(".", 1)
+    tokens = _split_args_preserving_json(args)
+    if tokens is None:
+        # Unsplittable args hold no object we could identify to merge into.
+        return f"{args} {flag}".strip()
+    if "--enforce-eager" in tokens:
+        return args
+
+    def _value_of(idx: int) -> tuple[str, int | None]:
+        """The option's value and the index holding it (``None`` for the ``--flag=value`` form)."""
+        token = tokens[idx]
+        if "=" in token:
+            return token.split("=", 1)[1], None
+        return (tokens[idx + 1], idx + 1) if idx + 1 < len(tokens) else ("", None)
+
+    dotted_mode_idx: int | None = None
+    json_idx: int | None = None
+    has_other_dotted = False
+    for idx, token in enumerate(tokens):
+        name = token.split("=", 1)[0]
+        if name == option:
+            dotted_mode_idx = idx
+        elif name.startswith(f"{config_option}."):
+            has_other_dotted = True
+        elif name == config_option:
+            json_idx = idx
+
+    if dotted_mode_idx is not None:
+        value, value_idx = _value_of(dotted_mode_idx)
+        if value == off_value:
+            return args
+        if value_idx is None:
+            tokens[dotted_mode_idx] = f"{option}={off_value}"
+        else:
+            tokens[value_idx] = off_value
+        return " ".join(tokens)
+    if json_idx is None or has_other_dotted:
+        # Dotted fields merge with each other, and the operator's own dotted arg is already
+        # costing them any JSON form, so appending loses nothing that was not lost already.
+        return f"{args} {flag}".strip()
+
+    value, value_idx = _value_of(json_idx)
+    merged = _json_with_field_set(value, field, off_value)
+    if merged is None:
+        log.warning(
+            "baseline_executor: %s does not hold a JSON object, so capture is disabled by appending %s; "
+            "vLLM resolves the pair by discarding the existing value",
+            config_option,
+            flag,
+        )
+        return f"{args} {flag}".strip()
+    if merged == value:
+        return args
+    if value_idx is None:
+        tokens[json_idx] = f"{config_option}={merged}"
+    else:
+        tokens[value_idx] = merged
+    return " ".join(tokens)
+
+
 def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
-    """Append the framework-correct disable-cuda-graph flag once (idempotent)."""
+    """Return ``extra_server_args`` with cuda-graph capture disabled, once (idempotent).
+
+    Token-level dedup, so a longer flag (e.g. ``--disable-cuda-graph-extra``) is not mistaken
+    for an existing ``--disable-cuda-graph``. vLLM needs more than an append; see
+    ``_with_vllm_capture_disabled``.
+    """
+    args = extra_server_args or ""
     flag = _disable_cuda_graph_flag(framework)
-    if flag in (extra_server_args or "").split():
-        return extra_server_args or ""
-    return f"{extra_server_args} {flag}".strip()
+    if (framework or "").strip().lower() == "vllm":
+        return _with_vllm_capture_disabled(args, flag)
+    if flag in args.split():
+        return args
+    return f"{args} {flag}".strip()
 
 
 def _classify_subprocess_error(

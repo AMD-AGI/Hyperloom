@@ -23,6 +23,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 )
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
+    _with_cuda_graph_disabled,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -567,7 +568,7 @@ def test_baseline_eager_fallback_records_effective_task_args(tmp_path):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    assert "--enforce-eager" in ctx.task.params["extra_server_args"]
+    assert "--compilation-config.cudagraph_mode NONE" in ctx.task.params["extra_server_args"]
     assert shared_state.baseline_eager_fallback is False
 
 
@@ -932,3 +933,85 @@ def test_no_reference_recipe_is_a_no_op(tmp_path, monkeypatch):
     )
 
     assert _fw_args(materialized) == ""
+
+
+class TestWithCudaGraphDisabled:
+    """Turning capture off must not cost the operator the rest of their compilation config.
+
+    vLLM merges every dotted ``--compilation-config.<field>`` into one dict and appends it to
+    argv last, so a dotted arg replaces a JSON-form ``--compilation-config`` outright.
+    """
+
+    @pytest.mark.parametrize(
+        "args,expected",
+        [
+            ("", "--compilation-config.cudagraph_mode NONE"),
+            (
+                "--max-model-len 4096",
+                "--max-model-len 4096 --compilation-config.cudagraph_mode NONE",
+            ),
+            # The capture modes grid variants and KEEP candidates actually carry.
+            (
+                '--compilation-config {"cudagraph_mode":"FULL"}',
+                '--compilation-config {"cudagraph_mode":"NONE"}',
+            ),
+            (
+                '--compilation-config={"cudagraph_mode":"PIECEWISE"}',
+                '--compilation-config={"cudagraph_mode":"NONE"}',
+            ),
+            # Every sibling field survives the merge.
+            (
+                '--compilation-config {"level":3,"cudagraph_mode":"FULL","cudagraph_capture_sizes":[1,2]}',
+                '--compilation-config {"level":3,"cudagraph_mode":"NONE","cudagraph_capture_sizes":[1,2]}',
+            ),
+            (
+                '--compilation-config {"cudagraph_capture_sizes":[17,34]} --port 8888',
+                '--compilation-config {"cudagraph_capture_sizes":[17,34],"cudagraph_mode":"NONE"} --port 8888',
+            ),
+            # Dotted args merge with each other, so appending is safe there.
+            (
+                "--compilation-config.level 3",
+                "--compilation-config.level 3 --compilation-config.cudagraph_mode NONE",
+            ),
+            ("--compilation-config.cudagraph_mode FULL", "--compilation-config.cudagraph_mode NONE"),
+            ("--compilation-config.cudagraph_mode=FULL", "--compilation-config.cudagraph_mode=NONE"),
+        ],
+    )
+    def test_vllm_capture_is_disabled_without_dropping_fields(self, args, expected):
+        assert _with_cuda_graph_disabled(args, "vllm") == expected
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            '--compilation-config {"cudagraph_mode":"NONE"}',
+            "--compilation-config.cudagraph_mode NONE",
+            # --enforce-eager forces cudagraph_mode=NONE in vLLM, so capture is already off.
+            '--enforce-eager --compilation-config {"level":3}',
+        ],
+    )
+    def test_vllm_leaves_already_captureless_args_alone(self, args):
+        assert _with_cuda_graph_disabled(args, "vllm") == args
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            "",
+            "--max-model-len 4096",
+            '--compilation-config {"cudagraph_mode":"FULL"}',
+            "--compilation-config.level 3",
+            '--compilation-config {"level":3} --compilation-config.cudagraph_mode FULL',
+        ],
+    )
+    def test_is_idempotent(self, args):
+        once = _with_cuda_graph_disabled(args, "vllm")
+        assert _with_cuda_graph_disabled(once, "vllm") == once
+
+    def test_sglang_flag_is_appended_once(self):
+        assert _with_cuda_graph_disabled("", "sglang") == "--disable-cuda-graph"
+        assert _with_cuda_graph_disabled("--disable-cuda-graph", "sglang") == "--disable-cuda-graph"
+
+    def test_sglang_longer_flag_is_not_mistaken_for_the_flag(self):
+        assert (
+            _with_cuda_graph_disabled("--disable-cuda-graph-extra", "sglang")
+            == "--disable-cuda-graph-extra --disable-cuda-graph"
+        )
