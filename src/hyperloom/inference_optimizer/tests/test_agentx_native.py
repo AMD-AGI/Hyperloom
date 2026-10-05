@@ -624,9 +624,14 @@ def test_native_execution_identity_binds_and_rejects_runners_yaml(
         )
 
 
-def test_recipe_resolution_uses_benchmark_interpreter(tmp_path, monkeypatch):
+@pytest.mark.parametrize("layout", [".", "inferencex-e2e"])
+def test_recipe_resolution_uses_benchmark_interpreter_and_persists_project_root(tmp_path, monkeypatch, layout):
     from hyperloom.orchestrator.actions.executors import benchmark_backend
 
+    project = tmp_path / layout
+    (project / "benchmarks").mkdir(parents=True)
+    (project / "benchmarks/srt_agentic.sh").write_text("#!/bin/bash\n")
+    (project / "benchmarks/benchmark_lib.sh").write_text("#!/bin/bash\n")
     seen = {}
     monkeypatch.setattr(
         benchmark_backend,
@@ -652,12 +657,13 @@ def test_recipe_resolution_uses_benchmark_interpreter(tmp_path, monkeypatch):
 
     monkeypatch.setattr(native_agentx.subprocess, "run", _run)
     result = native_agentx._run_magpie_recipe_resolver(
-        {"framework": "sglang"},
+        {"framework": "sglang", "inferencex_path": str(tmp_path)},
         inferencex_path=tmp_path,
     )
 
     assert seen["cmd"][0] == "/opt/benchmark/bin/python"
-    assert seen["payload"]["inferencex_path"] == str(tmp_path)
+    assert seen["payload"]["inferencex_path"] == str(project)
+    assert seen["payload"]["benchmark"]["inferencex_path"] == str(project)
     assert result["recipe"] == "recipe-a"
 
 

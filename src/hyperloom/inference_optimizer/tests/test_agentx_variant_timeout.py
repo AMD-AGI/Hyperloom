@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The benchmark launch synchronizes inner and outer caps for every workload."""
+"""Benchmark watchdog policy preserves fixed native workload identities."""
 
 from __future__ import annotations
 
@@ -10,6 +10,30 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors._grid_runner import sync_benchmark_timeout
 from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
+
+
+@pytest.mark.parametrize("agentx", [{"enabled": True}, {"enabled": True, "launch_overrides": {"version": 1}}])
+def test_native_watchdog_does_not_rewrite_fingerprinted_config(tmp_path, agentx):
+    from hyperloom.inference_optimizer.agentx.identity import native_workload_fingerprint, verified_workload_fingerprint
+
+    benchmark = {
+        "framework": "sglang",
+        "agentx": agentx,
+        "timeout_seconds": 7200,
+        "envs": {"CONC": 8},
+    }
+    fingerprint = native_workload_fingerprint(benchmark, "a" * 64)
+    benchmark["workload_spec"] = {
+        "execution": {"static_execution_fingerprint": "a" * 64, "workload_fingerprint": fingerprint}
+    }
+    path = tmp_path / "native.yaml"
+    path.write_text(yaml.safe_dump({"benchmark": benchmark}))
+    original = path.read_bytes()
+
+    sync_benchmark_timeout(path, 7800.0)
+
+    assert path.read_bytes() == original
+    assert verified_workload_fingerprint(yaml.safe_load(path.read_text())["benchmark"]) == fingerprint
 
 
 @pytest.mark.parametrize("declared", [1800, 2400, 36000])

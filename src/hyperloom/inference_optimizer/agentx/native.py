@@ -554,7 +554,7 @@ def _run_magpie_recipe_resolver(
     interpreter = resolve_benchmark_interpreter()
     payload = json.dumps(
         {
-            "benchmark": dict(benchmark),
+            "benchmark": {**benchmark, "inferencex_path": str(inferencex_path)},
             "inferencex_path": str(inferencex_path),
         }
     )

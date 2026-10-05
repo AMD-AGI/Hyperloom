@@ -800,9 +800,15 @@ def _prepend_magpie_pythonpath(magpie_dir: str, current_pythonpath: str) -> str:
 
 
 def sync_benchmark_timeout(config_path: Path, timeout_sec: float) -> None:
-    """Give Magpie and bypass the same cap as the enclosing benchmark process."""
+    """Sync ordinary benchmark caps; native configs retain their fixed identity."""
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     bench = cfg["benchmark"]
+    from hyperloom.inference_optimizer.agentx.native import native_agentx_enabled
+
+    if native_agentx_enabled(bench.get("agentx")):
+        # The subprocess watchdog still enforces timeout_sec. Mutating the
+        # resolved config here would invalidate its workload and recipe hashes.
+        return
     bench["timeout_seconds"] = timeout_sec
     if bench.get("server_lifecycle"):
         bench["server_lifecycle"]["server_ready_timeout_s"] = timeout_sec
@@ -905,7 +911,8 @@ def _run_magpie(
     # RESULT_DIR default; leaks are picked up by the salvage path.
     env["RESULT_DIR"] = result_dir or str(output_dir)
     # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing lm-eval output.
-    env["EVAL_RESULT_DIR"] = str(Path(env["RESULT_DIR"]) / "eval_output")
+    if not native_agentx:
+        env["EVAL_RESULT_DIR"] = str(Path(env["RESULT_DIR"]) / "eval_output")
     # Pin SERVER_LOG / GPU_METRICS_CSV per-task so logs land alongside ``benchmark_report.json``.
     env["SERVER_LOG"] = str(output_dir / "server.log")
     env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")

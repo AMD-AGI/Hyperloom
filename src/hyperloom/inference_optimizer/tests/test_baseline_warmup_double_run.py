@@ -1773,6 +1773,44 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
     assert "[REDACTED]" in result["error"]
 
 
+@pytest.mark.parametrize(
+    "protocol_errors", [[], ["materialized_config_snapshot_mismatch", "recipe_fingerprint_mismatch"]]
+)
+def test_baseline_invalid_measurement_reports_native_protocol_reasons(tmp_path, protocol_errors):
+    """Positive metrics with invalid native identity must report the rejected protocol."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+
+    def fake_run(cmd, **kwargs):
+        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]), tput=264.26)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    measurement = {
+        "valid_measurement": False,
+        "reported_success": True,
+        "throughput": 264.26,
+        "completed_requests": 1196,
+        "native_agentx_protocol_errors": protocol_errors,
+    }
+    executor = _executor(base, tmp_path, baseline_double_run=False)
+    ctx = _make_ctx({"output_dir": str(tmp_path / "output"), "timeout_sec": 10, "gpu_type": "mi300x"})
+    with (
+        patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run),
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.extract_benchmark_measurement", return_value=measurement
+        ),
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "invalid_measurement"
+    assert result["reported_success"] is True
+    if protocol_errors:
+        assert result["error"] == "native AgentX report failed protocol validation: " + "; ".join(protocol_errors)
+    else:
+        assert result["error"] == "benchmark report did not contain positive throughput and completed requests"
+
+
 def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
     """A stale server.log death marker in a reused output_dir must NOT bias a fresh attempt's classification."""
     base = tmp_path / "base.yaml"

@@ -35,6 +35,7 @@ from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import now_iso
 from hyperloom.common.agentx_mode import (
+    config_enables_native_agentx,
     managed_native_agentx_session,
     native_agentx_optimization_session,
     native_agentx_session,
@@ -3528,25 +3529,6 @@ class BenchmarkRunExecutor:
             output_dir=output_dir,
         )
         env = scrub_benchmark_process_env(os.environ.copy())
-        try:
-            from hyperloom.inference_optimizer.agentx.runtime import (
-                maybe_prepare_agentx,
-            )
-
-            maybe_prepare_agentx(
-                env=env,
-                inferencex_path=inferencex_path,
-                config_path=config_path,
-                allow_profile_compat=self.allow_agentx_profile_compat,
-            )
-        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-            return {
-                "status": "failed",
-                "error_class": AGENTX_PREFLIGHT_ERROR_CLASS,
-                "error": (f"AgentX launch-boundary validation failed: {type(exc).__name__}: {exc}"),
-                "output_dir": str(output_dir),
-                "materialized_config": str(materialized_config_path),
-            }
         # Put the venv first in PATH so the benchmark script's `python3` resolves to one with torch+rocm (defense in
         # depth vs Magpie YAML).
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
@@ -3566,7 +3548,8 @@ class BenchmarkRunExecutor:
             "run_eval_disabled": bool(run_eval_disabled),
         }
         # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing lm-eval output.
-        env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
+        if not config_enables_native_agentx(config_path):
+            env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
         # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into the task workspace;
         # ``harvest_leaked_artifacts`` is the defense-in-depth net.
         env["SERVER_LOG"] = str(output_dir / "server.log")
@@ -3603,6 +3586,25 @@ class BenchmarkRunExecutor:
             silence_timeout_sec, timeout_sec = resolve_benchmark_timeouts()
             env["PYTHONUNBUFFERED"] = "1"
             sync_benchmark_timeout(config_path, timeout_sec)
+        try:
+            from hyperloom.inference_optimizer.agentx.runtime import (
+                maybe_prepare_agentx,
+            )
+
+            maybe_prepare_agentx(
+                env=env,
+                inferencex_path=inferencex_path,
+                config_path=config_path,
+                allow_profile_compat=self.allow_agentx_profile_compat,
+            )
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            return {
+                "status": "failed",
+                "error_class": AGENTX_PREFLIGHT_ERROR_CLASS,
+                "error": (f"AgentX launch-boundary validation failed: {type(exc).__name__}: {exc}"),
+                "output_dir": str(output_dir),
+                "materialized_config": str(materialized_config_path),
+            }
         if not ctx_extra.get("mn_round_restarted"):
             try:
                 # Merge the reference base UNDER the per-task args (last-wins) so a multi-node per-round restart
@@ -4032,7 +4034,12 @@ class BenchmarkRunExecutor:
                 error = f"benchmark_report.json missing under {workspace}"
             else:
                 error_class = "invalid_measurement"
-                error = "benchmark report did not contain positive throughput and completed requests"
+                protocol_errors = measurement.get("native_agentx_protocol_errors") or []
+                error = (
+                    "native AgentX report failed protocol validation: " + "; ".join(protocol_errors)
+                    if protocol_errors
+                    else "benchmark report did not contain positive throughput and completed requests"
+                )
             error = redact_secret_values(error)
             return {
                 "status": "failed",
