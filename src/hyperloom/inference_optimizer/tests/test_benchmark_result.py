@@ -437,6 +437,117 @@ def _native_aiperf_path(workspace: Path) -> Path:
     return workspace / "aiperf_artifacts" / "profile_export_aiperf.json"
 
 
+def _write_native_request_accounting(workspace, *, successful, dropped, warmup, errors, measured_errors):
+    _write_native_config_snapshot(workspace)
+    total = successful + dropped
+    accounting = {
+        "records_total": total,
+        "records_profiled": successful,
+        "records_dropped_total": dropped,
+        "records_warmup_dropped": warmup,
+        "records_error_dropped": errors,
+        "error_categories": {"InvalidInferenceResultError": errors} if errors else {},
+    }
+    raw = _native_raw()
+    raw.update(num_requests_total=total, num_requests_successful=successful, request_accounting=accounting)
+    (workspace / "inferencex_result.json").write_text(json.dumps(raw), encoding="utf-8")
+    artifact = _native_aiperf_path(workspace)
+    aiperf = json.loads(artifact.read_text(encoding="utf-8"))
+    aiperf["request_count"]["avg"] = float(successful)
+    artifact.write_text(json.dumps(aiperf), encoding="utf-8")
+    report = _native_agentx_report()
+    report["throughput"]["completed_requests"] = successful
+    report["agentx_metrics"]["request_accounting"] = accounting
+    report["agentx_metrics"]["requests"] = {
+        "total": total,
+        "records_total": total,
+        "profiled_total": successful + measured_errors,
+        "successful": successful,
+        "errors": measured_errors,
+        "warmup_dropped": warmup,
+        "error_rate": measured_errors / (successful + measured_errors),
+        "threshold": 0.1,
+    }
+    return report
+
+
+@pytest.mark.parametrize(
+    ("successful", "dropped", "warmup", "errors", "measured_errors"),
+    [
+        (1279, 87, 87, 1, 0),  # The real GPU run: one warmup error, no measured errors.
+        (100, 13, 10, 5, 3),  # Two warmup errors and three measured errors.
+        (100, 12, 10, 2, 2),  # Every error belongs to the measurement phase.
+        (100, 2, 0, 2, 2),
+    ],
+)
+def test_native_agentx_protocol_counts_only_measured_errors(
+    tmp_path, monkeypatch, successful, dropped, warmup, errors, measured_errors
+):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    report = _write_native_request_accounting(
+        tmp_path,
+        successful=successful,
+        dropped=dropped,
+        warmup=warmup,
+        errors=errors,
+        measured_errors=measured_errors,
+    )
+
+    measurement = extract_benchmark_measurement(report, workspace=tmp_path)
+
+    assert measurement["valid_measurement"] is True
+    assert measurement["native_agentx_protocol_errors"] == []
+    assert measurement["request_error_rate"] == pytest.approx(100 * measured_errors / (successful + measured_errors))
+    assert measurement["agentx_request_accounting"]["records_error_dropped"] == errors
+
+
+@pytest.mark.parametrize("reported_errors", [0, 5])
+def test_native_agentx_protocol_rejects_erased_or_warmup_inflated_errors(tmp_path, monkeypatch, reported_errors):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    report = _write_native_request_accounting(
+        tmp_path, successful=100, dropped=13, warmup=10, errors=5, measured_errors=reported_errors
+    )
+
+    measurement = extract_benchmark_measurement(report, workspace=tmp_path)
+
+    assert measurement["valid_measurement"] is False
+    assert {
+        "report_profiled_total_mismatch",
+        "report_error_count_mismatch",
+        "report_error_rate_mismatch",
+    } <= set(measurement["native_agentx_protocol_errors"])
+
+
+@pytest.mark.parametrize(("dropped", "warmup", "errors"), [(9, 10, 1), (10, 9, 11), (13, 10, 2)])
+def test_native_agentx_protocol_rejects_impossible_warmup_error_union(tmp_path, monkeypatch, dropped, warmup, errors):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    report = _write_native_request_accounting(
+        tmp_path, successful=100, dropped=dropped, warmup=warmup, errors=errors, measured_errors=0
+    )
+
+    measurement = extract_benchmark_measurement(report, workspace=tmp_path)
+
+    assert measurement["valid_measurement"] is False
+    assert "request_accounting_drop_bounds_mismatch" in measurement["native_agentx_protocol_errors"]
+
+
+def test_native_agentx_protocol_keeps_all_phase_error_category_validation(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    report = _write_native_request_accounting(
+        tmp_path, successful=100, dropped=13, warmup=10, errors=5, measured_errors=3
+    )
+    report["agentx_metrics"]["request_accounting"]["error_categories"] = {"InvalidInferenceResultError": 3}
+    raw_path = tmp_path / "inferencex_result.json"
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    raw["request_accounting"] = report["agentx_metrics"]["request_accounting"]
+    raw_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    measurement = extract_benchmark_measurement(report, workspace=tmp_path)
+
+    assert measurement["valid_measurement"] is False
+    assert "request_accounting_error_categories_mismatch" in measurement["native_agentx_protocol_errors"]
+
+
 @pytest.mark.parametrize(
     ("median", "tail", "output", "duration", "error_rate", "verdict"),
     [

@@ -21,6 +21,7 @@ import yaml
 from hyperloom.common.coerce import first_float, first_int, to_float, to_int
 from hyperloom.common.jsonio import read_json
 
+from ._agentx_accounting import measured_request_errors
 from ._gpu_metrics import write_gpu_metrics
 
 log = logging.getLogger(__name__)
@@ -1312,10 +1313,8 @@ def _validate_native_agentx_protocol(
             reject("request_accounting_total_mismatch")
         if records_profiled <= 0:
             reject("request_accounting_empty")
-        # InferenceX drops the union of warmup and error rows. A row may be in
-        # both sets, so their sum need not equal records_dropped_total, but the
-        # union is bounded by max(counts) and sum(counts).
-        if not max(records_warmup, records_errors) <= records_dropped <= (records_warmup + records_errors):
+        measured_errors = measured_request_errors(accounting)
+        if measured_errors is None:
             reject("request_accounting_drop_bounds_mismatch")
         error_categories = accounting.get("error_categories")
         if not isinstance(error_categories, dict):
@@ -1340,23 +1339,24 @@ def _validate_native_agentx_protocol(
             reject("report_request_total_mismatch")
         if strict_non_negative_int(report_requests.get("records_total")) != records_total:
             reject("report_records_total_mismatch")
-        if strict_non_negative_int(report_requests.get("profiled_total")) != (successful + records_errors):
-            reject("report_profiled_total_mismatch")
-        if strict_non_negative_int(report_requests.get("errors")) != records_errors:
-            reject("report_error_count_mismatch")
         if strict_non_negative_int(report_requests.get("warmup_dropped")) != records_warmup:
             reject("report_warmup_count_mismatch")
-        error_rate_denominator = successful + records_errors
-        report_error_rate = strict_number(report_requests.get("error_rate"))
-        if error_rate_denominator <= 0:
-            reject("report_error_rate_invalid")
-        elif report_error_rate is None or not math.isclose(
-            report_error_rate,
-            records_errors / error_rate_denominator,
-            rel_tol=1e-12,
-            abs_tol=1e-12,
-        ):
-            reject("report_error_rate_mismatch")
+        if measured_errors is not None:
+            if strict_non_negative_int(report_requests.get("profiled_total")) != (successful + measured_errors):
+                reject("report_profiled_total_mismatch")
+            if strict_non_negative_int(report_requests.get("errors")) != measured_errors:
+                reject("report_error_count_mismatch")
+            error_rate_denominator = successful + measured_errors
+            report_error_rate = strict_number(report_requests.get("error_rate"))
+            if error_rate_denominator <= 0:
+                reject("report_error_rate_invalid")
+            elif report_error_rate is None or not math.isclose(
+                report_error_rate,
+                measured_errors / error_rate_denominator,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            ):
+                reject("report_error_rate_mismatch")
 
     request_metrics = raw.get("request_metrics")
     request_metrics = request_metrics if isinstance(request_metrics, dict) else {}

@@ -20,6 +20,8 @@ from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.common.io import safe_mtime
 from hyperloom.common.perf_metric import is_agentx_mode
 
+from ._agentx_accounting import measured_request_errors
+
 log = logging.getLogger(__name__)
 
 ACCURACY_THRESHOLD = 0.05  # allowed deviation
@@ -394,8 +396,17 @@ def _parse_agentx_error_gate(
 
         accounting = data.get("request_accounting")
         if isinstance(accounting, dict):
-            errors = accounting.get("records_error_dropped")
+            errors = measured_request_errors(accounting)
             successful = data.get("num_requests_successful")
+            if "records_dropped_total" in accounting:
+                dropped = accounting["records_dropped_total"]
+                total = data.get("num_requests_total")
+                if (
+                    errors is None
+                    or not all(type(value) is int and value >= 0 for value in (successful, dropped, total))
+                    or successful + dropped != total
+                ):
+                    return None, None
             if (
                 isinstance(errors, (int, float))
                 and not isinstance(errors, bool)
