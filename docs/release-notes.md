@@ -39,7 +39,7 @@ is a patch release on top of 1.1.2. The per-change history is on the
   retain their measurement-only contract. No historical baseline or KEEP is
   migrated. Unsupported or ambiguous recipes fail before measurement. The
   pinned pair is Magpie v0.3.0 plus native launch overrides, custom-model replay, and the eval source-path fix at commit
-  `c5c80698fef1b89cc6882264b80d5b306d4e9328` and InferenceX commit
+  `63e3b19bee66700dbb012c538f121c9de0d86a2a` and InferenceX commit
   `408c015be4b22d14c69518643609669405507077`. Both dependencies are pinned by
   immutable commit for reproducible AgentX measurements. The upstream hotfix
   keeps generic GSM8K evaluation and its probe files reachable after benchmark

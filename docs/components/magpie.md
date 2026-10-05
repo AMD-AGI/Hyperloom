@@ -42,7 +42,7 @@ Each run produces a `benchmark_report.json` that Hyperloom parses to extract
 throughput/measurements and pick winners. Hyperloom pins the Magpie
 [v0.3.0 release](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) plus native launch overrides, custom-model replay, and the
 generic eval source-path fix at immutable commit
-`c5c80698fef1b89cc6882264b80d5b306d4e9328`. The hotfix keeps evaluation scripts
+`63e3b19bee66700dbb012c538f121c9de0d86a2a`. The hotfix keeps evaluation scripts
 bound to their intended InferenceX source after directory changes. The launch extensions are pinned development commits rather than a new Magpie
 release. Earlier GPU validation used the v0.3.0 release commit and does not
 validate these extensions; their source and wheel share an audited execution tree.
@@ -79,3 +79,6 @@ for the example and current optimization limitations, and
 ## Magpie documentation
 
 For detailed documentation on Magpie, see [Magpie on ROCm Docs](https://rocm.docs.amd.com/projects/magpie/en/latest/).
+
+The pinned generic serving path also supplies InferenceX evaluation defaults (`EVAL_ONLY=false`,
+`IS_AGENTIC=0`, and a local placeholder API key), preserving explicitly configured values.

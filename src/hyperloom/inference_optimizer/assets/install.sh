@@ -188,7 +188,7 @@ MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # Operators can re-pin with MAGPIE_REF=<tag|sha>. Generic benchmarks keep the
 # importability contract; native AgentX additionally requires the audited
 # source identity and recipe-fingerprint capabilities.
-MAGPIE_REF="${MAGPIE_REF:-c5c80698fef1b89cc6882264b80d5b306d4e9328}"
+MAGPIE_REF="${MAGPIE_REF:-63e3b19bee66700dbb012c538f121c9de0d86a2a}"
 MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
 
 # aiperf (SemiAnalysis AgentX benchmark client) — pinned to an immutable commit

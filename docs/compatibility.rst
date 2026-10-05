@@ -98,7 +98,7 @@ The following table lists the validated Hyperloom version and component combinat
    The base benchmark path remains compatible with Magpie 0.2.0. The pinned
    native AgentX pair is `Magpie v0.3.0
    <https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0>`_ plus native launch overrides, custom-model replay, and the eval
-   source-path fix at commit ``c5c80698fef1b89cc6882264b80d5b306d4e9328`` and InferenceX commit
+   source-path fix at commit ``63e3b19bee66700dbb012c538f121c9de0d86a2a`` and InferenceX commit
    ``408c015be4b22d14c69518643609669405507077``. Pass the Magpie YAML with
    ``--benchmark-config``; its ``benchmark.agentx: enable`` source switch
    automatically selects Hyperloom's persisted AgentX session and grading mode.
