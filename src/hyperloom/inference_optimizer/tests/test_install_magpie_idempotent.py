@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 IO_INSTALL = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "install.sh"
 PREFLIGHT = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "cli" / "preflight.py"
 
-MAGPIE_AGENTX_COMMIT = "63e3b19bee66700dbb012c538f121c9de0d86a2a"
+MAGPIE_AGENTX_COMMIT = "938bfd7a9bc1f3970f3fbce8b65ad88a8e0958f5"
 
 PIP_MARKER = "pip-install-called"
 
