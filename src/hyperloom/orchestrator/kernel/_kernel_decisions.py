@@ -887,7 +887,7 @@ def untried_hot_reusable_kernels(
     min_gpu_pct: float | None = None,
     top_n: int | None = None,
 ) -> list[str]:
-    """Hot kernels still owing a ``kernel_opt`` attempt (reusable, gpu_pct >= min_gpu_pct, untouched); capped to top_n by gpu_pct, one kernel_id per task_group."""
+    """Hot kernels still owing a ``kernel_opt`` attempt (reusable, gpu_pct >= min_gpu_pct, untouched); capped to top_n by TraceLens rank, one kernel_id per task_group."""
     info = state.last_trace_analyze or {}
     hot = info.get("hot_kernels_top15") or info.get("hot_kernels") or []
     task_groups = info.get("task_groups") or []
@@ -934,8 +934,9 @@ def untried_hot_reusable_kernels(
     _ensure_kernel_task_state(state)
     attempts = state.kernel_opt_task_attempts or {}
 
-    # Sort by gpu_pct desc so dedup picks the strongest member of each task_group.
-    rows: list[tuple[float, str, str, list[str], str, tuple[str, str, float]]] = []
+    # TraceLens' order: task priority, then member impact. Rows it never ranked (bypass route, injected collectives)
+    # follow in emitted order under their own top_n, so they cannot fall behind TraceLens' cap.
+    rows: list[tuple[tuple[bool, int, float], str, str, list[str], str, tuple[str, str, float]]] = []
     for k in hot:
         if not isinstance(k, dict):
             continue
@@ -962,10 +963,12 @@ def untried_hot_reusable_kernels(
         group_key = group_info[1] if group_info else ""
         # Identity of the underlying kernel, independent of the synthetic per-row kernel_id.
         identity = (src, str(k.get("name") or k.get("operation") or ""), gpu_pct)
-        rows.append((gpu_pct, kid, src, members, group_key, identity))
-    rows.sort(key=lambda x: x[0], reverse=True)
+        rank = int(k.get("tracelens_pitem_rank") or 0)
+        order = (rank <= 0, rank, -float(k.get("impact_score") or 0.0))
+        rows.append((order, kid, src, members, group_key, identity))
+    rows.sort(key=lambda x: x[0])
 
-    ranked: list[tuple[float, str, str, list[str], str, tuple[str, str, float]]] = []
+    ranked: list[tuple[tuple[bool, int, float], str, str, list[str], str, tuple[str, str, float]]] = []
     seen_groups: set[str | tuple[str, ...]] = set()
     seen_identities: set[tuple[str, str, float]] = set()
     for row in rows:
@@ -982,7 +985,7 @@ def untried_hot_reusable_kernels(
             seen_identities.add(identity)
         seen_groups.add(dedup_key)
         ranked.append(row)
-    ranked = ranked[:top_n]
+    ranked = [r for r in ranked if not r[0][0]][:top_n] + [r for r in ranked if r[0][0]][:top_n]
 
     untried: list[str] = []
 
@@ -1032,7 +1035,7 @@ def untried_hot_reusable_kernels(
         recorded_source = str(attempt.get("last_source_file") or "")
         return not source or not recorded_source or source == recorded_source
 
-    for _pct, kid, src, members, group_key, _identity in ranked:
+    for _order, kid, src, members, group_key, _identity in ranked:
         if members and all(
             _member_is_rejected(member) and _matches_current_task(member, group_key, src) for member in members
         ):
