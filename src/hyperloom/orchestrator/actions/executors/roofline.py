@@ -947,6 +947,11 @@ class RooflineExecutor:
         # Inline-promote only the profile fields trace_analyze needs.
         self.shared_state.last_profile_trace = str(trace_path)
         self.shared_state.last_profile_status = "succeeded"
+        _trace_validate = (profile_result or {}).get("trace_validate") or {}
+        self.shared_state.last_profile_phase_coverage = {
+            "partial": bool(_trace_validate.get("phase_coverage_partial")),
+            "missing": str(_trace_validate.get("phase_coverage_missing") or ""),
+        }
         self.shared_state.record_profile_workload(
             successful_profile_params or ctx.task.params or {},
             arm=roofline_arm,
