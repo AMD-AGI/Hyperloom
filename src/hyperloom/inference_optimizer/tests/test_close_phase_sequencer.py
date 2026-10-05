@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.deadline import Deadline
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.breakdown.collectors.v6_close import collect_v6_close
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event
@@ -1096,7 +1097,9 @@ class TestEveryTerminalReachesAWrittenReport:
 
         monkeypatch.setattr(coord.phase_close, "on_enter_close", _slow_close)
         try:
-            coord._closing_deadline = await coord.phase_close.enter_closing_phase(grace_sec=0.1)
+            await coord.phase_close.enter_closing_phase(grace_sec=0.5)
+            # Measured from here, so the entry's own writes do not spend the window under test.
+            coord._closing_deadline = Deadline.after(0.5)
             await coord.await_within_session_bound(coord.phase_machine.advance_phase_if_needed, stage="advance_phase")
             assert cancelled.is_set()
             assert coord.shared_state.close_sequence_done is False
