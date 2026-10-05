@@ -1221,19 +1221,117 @@ def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
         print(f"Preflight: WARNING — pinned lm_eval via {source} failed; falling back")
 
 
+def _resumed_session_state(args: argparse.Namespace | None) -> dict[str, Any] | None:
+    """The persisted ``state.json`` of the session ``--resume-from`` names, or ``None``.
+
+    Preflight runs before the resume block loads the session, so anything preflight decides from a session-pinned
+    setting has to read it here. ``None`` (no session named, or no readable state) leaves the decision to the flags;
+    the resume block reports a missing or unreadable state itself.
+    """
+    raw = str(getattr(args, "resume_from", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        state = json.loads((Path(raw).expanduser() / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
 def _resolved_eval_disabled(args: argparse.Namespace) -> bool:
     """Effective ``--no-eval`` for this launch, flag or persisted."""
     if bool(getattr(args, "no_eval", False)):
         return True
+    state = _resumed_session_state(args)
+    return bool(state and state.get("eval_disabled"))
+
+
+def _supported_framework_names() -> tuple[str, ...]:
+    """The framework names ``--framework`` accepts (the framework registry)."""
+    from hyperloom.inference_optimizer import framework_registry
+
+    return tuple(framework_registry.names())
+
+
+def _refuse_resume_without_state(args: argparse.Namespace) -> None:
+    """Refuse, before any install step, a resume of a session whose first launch never wrote ``state.json``.
+
+    The resume block refuses such a session ("Coordinator never wrote SharedState"), but it runs after preflight, which
+    would otherwise check the default framework and fail on that instead of on the real reason. The framework the
+    session was created with is read from ``manifest.json`` only to name it in the refusal, and only if it is a
+    registered framework name (the manifest lives on shared storage too). A missing session directory or manifest is
+    left to the resume block, which reports those itself.
+    """
     raw = str(getattr(args, "resume_from", "") or "").strip()
     if not raw:
-        return False
-    resumed = Path(raw).expanduser()
+        return
+    session_dir = Path(raw).expanduser()
+    if not (session_dir / "manifest.json").is_file() or (session_dir / "state.json").exists():
+        return
     try:
-        state = json.loads((resumed / "state.json").read_text(encoding="utf-8"))
+        manifest = json.loads((session_dir / "manifest.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
-    return bool(state.get("eval_disabled"))
+        manifest = None
+    raw_framework = manifest.get("framework") if isinstance(manifest, dict) else None
+    framework = raw_framework.strip().lower() if isinstance(raw_framework, str) else ""
+    supported = _supported_framework_names()
+    if framework in supported:
+        hint = f"Start a fresh session with --framework {framework} instead."
+    elif raw_framework not in (None, ""):
+        hint = (
+            f"Its manifest.json records --framework {raw_framework!r}, which is not a supported framework "
+            f"({', '.join(supported)}). Start a fresh session instead."
+        )
+    else:
+        hint = "Start a fresh session instead."
+    print(
+        f"ERROR: cannot resume this session -- {session_dir}/state.json missing (manifest exists but Coordinator "
+        f"never wrote SharedState; the first launch stopped before the session had any state to resume). {hint}",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
+    """Apply the resumed session's pinned settings to ``args`` before any preflight check reads them.
+
+    A session's framework is fixed at creation, and the resume block re-exports the persisted one; without this, a
+    resume that does not re-pass ``--framework`` would have preflight install and probe the default framework instead
+    of the session's. An explicit ``--framework`` that differs from the persisted one is refused: the resume would
+    otherwise check one framework and run another. A kernel phase disabled at creation stays disabled, as the resume
+    block also enforces, so the TraceLens requirement is judged on the same setting the run uses.
+    """
+    if args is None:
+        return
+    state = _resumed_session_state(args)
+    if not state:
+        _refuse_resume_without_state(args)
+        return
+    raw_persisted = state.get("framework")
+    persisted = raw_persisted.strip().lower() if isinstance(raw_persisted, str) else ""
+    if raw_persisted not in (None, "") and persisted not in _supported_framework_names():
+        # state.json lives on shared storage; the framework name later becomes a manifest path that preflight
+        # pip-installs from, so only a registered framework name may be pinned.
+        print(
+            f"ERROR: cannot resume this session -- its state.json records --framework {raw_persisted!r}, which is "
+            f"not a supported framework ({', '.join(_supported_framework_names())}). The session state is invalid; "
+            "start a fresh session.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if persisted:
+        requested = str(getattr(args, "framework", None) or "").strip().lower()
+        if requested and requested != persisted:
+            print(
+                f"ERROR: cannot resume this session -- it was created with --framework {persisted} and this resume "
+                f"passes --framework {requested}; a session's framework cannot change. Drop --framework (or pass "
+                f"--framework {persisted}) to resume it, or start a fresh session for {requested}.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        args.framework = persisted
+    if state.get("kernel_enabled") is False:
+        args.no_kernel = True
 
 
 def _ensure_lm_eval_dep(
@@ -2030,6 +2128,7 @@ def _preflight(
     args: argparse.Namespace | None = None,
 ) -> tuple[str, str] | None:
     """Auto-install missing runtime deps and export auth aliases."""
+    _pin_resumed_session_args(args)
     install_event = _begin_install_event(args)
     _run_install_step(
         install_event,
