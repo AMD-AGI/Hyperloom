@@ -161,6 +161,7 @@ def test_manifest_stat_error_does_not_abort_the_tick(tmp_path, monkeypatch):
         target, reason, evidence = compute_next_phase(state)
     assert (target, reason) == ("CLOSE", "target_reached")
     assert "current_balance" in evidence["predicate_inputs"]["budget"]
+    assert "baseline_tput" in evidence["predicate_inputs"]["global"]
 
 
 def test_successful_manifest_read_is_reused(tmp_path, monkeypatch):
