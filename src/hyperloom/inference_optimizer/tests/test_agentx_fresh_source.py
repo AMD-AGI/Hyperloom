@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -108,6 +109,91 @@ def test_fresh_switch_builds_native_source_and_resolver_owns_launcher(
     assert os.environ["AGENTX_SERVER_SCRIPT"] == launcher
     assert args.tp == 4
     assert args.ep == 4
+
+
+@pytest.mark.parametrize("path", ["/runtime/bin:/usr/bin", "/opt/venv/bin:/runtime/bin:/usr/bin"])
+def test_cli_recipe_identity_survives_materialization_and_rejects_runtime_drift(monkeypatch, tmp_path, path):
+    from hyperloom.inference_optimizer.agentx import native
+    from hyperloom.inference_optimizer.agentx.identity import canonical_sha256, native_workload_fingerprint
+    from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+
+    monkeypatch.setenv("PATH", path)
+    monkeypatch.setenv("PYTHONPATH", "/runtime/packages")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/runtime/lib")
+    monkeypatch.setenv("LIBRARY_PATH", "/runtime/link")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+    monkeypatch.setenv("TP", "4")
+    monkeypatch.setenv("EP", "4")
+    monkeypatch.setenv("CONC", "8")
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+
+    def resolve(benchmark, *, inferencex_path):
+        current = copy.deepcopy(benchmark)
+        current["benchmark_script"] = "srt_agentic.sh"
+        current["docker_image"] = "fixture/image:fixed"
+        current["timeout_seconds"] = 7200
+        server_env = {
+            key: current["envs"][key]
+            for key in ("PATH", "PYTHONPATH", "LD_LIBRARY_PATH", "LIBRARY_PATH")
+            if key in current["envs"]
+        }
+        fingerprint = canonical_sha256(server_env)
+        return {
+            "benchmark": current,
+            "recipe": "fixture-recipe",
+            "config_file": "configs/amd-master.yaml",
+            "entry": {"image": current["docker_image"], "recipe-fingerprint": fingerprint},
+            "topology": {
+                "tp": 4,
+                "pp": 1,
+                "pcp_size": 1,
+                "gpu_count": 4,
+                "ep": 4,
+                "conc": 8,
+                "duration_seconds": 3600,
+                "recipe_fingerprint": fingerprint,
+            },
+        }
+
+    monkeypatch.setattr(native, "preview_native_recipe", resolve)
+    monkeypatch.setattr(
+        native,
+        "native_execution_identity",
+        lambda **kwargs: {
+            "static_execution_fingerprint": "b" * 64,
+            "workload_fingerprint": native_workload_fingerprint(kwargs["resolved_benchmark"], "b" * 64),
+        },
+    )
+    args = _args()
+    cli._configure_benchmark_config(args)
+    prepare_native_agentx_source(args)
+    cli._finalize_benchmark_config(args)
+    source = Path(os.environ["HYPERLOOM_BENCHMARK_CONFIG"])
+    result = materialize_config_with_envs(source, tmp_path / "baseline", agentx_mode=True, native_agentx_mode=True)
+    materialized = yaml.safe_load(result.read_text())["benchmark"]
+    assert materialized["envs"]["PATH"] == "/opt/venv/bin:/runtime/bin:/usr/bin"
+    assert (
+        materialized["workload_spec"]["recipe"]["recipe_fingerprint"]
+        == os.environ["HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT"]
+    )
+    candidate = materialize_config_with_envs(
+        result,
+        tmp_path / "candidate",
+        extra_server_args="--disable-cuda-graph",
+        agentx_mode=True,
+        native_agentx_mode=True,
+    )
+    candidate_benchmark = yaml.safe_load(candidate.read_text())["benchmark"]
+    assert "AGENTX_PHASE_WAIT_TIMEOUT_S" not in candidate_benchmark["envs"]
+    assert native_workload_fingerprint(candidate_benchmark, "b" * 64) == native_workload_fingerprint(
+        materialized,
+        "b" * 64,
+    )
+    assert candidate_benchmark["agentx"]["launch_overrides"]["append_args"] == ["--disable-cuda-graph"]
+
+    monkeypatch.setenv("PYTHONPATH", "/another/runtime")
+    with pytest.raises(ValueError, match="recipe changed after session finalization"):
+        materialize_config_with_envs(source, tmp_path / "changed", agentx_mode=True, native_agentx_mode=True)
 
 
 def test_local_checkpoint_needs_explicit_canonical_identity(monkeypatch, tmp_path):

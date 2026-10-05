@@ -798,7 +798,7 @@ def apply_agentx_switch(
     _grace = agentx_warmup_grace_sec(_agentx_env)
     _raw_grace = (os.environ.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
     envs["AGENTX_WARMUP_GRACE_PERIOD"] = str(_grace)
-    if bench.get("timeout_seconds") is not None:
+    if (not native_selected or profile_compat) and bench.get("timeout_seconds") is not None:
         envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(bench["timeout_seconds"])
     if _raw_grace != str(_grace):
         log.info(
@@ -2096,16 +2096,9 @@ def materialize_config_with_envs(
         # invoking the InferenceX launcher.  Persist the runtime search paths
         # so a later resume uses (or rejects drift from) the same ROCm/Python
         # libraries instead of silently inheriting a different login shell.
-        runtime_search_paths = {
-            name: os.environ.get(name, "").strip() for name in ("PATH", "PYTHONPATH", "LD_LIBRARY_PATH", "LIBRARY_PATH")
-        }
-        if runtime_search_paths["PATH"]:
-            path_parts = runtime_search_paths["PATH"].split(":")
-            if not path_parts or path_parts[0] != "/opt/venv/bin":
-                runtime_search_paths["PATH"] = f"/opt/venv/bin:{runtime_search_paths['PATH']}"
-        for name, value in runtime_search_paths.items():
-            if value:
-                envs[name] = value
+        from hyperloom.inference_optimizer.agentx.native import native_runtime_search_paths
+
+        envs.update(native_runtime_search_paths())
         # The native resolver fingerprints the complete BenchmarkConfig it is
         # handed.  Remove credentials before that boundary so the persisted
         # YAML and its launch-config fingerprint describe the same config.

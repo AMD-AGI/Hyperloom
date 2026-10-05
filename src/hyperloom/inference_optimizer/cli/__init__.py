@@ -1345,6 +1345,7 @@ def _finalize_benchmark_config(args: argparse.Namespace) -> bool:
     from hyperloom.inference_optimizer.agentx.native import (
         native_agentx_enabled,
         native_execution_identity,
+        native_runtime_search_paths,
         preview_native_recipe,
     )
 
@@ -1364,6 +1365,7 @@ def _finalize_benchmark_config(args: argparse.Namespace) -> bool:
     preview_envs_raw = preview_benchmark.get("envs")
     preview_envs = preview_envs_raw if isinstance(preview_envs_raw, dict) else {}
     preview_benchmark["envs"] = preview_envs
+    preview_envs.update(native_runtime_search_paths())
     for name in (
         "AGENTX_MODEL_ID",
         "AGENTX_SERVER_SCRIPT",

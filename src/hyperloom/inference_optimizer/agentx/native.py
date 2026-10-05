@@ -19,6 +19,7 @@ _AGENTIC_PREFIX = ("single_node", "agentic")
 _RESOLVER_SENTINEL = "HYPERLOOM_AGENTX_RECIPE="
 _NATIVE_CHECKOUT_PATH_RE = re.compile(r"^[A-Za-z0-9_@%+=:,./-]+$")
 
+
 # Ambient values consumed by the launchers in the exact-ref manifest below,
 # plus loader/search and ROCm/framework controls inherited by their children.
 # Keep this allowlist explicit: hashing every login-shell variable would make a
@@ -613,6 +614,18 @@ def validate_native_checkout_path(inferencex_path: str | Path) -> Path:
             f"Native AgentX InferenceX checkout path is shell-unsafe for the pinned Magpie launcher: {resolved}"
         )
     return resolved
+
+
+def native_runtime_search_paths() -> dict[str, str]:
+    """Pin the same runtime imports during recipe selection and materialization."""
+    paths = {
+        name: value
+        for name in ("PATH", "PYTHONPATH", "LD_LIBRARY_PATH", "LIBRARY_PATH")
+        if (value := os.environ.get(name, "").strip())
+    }
+    if paths.get("PATH") and paths["PATH"].split(":", 1)[0] != "/opt/venv/bin":
+        paths["PATH"] = f"/opt/venv/bin:{paths['PATH']}"
+    return paths
 
 
 def scrub_native_agentx_ambient_env(env: MutableMapping[str, str]) -> None:
@@ -1350,6 +1363,7 @@ __all__ = [
     "native_agentx_enabled",
     "native_execution_identity",
     "native_launch_environment_identity",
+    "native_runtime_search_paths",
     "preview_native_recipe",
     "resolve_native_launcher",
     "resolve_native_recipe",
