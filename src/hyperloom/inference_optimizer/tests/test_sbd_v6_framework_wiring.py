@@ -722,8 +722,9 @@ def test_a_source_proposal_keeps_every_kb_read_that_shaped_it(session_dir: Path)
     coord.phase_framework._record_framework_agent_authored_outcome(
         task=SimpleNamespace(task_id="t-int-1", kind="integrate_patch", params=integrate_params),
         result={"status": "reverted", "base_tput": 100.0, "output_throughput": 99.0, "delta_pct": -1.0},
+        adopted=False,
     )
-    coord.phase_framework.close_timeline(exit_reason="optimize_no_more_leverage")
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
     ext = _events(session_dir)[0]["ext"]
     [attempt] = ext["attempts"]
@@ -844,7 +845,7 @@ def test_local_explore_records_proposal_reasoning_before_dispatch(
             reason="no_new_candidates",
         )
     )
-    coord.phase_framework.close_timeline(exit_reason="optimize_budget_cap")
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     assert task_id
     proposal = _events(session_dir)[0]["ext"]["proposals"][0]
@@ -922,7 +923,7 @@ def _delegate_grid(coord: Coordinator, grid: list[dict[str, Any]]) -> None:
     if coord.shared_state.baseline_tput <= 0:
         coord.shared_state.baseline_tput = 100.0
     intent = Intent(type=IntentType.DELEGATE, payload={"action_name": "explore", "params": {"grid": grid}})
-    asyncio.run(coord._handle_delegate("orchestration", intent))
+    asyncio.run(coord.router.handle_delegate("orchestration", intent))
 
 
 def test_a_delegated_grid_is_a_proposal_carrying_its_read_and_relayed_citations(session_dir: Path):
@@ -988,7 +989,7 @@ def test_a_delegated_grid_is_a_proposal_carrying_its_read_and_relayed_citations(
 
     variant = {"extra_server_args": "--kv-cache-dtype fp8", "note": relayed["reasoning"]}
     asyncio.run(
-        coord._fact_write_hook(
+        coord.writeback.fact_write_hook(
             task=task,
             result={
                 "round_id": "explore-001",
@@ -1002,10 +1003,10 @@ def test_a_delegated_grid_is_a_proposal_carrying_its_read_and_relayed_citations(
                     }
                 ],
             },
-            kept=False,
+            verdict=Verdict.REVERTED,
         )
     )
-    coord.phase_framework.close_timeline(exit_reason="optimize_budget_cap")
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     ext = _events(session_dir)[0]["ext"]
     [proposal] = ext["proposals"]

@@ -332,7 +332,7 @@ def test_conversation_kb_block_is_fail_open_and_records_exposure(tmp_path) -> No
     state = SharedState(tick=7, phase="FRAMEWORK_AGENT")
     coordinator = _kb_coordinator(tmp_path, state, _Integration(evidence))
 
-    block = asyncio.run(coordinator._kb_prompt_block("proposal"))
+    block = asyncio.run(coordinator.conversation._kb_prompt_block("proposal"))
 
     assert evidence.prompt_block in block
     assert "original Recipe benchmark measurement remains" in block
@@ -362,7 +362,7 @@ def test_orchestration_injection_is_recorded_once_per_injected_experience_set(tm
     ):
         state.tick = tick
         integration.evidence = evidence
-        asyncio.run(coordinator._kb_prompt_block("proposal"))
+        asyncio.run(coordinator.conversation._kb_prompt_block("proposal"))
         state.record_experience_kb_injection(
             consumer="specialist",
             domain="serving_specialist",
@@ -376,7 +376,7 @@ def test_orchestration_injection_is_recorded_once_per_injected_experience_set(tm
         tick=4, read_id="read-4", status="unavailable", prompt_block="", rendered_refs=(), warnings=("offline",)
     )
     state.tick = 4
-    assert asyncio.run(coordinator._kb_prompt_block("proposal")) == ""
+    assert asyncio.run(coordinator.conversation._kb_prompt_block("proposal")) == ""
 
     orchestration = [row for row in state.experience_kb_injections if row["consumer"] == "orchestration"]
     specialist = [row for row in state.experience_kb_injections if row["consumer"] == "specialist"]
@@ -403,7 +403,6 @@ def test_injection_record_is_capped_and_survives_resume(tmp_path) -> None:
     assert len(restored.experience_kb_injections) == _KB_INJECTIONS_CAP
     assert restored.experience_kb_injections[-1]["read_id"] == f"read-{_KB_INJECTIONS_CAP + 4}"
     assert restored.experience_kb_injections == state.experience_kb_injections
-    assert "experience_kb_injections" not in SharedState.AGENT_UPDATE_FIELDS
 
 
 def _kb_coordinator(tmp_path, state: SharedState, integration: _Integration) -> Coordinator:
@@ -430,7 +429,7 @@ def test_specialist_dispatch_injects_its_experience_block_and_records_it(tmp_pat
     coordinator = _kb_coordinator(tmp_path, state, integration)
     params = {"gap_canonical_id": "gap.static_recon.aiter_master"}
 
-    asyncio.run(coordinator._warm_specialist_params(params))
+    asyncio.run(coordinator.specialist_dispatch.warm_specialist_params(params))
 
     assert params["experience_kb_block"] == evidence.prompt_block
     assert params["kb_read_id"] == "read-9"
@@ -468,13 +467,13 @@ def test_specialist_dispatch_reads_only_in_framework_agent_and_fails_open(tmp_pa
     coordinator = _kb_coordinator(tmp_path, state, integration)
 
     prelude_params = {"domain": "research_scout_specialist"}
-    asyncio.run(coordinator._warm_specialist_params(prelude_params))
+    asyncio.run(coordinator.specialist_dispatch.warm_specialist_params(prelude_params))
     state.phase = "FRAMEWORK_AGENT"
     integration.evidence = ExperienceKBEvidence(
         tick=3, read_id="", status="unavailable", prompt_block="", rendered_refs=(), warnings=("offline",)
     )
     offline_params = {"domain": "serving_specialist"}
-    asyncio.run(coordinator._warm_specialist_params(offline_params))
+    asyncio.run(coordinator.specialist_dispatch.warm_specialist_params(offline_params))
 
     for params in (prelude_params, offline_params):
         assert not {"experience_kb_block", "kb_read_id", "kb_rendered_refs"} & set(params)
@@ -497,8 +496,8 @@ def test_a_service_that_drops_mid_response_never_stops_a_turn_or_a_dispatch(tmp_
     coordinator = _kb_coordinator(tmp_path, state, integration)
     params = {"domain": "serving_specialist"}
 
-    assert asyncio.run(coordinator._kb_prompt_block("proposal")) == ""
-    asyncio.run(coordinator._warm_specialist_params(params))
+    assert asyncio.run(coordinator.conversation._kb_prompt_block("proposal")) == ""
+    asyncio.run(coordinator.specialist_dispatch.warm_specialist_params(params))
 
     assert not {"experience_kb_block", "kb_read_id", "kb_rendered_refs"} & set(params)
     assert state.experience_kb_injections == []
@@ -513,8 +512,8 @@ def test_a_specialist_read_that_matched_nothing_still_travels_with_the_dispatch(
     coordinator = _kb_coordinator(tmp_path, state, integration)
     params = {"domain": "serving_specialist"}
 
-    asyncio.run(coordinator._warm_specialist_params(params))
-    asyncio.run(coordinator._warm_specialist_params(params))
+    asyncio.run(coordinator.specialist_dispatch.warm_specialist_params(params))
+    asyncio.run(coordinator.specialist_dispatch.warm_specialist_params(params))
 
     assert params["kb_read_id"] == "read-empty"
     assert params["kb_rendered_refs"] == []
@@ -537,8 +536,8 @@ def test_an_agentx_run_reads_no_experience_since_none_of_its_own_is_published(tm
     coordinator.knowledge_plane = None
     params = {"domain": "serving_specialist"}
 
-    assert asyncio.run(coordinator._kb_prompt_block("proposal")) == ""
-    asyncio.run(coordinator._warm_specialist_params(params))
+    assert asyncio.run(coordinator.conversation._kb_prompt_block("proposal")) == ""
+    asyncio.run(coordinator.specialist_dispatch.warm_specialist_params(params))
 
     assert coordinator._kb_integration is None
     assert not {"experience_kb_block", "kb_read_id", "kb_rendered_refs"} & set(params)
@@ -566,7 +565,7 @@ def test_proposal_exposure_only_uses_current_orchestration_tick() -> None:
         warnings=(),
     )
     router = SimpleNamespace(
-        _kb_last_read=evidence,
+        _coord=SimpleNamespace(_kb_last_read=evidence),
         shared_state=SimpleNamespace(tick=7),
     )
     payload = {}
@@ -596,7 +595,7 @@ def test_a_grid_keeps_only_citations_of_experiences_its_tick_showed() -> None:
         rendered_refs=({"id": _FIRST, "purpose": "representative"},),
         warnings=(),
     )
-    router = SimpleNamespace(_kb_last_read=evidence, shared_state=SimpleNamespace(tick=7))
+    router = SimpleNamespace(_coord=SimpleNamespace(_kb_last_read=evidence), shared_state=SimpleNamespace(tick=7))
     shown = {"id": _FIRST, "stance": "ADOPT", "claim": "  Kept   twice on this model. "}
     unshown = {"id": _SECOND, "stance": "adopt", "claim": "Never rendered."}
     unknown_stance = {"id": _FIRST, "stance": "trust", "claim": "Not a stance."}

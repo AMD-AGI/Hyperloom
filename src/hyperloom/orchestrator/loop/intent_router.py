@@ -965,7 +965,9 @@ class IntentRouter(CoordinatorCollaborator):
         self.shared_state.reset_policy_denial_streak(action_name)
         from .proposals import record_config_proposal
 
-        record_config_proposal(self._coord, proposal_id, action_name, {**payload, "params": params}, outcome="delegated")
+        record_config_proposal(
+            self._coord, proposal_id, action_name, {**payload, "params": params}, outcome="delegated"
+        )
         await self.bus.append_and_seq(
             Message.new(
                 "coordinator",

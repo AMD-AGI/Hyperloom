@@ -22,10 +22,12 @@ import hyperloom_kb.collect as kb_collect
 from hyperloom.inference_optimizer import experience_collect, experience_kb_service
 from hyperloom.inference_optimizer.breakdown import exporter
 from hyperloom.inference_optimizer.breakdown.schema import SCHEMA_VERSION_V6
+from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.framework import _patch_material
+from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom_kb import (
@@ -50,13 +52,16 @@ def session_dir(tmp_path: Path):
         yield path
 
 
+def _tr(reason: str) -> Transition:
+    return Transition(from_phase="FRAMEWORK_AGENT", to_phase="SWEEP", reason=reason, evidence={}, loopback=False)
+
+
 def _coordinator(session_dir: Path) -> Coordinator:
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     return Coordinator(
         session_dir=session_dir,
         backends={"orchestration": MockBackend(idle), "critic": MockBackend(idle)},
         role_registry=default_role_registry(),
-        recipe_kb=None,
         knowledge_plane=None,
     )
 
@@ -248,11 +253,12 @@ def _record_framework_attempts(session_dir: Path) -> list[dict[str, Any]]:
             "target_files": ["vllm/attention.py"],
             "measured_against": {"throughput": 100.0, "extra_server_args": "--already-kept 1"},
         },
+        adopted=True,
     )
     import asyncio
 
     asyncio.run(
-        coord._fact_write_hook(
+        coord.writeback.fact_write_hook(
             task=SimpleNamespace(task_id="t-exp-1", kind="explore", params={"proposal_msg_id": "p-config"}),
             result={
                 "round_id": "explore-001",
@@ -274,10 +280,10 @@ def _record_framework_attempts(session_dir: Path) -> list[dict[str, Any]]:
                     }
                 ],
             },
-            kept=False,
+            verdict=Verdict.REVERTED,
         )
     )
-    coord.phase_framework.close_timeline(exit_reason="optimize_no_more_leverage")
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
     return [event for event in read_timeline_events(session_dir) if event.get("type") == "framework_agent"]
 
 
@@ -482,7 +488,7 @@ def test_a_specialists_config_only_deliverable_is_published_as_a_config_experien
         },
     )
     asyncio.run(
-        coord.phase_framework.maybe_autosubmit_config(
+        coord.phase_framework.maybe_autosubmit_framework_config(
             task=authoring,
             done_payload={
                 "proposal_set": [
@@ -508,8 +514,9 @@ def test_a_specialists_config_only_deliverable_is_published_as_a_config_experien
             "patches_applied": [],
             "measured_against": {"throughput": 100.0, "extra_server_args": "--already-kept 1"},
         },
+        adopted=True,
     )
-    coord.phase_framework.close_timeline(exit_reason="optimize_no_more_leverage")
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
     timeline = [event for event in read_timeline_events(session_dir) if event.get("type") == "framework_agent"]
 
     report = kb_collect.collect(experience_collect.MAPPING, _document(timeline), dry_run=True).to_dict()
