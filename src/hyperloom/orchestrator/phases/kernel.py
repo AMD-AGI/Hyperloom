@@ -4202,12 +4202,17 @@ class KernelPhase(CoordinatorCollaborator):
         *,
         reason: str,
     ) -> bool:
-        """Enqueue a fresh roofline if the watermark crossed; idempotency-keyed via ``reason``, stamps auto_roofline_pending_task_id. Returns True when enqueued."""
+        """Enqueue a fresh roofline if the watermark crossed; idempotency-keyed via ``reason`` and the roofline tput it crossed from, stamps auto_roofline_pending_task_id. Returns True when enqueued."""
         await self._release_finished_roofline_gate()
         if not self._needs_roofline_for_watermark():
             return False
+        # Crossings share a reason; the anchor separates this crossing's task from an earlier one's.
+        anchor = self.shared_state.last_roofline_tput
         try:
-            task = await self._coord.phase_prelude.enqueue_internal_analysis_task(reason=reason)
+            task = await self._coord.phase_prelude.enqueue_internal_analysis_task(
+                reason=reason,
+                idem_scope=f"-from{anchor:.0f}" if anchor > 0 else "",
+            )
         except Exception as exc:
             log.exception(
                 "watermark-roofline (%s): failed to enqueue: %r",

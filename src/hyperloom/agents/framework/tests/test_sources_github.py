@@ -51,6 +51,14 @@ def test_build_query_scopes_repo_and_ors_the_terms() -> None:
     assert "(deepseekv4 OR causallm)" in q
 
 
+def test_build_query_stays_within_the_search_operator_limit() -> None:
+    """GitHub answers 422 past five OR operators, so only the leading terms are sent."""
+    terms = ("glm5", "next", "glm", "flash", "model", "architecture", "support", "add")
+    q = gh._build_query("vllm-project/vllm", ("all",), terms=terms)
+    assert q.count(" OR ") == 5
+    assert "(glm5 OR next OR glm OR flash OR model OR architecture)" in q
+
+
 def test_search_perf_prs_sends_the_given_terms(monkeypatch) -> None:
     """The composed query reaches the Search API with the caller's terms."""
     captured: dict[str, str] = {}
@@ -63,6 +71,8 @@ def test_search_perf_prs_sends_the_given_terms(monkeypatch) -> None:
     gh.search_perf_prs("https://github.com/ROCm/vllm.git", terms=("deepseekv4",))
     assert "deepseekv4" in captured["url"]
     assert "throughput" not in captured["url"]
+    # Best-match order: a recency sort would bury the PRs that match the terms best.
+    assert "sort=" not in captured["url"]
 
 
 def test_build_query_open_only_keeps_is_open() -> None:
