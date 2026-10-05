@@ -79,9 +79,13 @@ def recovery_block(state: Any) -> dict[str, Any]:
             "type": raw_exception.get("type"),
             "message": (str(raw_exception.get("message") or "")[:500] or None),
         }
-    resume_pending = bool(_field(state, "resume_pending_revalidation", False))
+    stack_len = len(_field(state, "optimization_stack", None) or [])
+    validated_len = int(_field(state, "cumulative_gain_validated_stack_len", 0) or 0)
+    working_gen = int(_field(state, "working_recipe_generation", 0) or 0)
+    validated_gen = int(_field(state, "validated_recipe_generation", 0) or 0)
+    resume_pending = stack_len > validated_len or working_gen != validated_gen
     return {
-        "recovered": bool(crash_count > 0 or crash_timestamps or resume_pending or last_exception),
+        "recovered": bool(crash_count > 0 or crash_timestamps or last_exception),
         "crash_count": crash_count,
         "crash_timestamps": crash_timestamps,
         "degraded_mode": bool(_field(state, "degraded_mode", False)),

@@ -75,11 +75,11 @@ _AITER_LINE = (
 class TestForgeGemmHelperCoverage:
     def test_resolve_backend_requires_exact_kernel_order_forge(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        assert krh._resolve_gemm_tuning_backend({}) == "geak"
-        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "forge"}) == "geak"
-        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "unknown"}) == "geak"
+        assert krh.resolve_gemm_tuning_backend({}) == "geak"
+        assert krh.resolve_gemm_tuning_backend({"gemm_tuning_backend": "forge"}) == "geak"
+        assert krh.resolve_gemm_tuning_backend({"gemm_tuning_backend": "unknown"}) == "geak"
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-        assert krh._resolve_gemm_tuning_backend({}) == "forge"
+        assert krh.resolve_gemm_tuning_backend({}) == "forge"
 
     def test_parse_forge_gemm_sentinel(self):
         payload = {"status": "ok", "micro_decision": "candidate"}
@@ -281,16 +281,10 @@ class TestForgeGemmHelperCoverage:
         assert "preflight timed out" in caplog.text
         assert str(krh._FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC) in caplog.text
 
-    def test_resolve_forge_precision_falls_back_to_bf16(self, monkeypatch):
+    def test_resolve_forge_precision_falls_back_to_bf16(self):
         # Empty session precision + no fp8/fp4 quantization -> bf16/auto default.
         state = SharedState(precision="")
         state.current_best = {"extra_server_args": "", "extra_envs": {}}
-        import hyperloom.inference_optimizer.roofline_ceiling as rc
-
-        def _raise(*_a, **_k):
-            raise RuntimeError("no runtime workload")
-
-        monkeypatch.setattr(rc, "resolve_runtime_workload", _raise)
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
 
     def test_resolve_forge_server_log_uses_baseline_when_no_current_best(self, tmp_path):

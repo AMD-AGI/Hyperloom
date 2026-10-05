@@ -447,7 +447,7 @@ def test_all_runs_failing_is_not_a_success(_bound_session):
 def test_a_fault_the_entry_survived_is_named_on_the_event(_bound_session):
     recorder = make_framework_recorder(macro_cycle=0)
     recorder.record_run("r-1", role=ROLE_DISCOVERY, arm=ARM_SOURCE, status="succeeded")
-    recorder.record_fault(stage="framework_pump:tick", error_class="WorktreeError", message="patch did not apply")
+    recorder.record_fault(stage="framework_pump", error_class="WorktreeError", message="patch did not apply")
     # The fault does not end the entry: it is closed on its own exit evidence.
     recorder.finish(exit_reason="both_arms_plateaued")
 
@@ -455,7 +455,7 @@ def test_a_fault_the_entry_survived_is_named_on_the_event(_bound_session):
     assert event["status"] == "failed"
     assert event["ext"]["exit"]["reason"] == "both_arms_plateaued"
     assert event["ext"]["failure"] == {
-        "stage": "framework_pump:tick",
+        "stage": "framework_pump",
         "error_class": "WorktreeError",
         "message": "patch did not apply",
     }
@@ -463,7 +463,7 @@ def test_a_fault_the_entry_survived_is_named_on_the_event(_bound_session):
 
 def test_only_the_first_fault_is_kept(_bound_session):
     recorder = make_framework_recorder(macro_cycle=0)
-    recorder.record_fault(stage="framework_pump:tick", error_class="WorktreeError", message="the cause")
+    recorder.record_fault(stage="framework_pump", error_class="WorktreeError", message="the cause")
     recorder.record_fault(stage="phase_entered", error_class="RuntimeError", message="its consequence")
     recorder.finish(exit_reason="both_arms_plateaued")
 

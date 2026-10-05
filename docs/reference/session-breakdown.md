@@ -159,7 +159,7 @@ export. Five blocks: `session`, `task_config`, `grading`, `versions` and
 | `tick_count`       | int     | Number of Coordinator ticks.                                                                  |
 | `image`            | string \| null | Container image fully-qualified, if configured.                                       |
 | `image_id`         | string \| null | The image reference without its registry path.                                        |
-| `recovery`         | object  | Crash / interruption / resume history: `recovered`, `crash_count`, `crash_timestamps`, `degraded_mode`, `resume_pending_revalidation`, `last_tick_exception`. |
+| `recovery`         | object  | Crash / interruption / resume history: `recovered`, `crash_count`, `crash_timestamps`, `degraded_mode`, `resume_pending_revalidation` (true while the optimization stack holds entries no validation has covered yet), `last_tick_exception`. |
 
 Why the run ended is an outcome rather than an identity, and lives on
 `outcome.stop_reason`.

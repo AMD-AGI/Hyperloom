@@ -17,8 +17,8 @@ from typing import Any
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
-from hyperloom.common.timeutil import now_iso
 from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
 )
@@ -33,7 +33,6 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_PRECISION,
 )
 from ..session.paths import _SESSION_SKELETON
-from ..session.session_paths import agent_prompt_snapshot
 from .model_gate import _load_model_arch, _load_model_config_tags
 from ..model_config_utils import summarize_model_config
 
@@ -230,12 +229,6 @@ def _seed_shared_state(
         plateau_overrides["explore_empty_streak"] = int(args.plateau_explore_empty_streak)
     if getattr(args, "plateau_explore_lookback", None) is not None:
         plateau_overrides["explore_lookback"] = int(args.plateau_explore_lookback)
-    if getattr(args, "plateau_kernel_revert_streak", None) is not None:
-        plateau_overrides["kernel_revert_streak"] = int(args.plateau_kernel_revert_streak)
-    if getattr(args, "plateau_kernel_keep_gain", None) is not None:
-        plateau_overrides["kernel_keep_gain_pct"] = float(args.plateau_kernel_keep_gain)
-    if getattr(args, "plateau_kernel_lookback", None) is not None:
-        plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
 
     # Resolve int workload knobs from the CLI arg, applying the shared fallback default when unset.
     def _int_arg(arg_name: str, default: int) -> int:
@@ -277,7 +270,7 @@ def _seed_shared_state(
     _kernel_optimizer_record = "forge" if forge_explicitly_enabled() else "geak"
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority base for the baseline server args.
-    _ref_args, _ref_envs, _ref_model, _ref_source, _ref_controls = _resolve_reference_recipe(args)
+    _ref_args, _ref_envs, _ref_model, _ref_controls = _resolve_reference_recipe(args)
 
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
@@ -323,7 +316,6 @@ def _seed_shared_state(
         max_model_len=_int_arg("max_model_len", 0),
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
-        target_summary=args.target_summary or _default_target_summary(args),
         # AgentX corpus shape: seeded from canonical constants if AgentX is on;
         # overwritten by the measured shape after every aiperf run.
         agentx_corpus_shape=_build_agentx_corpus_shape_seed() if benchmark_mode == "agentx" else {},
@@ -333,7 +325,6 @@ def _seed_shared_state(
         reference_envs=_ref_envs,
         reference_launch_controls=_ref_controls,
         reference_model=_ref_model,
-        reference_source=_ref_source,
         # Operator launch shape; the process env carries it for one process only, so a resume re-exports it from here
         # rather than from argv.
         operator_server_args=str(getattr(args, "server_args", "") or "").strip(),
@@ -344,8 +335,11 @@ def _seed_shared_state(
         compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
-        warm_replay_min_confidence=float(getattr(args, "warm_replay_min_confidence", 0.7)),
-        warm_replay_min_reproduce_pct=float(getattr(args, "warm_replay_min_reproduce_pct", 0.8)),
+        **(
+            {}
+            if getattr(args, "warm_replay_min_confidence", None) is None
+            else {"warm_replay_min_confidence": float(args.warm_replay_min_confidence)}
+        ),
         max_minutes=int((args.max_hours or 0) * 60),
         research_lane_capacity=research_lane_capacity,
         gpu_specialist_capacity=gpu_specialist_capacity,
@@ -388,17 +382,22 @@ def _snapshot_system_prompts(
     session_dir: Path,
     *,
     prompts: dict[str, str],
+    macro_cycle: int,
     orchestration_phase: str = "",
 ) -> None:
-    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.snapshot.md``."""
+    """Persist each agent's effective system prompt via the shared snapshot writer.
+
+    The orchestration role additionally writes a phase-scoped copy when ``orchestration_phase`` is set.
+    """
+    from hyperloom.orchestrator.prompts import write_prompt_snapshot
+
     for role, body in prompts.items():
-        target = agent_prompt_snapshot(session_dir, role)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(body or "(empty)", encoding="utf-8")
+        write_prompt_snapshot(session_dir, role, body, macro_cycle=macro_cycle)
     boot_phase = orchestration_phase.strip()
     if boot_phase and "orchestration" in prompts:
-        scoped = agent_prompt_snapshot(session_dir, "orchestration", phase=boot_phase)
-        scoped.write_text(prompts["orchestration"] or "(empty)", encoding="utf-8")
+        write_prompt_snapshot(
+            session_dir, "orchestration", prompts["orchestration"], phase=boot_phase, macro_cycle=macro_cycle
+        )
 
 
 def _print_session_skeleton(session_dir: Path) -> None:
@@ -543,29 +542,6 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 
 
-def _default_target_summary(args: argparse.Namespace) -> str:
-    """Compose a human-readable objective summary from the CLI target flags."""
-    roofline = getattr(args, "target_roofline", None)
-    also = f" or {roofline}% of the roofline ceiling" if roofline else ""
-    if args.target_gain:
-        return (
-            f"Establish baseline on {Path(args.model).name} then drive "
-            f"cumulative_gain_validated to >= {args.target_gain}%{also} within "
-            f"{args.max_hours}h."
-        )
-    if args.target_tput:
-        from .. import framework_registry
-
-        target = framework_registry.format_primary_metric(getattr(args, "framework", None), args.target_tput)
-        return f"Establish baseline on {Path(args.model).name} then reach {target}{also} within {args.max_hours}h."
-    if roofline:
-        return (
-            f"Establish baseline on {Path(args.model).name} then reach {roofline}% "
-            f"of the roofline ceiling within {args.max_hours}h."
-        )
-    return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
-
-
 def _parse_conc_sweep_concs(args: argparse.Namespace, benchmark_mode: str) -> list[int]:
     """Parse ``--conc-sweep-concs`` into a list[int]; non-integers warned+dropped."""
     from hyperloom.orchestrator.kernel.conc_sweep import default_concs_for_mode
@@ -601,11 +577,11 @@ def _read_failure_summary(session_dir: Path) -> dict | None:
 
 def _resolve_reference_recipe(
     args: argparse.Namespace,
-) -> tuple[str, dict[str, str], str, str, dict[str, Any]]:
+) -> tuple[str, dict[str, str], str, dict[str, Any]]:
     """Resolve the reference launch recipe for a fresh launch."""
     source = (getattr(args, "reference_script", None) or "").strip()
     if not source:
-        return ("", {}, "", "", {})
+        return ("", {}, "", {})
 
     framework = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
     from ..reference_script import parse_reference_script
@@ -625,4 +601,4 @@ def _resolve_reference_recipe(
         raise SystemExit(2)
 
     print(f"Reference script: {source} ({len(recipe.server_args.split())} arg tokens, {len(recipe.envs)} env(s))")
-    return (recipe.server_args, dict(recipe.envs), recipe.model or "", source, dict(controls))
+    return (recipe.server_args, dict(recipe.envs), recipe.model or "", dict(controls))

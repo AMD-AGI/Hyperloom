@@ -17,8 +17,11 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 def _writeback(tmp_path: Path, state: SharedState) -> WritebackCollaborator:
     writer = WritebackCollaborator.__new__(WritebackCollaborator)
-    writer.session_dir = tmp_path
-    writer.shared_state = state
+    # session_dir and shared_state are read-only properties that delegate to _coord;
+    # provide a minimal stub so the factory works without a full Coordinator.
+    from types import SimpleNamespace
+
+    writer._coord = SimpleNamespace(session_dir=tmp_path, shared_state=state)
     return writer
 
 
@@ -100,7 +103,7 @@ def test_current_best_snapshot_preserves_removal_controls(tmp_path: Path, snapsh
     state.current_best.update(controls)
     writer = _writeback(tmp_path, state)
 
-    config = writer._current_best_launch_config() if snapshot == "launch_config" else writer.build_env_spec()["config"]
+    config = writer.current_best_launch_config() if snapshot == "launch_config" else writer.build_env_spec()["config"]
 
     assert {key: config.get(key) for key in controls} == controls
 
@@ -257,7 +260,7 @@ async def test_handoff_rejects_stale_tput_without_matching_measurement(
         _stop_after_handoff,
     )
 
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["accepted_flags"] == "--kv-cache-dtype fp8"
@@ -303,7 +306,7 @@ async def test_handoff_uses_only_matching_current_best_measurement(
         _stop_after_handoff,
     )
 
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["same_config_reference_status"] == "verified"
@@ -344,7 +347,7 @@ async def test_handoff_marks_declared_only_identity_without_faking_observation(
         _stop_after_handoff,
     )
 
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["same_config_reference_status"] == "unverified"
@@ -377,7 +380,7 @@ async def test_handoff_does_not_verify_matching_identity_without_evidence(
         _stop_after_handoff,
     )
 
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["same_config_reference_status"] == "unverified"
@@ -416,7 +419,7 @@ async def test_handoff_exposes_archived_sglang_observed_identity_map(
         "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         lambda _name: (_ for _ in ()).throw(RuntimeError("stop after handoff write")),
     )
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     expected = measurement["launch_evidence"]["observed_server_identity"]
@@ -452,7 +455,7 @@ async def test_handoff_hashes_observed_identity_from_server_args_alone(
         "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         lambda _name: (_ for _ in ()).throw(RuntimeError("stop after handoff write")),
     )
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["same_config_reference_verification_status"] == "verified_observed"

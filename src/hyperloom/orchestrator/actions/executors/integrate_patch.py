@@ -107,6 +107,7 @@ from ._grid_runner import (
 from . import _framework_switch_manifest as _switch_manifest
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
+    dedupe_extra_server_args,
     merge_server_args,
     tokenize_server_args_preserving_json,
 )
@@ -316,9 +317,7 @@ def _merge_established_server_args(inherited_args: str, round_args: str) -> str:
         return inherited_args
     merged = merge_server_args(inherited_args, round_args)
     if tokenize_server_args_preserving_json(merged) is not None:
-        from ...loop.coordinator_helpers import _dedupe_extra_server_args
-
-        return _dedupe_extra_server_args(merged)
+        return dedupe_extra_server_args(merged)
     # The combined string carries a quoted value with embedded whitespace, which
     # the deduper cannot parse; it would hand back the concatenation with two
     # copies of every inherited flag, and a duplicate is what the server
@@ -2969,7 +2968,7 @@ class IntegratePatchExecutor:
             # them in the next round's mandate.  The field lives on done_payload
             # (written by runner.py) and must be forwarded here because
             # _no_patches is the concrete dict framework.py reads via
-            # _maybe_rearm_enablement.
+            # maybe_rearm_enablement.
             ungrounded = (done_payload or {}).get("patches_ungrounded")
             if isinstance(ungrounded, list) and ungrounded:
                 _no_patches["patches_ungrounded"] = ungrounded

@@ -6,16 +6,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import os
 import time
 import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, AbstractSet, Any, Awaitable, Callable
 
-from hyperloom.common.env import env_bool, env_flag
+from hyperloom.common.env import env_float, env_int
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
@@ -28,7 +31,6 @@ DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop, in seconds.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 from ..phases import machine_state as _phase_state
-from hyperloom.inference_optimizer.session.optimization_journal import Journal
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.session.session_binding import bind_session
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
@@ -56,31 +58,9 @@ from ..bus.resource_lock import (
 from ..state.shared_state import SharedState, effective_closing_grace_sec, timed_teardown_step
 from .signals import SignalDrain
 from .intent_router import IntentRouter
-from ..phases.machine import MachinePhase
-from ..phases.prelude import PreludePhase
-from ..phases.sweep import SweepPhase
-from ..phases.close import ClosePhase
-from ..phases.internal import InternalTasksPhase
-from ..phases.kernel_stack import KernelStackPhase
-from ..phases.kernel import KernelPhase
-from ..phases.macro_cycle import MacroCycleCollaborator
-from .cycle_memory import CycleMemoryCollaborator
-from ..specialists.dispatch import SpecialistDispatchCollaborator
-from ..state.gaps import GapRefreshCollaborator
-from ..phases.framework import FrameworkPhase
-from ..gpu_lanes import GpuLanes
-from ..enablement.params import EnablementParams
-from ..enablement.lane import EnablementLane
-from ..enablement.build import EnablementBuild
-from ..enablement.revalidation import EnablementRevalidation
-from .maintenance import MaintenanceCollaborator
-from .build_lifecycle import BuildLifecycleCollaborator
-from .writeback import WritebackCollaborator
-from .dispatcher import DispatcherCollaborator
-from .proposals import ProposalsCollaborator
-from .conversation import ConversationCollaborator
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry, task_dispatch_origin
+from ..collaborator import OrchestrationPrompt
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.context_events import PromptSnapshotTracker, record_prompt_snapshot
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
@@ -99,14 +79,125 @@ from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.inference_optimizer.trace.orchestration_trace import (
     write_mcp_setup_once,
 )
-from .coordinator_helpers import (
-    _infer_model_class_from_config,
-    format_exc_brief,
-    resolve_reactor_turn_timeout_sec,
-)
+from hyperloom.common.timeutil import format_exc_brief
+from hyperloom.inference_optimizer.model_config_utils import resolve_local_model_dir
 
 
 log = logging.getLogger(__name__)
+
+REACTOR_TURN_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC"
+DEFAULT_REACTOR_TURN_TIMEOUT_SEC = 1800.0
+
+
+def resolve_reactor_turn_timeout_sec() -> float:
+    """Resolve the reactor turn's total wall-clock timeout."""
+    value = env_float(REACTOR_TURN_TIMEOUT_ENV, default=DEFAULT_REACTOR_TURN_TIMEOUT_SEC)
+    if value > 0.0 and math.isfinite(value):
+        return value
+    log.warning(
+        "%s=%.1f is not a positive finite number; using default %.1fs",
+        REACTOR_TURN_TIMEOUT_ENV,
+        value,
+        DEFAULT_REACTOR_TURN_TIMEOUT_SEC,
+    )
+    return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
+
+
+def _infer_model_class_from_config(model_path: str) -> str:
+    """Infer a deterministic model_class from local model metadata."""
+    raw_path = (model_path or "").strip()
+    payload: dict[str, Any] = {}
+    if raw_path:
+        # ``model_path`` may be an HF repo id; resolve to the local weights dir so the config-based classification
+        # works (the raw string still feeds the keyword fallback below).
+        _resolved = resolve_local_model_dir(raw_path)
+        cfg = (_resolved / "config.json") if _resolved is not None else Path(raw_path) / "config.json"
+        try:
+            if cfg.is_file():
+                data = json.loads(cfg.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    payload = data
+        except (OSError, ValueError):
+            log.debug("model_class inference: failed to read %s", cfg, exc_info=True)
+
+    # A multimodal checkpoint keeps the language model one level down, so the expert counts and the LM architecture
+    # live there rather than at the top. Read both, outer first: a VL wrapper would otherwise classify as dense.
+    payloads: list[dict[str, Any]] = [payload]
+    for nested_key in ("text_config", "llm_config", "language_config"):
+        nested = payload.get(nested_key)
+        if isinstance(nested, dict):
+            payloads.append(nested)
+
+    text_parts: list[str] = [raw_path.lower()]
+    for scope in payloads:
+        arch = scope.get("architectures")
+        if isinstance(arch, list):
+            text_parts.extend(str(x).lower() for x in arch if x)
+        elif arch:
+            text_parts.append(str(arch).lower())
+        for key in ("model_type", "attention_type", "attn_type"):
+            if scope.get(key):
+                text_parts.append(str(scope[key]).lower())
+    text = " ".join(text_parts)
+
+    def _positive_int(*keys: str) -> bool:
+        for scope in payloads:
+            for key in keys:
+                val = scope.get(key)
+                if isinstance(val, bool):
+                    continue
+                try:
+                    if val is not None and int(val) > 0:
+                        return True
+                except (TypeError, ValueError):
+                    continue
+        return False
+
+    is_moe = _positive_int(
+        "num_experts",
+        "n_routed_experts",
+        "num_local_experts",
+        "moe_num_experts",
+    ) or any(
+        k in text
+        for k in (
+            "moe",
+            "mixtral",
+            "deepseek-v2",
+            "deepseek-v3",
+            "deepseek-r1",
+            "kimi",
+            "glm-5",
+            "glm5",
+        )
+    )
+    is_mla = any(
+        k in text
+        for k in (
+            "mla",
+            "multi-head latent",
+            "deepseek",
+            "kimi",
+            "glm-5",
+            "glm5",
+        )
+    )
+    is_nsa = any(
+        k in text
+        for k in (
+            "nsa",
+            "native sparse attention",
+            "glm-5",
+            "glm5",
+        )
+    )
+    if is_moe and is_mla and is_nsa:
+        return "moe_mla_nsa"
+    if is_moe and is_mla:
+        return "moe_mla"
+    if is_moe:
+        return "moe_swa"
+    return "dense"
 
 
 if TYPE_CHECKING:
@@ -120,31 +211,7 @@ class CoordinatorState:
     pending_proposals: dict[str, PendingProposal] = field(default_factory=dict)
 
 
-class Coordinator(
-    MachinePhase,
-    PreludePhase,
-    SweepPhase,
-    ClosePhase,
-    InternalTasksPhase,
-    KernelStackPhase,
-    KernelPhase,
-    MacroCycleCollaborator,
-    CycleMemoryCollaborator,
-    SpecialistDispatchCollaborator,
-    GapRefreshCollaborator,
-    GpuLanes,
-    EnablementParams,
-    EnablementLane,
-    EnablementBuild,
-    EnablementRevalidation,
-    IntentRouter,
-    MaintenanceCollaborator,
-    BuildLifecycleCollaborator,
-    WritebackCollaborator,
-    DispatcherCollaborator,
-    ProposalsCollaborator,
-    ConversationCollaborator,
-):
+class Coordinator:
     """The single Coordinator instance per session."""
 
     def __init__(
@@ -156,39 +223,23 @@ class Coordinator(
         sub_agent_runner: SubAgentRunner | None = None,
         bus_class: type[MessageBus] = MessageBus,
         model_class: str | None = None,
-        recipe_kb: RecipeKB | None = None,
         phase_budget_pct: dict[str, float] | None = None,
         knowledge_plane: Any = None,
         proposal_scorer: Any = None,
-        warm_replay_enabled: bool = True,
-        warm_replay_min_confidence: float = 0.7,
-        warm_replay_min_reproduce_pct: float = 0.8,
     ):
         """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
-        self._init_dispatch_state()
-        self.phase_framework = FrameworkPhase(self)
-        # KernelStackPhase's per-kernel in-flight integrate guard, keyed on the recorded integrate-attempt count.
-        self._attempt_marks: dict[str, int] = {}
         # Bind the session for the SBD V6 recorders once, here, so no recorder entry point below has to be handed a
         # path.
         bind_session(self.session_dir)
         self.role_registry = role_registry or default_role_registry()
-        # KnowledgePlane owns RecipeKB.
-        plane_recipe_kb = getattr(knowledge_plane, "recipe_kb", None)
-        self.recipe_kb: RecipeKB | None = plane_recipe_kb if plane_recipe_kb is not None else recipe_kb
-        # Per-session optimization journal; lazy-instantiated on first use.
-        self._journal: Journal | None = None
-        # Warm-recipe replay controls (PRELUDE auto-apply of KB best_config).
-        self._warm_replay_enabled: bool = bool(warm_replay_enabled)
-        self._warm_replay_min_confidence: float = float(warm_replay_min_confidence)
-        self._warm_replay_min_reproduce_pct: float = float(warm_replay_min_reproduce_pct)
+        # Orchestration prompt overrides, rebuild closure, and snapshot writes.
+        self.orch_prompt = OrchestrationPrompt(overrides={})
         # KnowledgePlane facade; pre-warms PR feed + advisory context.
         self.knowledge_plane: Any = knowledge_plane
-        # ProposalScorer facade (advisory only).
-        self._proposal_scorer: Any = proposal_scorer
-        # Phase budget percentages, normalised once at construction.
-        self._phase_budget_pct: dict[str, float] = _phase_state.normalize_budget_pct(phase_budget_pct)
+        from .writeback import WritebackCollaborator
+
+        self._collaborator("_writeback", partial(WritebackCollaborator, proposal_scorer=proposal_scorer))
         self._model_class_override: str = (model_class or "").strip()
 
         # Validate every reactor has a backend wired.
@@ -220,10 +271,6 @@ class Coordinator(
 
         # Persistent session state (state.json) — load existing for resume.
         self.shared_state = SharedState.load_or_init(self.session_dir)
-        # Lifecycle save debounce: terminal events flush immediately; bursty non-terminal markers coalesce within a
-        # short window.
-        self._lifecycle_last_save: float = 0.0
-        self._lifecycle_save_min_interval_s: float = 2.0
         # Thread live SharedState into the runner so executors get it via ctx.extra.
         self.sub.shared_state = self.shared_state
         # Serving-disjoint invariant: the live serving process holds the first ``serving_tp`` cards, carved off the
@@ -231,8 +278,8 @@ class Coordinator(
         self.gpu_specialist_pool = SpecialistGpuPool(
             self.db,
             gpu_ids=resolve_gpu_specialist_devices(
-                int(getattr(self.shared_state, "gpu_specialist_capacity", 0) or 0),
-                serving_tp=self._resolve_serving_tp(),
+                int(self.shared_state.gpu_specialist_capacity or 0),
+                serving_tp=self.dispatcher.resolve_serving_tp(),
             ),
         )
         # Whole-node pool for enablement and bench specialists.
@@ -240,8 +287,6 @@ class Coordinator(
             self.db,
             gpu_ids=resolve_whole_machine_devices(),
         )
-        # Poll cadence of the waits on running dispatched work (closing grace, close steps).
-        self._dispatcher_poll_sec = 10.0
         # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
         try:
             from ..bus.storage.schema import set_lane_capacity as _set_lane_capacity
@@ -265,9 +310,9 @@ class Coordinator(
         )
         self.sub.policy = self.policy
         # Attach read-only context-pull MCP tools to Orchestration backend.
-        self._attach_orchestration_context_tools()
+        self.conversation.attach_orchestration_context_tools()
         # Resume detection must run before any boot-time state.json write.
-        self._resumed_from = self._detect_resume_state()
+        self.writeback.detect_resume_state()
         # Reap serving processes orphaned by a prior monitor-process crash (e.g. a raylet death that took the
         # optimizer down mid-benchmark), scoped strictly to this session's own pidfiles.
         self._reap_orphaned_servers_best_effort(phase="boot")
@@ -288,20 +333,9 @@ class Coordinator(
         self._last_maintenance_ts: float = time.monotonic()
 
         # Pin a per-macro-cycle budget window so per-phase budget fractions apply per cycle.
-        if float(getattr(self.shared_state, "cycle_minutes", 0) or 0) <= 0:
-            try:
-                _cycle_hours = float(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_CYCLE_HOURS",
-                        str(DEFAULT_CYCLE_HOURS),
-                    )
-                )
-            except ValueError:
-                _cycle_hours = DEFAULT_CYCLE_HOURS
+        if float(self.shared_state.cycle_minutes or 0) <= 0:
+            _cycle_hours = env_float("INFERENCE_OPTIMIZER_CYCLE_HOURS", default=DEFAULT_CYCLE_HOURS)
             self.shared_state.cycle_minutes = max(1.0, _cycle_hours * 60.0)
-
-        # Medium-intensity soft restart at each macro-cycle boundary.
-        self._cycle_soft_restart: bool = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART")
 
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
@@ -310,26 +344,15 @@ class Coordinator(
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
         self._backend_error_streak: dict[str, int] = {name: 0 for name in self.role_registry}
         self._backend_error_alarm_armed: dict[str, bool] = {name: True for name in self.role_registry}
-        try:
-            self._backend_error_streak_threshold: int = max(
-                1,
-                int(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
-                        "5",
-                    )
-                ),
-            )
-        except ValueError:
-            self._backend_error_streak_threshold = 5
+        self._backend_error_streak_threshold: int = max(
+            1,
+            env_int("INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", default=5),
+        )
 
         # Stable tick order from the live role_registry.
         _CANONICAL_ORDER = ("orchestration", "critic")
         self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
-        # Inline fast-action execution: run cheap lane-light action in-turn. Default ON.
-        self._inline_fast_actions_enabled: bool = env_flag("INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS", default=True)
-        self._coordinator_loop: asyncio.AbstractEventLoop | None = None
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: Deadline | None = None
         self._run_started_monotonic: float | None = None
@@ -337,13 +360,149 @@ class Coordinator(
         # work is not skipped just because the session deadline has passed.
         self._closing_deadline: Deadline | None = None
         self._signals: SignalDrain | None = None
-        # Latest objective wired by run(); refreshes target_gap_pct each tick. None outside a run.
+        # Latest objective wired by run(); None outside a run.
         self._current_objective: Objective | None = None
 
         # Initialise phase machine (fresh session enters PRELUDE). Idempotent.
-        self._ensure_phase_initialised()
+        self.phase_machine.ensure_phase_initialised(phase_budget_pct)
         # Recipe KB T0 defensive fallback for direct SDK/test callers; best-effort.
-        self._ensure_recipe_kb_t0_anchored()
+        self.phase_machine.ensure_recipe_kb_t0_anchored()
+
+    @property
+    def recipe_kb(self) -> RecipeKB | None:
+        """RecipeKB owned by the knowledge plane."""
+        plane = self.knowledge_plane
+        return plane.recipe_kb if plane is not None else None
+
+    @property
+    def run_deadline(self) -> Deadline | None:
+        """Wall-clock deadline of the current run leg; None outside a run."""
+        return self._run_deadline
+
+    @property
+    def run_started_monotonic(self) -> float | None:
+        """Monotonic start of the current run leg; None outside a run."""
+        return self._run_started_monotonic
+
+    def target_gap_pct(self) -> float:
+        """Percent improvement still needed to reach the run objective; 0.0 outside a run."""
+        objective = self._current_objective
+        return objective.gap_pct(self.shared_state) if objective is not None else 0.0
+
+    @property
+    def router(self) -> IntentRouter:
+        """Intent routing collaborator (extracted from this class)."""
+        return self._collaborator("_router", IntentRouter)
+
+    def _collaborator(self, attr: str, factory):
+        """Lazily build + cache a collaborator object; works for ``Coordinator.__new__`` test doubles too (uses ``__dict__``)."""
+        obj = self.__dict__.get(attr)
+        if obj is None:
+            obj = factory(self)
+            self.__dict__[attr] = obj
+        return obj
+
+    # Phase handlers, in call-chain order.
+    @property
+    def phase_machine(self):
+        from ..phases.machine import MachinePhase
+
+        return self._collaborator("_phase_machine", MachinePhase)
+
+    @property
+    def phase_prelude(self):
+        from ..phases.prelude import PreludePhase
+
+        return self._collaborator("_phase_prelude", PreludePhase)
+
+    @property
+    def phase_sweep(self):
+        from ..phases.sweep import SweepPhase
+
+        return self._collaborator("_phase_sweep", SweepPhase)
+
+    @property
+    def phase_close(self):
+        from ..phases.close import ClosePhase
+
+        return self._collaborator("_phase_close", ClosePhase)
+
+    @property
+    def phase_internal(self):
+        from ..phases.internal import InternalTasksPhase
+
+        return self._collaborator("_phase_internal", InternalTasksPhase)
+
+    @property
+    def phase_kernel_stack(self):
+        from ..phases.kernel_stack import KernelStackPhase
+
+        return self._collaborator("_phase_kernel_stack", KernelStackPhase)
+
+    @property
+    def phase_kernel(self):
+        from ..phases.kernel import KernelPhase
+
+        return self._collaborator("_phase_kernel", KernelPhase)
+
+    @property
+    def phase_macro_cycle(self):
+        from ..phases.macro_cycle import MacroCycleCollaborator
+
+        return self._collaborator("_phase_macro_cycle", MacroCycleCollaborator)
+
+    @property
+    def specialist_dispatch(self):
+        from ..specialists.dispatch import SpecialistDispatchCollaborator
+
+        return self._collaborator("_specialist_dispatch", SpecialistDispatchCollaborator)
+
+    @property
+    def gap_refresh(self):
+        from ..state.gaps import GapRefreshCollaborator
+
+        return self._collaborator("_gap_refresh", GapRefreshCollaborator)
+
+    @property
+    def phase_framework(self):
+        from ..phases.framework import FrameworkPhase
+
+        return self._collaborator("_phase_framework", FrameworkPhase)
+
+    @property
+    def gpu_lanes(self):
+        """GPU-lease params and lane resolution, shared by both dispatchers."""
+        from ..gpu_lanes import GpuLanes
+
+        return self._collaborator("_gpu_lanes", GpuLanes)
+
+    @property
+    def enablement_params(self):
+        """Enablement authoring-specialist request construction."""
+        from ..enablement.params import EnablementParams
+
+        return self._collaborator("_enablement_params", EnablementParams)
+
+    @property
+    def enablement_lane(self):
+        """Enablement round admission / in-flight / re-arm."""
+        from ..enablement.lane import EnablementLane
+
+        return self._collaborator("_enablement_lane", EnablementLane)
+
+    @property
+    def enablement_build(self):
+        """Off-loop compiled-build escalation and outcome routing."""
+        from ..enablement.build import EnablementBuild
+
+        return self._collaborator("_enablement_build", EnablementBuild)
+
+    @property
+    def enablement_revalidation(self):
+        """Genuine-baseline revalidation of a kept enablement round."""
+        from ..enablement.revalidation import EnablementRevalidation
+
+        return self._collaborator("_enablement_revalidation", EnablementRevalidation)
 
     @property
     def reconciler(self):
@@ -370,13 +529,41 @@ class Coordinator(
             self.__dict__["_reconciler"] = r
         return r
 
-    def _kb_hardware_slug(self) -> str:
-        """Topology-aware hardware dimension for the recipe ``canonical_id``."""
-        from hyperloom.orchestrator.actions.executors._multi_node_env import resolve_kb_topology
-        from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
+    @property
+    def conversation(self):
+        from .conversation import ConversationCollaborator
 
-        ss = self.shared_state
-        return kb_hardware_slug(ss.gpu_type or "unknown_gpu", **resolve_kb_topology())
+        return self._collaborator("_conversation", ConversationCollaborator)
+
+    @property
+    def proposals(self):
+        from .proposals import ProposalsCollaborator
+
+        return self._collaborator("_proposals", ProposalsCollaborator)
+
+    @property
+    def dispatcher(self):
+        from .dispatcher import DispatcherCollaborator
+
+        return self._collaborator("_dispatcher", DispatcherCollaborator)
+
+    @property
+    def writeback(self):
+        from .writeback import WritebackCollaborator
+
+        return self._collaborator("_writeback", WritebackCollaborator)
+
+    @property
+    def maintenance(self):
+        from .maintenance import MaintenanceCollaborator
+
+        return self._collaborator("_maintenance", MaintenanceCollaborator)
+
+    @property
+    def build_lifecycle(self):
+        from .build_lifecycle import BuildLifecycleCollaborator
+
+        return self._collaborator("_build_lifecycle", BuildLifecycleCollaborator)
 
     def _reap_orphaned_servers_best_effort(self, *, phase: str) -> None:
         """Reap leftover single-node serving processes via this session's pidfiles.
@@ -416,30 +603,15 @@ class Coordinator(
 
         write_trees(resolve_trees(), session_dir=self.session_dir)
 
-    # Advisory disk guard: when the session partition runs low, LRU-trim the
-    # bulkiest churn (per-task runs/ workspaces); durable state is never touched.
-    _DISK_FREE_MIN_GB: float = 20.0
-    _DISK_USED_MAX_FRAC: float = 0.85
-    _DISK_RUNS_KEEP_PER_ACTION: int = 50
-    _STATE_JSON_WARN_BYTES: int = 50 * 1024 * 1024
-
     # Action catalogue mapping action_name -> metadata.
     action_registry: Mapping[str, ActionMetadata] = ACTION_CATALOGUE
-
-    # Inline fast-action execution; deny report/session_breakdown (CLOSE artifacts).
-    _INLINE_ACTION_DENY: frozenset[str] = frozenset(
-        {
-            "report",
-            "session_breakdown",
-        }
-    )
 
     # Lifecycle
     async def stop(self) -> None:
         """Signal shutdown, cancel in-flight work, and close the DB."""
         self._stop.set()
         try:
-            await self.cancel_inflight_actions(reason="coordinator_stop")
+            await self.dispatcher.cancel_inflight_actions(reason="coordinator_stop")
         except Exception:
             log.exception("Coordinator.stop: cancelling in-flight actions raised")
         for t in self._tasks_running:
@@ -453,7 +625,7 @@ class Coordinator(
                 pass
             except Exception:
                 log.exception("reactor task raised on shutdown")
-        await self.close_db_after_executions()
+        await self.dispatcher.close_db_after_executions()
 
     def _bind_session_deadline(
         self,
@@ -500,91 +672,97 @@ class Coordinator(
 
     async def _recipe_kb_t4_hook(self) -> None:
         """Finalize or retry on graceful teardown/Ctrl-C."""
-        if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
+        if bool(getattr(self.knowledge_plane, "kb_disabled", False)):
             return
-        finalize_status = str(getattr(self.shared_state, "recipe_finalize_status", "") or "")
-        if getattr(self.shared_state, "close_sequence_done", False) and finalize_status in {
-            "written",
-            "skipped",
-            "disabled",
-        }:
-            return
-        config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
+        config = getattr(self.knowledge_plane, "config", None) or KnowledgeConfig.from_env()
         if config.mode is KnowledgeStoreMode.LOCAL:
             if self.recipe_kb is None:
                 return
             sid = (self.shared_state.recipe_kb_session_id or "").strip()
             if not sid:
                 return
-        self.ensure_recipe_finalized(source="t4_fallback")
+        self.writeback.ensure_recipe_finalized(source="t4_fallback")
         try:
             self.shared_state.save(self.session_dir)
         except Exception:
             log.exception("recipe KB T4 SharedState.save failed")
 
-    # Relative-change floor for the pre-GEAK reprofile: any change above this re-runs profile+TraceLens (effectively
-    # "any change", absorbing float noise).
-    _REPROFILE_CHANGE_TOL: float = 1e-5
-
-    # CLOSE step 0 post-opt roofline hard cap; on timeout the optimized snapshot is skipped so report/breakdown always
-    # run.
-    CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
-
-    # Floor on how long CLOSE waits for its full-stack revalidation. The bound scales to two baseline runtimes (a cold
-    # boot plus the warm decision round); explore's own session-deadline check keeps it inside the run's budget.
-    CLOSE_STACK_REVALIDATION_TIMEOUT_SEC: float = 600.0
-
-    # optimization_stack actions warranting a post-opt roofline; pure param-search (explore) is excluded.
-    _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
-
     async def tick(self, n: int = 1) -> None:
-        """Run exactly ``n`` reactor passes for every agent; dispatcher pumps at pass end, lazy resume replay on tick 1."""
-        await self._replay_resume_if_needed()
+        """Run ``n`` ticks of the run() loop body without its deadline or teardown."""
+        await self.writeback.replay_resume_if_needed()
         for _ in range(n):
-            # The tick's first act; see
-            # :mod:`hyperloom.orchestrator.bringup.reconcile`.
-            await self.reconciler.run(time.time())
-            self.shared_state.increment_tick()
-            # A phase-entry hook may have finished by setting a pending phase hint (for example current GEAK returning
-            # no_gain -> skip_to_sweep).
-            await self._await_within_session_bound(
-                self._advance_phase_if_needed,
+            await self._tick_once()
+
+    async def _tick_once(self) -> bool:
+        """Run one tick of the loop body; returns whether the session is in its closing phase."""
+        # Repair before anything is admitted: a round nobody will settle, a task row with no process, a review nobody
+        # answered. Ungated, because a stuck round closes every gate this could sit behind.
+        await self.reconciler.run(time.time())
+        # Bump the persistent tick counter — drives phase/plateau math.
+        self.shared_state.increment_tick()
+        try:
+            # A phase-entry hook may have finished early (for example a GEAK no_gain run exits KERNEL immediately).
+            await self.await_within_session_bound(
+                self.phase_machine.advance_phase_if_needed,
                 stage="advance_phase_pre_reactor",
             )
-            if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():
-                await self._await_within_session_bound(
-                    self._advance_phase_if_needed,
+            if self.shared_state.pending_escalate_hint.strip():
+                await self.await_within_session_bound(
+                    self.phase_machine.advance_phase_if_needed,
                     stage="advance_phase_hint",
                 )
+        except Exception as exc:
+            log.exception("phase advance before reactors failed")
+            self.record_exception(stage="advance_phase_pre_reactor", exc=exc)
+        in_closing = bool(self.shared_state.closing_phase)
+        # One reactor + dispatcher pass; during closing skip LLM passes.
+        if not in_closing:
             for name in self._tick_roles:
-                await self._await_within_session_bound(
-                    lambda n=name: self._reactor_pass(n),
+                if self.stop_requested():
+                    break
+                await self.await_within_session_bound(
+                    lambda n=name: self.reactor_pass(n),
                     stage=f"reactor:{name}",
                 )
-            await self._pump_dispatcher_once()
-            # FRAMEWORK_AGENT phase pump: enqueue next candidate / fetch next batch.
-            await self.phase_framework.pump(caller="tick")
+        if not self.stop_requested():
+            await self.dispatcher.pump_dispatcher_once()
+        if not in_closing:
+            phase = (self.shared_state.phase or "").strip().upper()
+            if not self.phase_machine.pump_table:
+                self.phase_machine.build_dispatch_tables()
+            pump = self.phase_machine.pump_table.get(phase)
+            if pump is not None:
+                await pump()
             # Phase-independent enablement pump: repair a non-runnable combo.
-            await self._pump_enablement_safely(caller="tick")
-            # phase machine advance at tick boundary.
-            await self._await_within_session_bound(
-                self._advance_phase_if_needed,
+            await self.enablement_lane.pump_enablement_safely()
+        # phase machine advance; runs even in_closing so CLOSE is recorded.
+        try:
+            await self.await_within_session_bound(
+                self.phase_machine.advance_phase_if_needed,
                 stage="advance_phase",
             )
+        except Exception as exc:
+            log.exception("phase advance failed")
+            self.record_exception(stage="advance_phase", exc=exc)
+        # Periodic reaper + DB retention; time-gated.
+        now = time.monotonic()
+        if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
+            await self.maintenance.run(tick=self.shared_state.tick)
+            self._last_maintenance_ts = now
+        return in_closing
 
-    def _record_coordinator_exception(
+    def record_exception(
         self,
         *,
         stage: str,
         exc: BaseException,
-        tick: int | None = None,
         agent: str = "",
     ) -> None:
         """Record a Coordinator-side exception without killing the session."""
         self._fault_open_phase_event(stage=stage, exc=exc)
         try:
             self.shared_state.record_tick_exception(
-                tick=int(tick if tick is not None else self.shared_state.tick or 0),
+                tick=int(self.shared_state.tick or 0),
                 stage=stage,
                 agent=agent,
                 exc_type=type(exc).__name__,
@@ -612,16 +790,14 @@ class Coordinator(
         open for every exception and is the thing that raised for almost none
         of them. Its own pump records what it is responsible for.
         """
-        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import active_kernel_recorder
-
-        for recorder in (active_kernel_recorder(), self.phase_framework.timeline()):
+        for recorder in (self.phase_kernel.timeline(), self.phase_framework.timeline()):
             if recorder is None:
                 continue
             recorder.record_fault(stage=stage, exc=exc)
 
     def _seconds_until_session_bound(self) -> float | None:
         """Seconds left on the active run or closing bound; ``None`` if unbounded."""
-        if bool(getattr(self.shared_state, "closing_phase", False)):
+        if bool(self.shared_state.closing_phase):
             bound = self._closing_deadline
         else:
             bound = self._run_deadline
@@ -636,7 +812,7 @@ class Coordinator(
             return None
         return self.reactor_turn_timeout_sec
 
-    def _stop_requested(self) -> bool:
+    def stop_requested(self) -> bool:
         """Whether an operator has asked this run to stop.
 
         Reads both the asyncio event and the drain's threading event, so the
@@ -667,7 +843,7 @@ class Coordinator(
         """Authoritative in-process stop classification."""
         return self._stop_classification
 
-    async def _await_within_session_bound(
+    async def await_within_session_bound(
         self,
         factory: Callable[[], Awaitable[Any]],
         *,
@@ -698,7 +874,7 @@ class Coordinator(
                 timeout,
             )
             if stage_timeout is not None and timeout == stage_timeout:
-                self._record_coordinator_exception(stage=stage, exc=exc, agent=stage.removeprefix("reactor:"))
+                self.record_exception(stage=stage, exc=exc, agent=stage.removeprefix("reactor:"))
 
     # Long-run interface
     async def run(
@@ -750,7 +926,8 @@ class Coordinator(
 
         if stop_reason == SUPERVISOR_RESTART_REASON:
             return
-        undecided = [p for p in self.state.pending_proposals.values() if not p.decided]
+        # A decided proposal is popped from the registry, so everything still pending is undecided.
+        undecided = list(self.state.pending_proposals.values())
         if not undecided:
             return
         try:
@@ -774,7 +951,7 @@ class Coordinator(
                         "stop_reason": stop_reason,
                     },
                 )
-        except Exception:  # trace must never mask the stop reason
+        except Exception:  # the trace must never mask the stop reason the session is closing on
             log.warning("trajectory: closing undecided proposals failed", exc_info=True)
 
     def _trajectory_phase_tick(self) -> tuple[str | None, int | None]:
@@ -795,14 +972,7 @@ class Coordinator(
     ) -> str:
         """Tick loop and shutdown sequence behind :meth:`run`."""
         objective = objective or TimeOnlyObjective()
-        # Stash so _compose_prompt can update target_gap_pct.
         self._current_objective = objective
-        # Capture the live loop for the inline fast-action context tool.
-        try:
-            self._coordinator_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self._coordinator_loop = None
-
         # A dedicated thread reading the interpreter's wakeup pipe, not a loop
         # callback: a TERM has to be recorded while the loop is busy.
         if install_signal_handlers:
@@ -812,7 +982,7 @@ class Coordinator(
             )
             log.info("Coordinator.run: stop-signal drain armed=%s", self._signals.armed)
 
-        await self._replay_resume_if_needed()
+        await self.writeback.replay_resume_if_needed()
         grace_sec, deadline, max_minutes_value = self._bind_session_deadline(
             max_minutes=max_minutes,
             closing_grace_sec=closing_grace_sec,
@@ -827,78 +997,16 @@ class Coordinator(
                 tick_n += 1
                 in_closing = bool(self.shared_state.closing_phase)
                 try:
-                    # Repair before anything is admitted: a round nobody will
-                    # settle, a task row with no process, a review nobody
-                    # answered. Ungated, because a stuck round closes every gate
-                    # this could sit behind.
-                    await self.reconciler.run(time.time())
-                    # Bump the persistent tick counter — drives phase/plateau math.
-                    self.shared_state.increment_tick()
-                    try:
-                        await self._await_within_session_bound(
-                            self._advance_phase_if_needed,
-                            stage="advance_phase_pre_reactor",
-                        )
-                        if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():
-                            await self._await_within_session_bound(
-                                self._advance_phase_if_needed,
-                                stage="advance_phase_hint",
-                            )
-                    except Exception as exc:
-                        log.exception("phase advance before reactors (run) failed")
-                        self._record_coordinator_exception(
-                            stage="advance_phase_pre_reactor",
-                            exc=exc,
-                            tick=tick_n,
-                        )
-                    in_closing = self.shared_state.closing_phase
-                    # One reactor + dispatcher pass; during closing skip LLM passes.
-                    if not in_closing:
-                        for name in self._tick_roles:
-                            if self._stop_requested():
-                                break
-                            await self._await_within_session_bound(
-                                lambda n=name: self._reactor_pass(n),
-                                stage=f"reactor:{name}",
-                            )
-                    if not self._stop_requested():
-                        await self._pump_dispatcher_once()
-                    # FRAMEWORK_AGENT phase pump: see ``tick()`` for rationale.
-                    if not in_closing:
-                        await self.phase_framework.pump(caller="run")
-                        # Phase-independent enablement pump.
-                        await self._pump_enablement_safely(caller="run")
-                    # phase machine advance; runs even in_closing so CLOSE is recorded.
-                    try:
-                        await self._await_within_session_bound(
-                            self._advance_phase_if_needed,
-                            stage="advance_phase",
-                        )
-                    except Exception as exc:
-                        log.exception("phase advance (run) failed")
-                        self._record_coordinator_exception(
-                            stage="advance_phase",
-                            exc=exc,
-                            tick=tick_n,
-                        )
-                    # Periodic reaper + DB retention; time-gated.
-                    now = time.monotonic()
-                    if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
-                        await self._run_maintenance(tick=tick_n)
-                        self._last_maintenance_ts = now
+                    in_closing = await self._tick_once()
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     raise
                 except Exception as exc:
                     last_tick_exc = exc
-                    log.exception("Coordinator.run: tick %d body raised", tick_n)
-                    self._record_coordinator_exception(
-                        stage="tick_body",
-                        exc=exc,
-                        tick=tick_n,
-                    )
+                    log.exception("Coordinator.run: tick %d body raised", self.shared_state.tick)
+                    self.record_exception(stage="tick_body", exc=exc)
 
                 # check stop conditions
-                if self._stop_requested():
+                if self.stop_requested():
                     stop_reason = self._signal_stop_reason()
                     break
                 if self.shared_state.stop_reason and not in_closing:
@@ -911,13 +1019,13 @@ class Coordinator(
                     if grace_sec <= 0:
                         stop_reason = "time_exhausted"
                         break
-                    closing_deadline = await self._enter_closing_phase(
+                    closing_deadline = await self.phase_close.enter_closing_phase(
                         grace_sec=grace_sec,
                     )
                     self._closing_deadline = closing_deadline
                     continue
                 if in_closing:
-                    report_terminal = await self._closing_report_terminal()
+                    report_terminal = await self.phase_close.closing_report_terminal()
                     grace_blown = closing_deadline is not None and closing_deadline.expired()
                     if report_terminal or grace_blown:
                         if grace_blown and not report_terminal:
@@ -929,8 +1037,8 @@ class Coordinator(
                         stop_reason = "time_exhausted"
                         break
                     # No reactor turn paces the closing ticks, so wait on the running work instead.
-                    poll_sec = self._dispatcher_poll_sec
-                    await self.wait_for_running_work(
+                    poll_sec = self.dispatcher.poll_sec
+                    await self.dispatcher.wait_for_running_work(
                         timeout=min(poll_sec, seconds_until(closing_deadline, unbounded_cap=poll_sec))
                     )
                 if (
@@ -978,7 +1086,7 @@ class Coordinator(
             )
             self.shared_state.save(self.session_dir)
             try:
-                await self.ensure_close_sequence(reason=self.shared_state.stop_reason)
+                await self.phase_close.ensure_close_sequence(reason=self.shared_state.stop_reason)
             except (asyncio.CancelledError, Exception):
                 log.exception("Coordinator: terminal close sequence did not finish")
             await self._recipe_kb_t4_hook()
@@ -1012,16 +1120,22 @@ class Coordinator(
                 log.exception("Coordinator: closing the %s backend failed", name)
 
     # Reactor
-    async def _reactor_pass(self, agent_name: str) -> None:
-        """Run one reactor turn for ``agent_name`` and route its intents, scoped as that agent on the trajectory."""
-        with trajectory_scope(component=agent_name, agent=agent_name):
-            await self._reactor_turn(agent_name)
+    async def reactor_pass(self, agent_name: str, *, request: str = "") -> BackendTurnResult | None:
+        """Run one reactor turn for ``agent_name``, route its intents, and return the turn's result.
 
-    async def _reactor_turn(self, agent_name: str) -> None:
-        """Body of :meth:`_reactor_pass`."""
+        ``request`` is appended to the composed prompt; a turn that carries one may legitimately reply without
+        intents. The turn is scoped as that agent on the trajectory.
+        """
+        with trajectory_scope(component=agent_name, agent=agent_name):
+            return await self._reactor_turn(agent_name, request=request)
+
+    async def _reactor_turn(self, agent_name: str, *, request: str = "") -> BackendTurnResult | None:
+        """Body of :meth:`reactor_pass`."""
         backend = self.backends[agent_name]
-        sys_prompt = await self._load_system_prompt(agent_name)
-        prompt = await self._compose_prompt(agent_name)
+        sys_prompt = await self.conversation.load_system_prompt(agent_name)
+        prompt = await self.conversation.compose_prompt(agent_name)
+        if request:
+            prompt = f"{prompt}\n\n{request}"
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
         _set_trace_ctx = getattr(backend, "set_trace_context", None)
@@ -1059,7 +1173,7 @@ class Coordinator(
                     latency_ms=int((time.perf_counter() - _t0) * 1000),
                     call_id=call_id,
                 )
-            await self._record_observation(
+            await self.writeback.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "backend_error", "agent": agent_name, "error": repr(exc)},
@@ -1068,22 +1182,22 @@ class Coordinator(
             return
         except NoIntentEmitted as exc:
             # No parseable intents; surface as observation so the next tick self-corrects.
-            await self._record_observation(
+            await self.writeback.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "no_intent_emitted", "agent": agent_name, "error": str(exc)[:500]},
             )
-            await self._advance_rendered_cursor(agent_name)
+            await self.conversation.advance_rendered_cursor(agent_name)
             return
         except Exception as exc:
             # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
-            await self._record_observation(
+            await self.writeback.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "reactor_exception", "agent": agent_name, "error": format_exc_brief(exc, limit=500)},
             )
-            self._record_coordinator_exception(
+            self.record_exception(
                 stage="reactor_pass",
                 agent=agent_name,
                 exc=exc,
@@ -1099,12 +1213,23 @@ class Coordinator(
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
-        self._record_reactor_conversation(agent_name, result)
+        self.conversation.record_reactor_conversation(agent_name, result)
         with trajectory_scope(call_id=call_id, parent_span_id=call_span.span_id):
             for intent in result.intents:
-                await self._handle_intent(agent_name, intent)
-        await self._advance_rendered_cursor(agent_name)
+                await self.router.handle_intent(agent_name, intent)
+        if not result.intents and not request:
+            await self.writeback.record_observation(
+                "coordinator",
+                "observation",
+                {"kind": "no_intent_emitted", "agent": agent_name, "error": "the turn emitted no intents"},
+            )
+        await self.conversation.advance_rendered_cursor(agent_name)
+        if agent_name == "orchestration":
+            state = self.shared_state
+            state.last_discarded_escalate_hint = ""
+            state.last_discarded_escalate_hint_ts = ""
         self.shared_state.agent_last_active[agent_name] = time.time()
+        return result
 
     def _trace_mcp_setup(self, *, agent_name: str, backend: Backend) -> None:
         """Persist orchestration MCP setup once per session."""
@@ -1197,7 +1322,7 @@ class Coordinator(
         threshold = self._backend_error_streak_threshold
         if new_value >= threshold and self._backend_error_alarm_armed.get(agent_name, True):
             self._backend_error_alarm_armed[agent_name] = False
-            await self._record_observation(
+            await self.writeback.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -1216,19 +1341,11 @@ class Coordinator(
                 },
             )
 
-    # Phases whose long, serially-drained GPU grids must not starve the per-phase cyclic budget exit.
-    _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT", "KERNEL_AGENT"})
-
-    # Fact-write surface — journal + direct KB lesson/pitfall/recipe writes.
-    PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0  # gain_pct ≤ this → pitfall
-
 
 __all__ = [
     "Coordinator",
     "CoordinatorState",
     "SharedState",
-    # Re-exported from coordinator_helpers / state.shared_state for callers/tests.
-    "_infer_model_class_from_config",
     "effective_closing_grace_sec",
     # Re-exported from policy.gate; referenced via ``coordinator.<name>`` in tests.
     "SPECIALIST_FROM_AGENT_PREFIX",

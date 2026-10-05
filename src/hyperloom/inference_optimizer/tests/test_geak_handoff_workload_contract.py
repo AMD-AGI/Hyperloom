@@ -124,8 +124,10 @@ def _coord(tmp_path: Path, *, framework: str = "sglang", agentx: bool = True, me
             },
         },
     )
-    coord.shared_state.current_best["measurement"]["launch_identity"] = coord.build_env_spec()["launch_identity"]
-    coord._record_geak_kernel_journey = lambda _result: None
+    coord.shared_state.current_best["measurement"]["launch_identity"] = coord.writeback.build_env_spec()[
+        "launch_identity"
+    ]
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
     return coord
 
 
@@ -134,7 +136,7 @@ async def _handoff(coord: Coordinator, monkeypatch: pytest.MonkeyPatch) -> dict:
         "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         Mock(side_effect=RuntimeError("stop after handoff write")),
     )
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
     return json.loads((coord.session_dir / "geak" / "handoff.json").read_text(encoding="utf-8"))
 
 
@@ -204,7 +206,7 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
         "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         lambda _name: tmp_path / "mock_geak_runner.py",
     )
-    coord._geak_timeouts = lambda: (60, 90, False)
+    coord.phase_kernel._geak_timeouts = lambda: (60, 90, False)
     captured_env = {}
 
     def _start_runner(_cmd, *, env, **_kwargs):
@@ -215,7 +217,7 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
 
     monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", _start_runner)
     with caplog.at_level("INFO", logger="hyperloom.orchestrator.phases.kernel"):
-        await coord._run_geak_kernel_phase(from_phase="KERNEL")
+        await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert (handoff["e2e_metric"], captured_env["E2E_METRIC"]) == (expected_metric, expected_metric)

@@ -11,7 +11,6 @@ from hyperloom.orchestrator.phases.machine_state import (
     make_lifecycle_event,
     record_lifecycle_event,
 )
-
 from hyperloom.orchestrator.state.shared_state import (
     _LIFECYCLE_CAP,
     SharedState,

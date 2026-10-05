@@ -8,7 +8,6 @@ from __future__ import annotations
 import dataclasses
 import json
 
-
 from hyperloom.orchestrator.state.shared_state import (
     LATEST_STATE_SCHEMA_VERSION,
     SharedState,

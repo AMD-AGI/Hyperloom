@@ -375,14 +375,13 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
             "output_dir": str(tmp_path / "axis-rejection"),
             "base_tput": 110.0,
             "grid": [{"name": "candidate", "extra_args": "--test-flag"}],
-            "source": "resume_stack_revalidate",
+            "source": "stack_revalidate",
             "geak_fallback": True,
             "expected_cfg_hash": fingerprint,
         },
         idempotency_key="geak-axis-rejection",
     )
     state.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
-    state.resume_pending_revalidation = True
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
 
     def fake_measure(cmd, *args, **kwargs):
@@ -403,13 +402,13 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
     async def must_not_replay(**kwargs):
         pytest.fail("native rejection must settle the candidate before any favorable fallback can run")
 
-    coord._validate_geak_via_geak_harness = must_not_replay
+    coord.writeback.validate_geak_via_geak_harness = must_not_replay
     with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=fake_measure):
         produced = (await sub.run_task(task)).result
     rejection = produced["per_variant_outcomes"][0]
     assert rejection["reason"].startswith("median_or_guard_failed")
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in rejection["gates"])
-    await coord._promote_to_shared_state("explore", produced, task=task)
+    await coord.writeback.promote_to_shared_state("explore", produced, task=task)
     assert state.current_best["tput"] == 110.0
     assert state.geak_result["revalidation_status"] == "no_promote"
     assert state.geak_result["revalidation_error"] == rejection["reason"]
@@ -1089,7 +1088,7 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
     ("source", "expected_base_tput", "expected_outcome", "has_winner"),
     [
         (None, 2358.80, "REVERT", False),
-        ("resume_stack_revalidate", 2192.52, "KEEP", True),
+        ("stack_revalidate", 2192.52, "KEEP", True),
     ],
 )
 async def test_explore_executor_supersedes_stale_params_base_tput(
@@ -1523,7 +1522,6 @@ async def test_explore_decision_stays_cold_when_the_session_skips_the_double_run
     sub, tr, _ = sub_agent_runner
     state = SharedState()
     state.baseline_tput = 800.0
-    state.baseline_double_run = False
     sub.shared_state = state
 
     base = tmp_path / "base.yaml"
@@ -1543,6 +1541,7 @@ async def test_explore_decision_stays_cold_when_the_session_skips_the_double_run
             "config_path": str(base),
             "output_dir": str(tmp_path / "explore-singleround"),
             "base_tput": 800.0,
+            "baseline_double_run": False,
             "grid": [{"name": "v", "extra_args": "--flag", "extra_envs": {}, "provenance": "llm_direct"}],
         },
         idempotency_key="ex-no-double-run",
@@ -2269,7 +2268,6 @@ async def test_explore_rejects_unsafe_aiter_unified_attn_before_benchmark(
     state.model_name = "Qwen3-14B-FP8"
     state.model_type = "qwen3"
     state.gpu_type = "mi355x"
-    state.baseline_double_run = False
     state.stack_fingerprint_meta = {
         "sglang": "0.5.20.dev20260920+gc610c40399",
         "aiter": "4ad99832823dde2315b361cbd3b54b1c5c12acd5",
@@ -2292,6 +2290,7 @@ async def test_explore_rejects_unsafe_aiter_unified_attn_before_benchmark(
             "config_path": str(base),
             "output_dir": str(output_dir),
             "base_tput": 800.0,
+            "baseline_double_run": False,
             "grid": [
                 {
                     "name": "unified",
@@ -2633,8 +2632,6 @@ async def test_an_explore_winner_inside_the_budget_is_promoted_by_writeback(sub_
     explore's in-round check would be refused and explore could never move
     ``current_best``.
     """
-    from unittest.mock import AsyncMock
-
     from hyperloom.orchestrator.loop import writeback as wb
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
@@ -2680,8 +2677,7 @@ async def test_an_explore_winner_inside_the_budget_is_promoted_by_writeback(sub_
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = state
-    monkeypatch.setattr(coord, "_maybe_enqueue_watermark_roofline", AsyncMock(), raising=False)
-    await coord._promote_explore(out, None, wb._PromoteOutcome())
+    await coord.writeback._promote_explore(out, None, wb._PromoteOutcome(verdict=wb.Verdict.RECORDED))
 
     assert state.current_best["variant_name"] == "v_in_budget"
 
