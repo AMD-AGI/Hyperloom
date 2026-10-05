@@ -63,6 +63,11 @@ GRADED_AXIS_KEYS = (
     "ttft_p90_ms",
     "tpot_p50_ms",
     "tpot_p90_ms",
+    # Recorded, not graded. On an agentic corpus the TPOT tail is a ratio over a near-zero denominator -- more than
+    # half the turns are tool-call-only and emit no text -- so its percentiles move run to run by far more than the
+    # band, while end-to-end latency holds. Carrying these makes that comparison answerable from the ledger.
+    "e2el_p50_ms",
+    "e2el_p90_ms",
     GRADED_DURATION,
     GRADED_ERROR_RATE,
 )
@@ -177,6 +182,8 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
         ("ttft_p50_ms", _positive(source.get("ttft_p50_ms"))),
         ("ttft_p90_ms", _positive(source.get("ttft_p90_ms"))),
         ("tpot_p50_ms", _positive(source.get("tpot_p50_ms"))),
+        ("e2el_p50_ms", _positive(source.get("e2el_p50_ms"))),
+        ("e2el_p90_ms", _positive(source.get("e2el_p90_ms"))),
         (GRADED_OUTPUT_PER_GPU, _positive(source.get(GRADED_OUTPUT_PER_GPU))),
         (GRADED_DURATION, duration),
         (GRADED_ERROR_RATE, error_rate),
@@ -229,6 +236,8 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
         "ttft_p90_ms",
         "tpot_p50_ms",
         "tpot_p90_ms",
+        "e2el_p50_ms",
+        "e2el_p90_ms",
         GRADED_INTVTY_P50,
         GRADED_OUTPUT_PER_GPU,
     ):

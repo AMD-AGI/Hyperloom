@@ -145,6 +145,7 @@ def map_aiperf(
         "std_itl_ms": stat(m, "inter_token_latency", "std"),
         "mean_e2el_ms": stat(m, "request_latency", "avg"),
         "median_e2el_ms": stat(m, "request_latency", "p50"),
+        "p90_e2el_ms": stat(m, "request_latency", "p90"),
         "p99_e2el_ms": stat(m, "request_latency", "p99"),
         "std_e2el_ms": stat(m, "request_latency", "std"),
         "theoretical_prefix_cache_hit": stat(m, "theoretical_prefix_cache_hit"),

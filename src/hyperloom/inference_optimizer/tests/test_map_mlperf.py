@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.perf_metric import (
+    GRADED_AXIS_KEYS,
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
     GRADED_TOTAL,
@@ -103,6 +104,14 @@ def test_a_tpot_series_with_no_samples_writes_no_interactivity_axis():
     mapped = _map(report)
     assert not [key for key in mapped if key.startswith("e2e_norm_intvty")]
     assert perf_snapshot_from_mapping(mapped) is None
+
+
+def test_end_to_end_latency_percentiles_are_recorded():
+    """Recorded, not graded: evidence for whether the TPOT tail or this one is the stabler axis."""
+    mapped = _map()
+    assert mapped["median_e2el_ms"] == pytest.approx(22622.874268)
+    assert mapped["p90_e2el_ms"] > mapped["median_e2el_ms"]
+    assert {"e2el_p50_ms", "e2el_p90_ms"} <= set(GRADED_AXIS_KEYS)
 
 
 def test_the_total_guard_carries_the_output_rate():
