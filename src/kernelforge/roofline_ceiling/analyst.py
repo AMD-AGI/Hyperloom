@@ -20,15 +20,14 @@ installing packages, and that is open-ended work code cannot enumerate -- so
 the workspace has to be defended rather than trusted. It is defended twice.
 
 The workspace guard is the real line: granting shell makes it active instead of
-skipped. It protects the measurement surface -- the kernel sources and driver by
-path, the configuration, harnesses, references and tests by the shared protected
-names -- and rolls the tree back and rejects the session on a change to any of
-it. A change to any other tracked file it lets through and reports, and this
-module fails the estimate on that report, because the analyst may only read.
-Build products of running the kernel are left alone: they land in ignored files
-or in the toolchain's own named droppings. Any other new file in the workspace
-is a violation too, so an analyst writing its answer under the workspace would
-have its answer deleted on the way out.
+skipped. The analyst may only read the workspace, so the guard rolls the tree
+back and rejects the session on a change to any tracked file, and to the
+measurement surface -- the kernel sources and driver by path, the configuration,
+harnesses, references and tests by the shared protected names -- even where it
+is ignored. Build products of running the kernel are left alone: they land in
+other ignored files or in the toolchain's own named droppings. Any other new
+file in the workspace is a violation too, so an analyst writing its answer under
+the workspace would have its answer deleted on the way out.
 
 So the analyst writes into a scratch directory outside the workspace, and this
 module moves the two deliverables into place afterwards. The hook is the second
@@ -222,15 +221,16 @@ def _spec(
         ),
         # Two lines, because a shell gets past the first: the hook refuses the
         # editing tools outside the output directories, and the workspace guard
-        # rejects and rolls back a change to the measurement surface -- the
-        # kernel sources and driver exactly, the configuration, harnesses,
-        # references and tests by the shared protected names. Not ``["*"]``:
-        # the guard snapshots every protected ignored file byte for byte and
-        # rejects any new one, and the ignored tree is where running the kernel
-        # compiles to, so that glob reads a multi-GiB JIT cache into memory and
-        # rejects the session for the build products of its own measurement.
+        # rolls back and rejects a change to any tracked file, and to the
+        # measurement surface -- the kernel sources and driver by path, the
+        # configuration, harnesses, references and tests by the shared
+        # protected names -- even where it is ignored. Not ``["*"]``: that
+        # protects every ignored file too, so the guard would read the
+        # campaign's multi-GiB JIT cache into memory and reject the session for
+        # the build products of its own measurement.
         hooks=_writable_only_within(writable_dirs),
         protected_paths=[path for path in protected_paths if path],
+        allow_tracked_changes=False,
         ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
         additional_directories=list(writable_dirs),
         # The kernel under analysis is routinely a dirty checkout mid-campaign,
@@ -240,23 +240,11 @@ def _spec(
 
 
 async def _ask(backend: Any, spec: AgentRunSpec) -> None:
-    """Run one session, refusing it if it left a workspace file changed.
-
-    The guard rolls back the measurement surface itself. Any other tracked
-    file it lets through, and reports as the session's file changes; the
-    analyst may only read the workspace, so a change there fails the estimate
-    rather than being taken as part of it.
-    """
-    result = await asyncio.wait_for(
+    """Run one session; the files it wrote are the answer, not its reply."""
+    await asyncio.wait_for(
         backend.run(spec),
         timeout=watchdog_timeout_sec(spec.timeout_sec or 0),
     )
-    changed = list(getattr(result, "file_changes", None) or [])
-    if changed:
-        raise CeilingAnalysisError(
-            "the analyst session changed workspace files it may only read, and they were left as it changed "
-            "them: " + ", ".join(changed)
-        )
 
 
 def _derivation_problem(document_path: Path) -> str:

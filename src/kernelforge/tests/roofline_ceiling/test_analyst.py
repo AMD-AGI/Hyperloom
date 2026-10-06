@@ -225,22 +225,10 @@ def test_the_kernel_under_optimization_stays_out_of_reach(tmp_path):
     spec = backend.specs[0]
     assert spec.protected_paths == ["kernel.py", "driver.py"]
     assert spec.protected_globs == []
+    assert spec.allow_tracked_changes is False
     assert spec.ignored_untracked_globs == list(TOOL_OWNED_UNTRACKED_GLOBS)
     assert not spec.allow_untracked
     assert spec.hooks.pre_tool_use
-
-
-def test_a_session_that_changed_a_workspace_file_fails_the_estimate(tmp_path):
-    """The guard lets a tracked file outside the measurement surface through; the analyst may only read it."""
-
-    class _Touches(_Backend):
-        async def run(self, spec, usage=None):
-            result = await super().run(spec, usage)
-            result.file_changes = ["src/helpers.py"]
-            return result
-
-    with pytest.raises(CeilingAnalysisError, match="changed workspace files it may only read.*src/helpers.py"):
-        _analyse(_Touches(_GOOD), tmp_path)
 
 
 def _git_workspace(root: Path) -> Path:
@@ -305,14 +293,38 @@ def test_the_guard_rolls_back_and_rejects_an_edit_to_the_kernel(tmp_path):
     assert (workspace / "kernel.py").read_text(encoding="utf-8") == "def kernel():\n    return 1\n"
 
 
-def test_the_guard_reports_an_edit_to_any_other_tracked_file(tmp_path):
-    """Outside the measurement surface the guard reports rather than rejects, and the estimate fails on the report."""
+def test_the_guard_rolls_back_and_rejects_an_edit_to_any_other_tracked_file(tmp_path):
+    """The analyst may only read: a tracked file outside the measurement surface is restored too, not left changed."""
     workspace = _git_workspace(tmp_path / "ws")
 
     guard = _guarded(workspace, tmp_path / "scratch")
     (workspace / "helpers.py").write_text("SCALE = 2\n", encoding="utf-8")
 
-    assert guard.verify() == ["helpers.py"]
+    with pytest.raises(WorkspaceSafetyError, match="helpers.py"):
+        guard.verify()
+    assert (workspace / "helpers.py").read_text(encoding="utf-8") == "SCALE = 1\n"
+
+
+def test_a_file_already_dirty_mid_campaign_is_restored_to_what_the_session_found(tmp_path):
+    """Rollback restores the inherited dirty state, not HEAD, so the campaign's own work survives the rejection."""
+    workspace = _git_workspace(tmp_path / "ws")
+    (workspace / "helpers.py").write_text("SCALE = 3\n", encoding="utf-8")
+
+    guard = _guarded(workspace, tmp_path / "scratch")
+    (workspace / "helpers.py").write_text("SCALE = 4\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceSafetyError, match="helpers.py"):
+        guard.verify()
+    assert (workspace / "helpers.py").read_text(encoding="utf-8") == "SCALE = 3\n"
+
+
+def test_a_session_that_leaves_tracked_files_alone_is_accepted(tmp_path):
+    workspace = _git_workspace(tmp_path / "ws")
+    (workspace / "helpers.py").write_text("SCALE = 3\n", encoding="utf-8")
+
+    guard = _guarded(workspace, tmp_path / "scratch")
+
+    assert guard.verify() == []
 
 
 def _deny_reason(hooks, tool_name: str, file_path: str):
