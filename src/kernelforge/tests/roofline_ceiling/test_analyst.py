@@ -348,6 +348,25 @@ def test_an_empty_derivation_counts_as_none(tmp_path):
     assert f"{DOCUMENT_FILENAME} is empty" in backend.specs[1].user_prompt
 
 
+def test_an_undecodable_derivation_is_sent_back_rather_than_ending_the_run(tmp_path):
+    """A session cut mid-write can leave half a multi-byte character; that is repairable, not fatal."""
+
+    class _TruncatedFirst(_Backend):
+        async def run(self, spec, usage=None):
+            result = await super().run(spec, usage)
+            if len(self.specs) == 1:
+                (Path(self._output_dir(spec)) / DOCUMENT_FILENAME).write_bytes(b"# Roofs\n\nHBM 6.2 TB/s \xe2\x80")
+            return result
+
+    backend = _TruncatedFirst(_GOOD, _GOOD)
+
+    report = _analyse(backend, tmp_path)
+
+    assert report.ideal_ms() == {"c0": 12.8}
+    assert f"{DOCUMENT_FILENAME} is not valid UTF-8 text" in backend.specs[1].user_prompt
+    assert (tmp_path / "out" / DOCUMENT_FILENAME).read_text() == _DERIVATION
+
+
 def test_a_ceiling_never_given_a_derivation_is_not_published(tmp_path):
     backend = _Backend(_GOOD, _GOOD, documents=[None, None])
 

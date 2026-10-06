@@ -242,6 +242,9 @@ def _derivation_problem(document_path: Path) -> str:
         text = document_path.read_text(encoding="utf-8")
     except OSError as exc:
         return f"{document_path} was not written ({exc})"
+    except ValueError as exc:
+        # A session cut at its deadline mid-write can leave a truncated multi-byte sequence behind.
+        return f"{document_path} is not valid UTF-8 text ({exc})"
     return "" if text.strip() else f"{document_path} is empty"
 
 
