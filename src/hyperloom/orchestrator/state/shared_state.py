@@ -2214,6 +2214,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 # TraceLens kernel_category bucket ("" when absent).
                 "kernel_category": entry.get("kernel_category") or "",
                 "gpu_pct": entry.get("gpu_pct"),
+                "tracelens_pitem_rank": entry.get("tracelens_pitem_rank"),
+                "impact_score": entry.get("impact_score"),
                 "bottleneck": entry.get("bottleneck"),
                 "bound_type": entry.get("bound_type"),
                 "arithmetic_intensity": arithmetic_intensity,

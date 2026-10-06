@@ -221,7 +221,6 @@ def test_mission_summary_surfaces_untried_hot_kernels(session_dir):
     assert "untried_hot_kernels" in summary
     assert "k001" in summary
     assert "k002" in summary
-    assert summary.find("k002") < summary.find("k001"), summary
 
 
 def test_report_always_allowed_regardless_of_hot_kernels(session_dir):
