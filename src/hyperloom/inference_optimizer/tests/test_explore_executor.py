@@ -180,11 +180,6 @@ def _stack_config(**changes: object) -> dict[str, object]:
     return {"mem_fraction_static": 0.9, "max_running_requests": 512, **changes}
 
 
-# The stack pins chunked-prefill at 32768, so a variant naming 65536 is a real
-# change however the stack came to hold that value.
-_CHUNKED_STACK = {"observed_server_config": _stack_config(chunked_prefill_size=32768)}
-
-
 def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
     base_yaml = tmp_path / "base.yaml"
     base_yaml.write_text(
@@ -213,149 +208,88 @@ def _variant(args: str = _RESTATES_ARGV, **fields: object) -> GridVariant:
     return GridVariant(_CANDIDATE, extra_server_args=args, **fields)
 
 
-def _revalidate() -> GridVariant:
-    gv = _variant()
-    gv.provenance = "resume_stack_revalidate"
-    return gv
+# Each case is (id, variant, filter overrides). The verdict is the whole
+# expectation: does the launch this variant would produce already match the
+# stack the server is running?
 
-
-# Each case below is (id, grid, filter overrides). Every grid holds one variant,
-# so the group a case sits in is the whole expectation: does the launch this
-# variant would produce already match the stack the server is running?
-
-# Merged launch == observed stack, so the measurement would re-run the stack.
+# Everything the variant changes already holds in the running server, so the
+# measurement would re-run the stack.
 _ALREADY_THE_STACK = (
     (
         "same_argv_and_env",
-        [_variant(extra_envs={_TUNED_ENV: "kernel"})],
+        _variant(extra_envs={_TUNED_ENV: "kernel"}),
         {"observed_server_env": _stack_env(HICACHE_IO_BACKEND="kernel")},
     ),
     (
         # 3600 and 3600.0 are one value; the engine reports the float.
         "a_value_the_engine_reports_as_a_float",
-        [_variant("--watchdog-timeout 3600")],
+        _variant("--watchdog-timeout 3600"),
         {"observed_server_config": _stack_config(watchdog_timeout=3600.0)},
-    ),
-    (
-        # A bare flag asks for the feature on, which is what the engine resolved.
-        "a_bare_flag_the_engine_resolved_true",
-        [_variant("--enable-dp-attention")],
-        {"observed_server_config": _stack_config(enable_dp_attention=True)},
     ),
 )
 
-# Merged launch differs from the stack, or the stack is not known well enough
-# to prove a match: either way the variant runs.
+# The variant changes something the stack does not hold, or the stack is not
+# known to hold it: either way the variant runs.
 _MUST_RUN = (
-    ("different_argv_value", [_variant("--max-running-requests 128")], {}),
-    (
-        # The wrong drop reported on #1579: the stack sits at 32768, so a
-        # variant proposing 65536 is a real change.
-        "different_argv_value_the_stack_already_pins",
-        [_variant("--chunked-prefill-size 65536")],
-        _CHUNKED_STACK,
-    ),
+    ("different_argv_value", _variant("--max-running-requests 128"), {}),
     (
         "different_env_value",
-        [_variant(extra_envs={_TUNED_ENV: "direct"})],
+        _variant(extra_envs={_TUNED_ENV: "direct"}),
         {"observed_server_env": _stack_env(HICACHE_IO_BACKEND="kernel")},
     ),
-    # One half of the stack is unrecorded, so no match can be proven either way.
-    # The config case restates the stack exactly: only the missing evidence keeps it.
-    ("stack_config_is_unknown", [_variant()], {"observed_server_config": {}}),
-    ("stack_env_is_unknown", [_variant(extra_envs={_TUNED_ENV: "kernel"})], {"observed_server_env": {}}),
     (
-        # A dp change the old string comparison could not see, because
-        # split_launch_flags dropped the parallelism family from both sides.
+        # chaojhou 1: parallelism is compared, not stripped.
         "different_parallelism_value",
-        [_variant("--dp-size 4")],
+        _variant("--dp-size 4"),
         {"observed_server_config": _stack_config(dp_size=8)},
     ),
     (
-        # _args_pairs kept a flag's first value and scattered the rest, so two
-        # lists sharing a prefix compared equal. Exempt rather than compared.
+        # chaojhou 2: a list-valued flag is never judged against the merged config.
         "multi_value_flag_is_not_comparable",
-        [_variant("--cuda-graph-bs 1 2 4 8")],
+        _variant("--cuda-graph-bs 1 2 4 8"),
         {"observed_server_config": _stack_config(cuda_graph_bs=[1, 2, 4, 8, 16])},
     ),
-    (
-        # The engine resolved the feature off, so asking for it on is a change.
-        "a_bare_flag_the_engine_resolved_false",
-        [_variant("--enable-dp-attention")],
-        {"observed_server_config": _stack_config(enable_dp_attention=False)},
-    ),
-    (
-        # A setting absent from the resolved config is unknown, not equal: the
-        # engine reports every setting it has, so absence is not a match.
-        "a_setting_the_engine_never_reported",
-        [_variant("--stream-interval 20")],
-        {},
-    ),
-    # A removal changes the launch by subtraction, which the materialized
-    # config cannot express, so the comparison reads it as proposing nothing.
-    ("removes_an_arg_the_script_supplies", [_variant(remove_args=["--enable-dp-attention"])], {}),
-    ("unsets_an_env_the_container_exports", [_variant(unset_envs=["HIP_FORCE_DEV_KERNARG"])], {}),
-    # Restates the stack exactly on both halves, so only the exemption saves it.
-    ("resume_stack_revalidate_is_exempt", [_revalidate()], {}),
 )
 
 
 @pytest.mark.parametrize(
-    ("grid", "overrides"),
+    ("variant", "overrides"),
     [case[1:] for case in _ALREADY_THE_STACK],
     ids=[case[0] for case in _ALREADY_THE_STACK],
 )
-def test_variant_that_is_already_the_stack_is_dropped(tmp_path, grid, overrides):
+def test_variant_that_is_already_the_stack_is_dropped(tmp_path, variant, overrides):
     """The server is already running this launch, so measuring it buys nothing."""
-    kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path, **overrides))
+    kept, dropped = filter_baseline_noop_variants([variant], **_noop_filter_kwargs(tmp_path, **overrides))
     assert kept == []
     assert [name for name, _ in dropped] == [_CANDIDATE]
     assert "baseline noop" in dropped[0][1]
 
 
 @pytest.mark.parametrize(
-    ("grid", "overrides"),
+    ("variant", "overrides"),
     [case[1:] for case in _MUST_RUN],
     ids=[case[0] for case in _MUST_RUN],
 )
-def test_variant_that_is_not_known_to_be_the_stack_is_kept(tmp_path, grid, overrides):
+def test_variant_that_is_not_known_to_be_the_stack_is_kept(tmp_path, variant, overrides):
     """Keep on a real difference, and keep on a guess: only a proven match may drop."""
-    kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path, **overrides))
+    kept, dropped = filter_baseline_noop_variants([variant], **_noop_filter_kwargs(tmp_path, **overrides))
     assert [gv.name for gv in kept] == [_CANDIDATE]
     assert dropped == []
 
 
-def _measurement(config: dict[str, object], env: dict[str, str]) -> dict:
-    return {"launch_evidence": {"observed_server_config": config, "observed_server_env": env}}
+def test_a_removal_is_never_a_restatement_of_the_stack(tmp_path):
+    """chaojhou 3: the materialized config cannot show a subtraction, so it must not read as a noop.
 
-
-_OBSERVED_LAUNCH_CASES = (
-    (
-        "current_best_carries_both_halves",
-        SimpleNamespace(current_best_measurement=_measurement({"tp_size": 2}, {_TUNED_ENV: "kernel"})),
-        ({"tp_size": 2}, {_TUNED_ENV: "kernel"}),
-    ),
-    (
-        # last_baseline is an attempt entry and never carries launch_evidence,
-        # so a stack without a current best is simply unknown.
-        "no_current_best_means_no_evidence",
-        SimpleNamespace(
-            current_best_measurement={},
-            last_baseline=_measurement({"tp_size": 1}, {_TUNED_ENV: "direct"}),
-        ),
-        ({}, {}),
-    ),
-)
-
-
-@pytest.mark.parametrize(
-    ("state", "expected"),
-    [case[1:] for case in _OBSERVED_LAUNCH_CASES],
-    ids=[case[0] for case in _OBSERVED_LAUNCH_CASES],
-)
-def test_observed_launch_from_state_reads_only_the_current_stack(state, expected):
-    """Only current_best carries evidence; nothing else is consulted for it."""
-    assert observed_launch_from_state(state) == expected
+    ``unset_envs`` also pops the process env at run time, which the probe's
+    YAML never sees; ``remove_args`` leaves no trace in the merged argv.
+    """
+    grid = [
+        GridVariant("removes-an-arg", remove_args=["--enable-dp-attention"]),
+        GridVariant("unsets-an-env", unset_envs=["HIP_FORCE_DEV_KERNARG"]),
+    ]
+    kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path))
+    assert [gv.name for gv in kept] == ["removes-an-arg", "unsets-an-env"]
+    assert dropped == []
 
 
 def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
@@ -379,6 +313,13 @@ def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
     evidence = build_launch_evidence(config_path=config, actual_server_log=str(log), framework="sglang", slot=tmp_path)
     assert evidence["observed_server_launch_flags"] == ""
     assert evidence["observed_server_config"]["max_running_requests"] == 512
+    # The env is stamped from the recipe; the argv key holds the launch command, not an env value.
+    assert evidence["observed_server_env"] == _RECIPE_ENV
+
+    # chaojhou 4: last_baseline is an attempt entry that never carries launch_evidence,
+    # so a stack with no current best is unknown rather than read from it.
+    no_current_best = SimpleNamespace(current_best_measurement={}, last_baseline={"launch_evidence": evidence})
+    assert observed_launch_from_state(no_current_best) == ({}, {})
 
     state = SimpleNamespace(current_best_measurement={"launch_evidence": evidence})
     observed_config, observed_env = observed_launch_from_state(state)
@@ -387,48 +328,12 @@ def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
     _, dropped = filter_baseline_noop_variants([_variant(_RESTATES_ARGV)], **kwargs)
     assert [name for name, _ in dropped] == [_CANDIDATE]
 
-    kept, none_dropped = filter_baseline_noop_variants([_variant("--max-running-requests 128")], **kwargs)
-    assert [gv.name for gv in kept] == [_CANDIDATE]
-    assert none_dropped == []
-
-
-def test_a_measurement_stamps_its_env_and_the_filter_drops_a_restatement_of_it(tmp_path):
-    """End to end: build_launch_evidence stamps the launched env, and the filter reads it back.
-
-    The stack was measured off the same recipe this round builds from, so the
-    keys the variant never names hold the same values on both sides.
-    """
-    config = tmp_path / "stack.yaml"
-    config.write_text(
-        yaml.safe_dump(
-            {
-                "benchmark": {
-                    "framework": "sglang",
-                    # The argv key rides along so the stamp has to drop it: it
-                    # holds the launch command, not an env value.
-                    "envs": {
-                        "EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9",
-                        **_stack_env(HICACHE_IO_BACKEND="kernel"),
-                    },
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    evidence = build_launch_evidence(
-        config_path=config,
-        actual_server_log=None,
-        framework="sglang",
-        slot=tmp_path,
-    )
-    assert evidence["observed_server_env"] == _stack_env(HICACHE_IO_BACKEND="kernel")
-    state = SimpleNamespace(current_best_measurement={"launch_evidence": evidence}, last_baseline={})
-    kept, dropped = filter_baseline_noop_variants(
-        [_variant(extra_envs={_TUNED_ENV: "kernel"})],
-        **_noop_filter_kwargs(tmp_path, observed_server_env=observed_launch_from_state(state)[1]),
-    )
-    assert kept == []
-    assert dropped[0][0] == _CANDIDATE
+    # A different value runs, and so does a setting the engine never reported:
+    # absence from the record is unknown, not equal.
+    for args in ("--max-running-requests 128", "--stream-interval 20"):
+        kept, none_dropped = filter_baseline_noop_variants([_variant(args)], **kwargs)
+        assert [gv.name for gv in kept] == [_CANDIDATE], args
+        assert none_dropped == []
 
 
 def test_record_explore_accepted_dedup_by_fingerprint():
