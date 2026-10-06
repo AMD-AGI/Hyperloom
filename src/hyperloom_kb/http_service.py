@@ -11,7 +11,10 @@ import hmac
 import json
 import logging
 import os
+import shutil
 import signal
+import threading
+import time
 import uuid
 from collections.abc import Collection, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, suppress
@@ -24,12 +27,24 @@ from pathlib import Path
 from typing import Any, TextIO, cast
 from urllib.parse import parse_qs, urlsplit
 
+import psycopg
 from psycopg.types.json import Jsonb
+from psycopg_pool import PoolTimeout
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
 from hyperloom_kb.database import Database, WriteSource
 from hyperloom_kb.embedded_postgres import start_embedded_postgres
 from hyperloom_kb.legacy_home import LegacyHome
+from hyperloom_kb.observability import (
+    PROBE_ROUTES,
+    REQUEST_ID_HEADER,
+    JsonLogFormatter,
+    Metrics,
+    RequestContext,
+    current_request,
+    event,
+    route_of,
+)
 from hyperloom_kb.local_state import LABEL_BEFORE_PULL, LABEL_MANUAL, Connection, LocalState, UnknownStateItem
 from hyperloom_kb.knowledge_read import (
     AnthropicPlannerBackend,
@@ -80,6 +95,10 @@ DEFAULT_HOME = Path("~/.local/share/hyperloom-kb").expanduser()
 SERVICE_LOCK = "service.lock"
 DATABASE_URL_ENV = "HYPERLOOM_KB_DATABASE_URL"
 _CONFLICT = "conflict"
+# Below this a write could fail for space, so the service stops reporting ready.
+MIN_FREE_DISK_BYTES = 512 * 1024 * 1024
+# A SIGTERM lets requests in flight finish this long; below an orchestrator's usual 30 s grace period.
+DRAIN_SECONDS = 25.0
 # A transport guard, not a data policy: Experiences of any size are stored.
 _MAX_REQUEST_BYTES = 256 * 1024 * 1024
 _READ_FIELDS = frozenset(
@@ -268,6 +287,7 @@ class ExperienceHTTPService:
         self.declaration = declaration
         self.name = name
         self._database = database
+        config.home.mkdir(parents=True, exist_ok=True)
         legacy = LegacyHome.find(config.home)
         self.kb_id = database.resolve_kb(adopt_kb_id=legacy.kb_id if legacy is not None else "")
         self._config_digest = config_digest
@@ -278,10 +298,30 @@ class ExperienceHTTPService:
         self._planner = planner
         self._declarations: dict[str, ExperienceDeclaration] = {}
         self._views: dict[str, _ReadView] = {}
+        self.metrics = Metrics()
         self.register(declaration)
         if legacy is not None:
             self._adopt(legacy)
+        self._missing_records = self._verify_records()
         self._sync = GlobalSync(self, self._ledger, global_kb)
+
+    def _verify_records(self) -> int:
+        """How many records the database holds whose file is missing or of another size; reported as unready."""
+
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                "SELECT experience_id, bytes FROM experiences WHERE kb_id = %s", (self.kb_id,)
+            ).fetchall()
+        missing = sum(1 for row in rows if not self._records.holds(str(row["experience_id"]), int(row["bytes"])))
+        event(
+            log,
+            "records_verified",
+            level=logging.WARNING if missing else logging.INFO,
+            kb_id=self.kb_id,
+            records=len(rows),
+            missing=missing,
+        )
+        return missing
 
     def _adopt(self, legacy: LegacyHome) -> None:
         """Bring a home an older service kept on disk into the database, once."""
@@ -375,13 +415,15 @@ class ExperienceHTTPService:
         if declaration.schema_ref in self._declarations:
             return
         with self._database.transaction() as connection:
-            connection.execute(
+            registered = connection.execute(
                 """
                 INSERT INTO schemas(kb_id, schema_ref, declaration, registered_at) VALUES (%s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 """,
                 (self.kb_id, declaration.schema_ref, Jsonb(declaration.to_dict()), _utc_now()),
-            )
+            ).rowcount
+        if registered:
+            event(log, "audit", action="register_schema", schema_ref=declaration.schema_ref)
         self._declarations[declaration.schema_ref] = declaration
 
     def _decision(self, store: InMemoryExperienceStore, experience_id: str) -> str:
@@ -474,6 +516,7 @@ class ExperienceHTTPService:
                     _utc_now(),
                 ),
             )
+        self.metrics.count("hyperloom_kb_writes_total", schema_ref=experience.schema_ref, result=status)
         if status == _CONFLICT:
             raise ImmutableExperienceConflict("Experience id already exists with different content")
         return {"status": status, "experience_id": experience.id, "content_hash": content_hash}
@@ -747,11 +790,14 @@ class ExperienceHTTPService:
         schema = self._schema_ref(schema_ref)
         with self._database.transaction() as connection:
             self._schema_row(connection, schema, changes_reads=False)
-            return self._state.label(connection, schema, name=name, reason=LABEL_MANUAL).to_dict()
+            label = self._state.label(connection, schema, name=name, reason=LABEL_MANUAL)
+        event(log, "audit", action="label", schema_ref=schema, label_id=label.label_id, name=label.name)
+        return label.to_dict()
 
     def delete_label(self, label_id: str) -> dict[str, JsonValue]:
         with self._database.transaction() as connection:
             self._state.delete_label(connection, label_id)
+        event(log, "audit", action="delete_label", label_id=label_id)
         return {"deleted": label_id}
 
     def restore(self, label_id: str) -> dict[str, JsonValue]:
@@ -762,6 +808,14 @@ class ExperienceHTTPService:
             label = self._state.get_label(connection, label_id)
             self._schema_row(connection, label.schema_ref, changes_reads=True)
             saved = self._state.restore(connection, label)
+        event(
+            log,
+            "audit",
+            action="restore",
+            schema_ref=label.schema_ref,
+            label_id=label.label_id,
+            saved_label_id=None if saved is None else saved.label_id,
+        )
         return {"restored": label.to_dict(), "saved": None if saved is None else saved.to_dict()}
 
     def exclude(self, experience_id: str, reason: str) -> dict[str, JsonValue]:
@@ -769,6 +823,7 @@ class ExperienceHTTPService:
             schema = self._schema_of(connection, experience_id)
             self._schema_row(connection, schema, changes_reads=True)
             self._state.exclude(connection, schema, experience_id, reason)
+        event(log, "audit", action="exclude", schema_ref=schema, experience_id=experience_id, reason=reason)
         return {"experience_id": experience_id, "status": "excluded"}
 
     def include(self, experience_id: str) -> dict[str, JsonValue]:
@@ -776,6 +831,7 @@ class ExperienceHTTPService:
             schema = self._schema_of(connection, experience_id)
             self._schema_row(connection, schema, changes_reads=True)
             lifted = self._state.include(connection, schema, experience_id)
+        event(log, "audit", action="include", schema_ref=schema, experience_id=experience_id, lifted=lifted)
         return {"experience_id": experience_id, "status": "included" if lifted else "not_excluded"}
 
     def exclusions(self, schema_ref: str | None = None) -> dict[str, JsonValue]:
@@ -787,11 +843,29 @@ class ExperienceHTTPService:
                 "history": list(self._state.exclusion_history(connection, schema)),
             }
 
+    def _synced(self, direction: str, report: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        self.metrics.count("hyperloom_kb_sync_batches_total", direction=direction, status=str(report["status"]))
+        counts = {key: report.get(key) for key in ("created", "unchanged", "skipped", "held_back", "has_more")}
+        rejected = report.get("rejected")
+        event(
+            log,
+            "sync",
+            level=logging.INFO if report["status"] == "completed" else logging.WARNING,
+            direction=direction,
+            status=report["status"],
+            global_url=report.get("global_url"),
+            schema_ref=report.get("schema_ref"),
+            rejected=len(rejected) if isinstance(rejected, list) else 0,
+            error=report.get("error", ""),
+            **counts,
+        )
+        return report
+
     def push(self) -> dict[str, JsonValue]:
-        return self._sync.push()
+        return self._synced("push", self._sync.push())
 
     def pull(self, schema_ref: str) -> dict[str, JsonValue]:
-        return self._sync.pull(schema_ref)
+        return self._synced("pull", self._sync.pull(schema_ref))
 
     def begin_pull(self, schema_ref: str) -> dict[str, JsonValue] | None:
         with self._database.transaction() as connection:
@@ -839,6 +913,71 @@ class ExperienceHTTPService:
             "home": str(self.config.home.resolve()),
         }
 
+    def readiness(self) -> dict[str, bool]:
+        """Each check a service must pass to take traffic; the names say what failed, never what the KB holds."""
+
+        try:
+            with self._database.transaction() as connection:
+                connection.execute("SELECT 1")
+            database = True
+        except (psycopg.Error, PoolTimeout):
+            database = False
+        home = self.config.home
+        return {
+            "database": database,
+            "home_writable": os.access(home, os.W_OK),
+            "disk_space": shutil.disk_usage(home).free >= MIN_FREE_DISK_BYTES,
+            "records": self._missing_records == 0,
+        }
+
+    def metric_gauges(self) -> list[tuple[str, dict[str, str], float]]:
+        """The gauges a metrics scrape samples now: what the KB holds, how large it is, and how ready it is."""
+
+        gauges: list[tuple[str, dict[str, str], float]] = [
+            ("hyperloom_kb_build_info", {"kb_id": self.kb_id, "name": self.name, "code_digest": self._code_digest}, 1),
+            ("hyperloom_kb_records_missing", {}, self._missing_records),
+            ("hyperloom_kb_disk_free_bytes", {}, shutil.disk_usage(self.config.home).free),
+        ]
+        gauges += [("hyperloom_kb_ready", {"check": check}, float(ok)) for check, ok in self.readiness().items()]
+        gauges += [
+            ("hyperloom_kb_database_pool", {"stat": stat}, float(value))
+            for stat, value in sorted(self._database.pool.get_stats().items())
+            if stat in ("pool_size", "pool_available", "requests_waiting")
+        ]
+        with self._database.transaction() as connection:
+            for row in connection.execute(
+                """
+                SELECT experiences.schema_ref,
+                    COUNT(*) FILTER (WHERE outside.experience_id IS NULL AND exclusions.experience_id IS NULL) AS visible,
+                    COUNT(exclusions.experience_id) AS excluded,
+                    COUNT(outside.experience_id) AS outside
+                FROM experiences
+                LEFT JOIN outside USING (kb_id, schema_ref, experience_id)
+                LEFT JOIN exclusions USING (kb_id, schema_ref, experience_id)
+                WHERE experiences.kb_id = %s GROUP BY experiences.schema_ref
+                """,
+                (self.kb_id,),
+            ):
+                for state in ("visible", "excluded", "outside"):
+                    gauges.append(
+                        ("hyperloom_kb_experiences", {"schema_ref": row["schema_ref"], "state": state}, row[state])
+                    )
+            sizes = connection.execute(
+                """
+                SELECT COALESCE(SUM(bytes), 0) AS records, MAX(stored_at) AS last_write,
+                    pg_database_size(current_database()) AS database
+                FROM experiences WHERE kb_id = %s
+                """,
+                (self.kb_id,),
+            ).fetchone()
+        if sizes is not None:
+            gauges.append(("hyperloom_kb_record_bytes", {}, float(sizes["records"])))
+            gauges.append(("hyperloom_kb_database_bytes", {}, float(sizes["database"])))
+            if sizes["last_write"]:
+                written = datetime.fromisoformat(str(sizes["last_write"]).replace("Z", "+00:00"))
+                gauges.append(("hyperloom_kb_last_write_timestamp_seconds", {}, written.timestamp()))
+        return gauges
+
 
 class ExperienceHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
@@ -854,12 +993,18 @@ class RequestHandler(BaseHTTPRequestHandler):
         return
 
     def _write(self, status: HTTPStatus, value: Mapping[str, JsonValue]) -> None:
-        data = (_canonical(dict(value)) + "\n").encode()
+        self._send(status, (_canonical(dict(value)) + "\n").encode(), "application/json")
+
+    def _send(self, status: HTTPStatus, data: bytes, content_type: str) -> None:
+        context = current_request.get()
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        if context is not None:
+            self.send_header(REQUEST_ID_HEADER, context.request_id)
         self.end_headers()
         self.wfile.write(data)
+        self._answered = (int(status), len(data))
 
     def _authorized(self) -> bool:
         supplied = self.headers.get("Authorization", "")
@@ -874,12 +1019,38 @@ class RequestHandler(BaseHTTPRequestHandler):
             raise HTTPServiceError("request body is too large")
         return _json_object(json.loads(self.rfile.read(length)), "request body")
 
+    def _probe(self, path: str) -> bool:
+        """Answer the unauthenticated probes an orchestrator and a metrics scraper send; ``False`` for any other path.
+
+        They carry nothing a KB holds: which checks pass, and counts and sizes.
+        """
+
+        app = self.server.app
+        if self.command != "GET" or path not in PROBE_ROUTES:
+            return False
+        if path == "/livez":
+            self._write(HTTPStatus.OK, {"status": "alive"})
+        elif path == "/readyz":
+            checks = app.readiness()
+            ready = all(checks.values())
+            self._write(
+                HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE,
+                {"ready": ready, "checks": {check: "ok" if ok else "failed" for check, ok in checks.items()}},
+            )
+        else:
+            text = app.metrics.render(app.metric_gauges())
+            self._send(HTTPStatus.OK, text.encode(), "text/plain; version=0.0.4; charset=utf-8")
+        return True
+
     def _dispatch(self) -> None:
-        if not self._authorized():
-            self._write(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
-            return
         app = self.server.app
         parsed = urlsplit(self.path)
+        if self._probe(parsed.path):
+            return
+        if not self._authorized():
+            app.metrics.count("hyperloom_kb_http_unauthorized_total")
+            self._write(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return
         query = parse_qs(parsed.query)
         if self.command == "GET" and parsed.path == "/health":
             self._write(HTTPStatus.OK, app.health())
@@ -948,9 +1119,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             if experience.id != parsed.path.removeprefix(prefix):
                 raise HTTPServiceError("Experience path id differs from payload")
             declaration = body.get("declaration")
+            context = current_request.get() or RequestContext("")
             self._write(
                 HTTPStatus.OK,
-                app.write(experience, None if declaration is None else ExperienceDeclaration.from_dict(declaration)),
+                app.write(
+                    experience,
+                    None if declaration is None else ExperienceDeclaration.from_dict(declaration),
+                    source=WriteSource(context.client_kb_id, context.client_name, context.request_id),
+                ),
             )
             return
         self._write(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -999,6 +1175,38 @@ class RequestHandler(BaseHTTPRequestHandler):
         return True
 
     def _handle(self) -> None:
+        """Answer one request, counted and timed, with its context on every line logged while answering it."""
+
+        token = current_request.set(RequestContext.from_headers(self.headers))
+        self._answered = (0, 0)
+        started = time.monotonic()
+        metrics = self.server.app.metrics
+        try:
+            with metrics.in_flight():
+                self._answer()
+        finally:
+            route = route_of(urlsplit(self.path).path)
+            status, sent = self._answered
+            seconds = time.monotonic() - started
+            received = int(self.headers.get("Content-Length") or 0) if self.command in ("POST", "PUT") else 0
+            metrics.observe_request(
+                method=self.command, route=route, status=status, seconds=seconds, bytes_in=received, bytes_out=sent
+            )
+            if route not in PROBE_ROUTES:
+                event(
+                    log,
+                    "http_request",
+                    level=logging.WARNING if status >= 500 else logging.INFO,
+                    method=self.command,
+                    route=route,
+                    status=status,
+                    duration_ms=round(seconds * 1000, 3),
+                    bytes_in=received,
+                    bytes_out=sent,
+                )
+            current_request.reset(token)
+
+    def _answer(self) -> None:
         try:
             self._dispatch()
         except UnknownStateItem as exc:
@@ -1070,8 +1278,14 @@ def _record_holder(lock: TextIO, port: int) -> None:
     lock.flush()
 
 
-def _stop_serving(signum: int, frame: Any) -> None:
-    raise KeyboardInterrupt
+def serve_until_stopped(server: ExperienceHTTPServer, stop: threading.Event, drain_seconds: float) -> None:
+    """Serve until ``stop`` is set, then stop taking requests and let those in flight finish for ``drain_seconds``."""
+
+    threading.Thread(target=lambda: (stop.wait(), server.shutdown()), daemon=True).start()
+    server.serve_forever()
+    deadline = time.monotonic() + drain_seconds
+    while server.app.metrics.requests_in_flight() and time.monotonic() < deadline:
+        time.sleep(0.05)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1089,7 +1303,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Import complete Experiences from JSONL before serving; repeatable.",
     )
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonLogFormatter())
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
 
     settings = ServiceSettings.from_env(os.environ)
     planner: LLMQueryPlanner | None = None
@@ -1103,9 +1319,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     if settings.global_problem:
         log.warning("Push and pull are unavailable: %s", settings.global_problem)
-    # A service manager stops the service with SIGTERM; leaving through the same path as Ctrl-C stops the database
-    # this process started rather than orphaning it.
-    signal.signal(signal.SIGTERM, _stop_serving)
+    # A service manager stops the service with SIGTERM: it stops taking requests, lets the ones in flight finish, and
+    # stops the database this process started rather than orphaning it.
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: stop.set())
     home = args.home.expanduser()
     with ExitStack() as stack:
         lock: TextIO | None = None
@@ -1132,21 +1349,19 @@ def main(argv: list[str] | None = None) -> int:
         server = create_http_server(app, args.host, args.port)
         if lock is not None:
             _record_holder(lock, server.server_address[1])
-        print(
-            _canonical(
-                {
-                    "event": "experience_kb_listening",
-                    "host": args.host,
-                    "port": server.server_address[1],
-                    "home": str(home),
-                    "kb_id": app.kb_id,
-                    "schema_ref": app.declaration.schema_ref,
-                }
-            ),
-            flush=True,
+        event(
+            log,
+            "listening",
+            host=args.host,
+            port=server.server_address[1],
+            home=str(home),
+            kb_id=app.kb_id,
+            schema_ref=app.declaration.schema_ref,
+            code_digest=code_digest(),
         )
         with server, suppress(KeyboardInterrupt):
-            server.serve_forever()
+            serve_until_stopped(server, stop, DRAIN_SECONDS)
+        event(log, "stopped", kb_id=app.kb_id)
     return 0
 
 
@@ -1165,6 +1380,7 @@ __all__ = [
     "code_digest",
     "create_http_server",
     "main",
+    "serve_until_stopped",
 ]
 
 

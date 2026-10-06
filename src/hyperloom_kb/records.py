@@ -33,6 +33,12 @@ class RecordFiles:
     def write(self, experience_id: str, data: bytes) -> None:
         _atomic_write(self._path(experience_id), data)
 
+    def holds(self, experience_id: str, size: int) -> bool:
+        """Whether the file of ``experience_id`` is there with the ``size`` the database holds for it."""
+
+        path = self._path(experience_id)
+        return path.is_file() and path.stat().st_size == size
+
     def read(self, experience_id: str, content_hash: str) -> Experience:
         path = self._path(experience_id)
         try:

@@ -23,6 +23,8 @@ from hyperloom_kb.remote import RemoteClient, RemoteClientError, RemoteConfig, i
 from hyperloom_kb.schema import JsonValue
 
 LOG_NAME = "service.log"
+# A log past this size is kept as ``service.log.1`` when the next service starts, replacing the one kept before.
+LOG_ROTATE_BYTES = 8 * 1024 * 1024
 DEFAULT_START_TIMEOUT_SECONDS = 60.0
 _POLL_SECONDS = 0.2
 
@@ -74,7 +76,10 @@ def _spawn(host: str, port: int, home: Path, token: str, env: Mapping[str, str])
     ]
     try:
         home.mkdir(parents=True, exist_ok=True)
-        with (home / LOG_NAME).open("ab") as log:
+        log_path = home / LOG_NAME
+        if log_path.is_file() and log_path.stat().st_size > LOG_ROTATE_BYTES:
+            os.replace(log_path, log_path.with_name(f"{LOG_NAME}.1"))
+        with log_path.open("ab") as log:
             return subprocess.Popen(
                 command,
                 stdin=subprocess.DEVNULL,
@@ -205,6 +210,7 @@ def ensure_local_service(
 __all__ = [
     "DEFAULT_START_TIMEOUT_SECONDS",
     "LOG_NAME",
+    "LOG_ROTATE_BYTES",
     "LocalService",
     "LocalServiceError",
     "ensure_local_service",

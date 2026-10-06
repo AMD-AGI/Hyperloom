@@ -13,6 +13,7 @@ import logging
 import os
 import tempfile
 import urllib.error
+import uuid
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_kb.identity import derive_experience_id
+from hyperloom_kb.observability import REQUEST_ID_HEADER, client_headers
 from hyperloom_kb.schema import (
     Alternative,
     Change,
@@ -163,6 +165,12 @@ class RemoteClient:
         # Set by a write the service could not take, cleared by one it took: until then every publish spools without
         # a request, so an unreachable service costs one timeout rather than one per write.
         self._spooling = False
+        self._identity: dict[str, str] = {}
+
+    def identify(self, kb_id: str, name: str) -> None:
+        """Name the KB this client acts for on every later request, as a service syncing with another does."""
+
+        self._identity = client_headers(kb_id, name)
 
     def _request(
         self,
@@ -171,9 +179,12 @@ class RemoteClient:
         body: dict[str, JsonValue] | None = None,
     ) -> dict[str, JsonValue]:
         data = None if body is None else json.dumps(body).encode()
+        request_id = uuid.uuid4().hex
         headers = {
             "Accept": "application/json",
             "Authorization": f"Bearer {self.config.token}",
+            REQUEST_ID_HEADER: request_id,
+            **self._identity,
         }
         if data is not None:
             headers["Content-Type"] = "application/json"
@@ -194,11 +205,13 @@ class RemoteClient:
                     # The status is known even when the body is cut off; it still decides whether to retry.
                     detail = f"<body unreadable: {type(cut).__name__}>"
             raise RemoteClientError(
-                f"Experience service returned HTTP {exc.code}: {detail}",
+                f"Experience service returned HTTP {exc.code} to request {request_id}: {detail}",
                 retryable=exc.code not in _PERMANENT_HTTP_STATUSES,
             ) from exc
         except (OSError, TimeoutError, ValueError, RecursionError, http.client.HTTPException) as exc:
-            raise RemoteClientError(f"Experience service request failed with {type(exc).__name__}") from exc
+            raise RemoteClientError(
+                f"Experience service request {request_id} failed with {type(exc).__name__}"
+            ) from exc
         if not isinstance(payload, dict):
             raise RemoteClientError("Experience service response is not an object")
         return payload

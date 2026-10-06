@@ -301,8 +301,12 @@ network, put a TLS-terminating proxy in front of it and hand out its
 | `POST /v1/exclusions` | exclude an Experience from reads | `exclude()` |
 | `DELETE /v1/exclusions/{experience_id}` | lift an exclusion | `include()` |
 | `GET /health` | identity, liveness, schemas, corpus size, process, settings digest | `health()` |
+| `GET /livez` | the process answers; no token | |
+| `GET /readyz` | the service can take traffic; no token | |
+| `GET /metrics` | Prometheus metrics; no token | |
 
-Every request, including `/health`, sends `Authorization: Bearer <token>`.
+Every other request, `/health` included, sends `Authorization: Bearer <token>`;
+see [Observability](#observability) for the three that need none.
 Unknown request fields are rejected, so a misspelled field fails loudly. A
 request body may be up to 256 MiB; Experiences themselves have no size limit.
 
@@ -475,3 +479,70 @@ Experience KB code it runs.
   failure; files the service rejects for good move to `spool/rejected/`.
   Hyperloom flushes at every launch and before every workspace `push`.
 - `write()` raises on any failure and never spools; push uses it.
+- Every request carries a fresh `X-Request-ID`, and every `RemoteClientError`
+  names it, so a failure a client reports is found in the service's log by
+  that id.
+
+## Observability
+
+Every service, local or global, reports the same way; a global KB's
+dashboards and alerts are built on these, and a workspace reads them
+directly.
+
+**Probes.** Three endpoints answer without a token and carry nothing a KB
+holds:
+
+| Endpoint | Answer |
+|---|---|
+| `GET /livez` | `200 {"status": "alive"}` while the process answers. |
+| `GET /readyz` | `200` when every check passes, `503` otherwise, with each check `ok` or `failed`: `database` (a query answers), `home_writable`, `disk_space` (at least 512 MiB free under the home), and `records` (every record the database holds had its file, of its size, when the service started). |
+| `GET /metrics` | The Prometheus text format. |
+
+**Metrics.** Counters count since the process started; gauges are sampled at
+each scrape.
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `hyperloom_kb_http_requests_total` | `method`, `route`, `status` | Requests answered; `route` is the path template, such as `/v1/experiences/{experience_id}`. |
+| `hyperloom_kb_http_request_duration_seconds` | `method`, `route` | Histogram of answer times, 5 ms to 30 s buckets. |
+| `hyperloom_kb_http_requests_in_flight` | | Requests being answered now. |
+| `hyperloom_kb_http_request_bytes_total`, `hyperloom_kb_http_response_bytes_total` | `route` | Body bytes received and sent. |
+| `hyperloom_kb_http_unauthorized_total` | | Requests refused for their token. |
+| `hyperloom_kb_writes_total` | `schema_ref`, `result` | Writes by result: `created`, `unchanged`, `conflict`. |
+| `hyperloom_kb_sync_batches_total` | `direction`, `status` | Push and pull batches by status: `completed`, `incomplete`, `refused`. |
+| `hyperloom_kb_experiences` | `schema_ref`, `state` | Stored Experiences: `visible`, `excluded`, or `outside` the state after a restore. |
+| `hyperloom_kb_record_bytes`, `hyperloom_kb_database_bytes`, `hyperloom_kb_disk_free_bytes` | | Record files, database, and free disk. |
+| `hyperloom_kb_last_write_timestamp_seconds` | | When the KB last stored a new Experience. |
+| `hyperloom_kb_records_missing` | | Records whose file was missing at start. |
+| `hyperloom_kb_ready` | `check` | Each readiness check, `1` or `0`. |
+| `hyperloom_kb_database_pool` | `stat` | `pool_size`, `pool_available`, `requests_waiting`. |
+| `hyperloom_kb_build_info` | `kb_id`, `name`, `code_digest` | Always `1`; names the KB and the code serving it. |
+| `hyperloom_kb_start_time_seconds` | | When the process started. |
+
+**Logs.** A service logs one JSON object per line, to standard error; a
+workspace's service writes them to `service.log`. Every line has `ts`,
+`level`, `logger`, `message`, and `event`:
+
+| `event` | When | Fields |
+|---|---|---|
+| `http_request` | every answered request but the probes | `method`, `route`, `status`, `duration_ms`, `bytes_in`, `bytes_out` |
+| `audit` | a schema registered, a label made or deleted, a restore, an exclude, an include | `action` and what it acted on: `schema_ref`, `label_id`, `experience_id`, `reason`, `saved_label_id` |
+| `sync` | a push or pull batch | `direction`, `status`, `global_url`, the counts, `error` |
+| `records_verified` | at start | `records`, `missing` |
+| `listening`, `stopped` | start and stop | `port`, `home`, `kb_id`, `code_digest` |
+
+A line logged while answering a request also has its `request_id`, and the
+`client_kb_id` and `client_name` of the KB that sent it, when it named itself.
+Tokens and request bodies are never logged.
+
+**Which KB sent what.** A service syncing with a global KB names itself on
+every request with `X-Hyperloom-KB-Client` (its `kb_id`) and
+`X-Hyperloom-KB-Client-Name`, and every request carries `X-Request-ID`, which
+the answer echoes. The service records every write, refused ones included,
+with its result, the KB that sent it, and its request id, in the database's
+`writes` table; a pull records the global KB as the sender of what it brings.
+
+**Log rotation and stopping.** A workspace's `service.log` past 8 MiB is kept
+as `service.log.1`, replacing the one kept before, when the next service
+starts. `SIGTERM` stops a service taking requests, lets those in flight finish
+for up to 25 seconds, and stops the embedded database the service started.

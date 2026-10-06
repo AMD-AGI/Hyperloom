@@ -41,6 +41,20 @@ hyperloom-kb labels [--schema REF]   # labels newest first, current_label_id, mo
 non-empty state has no label yet. A command that names no schema acts on the
 service's default schema, the `schema_ref` in `health`.
 
+## Health and metrics
+
+`hyperloom-kb health` reports the KB's identity and what its reads see per
+schema. Three endpoints answer without a token, for an orchestrator, a
+metrics scraper, or a quick look:
+
+```bash
+curl -s "$HYPERLOOM_KB_URL/readyz"    # ready, and which check failed when not
+curl -s "$HYPERLOOM_KB_URL/metrics"   # Prometheus metrics: requests, latency, writes, storage
+```
+
+A failure `hyperloom-kb` reports names its request id; the service logs one
+JSON line per request with that `request_id`, so search its log for it.
+
 ## Label and restore
 
 ```bash
