@@ -282,7 +282,17 @@ paging by position, through whichever replica, never passes one still to
 commit. Labels, restores, and exclusions of a schema hold its row for their
 transaction, and each push or pull of a KB holds a database-wide lock, so
 replicas never interleave them. A database holds one KB for now; serving one of
-several is left for when requests carry who they act for.
+several is left for when requests carry who they act for. Such a service
+installs with `pip install ".[kb-service]"`, which leaves out the embedded
+server, and its replicas share `--home` on one file system they all mount with
+atomic rename, such as CephFS or NFS.
+
+The database must never lose a write it committed. A pull refuses a KB whose
+positions went back, and a position given again to other content is one every
+workspace that pulled past it never sees, so a failover may promote only a
+replica that confirmed every commit, as synchronous replication guarantees.
+The pool checks each connection as it hands it out, so the first request after
+a failover or restart gets a live connection.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -533,6 +543,11 @@ each scrape.
 | `hyperloom_kb_database_pool` | `stat` | `pool_size`, `pool_available`, `requests_waiting`. |
 | `hyperloom_kb_build_info` | `kb_id`, `name`, `code_digest` | Always `1`; names the KB and the code serving it. |
 | `hyperloom_kb_start_time_seconds` | | When the process started. |
+
+Replicas of one KB each count their own requests, writes, and batches, so those
+add up across replicas; `hyperloom_kb_experiences`, `hyperloom_kb_record_bytes`,
+`hyperloom_kb_database_bytes`, and `hyperloom_kb_last_write_timestamp_seconds`
+describe the KB, which every replica reports the same, so take their maximum.
 
 **Logs.** A service logs one JSON object per line, to standard error; a
 workspace's service writes them to `service.log`. Every line has `ts`,
