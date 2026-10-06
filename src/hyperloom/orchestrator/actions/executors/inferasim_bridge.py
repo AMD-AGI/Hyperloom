@@ -5,13 +5,14 @@
 
 Maps a Hyperloom benchmark spec (the ``benchmark`` block of a materialized
 Magpie YAML: framework/model/precision + TP/CONC/ISL/OSL envs) onto Infera's
-``inferasim`` serving projection and returns the same throughput/latency
-measurements a real serving benchmark would produce -- without booting a
-server or touching a GPU.
+``inferasim`` serving projection and returns projected throughput/latency.
 
-This is the analytical inner-loop that lets the optimizer simulate candidate
-serving configs and spend real GPU time only on the final validation, which is
-the GPU-time reduction projected in the deck.
+The only consumer is EXPLORE's projection router (:mod:`_explore_projection`),
+which compares a variant's projection with the stack's projection to decide
+which variants are worth a real benchmark. A projected number is never
+compared with a measured one and never decides a KEEP. In particular
+``ProjMetrics.output_throughput`` is the projected aggregate decode rate, not
+Magpie's ``output_throughput``.
 
 Design notes
 ------------
@@ -27,24 +28,31 @@ Design notes
   (``HYPERLOOM_INFERASIM_WORKLOAD``); a best-effort heuristic maps common HF
   model paths to presets so the common cases work with zero extra config.
 * Two projection modes, picked by ``HYPERLOOM_INFERASIM_MODE``. ``simulate``
-  (the default) is purely analytical: no anchor is read, so no warmup server is
-  ever booted to produce one. ``benchmark`` calibrates against the nearest
-  in-regime warmup anchor (``HYPERLOOM_INFERASIM_ANCHOR`` /
-  ``_ANCHOR_STORE`` / ``_ANCHOR_SCALING``). EXPLORE only needs candidates
-  ordered correctly, and simulate mode orders them about as well as benchmark
-  mode does while costing no anchor runs; benchmark mode is for when the
-  absolute numbers matter.
+  (the default) is purely analytical: no anchor is read, so no server is ever
+  booted to produce one. ``benchmark`` calibrates against the nearest in-regime
+  anchor (``HYPERLOOM_INFERASIM_ANCHOR`` / ``_ANCHOR_STORE`` /
+  ``_ANCHOR_SCALING``). When the store has none for the candidate's regime, one
+  is harvested with Infera's served-anchor benchmark and indexed into the
+  store, so the next candidate in that regime reuses it
+  (``HYPERLOOM_INFERASIM_HARVEST=0`` turns that off). Benchmark mode fails
+  closed: if no anchor can be found or harvested, the projection raises rather
+  than quietly returning an analytical number.
 """
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import hashlib
 import json
+import logging
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
@@ -63,6 +71,12 @@ ENV_ANCHOR_SCALING = "HYPERLOOM_INFERASIM_ANCHOR_SCALING"  # comma-sep TP-scalin
 ENV_ANCHOR_STORE = "HYPERLOOM_INFERASIM_ANCHOR_STORE"  # dir of warmup anchors (auto-select)
 ENV_SERVING_MODEL = "HYPERLOOM_INFERASIM_SERVING_MODEL"  # continuous (default) | static
 ENV_MODE = "HYPERLOOM_INFERASIM_MODE"  # simulate (default) | benchmark
+ENV_HARVEST = "HYPERLOOM_INFERASIM_HARVEST"  # benchmark mode: harvest on a miss (default on)
+ENV_HARVEST_PYTHON = "HYPERLOOM_INFERASIM_HARVEST_PYTHON"  # interpreter that can launch the engine
+ENV_HARVEST_GPUS = "HYPERLOOM_INFERASIM_HARVEST_GPUS"  # GPUs the harvest may use (default min(TP*PP, 4))
+ENV_HARVEST_TIMEOUT = "HYPERLOOM_INFERASIM_HARVEST_TIMEOUT_SEC"
+
+log = logging.getLogger(__name__)
 
 MODE_SIMULATE = "simulate"
 MODE_BENCHMARK = "benchmark"
@@ -199,9 +213,9 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
-def _first_env_or(bench_envs: dict, key: str, default: Any) -> Any:
+def _first_env_or(bench_envs: dict, key: str, default: Any, *, ambient: bool = True) -> Any:
     """Ambient env wins over YAML envs (Magpie/bypass convention), then default."""
-    val = os.environ.get(key)
+    val = os.environ.get(key) if ambient else None
     if val is None or str(val).strip() == "":
         val = bench_envs.get(key)
     if val is None or str(val).strip() == "":
@@ -216,20 +230,6 @@ def _precision_to_weight_dtype(precision: str) -> str:
     if p in ("mxfp4", "fp4"):
         return "mxfp4"
     return "bf16"
-
-
-def _parse_server_arg_int(server_args: str, *flags: str) -> int | None:
-    """Pull an int value for any of ``flags`` out of a server-arg string."""
-    if not server_args:
-        return None
-    toks = server_args.split()
-    for i, tok in enumerate(toks):
-        for flag in flags:
-            if tok == flag and i + 1 < len(toks):
-                return _as_int(toks[i + 1], 0) or None
-            if tok.startswith(flag + "="):
-                return _as_int(tok.split("=", 1)[1], 0) or None
-    return None
 
 
 def _parse_server_arg_str(server_args: str, *flags: str) -> str | None:
@@ -336,32 +336,38 @@ def _parse_server_arg_int(server_args: str, *flags: str) -> int:
         return 0
 
 
-def spec_from_benchmark(bench: dict) -> ServingSpec:
-    """Extract a :class:`ServingSpec` from a Magpie ``benchmark`` block."""
+def spec_from_benchmark(bench: dict, *, ambient: bool = True) -> ServingSpec:
+    """Extract a :class:`ServingSpec` from a Magpie ``benchmark`` block.
+
+    ``ambient=False`` reads the block alone: no process env and no
+    ``HYPERLOOM_INFERASIM_*`` overrides. That is what a caller comparing two
+    materialized configs needs, since an exported ``CONC`` would otherwise
+    project every variant at the same concurrency.
+    """
     bench = bench or {}
+
+    def override(name: str) -> str:
+        return (os.environ.get(name) or "") if ambient else ""
+
     envs = dict(bench.get("envs") or {})
     framework = str(bench.get("framework") or "sglang").lower()
-    model_path = str(bench.get("model") or os.environ.get("MODEL", ""))
+    model_path = str(bench.get("model") or override("MODEL"))
     # Infera names the engine as a free string, so a build ("mori-sglang") is a
     # regime of its own and reaches us as one. Resolving the args env through the
     # registry rather than an exact table means such a build still has its server
     # args read -- the hand-rolled table returned nothing for it, which silently
     # dropped the attention backend, KV dtype and speculative flags that decide
     # the regime.
-    extra_args = str(_first_env_or(envs, server_args_env_name(framework), ""))
+    extra_args = str(_first_env_or(envs, server_args_env_name(framework), "", ambient=ambient))
 
-    tp = _as_int(_first_env_or(envs, "TP", 1), 1)
+    tp = _as_int(_first_env_or(envs, "TP", 1, ambient=ambient), 1)
     # EP/PP: explicit bridge env, else parse from server args, else 1.
     ep = (
-        _as_int(os.environ.get(ENV_EP) or "", 0)
+        _as_int(override(ENV_EP), 0)
         or _parse_server_arg_int(extra_args, "--ep-size", "--expert-parallel-size", "--moe-ep-size")
         or 1
     )
-    pp = (
-        _as_int(os.environ.get(ENV_PP) or "", 0)
-        or _parse_server_arg_int(extra_args, "--pp-size", "--pipeline-parallel-size")
-        or 1
-    )
+    pp = _as_int(override(ENV_PP), 0) or _parse_server_arg_int(extra_args, "--pp-size", "--pipeline-parallel-size") or 1
 
     weight_dtype = _precision_to_weight_dtype(str(bench.get("precision") or "bf16"))
     # KV dtype: explicit bridge env wins, else the server arg the variant sets,
@@ -369,9 +375,9 @@ def spec_from_benchmark(bench: dict) -> ServingSpec:
     # dtype by passing this flag and nothing else -- and the projection prices KV
     # dtype perfectly well, so ignoring the flag made a lever the model *can*
     # see look like one it cannot, and projected an fp8 candidate as bf16.
-    kv_dtype = str(os.environ.get(ENV_KV_DTYPE) or _parse_kv_cache_dtype(extra_args) or "bf16").lower()
+    kv_dtype = str(override(ENV_KV_DTYPE) or _parse_kv_cache_dtype(extra_args) or "bf16").lower()
 
-    conc = max(1, _as_int(_first_env_or(envs, "CONC", 64), 64))
+    conc = max(1, _as_int(_first_env_or(envs, "CONC", 64, ambient=ambient), 64))
     # A running batch cannot exceed the scheduler's cap on concurrent sequences,
     # so a variant that lowers it lowers the batch the decode step actually runs.
     max_seqs = _parse_server_arg_int(extra_args, "--max-num-seqs", "--max-running-requests")
@@ -385,8 +391,8 @@ def spec_from_benchmark(bench: dict) -> ServingSpec:
         ep=max(1, ep),
         pp=max(1, pp),
         conc=conc,
-        isl=max(1, _as_int(_first_env_or(envs, "ISL", 1024), 1024)),
-        osl=max(1, _as_int(_first_env_or(envs, "OSL", 1024), 1024)),
+        isl=max(1, _as_int(_first_env_or(envs, "ISL", 1024, ambient=ambient), 1024)),
+        osl=max(1, _as_int(_first_env_or(envs, "OSL", 1024, ambient=ambient), 1024)),
         weight_dtype=weight_dtype,
         kv_cache_dtype=kv_dtype,
         extra_server_args=extra_args,
@@ -765,6 +771,203 @@ def _build_argv(spec: ServingSpec, workload: str, anchor: AnchorChoice | None = 
     return argv
 
 
+_HARVEST_SCRIPT_REL = "infera/projection/core/projection/inference_projection/benchmark_vllm.py"
+_DEFAULT_HARVEST_GPUS = 4
+_DEFAULT_HARVEST_TIMEOUT_SEC = 1800
+# Parallelism is chosen by the harvest itself (``--tp`` / ``--benchmark-gpus``);
+# a width pinned in the deployment's server args would fight it.
+_PARALLEL_FLAGS = frozenset(
+    {
+        "--tensor-parallel-size",
+        "-tp",
+        "--tp",
+        "--tp-size",
+        "--pipeline-parallel-size",
+        "-pp",
+        "--pp-size",
+        "--data-parallel-size",
+        "-dp",
+        "--dp-size",
+    }
+)
+
+
+def harvest_enabled() -> bool:
+    """Harvest on a miss unless ``HYPERLOOM_INFERASIM_HARVEST`` turns it off."""
+    raw = str(os.environ.get(ENV_HARVEST) or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _harvest_engine(framework: str) -> str | None:
+    """The ``--serving-backend`` Infera's harvest launches for ``framework``.
+
+    The harvest only knows vLLM, SGLang and ATOM; a build of one of them
+    ("mori-sglang") is launched as its family.
+    """
+    fw = (framework or "").lower()
+    for family in ("sglang", "atom", "vllm"):
+        if family in fw:
+            return family
+    return None
+
+
+def _strip_parallel_flags(server_args: str) -> str:
+    toks = (server_args or "").split()
+    out: list[str] = []
+    skip = False
+    for tok in toks:
+        if skip:
+            skip = False
+            continue
+        flag = tok.split("=", 1)[0]
+        if flag in _PARALLEL_FLAGS:
+            skip = "=" not in tok
+            continue
+        out.append(tok)
+    return " ".join(out)
+
+
+def _regime_key(spec: ServingSpec) -> str:
+    """One harvest per regime and model; concurrent misses on it share the lock."""
+    recipe = recipe_from_spec(spec)
+    axes = {k: recipe.get(k) for k in ("model", "engine", "weight_dtype", "kv_cache_dtype", "attention_backend")}
+    axes["speculative"] = recipe.get("speculative")
+    return hashlib.sha256(json.dumps(axes, sort_keys=True).encode()).hexdigest()[:16]
+
+
+@contextlib.contextmanager
+def _regime_lock(store_root: str, key: str) -> Iterator[None]:
+    lock_path = Path(store_root) / f".harvest-{key}.lock"
+    with lock_path.open("a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def harvest_command(spec: ServingSpec, save_path: str) -> list[str] | None:
+    """The served-anchor harvest for ``spec``'s regime, or None if it cannot run."""
+    root = os.environ.get(ENV_ROOT, "")
+    script = Path(root) / _HARVEST_SCRIPT_REL
+    engine = _harvest_engine(spec.framework)
+    if not root or not script.is_file() or not engine or not spec.model_path:
+        return None
+    gpus = _as_int(os.environ.get(ENV_HARVEST_GPUS), 0) or _DEFAULT_HARVEST_GPUS
+    gpus = max(1, min(gpus, spec.tp * spec.pp))
+    python = os.environ.get(ENV_HARVEST_PYTHON) or sys.executable or "python3"
+    cmd = [
+        python,
+        str(script),
+        "--model",
+        spec.model_path,
+        "--tp",
+        str(spec.tp),
+        "--pp",
+        str(spec.pp),
+        "--benchmark-gpus",
+        str(gpus),
+        "--input-len",
+        str(spec.isl),
+        "--output-len",
+        str(spec.osl),
+        # Capture mode: the sweep follows the engine's CUDA-graph sizes up to
+        # here, so the concurrency variants of this regime interpolate rather
+        # than extrapolate from it.
+        "--concurrency",
+        str(min(1024, max(64, 2 * spec.conc))),
+        # Real weights: dummy routing flattens the MoE decode curve, the
+        # difference between ~2% and ~30% TPOT error on gpt-oss-120b.
+        "--load-format",
+        "auto",
+        "--routing-dist",
+        "none",
+        "--serving-backend",
+        engine,
+        "--save",
+        save_path,
+    ]
+    if spec.ep > 1:
+        cmd.append("--enable-expert-parallel")
+    server_args = _strip_parallel_flags(spec.extra_server_args)
+    if server_args:
+        cmd.append("--server-args=" + server_args)
+    return cmd
+
+
+def harvest_anchor(spec: ServingSpec) -> AnchorChoice | None:
+    """Measure a served anchor for ``spec``'s regime, index it, and select it.
+
+    Only runs in benchmark mode with an anchor store to write into. Holds a
+    per-regime lock so concurrent misses on one regime boot one server, and
+    re-checks the store under it in case another caller already harvested.
+    Returns None whenever the harvest cannot run or does not produce an
+    in-regime anchor; the caller then fails closed.
+    """
+    store_root = os.environ.get(ENV_ANCHOR_STORE)
+    if not store_root or not harvest_enabled():
+        return None
+    Path(store_root).mkdir(parents=True, exist_ok=True)
+    key = _regime_key(spec)
+    with _regime_lock(store_root, key):
+        existing = select_anchor(spec)
+        if existing is not None and existing.regime_distance == 0:
+            return existing
+        save_path = str(Path(store_root) / "harvested" / f"{key}-tp{spec.tp}-c{spec.conc}.json")
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        cmd = harvest_command(spec, save_path)
+        if cmd is None:
+            log.warning(
+                "inferasim: cannot harvest an anchor for %s on %s (needs %s, a vllm/sglang/atom engine and a model path)",
+                spec.model_path,
+                spec.framework,
+                ENV_ROOT,
+            )
+            return None
+        timeout = _as_int(os.environ.get(ENV_HARVEST_TIMEOUT), 0) or _DEFAULT_HARVEST_TIMEOUT_SEC
+        log.info("inferasim: no in-regime anchor for %s; harvesting one: %s", spec.model_path, " ".join(cmd))
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning("inferasim: anchor harvest did not run (%s)", exc)
+            return None
+        if proc.returncode != 0 or not Path(save_path).is_file():
+            log.warning(
+                "inferasim: anchor harvest failed rc=%s: %s", proc.returncode, (proc.stderr or proc.stdout or "")[-600:]
+            )
+            return None
+        if not anchor_curve_is_sane(save_path):
+            log.warning("inferasim: harvested anchor %s failed the decode-curve sanity check", save_path)
+            return None
+        _ensure_infera_importable()
+        from infera.projection.core.projection.inference_projection.search.anchor_store import AnchorStore
+
+        AnchorStore(store_root).add_artifact(save_path)
+        choice = select_anchor(spec)
+    if choice is None or choice.regime_distance != 0:
+        log.warning("inferasim: harvested anchor %s is not selected in-regime for %s", save_path, spec.model_path)
+        return None
+    return choice
+
+
+def resolve_anchor(spec: ServingSpec) -> AnchorChoice:
+    """The in-regime anchor benchmark mode calibrates ``spec`` against.
+
+    Harvests one on a miss. Raises when none can be had: benchmark mode never
+    falls back to an analytical number while still being labelled calibrated.
+    """
+    anchor = select_anchor(spec)
+    if anchor is not None and anchor.regime_distance == 0:
+        return anchor
+    harvested = harvest_anchor(spec)
+    if harvested is not None:
+        return harvested
+    raise InferasimBridgeError(
+        f"{ENV_MODE}=benchmark but no in-regime anchor for {spec.model_path!r} "
+        f"(engine={spec.framework}) could be found or harvested"
+    )
+
+
 def project(spec: ServingSpec) -> ProjMetrics:
     """Run the InferaSim projection for ``spec`` and return mapped metrics."""
     _ensure_infera_importable()
@@ -776,7 +979,7 @@ def project(spec: ServingSpec) -> ProjMetrics:
     )
 
     mode = projection_mode()
-    anchor = select_anchor(spec) if mode == MODE_BENCHMARK else None
+    anchor = resolve_anchor(spec) if mode == MODE_BENCHMARK else None
     argv = _build_argv(spec, workload, anchor)
     # Template reads INFERASIM_* env; also expose TP/PP/EP for template default
     # interpolation (overrides above still win for explicit workloads).

@@ -1,65 +1,31 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the inferasim benchmark backend + projection bridge.
+"""Tests for the InferaSim projection bridge.
 
-No GPU and no Infera install: the projection call is monkeypatched, so these
-verify backend selection, argv construction, benchmark-spec parsing, model
-preset resolution, the metrics->report mapping, and that a simulated run flows
-through Hyperloom's measurement extractor unchanged.
+No GPU and no Infera install: the projection and the harvest subprocess are
+stubbed, so these verify benchmark-spec parsing, argv construction, model
+preset resolution, anchor selection, harvest-on-miss, and that benchmark mode
+fails closed rather than returning an uncalibrated number.
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
-import yaml
 
 from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
 from hyperloom.orchestrator.actions.executors import inferasim_bridge as ib
-from hyperloom.orchestrator.actions.executors import inferasim_runner
-from hyperloom.orchestrator.actions.executors.benchmark_result import (
-    extract_benchmark_measurement,
-    is_valid_measurement,
-)
 
 
-def test_inferasim_backend_selected(monkeypatch):
+def test_inferasim_is_not_a_benchmark_backend(monkeypatch):
+    """Baseline, integrate and rebench must never be answered by a projection."""
+    assert "inferasim" not in bb.KNOWN_BENCHMARK_BACKENDS
     monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "inferasim")
-    assert bb.resolve_backend_name() == "inferasim"
-    backend = bb.resolve_backend()
-    assert backend.name == "inferasim"
-    cmd = backend.build_command(
-        python_exe="PY",
-        config_path=Path("/cfg.yaml"),
-        output_dir=Path("/out"),
-    )
-    assert cmd == [
-        "PY",
-        "-m",
-        "hyperloom.orchestrator.actions.executors.inferasim_runner",
-        "benchmark",
-        "--benchmark-config",
-        "/cfg.yaml",
-        "--output-dir",
-        "/out",
-        "--run-mode",
-        "local",
-    ]
-
-
-def test_inferasim_backend_lifecycle_ineligible():
-    backend = bb.InferasimBackend()
-    verdict = backend.lifecycle_eligibility({"framework": "sglang"})
-    assert verdict is not None
-    assert verdict["eligible"] is False
-
-
-def test_inferasim_interpreter_prefers_env(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_INFERASIM_PYTHON", "/opt/infera/bin/python")
-    assert bb.InferasimBackend().resolve_interpreter() == "/opt/infera/bin/python"
+    assert bb.resolve_backend_name() == "magpie"
 
 
 def test_spec_from_benchmark_parses_envs(monkeypatch):
@@ -162,115 +128,6 @@ def test_resolve_preset_heuristics_and_override(monkeypatch):
     assert ib.resolve_preset("/some/unknown-model") is None
     monkeypatch.setenv(ib.ENV_MODEL, "custom_preset")
     assert ib.resolve_preset("/models/gpt-oss-120b") == "custom_preset"
-
-
-def _fake_metrics() -> ib.ProjMetrics:
-    return ib.ProjMetrics(
-        output_throughput=9000.0,
-        request_throughput=8.78,
-        total_token_throughput=18000.0,
-        ttft_ms=25.0,
-        tpot_ms=6.5,
-        itl_ms=6.5,
-        e2el_ms=6650.0,
-        decode_tps_per_gpu=9000.0,
-        memory_per_gpu_gb=70.0,
-        max_concurrency=64,
-        calibrated=False,
-        replica_gpus=1,
-    )
-
-
-def test_raw_result_from_metrics_shape():
-    spec = ib.ServingSpec(framework="sglang", model_path="/m", tp=1, conc=64, isl=1024, osl=1024)
-    raw = ib.raw_result_from_metrics(spec, _fake_metrics())
-    assert raw["output_throughput"] == 9000.0
-    assert raw["mean_ttft_ms"] == 25.0
-    assert raw["mean_tpot_ms"] == 6.5
-    assert raw["mean_e2el_ms"] == 6650.0
-    assert raw["total_output_tokens"] == 64 * 1024
-    assert raw["inferasim_decode_tps_per_gpu"] == 9000.0
-
-
-def _write_bench(tmp_path: Path) -> Path:
-    cfg = {
-        "benchmark": {
-            "framework": "sglang",
-            "model": "/models/gpt-oss-120b",
-            "precision": "bf16",
-            "run_mode": "local",
-            "envs": {"TP": 1, "CONC": 64, "ISL": 1024, "OSL": 1024},
-        }
-    }
-    path = tmp_path / "bench.yaml"
-    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
-    return path
-
-
-def test_runner_end_to_end_with_mocked_projection(tmp_path, monkeypatch):
-    """The runner writes a Magpie-compatible report from projected metrics."""
-    monkeypatch.setattr(ib, "project", lambda spec: _fake_metrics())
-
-    cfg_path = _write_bench(tmp_path)
-    rc = inferasim_runner.run_benchmark(cfg_path, tmp_path / "out")
-    assert rc == 0
-
-    workspaces = list((tmp_path / "out").glob("benchmark_sglang_*"))
-    assert len(workspaces) == 1
-    ws = workspaces[0]
-    report = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
-    assert report["success"] is True
-    assert report["bypass_analysis"]["backend"] == "inferasim"
-
-    m = extract_benchmark_measurement(report, workspace=ws)
-    assert is_valid_measurement(m) is True
-    assert m["output_throughput"] == 9000.0
-    assert m["ttft_mean_ms"] == 25.0
-
-
-def test_runner_projection_failure_emits_failed_report(tmp_path, monkeypatch):
-    def boom(spec):
-        raise ib.InferasimBridgeError("no preset resolvable")
-
-    monkeypatch.setattr(ib, "project", boom)
-    cfg_path = _write_bench(tmp_path)
-    rc = inferasim_runner.run_benchmark(cfg_path, tmp_path / "out")
-    assert rc == 1
-
-    ws = sorted((tmp_path / "out").glob("benchmark_sglang_*"))[-1]
-    report = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
-    assert report["success"] is False
-    assert any("no preset resolvable" in e for e in report["errors"])
-
-
-def test_runner_cli_rejects_non_local(tmp_path):
-    rc = inferasim_runner.main(
-        [
-            "benchmark",
-            "--benchmark-config",
-            str(tmp_path / "c.yaml"),
-            "--output-dir",
-            str(tmp_path / "o"),
-            "--run-mode",
-            "docker",
-        ]
-    )
-    assert rc == 2
-
-
-def test_runner_server_phase_is_noop_success(tmp_path):
-    rc = inferasim_runner.main(
-        [
-            "benchmark",
-            "--benchmark-config",
-            str(tmp_path / "c.yaml"),
-            "--output-dir",
-            str(tmp_path / "o"),
-            "--phase",
-            "server",
-        ]
-    )
-    assert rc == 0
 
 
 def test_resolve_workload_prefers_explicit_env(tmp_path, monkeypatch):
@@ -554,3 +411,193 @@ def test_benchmark_mode_calibrates_against_the_anchor(tmp_path, monkeypatch):
     argv = _anchored_argv(tmp_path, monkeypatch, "benchmark")
     assert argv[argv.index("--load-benchmark") + 1] == str(tmp_path / "anchor.json")
     assert argv[argv.index("--load-benchmark-scaling") + 1] == str(tmp_path / "scaling.json")
+
+
+# ── reading a materialized config on its own ─────────────────────────────────
+
+
+def test_ambient_env_is_ignored_when_asked(monkeypatch):
+    """Comparing two materialized configs must not let an exported CONC flatten them."""
+    monkeypatch.setenv("CONC", "8")
+    monkeypatch.setenv("TP", "1")
+    monkeypatch.setenv(ib.ENV_KV_DTYPE, "bf16")
+    bench = {
+        "framework": "vllm",
+        "model": "/models/gpt-oss-120b",
+        "envs": {"TP": 8, "CONC": 128, "EXTRA_VLLM_ARGS": "--kv-cache-dtype fp8"},
+    }
+    ambient = ib.spec_from_benchmark(bench)
+    alone = ib.spec_from_benchmark(bench, ambient=False)
+    assert (ambient.tp, ambient.conc, ambient.kv_cache_dtype) == (1, 8, "bf16")
+    assert (alone.tp, alone.conc, alone.kv_cache_dtype) == (8, 128, "fp8")
+
+
+# ── harvest on a miss, fail closed otherwise ─────────────────────────────────
+
+
+def _infera_root(tmp_path: Path) -> Path:
+    root = tmp_path / "infera"
+    script = root / ib._HARVEST_SCRIPT_REL
+    script.parent.mkdir(parents=True)
+    script.write_text("# stub\n")
+    return root
+
+
+def _spec(**kw) -> ib.ServingSpec:
+    base = {"framework": "vllm", "model_path": "/models/gpt-oss-120b", "tp": 8, "conc": 64}
+    base.update(kw)
+    return ib.ServingSpec(**base)
+
+
+def test_harvest_command_measures_the_candidates_regime(tmp_path, monkeypatch):
+    monkeypatch.setenv(ib.ENV_ROOT, str(_infera_root(tmp_path)))
+    monkeypatch.delenv(ib.ENV_HARVEST_GPUS, raising=False)
+    spec = _spec(
+        framework="mori-sglang",
+        ep=8,
+        extra_server_args="--attention-backend aiter --tp-size 8 --max-running-requests 128",
+    )
+    cmd = ib.harvest_command(spec, "/store/a.json")
+    assert cmd is not None
+    arg = lambda flag: cmd[cmd.index(flag) + 1]  # noqa: E731
+    assert arg("--serving-backend") == "sglang"  # a build launches as its family
+    assert arg("--tp") == "8"
+    assert arg("--benchmark-gpus") == "4"  # reduced-width anchor, restored to TP8
+    assert arg("--load-format") == "auto"  # real weights
+    assert arg("--concurrency") == "128"
+    assert "--enable-expert-parallel" in cmd
+    server_args = next(c for c in cmd if c.startswith("--server-args="))
+    assert "--attention-backend aiter" in server_args
+    assert "--tp-size" not in server_args  # the harvest picks its own width
+
+
+@pytest.mark.parametrize(
+    "spec_kw, root_ok",
+    [
+        ({}, False),  # no Infera checkout
+        ({"framework": "trtllm"}, True),  # engine the harvest cannot launch
+        ({"model_path": ""}, True),  # nothing to load
+    ],
+)
+def test_harvest_command_declines_when_it_cannot_run(tmp_path, monkeypatch, spec_kw, root_ok):
+    if root_ok:
+        monkeypatch.setenv(ib.ENV_ROOT, str(_infera_root(tmp_path)))
+    else:
+        monkeypatch.delenv(ib.ENV_ROOT, raising=False)
+    assert ib.harvest_command(_spec(**spec_kw), "/store/a.json") is None
+
+
+def test_benchmark_mode_fails_closed_without_an_anchor(monkeypatch):
+    """No anchor and no way to harvest one must raise, not return an analytical number."""
+    monkeypatch.setenv(ib.ENV_MODE, "benchmark")
+    monkeypatch.delenv(ib.ENV_ANCHOR, raising=False)
+    monkeypatch.delenv(ib.ENV_ANCHOR_STORE, raising=False)
+    with pytest.raises(ib.InferasimBridgeError, match="no in-regime anchor"):
+        ib.resolve_anchor(_spec())
+
+
+def test_harvest_disabled_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv(ib.ENV_ANCHOR_STORE, str(tmp_path / "store"))
+    monkeypatch.setenv(ib.ENV_HARVEST, "0")
+    monkeypatch.delenv(ib.ENV_ANCHOR, raising=False)
+    monkeypatch.setattr(ib, "select_anchor", lambda spec: None)
+    with pytest.raises(ib.InferasimBridgeError):
+        ib.resolve_anchor(_spec())
+
+
+def test_an_in_regime_anchor_is_used_without_harvesting(monkeypatch):
+    choice = ib.AnchorChoice(path="/a.json", regime_distance=0)
+    monkeypatch.setattr(ib, "select_anchor", lambda spec: choice)
+    monkeypatch.setattr(ib, "harvest_anchor", lambda spec: pytest.fail("harvested despite a hit"))
+    assert ib.resolve_anchor(_spec()) is choice
+
+
+def test_an_out_of_regime_anchor_triggers_a_harvest(monkeypatch):
+    near = ib.AnchorChoice(path="/near.json", regime_distance=1)
+    fresh = ib.AnchorChoice(path="/fresh.json", regime_distance=0)
+    monkeypatch.setattr(ib, "select_anchor", lambda spec: near)
+    monkeypatch.setattr(ib, "harvest_anchor", lambda spec: fresh)
+    assert ib.resolve_anchor(_spec()) is fresh
+
+
+def test_harvest_runs_once_indexes_and_selects(tmp_path, monkeypatch):
+    """A miss boots one harvest; the artifact is indexed and then selected."""
+    store = tmp_path / "store"
+    monkeypatch.setenv(ib.ENV_ROOT, str(_infera_root(tmp_path)))
+    monkeypatch.setenv(ib.ENV_ANCHOR_STORE, str(store))
+    monkeypatch.delenv(ib.ENV_HARVEST, raising=False)
+    monkeypatch.setattr(ib, "_ensure_infera_importable", lambda: None)
+
+    indexed: list[str] = []
+
+    class FakeStore:
+        def __init__(self, root):
+            assert root == str(store)
+
+        def add_artifact(self, path):
+            indexed.append(path)
+
+    import sys
+    import types
+
+    mod_name = "infera.projection.core.projection.inference_projection.search.anchor_store"
+    for name in (
+        "infera",
+        "infera.projection",
+        "infera.projection.core",
+        "infera.projection.core.projection",
+        "infera.projection.core.projection.inference_projection",
+        "infera.projection.core.projection.inference_projection.search",
+    ):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    fake = types.ModuleType(mod_name)
+    fake.AnchorStore = FakeStore
+    monkeypatch.setitem(sys.modules, mod_name, fake)
+
+    runs: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        runs.append(cmd)
+        save = cmd[cmd.index("--save") + 1]
+        Path(save).write_text(
+            json.dumps({"sweep": [{"batch": 16, "decode_ms": 10.0}, {"batch": 64, "decode_ms": 14.0}], "meta": {}})
+        )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(ib.subprocess, "run", fake_run)
+    selections = iter([None, ib.AnchorChoice(path="/harvested.json", regime_distance=0)])
+    monkeypatch.setattr(ib, "select_anchor", lambda spec: next(selections))
+
+    choice = ib.harvest_anchor(_spec())
+    assert choice is not None and choice.path == "/harvested.json"
+    assert len(runs) == 1
+    assert len(indexed) == 1 and indexed[0].startswith(str(store / "harvested"))
+
+
+def test_a_failed_harvest_returns_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv(ib.ENV_ROOT, str(_infera_root(tmp_path)))
+    monkeypatch.setenv(ib.ENV_ANCHOR_STORE, str(tmp_path / "store"))
+    monkeypatch.delenv(ib.ENV_HARVEST, raising=False)
+    monkeypatch.setattr(ib, "select_anchor", lambda spec: None)
+    monkeypatch.setattr(
+        ib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "engine failed to start")
+    )
+    assert ib.harvest_anchor(_spec()) is None
+
+
+def test_a_corrupt_harvest_is_not_indexed(tmp_path, monkeypatch):
+    monkeypatch.setenv(ib.ENV_ROOT, str(_infera_root(tmp_path)))
+    monkeypatch.setenv(ib.ENV_ANCHOR_STORE, str(tmp_path / "store"))
+    monkeypatch.delenv(ib.ENV_HARVEST, raising=False)
+    monkeypatch.setattr(ib, "select_anchor", lambda spec: None)
+
+    def fake_run(cmd, **kw):
+        save = cmd[cmd.index("--save") + 1]
+        Path(save).write_text(
+            json.dumps({"sweep": [{"batch": 16, "decode_ms": 16.3}, {"batch": 64, "decode_ms": 1.4}]})
+        )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(ib.subprocess, "run", fake_run)
+    monkeypatch.setattr(ib, "_ensure_infera_importable", lambda: pytest.fail("indexed a corrupt anchor"))
+    assert ib.harvest_anchor(_spec()) is None

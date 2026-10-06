@@ -126,13 +126,12 @@ ast = [
 claude = [
     "claude-agent-sdk>=0.2.110",
 ]
-# InferaSim (Infera) serving-projection benchmark backend
-# (HYPERLOOM_BENCHMARK_BACKEND=inferasim). Lazy-imported by
+# InferaSim (Infera) serving projection for EXPLORE's projection router
+# (HYPERLOOM_EXPLORE_PROJECTION=1). Lazy-imported by
 # ``orchestrator.actions.executors.inferasim_bridge``; not needed unless the
-# inferasim backend is selected. Infera is not yet on PyPI, so most deployments
-# instead point HYPERLOOM_INFERASIM_ROOT at an Infera checkout (or
-# HYPERLOOM_INFERASIM_PYTHON at an interpreter that can import ``infera``); this
-# extra is a convenience for when it is pip-installable.
+# router is on. Infera is not yet on PyPI, so most deployments instead point
+# HYPERLOOM_INFERASIM_ROOT at an Infera checkout; this extra is a convenience
+# for when it is pip-installable.
 inferasim = [
     "amd-infera",
 ]
