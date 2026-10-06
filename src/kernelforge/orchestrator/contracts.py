@@ -121,6 +121,53 @@ class CaseRoofline:
         }
 
 
+#: How a planning or reviewing agent is to read the roofline figures. Carried in
+#: the payload beside them, so it reaches every agent that sees them and no
+#: campaign without a ceiling has its prompt changed.
+ROOFLINE_HOW_TO_READ = (
+    "Each case's roofline.attainment is ceiling_ms / incumbent_ms: the fraction of that shape's estimated best "
+    "achievable latency the current best kernel delivers, 1.0 being at the ceiling. The objective is the "
+    "equal-weight mean across scored cases, so the case with the lowest attainment is where the next round's "
+    "effort buys the most, and a case near 1.0 has little headroom left. A case whose roofline.excluded is set has "
+    "no usable figure, most often because its ceiling sits above the latency already measured: that ceiling is "
+    "wrong, and the case must not be read as finished. mean_attainment is the objective only when covered_cases "
+    "equals scored_cases. When target is set, the campaign stops once mean_attainment reaches it over every scored "
+    "case. The ceiling is an agent's estimate, not a measurement: use it to choose where to work, never to accept "
+    "or reject a candidate."
+)
+
+
+@dataclass(frozen=True)
+class CampaignRoofline:
+    """The campaign's standing against its estimated roofline ceiling.
+
+    ``mean_attainment`` is the equal-weight mean of the per-case attainment over
+    ``covered_cases`` of the ``scored_cases`` the objective scores, or ``None``
+    when no case has a figure. ``target`` is the mean attainment the campaign
+    stops at, or ``None`` when it was given none.
+    """
+
+    scored_cases: int
+    covered_cases: int
+    mean_attainment: float | None = None
+    target: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.scored_cases < 0 or not 0 <= self.covered_cases <= self.scored_cases:
+            raise ValueError("roofline.covered_cases must lie between 0 and roofline.scored_cases")
+        _optional_number(self.mean_attainment, "roofline.mean_attainment", positive=True)
+        _optional_number(self.target, "roofline.target", positive=True)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mean_attainment": self.mean_attainment,
+            "target": self.target,
+            "covered_cases": self.covered_cases,
+            "scored_cases": self.scored_cases,
+            "how_to_read": ROOFLINE_HOW_TO_READ,
+        }
+
+
 @dataclass(frozen=True)
 class CaseEvidence:
     """Normalized case evidence exposed to read-only planning agents."""
@@ -199,6 +246,8 @@ class OrchestrationContext:
     # The previous iteration's Plan Critic ruling.
     last_critic_verdict: str = ""
     last_critic_review: str = ""
+    # Present only when the campaign has a roofline ceiling; each case's own figure rides on ``CaseEvidence.roofline``.
+    roofline: CampaignRoofline | None = None
 
     def __post_init__(self) -> None:
         _text(self.analysis_commit, "context.analysis_commit")
@@ -274,6 +323,8 @@ class OrchestrationContext:
             raise ValueError("context.cases must not be empty")
         if len(set(case_ids)) != len(case_ids):
             raise ValueError("context.cases must have unique case_id values")
+        if self.roofline is not None and not isinstance(self.roofline, CampaignRoofline):
+            raise ValueError("context.roofline must be a CampaignRoofline or absent")
 
     @property
     def case_ids(self) -> frozenset[str]:
@@ -292,7 +343,7 @@ class OrchestrationContext:
             self.evidence_mean_case_speedup,
             self.current_mean_case_speedup,
         )
-        return {
+        payload: dict[str, Any] = {
             "analysis_commit": self.analysis_commit,
             "canonical_commit": canonical_commit,
             "analysis_evidence": {
@@ -329,6 +380,10 @@ class OrchestrationContext:
                 ref.to_dict() for ref in (self.evidence_refs if evidence_refs is None else evidence_refs)
             ],
         }
+        # Omitted rather than null, like ``CaseEvidence.roofline``.
+        if self.roofline is not None:
+            payload["roofline"] = self.roofline.to_dict()
+        return payload
 
 
 @dataclass(frozen=True)

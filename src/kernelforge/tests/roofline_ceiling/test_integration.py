@@ -181,7 +181,85 @@ def test_without_a_ceiling_the_planner_plans_from_exactly_the_evidence_it_always
     context = _planning_context("a")
 
     assert _loop()._with_ceiling_standing(context) is context
-    assert all("roofline" not in case for case in context.to_prompt_dict()["cases"])
+    payload = context.to_prompt_dict()
+    assert "roofline" not in payload
+    assert all("roofline" not in case for case in payload["cases"])
+
+
+def test_a_ceiling_that_failed_to_estimate_injects_nothing_anywhere():
+    """``--roofline-ceiling on`` whose estimate failed is the same as off for every agent."""
+
+    async def estimator(**_kwargs):
+        raise CeilingAnalysisError("no readable performance_ceiling.json after 2 attempts")
+
+    loop = _loop(target=0.86, estimator=estimator)
+    asyncio.run(loop._establish_ceiling())
+    context = _planning_context("decode-t1")
+
+    assert loop._with_ceiling_standing(context) is context
+    assert "roofline" not in _supervisor_payload(loop, context)["orchestration_context"]
+
+
+def test_the_planner_sees_the_campaign_mean_the_target_and_how_to_read_them(tmp_path):
+    path = _publish(_report((("a", 9.0), ("b", 4.0))), tmp_path)
+    loop = _loop(str(path), target=0.86, case_times={"a": 10.0, "b": 5.0})
+
+    roofline = loop._with_ceiling_standing(_planning_context("a", "b")).to_prompt_dict()["roofline"]
+
+    assert roofline["mean_attainment"] == pytest.approx(0.85)
+    assert roofline["target"] == 0.86
+    assert (roofline["covered_cases"], roofline["scored_cases"]) == (2, 2)
+    assert "lowest attainment" in roofline["how_to_read"]
+    assert "never to accept or reject a candidate" in roofline["how_to_read"]
+
+
+def test_the_campaign_standing_says_when_it_covers_only_part_of_the_suite(tmp_path):
+    path = _publish(_report((("a", 9.0),)), tmp_path)
+    loop = _loop(str(path), case_times={"a": 10.0, "b": 5.0})
+
+    roofline = loop._with_ceiling_standing(_planning_context("a", "b")).to_prompt_dict()["roofline"]
+
+    assert (roofline["covered_cases"], roofline["scored_cases"]) == (1, 2)
+    assert roofline["target"] is None
+
+
+def test_a_specialist_scoped_to_one_case_still_sees_the_campaign_standing(tmp_path):
+    path = _publish(_report((("a", 9.0), ("b", 4.0))), tmp_path)
+    loop = _loop(str(path), case_times={"a": 10.0, "b": 8.0})
+
+    scoped = loop._with_ceiling_standing(_planning_context("a", "b")).to_prompt_dict(case_ids=("a",))
+
+    assert [case["case_id"] for case in scoped["cases"]] == ["a"]
+    assert scoped["roofline"]["scored_cases"] == 2
+
+
+def _supervisor_payload(loop, context):
+    loop._build_orchestration_context = lambda: context
+    loop._analysis_bundle = None
+    loop._active_analysis_context = None
+    loop._latest_optimization_plan_path = ""
+    loop.lessons = None
+    return json.loads(loop._build_supervisor_evidence_context(3))
+
+
+def test_the_supervisor_reviews_a_stall_with_the_same_standing_as_the_planner(tmp_path):
+    path = _publish(_report((("a", 9.0), ("b", 4.0))), tmp_path)
+    loop = _loop(str(path), target=0.86, case_times={"a": 10.0, "b": 8.0})
+
+    payload = _supervisor_payload(loop, _planning_context("a", "b"))["orchestration_context"]
+
+    assert payload["roofline"]["mean_attainment"] == pytest.approx(0.7)
+    assert {case["case_id"]: case["roofline"]["attainment"] for case in payload["cases"]} == {
+        "a": pytest.approx(0.9),
+        "b": pytest.approx(0.5),
+    }
+
+
+def test_without_a_ceiling_the_supervisor_sees_no_roofline():
+    payload = _supervisor_payload(_loop(), _planning_context("decode-t1"))["orchestration_context"]
+
+    assert "roofline" not in payload
+    assert all("roofline" not in case for case in payload["cases"])
 
 
 def test_the_standing_is_attached_where_the_round_is_planned():

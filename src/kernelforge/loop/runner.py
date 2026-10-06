@@ -3023,20 +3023,23 @@ class IterationLoop(AnalysisRuntimeMixin):
         )
 
     def _with_ceiling_standing(self, context):
-        """Attach each case's roofline standing to a planning context, when a ceiling is published.
+        """Attach the roofline standing to a planning context, when a ceiling is published.
 
         This is where the ceiling steers the campaign: the planner decides which
         cases the round's effort goes to, so it is the one that has to see which
-        still have headroom. The implementer's copy, from
-        ``_render_ceiling_advisory``, arrives after that choice is made. Like the
-        rest of the planning evidence it is guidance for the next round and
-        never enters a KEEP.
+        still have headroom, and the supervisor reviewing a stall has to see
+        whether the kernel is near its ceiling or far from it. Each case carries
+        its own figure; the context carries the mean, the target and how to
+        read both. The implementer's copy, from ``_render_ceiling_advisory``,
+        arrives after the round's cases are chosen. Like the rest of the
+        planning evidence it is guidance for the next round and never enters a
+        KEEP.
         """
         report = self._ceiling()
         standing = self._roofline_attainment()
         if report is None or standing is None:
             return context
-        from kernelforge.orchestrator.contracts import CaseRoofline
+        from kernelforge.orchestrator.contracts import CampaignRoofline, CaseRoofline
 
         ceilings = report.ideal_ms()
         scored = {entry.case_id: entry for entry in standing.cases}
@@ -3059,9 +3062,17 @@ class IterationLoop(AnalysisRuntimeMixin):
                 excluded=standing.excluded.get(case_id, ""),
             )
 
+        scored_ids = self._scored_case_ids()
+        target = float(self.ic.roofline_target or 0.0)
         return replace(
             context,
             cases=tuple(replace(case, roofline=roofline(case.case_id)) for case in context.cases),
+            roofline=CampaignRoofline(
+                scored_cases=len(scored_ids),
+                covered_cases=len(set(scored_ids) & set(scored)),
+                mean_attainment=standing.mean,
+                target=target if target > 0 else None,
+            ),
         )
 
     def _ceiling(self) -> Any | None:
