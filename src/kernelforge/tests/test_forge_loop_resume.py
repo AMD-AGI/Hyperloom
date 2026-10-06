@@ -113,6 +113,7 @@ def _install_cli_fakes(monkeypatch, tmp_path):
             gpu_target=overrides.get("gpu_target", "gfx942"),
             gpu_type=overrides.get("gpu_type", "mi355x"),
             agent_model=overrides.get("agent_model", "test-model"),
+            agent_sandbox_mode=overrides.get("agent_sandbox_mode", "bypass"),
         )
 
     class FakeTracker:

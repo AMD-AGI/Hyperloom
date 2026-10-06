@@ -349,8 +349,9 @@ def test_the_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypa
 
     result = asyncio.run(estimator(case_ids=["decode-t1"], case_ms={"decode-t1": 14.0}))
 
+    resolver = seen.pop("resolver")
     assert result == "outcome"
-    assert seen.pop("resolver")["sandbox_mode"] == "read-only"
+    assert resolver["sandbox_mode"] == "read-only"
     assert seen["known_case_ids"] == ["decode-t1"]
     # Every keyword the estimator sends has to be one the signature declares.
     accepted = set(inspect.signature(real_estimate_ceiling).parameters)
