@@ -119,13 +119,26 @@ holds exits, naming that service's pid and port, and `ensure` reports that line.
 Two workspaces therefore need their own `USER_DATA_PATH`, or the second gets no
 service of its own.
 
-The embedded server is the PostgreSQL the `pgembed` wheel ships, reachable only
-through a socket in the home. A root service runs it as the system user
+The embedded server is the PostgreSQL the `pgembed` wheel ships for Linux and
+macOS, reachable only through a socket in the home, or in `/tmp` when the
+home's path is too long for one. A root service runs it as the system user
 `hyperloom-kb-db`, or as the user owning a database directory made earlier, so
 a recreated container that mounts the same home starts it again. No directory's
-permissions are changed for it: a home that user cannot traverse to, such as
-one under a `700` `/root`, is refused with the directory that blocks it, and
-`USER_DATA_PATH` belongs somewhere every user may traverse.
+permissions are changed for it: a home or a PostgreSQL install that user cannot
+traverse to, such as one under a `700` `/root`, is refused with the directory
+that blocks it, and the workspace and `USER_DATA_PATH` belong somewhere every
+user may traverse. `experience_kb_service check-home` says before a launch
+whether the workspace's service could start there; setup runs it in both
+modes, since a `docker` run is always root and a container image keeps its own
+`/root` private.
+
+The database directory must stay private to that user, so a home whose file
+system keeps no permissions (a Windows drive mounted into WSL) or refuses a
+root caller's change of owner (NFS exported with `root_squash`) is refused with
+that reason. Elsewhere, and on Windows, a service needs
+`HYPERLOOM_KB_DATABASE_URL`. Record files need only a file and an atomic
+rename; a directory is flushed after each rename where its file system can
+flush one.
 
 Only an optimize launch and `ensure` restart a service. `push` and `pull`,
 including the automatic push at the end of a run, use the service as it runs

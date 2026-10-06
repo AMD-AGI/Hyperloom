@@ -5,31 +5,40 @@
 
 PostgreSQL refuses to run as root, so a root caller runs it as a dedicated system user. The user follows the data
 directory: an existing directory keeps the uid that owns it, so a recreated container that mounts the same home still
-starts it. No directory's permissions are ever widened; a home the database user cannot reach is refused instead.
+starts it. No directory's permissions are ever widened; a home the database user cannot reach is refused instead, as is
+a home on a file system that cannot keep the data directory private to that user. It runs on Linux and macOS.
 """
 
 from __future__ import annotations
 
-import grp
 import hashlib
 import importlib.util
 import os
-import pwd
 import shlex
 import stat
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+if os.name == "posix":
+    import grp
+    import pwd
 
 PGDATA_DIR = "postgres"
 DB_USER = "hyperloom-kb-db"
 DATABASE = "postgres"
 START_TIMEOUT_SECONDS = 60
-# ``sun_path`` holds 108 bytes including its terminator, and the server names its socket ``.s.PGSQL.<port>``.
-_SOCKET_PATH_LIMIT = 107
+# ``sun_path`` holds 108 bytes on Linux and 104 on macOS, terminator included, and the server names its socket
+# ``.s.PGSQL.<port>``.
+_SOCKET_PATH_LIMIT = 103 if sys.platform == "darwin" else 107
 _SOCKET_NAME = ".s.PGSQL.5432"
+# PostgreSQL's own default socket directory: short on every POSIX system, unlike a TMPDIR.
+_SHORT_SOCKET_ROOT = Path("/tmp")
 _LOG = "server.log"
+# PostgreSQL starts only on a data directory that no one but its owner, and at most its group, may read.
+_PGDATA_FORBIDDEN_MODE = 0o027
 
 
 class EmbeddedPostgresError(RuntimeError):
@@ -106,27 +115,73 @@ def _user_exists(name: str) -> bool:
     return True
 
 
-def _require_reachable(path: Path, user: _DatabaseUser, what: str) -> None:
-    """Refuse a ``path`` the database user cannot reach rather than widen any directory on the way to it."""
+def _blocking_directory(path: Path, uid: int, groups: set[int]) -> tuple[Path, str] | None:
+    """The first existing directory on the way to ``path`` that ``uid`` in ``groups`` may not traverse, and its mode."""
 
-    if user.uid is None or user.gid is None:
-        return
-    groups = set(os.getgrouplist(user.name, user.gid))
     for directory in (path, *path.parents):
         if not directory.exists():
             continue
         status = directory.stat()
-        if status.st_uid == user.uid:
+        if status.st_uid == uid:
             allowed = status.st_mode & stat.S_IXUSR
         elif status.st_gid in groups:
             allowed = status.st_mode & stat.S_IXGRP
         else:
             allowed = status.st_mode & stat.S_IXOTH
         if not allowed:
-            raise EmbeddedPostgresError(
-                f"the database user {user.name} (uid {user.uid}) cannot reach {what} through {directory} "
-                f"({stat.filemode(status.st_mode)}); place it under directories every user may traverse"
-            )
+            return directory, stat.filemode(status.st_mode)
+    return None
+
+
+def _require_reachable(path: Path, user: _DatabaseUser, what: str) -> None:
+    """Refuse a ``path`` the database user cannot reach rather than widen any directory on the way to it."""
+
+    if user.uid is None or user.gid is None:
+        return
+    blocking = _blocking_directory(path, user.uid, set(os.getgrouplist(user.name, user.gid)))
+    if blocking is not None:
+        directory, mode = blocking
+        raise EmbeddedPostgresError(
+            f"the database user {user.name} (uid {user.uid}) cannot reach {what} through {directory} ({mode}); "
+            "place it under directories every user may traverse"
+        )
+
+
+def root_run_problem(home: Path) -> str:
+    """Why a root caller could not run ``home``'s database, or ``""`` when it could.
+
+    The server would run as a dedicated user that owns none of the directories on the way to the home or to the
+    binaries, so each of them must let other users traverse it.
+    """
+
+    for path, what in ((home.expanduser().absolute(), "the KB home"), (_binaries(), "the PostgreSQL binaries")):
+        blocking = _blocking_directory(path, -1, set())
+        if blocking is not None:
+            directory, mode = blocking
+            return f"{what} {path} is under {directory} ({mode}), which other users may not traverse"
+    return ""
+
+
+def _give(path: Path, user: _DatabaseUser) -> None:
+    if user.uid is None or user.gid is None:
+        return
+    try:
+        os.chown(path, user.uid, user.gid)
+    except PermissionError as exc:
+        raise EmbeddedPostgresError(
+            f"cannot give {path} to the database user {user.name}: {exc.strerror}; its file system refuses ownership "
+            "changes, as NFS exported with root_squash does, so place the KB home on a local file system"
+        ) from exc
+
+
+def _require_private(pgdata: Path) -> None:
+    mode = pgdata.stat().st_mode
+    if stat.S_IMODE(mode) & _PGDATA_FORBIDDEN_MODE:
+        raise EmbeddedPostgresError(
+            f"{pgdata} is {stat.filemode(mode)}, but PostgreSQL needs its data directory private to its owner; its file "
+            "system does not keep that, as a Windows drive mounted into WSL does not, so place the KB home on a local "
+            "Linux or macOS file system"
+        )
 
 
 def _run(user: _DatabaseUser, command: list[str], *, cwd: Path, timeout: float) -> subprocess.CompletedProcess[str]:
@@ -156,10 +211,9 @@ def _socket_directory(pgdata: Path, user: _DatabaseUser) -> Path:
     if len(str(pgdata / _SOCKET_NAME)) <= _SOCKET_PATH_LIMIT:
         return pgdata
     digest = hashlib.sha256(str(pgdata.resolve()).encode()).hexdigest()[:12]
-    directory = Path(tempfile.gettempdir()) / f"hyperloom-kb-{digest}"
+    directory = _SHORT_SOCKET_ROOT / f"hyperloom-kb-{digest}"
     directory.mkdir(mode=0o700, exist_ok=True)
-    if user.uid is not None and user.gid is not None:
-        os.chown(directory, user.uid, user.gid)
+    _give(directory, user)
     return directory
 
 
@@ -205,9 +259,10 @@ def start_embedded_postgres(home: Path) -> EmbeddedPostgres:
     _require_reachable(pgdata.parent, user, f"the database directory {pgdata}")
     _require_reachable(binaries, user, f"the PostgreSQL binaries at {binaries}")
     if not (pgdata / "PG_VERSION").is_file():
-        pgdata.mkdir(mode=0o700, exist_ok=True)
-        if user.uid is not None and user.gid is not None:
-            os.chown(pgdata, user.uid, user.gid)
+        pgdata.mkdir(exist_ok=True)
+        pgdata.chmod(0o700)
+        _give(pgdata, user)
+        _require_private(pgdata)
         initdb = [
             str(binaries / "initdb"),
             "-D",
@@ -247,5 +302,6 @@ __all__ = [
     "PGDATA_DIR",
     "EmbeddedPostgres",
     "EmbeddedPostgresError",
+    "root_run_problem",
     "start_embedded_postgres",
 ]

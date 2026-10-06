@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import socket
 from pathlib import Path
 from typing import Any, cast
@@ -145,6 +146,38 @@ def test_ensure_reports_a_service_that_cannot_serve(monkeypatch, capsys) -> None
     captured = capsys.readouterr()
     assert "did not answer as this Experience service" in captured.err
     assert "workspace-token" not in captured.err + captured.out
+
+
+def test_check_home_refuses_a_docker_workspace_under_root_and_names_it(monkeypatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", "/root/workspace/session")
+
+    assert experience_kb_service.main(["check-home", "--run-mode", "docker"]) == 1
+    refused = capsys.readouterr().err
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("HYPERLOOM_RUN_MODE", "docker")
+    assert experience_kb_service.main(["check-home"]) == 0
+
+    assert "the KB home /root/workspace/session/experience-kb is under /root" in refused
+    assert "Move the workspace and USER_DATA_PATH" in refused
+    assert f"under {tmp_path / 'experience-kb'} in docker mode" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a run as another user starts its database as itself")
+def test_check_home_refuses_a_baremetal_root_run_under_a_private_directory(monkeypatch, tmp_path: Path, capsys) -> None:
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    monkeypatch.setenv("USER_DATA_PATH", str(private / "session"))
+
+    assert experience_kb_service.main(["check-home", "--run-mode", "baremetal"]) == 1
+    assert f"is under {private} (drwx------), which other users may not traverse" in capsys.readouterr().err
+
+
+def test_check_home_needs_a_run_mode(monkeypatch) -> None:
+    monkeypatch.delenv("HYPERLOOM_RUN_MODE", raising=False)
+
+    with pytest.raises(SystemExit) as exit_info:
+        experience_kb_service.main(["check-home"])
+    assert exit_info.value.code == 2
 
 
 def test_ensure_says_when_it_restarted_a_stale_service(monkeypatch, capsys) -> None:
@@ -364,6 +397,7 @@ def test_skills_describe_the_service_by_the_commands_and_variables_it_reads() ->
     # Every workspace gets its local service: setup generates its .env entries and starts it; nobody opts out.
     assert "hyperloom.inference_optimizer.experience_kb_service init-env" in setup
     assert "hyperloom.inference_optimizer.experience_kb_service ensure" in setup
+    assert "hyperloom.inference_optimizer.experience_kb_service check-home" in setup
     assert "No Experience KB" not in setup
     assert "pip install your_package.whl --target ." in setup
     assert "hyperloom_kb-" not in setup
