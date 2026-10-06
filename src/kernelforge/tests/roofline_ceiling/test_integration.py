@@ -328,6 +328,53 @@ def test_without_a_target_the_ceiling_ends_nothing(tmp_path):
     assert not loop._is_roofline_target_met()
 
 
+def test_a_campaign_without_a_ceiling_logs_no_roofline_progress():
+    assert _loop()._render_roofline_progress() == ""
+
+
+def test_each_iteration_logs_the_mean_attainment_against_the_target(tmp_path):
+    path = _publish(_report(), tmp_path)
+    # 12.8 / 40.0
+    loop = _loop(str(path), target=0.86, case_times={"decode-t1": 40.0})
+
+    assert loop._render_roofline_progress() == (
+        "  [roofline] attainment 32.0% of the estimated ceiling (target 86%)"
+    )
+
+
+def test_the_progress_line_names_no_target_when_none_was_set(tmp_path):
+    path = _publish(_report(), tmp_path)
+
+    line = _loop(str(path), case_times={"decode-t1": 40.0})._render_roofline_progress()
+
+    assert line == "  [roofline] attainment 32.0% of the estimated ceiling"
+
+
+def test_a_mean_over_part_of_the_suite_says_so(tmp_path):
+    """A mean that leaves a scored case out is not the objective, and must not read as it."""
+    path = _publish(_report((("a", 9.0),)), tmp_path)
+    loop = _loop(str(path), target=0.86, case_times={"a": 10.0, "b": 5.0})
+
+    assert loop._render_roofline_progress() == (
+        "  [roofline] attainment 90.0% of the estimated ceiling over 1 of 2 scored cases (target 86%)"
+    )
+
+
+def test_a_ceiling_with_no_usable_case_logs_that_instead_of_a_figure(tmp_path):
+    path = _publish(_report((("a", 9.0),)), tmp_path)
+    # The ceiling sits above the measurement, so the only case is excluded.
+    loop = _loop(str(path), case_times={"a": 6.0})
+
+    assert loop._render_roofline_progress() == "  [roofline] attainment: no scored case has a usable ceiling"
+
+
+def test_the_progress_is_logged_with_each_iteration_header():
+    source = inspect.getsource(IterationLoop._run_locked)
+    header_at = source.index('f"--- Iteration {iteration} "')
+
+    assert header_at < source.index("self._render_roofline_progress()")
+
+
 def test_attainment_follows_the_incumbent_not_the_frozen_anchor(tmp_path):
     path = _publish(_report(), tmp_path)
     loop = _loop(str(path), target=0.86, case_times={"decode-t1": 40.0})

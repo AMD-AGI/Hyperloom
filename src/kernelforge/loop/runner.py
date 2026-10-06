@@ -3134,6 +3134,24 @@ class IterationLoop(AnalysisRuntimeMixin):
             return False
         return standing.mean >= target
 
+    def _render_roofline_progress(self) -> str:
+        """One log line with the incumbent's mean attainment, or ``""`` when the campaign has no ceiling.
+
+        A mean taken over fewer cases than the suite scores says so, because
+        that mean is not the objective and must not read as if it were.
+        """
+        standing = self._roofline_attainment()
+        if standing is None:
+            return ""
+        if not standing.usable:
+            return "  [roofline] attainment: no scored case has a usable ceiling"
+        scored = self._scored_case_ids()
+        covered = {entry.case_id for entry in standing.cases} & set(scored)
+        coverage = "" if standing.covers(scored) else f" over {len(covered)} of {len(scored)} scored cases"
+        target = float(self.ic.roofline_target or 0.0)
+        suffix = f" (target {target * 100:.0f}%)" if target > 0 else ""
+        return f"  [roofline] attainment {standing.mean * 100:.1f}% of the estimated ceiling{coverage}{suffix}"
+
     def _render_ceiling_advisory(self) -> str:
         """Render the roofline standing for the implementer, when a ceiling is published.
 
@@ -5043,6 +5061,9 @@ class IterationLoop(AnalysisRuntimeMixin):
                 if self.best_mean_case_speedup is not None
                 else f"--- Iteration {iteration} ---"
             )
+            roofline_progress = self._render_roofline_progress()
+            if roofline_progress:
+                print(roofline_progress)
 
             # Re-scope the ownership boundary to this iteration: untracked files already here are the operator's or an
             # earlier round's, and this iteration's REVERT must not delete them.
