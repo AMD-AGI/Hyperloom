@@ -466,10 +466,13 @@ and every assumption. Nothing recomputes the latencies and nothing checks their
 arithmetic, so that document is the whole of what a reader has when deciding
 whether to believe them.
 
-Both files are written by the analyst itself. The framework reads the JSON back
-and checks one thing: whether it can be read as an answer — a non-empty `cases`
-object of finite positive latencies. A file that cannot is handed back once
-with the reason. A file that can is taken as given.
+Both files are written by the analyst itself, and the framework checks two
+things: that the JSON can be read as an answer — a non-empty `cases` object of
+finite positive latencies — and that the derivation exists and is not empty.
+Either failure is handed back once with the reason. A ceiling still missing a
+readable answer or its derivation after that is not published, so the command
+fails and a campaign runs without a ceiling. A pair that passes is taken as
+given.
 
 The session therefore runs with a shell and a writable sandbox, because
 reaching a profiler on an arbitrary image means installing packages and that is

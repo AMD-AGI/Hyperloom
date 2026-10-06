@@ -10,8 +10,8 @@ scored shape. The analyst owns all of it: it measures the machine's roofs
 during its session, derives the minimum legal work, composes the two into a
 latency, and writes both the answer and the derivation behind it. The framework
 settles what must not vary between runs -- which shapes are scored, which
-machine this is, what the kernel really dispatches -- and then reads back one
-file, checking only that it can be read.
+machine this is, what the kernel really dispatches -- and then reads back the
+answer, checking only that it can be read and that its derivation is beside it.
 
 **Attainment** is ``ceiling / measured``, computed in
 :mod:`~kernelforge.roofline_ceiling.attainment` against whatever latencies the

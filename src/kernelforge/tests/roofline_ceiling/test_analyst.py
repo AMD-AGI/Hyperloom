@@ -18,18 +18,27 @@ from kernelforge.roofline_ceiling.analyst import (
 )
 from kernelforge.roofline_ceiling.device_profile import DeviceIdentity
 from kernelforge.roofline_ceiling.evidence import EvidenceBundle
-from kernelforge.roofline_ceiling.report import REPORT_FILENAME
+from kernelforge.roofline_ceiling.report import DOCUMENT_FILENAME, REPORT_FILENAME
 
 _GOOD = {"cases": {"c0": 12.8}, "mean_ideal_ms": 12.8}
 
 
+_DERIVATION = "# Performance ceiling analysis\n\n## Conclusion\n\nc0 is HBM-bound at 12.8 ms.\n"
+
+
 class _Backend:
-    """A backend that writes canned files and records the specs it was given."""
+    """A backend that writes canned files and records the specs it was given.
+
+    Each attempt writes the next of ``payloads`` as the ceiling file and the
+    next of ``documents`` as the derivation; ``None`` writes nothing, and with
+    no ``documents`` given every attempt writes a derivation.
+    """
 
     name = "fake"
 
-    def __init__(self, *payloads, leavings: dict[str, str] | None = None):
+    def __init__(self, *payloads, documents=None, leavings: dict[str, str] | None = None):
         self._payloads = list(payloads)
+        self._documents = None if documents is None else list(documents)
         self._leavings = dict(leavings or {})
         self.specs: list = []
 
@@ -46,6 +55,9 @@ class _Backend:
                 target = scratch / REPORT_FILENAME
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
+        document = _DERIVATION if self._documents is None else (self._documents.pop(0) if self._documents else None)
+        if document is not None:
+            (scratch / DOCUMENT_FILENAME).write_text(document, encoding="utf-8")
         return type("Result", (), {"text": "done", "end_reason": "agent_stopped"})()
 
     @staticmethod
@@ -257,6 +269,7 @@ def test_both_deliverables_are_moved_into_the_output_directory(tmp_path):
     _analyse(backend, tmp_path)
 
     assert (tmp_path / "out" / REPORT_FILENAME).is_file()
+    assert (tmp_path / "out" / DOCUMENT_FILENAME).read_text() == _DERIVATION
 
 
 def test_what_the_session_left_behind_is_kept_as_the_record(tmp_path):
@@ -278,6 +291,8 @@ def test_an_unreadable_file_is_handed_back_once_with_the_reason(tmp_path):
     assert report.ideal_ms() == {"c0": 12.8}
     assert len(backend.specs) == 2
     assert "finite positive number" in backend.specs[1].user_prompt
+    # The derivation was already there, so the repair asks for it to be kept rather than rewritten.
+    assert f"Leave {DOCUMENT_FILENAME} in place" in backend.specs[1].user_prompt
 
 
 def test_a_session_that_never_writes_the_file_is_told_so(tmp_path):
@@ -292,7 +307,7 @@ def test_a_session_that_never_writes_the_file_is_told_so(tmp_path):
 def test_two_unreadable_attempts_end_the_run_rather_than_a_third(tmp_path):
     backend = _Backend({"cases": {}}, {"cases": {}})
 
-    with pytest.raises(CeilingAnalysisError, match="no readable performance_ceiling.json"):
+    with pytest.raises(CeilingAnalysisError, match="no usable ceiling after 2 attempts: performance_ceiling.json"):
         _analyse(backend, tmp_path)
 
     assert len(backend.specs) == 2
@@ -304,3 +319,50 @@ def test_malformed_json_on_disk_is_a_repairable_failure(tmp_path):
     report = _analyse(backend, tmp_path)
 
     assert report.ideal_ms() == {"c0": 12.8}
+
+
+# --- the derivation is part of the deliverable ----------------------------------
+
+
+def test_a_readable_ceiling_without_its_derivation_is_sent_back_for_it(tmp_path):
+    """The derivation is the only check on the roofs, so a ceiling is not published without it."""
+    backend = _Backend(_GOOD, _GOOD, documents=[None, _DERIVATION])
+
+    report = _analyse(backend, tmp_path)
+
+    assert report.ideal_ms() == {"c0": 12.8}
+    assert len(backend.specs) == 2
+    repair = backend.specs[1].user_prompt
+    assert f"{DOCUMENT_FILENAME} was not written" in repair
+    assert "Leave" not in repair
+    # The JSON was fine, so the repair does not ask for it again.
+    assert "could not be read as a ceiling" not in repair
+    assert (tmp_path / "out" / DOCUMENT_FILENAME).read_text() == _DERIVATION
+
+
+def test_an_empty_derivation_counts_as_none(tmp_path):
+    backend = _Backend(_GOOD, _GOOD, documents=["  \n", _DERIVATION])
+
+    _analyse(backend, tmp_path)
+
+    assert f"{DOCUMENT_FILENAME} is empty" in backend.specs[1].user_prompt
+
+
+def test_a_ceiling_never_given_a_derivation_is_not_published(tmp_path):
+    backend = _Backend(_GOOD, _GOOD, documents=[None, None])
+
+    with pytest.raises(CeilingAnalysisError, match=f"{DOCUMENT_FILENAME} was not written"):
+        _analyse(backend, tmp_path)
+
+    assert len(backend.specs) == 2
+    assert not (tmp_path / "out" / REPORT_FILENAME).exists()
+
+
+def test_a_repair_asks_for_both_files_when_neither_can_be_used(tmp_path):
+    backend = _Backend(None, _GOOD, documents=[None, _DERIVATION])
+
+    _analyse(backend, tmp_path)
+
+    repair = backend.specs[1].user_prompt
+    assert "could not be read as a ceiling" in repair
+    assert f"{DOCUMENT_FILENAME} was not written" in repair

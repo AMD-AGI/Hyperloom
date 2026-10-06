@@ -40,7 +40,7 @@ class NoScoredCasesError(RuntimeError):
 
 
 #: The failures an estimate can end in on a correctly wired call: no scored
-#: case, no readable answer, an agent provider that is unavailable or whose
+#: case, no readable answer or no derivation beside it, an agent provider that is unavailable or whose
 #: session failed (the workspace guard rejecting it included), a session past
 #: its watchdog, and the filesystem. A caller that degrades on these must let
 #: anything else raise, because anything else is a bug in the call.

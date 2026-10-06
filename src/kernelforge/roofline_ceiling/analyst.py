@@ -7,11 +7,13 @@ Everything about the estimate is the analyst's -- the roofs, the minimum legal
 work, how that work composes, and the two files it lands in. This module opens
 the session, bounds where it may write, and reads the answer back.
 
-The only thing checked is whether ``performance_ceiling.json`` can be read as
-an answer at all. A file that cannot is handed back with the reason; a file
-that can is taken as given. Nothing re-derives a latency, because a framework
-that could would be asserting a work model this design already found too narrow
-for real operators.
+Two things are checked: that ``performance_ceiling.json`` can be read as an
+answer, and that ``performance_ceiling_analysis.md`` is there and not empty. The
+derivation is required because it is the only place a wrong ceiling can be
+caught, so a ceiling without one is not published. A file that fails either
+check is handed back with the reason; a pair that passes is taken as given.
+Nothing re-derives a latency, because a framework that could would be asserting
+a work model this design already found too narrow for real operators.
 
 The session needs a shell -- reaching a profiler on an arbitrary image means
 installing packages, and that is open-ended work code cannot enumerate -- so
@@ -69,9 +71,9 @@ ROLE_FILENAME = "ceiling_analyst.md"
 #: timeout bounds it either way.
 DEFAULT_ANALYST_TURNS = 120
 
-#: One repair round. The failure a repair fixes is an unreadable file, and an
-#: analyst that cannot write a readable one twice will not write one on the
-#: third ask -- it will spend budget agreeing with the error message.
+#: One repair round. The failure a repair fixes is a missing or unreadable
+#: file, and an analyst that cannot write a usable one twice will not write one
+#: on the third ask -- it will spend budget agreeing with the error message.
 MAX_REPAIR_ROUNDS = 1
 
 #: Tools that put bytes on disk. A shell can too, which is why the workspace
@@ -81,7 +83,7 @@ _WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 
 
 class CeilingAnalysisError(RuntimeError):
-    """Raised when no readable ceiling file could be obtained."""
+    """Raised when no readable ceiling file with a derivation beside it could be obtained."""
 
 
 def load_role(project_root: str | Path | None = None) -> str:
@@ -234,15 +236,34 @@ async def _ask(backend: Any, spec: AgentRunSpec) -> str:
     return str(getattr(result, "text", "") or "").strip()
 
 
-def _repair_prompt(report_path: Path, problem: str) -> str:
-    """Ask for the one file to be rewritten, naming what could not be read."""
-    return (
-        f"{report_path} could not be read as a ceiling: {problem}\n\n"
-        f"Rewrite that file. It must be JSON with exactly two keys: 'cases', an object mapping "
-        f"every scored case id to its ideal latency in milliseconds as a finite positive number, "
-        f"and 'mean_ideal_ms', the equal-weight arithmetic mean of those latencies. Leave "
-        f"{DOCUMENT_FILENAME} in place unless the derivation changes too."
-    )
+def _derivation_problem(document_path: Path) -> str:
+    """Why the derivation beside the ceiling cannot be published, or ``""`` when it can."""
+    try:
+        text = document_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"{document_path} was not written ({exc})"
+    return "" if text.strip() else f"{document_path} is empty"
+
+
+def _repair_prompt(report_path: Path, report_problem: str, document_path: Path, document_problem: str) -> str:
+    """Ask for exactly the files that cannot be used, naming what is wrong with each."""
+    asks: list[str] = []
+    if report_problem:
+        asks.append(
+            f"{report_path} could not be read as a ceiling: {report_problem}\n\n"
+            "Rewrite that file. It must be JSON with exactly two keys: 'cases', an object mapping "
+            "every scored case id to its ideal latency in milliseconds as a finite positive number, "
+            "and 'mean_ideal_ms', the equal-weight arithmetic mean of those latencies."
+        )
+    if document_problem:
+        asks.append(
+            f"{document_problem}. Write the derivation there, in the structure your role document "
+            "prescribes: nothing recomputes the latencies, so without it the ceiling cannot be checked "
+            "and is not published."
+        )
+    elif report_problem:
+        asks.append(f"Leave {DOCUMENT_FILENAME} in place unless the derivation changes too.")
+    return "\n\n".join(asks)
 
 
 def _move_into_place(scratch: Path, destination: Path) -> None:
@@ -254,9 +275,7 @@ def _move_into_place(scratch: Path, destination: Path) -> None:
     """
     destination.mkdir(parents=True, exist_ok=True)
     for name in (REPORT_FILENAME, DOCUMENT_FILENAME):
-        source = scratch / name
-        if source.is_file():
-            shutil.copy2(source, destination / name)
+        shutil.copy2(scratch / name, destination / name)
 
     workings = destination / EVIDENCE_DIRNAME / "analyst"
     if workings.exists():
@@ -285,11 +304,12 @@ async def run_ceiling_analysis(
     turns: int = DEFAULT_ANALYST_TURNS,
     project_root: str | Path | None = None,
 ) -> CeilingReport:
-    """Run the analyst until it leaves a readable ceiling file, or give up."""
+    """Run the analyst until it leaves a readable ceiling and its derivation, or give up."""
     destination = Path(output_dir)
     system_prompt = load_role(project_root)
     scratch = Path(tempfile.mkdtemp(prefix="forge_ceiling_"))
     report_path = scratch / REPORT_FILENAME
+    document_path = scratch / DOCUMENT_FILENAME
 
     try:
         attempt_prompt = build_request(
@@ -316,21 +336,30 @@ async def run_ceiling_analysis(
                     turns=turns,
                 ),
             )
+            report_problem = ""
             try:
                 report = read_report(report_path)
             except (OSError, ValueError, CeilingContractError) as exc:
-                last_problem = str(exc) if not isinstance(exc, OSError) else f"it was not written ({exc})"
-                log.warning("ceiling attempt %d left no readable %s: %s", attempt + 1, REPORT_FILENAME, last_problem)
-                if attempt >= MAX_REPAIR_ROUNDS:
-                    break
-                attempt_prompt = _repair_prompt(report_path, last_problem)
-                continue
-            _move_into_place(scratch, destination)
-            return report
+                report_problem = str(exc) if not isinstance(exc, OSError) else f"it was not written ({exc})"
+            document_problem = _derivation_problem(document_path)
+            if not report_problem and not document_problem:
+                _move_into_place(scratch, destination)
+                return report
 
-        raise CeilingAnalysisError(
-            f"no readable {REPORT_FILENAME} after {MAX_REPAIR_ROUNDS + 1} attempts: {last_problem}"
-        )
+            last_problem = "; ".join(
+                problem
+                for problem in (
+                    f"{REPORT_FILENAME}: {report_problem}" if report_problem else "",
+                    document_problem,
+                )
+                if problem
+            )
+            log.warning("ceiling attempt %d left no usable answer: %s", attempt + 1, last_problem)
+            if attempt >= MAX_REPAIR_ROUNDS:
+                break
+            attempt_prompt = _repair_prompt(report_path, report_problem, document_path, document_problem)
+
+        raise CeilingAnalysisError(f"no usable ceiling after {MAX_REPAIR_ROUNDS + 1} attempts: {last_problem}")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 

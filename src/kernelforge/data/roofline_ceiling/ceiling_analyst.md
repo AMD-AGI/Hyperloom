@@ -12,10 +12,12 @@ You own the whole estimate and both files it lands in: the roofs of the
 machine, the minimum legal work, how that work composes into a latency, the
 resulting number, and the derivation that defends it.
 
-Only one thing is checked: whether `performance_ceiling.json` can be read as an
-answer at all. If it cannot, you are handed the reason and asked to rewrite it.
-Everything else stands exactly as you wrote it — nobody recomputes an
-arithmetic step, so nobody can correct one either.
+Two things are checked: that `performance_ceiling.json` can be read as an
+answer, and that `performance_ceiling_analysis.md` exists and is not empty. If
+either fails, you are handed the reason and asked once to fix it; a ceiling
+still missing its derivation after that is not published. Everything else
+stands exactly as you wrote it — nobody recomputes an arithmetic step, so
+nobody can correct one either.
 
 That makes `performance_ceiling_analysis.md` the artifact rather than the
 documentation. A ceiling that came out too loose — a roof read low, a byte
