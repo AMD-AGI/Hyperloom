@@ -130,6 +130,92 @@ def test_scrub_benchmark_process_env_removes_control_plane_credentials():
     }
 
 
+def test_redact_secret_env_values_masks_credentials_and_keeps_knobs():
+    env = {
+        "OPENAI_API_KEY": "plaintext",
+        "ANTHROPIC_AUTH_TOKEN": "plaintext",
+        # Allowed into a benchmark subprocess, but still a credential once the record leaves the process.
+        "HF_TOKEN": "plaintext",
+        # Listed by name only: neither carries a credential-shaped fragment.
+        "AWS_ACCESS_KEY_ID": "plaintext",
+        "ANTHROPIC_CUSTOM_HEADERS": "plaintext",
+        "TOKENIZERS_PARALLELISM": "false",
+        "DURATION": "3600",
+    }
+
+    assert common_env_safety.redact_secret_env_values(env) == {
+        "OPENAI_API_KEY": "[REDACTED]",
+        "ANTHROPIC_AUTH_TOKEN": "[REDACTED]",
+        "HF_TOKEN": "[REDACTED]",
+        "AWS_ACCESS_KEY_ID": "[REDACTED]",
+        "ANTHROPIC_CUSTOM_HEADERS": "[REDACTED]",
+        "TOKENIZERS_PARALLELISM": "false",
+        "DURATION": "3600",
+    }
+    assert env["OPENAI_API_KEY"] == "plaintext"
+    assert common_env_safety.redact_secret_env_values(None) == {}
+
+
+def test_redact_secret_env_values_keeps_token_count_knobs_visible():
+    # TOKEN is a credential only as a whole name segment, and never as PER_TOKEN.
+    knobs = {
+        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+        "AITER_PER_TOKEN_2": "1",
+        "MAX_NUM_BATCHED_TOKENS": "8192",
+        "VLLM_MAX_NUM_BATCHED_TOKENS": "8192",
+        "SGLANG_MAX_PREFILL_TOKENS": "16384",
+        "SGLANG_USE_AITER_PER_TOKEN_GROUP_QUANT": "1",
+        "TOKENIZERS_PARALLELISM": "false",
+        "TOKENIZER_MODE": "auto",
+    }
+
+    assert common_env_safety.redact_secret_env_values(knobs) == knobs
+
+
+def test_redact_secret_env_values_masks_every_langfuse_marker_and_scrubs_kept_values():
+    env = {
+        "HF_TOKEN": "plaintext",
+        "GITHUB_TOKEN": "plaintext",
+        "HUGGING_FACE_HUB_TOKEN": "plaintext",
+        "SERVICE_TOKEN_2": "plaintext",
+        "HF_TOKEN_BACKUP": "plaintext",
+        "PER_TOKEN_SCALE_TOKEN": "plaintext",
+        "TOKEN": "plaintext",
+        "TOKENIZER_API_KEY": "plaintext",
+        "MY_SERVICE_API_KEY": "plaintext",
+        "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=plaintext",
+        "SGLANG_CUSTOM_HEADERS": "plaintext",
+        "SSH_PRIVATE_KEY": "plaintext",
+        "MINIO_ACCESS_KEY": "plaintext",
+        "AWS_SECRET_KEY": "plaintext",
+        "BASIC_AUTH": "plaintext",
+        "REQUEST_SIGNATURE": "plaintext",
+        "GPG_PASSPHRASE": "plaintext",
+        "DB_PASSWD": "plaintext",
+        # Kept by name, but a recognizable credential inside the value is still masked.
+        "EXTRA_ARGS": "--header Bearer abcdefghijklmnop",
+        "WORKERS": 4,
+    }
+
+    redacted = common_env_safety.redact_secret_env_values(env)
+
+    for name in env:
+        if name not in {"EXTRA_ARGS", "WORKERS"}:
+            assert redacted[name] == "[REDACTED]", name
+    assert redacted["EXTRA_ARGS"] == "--header Bearer [REDACTED]"
+    assert redacted["WORKERS"] == 4
+
+
+def test_langfuse_redact_env_markers_are_the_shared_list():
+    from hyperloom.inference_optimizer.trace import langfuse_mapping
+
+    assert langfuse_mapping._SENSITIVE_ENV_MARKERS is common_env_safety.SENSITIVE_ENV_NAME_MARKERS
+    # The Langfuse snapshot keeps its wider substring match.
+    assert langfuse_mapping.redact_env({"MAX_NUM_BATCHED_TOKENS": "8192"}) == {
+        "MAX_NUM_BATCHED_TOKENS": "***redacted***"
+    }
+
+
 def test_variant_env_key_allows_workload_pins_and_blocks_hijacks():
     # Sweep, conc-sweep and shape-capture grids set these from code, so an allowlist that dropped them would silently
     # flatten every variant.
@@ -328,3 +414,10 @@ def test_redact_secret_values_preserves_json_around_ocp_header():
     out = common_env_safety.redact_secret_values(text)
 
     assert json.loads(out) == {"h": "Ocp-Apim-Subscription-Key: [REDACTED]", "ok": True}
+
+
+def test_any_custom_headers_name_is_secret_shaped():
+    """A generic ``*_CUSTOM_HEADERS`` name carries header credentials, like the text-redaction pattern assumes."""
+    assert common_env_safety.is_secret_shaped_env_name("SERVICE_CUSTOM_HEADERS")
+    assert common_env_safety.is_secret_shaped_env_name("service_custom_headers")
+    assert not common_env_safety.is_secret_shaped_env_name("TOKENIZERS_PARALLELISM")

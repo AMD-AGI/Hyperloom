@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.agentx_mode import native_agentx_session
+from hyperloom.common.env_safety import redact_secret_env_values
 
 from ...performance_display import throughput_fields
 from ...session.sbd_v6 import read_timeline_events
@@ -150,7 +151,22 @@ def collect_v6_metadata(
     if grading:
         projected["grading"] = grading
     metadata = _overlay_recorded(projected, recorded)
+    _mask_launch_env(metadata)
     return {"exported_at_utc": exported_at_utc, **metadata, "warnings": list(warnings)}
+
+
+def _mask_launch_env(metadata: dict[str, Any]) -> None:
+    """Mask credentials in the final ``task_config.launch_env``, in place.
+
+    Runs after the recorded overlay, because a fragment recorded before the
+    recorder masked its values still holds them in plaintext. A value that is
+    not a mapping cannot be masked key by key, so it is dropped.
+    """
+    task_config = metadata.get("task_config")
+    if not isinstance(task_config, dict) or "launch_env" not in task_config:
+        return
+    launch_env = task_config["launch_env"]
+    task_config["launch_env"] = redact_secret_env_values(launch_env) if isinstance(launch_env, dict) else {}
 
 
 def _projected_total_elapsed_minutes(session: dict[str, Any], state: dict[str, Any]) -> float:
