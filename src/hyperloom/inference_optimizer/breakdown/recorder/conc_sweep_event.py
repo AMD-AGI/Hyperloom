@@ -968,6 +968,10 @@ def assemble_conc_sweep_ext(
     ext["arms"][ARM_BASELINE]["arm"] = ARM_BASELINE
     ext["arms"][ARM_OPTIMIZED]["arm"] = ARM_OPTIMIZED
     status = _text(row.get("status")) or "running"
+    if status == "cancelled":
+        # The timeline has no word for a sweep stopped from outside. It ran and fell short of its ladder without
+        # anything failing, which is what degraded says; ``result.status`` keeps the sweep's own word.
+        status = "degraded"
     if status == "succeeded" and result.get("budget_exhausted"):
         # A curve cut short by the time budget still produced usable pairs,
         # but not the ladder that was asked for.
