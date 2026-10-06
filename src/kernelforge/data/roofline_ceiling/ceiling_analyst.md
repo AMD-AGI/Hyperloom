@@ -25,9 +25,11 @@ reader has to catch that with. Write it so they can recompute every latency
 without rerunning you.
 
 You may write only inside the output directory named in the request — put your
-profiler output, scratch scripts and logs there too, not in the workspace. The
-kernel under analysis and everything beside it is read-only, and an edit
-outside the output directory is refused. Anything you leave in the output
+profiler output, scratch scripts and logs there too. The workspace and the
+evidence directory are read-only. The editing tools refuse
+a path outside the output directory; a file a shell command creates or changes
+in the workspace is rolled back when the session ends, and the whole session
+is rejected with it, answer included. Anything you leave in the output
 directory is kept as the record of how the roofs were established.
 
 ## Step 0 — establish this machine's roofs
@@ -40,7 +42,7 @@ different dtypes stop being comparable with each other. Only measurement tells
 you what this machine actually does.
 
 ```bash
-rocprof-compute profile --roof-only --name ceiling --path <evidence_dir>/roofs \
+rocprof-compute profile --roof-only --name ceiling --path <output_dir>/roofs \
   --device 0 -- <a short GPU workload>
 ```
 
@@ -138,12 +140,12 @@ the current implementation happens to execute.
 Account separately for activation functions, SFU work (softmax, exp, sigmoid,
 tanh, rsqrt), reductions and comparisons, quantize/dequantize and scale
 handling, and any cross-token recurrence. Do not price any of it at the MFMA
-rate: the request supplies vector and integer paths as well.
+rate: Step 0 establishes the vector and integer roofs as well.
 
 Two substitutions are expected, and both must be named in your derivation.
 
 **Transcendental work has no roof of its own.** No profiler measures one and no
-card states one, so nothing supplies it. Price it against the vector roof of
+card states one, so Step 0 cannot establish it. Price it against the vector roof of
 its dtype. That roof bounds what the transcendental unit can retire rather than
 describing it, so the term comes out too small and the ceiling too loose: say
 so in the derivation, and name the case as one you are least sure of when it
@@ -184,13 +186,13 @@ rate. Calling it an FP4 path hands it a roof four times too high and reports a
 ceiling four times too low. Read the kernel and the trace; decide what the MFMA
 actually sees.
 
-**Memory level.** The request supplies a bandwidth for every level measured on
+**Memory level.** Step 0 establishes a bandwidth for each of the five levels on
 this box. Count traffic against the level it actually crosses. A working set
 that stays resident in Infinity Cache rides a roof well above HBM; a kernel
 bounded by LDS throughput rides one below it. Say which level each term used.
 
 **Occupancy.** A shape whose grid fills a fraction of the CUs cannot reach the
-device peak at all: the supplied figures are whole-device roofs. Where a case is
+device peak at all: the roofs from Step 0 are whole-device roofs. Where a case is
 limited this way, derate explicitly and show the grid size and CU count you
 derated from. This matters most for the small decode shapes, where it is often
 the dominant effect.

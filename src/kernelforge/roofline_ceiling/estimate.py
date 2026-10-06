@@ -16,12 +16,14 @@ box's rather than a record of some earlier box's.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from kernelforge.roofline_ceiling.analyst import run_ceiling_analysis
+from kernelforge.agent_backends.base import AgentProviderError
+from kernelforge.roofline_ceiling.analyst import CeilingAnalysisError, run_ceiling_analysis
 from kernelforge.roofline_ceiling.contract import CeilingReport
 from kernelforge.roofline_ceiling.evidence import collect_evidence
 from kernelforge.roofline_ceiling.report import (
@@ -35,6 +37,20 @@ SOURCE_ANALYST = "analyst"
 
 class NoScoredCasesError(RuntimeError):
     """Raised when the driver named no scored case to produce a ceiling for."""
+
+
+#: The failures an estimate can end in on a correctly wired call: no scored
+#: case, no readable answer, an agent provider that is unavailable or whose
+#: session failed (the workspace guard rejecting it included), a session past
+#: its watchdog, and the filesystem. A caller that degrades on these must let
+#: anything else raise, because anything else is a bug in the call.
+ESTIMATE_ERRORS: tuple[type[Exception], ...] = (
+    NoScoredCasesError,
+    CeilingAnalysisError,
+    AgentProviderError,
+    asyncio.TimeoutError,
+    OSError,
+)
 
 
 @dataclass(frozen=True)
@@ -117,6 +133,7 @@ async def estimate_ceiling(
 
 
 __all__ = [
+    "ESTIMATE_ERRORS",
     "SOURCE_ANALYST",
     "CeilingOutcome",
     "NoScoredCasesError",

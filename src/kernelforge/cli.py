@@ -1591,6 +1591,9 @@ def forge_loop(
             + ". The Python launcher, original reference, driver, ABI and specialization are frozen."
         )
 
+    # Resolved before the loop is built: the ceiling estimator captures it, and the raw option is ``None`` by default.
+    session_timeout_sec = _forge_session_timeout_sec(max_hours, session_timeout_sec)
+
     # Construct the loop only after task preparation has resolved the profiling contract; IterationLoop snapshots that
     # readiness in its runtime state.
     loop_runner = IterationLoop(
@@ -1801,7 +1804,6 @@ def forge_loop(
     # A turn cap never bounded time: it fired on 2.2% of sessions, so a session that neither converged nor capped ran
     # until something outside killed it.
     config.max_turns = FORGE_IMPLEMENTER_TURN_BACKSTOP
-    session_timeout_sec = _forge_session_timeout_sec(max_hours, session_timeout_sec)
     print(
         f"  Implementer session budget: {session_timeout_sec}s "
         f"(campaign budget {max_hours:g}h; turn backstop {config.max_turns})"

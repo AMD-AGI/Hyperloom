@@ -2526,9 +2526,11 @@ class IterationLoop(AnalysisRuntimeMixin):
         above, which is both a better clock than a single run and one driver run
         the estimator no longer has to pay for.
 
-        A failure here is reported and dropped. Without a ceiling the campaign
-        simply has no attainment target and runs to its time budget, which is
-        what every campaign did before this existed.
+        An estimate that ends in one of ``ESTIMATE_ERRORS`` is reported and
+        dropped. Without a ceiling the campaign simply has no attainment target
+        and runs to its time budget, which is what every campaign did before
+        this existed. Any other exception is a bug in how the estimator was
+        wired, and raises rather than passing for that degraded path.
         """
         if self._ceiling_estimator is None:
             return
@@ -2537,16 +2539,16 @@ class IterationLoop(AnalysisRuntimeMixin):
             return
         if self.resume and self._adopt_recorded_ceiling(scored):
             return
+        from kernelforge.roofline_ceiling.estimate import ESTIMATE_ERRORS
+
         anchor = self._best_case_times or self._baseline_case_times
+        case_ms = {case_id: anchor[case_id] for case_id in scored}
         print("Estimating the roofline ceiling for this kernel...")
         try:
-            outcome = await self._ceiling_estimator(
-                case_ids=scored,
-                case_ms={case_id: anchor[case_id] for case_id in scored},
-            )
-        except Exception as exc:  # noqa: BLE001 - an absent ceiling costs a target, never the campaign
+            outcome = await self._ceiling_estimator(case_ids=scored, case_ms=case_ms)
+        except ESTIMATE_ERRORS as exc:
             log.warning("roofline ceiling unavailable: %s", exc, exc_info=True)
-            print(f"  [roofline] no ceiling for this campaign: {exc}")
+            print(f"  [roofline] no ceiling for this campaign: {str(exc) or type(exc).__name__}")
             return
 
         self._ceiling_report_path = str(outcome.report_path)
@@ -2593,15 +2595,13 @@ class IterationLoop(AnalysisRuntimeMixin):
         return True
 
     def _record_ceiling(self) -> None:
-        """Checkpoint where this campaign's ceiling was published, for a resume to read back."""
-        try:
-            self.run_state.ceiling_report_path = self._ceiling_report_path
-            self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - persistence is best-effort
-            self.persistence_degraded = True
-            self.persistence_errors.append("persist roofline ceiling path")
-            self.persistence_errors = self.persistence_errors[-10:]
-            log.warning("run_state: failed to persist the roofline ceiling path", exc_info=True)
+        """Checkpoint where this campaign's ceiling was published, for a resume to read back.
+
+        ``LoopStateStore.save`` records its own write failures as degraded
+        persistence rather than raising, so there is nothing to catch here.
+        """
+        self.run_state.ceiling_report_path = self._ceiling_report_path
+        self.state_store.save(self.run_state)
 
     async def _measure_baseline(self) -> float | None:
         """Bench the pristine kernel before any agent edit — the speedup anchor."""
@@ -3080,7 +3080,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 from kernelforge.roofline_ceiling.report import read_report
 
                 cached = read_report(path)
-            except Exception as exc:  # noqa: BLE001 - a missing ceiling is never worth failing a campaign for
+            except (OSError, ValueError) as exc:
                 log.warning("ceiling unavailable from %s: %s", path, exc)
                 cached = None
             self._ceiling_report = cached

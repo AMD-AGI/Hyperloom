@@ -101,7 +101,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 |:--|:--|:--|
 | `--max-hours <h>` | `1.0` | Runtime budget in hours; the loop is time-driven. Minimum `1.0`. A round is started only when what remains can finish it, so the run ends before the budget does. Above 2 hours this also enables Analysis profiling and, for single-lane rounds, Plan Critic review. |
 | `--deadline-unix <t>` | `0` | Absolute UNIX deadline shared by task preparation and optimization. |
-| `--session-timeout-sec <s>` | from `--max-hours` | Wall-clock budget for one implementer session. The claude backend cuts the session at this deadline and the session is told about it. |
+| `--session-timeout-sec <s>` | from `--max-hours` | Wall-clock budget for one implementer session. The claude backend cuts the session at this deadline and the session is told about it. Under `--roofline-ceiling on` it also bounds the ceiling analyst session. |
 | `--agent-timeout-sec <s>` | provider default | Timeout for one Agent session. |
 | `--profile-timeout-sec <s>` | `7200` | Ceiling for the single complete Analysis Agent session. Phase and case artifacts are persisted for resume when the deadline is reached. |
 
@@ -417,11 +417,9 @@ currently keeping. See `--roofline-target` under `forge-loop`.
 The estimate is an agent's, composition included, because no table covers MoE
 routing, paged attention, fusion legality or occupancy derating for an arbitrary
 operator, and a fixed composition rule makes the analyst distort its model to
-fit the rule. The hardware is not the agent's: it is handed measured peaks,
-bandwidths and a launch cost, and told to use those and nothing it recalls. Each
-published report carries the analyst's own derivation — formulas, figures used
-and assumptions — because nothing recomputes the latencies and that document is
-the only record of how they were reached.
+fit the rule. Each published report carries the analyst's own derivation —
+formulas, figures used and assumptions — because nothing recomputes the
+latencies and that document is the only record of how they were reached.
 
 The hardware figures are the analyst's too. It measures them on the box during
 its session — `rocprof-compute --roof-only` for the peaks and bandwidths, a
@@ -475,10 +473,13 @@ with the reason. A file that can is taken as given.
 
 The session therefore runs with a shell and a writable sandbox, because
 reaching a profiler on an arbitrary image means installing packages and that is
-open-ended work code cannot enumerate. Two things bound it: a pre-tool hook
-refuses edits outside the output and evidence directories, and the workspace
-guard snapshots every workspace file before the session and restores it after,
-so the kernel under optimization comes out as it went in.
+open-ended work code cannot enumerate. Two things bound it. A pre-tool hook
+refuses edits outside the analyst's output directory, a scratch directory
+outside the workspace whose contents are moved under `--output-dir` when the
+session ends. The workspace guard snapshots every workspace file before the
+session; anything the session changed or created in the workspace, through a
+shell or otherwise, is rolled back and the session rejected, so the kernel
+under optimization comes out as it went in.
 
 The result dict (`ideal_ms` per case, `mean_ideal_ms`, `report_path`) is
 printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__` sentinels.

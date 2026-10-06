@@ -14,6 +14,8 @@ import click
 import pytest
 
 from kernelforge import cli as cli_module
+from kernelforge.agent_backends.base import AgentProviderUnavailableError
+from kernelforge.roofline_ceiling.analyst import CeilingAnalysisError
 from kernelforge.roofline_ceiling.contract import load_report
 from kernelforge.roofline_ceiling.estimate import estimate_ceiling as real_estimate_ceiling
 from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
@@ -59,7 +61,7 @@ def _loop(
     )
     # Stands in for a ceiling ``_establish_ceiling`` already published.
     loop._ceiling_report_path = path
-    loop._baseline_case_times = dict(case_times or {"decode-t1": 40.0})
+    loop._baseline_case_times = dict({"decode-t1": 40.0} if case_times is None else case_times)
     loop._best_case_times = dict(loop._baseline_case_times)
     # ``_run_locked`` loads both before it reaches the ceiling; these stand in for it.
     loop.run_state = run_state or RunState()
@@ -424,9 +426,17 @@ def test_a_recorded_ceiling_that_cannot_be_read_is_estimated_again(tmp_path, cap
     assert "cannot be read back" in capsys.readouterr().out
 
 
-def test_an_estimate_that_fails_costs_the_target_not_the_campaign(tmp_path, capsys):
+@pytest.mark.parametrize(
+    "failure",
+    [
+        CeilingAnalysisError("no readable performance_ceiling.json after 2 attempts"),
+        AgentProviderUnavailableError("no Agent provider is configured or installed"),
+        asyncio.TimeoutError(),
+    ],
+)
+def test_an_estimate_that_fails_costs_the_target_not_the_campaign(capsys, failure):
     async def estimator(**_kwargs):
-        raise RuntimeError("rocprof-compute is not installed")
+        raise failure
 
     loop = _loop(target=0.86, estimator=estimator)
     asyncio.run(loop._establish_ceiling())
@@ -434,6 +444,17 @@ def test_an_estimate_that_fails_costs_the_target_not_the_campaign(tmp_path, caps
     assert loop._ceiling_report_path == ""
     assert not loop._is_roofline_target_met()
     assert "no ceiling for this campaign" in capsys.readouterr().out
+
+
+def test_a_miswired_estimator_raises_instead_of_passing_for_a_failed_estimate():
+    """A bug in the call must not read as the degraded path an operator expects."""
+
+    async def estimator(**_kwargs):
+        raise TypeError("'<=' not supported between instances of 'NoneType' and 'int'")
+
+    loop = _loop(target=0.86, estimator=estimator)
+    with pytest.raises(TypeError):
+        asyncio.run(loop._establish_ceiling())
 
 
 def test_no_estimate_is_attempted_before_the_case_set_is_known():

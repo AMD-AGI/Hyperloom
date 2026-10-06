@@ -21,10 +21,9 @@ from kernelforge.agent_backends.registry import (
     resolve_agent_runtime,
     select_default_agent_provider,
 )
-from kernelforge.roofline_ceiling.analyst import CeilingAnalysisError
 from kernelforge.roofline_ceiling.contract import CeilingReport
 from kernelforge.roofline_ceiling.estimate import (
-    NoScoredCasesError,
+    ESTIMATE_ERRORS,
     estimate_ceiling,
 )
 from kernelforge.roofline_ceiling.report import WORKSPACE_SUBDIR
@@ -210,8 +209,8 @@ def roofline_ceiling_command(
                 run_timeout_sec=float(run_timeout_sec),
             )
         )
-    except (CeilingAnalysisError, NoScoredCasesError) as exc:
-        raise click.ClickException(str(exc)) from exc
+    except ESTIMATE_ERRORS as exc:
+        raise click.ClickException(str(exc) or type(exc).__name__) from exc
 
     for note in outcome.notes:
         click.echo(f"[ceiling] note: {note}")
