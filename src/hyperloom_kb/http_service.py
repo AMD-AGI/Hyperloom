@@ -33,7 +33,7 @@ from psycopg_pool import PoolTimeout
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
 from hyperloom_kb.database import Database, WriteSource
-from hyperloom_kb.embedded_postgres import start_embedded_postgres
+from hyperloom_kb.embedded_postgres import EmbeddedPostgresError, start_embedded_postgres
 from hyperloom_kb.legacy_home import LegacyHome
 from hyperloom_kb.observability import (
     PROBE_ROUTES,
@@ -1328,8 +1328,15 @@ def main(argv: list[str] | None = None) -> int:
         lock: TextIO | None = None
         database_url = settings.database_url
         if not database_url:
+            if os.name != "posix":
+                raise SystemExit(
+                    f"the embedded database runs on Linux and macOS; set {DATABASE_URL_ENV} to a PostgreSQL server"
+                )
             lock = stack.enter_context(_sole_service(home))
-            embedded = start_embedded_postgres(home)
+            try:
+                embedded = start_embedded_postgres(home)
+            except EmbeddedPostgresError as exc:
+                raise SystemExit(f"{exc}; or set {DATABASE_URL_ENV} to a PostgreSQL server") from None
             if embedded.started:
                 stack.callback(embedded.stop)
             database_url = embedded.conninfo
