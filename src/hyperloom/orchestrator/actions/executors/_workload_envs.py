@@ -1484,6 +1484,14 @@ def materialize_config_with_envs(
     from hyperloom.inference_optimizer import framework_registry as _fw_reg
 
     _is_scriptable_profile = _fw_reg.is_scriptable(bench.get("framework"))
+    if is_profile and str(bench.get("framework") or "").lower() == "xdit":
+        from ._server_patcher import ensure_xdit_patched_for_tracelens
+
+        xdit_patched = ensure_xdit_patched_for_tracelens()
+        if xdit_patched:
+            envs["EXTRA_XDIT_ARGS"] = "--profile_wait 1 --profile_capture_phase --with_stack"
+        else:
+            envs["EXTRA_XDIT_ARGS"] = "--profile_wait 1"
     profile_num_prompts: int | None = None
     atom_caps: _AtomTracelensCaps | None = None
     # ``(sentinel, flag)`` pairs remembered so the re-assertion at the very end of
