@@ -14,6 +14,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.launch_log_evidence import (
+    engine_adjusted_settings_from_log,
     launch_argv_from_log,
     observed_model_binding_from_log,
     observed_server_config_from_log,
@@ -99,10 +100,12 @@ def build_launch_evidence(
     observed_flags = ""
     observed_server_identity: dict[str, Any] = {}
     observed_server_config: dict[str, Any] = {}
+    engine_adjusted_settings: dict[str, dict[str, str]] = {}
     observed_model_binding: dict[str, Any] = {}
     if actual_server_log:
         try:
             observed_server_config = observed_server_config_from_log(actual_server_log, resolved_framework)
+            engine_adjusted_settings = engine_adjusted_settings_from_log(actual_server_log, resolved_framework)
             observed_flags = launch_argv_from_log(actual_server_log, resolved_framework)
             # Read from the raw launch line, which still carries the operands
             # ``split_launch_flags`` strips: without it the evidence records only
@@ -144,6 +147,9 @@ def build_launch_evidence(
         # What the engine resolved, the only account of a launch neither engine
         # echoes as argv. Complete for SGLang; non-defaults only for vLLM.
         "observed_server_config": observed_server_config,
+        # Settings the engine rewrote after parsing them: the config above holds
+        # the resolved value, which is not what a flag would pass.
+        "engine_adjusted_settings": engine_adjusted_settings,
         "observed_server_identity": observed_server_identity,
         "observed_model_binding": observed_model_binding,
         "requested_model_digest": _digest_operand(

@@ -336,6 +336,45 @@ def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
         assert none_dropped == []
 
 
+def test_a_setting_the_engine_rewrote_is_not_already_in_effect(tmp_path):
+    """DP attention divides chunked_prefill_size, so the resolved 8192 is not what ``--chunked-prefill-size 8192`` passes.
+
+    Taken from a real SGLang log: 65536 was requested and 8192 resolved under
+    dp_size=8. Passing 8192 would launch with 1024, a real change. The engine's
+    own report covers it, and so does the DP-attention rule for a log that never
+    carried the report.
+    """
+    config = tmp_path / "stack.yaml"
+    config.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
+        encoding="utf-8",
+    )
+    log = tmp_path / "server.log"
+    record = {"enable_dp_attention": True, "dp_size": 8, "chunked_prefill_size": 8192, "max_running_requests": 512}
+    log.write_text(
+        "[2026-09-18 19:11:48] DP attention is enabled. chunked prefill size is adjusted from 65536 to 8192.\n"
+        f"[2026-09-18 19:11:50] server_args={record!r}\n",
+        encoding="utf-8",
+    )
+    evidence = build_launch_evidence(config_path=config, actual_server_log=str(log), framework="sglang", slot=tmp_path)
+    assert evidence["engine_adjusted_settings"] == {"chunked_prefill_size": {"requested": "65536", "resolved": "8192"}}
+
+    for engine_report in (evidence["engine_adjusted_settings"], {}):
+        stack = {**evidence, "engine_adjusted_settings": engine_report}
+        observed_config, observed_env = observed_launch_from_state(
+            SimpleNamespace(current_best_measurement={"launch_evidence": stack})
+        )
+        kwargs = _noop_filter_kwargs(tmp_path, observed_server_config=observed_config, observed_server_env=observed_env)
+
+        kept, dropped = filter_baseline_noop_variants([_variant("--chunked-prefill-size 8192")], **kwargs)
+        assert [gv.name for gv in kept] == [_CANDIDATE]
+        assert dropped == []
+
+        # Only the rewritten settings are unknown: a plain restatement still drops.
+        _, dropped = filter_baseline_noop_variants([_variant(_RESTATES_ARGV)], **kwargs)
+        assert [name for name, _ in dropped] == [_CANDIDATE]
+
+
 def test_record_explore_accepted_dedup_by_fingerprint():
     state = SharedState()
     variant = {

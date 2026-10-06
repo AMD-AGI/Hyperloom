@@ -501,6 +501,63 @@ def observed_server_config_from_log(path: str, framework: str) -> dict[str, Any]
     return _server_args_from_log(path, spec, keep=None)
 
 
+#: ``chunked prefill size is adjusted from 65536 to 8192``: an engine saying it
+#: rewrote a setting after parsing it.
+_ENGINE_ADJUSTED_RE = re.compile(
+    r"(?P<name>[A-Za-z][A-Za-z0-9_ -]*?)\s+(?:is|was)\s+adjusted\s+from\s+(?P<old>\S+)\s+to\s+(?P<new>[^\s,;]+)",
+    re.IGNORECASE,
+)
+_ENGINE_ADJUSTED_MAX = 64
+
+#: Setting-name prefixes SGLang derives from other settings once DP attention is
+#: on: it divides ``chunked_prefill_size`` by the attention-DP size and re-clamps
+#: the CUDA-graph batch sizes to it. The resolved value is then not the value a
+#: flag would pass, so "the record equals my flag" proves nothing for these.
+_SGLANG_DERIVED_UNDER_DP_ATTENTION = ("chunked_prefill_size", "cuda_graph_max_bs", "cuda_graph_bs")
+
+
+def engine_adjusted_settings_from_log(path: str, framework: str) -> dict[str, dict[str, str]]:
+    """Settings the engine says it rewrote, as ``{name: {"requested": old, "resolved": new}}``.
+
+    Read from lines such as ``chunked prefill size is adjusted from 65536 to
+    8192``. The launch record holds only the resolved value, so without this a
+    caller cannot tell an input from the engine's rewrite of it. An engine with
+    no launch record yields nothing, like the other readers.
+    """
+    if _LAUNCH_RECORDS.get(str(framework or "").strip().lower()) is None:
+        return {}
+    adjusted: dict[str, dict[str, str]] = {}
+    remaining = _SERVER_ARGS_MAX_CHARS
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for _ in range(_SERVER_ARGS_MAX_LINES):
+                line = handle.readline(remaining)
+                if not line:
+                    break
+                remaining -= len(line)
+                match = _ENGINE_ADJUSTED_RE.search(line)
+                if match is not None and len(adjusted) < _ENGINE_ADJUSTED_MAX:
+                    name = re.sub(r"[\s-]+", "_", match.group("name").strip().lower())
+                    adjusted[name] = {"requested": match.group("old"), "resolved": match.group("new").rstrip(".")}
+                if remaining <= 0:
+                    break
+    except OSError:
+        return {}
+    return adjusted
+
+
+def settings_the_engine_rewrote(config: Mapping[str, Any], adjusted: Mapping[str, Any] | None = None) -> frozenset[str]:
+    """Names in ``config`` whose resolved value is not the value a launch flag would pass.
+
+    The engine's own report (``adjusted``) is authoritative. The DP-attention
+    rule backs it for logs that predate the report or never carried it.
+    """
+    names = {str(name) for name in (adjusted or {})}
+    if config.get("enable_dp_attention") is True:
+        names.update(key for key in config if str(key).startswith(_SGLANG_DERIVED_UNDER_DP_ATTENTION))
+    return frozenset(names)
+
+
 def observed_sglang_server_identity_from_log(path: str) -> dict[str, Any]:
     """Parse allowlisted identity from a capped SGLang ``server_args`` record."""
     return observed_server_identity_from_log(path, "sglang")

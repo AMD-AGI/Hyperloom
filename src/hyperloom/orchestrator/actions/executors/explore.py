@@ -20,7 +20,7 @@ import yaml
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
-from hyperloom.common.launch_log_evidence import launch_flag_setting_name
+from hyperloom.common.launch_log_evidence import launch_flag_setting_name, settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
@@ -376,7 +376,12 @@ def _is_config_replay_variant(variant: Any) -> bool:
 
 
 def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, str]]:
-    """The running server's resolved config and env, empty unless ``current_best`` observed them."""
+    """The running server's resolved config and env, empty unless ``current_best`` observed them.
+
+    A setting the engine rewrote after parsing it is left out of the config: its
+    resolved value is not the value a flag would pass, so it reads as unknown
+    and a variant touching it runs.
+    """
     measurement = getattr(state, "current_best_measurement", None)
     if not isinstance(measurement, dict) or not measurement:
         return {}, {}
@@ -386,6 +391,9 @@ def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, st
 
     raw_config = evidence.get("observed_server_config")
     config = dict(raw_config) if isinstance(raw_config, Mapping) else {}
+    raw_adjusted = evidence.get("engine_adjusted_settings")
+    for name in settings_the_engine_rewrote(config, raw_adjusted if isinstance(raw_adjusted, Mapping) else None):
+        config.pop(name, None)
     raw_env = evidence.get("observed_server_env")
     # Same shape as a variant's extra_envs, so the two compare directly.
     env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, Mapping) else {}
