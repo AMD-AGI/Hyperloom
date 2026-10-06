@@ -32,6 +32,7 @@ Experiences from other logs in [Experience collection](experience-kb-collect.md)
 | `HYPERLOOM_GLOBAL_KB_TOKEN` | the user | The global KB's access token. Required with `HYPERLOOM_GLOBAL_KB_URL`. |
 | `HYPERLOOM_KB_AUTO_PUSH` | the user | `1` pushes after every run's Experiences are written locally. Default off. |
 | `USER_DATA_PATH` | `hyperloom-setup` | The local service keeps its data under `$USER_DATA_PATH/experience-kb`. |
+| `HYPERLOOM_KB_DATABASE_URL` | the operator | The PostgreSQL database a service keeps its index and state in. Unset, the service runs an embedded PostgreSQL in its home, which is what a workspace does. |
 | `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_MODEL` | `hyperloom-setup` | The gateway and model the service plans reads with; `LOCAL_KB_PLANNER_MODEL` overrides the model. Without a gateway the service still accepts writes and reads report `unavailable`. |
 
 All of these live in the workspace `.env`. The service reads them when it
@@ -112,10 +113,19 @@ It looks at what answers on `HYPERLOOM_KB_URL`:
   at, or anything else on the port, such as another user's service: it refuses
   without stopping it, and the user picks another port in `HYPERLOOM_KB_URL`.
 
-A data home has one service. A service holds `service.lock` in its home while
-it serves, and one started on a home another service holds exits, naming that
-service's pid and port; `ensure` reports that line. Two workspaces therefore
-need their own `USER_DATA_PATH`, or the second gets no service of its own.
+A data home has one service. A service runs its home's embedded PostgreSQL
+and holds `service.lock` while it serves; one started on a home another service
+holds exits, naming that service's pid and port, and `ensure` reports that line.
+Two workspaces therefore need their own `USER_DATA_PATH`, or the second gets no
+service of its own.
+
+The embedded server is the PostgreSQL the `pgembed` wheel ships, reachable only
+through a socket in the home. A root service runs it as the system user
+`hyperloom-kb-db`, or as the user owning a database directory made earlier, so
+a recreated container that mounts the same home starts it again. No directory's
+permissions are changed for it: a home that user cannot traverse to, such as
+one under a `700` `/root`, is refused with the directory that blocks it, and
+`USER_DATA_PATH` belongs somewhere every user may traverse.
 
 Only an optimize launch and `ensure` restart a service. `push` and `pull`,
 including the automatic push at the end of a run, use the service as it runs
@@ -143,14 +153,16 @@ collection spools without waiting on the service. Requests to a loopback service
 
 | Path | Content |
 |---|---|
-| `canonical/` | The immutable schemas and Experiences; the source of truth. |
-| `kb.sqlite3` | Write order for listing and export; rebuilt from `canonical/` when lost. |
-| `sync.sqlite3` | Push and pull progress per global KB. Losing it makes the next push and pull resend everything, which the idempotent writes absorb. |
-| `state.sqlite3` | Labels, exclusions and their history, and what a restore set outside the current state. Without it every stored Experience is in the state and none is excluded. |
-| `identity.json` | The home's `kb_id`, made when it is first served. It moves with the home; a new home is a new KB. |
+| `postgres/` | The embedded PostgreSQL database: the KB's `kb_id`, its schemas, the index of its records in write order, labels, exclusions and their history, sync progress, and every write with the KB that sent it. |
+| `<kb_id>/records/` | One immutable file per Experience, read only against the content hash the database holds for it. |
 | `spool/` | Writes the service has not accepted yet. |
-| `service.log` | The service's log. |
+| `service.log` | The service's log, and the embedded database's in `postgres/server.log`. |
 | `service.lock` | Held by the one service serving this home; names its pid and port. |
+
+A home an older service kept on disk, with `canonical/`, `identity.json`, and
+`sync.sqlite3`, is adopted the first time it is served: its Experiences, its
+`kb_id`, and the Experiences it pulled, which push never sends back, move into
+the database. The old files are left as they are.
 
 ## Schemas
 
@@ -217,8 +229,9 @@ schema from its start again, so an Experience the global KB shows again arrives
 too and the ones already here count as `unchanged`. A workspace `pull` names
 the schema its packaged mapping writes.
 
-**Identity.** Every service has a `kb_id`, made when its home is first served
-and kept with the home. The first push or pull to a global KB records its
+**Identity.** Every KB has a `kb_id`, made when its database is first served
+and kept in it, so every service of one database is the same KB and a new
+database is a new one. The first push or pull to a global KB records its
 `kb_id`; a later sync where that URL answers with another `kb_id`, such as a
 redeployed global KB, is refused, as is a pull from a global KB that holds
 less of the schema than this service already pulled, such as one restored from
@@ -246,6 +259,17 @@ python -m hyperloom_kb --name team-hub --host 0.0.0.0 --port 8787 --home /srv/hy
 A global KB is the same service as a local one, with the same labels,
 restores, and exclusions; its state decides what its export, and so every pull,
 brings.
+
+Given `HYPERLOOM_KB_DATABASE_URL`, a service keeps its index and state in that
+PostgreSQL database instead of an embedded one, and any number of services may
+serve one KB from one database and one `--home` its record files live under,
+such as several replicas behind one URL. Every write takes the KB's next
+position under that KB's row lock, so positions commit in order and a pull
+paging by position, through whichever replica, never passes one still to
+commit. Labels, restores, and exclusions of a schema hold its row for their
+transaction, and each push or pull of a KB holds a database-wide lock, so
+replicas never interleave them. A database holds one KB for now; serving one of
+several is left for when requests carry who they act for.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -431,7 +455,7 @@ with its time.
 {"status": "ok", "kb_id": "kb-...", "name": "team-hub", "schema_ref": "schema:sha256:...", "experience_count": 3, "schemas": {"schema:sha256:...": 3}, "pid": 4242, "config_digest": "...", "code_digest": "..."}
 ```
 
-`kb_id` identifies the service's home and `name` is only for people.
+`kb_id` identifies the KB the service's database holds, and `name` is only for people.
 `schema_ref` is the default read schema;
 `experience_count` and `schemas` count what reads see; `config_digest`
 fingerprints the settings the service started with, and `code_digest` the

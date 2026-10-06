@@ -31,6 +31,8 @@ from hyperloom_kb import (
     create_http_server,
     derive_experience_id,
 )
+from hyperloom_kb.database import Database
+from hyperloom_kb.tests.conftest import fresh_database
 
 TOKEN = "state-token"
 NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
@@ -68,9 +70,11 @@ def _id(seq: int) -> str:
     return _experience(seq).id
 
 
-def _service(home: Path, global_url: str | None = None) -> ExperienceHTTPService:
+def _service(home: Path, global_url: str | None = None, *, database: Database | None = None) -> ExperienceHTTPService:
     global_kb = None if global_url is None else RemoteClient(RemoteConfig(global_url, TOKEN))
-    return ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), SCHEMA, None, global_kb=global_kb)
+    return ExperienceHTTPService(
+        HTTPServiceConfig(home, TOKEN), SCHEMA, None, database=database or fresh_database(), global_kb=global_kb
+    )
 
 
 @contextmanager
@@ -231,14 +235,13 @@ def test_an_experience_excluded_before_its_push_waits_for_an_include_whatever_a_
     assert (after_include["created"], shared) == (1, {_id(0)})
 
 
-def test_a_home_with_no_recorded_state_keeps_every_stored_experience_visible(tmp_path: Path) -> None:
-    home = tmp_path / "local"
-    with _serving(_service(home)) as client:
+def test_a_kb_with_no_recorded_state_keeps_every_stored_experience_visible(tmp_path: Path) -> None:
+    home, database = tmp_path / "local", fresh_database()
+    with _serving(_service(home, database=database)) as client:
         for seq in range(3):
             client.write(_experience(seq))
-    (home / "state.sqlite3").unlink()
 
-    app = _service(home)
+    app = _service(home, database=database)
     with _serving(app) as client:
         visible = (_readable(app), _listed(client))
         labels = client.labels()

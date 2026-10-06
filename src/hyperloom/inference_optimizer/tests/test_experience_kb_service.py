@@ -24,6 +24,9 @@ from hyperloom_kb import (
     LocalServiceError,
 )
 
+# Spawned services run their own embedded database under ``tmp_path``.
+pytestmark = pytest.mark.usefixtures("reachable_tmp_path")
+
 _PACKAGE = Path(hyperloom.__file__).parent
 
 

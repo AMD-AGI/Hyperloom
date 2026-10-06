@@ -38,6 +38,8 @@ from hyperloom_kb import (
     derive_experience_id,
     sync,
 )
+from hyperloom_kb.database import Database
+from hyperloom_kb.tests.conftest import fresh_database
 
 LOCAL_TOKEN = "local-token"
 GLOBAL_TOKEN = "global-token"
@@ -80,10 +82,14 @@ def _service(
     schema: ExperienceDeclaration,
     token: str,
     global_url: str | None = None,
+    *,
+    database: Database | None = None,
     **client_options: Any,
 ) -> ExperienceHTTPService:
     global_kb = None if global_url is None else RemoteClient(RemoteConfig(global_url, GLOBAL_TOKEN), **client_options)
-    return ExperienceHTTPService(HTTPServiceConfig(home, token), schema, None, global_kb=global_kb)
+    return ExperienceHTTPService(
+        HTTPServiceConfig(home, token), schema, None, database=database or fresh_database(), global_kb=global_kb
+    )
 
 
 @contextmanager
@@ -242,10 +248,11 @@ def test_a_workspace_that_switched_schema_keeps_and_syncs_both(tmp_path: Path) -
         teammate.write(_experience(first, 0, run_id="teammate-first"), declaration=first)
         teammate.write(_experience(second, 0, run_id="teammate-second"), declaration=second)
 
-        with _serving(_service(tmp_path / "local", first, LOCAL_TOKEN, global_url)) as local_url:
+        database = fresh_database()
+        with _serving(_service(tmp_path / "local", first, LOCAL_TOKEN, global_url, database=database)) as local_url:
             _client(local_url, LOCAL_TOKEN, tmp_path).write(_experience(first, 1, run_id="run-1"), declaration=first)
         # The workspace now runs the second schema; its service restarts with it as the default.
-        with _serving(_service(tmp_path / "local", second, LOCAL_TOKEN, global_url)) as local_url:
+        with _serving(_service(tmp_path / "local", second, LOCAL_TOKEN, global_url, database=database)) as local_url:
             local = _client(local_url, LOCAL_TOKEN, tmp_path)
             local.write(_experience(second, 1, run_id="run-2"), declaration=second)
             pushed = local.push()

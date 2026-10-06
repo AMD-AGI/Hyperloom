@@ -44,6 +44,10 @@ web = [
 # Full runtime dependency set installed by the packaged install.sh.
 runtime = [
     "PyYAML>=6.0",
+    # The Experience KB keeps its index and state in PostgreSQL; a local service runs the embedded server pgembed
+    # ships, so no database is installed separately.
+    "pgembed==0.2.0",
+    "psycopg[binary,pool]>=3.2,<4",
     "hyperloom-inference_optimizer[llm,web,forge]",
 ]
 # Built-in kernel-opt agent (``kernelforge``). ``torch`` is deliberately absent:

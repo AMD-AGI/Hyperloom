@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import shutil
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -31,6 +30,7 @@ from hyperloom_kb import (
     derive_experience_id,
     sync,
 )
+from hyperloom_kb.tests.conftest import fresh_database
 
 TOKEN = "pull-token"
 NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
@@ -73,7 +73,10 @@ def _experience(seq: int, *, run_id: str = "local-run", schema: ExperienceDeclar
 def _service(home: Path, global_url: str | None = None, **options: Any) -> ExperienceHTTPService:
     global_kb = None if global_url is None else RemoteClient(RemoteConfig(global_url, TOKEN))
     schema = options.pop("schema", SCHEMA)
-    return ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), schema, None, global_kb=global_kb, **options)
+    database = options.pop("database", None) or fresh_database()
+    return ExperienceHTTPService(
+        HTTPServiceConfig(home, TOKEN), schema, None, database=database, global_kb=global_kb, **options
+    )
 
 
 @contextmanager
@@ -103,16 +106,17 @@ def _seed(global_client: RemoteClient, count: int, *, run_id: str = "teammate-ru
         global_client.write(_experience(seq, run_id=run_id), declaration=SCHEMA)
 
 
-def test_a_service_keeps_its_identity_with_its_home(tmp_path: Path) -> None:
-    first = _service(tmp_path / "hub", name="team hub")
-    same_home = _service(tmp_path / "hub")
-    other_home = _service(tmp_path / "other")
+def test_a_kb_keeps_its_identity_in_its_database(tmp_path: Path) -> None:
+    database = fresh_database()
+    first = _service(tmp_path / "hub", name="team hub", database=database)
+    another_replica = _service(tmp_path / "hub", database=database)
+    other_database = _service(tmp_path / "hub")
     with _serving(first) as client:
         health = client.health()
 
     assert (health["kb_id"], health["name"]) == (first.kb_id, "team hub")
-    assert same_home.kb_id == first.kb_id
-    assert other_home.kb_id != first.kb_id
+    assert another_replica.kb_id == first.kb_id
+    assert other_database.kb_id != first.kb_id
 
 
 def test_a_global_kb_state_decides_what_a_pull_brings(tmp_path: Path) -> None:
@@ -239,16 +243,18 @@ def test_sync_refuses_another_global_kb_at_the_same_url(tmp_path: Path) -> None:
 
 
 def test_a_pull_refuses_a_global_kb_that_lost_experiences_it_pulled(tmp_path: Path) -> None:
-    hub = tmp_path / "global"
-    with _serving(_service(hub)) as global_client:
-        _seed(global_client, 1)
-        shutil.copytree(hub, tmp_path / "backup")
+    with _serving(_service(tmp_path / "global")) as global_client:
         _seed(global_client, 3)
         port = _port(global_client)
+        global_kb_id = str(global_client.health()["kb_id"])
         local_app = _service(tmp_path / "local", global_client.config.base_url)
         with _serving(local_app) as local:
             assert local.pull(SCHEMA.schema_ref)["created"] == 3
-    with _serving(_service(tmp_path / "backup"), port=port):
+    # The same KB serves again from a backup taken when it held only its first Experience.
+    backup = fresh_database()
+    backup.resolve_kb(adopt_kb_id=global_kb_id)
+    with _serving(_service(tmp_path / "backup", database=backup), port=port) as restored:
+        _seed(restored, 1)
         with _serving(local_app) as local:
             refused = local.pull(SCHEMA.schema_ref)
 

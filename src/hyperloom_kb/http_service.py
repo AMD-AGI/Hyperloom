@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Authenticated HTTP service for one shared Experience corpus."""
+"""Authenticated HTTP service for one Experience KB, kept in a PostgreSQL database and its home's record files."""
 
 from __future__ import annotations
 
@@ -11,11 +11,10 @@ import hmac
 import json
 import logging
 import os
-import sqlite3
-import threading
+import signal
 import uuid
 from collections.abc import Collection, Iterator, Mapping
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import cache, partial
@@ -25,8 +24,13 @@ from pathlib import Path
 from typing import Any, TextIO, cast
 from urllib.parse import parse_qs, urlsplit
 
+from psycopg.types.json import Jsonb
+
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
-from hyperloom_kb.local_state import LABEL_BEFORE_PULL, LABEL_MANUAL, LocalState, UnknownStateItem
+from hyperloom_kb.database import Database, WriteSource
+from hyperloom_kb.embedded_postgres import start_embedded_postgres
+from hyperloom_kb.legacy_home import LegacyHome
+from hyperloom_kb.local_state import LABEL_BEFORE_PULL, LABEL_MANUAL, Connection, LocalState, UnknownStateItem
 from hyperloom_kb.knowledge_read import (
     AnthropicPlannerBackend,
     KnowledgeReadService,
@@ -50,16 +54,15 @@ from hyperloom_kb.retrieval_policy import (
     LexicalFuzzyProvider,
     RetrievalConfiguration,
 )
-from hyperloom_kb.schema import Experience, ExperienceDeclaration, JsonValue
-from hyperloom_kb.service import ExperienceService
+from hyperloom_kb.records import RecordFiles
+from hyperloom_kb.schema import Experience, ExperienceDeclaration, ExperienceStatus, JsonValue
+from hyperloom_kb.service import CompleteExperienceRequired
 from hyperloom_kb.storage import (
     ImmutableExperienceConflict,
-    StorageContractError,
     InMemoryExperienceStore,
     InsertStatus,
-    LocalExperienceStore,
-    LocalSchemaRegistry,
-    StoredExperience,
+    StorageContractError,
+    canonical_experience_bytes,
 )
 from hyperloom_kb.sync import GlobalSync, SyncLedger, SyncUnavailable, global_config_from_env
 
@@ -73,10 +76,10 @@ MAX_LIST_LIMIT = 500
 MAX_EXPORT_LIMIT = 100
 READ_POLICY_VERSION = "shared-experience-read@v1"
 DEFAULT_HOME = Path("~/.local/share/hyperloom-kb").expanduser()
-# Held by the one service process that serves a home, for as long as it serves it.
+# Held by the one service process that runs a home's embedded database, for as long as it serves it.
 SERVICE_LOCK = "service.lock"
-# The home's identity: made when the home is first served and kept with its data wherever the home moves.
-IDENTITY_FILE = "identity.json"
+DATABASE_URL_ENV = "HYPERLOOM_KB_DATABASE_URL"
+_CONFLICT = "conflict"
 # A transport guard, not a data policy: Experiences of any size are stored.
 _MAX_REQUEST_BYTES = 256 * 1024 * 1024
 _READ_FIELDS = frozenset(
@@ -87,20 +90,6 @@ _WRITE_FIELDS = frozenset({"experience", "declaration"})
 
 class HTTPServiceError(ValueError):
     """Raised when a request or service configuration is invalid."""
-
-
-def _identity(home: Path) -> str:
-    path = home / IDENTITY_FILE
-    try:
-        return str(json.loads(path.read_text(encoding="utf-8"))["kb_id"])
-    except FileNotFoundError:
-        pass
-    home.mkdir(parents=True, exist_ok=True)
-    kb_id = f"kb-{uuid.uuid4().hex}"
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps({"kb_id": kb_id, "created_at": _utc_now()}) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
-    return kb_id
 
 
 @cache
@@ -140,6 +129,8 @@ class ServiceSettings:
     planner_problem: str
     global_kb: RemoteConfig | None
     global_problem: str
+    # Empty runs the home's own embedded database.
+    database_url: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> ServiceSettings:
@@ -154,7 +145,8 @@ class ServiceSettings:
             global_kb = global_config_from_env(env)
         except SyncUnavailable as exc:
             global_problem = str(exc)
-        return cls(planner, planner_problem, global_kb, global_problem)
+        database_url = str(env.get(DATABASE_URL_ENV) or "").strip()
+        return cls(planner, planner_problem, global_kb, global_problem, database_url)
 
     def digest(self) -> str:
         """Equal digests mean two environments start behaviorally identical services, whatever their spelling."""
@@ -166,6 +158,7 @@ class ServiceSettings:
             else [planner.base_url, planner.api_key, planner.model, planner.timeout_seconds, planner.max_output_tokens],
             "global": None if self.global_kb is None else [self.global_kb.base_url, self.global_kb.token],
             "problems": [self.planner_problem, self.global_problem],
+            "database": self.database_url,
         }
         return hashlib.sha256(_canonical(values).encode()).hexdigest()
 
@@ -232,85 +225,6 @@ class HTTPServiceConfig:
             raise HTTPServiceError("HYPERLOOM_KB_TOKEN must be configured")
 
 
-class ExperienceIndex:
-    """Durable write order for list paging, rebuildable from canonical storage."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
-        with self._lock, self._connection() as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS experiences (
-                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                    experience_id TEXT NOT NULL UNIQUE,
-                    schema_ref TEXT NOT NULL,
-                    indexed_at TEXT NOT NULL
-                )
-                """
-            )
-
-    @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        try:
-            with connection:
-                yield connection
-        finally:
-            connection.close()
-
-    def register(self, experience_id: str, schema_ref: str) -> None:
-        with self._lock, self._connection() as connection:
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO experiences(experience_id, schema_ref, indexed_at)
-                VALUES (?, ?, ?)
-                """,
-                (experience_id, schema_ref, _utc_now()),
-            )
-
-    def indexed_ids(self, schema_ref: str) -> frozenset[str]:
-        with self._lock, self._connection() as connection:
-            rows = connection.execute(
-                "SELECT experience_id FROM experiences WHERE schema_ref = ?",
-                (schema_ref,),
-            ).fetchall()
-        return frozenset(str(row["experience_id"]) for row in rows)
-
-    def head(self, schema_ref: str | None) -> int:
-        """The last write position of one schema or, with ``schema_ref=None``, of every schema; 0 before any write."""
-
-        with self._lock, self._connection() as connection:
-            row = connection.execute(
-                "SELECT MAX(sequence) FROM experiences WHERE (? IS NULL OR schema_ref = ?)", (schema_ref, schema_ref)
-            ).fetchone()
-        return int(row[0] or 0)
-
-    def page(
-        self,
-        schema_ref: str | None,
-        *,
-        after: int,
-        limit: int,
-    ) -> tuple[tuple[tuple[int, str], ...], int, bool]:
-        """One page in write order, of one schema or, with ``schema_ref=None``, of every schema."""
-
-        with self._lock, self._connection() as connection:
-            rows = connection.execute(
-                """
-                SELECT sequence, experience_id FROM experiences
-                WHERE (? IS NULL OR schema_ref = ?) AND sequence > ?
-                ORDER BY sequence LIMIT ?
-                """,
-                (schema_ref, schema_ref, after, limit + 1),
-            ).fetchall()
-        page = tuple((int(row["sequence"]), str(row["experience_id"])) for row in rows[:limit])
-        return page, page[-1][0] if page else after, len(rows) > limit
-
-
 def _summary(experience: Experience) -> dict[str, JsonValue]:
     return {
         "experience_id": experience.id,
@@ -322,19 +236,21 @@ def _summary(experience: Experience) -> dict[str, JsonValue]:
     }
 
 
-def _completion_order(record: StoredExperience) -> tuple[str, str]:
-    experience = record.experience
-    return (
-        (experience.completed_at or experience.created_at).isoformat(),
-        experience.id,
-    )
+@dataclass(frozen=True)
+class _ReadView:
+    """What reads of one schema search, built at one version of the schema's records and state."""
+
+    version: int
+    store: InMemoryExperienceStore
+    view: QueryView
 
 
 class ExperienceHTTPService:
-    """Write, read, and list one authoritative Experience corpus holding any number of schemas.
+    """Write, read, and list one Experience KB holding any number of schemas, kept in ``database`` and its home.
 
-    ``declaration`` is the schema a read searches when it names none; every other registered schema is stored,
-    listed, exported, and synced the same way.
+    The service keeps no state of its own beyond caches the database invalidates, so any number of processes may
+    serve one KB from one database and one home. ``declaration`` is the schema a read searches when it names none;
+    every other registered schema is stored, listed, exported, and synced the same way.
     """
 
     def __init__(
@@ -343,6 +259,7 @@ class ExperienceHTTPService:
         declaration: ExperienceDeclaration,
         planner: LLMQueryPlanner | None,
         *,
+        database: Database,
         global_kb: RemoteClient | None = None,
         config_digest: str = "",
         name: str = "",
@@ -350,87 +267,126 @@ class ExperienceHTTPService:
         self.config = config
         self.declaration = declaration
         self.name = name
-        self.kb_id = _identity(config.home)
+        self._database = database
+        legacy = LegacyHome.find(config.home)
+        self.kb_id = database.resolve_kb(adopt_kb_id=legacy.kb_id if legacy is not None else "")
         self._config_digest = config_digest
         self._code_digest = code_digest()
-        canonical_root = config.home / "canonical"
-        self._store = LocalExperienceStore(canonical_root)
-        self._experience_service = ExperienceService(
-            LocalSchemaRegistry(canonical_root),
-            self._store,
-        )
-        self._experience_service.register_schema(declaration)
-        self._index = ExperienceIndex(config.home / "kb.sqlite3")
-        self._state = LocalState(config.home / "state.sqlite3")
-        self._ledger = SyncLedger(config.home / "sync.sqlite3")
+        self._records = RecordFiles(config.home, self.kb_id)
+        self._state = LocalState(self.kb_id)
+        self._ledger = SyncLedger(database, self.kb_id)
         self._planner = planner
-        self._write_lock = threading.RLock()
-        self._mirror = InMemoryExperienceStore()
         self._declarations: dict[str, ExperienceDeclaration] = {}
-        self._views: dict[str, QueryView] = {}
-        self._visible: dict[str, frozenset[str]] = {}
-        self._pushable: dict[str, frozenset[str]] = {}
-        for registered in self._experience_service.list_schemas():
-            self._load(registered)
+        self._views: dict[str, _ReadView] = {}
+        self.register(declaration)
+        if legacy is not None:
+            self._adopt(legacy)
         self._sync = GlobalSync(self, self._ledger, global_kb)
 
-    def _load(self, declaration: ExperienceDeclaration) -> None:
-        schema_ref = declaration.schema_ref
-        records = self._store.list_experiences(schema_ref)
-        indexed = self._index.indexed_ids(schema_ref)
-        for record in sorted(records, key=_completion_order):
-            self._mirror.insert_complete(record.experience)
-            if record.experience.id not in indexed:
-                self._index.register(record.experience.id, schema_ref)
-        self._declarations[schema_ref] = declaration
-        self._refresh(declaration)
+    def _adopt(self, legacy: LegacyHome) -> None:
+        """Bring a home an older service kept on disk into the database, once."""
 
-    def _stored_ids(self, schema_ref: str) -> frozenset[str]:
-        return frozenset(record.experience.id for record in self._mirror.list_experiences(schema_ref))
+        with self._database.transaction() as connection:
+            row = connection.execute("SELECT adopted_home FROM kbs WHERE kb_id = %s", (self.kb_id,)).fetchone()
+        if row is not None and row["adopted_home"]:
+            return
+        for declaration in legacy.schemas():
+            self.register(declaration)
+        for experience in legacy.experiences():
+            self.write(experience)
+        for experience_id in legacy.pulled():
+            self._ledger.mark_pulled(experience_id)
+        with self._database.transaction() as connection:
+            connection.execute(
+                "UPDATE kbs SET adopted_home = %s WHERE kb_id = %s", (str(legacy.home.resolve()), self.kb_id)
+            )
 
-    def _refresh(self, declaration: ExperienceDeclaration) -> None:
-        """Rebuild what reads of ``declaration``'s schema see from its stored Experiences and their state."""
+    def _schema_row(self, connection: Connection, schema_ref: str, *, changes_reads: bool) -> None:
+        """Lock ``schema_ref`` for this transaction; ``changes_reads`` also moves on what cached reads were built at."""
 
-        records = self._mirror.list_experiences(declaration.schema_ref)
-        visible = self._state.visible(declaration.schema_ref, {record.experience.id for record in records})
-        self._views[declaration.schema_ref] = QueryViewBuilder().build(
-            declaration,
-            tuple(record for record in records if record.experience.id in visible),
-            fuzzy_ready=True,
-        )
-        self._visible[declaration.schema_ref] = visible
-        self._pushable[declaration.schema_ref] = visible - self._state.withheld(declaration.schema_ref)
+        if changes_reads:
+            query = "UPDATE schemas SET version = version + 1 WHERE kb_id = %s AND schema_ref = %s RETURNING version"
+        else:
+            query = "SELECT version FROM schemas WHERE kb_id = %s AND schema_ref = %s FOR UPDATE"
+        if connection.execute(query, (self.kb_id, schema_ref)).fetchone() is None:
+            raise HTTPServiceError(f"schema_ref {schema_ref} is not registered; write it with its declaration")
+
+    def _schema_of(self, connection: Connection, experience_id: str) -> str:
+        row = connection.execute(
+            "SELECT schema_ref FROM experiences WHERE kb_id = %s AND experience_id = %s", (self.kb_id, experience_id)
+        ).fetchone()
+        if row is None:
+            raise UnknownStateItem(f"Experience {experience_id} is not held here")
+        return str(row["schema_ref"])
 
     def is_visible(self, experience: Experience) -> bool:
-        return experience.id in self._visible.get(experience.schema_ref, frozenset())
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT NOT EXISTS (
+                    SELECT 1 FROM outside WHERE kb_id = %(kb)s AND schema_ref = %(schema)s AND experience_id = %(id)s
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM exclusions WHERE kb_id = %(kb)s AND schema_ref = %(schema)s AND experience_id = %(id)s
+                ) AS visible
+                """,
+                {"kb": self.kb_id, "schema": experience.schema_ref, "id": experience.id},
+            ).fetchone()
+        return bool(row and row["visible"])
 
     def is_pushable(self, experience: Experience) -> bool:
-        return experience.id in self._pushable.get(experience.schema_ref, frozenset())
+        if not self.is_visible(experience):
+            return False
+        with self._database.transaction() as connection:
+            return experience.id not in self._state.withheld(connection, experience.schema_ref)
 
     def held(self, experience_id: str) -> Experience:
-        stored = self._mirror.get_experience(experience_id)
-        if stored is None:
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                "SELECT content_hash FROM experiences WHERE kb_id = %s AND experience_id = %s",
+                (self.kb_id, experience_id),
+            ).fetchone()
+        if row is None:
             raise UnknownStateItem(f"Experience {experience_id} is not held here")
-        return stored.experience
+        return self._records.read(experience_id, str(row["content_hash"]))
 
     @property
     def schema_refs(self) -> tuple[str, ...]:
-        return tuple(sorted(self._declarations))
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                "SELECT schema_ref FROM schemas WHERE kb_id = %s ORDER BY schema_ref", (self.kb_id,)
+            ).fetchall()
+        return tuple(str(row["schema_ref"]) for row in rows)
 
     def declaration_for(self, schema_ref: str) -> ExperienceDeclaration:
         declaration = self._declarations.get(schema_ref)
-        if declaration is None:
+        if declaration is not None:
+            return declaration
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                "SELECT declaration FROM schemas WHERE kb_id = %s AND schema_ref = %s", (self.kb_id, schema_ref)
+            ).fetchone()
+        if row is None:
             raise HTTPServiceError(f"schema_ref {schema_ref} is not registered; write it with its declaration")
+        declaration = ExperienceDeclaration.from_dict(row["declaration"])
+        self._declarations[schema_ref] = declaration
         return declaration
 
     def register(self, declaration: ExperienceDeclaration) -> None:
-        with self._write_lock:
-            if declaration.schema_ref not in self._declarations:
-                self._experience_service.register_schema(declaration)
-                self._load(declaration)
+        if declaration.schema_ref in self._declarations:
+            return
+        with self._database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO schemas(kb_id, schema_ref, declaration, registered_at) VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (self.kb_id, declaration.schema_ref, Jsonb(declaration.to_dict()), _utc_now()),
+            )
+        self._declarations[declaration.schema_ref] = declaration
 
-    def _decision(self, experience_id: str) -> str:
-        outcome = self.held(experience_id).outcome
+    def _decision(self, store: InMemoryExperienceStore, experience_id: str) -> str:
+        stored = store.get_experience(experience_id)
+        outcome = stored.experience.outcome if stored is not None else None
         return outcome.decision if outcome is not None else ""
 
     def _outcome(self, value: Any, declaration: ExperienceDeclaration) -> str:
@@ -440,25 +396,87 @@ class ExperienceHTTPService:
             raise HTTPServiceError(f"outcome must be one of: {', '.join(allowed)}")
         return outcome
 
-    def write(self, experience: Experience, declaration: ExperienceDeclaration | None = None) -> dict[str, JsonValue]:
-        """Store one complete Experience; ``declaration`` registers its schema when this service lacks it."""
+    def _existing(self, connection: Connection, experience_id: str, content_hash: str) -> str:
+        """``unchanged`` or ``conflict`` for an id already stored with that or other content, ``""`` for a new one."""
+
+        row = connection.execute(
+            "SELECT content_hash FROM experiences WHERE kb_id = %s AND experience_id = %s", (self.kb_id, experience_id)
+        ).fetchone()
+        if row is None:
+            return ""
+        return InsertStatus.UNCHANGED.value if row["content_hash"] == content_hash else _CONFLICT
+
+    def write(
+        self,
+        experience: Experience,
+        declaration: ExperienceDeclaration | None = None,
+        *,
+        source: WriteSource = WriteSource(),
+    ) -> dict[str, JsonValue]:
+        """Store one complete Experience ``source`` sent; ``declaration`` registers its schema when this KB lacks it.
+
+        Every write is recorded with its source and result, a refused one included.
+        """
 
         if declaration is not None:
             if declaration.schema_ref != experience.schema_ref:
                 raise HTTPServiceError("declaration does not derive the Experience schema_ref")
             self.register(declaration)
         schema = self.declaration_for(experience.schema_ref)
-        with self._write_lock:
-            result = self._experience_service.submit_complete(experience)
-            if self._mirror.get_experience(experience.id) is None:
-                self._mirror.insert_complete(result.record.experience)
-                self._refresh(schema)
-            self._index.register(experience.id, experience.schema_ref)
-        return {
-            "status": result.status.value,
-            "experience_id": experience.id,
-            "content_hash": result.record.content_hash,
-        }
+        if experience.status is not ExperienceStatus.COMPLETE:
+            raise CompleteExperienceRequired("a write requires a complete Experience")
+        schema.validate(experience)
+        data = canonical_experience_bytes(experience)
+        content_hash = hashlib.sha256(data).hexdigest()
+        with self._database.transaction() as connection:
+            status = self._existing(connection, experience.id, content_hash)
+            if not status:
+                connection.execute("SELECT 1 FROM kbs WHERE kb_id = %s FOR UPDATE", (self.kb_id,))
+                status = self._existing(connection, experience.id, content_hash)
+            if not status:
+                position = connection.execute(
+                    "UPDATE kbs SET last_sequence = last_sequence + 1 WHERE kb_id = %s RETURNING last_sequence",
+                    (self.kb_id,),
+                ).fetchone()
+                assert position is not None, "the KB row resolve_kb made is never deleted"
+                self._records.write(experience.id, data)
+                connection.execute(
+                    """
+                    INSERT INTO experiences(kb_id, experience_id, schema_ref, sequence, content_hash, bytes, stored_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        self.kb_id,
+                        experience.id,
+                        experience.schema_ref,
+                        position["last_sequence"],
+                        content_hash,
+                        len(data),
+                        _utc_now(),
+                    ),
+                )
+                self._schema_row(connection, experience.schema_ref, changes_reads=True)
+                status = InsertStatus.CREATED.value
+            connection.execute(
+                """
+                INSERT INTO writes(kb_id, experience_id, schema_ref, result, source_kb_id, source_name, request_id,
+                    received_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    self.kb_id,
+                    experience.id,
+                    experience.schema_ref,
+                    status,
+                    source.kb_id,
+                    source.name,
+                    source.request_id,
+                    _utc_now(),
+                ),
+            )
+        if status == _CONFLICT:
+            raise ImmutableExperienceConflict("Experience id already exists with different content")
+        return {"status": status, "experience_id": experience.id, "content_hash": content_hash}
 
     def seed(self, path: Path) -> dict[str, int]:
         counts = {InsertStatus.CREATED.value: 0, InsertStatus.UNCHANGED.value: 0}
@@ -472,6 +490,37 @@ class ExperienceHTTPService:
                 response = self.write(Experience.from_dict(value.get("experience", value)))
                 counts[str(response["status"])] += 1
         return counts
+
+    def _read_view(self, declaration: ExperienceDeclaration) -> _ReadView:
+        """What reads of ``declaration``'s schema search, rebuilt whenever its records or state moved on."""
+
+        schema_ref = declaration.schema_ref
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                "SELECT version FROM schemas WHERE kb_id = %s AND schema_ref = %s", (self.kb_id, schema_ref)
+            ).fetchone()
+            version = int(row["version"]) if row else 0
+            cached = self._views.get(schema_ref)
+            if cached is not None and cached.version == version:
+                return cached
+            visible = self._state.visible(connection, schema_ref)
+            hashes = {
+                str(entry["experience_id"]): str(entry["content_hash"])
+                for entry in connection.execute(
+                    "SELECT experience_id, content_hash FROM experiences WHERE kb_id = %s AND schema_ref = %s",
+                    (self.kb_id, schema_ref),
+                )
+            }
+        store = InMemoryExperienceStore()
+        for experience_id in sorted(visible):
+            store.insert_complete(self._records.read(experience_id, hashes[experience_id]))
+        built = _ReadView(
+            version,
+            store,
+            QueryViewBuilder().build(declaration, store.list_experiences(schema_ref), fuzzy_ready=True),
+        )
+        self._views[schema_ref] = built
+        return built
 
     def read(
         self,
@@ -499,14 +548,15 @@ class ExperienceHTTPService:
             content_inline_limit = _bounded_int(content_inline_limit, "content_inline_limit", minimum=0)
         if render_budget_chars is not None:
             render_budget_chars = _bounded_int(render_budget_chars, "render_budget_chars", minimum=1)
-        view = self._views[declaration.schema_ref]
+        read_view = self._read_view(declaration)
+        store, view = read_view.store, read_view.view
         if selected_outcome != MIXED_OUTCOME:
             view = QueryViewBuilder().restrict(
                 view,
                 (
                     experience_id
                     for experience_id in view.visible_experience_ids
-                    if self._decision(experience_id) == selected_outcome
+                    if self._decision(store, experience_id) == selected_outcome
                 ),
             )
         eligible_count = len(view.visible_experience_ids)
@@ -541,9 +591,9 @@ class ExperienceHTTPService:
         )
         executor = QueryExecutor(
             LocalRetrievalService(
-                self._mirror,
+                store,
                 views,
-                providers=(LexicalFuzzyProvider(self._mirror),),
+                providers=(LexicalFuzzyProvider(store),),
                 renderer=partial(render_complete_experience, inline_limit=content_inline_limit, external=external),
             ),
             provider_refs=provider_refs,
@@ -563,7 +613,8 @@ class ExperienceHTTPService:
         }
         experiences: list[JsonValue] = []
         for reference in result.rendered_refs:
-            item = _summary(self.held(reference.id))
+            stored = store.get_experience(reference.id)
+            item = _summary(stored.experience if stored is not None else self.held(reference.id))
             group = groups.get(reference.id)
             item["score"] = group.score if group is not None else 0.0
             item["why_matched"] = [
@@ -619,8 +670,33 @@ class ExperienceHTTPService:
     ) -> tuple[tuple[tuple[int, Experience], ...], int, bool]:
         """Complete Experiences in write order after the ``after`` sequence, of one schema or of all of them."""
 
-        page, next_cursor, has_more = self._index.page(schema_ref, after=after, limit=limit)
-        return tuple((sequence, self.held(experience_id)) for sequence, experience_id in page), next_cursor, has_more
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT sequence, experience_id, content_hash FROM experiences
+                WHERE kb_id = %s AND (%s::text IS NULL OR schema_ref = %s) AND sequence > %s
+                ORDER BY sequence LIMIT %s
+                """,
+                (self.kb_id, schema_ref, schema_ref, after, limit + 1),
+            ).fetchall()
+        page = rows[:limit]
+        records = tuple(
+            (int(row["sequence"]), self._records.read(str(row["experience_id"]), str(row["content_hash"])))
+            for row in page
+        )
+        return records, int(page[-1]["sequence"]) if page else after, len(rows) > limit
+
+    def _head(self, connection: Connection, schema_ref: str | None) -> int:
+        """The last write position of one schema or, with ``schema_ref=None``, of every schema; 0 before any write."""
+
+        row = connection.execute(
+            """
+            SELECT COALESCE(MAX(sequence), 0) AS head FROM experiences
+            WHERE kb_id = %s AND (%s::text IS NULL OR schema_ref = %s)
+            """,
+            (self.kb_id, schema_ref, schema_ref),
+        ).fetchone()
+        return int(row["head"]) if row else 0
 
     def export(
         self,
@@ -638,15 +714,16 @@ class ExperienceHTTPService:
             for sequence, experience in records
             if self._listed(experience, include_excluded)
         ]
-        page: dict[str, JsonValue] = {
-            "items": items,
-            "next_cursor": next_cursor,
-            "has_more": has_more,
-            "head": self._index.head(schema_ref),
-        }
-        if schema_ref is not None:
-            page["declaration"] = self.declaration_for(schema_ref).to_dict()
-            page["state"] = self._state.hidden_digest(schema_ref)
+        with self._database.transaction() as connection:
+            page: dict[str, JsonValue] = {
+                "items": items,
+                "next_cursor": next_cursor,
+                "has_more": has_more,
+                "head": self._head(connection, schema_ref),
+            }
+            if schema_ref is not None:
+                page["declaration"] = self.declaration_for(schema_ref).to_dict()
+                page["state"] = self._state.hidden_digest(connection, schema_ref)
         return page
 
     def _schema_ref(self, schema_ref: str | None) -> str:
@@ -656,55 +733,59 @@ class ExperienceHTTPService:
         """``schema_ref``'s labels, newest first, its current label, and whether the state changed since it."""
 
         schema = self._schema_ref(schema_ref)
-        current, modified = self._state.current(schema, self._stored_ids(schema))
+        with self._database.transaction() as connection:
+            current, modified = self._state.current(connection, schema)
+            labels = self._state.labels(connection, schema)
         return {
             "schema_ref": schema,
             "current_label_id": None if current is None else current.label_id,
             "modified": modified,
-            "labels": [label.to_dict() for label in self._state.labels(schema)],
+            "labels": [label.to_dict() for label in labels],
         }
 
     def create_label(self, *, schema_ref: str | None = None, name: str = "") -> dict[str, JsonValue]:
         schema = self._schema_ref(schema_ref)
-        with self._write_lock:
-            return self._state.label(schema, self._stored_ids(schema), name=name, reason=LABEL_MANUAL).to_dict()
+        with self._database.transaction() as connection:
+            self._schema_row(connection, schema, changes_reads=False)
+            return self._state.label(connection, schema, name=name, reason=LABEL_MANUAL).to_dict()
 
     def delete_label(self, label_id: str) -> dict[str, JsonValue]:
-        with self._write_lock:
-            self._state.delete_label(label_id)
+        with self._database.transaction() as connection:
+            self._state.delete_label(connection, label_id)
         return {"deleted": label_id}
 
     def restore(self, label_id: str) -> dict[str, JsonValue]:
         """Make ``label_id``'s state current; a current state no label holds is labelled first and named in
         ``saved``."""
 
-        with self._write_lock:
-            label = self._state.get_label(label_id)
-            saved = self._state.restore(label, self._stored_ids(label.schema_ref))
-            self._refresh(self.declaration_for(label.schema_ref))
+        with self._database.transaction() as connection:
+            label = self._state.get_label(connection, label_id)
+            self._schema_row(connection, label.schema_ref, changes_reads=True)
+            saved = self._state.restore(connection, label)
         return {"restored": label.to_dict(), "saved": None if saved is None else saved.to_dict()}
 
     def exclude(self, experience_id: str, reason: str) -> dict[str, JsonValue]:
-        with self._write_lock:
-            experience = self.held(experience_id)
-            self._state.exclude(experience.schema_ref, experience.id, reason)
-            self._refresh(self.declaration_for(experience.schema_ref))
+        with self._database.transaction() as connection:
+            schema = self._schema_of(connection, experience_id)
+            self._schema_row(connection, schema, changes_reads=True)
+            self._state.exclude(connection, schema, experience_id, reason)
         return {"experience_id": experience_id, "status": "excluded"}
 
     def include(self, experience_id: str) -> dict[str, JsonValue]:
-        with self._write_lock:
-            experience = self.held(experience_id)
-            lifted = self._state.include(experience.schema_ref, experience.id)
-            self._refresh(self.declaration_for(experience.schema_ref))
+        with self._database.transaction() as connection:
+            schema = self._schema_of(connection, experience_id)
+            self._schema_row(connection, schema, changes_reads=True)
+            lifted = self._state.include(connection, schema, experience_id)
         return {"experience_id": experience_id, "status": "included" if lifted else "not_excluded"}
 
     def exclusions(self, schema_ref: str | None = None) -> dict[str, JsonValue]:
         schema = self._schema_ref(schema_ref)
-        return {
-            "schema_ref": schema,
-            "exclusions": list(self._state.exclusions(schema)),
-            "history": list(self._state.exclusion_history(schema)),
-        }
+        with self._database.transaction() as connection:
+            return {
+                "schema_ref": schema,
+                "exclusions": list(self._state.exclusions(connection, schema)),
+                "history": list(self._state.exclusion_history(connection, schema)),
+            }
 
     def push(self) -> dict[str, JsonValue]:
         return self._sync.push()
@@ -713,24 +794,45 @@ class ExperienceHTTPService:
         return self._sync.pull(schema_ref)
 
     def begin_pull(self, schema_ref: str) -> dict[str, JsonValue] | None:
-        with self._write_lock:
-            saved = self._state.save_if_modified(schema_ref, self._stored_ids(schema_ref), LABEL_BEFORE_PULL)
+        with self._database.transaction() as connection:
+            self._schema_row(connection, schema_ref, changes_reads=False)
+            saved = self._state.save_if_modified(connection, schema_ref, LABEL_BEFORE_PULL)
         return None if saved is None else saved.to_dict()
 
     def bring_in(self, schema_ref: str, experience_ids: Collection[str]) -> None:
-        with self._write_lock:
-            self._state.bring_in(schema_ref, experience_ids)
-            self._refresh(self.declaration_for(schema_ref))
+        with self._database.transaction() as connection:
+            self._schema_row(connection, schema_ref, changes_reads=True)
+            self._state.bring_in(connection, schema_ref, experience_ids)
 
     def health(self) -> dict[str, JsonValue]:
-        counts = {schema_ref: len(view.visible_experience_ids) for schema_ref, view in sorted(self._views.items())}
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT schemas.schema_ref, COUNT(experiences.experience_id) AS visible FROM schemas
+                LEFT JOIN experiences ON experiences.kb_id = schemas.kb_id
+                    AND experiences.schema_ref = schemas.schema_ref
+                    AND NOT EXISTS (
+                        SELECT 1 FROM outside WHERE outside.kb_id = experiences.kb_id
+                            AND outside.schema_ref = experiences.schema_ref
+                            AND outside.experience_id = experiences.experience_id
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM exclusions WHERE exclusions.kb_id = experiences.kb_id
+                            AND exclusions.schema_ref = experiences.schema_ref
+                            AND exclusions.experience_id = experiences.experience_id
+                    )
+                WHERE schemas.kb_id = %s GROUP BY schemas.schema_ref ORDER BY schemas.schema_ref
+                """,
+                (self.kb_id,),
+            ).fetchall()
+        counts = {str(row["schema_ref"]): int(row["visible"]) for row in rows}
         return {
             "status": "ok",
             "kb_id": self.kb_id,
             "name": self.name,
             "schema_ref": self.declaration.schema_ref,
             "experience_count": sum(counts.values()),
-            "schemas": dict(counts),
+            "schemas": counts,
             "pid": os.getpid(),
             "config_digest": self._config_digest,
             "code_digest": self._code_digest,
@@ -942,8 +1044,8 @@ def create_http_server(
 def _sole_service(home: Path) -> Iterator[TextIO]:
     """Hold ``home`` for this process, or exit naming the service that does.
 
-    A service pages its index but answers from an in-memory mirror of the corpus, so a second service on the same
-    home would serve, page, and push a different set of Experiences than the first.
+    The holder starts the home's embedded database and stops it when it stops serving, so a second service on the
+    same home would lose its database under it.
     """
 
     import fcntl
@@ -966,6 +1068,10 @@ def _record_holder(lock: TextIO, port: int) -> None:
     lock.truncate()
     lock.write(f"pid {os.getpid()}, port {port}\n")
     lock.flush()
+
+
+def _stop_serving(signum: int, frame: Any) -> None:
+    raise KeyboardInterrupt
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -997,11 +1103,26 @@ def main(argv: list[str] | None = None) -> int:
         )
     if settings.global_problem:
         log.warning("Push and pull are unavailable: %s", settings.global_problem)
-    with _sole_service(args.home.expanduser()) as lock:
+    # A service manager stops the service with SIGTERM; leaving through the same path as Ctrl-C stops the database
+    # this process started rather than orphaning it.
+    signal.signal(signal.SIGTERM, _stop_serving)
+    home = args.home.expanduser()
+    with ExitStack() as stack:
+        lock: TextIO | None = None
+        database_url = settings.database_url
+        if not database_url:
+            lock = stack.enter_context(_sole_service(home))
+            embedded = start_embedded_postgres(home)
+            if embedded.started:
+                stack.callback(embedded.stop)
+            database_url = embedded.conninfo
+        database = Database(database_url)
+        stack.callback(database.close)
         app = ExperienceHTTPService(
-            HTTPServiceConfig(args.home, os.environ.get("HYPERLOOM_KB_TOKEN", "")),
+            HTTPServiceConfig(home, os.environ.get("HYPERLOOM_KB_TOKEN", "")),
             load_declaration(args.declaration),
             planner,
+            database=database,
             global_kb=None if settings.global_kb is None else RemoteClient(settings.global_kb),
             config_digest=settings.digest(),
             name=args.name,
@@ -1009,14 +1130,16 @@ def main(argv: list[str] | None = None) -> int:
         for seed in args.seed_jsonl:
             log.info("seeded %s: %s", seed, _canonical(app.seed(seed)))
         server = create_http_server(app, args.host, args.port)
-        _record_holder(lock, server.server_address[1])
+        if lock is not None:
+            _record_holder(lock, server.server_address[1])
         print(
             _canonical(
                 {
                     "event": "experience_kb_listening",
                     "host": args.host,
                     "port": server.server_address[1],
-                    "home": str(args.home),
+                    "home": str(home),
+                    "kb_id": app.kb_id,
                     "schema_ref": app.declaration.schema_ref,
                 }
             ),
@@ -1033,8 +1156,8 @@ __all__ = [
     "MAX_READ_LIMIT",
     "MIXED_OUTCOME",
     "ExperienceHTTPServer",
+    "DATABASE_URL_ENV",
     "ExperienceHTTPService",
-    "ExperienceIndex",
     "HTTPServiceConfig",
     "HTTPServiceError",
     "RequestHandler",

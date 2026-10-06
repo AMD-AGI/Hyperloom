@@ -40,6 +40,10 @@ from hyperloom_kb import (
     load_declaration,
 )
 from hyperloom_kb.http_service import code_digest
+from hyperloom_kb.tests.conftest import fresh_database
+
+# Spawned services run their own embedded database under ``tmp_path``.
+pytestmark = pytest.mark.usefixtures("reachable_tmp_path")
 
 TOKEN = "local-service-token"
 
@@ -69,7 +73,9 @@ def _env_without_planner_gateway(tmp_path: Path) -> dict[str, str]:
 
 @contextmanager
 def _serving(tmp_path: Path, declaration: ExperienceDeclaration, token: str) -> Iterator[int]:
-    app = ExperienceHTTPService(HTTPServiceConfig(tmp_path / "other-service", token), declaration, None)
+    app = ExperienceHTTPService(
+        HTTPServiceConfig(tmp_path / "other-service", token), declaration, None, database=fresh_database()
+    )
     server = create_http_server(app, "127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
     thread.start()
@@ -283,7 +289,8 @@ def test_a_data_home_another_service_serves_is_never_served_twice(tmp_path: Path
 
 def test_a_service_that_cannot_start_is_reported_with_its_log(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    (home / "kb.sqlite3").mkdir(parents=True)
+    home.mkdir()
+    (home / "postgres").write_text("not a database directory", encoding="utf-8")
 
     with pytest.raises(LocalServiceError, match="exited with status"):
         ensure_local_service(_config(_free_port(), tmp_path), home, env=_env_without_planner_gateway(tmp_path))

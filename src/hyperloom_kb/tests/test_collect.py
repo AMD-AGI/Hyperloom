@@ -38,6 +38,7 @@ from hyperloom_kb.collect import (
 )
 from hyperloom_kb.collect.cli import main as collect_main
 from hyperloom_kb.collect.sensitive import find_sensitive
+from hyperloom_kb.tests.conftest import fresh_database
 
 MAPPING = "hyperloom-sbd-v6"
 TOKEN = "collect-test-token"
@@ -403,6 +404,7 @@ def test_publish_to_the_experience_service(tmp_path: Path) -> None:
         HTTPServiceConfig(tmp_path / "service", TOKEN),
         declaration,
         LLMQueryPlanner(_UnusedPlanner(), PlannerConfiguration.create("unused-planner")),
+        database=fresh_database(),
     )
     server = create_http_server(app, "127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
