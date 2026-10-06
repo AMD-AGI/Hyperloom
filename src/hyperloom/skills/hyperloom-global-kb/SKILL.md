@@ -103,9 +103,10 @@ HYPERLOOM_GLOBAL_KB_TOKEN=<HYPERLOOM_KB_TOKEN from service.env>
 HYPERLOOM_KB_AUTO_PUSH=1
 ```
 
-The workspace's next optimize launch, or its
-`python -m hyperloom.inference_optimizer.experience_kb_service push` or `pull`,
-restarts its local service with them.
+The workspace's next optimize launch, or
+`python -m hyperloom.inference_optimizer.experience_kb_service ensure`, restarts
+its local service with them. Push and pull use the service as it runs and never
+restart it, so run `ensure` before the first push or pull after adding the keys.
 
 The service speaks plain HTTP. When teammates reach it across an untrusted
 network, put a TLS-terminating proxy in front of it and give them the proxy's

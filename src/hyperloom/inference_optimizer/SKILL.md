@@ -621,20 +621,6 @@ the latest orchestration and specialist entries with one line per injected
 Experience. When a poll shows a new entry, report each Experience's summary
 together with the matching section of `prompt_block` to the user.
 
-When Experience KB is enabled, after the workload Skill resolves `MODEL_PATH`
-and `FRAMEWORK`, validate the same production path:
-
-```bash
-mkdir -p "$USER_DATA_PATH/optimizer_runs"
-python3 -m hyperloom.inference_optimizer.tools.cold_start_check \
-  --model "$MODEL_PATH" \
-  --framework "$FRAMEWORK" \
-  --require-experience-kb \
-  --output "$USER_DATA_PATH/optimizer_runs/experience-kb-cold-start.json"
-```
-
-Require `cold_start_ready=true`.
-
 ### Tool source fields (prompt → env, sandbox-only)
 
 Prompt fields naming read-only source trees consumed by sandbox-side
