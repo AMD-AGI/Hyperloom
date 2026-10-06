@@ -57,7 +57,6 @@ async def _build_coord_with_capacity(
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=None,
         knowledge_plane=None,
     )
     return coord
@@ -65,8 +64,8 @@ async def _build_coord_with_capacity(
 
 async def _pump_until_drained(coord) -> None:
     """Pump until nothing is queued or in flight; each pump returns on its first completion."""
-    while await coord.tasks.queued() or coord._inflight_actions:
-        await coord._pump_dispatcher_once()
+    while await coord.tasks.queued() or coord.dispatcher._inflight_actions:
+        await coord.dispatcher.pump_dispatcher_once()
 
 
 class _ConcurrencyProbe:
@@ -380,7 +379,7 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
     # The lease was taken before the deadline was read back here, so the kill is
     # this many seconds away at most; the lease must still be held then.
     assert ttl >= deadline.remaining()
-    budget = coord._specialist_wall_budget_sec(params={"domain": "serving_specialist", "needs_gpu": True})
+    budget = coord.dispatcher._specialist_wall_budget_sec(params={"domain": "serving_specialist", "needs_gpu": True})
     assert ttl == pytest.approx(max(5, budget * (1.0 + GPU_LEASE_TTL_GRACE)), abs=2)
     assert probe.gpu_ids_by_task
 
@@ -413,15 +412,7 @@ def test_cli_clamps_research_lane_capacity_above_ceiling(tmp_path, monkeypatch):
     monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
 
     args = cli_mod._build_parser().parse_args(
-        [
-            "optimize",
-            "--model",
-            "/tmp/dummy-model",
-            "--research-lane-capacity",
-            "32",
-            "--target-summary",
-            "clamp test",
-        ]
+        ["optimize", "--model", "/tmp/dummy-model", "--research-lane-capacity", "32"]
     )
     state = _seed_shared_state(
         session_dir=tmp_path,

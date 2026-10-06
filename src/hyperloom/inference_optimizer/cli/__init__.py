@@ -98,6 +98,7 @@ from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
 from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.collaborator import OrchestrationPrompt as _OrchestrationPrompt
 from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree, resolve_kernel_search_roots
 from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
 from hyperloom.orchestrator.state.shared_state import SharedState, timed_teardown_step
@@ -320,6 +321,7 @@ def _build_orchestration_prompt(
     no_framework_agent: bool = False,
     macro_cycle: int = 0,
     cycle_directive: str = "",
+    cycle_strategy: Mapping[str, Any] | None = None,
     phase: str = "",
     transport: str = TRANSPORT_TOOLS,
     action_registry: Mapping[str, ActionMetadata] | None = None,
@@ -343,6 +345,7 @@ def _build_orchestration_prompt(
         max_minutes=int(max_minutes),
         macro_cycle=int(macro_cycle),
         cycle_directive=cycle_directive,
+        cycle_strategy=cycle_strategy,
         phase=phase,
         transport=transport,
         benchmark_mode=benchmark_mode,
@@ -1837,8 +1840,7 @@ def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
-    ENABLEMENT has no flag: nothing enforces a cap for it, since
-    ``compute_next_phase`` does not consult ``phase_cap_exceeded`` there.
+    ENABLEMENT has no flag: nothing enforces a per-phase cap for it.
     """
     from hyperloom.orchestrator.phases.machine_state import (
         PHASE_CLOSE,
@@ -1856,7 +1858,7 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
         ("phase_budget_sweep_pct", PHASE_SWEEP),
         ("phase_budget_close_pct", PHASE_CLOSE),
     ):
-        val = getattr(args, cli_field, None)
+        val = getattr(args, cli_field)
         if val is not None:
             phase_budget_pct[phase_name] = float(val)
     return phase_budget_pct
@@ -2861,13 +2863,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # flags real defaults rather than None.
         if args.no_warm_replay:
             state.warm_replay_enabled = False
-        for _wr_attr, _wr_default in (
-            ("warm_replay_min_confidence", 0.7),
-            ("warm_replay_min_reproduce_pct", 0.8),
-        ):
-            _wr_value = getattr(args, _wr_attr)
-            if _wr_value != _wr_default:
-                setattr(state, _wr_attr, _wr_value)
+        _wr_value = getattr(args, "warm_replay_min_confidence", None)
+        if _wr_value is not None:
+            state.warm_replay_min_confidence = _wr_value
         # Honour persisted kernel_enabled on resume; CLI --no-kernel can still override.
         if not state.kernel_enabled:
             args.no_kernel = True
@@ -2942,7 +2940,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _begin_resume_leg(state)
         extend_hours = float(args.extend_hours)
         if extend_hours > 0.0:
-            state.extend_budget_minutes(extend_hours * 60.0, reason="--extend-hours")
+            state.extend_budget_minutes(extend_hours * 60.0)
         state.save(session_dir)
         _record_resumed_model_gate(
             args,
@@ -3224,16 +3222,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir,
         backends=backends,
         model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
-        recipe_kb=recipe_kb_client,
         phase_budget_pct=phase_budget_pct or None,
         # KnowledgePlane facade (None when --degraded-pr).
         knowledge_plane=knowledge_plane,
         # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
         proposal_scorer=_build_proposal_scorer(args, session_dir),
-        # Warm-recipe replay controls.
-        warm_replay_enabled=state.warm_replay_enabled,
-        warm_replay_min_confidence=state.warm_replay_min_confidence,
-        warm_replay_min_reproduce_pct=state.warm_replay_min_reproduce_pct,
     )
     framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
     max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
@@ -3269,24 +3262,24 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
-    coordinator.system_prompt_overrides = prompts
-    # Cache a pure rebuild closure so the macro-cycle boundary can re-focus the orchestration prompt without reaching
-    # back into argparse.
     import functools as _functools
 
-    coordinator._orch_prompt_is_user_supplied = bool(args.orch_prompt)
-    coordinator._rebuild_orch_prompt = _functools.partial(
-        _build_orchestration_prompt,
-        no_kernel=no_kernel,
-        no_framework_agent=no_framework_agent,
-        framework=framework_for_prompt,
-        objective=objective,
-        max_minutes=max_minutes_for_prompt,
-        transport=_orch_transport,
-        benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
-        agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
-        agentx_grading=coordinator.shared_state.grading,
-        agentx_backend=coordinator.shared_state.agentx_backend,
+    coordinator.orch_prompt = _OrchestrationPrompt(
+        overrides=prompts,
+        is_user_supplied=bool(args.orch_prompt),
+        rebuild=_functools.partial(
+            _build_orchestration_prompt,
+            no_kernel=no_kernel,
+            no_framework_agent=no_framework_agent,
+            framework=framework_for_prompt,
+            objective=objective,
+            max_minutes=max_minutes_for_prompt,
+            transport=_orch_transport,
+            benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
+            agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+            agentx_grading=coordinator.shared_state.grading,
+            agentx_backend=coordinator.shared_state.agentx_backend,
+        ),
     )
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
@@ -3304,7 +3297,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         specialist_executor=specialist_executor,
     )
     # Persist effective system prompts for resume / drift inspection.
-    _snapshot_system_prompts(session_dir, prompts=prompts, orchestration_phase=_initial_phase)
+    _snapshot_system_prompts(
+        session_dir, prompts=prompts, orchestration_phase=_initial_phase, macro_cycle=_initial_macro_cycle
+    )
 
     def _backend_kind(role: str) -> str:
         backend = backends.get(role)

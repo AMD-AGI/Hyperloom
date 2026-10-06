@@ -17,7 +17,7 @@ Orchestration emits a `request{target_agent: "kernel_agent", kind: "<kind>"}` in
 `IntentRouter._handle_request` (`orchestrator/loop/intent_router.py`) intercepts it
 before any agent backend runs:
 
-1. `_sequence_denial_for_request` checks the baseline prerequisite — if
+1. `sequence_denial_for_request` checks the baseline prerequisite — if
    `baseline_tput == 0` and the kind is not `trace_analyze`, the request is
    policy-denied immediately (no bus record).
 2. Records the request on the message bus (`source: "orchestration"`).
@@ -53,7 +53,7 @@ and PolicyGate rejects an orchestration-issued REQUEST for either
 `inference_optimizer/protocol/action_surfaces.py`, raised as
 `rule="phase_incompatible"`) because they run once at phase entry from a lane
 budget. PolicyGate validates the REQUEST payload from orchestration
-(path-sandbox, phase-action gate) but never sees the RESPONSE.
+(path-sandbox) but never sees the RESPONSE.
 
 A request whose kind maps to a catalogued action runs under that action's
 lanes: `integrate` takes `server_lifecycle`, `workspace_mutation` and
@@ -62,11 +62,11 @@ typically the `kernel_agent` task, has them.
 
 ## KERNEL phase entry: Coordinator-direct calls
 
-When the Coordinator enters the KERNEL phase (`phases/kernel.py::_on_enter_kernel`, dispatched by `phases/machine.py::_on_phase_entered`),
+When the Coordinator enters the KERNEL phase (`phases/kernel.py::on_enter_kernel`, dispatched by `phases/machine.py::_on_phase_entered`),
 it opens the kernel timeline and enqueues one `kernel_agent` task. The
 dispatcher admits it under `server_lifecycle`, `workspace_mutation` and
 `benchmark_lane` without joining it, so ticks keep running while it works. Its
-executor, `_run_kernel_agent`, calls the handlers directly in Python — not
+executor, `run_agent`, calls the handlers directly in Python — not
 through the REQUEST bus — and every step it runs (reprofile, GEMM tuning,
 fusion, the rewrite controller, GEAK and its revalidation) is covered by those
 lanes. Which calls it makes depends on the backend:
@@ -74,7 +74,7 @@ lanes. Which calls it makes depends on the backend:
 ```python
 # 1. GEAK branch — the SGLang/vLLM default. One whole-pipeline e2e run, then
 #    the phase winds down to SWEEP. Nothing below this line executes.
-if geak_enabled:                      # geak_selected(): order is not exactly `forge`
+if geak_enabled:                      # KernelPhase.geak_enabled(): order is not exactly `forge`
     await self._run_geak_kernel_phase(from_phase=from_phase)
     return
 
@@ -102,7 +102,7 @@ async def _finish_kernel_entry(self) -> None:
 **The rewrite controller is not downstream of GEMM tuning.** Tuning GEMM shape
 tables and rewriting kernel source are unrelated jobs, so each stage in the
 shared tail consults only its own switch and each skip is a return inside its
-own helper rather than out of `_run_kernel_agent`.
+own helper rather than out of `run_agent`.
 `INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING=1` therefore leaves the rewrite controller
 alone.
 
@@ -126,7 +126,7 @@ The fusion lane (`_maybe_run_forge_fusion_before_kernel_opt` →
 framework in `{sglang, vllm, vllm-aiter}`, a `last_profile_trace` to discover
 from, and no `last_fusion` whose status is already `ok` / `complete` / `kept`
 (idempotent re-entry). It is forge-only — under the default `geak` backend
-`_run_kernel_agent` returns before the lane is reached.
+`run_agent` returns before the lane is reached.
 
 A fusion result is written to the `last_fusion` SharedState field and posted as
 a `run_fusion_done` response with `source="kernel_entry_auto"`. A result that is
@@ -143,7 +143,7 @@ The seven rules from the retired `kernel_agent.md` live in executable Python:
 |---|---|
 | IR-1 submit all candidates in parallel | None in Hyperloom: #1408 moved kernel selection into KernelForge |
 | IR-2 never modify source before GEAK submission | `_is_runtime_generated_kernel` gate in `request_handlers.py` |
-| IR-3 integration is mandatory after every KEEP | `phases/kernel_stack.py::KernelStackPhase._auto_enqueue_pending_integrations` (called by `intent_router.py`) |
+| IR-3 integration is mandatory after every KEEP | `phases/kernel_stack.py::KernelStackPhase.drain_pending_keep_integrates` (called by `intent_router.py`) |
 | IR-4 kill stale servers before restart | `_multi_node_server_lifecycle.py::restart_server_for_round` |
 | IR-5 safe process management | `orchestrator/actions/executors/_subprocess_kill.py` |
 | IR-6 use apply_kernel_patch.py --target-file | `actions/executors/_kernel_agent_tool.py::_maybe_apply_kernel_patch` → `agents/kernel/tools/apply_kernel_patch.py::apply_kernel_patch` |
@@ -176,7 +176,7 @@ decides kernel strategy internally:
 ATOM CLI default. That default applies to an LLM-issued `run_gemm_tuning`
 REQUEST, which is dispatched inline whatever the backend. The KERNEL-**entry**
 GEMM tuning is a different matter: under `geak` it never fires at all, because
-`_run_kernel_agent` hands the phase to `_run_geak_kernel_phase` and returns
+`run_agent` hands the phase to `_run_geak_kernel_phase` and returns
 before reaching it.
 
 FlyDSL kernels (`source_type=flydsl`) are handled by Forge when it is enabled.

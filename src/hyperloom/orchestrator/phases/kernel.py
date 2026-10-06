@@ -18,12 +18,13 @@ import uuid
 from concurrent.futures import CancelledError as FuturesCancelledError
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
-from hyperloom.common.env import env_bool
+from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.perf_metric import graded_axes_of
 from hyperloom.orchestrator.lever import (
@@ -46,22 +47,21 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     JournalEntry,
 )
-from ..state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, resolve_graded_comparison
+from ..state.shared_state import resolve_graded_comparison
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound
 from ..bus.message_bus import Message
-from ..loop.coordinator_helpers import (
-    _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
-    _MAX_ROOFLINE_FAILURE_RETRIES,
+from ..kernel.geak_config import (
     _geak_accepted_kernel_specs,
     _geak_has_accepted_kernel,
-    _geak_spec_name,
+    geak_spec_name,
     geak_is_cand_tag,
     geak_spec_is_env,
-    ROOFLINE_WATERMARK_RATIO,
     _accepted_config_as_variant,
     _accepted_config_controls,
-    _coerce_tp,
-    _resolve_gpu_pin,
+)
+from ..actions.executors._gpu_pin import (
+    coerce_tp,
+    resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
     _resolve_handoff_tp,
@@ -69,7 +69,20 @@ from ..loop.coordinator_helpers import (
 )
 from ..collaborator import CoordinatorCollaborator
 
+if TYPE_CHECKING:
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import KernelEventRecorder
+    from .machine import Transition
+
 log = _logging.getLogger(__name__)
+
+# |measurement_divergence_pct| above this (GEAK vs orchestrator, same config) is logged as a measurement-mismatch
+# warning at geak promote.
+_GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = 3.0
+
+ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
+
+# Consecutive roofline failures tolerated before the watermark stops re-arming.
+MAX_ROOFLINE_FAILURE_RETRIES: int = 3
 
 # Last-resort location of the aiter checkout inside the standard serving container.
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
@@ -199,8 +212,65 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
     )
 
 
+@dataclass(frozen=True)
+class KernelExitFacts:
+    """What the phase machine's KERNEL exit reads from the task queue."""
+
+    agent_in_flight: bool
+
+
 class KernelPhase(CoordinatorCollaborator):
-    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
+    """KERNEL_AGENT phase handler: drives kernel-level optimization tasks."""
+
+    # Relative-change floor for the pre-GEAK reprofile: effectively "any change", absorbing float noise.
+    _REPROFILE_CHANGE_TOL: float = 1e-5
+
+    async def exit_facts(self) -> KernelExitFacts:
+        """Advance the idle streak for this tick and report the facts the KERNEL exit decision reads."""
+        await self._track_idle_streak()
+        in_kernel = str(self.shared_state.phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT
+        return KernelExitFacts(agent_in_flight=in_kernel and await self._agent_in_flight())
+
+    async def _inflight_task_ids(self) -> tuple[str, ...]:
+        """Return the ids of queued/running tasks doing KERNEL-lane work."""
+        kinds = _phase_state.PHASE_ALLOWED_ACTIONS[_phase_state.PHASE_KERNEL_AGENT]
+        tasks = list(await self.tasks.queued()) + list(await self.tasks.running())
+        return tuple(
+            sorted(str(task.task_id) for task in tasks if str(getattr(task, "kind", "") or "").strip() in kinds)
+        )
+
+    async def _agent_in_flight(self) -> bool:
+        """Whether the ``kernel_agent`` task is queued or running."""
+        tasks = list(await self.tasks.queued()) + list(await self.tasks.running())
+        return any(task.kind == "kernel_agent" for task in tasks)
+
+    async def _track_idle_streak(self) -> None:
+        """Advance or reset the KERNEL idle-streak counters for this tick."""
+        state = self.shared_state
+        if str(state.phase or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
+            state.kernel_idle_ticks = 0
+            state.kernel_progress_fingerprint = ""
+            state.kernel_idle_since_unix = 0.0
+            return
+        now = time.time()
+        inflight = await self._inflight_task_ids()
+        fingerprint = _phase_state.compute_kernel_progress_fingerprint(
+            state,
+            inflight_task_ids=inflight,
+        )
+        if fingerprint != str(state.kernel_progress_fingerprint or ""):
+            state.kernel_progress_fingerprint = fingerprint
+            state.kernel_idle_ticks = 0
+            state.kernel_idle_since_unix = now
+            return
+        if inflight or _phase_state.kernel_inline_step_running(state, now_unix=now):
+            state.kernel_idle_since_unix = now
+            return
+        # Only reachable after a tick that opened the streak above, so ``kernel_idle_since_unix`` is already stamped
+        # whenever the counter is non-zero — the pairing the guard's wall-clock floor relies on.
+        state.kernel_idle_ticks = int(state.kernel_idle_ticks or 0) + 1
+
+    _kernel_timeline_recorder: "KernelEventRecorder | None" = None
 
     @staticmethod
     def _serving_config_signature(serving_config: Any) -> str:
@@ -234,7 +304,7 @@ class KernelPhase(CoordinatorCollaborator):
         """Whether the latest trace predates the current backend/config."""
         if not signature:
             return False
-        recorded = getattr(self.shared_state, "last_profile_workload", None)
+        recorded = self.shared_state.last_profile_workload
         if not isinstance(recorded, Mapping) or not recorded:
             # No workload recorded for the trace: defer to _profile_workload_changed, which owns the "stale trace with
             # no workload metadata" decision.
@@ -244,15 +314,15 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _profile_workload_changed(self) -> bool:
         """Whether the latest trace predates the active serving workload."""
-        status = str(getattr(self.shared_state, "last_profile_status", "") or "").strip().lower()
+        status = str(self.shared_state.last_profile_status or "").strip().lower()
         if status and status != "succeeded":
             return True
-        recorded = getattr(self.shared_state, "last_profile_workload", None)
+        recorded = self.shared_state.last_profile_workload
         if not isinstance(recorded, dict) or not recorded:
             return bool(
-                getattr(self.shared_state, "last_profile_trace", "")
-                or getattr(self.shared_state, "last_trace_analyze", None)
-                or getattr(self.shared_state, "roofline_snapshots", None)
+                self.shared_state.last_profile_trace
+                or self.shared_state.last_trace_analyze
+                or self.shared_state.roofline_snapshots
             )
         identity = self.shared_state.profile_workload_identity
         return identity(recorded) != identity(self.shared_state.profile_workload_context())
@@ -260,11 +330,11 @@ class KernelPhase(CoordinatorCollaborator):
     async def _maybe_reprofile_for_kernel(self) -> None:
         """Reprofile inline when projected tput diverges from the last measured trace, so the phase targets the live bottleneck."""
         before = self._last_measured_roofline_tput()
-        cur = self._current_tput_from_validated_gain()
+        cur = self.current_tput_from_validated_gain()
         profile_signature = self._current_profile_config_signature()
         config_changed = self._profile_config_changed(profile_signature)
         workload_changed = self._profile_workload_changed()
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
 
         def _note_reprofile(**fields: Any) -> None:
             if recorder is None:
@@ -286,9 +356,9 @@ class KernelPhase(CoordinatorCollaborator):
         trigger = "config_changed" if config_changed else ("workload_changed" if workload_changed else "gain")
         if config_changed or workload_changed:
             log.info("kernel-entry reprofile: active runtime context changed")
-        snapshots_before = len(getattr(self.shared_state, "roofline_snapshots", None) or [])
-        snapshot_id_before = int(getattr(self.shared_state, "roofline_snapshot_id", 0) or 0)
-        stack_len = int(getattr(self.shared_state, "cumulative_gain_validated_stack_len", 0) or 0)
+        snapshots_before = len(self.shared_state.roofline_snapshots or [])
+        snapshot_id_before = int(self.shared_state.roofline_snapshot_id or 0)
+        stack_len = int(self.shared_state.cumulative_gain_validated_stack_len or 0)
         profile_identity = json.dumps(
             {
                 "config": profile_signature,
@@ -300,8 +370,8 @@ class KernelPhase(CoordinatorCollaborator):
         )
         profile_fingerprint = hashlib.sha256(profile_identity.encode("utf-8")).hexdigest()[:12]
         idempotency_reason = f"kernel_entry_g{stack_len}_{profile_fingerprint}"
-        task_kind = self._internal_analysis_kind()
-        params = self._internal_analysis_params(
+        task_kind = self._coord.phase_prelude.internal_analysis_kind()
+        params = self._coord.phase_prelude.internal_analysis_params(
             reason=idempotency_reason,
             inline_event=recorder.event_id if recorder is not None else "",
         )
@@ -333,8 +403,8 @@ class KernelPhase(CoordinatorCollaborator):
             return
         # Advance the anchor only when a new snapshot actually landed.
         after = self._last_measured_roofline_tput()
-        snapshots_after = len(getattr(self.shared_state, "roofline_snapshots", None) or [])
-        snapshot_id_after = int(getattr(self.shared_state, "roofline_snapshot_id", 0) or 0)
+        snapshots_after = len(self.shared_state.roofline_snapshots or [])
+        snapshot_id_after = int(self.shared_state.roofline_snapshot_id or 0)
         snapshot_landed = (
             after != before or snapshots_after != snapshots_before or snapshot_id_after != snapshot_id_before
         )
@@ -360,15 +430,15 @@ class KernelPhase(CoordinatorCollaborator):
         if snapshot_landed:
             self._record_kernel_discovered_from_cache(provenance="reprofile_snapshot")
 
-    def _geak_enabled(self) -> bool:
+    def geak_enabled(self) -> bool:
         """Whether the KERNEL_AGENT phase is delegated to the GEAK e2e optimizer."""
         from ..kernel.request_handlers import geak_selected
 
         return geak_selected()
 
-    def _kernel_timeline(self) -> Any:
+    def timeline(self) -> Any:
         """The in-flight kernel timeline recorder, or ``None``."""
-        return getattr(self, "_kernel_timeline_recorder", None)
+        return self._kernel_timeline_recorder
 
     def _open_kernel_timeline(self, *, route: str, route_reason: str, from_phase: str) -> None:
         """Open the kernel timeline event for this KERNEL entry."""
@@ -376,24 +446,23 @@ class KernelPhase(CoordinatorCollaborator):
 
         state = self.shared_state
         recorder = make_kernel_recorder(
-            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            macro_cycle=int(state.macro_cycle or 0),
             route=route,
             route_reason=route_reason,
             resumed=str(from_phase or "") == "resume",
-            code_revision=str(getattr(state, "code_revision", "") or ""),
         )
         self._kernel_timeline_recorder = recorder
         if recorder is None:
             return
         state = self.shared_state
-        stack = state.optimization_stack if isinstance(getattr(state, "optimization_stack", None), list) else []
+        stack = state.optimization_stack if isinstance(state.optimization_stack, list) else []
         self._kernel_stack_at_entry = [dict(item) for item in stack if isinstance(item, dict)]
-        cached = getattr(state, "last_trace_analyze", None) or {}
-        current_best = state.current_best if isinstance(getattr(state, "current_best", None), dict) else {}
+        cached = state.last_trace_analyze or {}
+        current_best = state.current_best if isinstance(state.current_best, dict) else {}
         recorder.begin(
-            stack_depth_in=getattr(state, "cumulative_gain_validated_stack_len", None),
+            stack_depth_in=state.cumulative_gain_validated_stack_len or None,
             tput_before=current_best.get("tput"),
-            session_baseline_tput=getattr(state, "baseline_tput", None),
+            session_baseline_tput=state.baseline_tput or None,
             snapshot=cached,
             snapshot_staleness="absent" if not cached else "fresh",
         )
@@ -401,10 +470,10 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _record_kernel_discovered_from_cache(self, *, provenance: str) -> None:
         """Record the profiling table the visit inherited or just produced."""
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
         if recorder is None:
             return
-        cached = getattr(self.shared_state, "last_trace_analyze", None) or {}
+        cached = self.shared_state.last_trace_analyze or {}
         recorder.record_discovered_kernels(cached, provenance=provenance)
 
     def _record_kernel_rewrite_controller_timeline(self, result: dict[str, Any]) -> None:
@@ -417,7 +486,7 @@ class KernelPhase(CoordinatorCollaborator):
             record_backend_versions_and_timeline,
         )
 
-        cycle = int(result.get("macro_cycle") or getattr(self.shared_state, "macro_cycle", 0) or 0)
+        cycle = int(result.get("macro_cycle") or self.shared_state.macro_cycle or 0)
         for index, row in enumerate(rows):
             if not isinstance(row, dict):
                 continue
@@ -472,6 +541,7 @@ class KernelPhase(CoordinatorCollaborator):
                     },
                     "proposal": {"decision": decision},
                 },
+                recorder=self.timeline(),
             )
 
     def _record_gemm_tuning_timeline(self, result: dict[str, Any]) -> None:
@@ -487,7 +557,7 @@ class KernelPhase(CoordinatorCollaborator):
         best micro speedup is never substituted for it, since a per-shape timing ratio is not the
         axis the KEEP verdict was graded on.
         """
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
         if recorder is None or not isinstance(result, dict):
             return
         tuners = result.get("tuners_run")
@@ -498,7 +568,7 @@ class KernelPhase(CoordinatorCollaborator):
         base_run_id = str(
             result.get("task_id")
             or (Path(workspace).name if workspace else "")
-            or f"gemm-c{int(getattr(self.shared_state, 'macro_cycle', 0) or 0)}"
+            or f"gemm-c{int(self.shared_state.macro_cycle or 0)}"
         )
         tuned_file = str(result.get("tuned_file") or result.get("config_path") or "")
         # _validate_gemm_tuning_e2e writes the validated gain to e2e_gain_pct, not gain_pct -- no
@@ -604,7 +674,7 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _record_fusion_timeline(self, result: dict[str, Any]) -> None:
         """Record a settled fusion campaign in the Forge lane."""
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
         if recorder is None or not isinstance(result, dict):
             return
         recorder.record_fusion_run(
@@ -628,14 +698,15 @@ class KernelPhase(CoordinatorCollaborator):
         if agent_backend:
             tool_versions.record_tool_version(self.session_dir, tool=agent_backend)
 
-    def _close_kernel_timeline(self, *, exit_reason: str = "") -> None:
+    def close_kernel_timeline(self, tr: "Transition") -> None:
         """Close the kernel timeline event when the phase is left."""
-        recorder = self._kernel_timeline()
+        exit_reason = tr.reason
+        recorder = self.timeline()
         if recorder is None:
             return
         self._kernel_timeline_recorder = None
         state = self.shared_state
-        current_best = state.current_best if isinstance(getattr(state, "current_best", None), dict) else {}
+        current_best = state.current_best if isinstance(state.current_best, dict) else {}
         stack_before = getattr(self, "_kernel_stack_at_entry", None) or []
         stack_after = [dict(item) for item in (state.optimization_stack or []) if isinstance(item, dict)]
         if len(stack_after) >= len(stack_before):
@@ -647,37 +718,37 @@ class KernelPhase(CoordinatorCollaborator):
         recorder.finish(
             exit_reason=exit_reason,
             tput_after=current_best.get("tput"),
-            cumulative_gain_validated_out=getattr(state, "cumulative_gain_validated", None),
-            stack_depth_out=getattr(state, "cumulative_gain_validated_stack_len", None),
+            cumulative_gain_validated_out=state.cumulative_gain_validated or None,
+            stack_depth_out=state.cumulative_gain_validated_stack_len or None,
             stack_added=stack_added,
             stack_removed=stack_removed,
         )
 
-    async def _on_enter_kernel(self, *, from_phase: str) -> None:
+    async def on_enter_kernel(self, tr: "Transition") -> None:
         """Open the KERNEL timeline and enqueue the ``kernel_agent`` task that carries the phase's work."""
         state = self.shared_state
-        if not self._kernel_enabled():
+        if not self._coord.phase_machine.kernel_enabled():
             log.info(
                 "KERNEL entry hook fired with kernel_enabled=False (from=%s)",
-                from_phase or "<unknown>",
+                tr.from_phase or "<unknown>",
             )
             return
         self._open_kernel_timeline(
-            route=ROUTE_GEAK if self._geak_enabled() else ROUTE_FORGE,
-            route_reason=f"kernel_optimizer={str(getattr(state, 'kernel_optimizer', '') or '')}",
-            from_phase=from_phase,
+            route=ROUTE_GEAK if self.geak_enabled() else ROUTE_FORGE,
+            route_reason=f"kernel_optimizer={str(state.kernel_optimizer or '')}",
+            from_phase=tr.from_phase,
         )
-        lanes, catalogue_ttl = self._registry_lanes_ttl("kernel_agent")
+        lanes, catalogue_ttl = self._coord.dispatcher.registry_lanes_ttl("kernel_agent")
         # Leases do not expire on their TTL, so it only records how long the holder expects to keep the lanes.
-        remaining = _phase_state.phase_budget_remaining_seconds(state, budget_pct=self._phase_budget_pct)
+        remaining = _phase_state.phase_budget_remaining_seconds(state)
         ttl = int(remaining) if remaining is not None and remaining > 0 else catalogue_ttl
         # A resumed session re-enters the phase whose earlier task already settled, so only a live row is reused.
-        base_key = f"kernel_agent_c{int(getattr(state, 'macro_cycle', 0) or 0)}"
+        base_key = f"kernel_agent_c{int(state.macro_cycle or 0)}"
         attempt = 0
         while True:
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind="kernel_agent",
-                params={"from_phase": str(from_phase or "")},
+                params={"from_phase": str(tr.from_phase or "")},
                 idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
                 requires_lanes=lanes,
                 lease_ttl_sec=ttl,
@@ -688,7 +759,66 @@ class KernelPhase(CoordinatorCollaborator):
             attempt += 1
         log.info("KERNEL entry: kernel_agent task=%s (%s)", task.task_id, task.state)
 
-    async def _run_kernel_agent(self, ctx: Any) -> dict[str, Any]:
+    @staticmethod
+    def _skip_gemm_tuning() -> bool:
+        """Report whether GEMM tuning is disabled via the env escape hatch.
+
+        Returns:
+            bool: ``True`` when ``INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING`` is set.
+        """
+        return env_bool("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING")
+
+    def _gemm_tuning_required_before_kernel_opt(self) -> bool:
+        """Decide whether GEMM tuning must run before kernel_opt.
+
+        When using the kernelforge gemm-tune backend: eligible on any supported
+        framework (sglang / vllm / vllm-aiter), with no precision or MoE
+        pre-filter. When using GEAK: only FP8 + SGLang (legacy behavior).
+
+        Returns:
+            bool: ``True`` when GEMM tuning should run before source-level
+                ``kernel_opt``.
+        """
+        if self._skip_gemm_tuning():
+            return False
+        ss = self.shared_state
+        precision = str(ss.precision or "").strip().lower()
+        framework = str(ss.framework or "").strip().lower()
+
+        from ..kernel.request_handlers import resolve_gemm_tuning_backend
+
+        backend = resolve_gemm_tuning_backend({})
+
+        if backend == "forge":
+            # kernelforge gemm-tune handles any precision (bf16/fp16/fp8/fp4/mxfp4),
+            # dense or MoE, on sglang/vllm. Real e2e KEEPs span all of these —
+            # including bf16 *dense* (+11.1%) — so we must NOT pre-filter on
+            # precision/MoE here, or a category that can optimize gets silently
+            # blocked. Gate only on a supported framework and let forge itself
+            # return no_improvement when a shape can't be beaten.
+            eligible = framework in ("sglang", "vllm", "vllm-aiter")
+        else:
+            # GEAK: legacy FP8 + SGLang only.
+            eligible = precision == "fp8" and framework == "sglang"
+
+        if not eligible:
+            return False
+        last = ss.last_gemm_tuning or {}
+        status = str(last.get("status") or "").strip().lower()
+        # The fp8 -> bf16 dense retry runs inside a single gemm call (the
+        # tuner router selects the bf16 pass as a fallback), so a completed run's
+        # status is terminal -- there is no pending second attempt to re-trigger.
+        return status not in {
+            "ok",
+            "succeeded",
+            "success",
+            "complete",
+            "completed",
+            "skipped",
+            "failed",
+        }
+
+    async def run_agent(self, ctx: Any) -> dict[str, Any]:
         """Run the KERNEL_AGENT phase's work under the ``kernel_agent`` task's lanes.
 
         Args:
@@ -699,7 +829,7 @@ class KernelPhase(CoordinatorCollaborator):
             A result payload naming the route that ran.
         """
         from_phase = str((ctx.task.params or {}).get("from_phase") or "")
-        if self._geak_enabled():
+        if self.geak_enabled():
             # GEAK owns the whole KERNEL_AGENT phase: one in-process e2e run seeded with the best config so far, then
             # hand straight to SWEEP.
             await self._run_geak_kernel_phase(from_phase=from_phase)
@@ -713,7 +843,7 @@ class KernelPhase(CoordinatorCollaborator):
         log.info(
             "KERNEL entry: running GEMM tuning before source-level kernel_opt",
         )
-        self._record_phase_entry_evidence(
+        self._coord.phase_machine.record_phase_entry_evidence(
             gemm_tuning={"status": "running", "source": "kernel_entry_auto"},
         )
         run_gemm_tuning_handler = None
@@ -726,7 +856,7 @@ class KernelPhase(CoordinatorCollaborator):
                 {
                     "task_id": "kernel_entry_gemm_tuning",
                     "reason": "kernel_entry_auto",
-                    "macro_cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    "macro_cycle": int(self.shared_state.macro_cycle or 0),
                 },
                 session_dir=self.session_dir,
             )
@@ -755,7 +885,7 @@ class KernelPhase(CoordinatorCollaborator):
                 },
             )
         )
-        self._record_phase_entry_evidence(
+        self._coord.phase_machine.record_phase_entry_evidence(
             gemm_tuning={
                 "status": "done" if status in {"ok", "complete", "succeeded"} else status,
                 "source": "kernel_entry_auto",
@@ -949,20 +1079,17 @@ class KernelPhase(CoordinatorCollaborator):
     def _geak_timeouts(self) -> tuple[int, int, bool]:
         """Resolve the GEAK e2e timeouts from the live run budget."""
         # Standalone fallback ONLY: the 12h (43200s) default applies when no run deadline is set (budget_known=False).
-        env_default_timeout = int(os.environ.get("GEAK_E2E_TIMEOUT_S", "43200"))
-        deadline = self._run_deadline
+        env_default_timeout = env_int("GEAK_E2E_TIMEOUT_S", default=43200)
+        deadline = self._coord.run_deadline
         if deadline is None:
             return env_default_timeout, env_default_timeout + 600, False
         remaining = deadline.remaining()
         grace = self.shared_state.closing_reserve_sec()
-        margin = float(os.environ.get("GEAK_BUDGET_MARGIN_S", "300"))
+        margin = env_float("GEAK_BUDGET_MARGIN_S", default=300.0)
         # Reserve the closing window: kill the subprocess with at least ``grace`` left.
         kill_budget = remaining - grace
         # Also honour the KERNEL_AGENT phase's own wall-clock budget: cap by min(session, kernel_phase).
-        phase_rem = _phase_state.phase_budget_remaining_seconds(
-            self.shared_state,
-            budget_pct=self._phase_budget_pct,
-        )
+        phase_rem = _phase_state.phase_budget_remaining_seconds(self.shared_state)
         if phase_rem is not None:
             kill_budget = min(kill_budget, float(phase_rem))
         # The runner self-stops ``margin`` before the hard subprocess kill, which reserves the closing-grace window.
@@ -981,16 +1108,10 @@ class KernelPhase(CoordinatorCollaborator):
                     float(session_remaining) - self.shared_state.closing_reserve_sec(),
                 )
             )
-        phase_remaining = _phase_state.phase_budget_remaining_seconds(
-            self.shared_state,
-            budget_pct=self._phase_budget_pct,
-        )
+        phase_remaining = _phase_state.phase_budget_remaining_seconds(self.shared_state)
         if phase_remaining is not None:
             candidates.append(max(0.0, float(phase_remaining)))
-        phase_cap = _phase_state.phase_cap_seconds(
-            self.shared_state,
-            budget_pct=self._phase_budget_pct,
-        )
+        phase_cap = _phase_state.phase_cap_seconds(self.shared_state)
         if phase_cap is not None:
             candidates.append(
                 max(
@@ -1008,7 +1129,7 @@ class KernelPhase(CoordinatorCollaborator):
         from hyperloom.common.agentx_mode import native_agentx_optimization_session, native_agentx_session
         from ..actions.executors._workload_envs import agentx_enabled
 
-        benchmark_mode = str(getattr(state, "benchmark_mode", "") or "").strip()
+        benchmark_mode = str(state.benchmark_mode or "").strip()
         agentx = is_agentx_mode(benchmark_mode) if benchmark_mode else agentx_enabled()
 
         def _finish_skip(
@@ -1034,18 +1155,16 @@ class KernelPhase(CoordinatorCollaborator):
                     runner_timeout_sec=runner_timeout_s,
                     kill_timeout_sec=kill_timeout_s,
                 )
-            prev = state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
+            prev = state.geak_result if isinstance(state.geak_result, dict) else {}
             if not _geak_rebench.geak_verdict_is_terminal(prev):
                 state.geak_result = result
-            self._record_phase_entry_evidence(
+            self._coord.phase_machine.record_phase_entry_evidence(
                 geak={
                     "status": result.get("status"),
                     "error_class": result.get("error_class"),
                     "error": (str(result.get("error") or "")[:500] or None),
                 }
             )
-            # Persist the wind-down hint durably.
-            state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
 
         if native_agentx_session(state) and not native_agentx_optimization_session(state):
@@ -1054,7 +1173,7 @@ class KernelPhase(CoordinatorCollaborator):
             # KERNEL_AGENT budget, but every resulting candidate is
             # unpromotable by the canonical AgentX revalidation path. Skip
             # before dispatch instead of doing work that can never be kept.
-            recorder = self._kernel_timeline()
+            recorder = self.timeline()
             if recorder is not None:
                 recorder.finish_failed(
                     stage="geak_dispatch",
@@ -1079,10 +1198,10 @@ class KernelPhase(CoordinatorCollaborator):
 
         cb = state.current_best or {}
         try:
-            env_spec = self.build_env_spec()
+            env_spec = self._coord.writeback.build_env_spec()
         except (OSError, TypeError, ValueError) as exc:
             log.exception("geak: cannot serialize the accepted launch configuration")
-            recorder = self._kernel_timeline()
+            recorder = self.timeline()
             if recorder is not None:
                 recorder.finish_failed(stage="geak_handoff", error_class="invalid_env_spec", message=str(exc))
             _finish_skip(
@@ -1093,7 +1212,7 @@ class KernelPhase(CoordinatorCollaborator):
         accepted_flags = str(spec_config.get("extra_server_args", cb.get("extra_server_args")) or "")
         extra_envs = spec_config.get("extra_envs", cb.get("extra_envs")) or {}
         accepted_env = shlex.join(f"{k}={v}" for k, v in dict(extra_envs).items())
-        state_measurement = getattr(state, "current_best_measurement", None)
+        state_measurement = state.current_best_measurement or None
         measurement = (
             state_measurement
             if isinstance(state_measurement, Mapping) and state_measurement
@@ -1145,19 +1264,19 @@ class KernelPhase(CoordinatorCollaborator):
             observed_identity = f"sha256:{hashlib.sha256(observed_payload).hexdigest()}"
         same_config_tput = float(measurement.get("tput") or 0.0) if reference_verified else 0.0
         workload = {
-            "isl": int(getattr(state, "isl", 0) or int(os.environ.get("ISL", "1024"))),
-            "osl": int(getattr(state, "osl", 0) or int(os.environ.get("OSL", "1024"))),
-            "conc": int(getattr(state, "conc", 0) or int(os.environ.get("CONC", "64"))),
+            "isl": int(state.isl),
+            "osl": int(state.osl),
+            "conc": int(state.conc or 64),
         }
         # Forward the benchmark settings and GPU placement used by Hyperloom.
-        _recipe_path = str(getattr(state, "baseline_config_path", "") or "")
+        _recipe_path = str(state.baseline_config_path or "")
         # Parse once so every handoff field uses the same recipe snapshot.
         _recipe_envs = self._read_recipe_bench_envs(_recipe_path)
         bench_protocol = self._resolve_bench_protocol(_recipe_path, envs=_recipe_envs)
         # Preserve the run's actual GPU pin; {} means the whole machine.
-        gpu_pin = _resolve_gpu_pin(recipe_envs=_recipe_envs)
+        gpu_pin = resolve_gpu_pin(recipe_envs=_recipe_envs)
         # Resolve TP and GPU ids together so the values cannot disagree.
-        _tp = _coerce_tp(_recipe_envs.get("TP"), os.environ.get("TP"))
+        _tp = coerce_tp(_recipe_envs.get("TP"), os.environ.get("TP"))
         # Clamp ids to the visible mask, then TP to the resulting device set.
         _gpu_ids = _resolve_handoff_gpu_ids(gpu_pin=gpu_pin, tp=_tp)
         _tp = _resolve_handoff_tp(gpu_ids=_gpu_ids, tp=_tp)
@@ -1189,7 +1308,7 @@ class KernelPhase(CoordinatorCollaborator):
             )
         _serving_fidelity = _resolve_serving_fidelity(
             baseline_server_args=_current_best_server_args,
-            state_max_model_len=int(getattr(state, "max_model_len", 0) or 0),
+            state_max_model_len=int(state.max_model_len or 0),
         )
 
         # GEAK's E2E_METRIC and the workload spec's metric_basis are the same
@@ -1197,22 +1316,22 @@ class KernelPhase(CoordinatorCollaborator):
         # different axis than the one KEEP is decided on would have GEAK searching
         # against a reference it was never measured against.
         e2e_metric, _ = geak_metric_axis(
-            benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
-            grading=getattr(state, "grading", None),
+            benchmark_mode=str(state.benchmark_mode or ""),
+            grading=state.grading or None,
         )
         handoff = {
             # v2 adds baseline_env_spec; v3 adds actual GPU-pinning metadata.
             "schema_version": 3,
-            "model_path": str(getattr(state, "model_path", "") or os.environ.get("MODEL_PATH", "")),
-            "framework": str(getattr(state, "framework", "") or os.environ.get("FRAMEWORK", "") or "sglang"),
-            "gpu_type": str(getattr(state, "gpu_type", "") or os.environ.get("GPU_TYPE", "")),
+            "model_path": str(state.model_path or os.environ.get("MODEL_PATH", "")),
+            "framework": str(state.framework or os.environ.get("FRAMEWORK", "") or "sglang"),
+            "gpu_type": str(state.gpu_type or os.environ.get("GPU_TYPE", "")),
             "tp": _tp,
             "workload": workload,
             "accepted_flags": accepted_flags,
             "accepted_env": accepted_env,
-            "launch_recipe": str(getattr(state, "baseline_config_path", "") or ""),
+            "launch_recipe": str(state.baseline_config_path or ""),
             # AgentX canonical throughput is not a reference for GEAK's proxy workload.
-            "raw_baseline_tput": 0.0 if agentx else float(getattr(state, "baseline_tput", 0.0) or 0.0),
+            "raw_baseline_tput": 0.0 if agentx else float(state.baseline_tput or 0.0),
             # Zero means no verified same-config reference.
             "orchestrator_best_tput_same_config": same_config_tput,
             "same_config_reference_status": "verified" if reference_verified else "unverified",
@@ -1228,15 +1347,10 @@ class KernelPhase(CoordinatorCollaborator):
             "observed_server_identity": observed_server_identity,
             "measurement_evidence": launch_evidence,
             "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
-            # Serving-launch fidelity (both optional; unset => GEAK adapter default).
-            "max_model_len": int(getattr(state, "max_model_len", 0) or int(os.environ.get("MAX_MODEL_LEN", "0") or 0)),
-            "mem_fraction": float(
-                getattr(state, "mem_fraction", 0.0) or float(os.environ.get("GPU_MEMORY_UTILIZATION", "0") or 0.0)
-            ),
             "exp_root": str(self.session_dir / "geak"),
             # Macro-cycle-scoped eval_dir so a same-cycle resume reuses the in-progress on-disk artifacts while a new
             # cycle gets a fresh dir.
-            "eval_dir": str(self.session_dir / "geak" / f"e2e_cycle{int(getattr(state, 'macro_cycle', 0) or 0)}"),
+            "eval_dir": str(self.session_dir / "geak" / f"e2e_cycle{int(state.macro_cycle or 0)}"),
             # GEAK owns client selection; AgentX results are proposal proxies.
             "bench_client": "auto",
             "e2e_metric": e2e_metric,
@@ -1262,12 +1376,12 @@ class KernelPhase(CoordinatorCollaborator):
             handoff["bench_protocol"] = bench_protocol
         # Parsed once for both resolvers below: they read the same recipe, so a
         # second read could only disagree with the first.
-        recipe_bench = self._recipe_benchmark(str(getattr(state, "baseline_config_path", "") or ""))
+        recipe_bench = self._recipe_benchmark(str(state.baseline_config_path or ""))
         workload_spec = self._resolve_workload_spec(recipe_bench)
         if workload_spec:
             # Give the kernel agents the shape they must actually optimize for;
             # absence leaves GEAK on the handoff's synthetic isl/osl.
-            observed = self._observed_replay_shape(float(getattr(state, "baseline_tput", 0.0) or 0.0))
+            observed = self._observed_replay_shape(float(state.baseline_tput or 0.0))
             if observed:
                 workload_spec = {**workload_spec, **observed}
                 log.info(
@@ -1283,7 +1397,6 @@ class KernelPhase(CoordinatorCollaborator):
         launch_server_script = self._resolve_launch_server_script(recipe_bench)
         if launch_server_script:
             handoff["launch_server_script"] = launch_server_script
-        # Only forward resolved fidelity knobs; absence => GEAK adapter default.
         handoff.update(_serving_fidelity)
         # Full layered environment and its matching measurement identity.
         if env_spec:
@@ -1308,7 +1421,7 @@ class KernelPhase(CoordinatorCollaborator):
         handoff_path = out_dir / "handoff.json"
         handoff_path.write_text(json.dumps(handoff, indent=2), encoding="utf-8")
 
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
         if recorder is not None:
             recorder.enter_stage("geak_delegation")
             recorder.record_geak_handoff(handoff)
@@ -1325,7 +1438,7 @@ class KernelPhase(CoordinatorCollaborator):
 
         def _settled_replay(candidate: dict[str, Any]) -> bool:
             """Whether ``candidate`` is a result this session already settled."""
-            prev = state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
+            prev = state.geak_result if isinstance(state.geak_result, dict) else {}
             return _geak_rebench.geak_candidate_is_adjudicated(prev, candidate, harness_can_replay=not agentx)
 
         def _promote_recovered_result(
@@ -1367,9 +1480,7 @@ class KernelPhase(CoordinatorCollaborator):
             }
             if runner_timeout_s is not None:
                 evidence["runner_timeout_s"] = runner_timeout_s
-            self._record_phase_entry_evidence(geak=evidence)
-            # Set the wind-down hint BEFORE the durable save (it is in-memory only).
-            state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
+            self._coord.phase_machine.record_phase_entry_evidence(geak=evidence)
             state.save(self.session_dir)
             return True
 
@@ -1398,7 +1509,7 @@ class KernelPhase(CoordinatorCollaborator):
 
         # Budget-aware timeouts: shrink to the remaining run deadline and always reserve the closing-grace window.
         runner_timeout, kill_timeout, budget_known = self._geak_timeouts()
-        min_run = int(os.environ.get("GEAK_MIN_RUN_S", "600"))
+        min_run = env_int("GEAK_MIN_RUN_S", default=600)
         if budget_known and runner_timeout < min_run:
             log.warning(
                 "GEAK: only %ds budget remains (< min %ds); skipping e2e "
@@ -1440,13 +1551,13 @@ class KernelPhase(CoordinatorCollaborator):
 
         # Run in its own process group so a timeout can SIGTERM the whole runner -> run_e2e -> vllm/node tree (grace
         # to flush result.json), then SIGKILL, instead of orphaning run_e2e + its servers.
-        term_grace = int(os.environ.get("GEAK_TERM_GRACE_S", "180"))
+        term_grace = env_int("GEAK_TERM_GRACE_S", default=180)
 
         # Persisted grading determines the axis even when the session's metric
         # override is absent from this process's environment.
         _geak_e2e_metric, _ = geak_metric_axis(
-            benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
-            grading=getattr(state, "grading", None),
+            benchmark_mode=str(state.benchmark_mode or ""),
+            grading=state.grading or None,
         )
 
         def _run() -> subprocess.CompletedProcess:
@@ -1624,7 +1735,7 @@ class KernelPhase(CoordinatorCollaborator):
             # A no_gain headline over an accepted, parity-checked kernel still deserves the measurement — the rebench
             # is what decides, and without it the kernel is lost with no number attached to it.
             await self._revalidate_geak_candidate(reason="geak_e2e_accepted_kernel")
-        self._record_phase_entry_evidence(
+        self._coord.phase_machine.record_phase_entry_evidence(
             geak={
                 "status": result.get("status"),
                 "throughput_speedup": result.get("throughput_speedup"),
@@ -1649,8 +1760,6 @@ class KernelPhase(CoordinatorCollaborator):
                 },
             )
         )
-        # KERNEL is a one-shot under GEAK: wind down to SWEEP (persist the hint).
-        state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
         state.save(self.session_dir)
 
     async def _revalidate_geak_candidate(self, *, reason: str) -> None:
@@ -1662,14 +1771,14 @@ class KernelPhase(CoordinatorCollaborator):
         GEAK-harness replay (2a) instead.
         """
         state = self.shared_state
-        params = self._geak_rebench_params(reason=reason)
+        params = self._coord.writeback.geak_rebench_params(reason=reason)
         from .geak_native_revalidation import ORIGIN, finish_invalid_source, revalidate_source
 
         if params.get("origin") == ORIGIN:
-            await revalidate_source(self, params)
+            await revalidate_source(self._coord, params)
             return
         if params.get("reason") == "geak_native_source_invalid":
-            finish_invalid_source(self, str(params.get("error") or "GEAK source artifacts are unavailable"))
+            finish_invalid_source(self._coord, str(params.get("error") or "GEAK source artifacts are unavailable"))
             return
         skip_reason = params.get("reason") if params.get("skipped") else None
         if skip_reason == "geak_invalid_config":
@@ -1677,15 +1786,12 @@ class KernelPhase(CoordinatorCollaborator):
         if skip_reason == "geak_no_material":
             state.geak_result = {**state.geak_result, "revalidation_status": "no_material"}
             state.geak_pending = {}
-            state.resume_pending_revalidation = False
             state.save(self.session_dir)
             return
         if skip_reason is not None:
             await self._revalidate_on_geak_harness(decline_reason=str(skip_reason))
             return
-        task = _covered_step(
-            "explore", params, idempotency_key=f"geak-revalidate-c{int(getattr(state, 'macro_cycle', 0) or 0)}"
-        )
+        task = _covered_step("explore", params, idempotency_key=f"geak-revalidate-c{int(state.macro_cycle or 0)}")
         try:
             result = await self.sub.execute_covered(task)
         except FuturesCancelledError as exc:
@@ -1696,16 +1802,16 @@ class KernelPhase(CoordinatorCollaborator):
             }
             state.save(self.session_dir)
             raise
-        if self._is_promotable_result("explore", result):
-            await self._promote_to_shared_state("explore", result, task=task)
+        if self._coord.writeback.is_promotable_result("explore", result):
+            await self._coord.writeback.promote_to_shared_state("explore", result, task=task)
         else:
-            await self._handle_unpromotable_result(task, result)
+            await self._coord.writeback.handle_unpromotable_result(task, result)
 
     async def _revalidate_on_geak_harness(self, *, decline_reason: str) -> None:
         """Replay the candidate through GEAK's own harness (2a); record the decline when it does not validate."""
         state = self.shared_state
         log.warning("geak: 2b declined (%s); validating through the GEAK harness instead", decline_reason)
-        fb = await self._validate_geak_via_geak_harness(reason=decline_reason)
+        fb = await self._coord.writeback.validate_geak_via_geak_harness(reason=decline_reason)
         # Both are verdicts 2a has already recorded.
         if fb.get("validated") or fb.get("status") == "no_promote":
             return
@@ -1747,7 +1853,7 @@ class KernelPhase(CoordinatorCollaborator):
         """Validate the return and record any measured claim without a headline gain."""
         if not isinstance(result, dict):
             return False
-        result.setdefault("kernel_event_id", kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0)))
+        result.setdefault("kernel_event_id", kernel_event_id(int(self.shared_state.macro_cycle or 0)))
         prior_pending = self.shared_state.geak_pending or {}
         prior_review = prior_pending.get("native_review") or {}
         preserve_review = bool(prior_review) and _geak_rebench.geak_candidate_matches(
@@ -1758,7 +1864,7 @@ class KernelPhase(CoordinatorCollaborator):
         try:
             accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
         except ValueError as exc:
-            self._reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
+            self.reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
             return False
         # A material artifact can still be rechecked without a GEAK throughput claim.
         if result.get("status") not in ("ok",) and not _geak_has_accepted_kernel(result):
@@ -1824,7 +1930,7 @@ class KernelPhase(CoordinatorCollaborator):
                 status=prior_pending.get("status", "awaiting_rebench"),
                 revalidation_task_id=prior_pending.get("revalidation_task_id", ""),
             )
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
         if recorder is not None:
             recorder.record_geak_claim(
                 self.shared_state.geak_pending,
@@ -1873,7 +1979,7 @@ class KernelPhase(CoordinatorCollaborator):
                 delta = None if stated is None or stated == "" else float(stated)
             except (TypeError, ValueError):
                 delta = None
-            name = _geak_spec_name(raw)
+            name = geak_spec_name(raw)
             if not name:
                 continue
             row = {**raw, "lane": lane, "alias_collapsed": False}
@@ -1894,12 +2000,12 @@ class KernelPhase(CoordinatorCollaborator):
             kept["alias_collapsed"] = True
             # The collapsed twin's name is the one a reader may hold, so it is
             # carried on the survivor rather than dropped with the row.
-            aliases = {*(kept.get("aliases") or []), _geak_spec_name(kept), name}
-            if geak_is_cand_tag(_geak_spec_name(kept)) and not geak_is_cand_tag(name):
+            aliases = {*(kept.get("aliases") or []), geak_spec_name(kept), name}
+            if geak_is_cand_tag(geak_spec_name(kept)) and not geak_is_cand_tag(name):
                 row["alias_collapsed"] = True
                 out[position] = row
                 kept = row
-            kept["aliases"] = sorted({a for a in aliases if a and a != _geak_spec_name(kept)})
+            kept["aliases"] = sorted({a for a in aliases if a and a != geak_spec_name(kept)})
         return out
 
     @staticmethod
@@ -1915,7 +2021,7 @@ class KernelPhase(CoordinatorCollaborator):
             "overlay_loaded": overlay_loaded,
         }
 
-    def _reject_geak_promotion(
+    def reject_geak_promotion(
         self,
         result: dict[str, Any],
         *,
@@ -1936,7 +2042,7 @@ class KernelPhase(CoordinatorCollaborator):
         }
         self.shared_state.geak_result = rejected_result
         self.shared_state.geak_pending = {}
-        KernelPhase._reject_geak_kernel_journey(
+        KernelPhase.reject_geak_kernel_journey(
             self,
             rejected_result,
             measured_tput=measured_tput,
@@ -1944,7 +2050,7 @@ class KernelPhase(CoordinatorCollaborator):
             provenance="geak_promote_rejected",
             rejection_reason=reason,
         )
-        recorder = KernelPhase._kernel_timeline(self)
+        recorder = KernelPhase.timeline(self)
         if recorder is not None:
             recorder.record_geak_rebench_attempt(
                 attempt_id=attempt_id,
@@ -1956,7 +2062,7 @@ class KernelPhase(CoordinatorCollaborator):
             )
             recorder.record_geak_rebench_conclusion(final_status="no_promote", final_error=reason)
 
-    def _promote_geak_from_candidate(
+    def promote_geak_from_candidate(
         self,
         result: dict[str, Any],
         *,
@@ -1979,7 +2085,7 @@ class KernelPhase(CoordinatorCollaborator):
         try:
             accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
         except ValueError as exc:
-            self._reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
+            self.reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
             return False
 
         # The lever is stamped here, not guessed from the task kind: GEAK promotes on a proven kernel overlay OR on a
@@ -2080,14 +2186,14 @@ class KernelPhase(CoordinatorCollaborator):
                 promotion_measurement["extra_envs"] = launch_envs
                 promotion_measurement.update(launch_controls)
                 promotion_measurement["args_mode"] = "replace"
-        lifted = self._lift_to_current_best(
+        lifted = self._coord.writeback.lift_to_current_best(
             "geak_e2e",
             measured,
             promotion_measurement,
             entry_extra=entry_extra,
         )
         if not lifted:
-            KernelPhase._reject_geak_promotion(
+            KernelPhase.reject_geak_promotion(
                 self,
                 result,
                 measured_tput=measured,
@@ -2110,20 +2216,18 @@ class KernelPhase(CoordinatorCollaborator):
         if overlay_loaded is not True:
             # The journey is replayed before the main-flow rebench and can therefore contain GEAK-internal KEEPs for
             # kernels that were not present in the configuration that produced ``measured``.
-            self._reject_geak_kernel_journey(
+            self.reject_geak_kernel_journey(
                 result,
                 measured_tput=measured,
                 current_best_tput=pre_geak,
                 provenance=provenance,
                 rejection_reason="overlay_not_proven_loaded",
             )
-        if base > 0:
-            self._update_cumulative_gain_validated(
-                measured,
-                graded_measurement,
-                source="geak_e2e_promote",
-            )
-        self.shared_state.resume_pending_revalidation = False
+        self._coord.writeback.validate(
+            measured,
+            graded_measurement,
+            source="geak_e2e_promote",
+        )
         self.shared_state.geak_pending = {}
         return True
 
@@ -2211,7 +2315,7 @@ class KernelPhase(CoordinatorCollaborator):
                     "decision_reason": provenance,
                     "artifact_kind": str(spec.get("kind") or "authored"),
                     "ts": ts,
-                    "cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    "cycle": int(self.shared_state.macro_cycle or 0),
                 }
             )
             # Max over attempts, matching the canonical ledger writer in ``_kernel_decisions.py`` -- ``by_kernel`` and
@@ -2252,7 +2356,7 @@ class KernelPhase(CoordinatorCollaborator):
             _record_geak_integration(
                 entry,
                 kernel_id=kid,
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                macro_cycle=int(self.shared_state.macro_cycle or 0),
             )
         self.shared_state.kernel_integrate_attempts = ledger
         log.info(
@@ -2272,7 +2376,7 @@ class KernelPhase(CoordinatorCollaborator):
         """
         if not isinstance(result, dict) or not result:
             return
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
         if recorder is None:
             return
         recorder.record_geak_measurement(result)
@@ -2289,7 +2393,7 @@ class KernelPhase(CoordinatorCollaborator):
         kill_timeout_sec: int | None = None,
     ) -> None:
         """Record the delegated GEAK runner's terminal state."""
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
         if recorder is None:
             return
         versions = result.get("versions")
@@ -2330,9 +2434,7 @@ class KernelPhase(CoordinatorCollaborator):
             return
 
         record_geak_attempts(
-            event=str(
-                result.get("kernel_event_id") or kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0))
-            ),
+            event=str(result.get("kernel_event_id") or kernel_event_id(int(self.shared_state.macro_cycle or 0))),
             journey=journey,
         )
 
@@ -2346,7 +2448,7 @@ class KernelPhase(CoordinatorCollaborator):
                 version=str(meta.get("version") or meta.get("commit") or "") or None,
             )
 
-    def _reject_geak_kernel_journey(
+    def reject_geak_kernel_journey(
         self,
         result: dict[str, Any],
         *,
@@ -2357,9 +2459,7 @@ class KernelPhase(CoordinatorCollaborator):
     ) -> None:
         """Revoke the persisted provisional GEAK KEEPs after a final rebench."""
         reject_geak_attempts(
-            event=str(
-                result.get("kernel_event_id") or kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0))
-            ),
+            event=str(result.get("kernel_event_id") or kernel_event_id(int(self.shared_state.macro_cycle or 0))),
             measured_tput=measured_tput,
             current_best_tput=current_best_tput,
             provenance=provenance,
@@ -2543,10 +2643,7 @@ class KernelPhase(CoordinatorCollaborator):
         from ..kernel.request_handlers import integrate_handler
         from ..measurement.paired import assess_paired, interleaved_plan
 
-        try:
-            n_pairs = int(os.environ.get("HYPERLOOM_GEMM_PAIRED_PAIRS", "0") or 0)
-        except ValueError:
-            n_pairs = 0
+        n_pairs = env_int("HYPERLOOM_GEMM_PAIRED_PAIRS", default=0)
         if n_pairs <= 0 or float(reference.get("tput") or 0.0) <= 0:
             return None
 
@@ -2987,12 +3084,12 @@ class KernelPhase(CoordinatorCollaborator):
         """Whether the fp8 block-scale CK backend switch should be E2E-validated."""
         if not isinstance(result, dict):
             return False
-        from ..kernel.request_handlers import _resolve_gemm_tuning_backend
+        from ..kernel.request_handlers import resolve_gemm_tuning_backend
 
-        backend = str(result.get("backend") or _resolve_gemm_tuning_backend({})).strip().lower()
+        backend = str(result.get("backend") or resolve_gemm_tuning_backend({})).strip().lower()
         if backend != "forge":
             return False
-        framework = str(getattr(self.shared_state, "framework", "") or "").strip().lower()
+        framework = str(self.shared_state.framework or "").strip().lower()
         if framework != "sglang":
             return False
         if not self._ck_switch_precision_is_fp8(result):
@@ -3001,30 +3098,27 @@ class KernelPhase(CoordinatorCollaborator):
         from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
         from ..actions.executors._workload_envs import _GFX942_GPU_TYPES
 
-        gpu = _resolve_amd_gpu_type(getattr(self.shared_state, "gpu_type", "") or "")
+        gpu = _resolve_amd_gpu_type(self.shared_state.gpu_type or "")
         if gpu not in _GFX942_GPU_TYPES:
             return False
 
         # Block-scale fp8 only, asserted positively via ``weight_block_size``.
         from hyperloom.inference_optimizer.model_config_utils import _fp8_is_block_scale
 
-        model_path = str(getattr(self.shared_state, "model_path", "") or os.environ.get("MODEL_PATH", ""))
+        model_path = str(self.shared_state.model_path or os.environ.get("MODEL_PATH", ""))
         return _fp8_is_block_scale(model_path)
 
     def _ck_switch_precision_is_fp8(self, result: dict[str, Any]) -> bool:
         """Whether the workload runs fp8, resolved from any available signal."""
-        if str(getattr(self.shared_state, "precision", "") or "").strip().lower() == "fp8":
+        if str(self.shared_state.precision or "").strip().lower() == "fp8":
             return True
         if isinstance(result, dict) and str(result.get("precision") or "").strip().lower() == "fp8":
             return True
-        try:
-            from ..kernel.request_handlers import _resolve_forge_precision_and_quant
+        from ..kernel.request_handlers import _resolve_forge_precision_and_quant
 
-            precision, _ = _resolve_forge_precision_and_quant(self.shared_state, {})
-            if str(precision or "").strip().lower() == "fp8":
-                return True
-        except Exception:  # noqa: BLE001 - best-effort runtime resolution
-            pass
+        precision, _ = _resolve_forge_precision_and_quant(self.shared_state, {})
+        if str(precision or "").strip().lower() == "fp8":
+            return True
         return False
 
     def _sync_profile_state_after_gemm_roofline(self, result: dict[str, Any]) -> None:
@@ -3112,7 +3206,7 @@ class KernelPhase(CoordinatorCollaborator):
     ) -> None:
         """Mirror an adopted GEMM-tuning stack entry as an optimization_journal KEEP row."""
         try:
-            journal = self._ensure_journal()
+            journal = self._coord.writeback.ensure_journal()
             variant_name = str(entry.get("variant_name") or "gemm_tuning")
             backend = str(entry.get("backend") or "").strip().lower()
             try:
@@ -3128,7 +3222,7 @@ class KernelPhase(CoordinatorCollaborator):
                 metrics["tuned_file"] = str(entry.get("tuned_file"))
             journal.append_entry(
                 JournalEntry(
-                    phase=self._journal_entry_phase(),
+                    phase=self._coord.writeback.journal_entry_phase(),
                     iter=int(self.shared_state.tick or 0),
                     kind=KIND_GEMM_TUNING,
                     change=variant_name,
@@ -3164,7 +3258,7 @@ class KernelPhase(CoordinatorCollaborator):
         if not isinstance(result, dict):
             return
         entry = dict(result)
-        attempts = list(getattr(self.shared_state, "gemm_tuning_attempts", []) or [])
+        attempts = list(self.shared_state.gemm_tuning_attempts or [])
         if attempts and isinstance(attempts[-1], dict):
             entry.setdefault("ts", attempts[-1].get("ts"))
             attempts[-1] = entry
@@ -3350,14 +3444,14 @@ class KernelPhase(CoordinatorCollaborator):
                 reverted.append({**cand, "reason": "aiter_moe_runtime_triton_config_inert"})
                 continue
             if tuner_name == "fmoe_ck" and not model_supports_aiter_ck_fused_moe(
-                str(getattr(self.shared_state, "model_path", "") or ""),
-                int(getattr(self.shared_state, "tp", 0) or 0),
+                str(self.shared_state.model_path or ""),
+                int(self.shared_state.tp or 0),
             ):
                 log.info(
                     "gemm E2E: skipping %s — aiter CK fused-MoE cannot serve "
                     "this model at tp=%s (intermediate size is not 128-aligned)",
                     tuner_name,
-                    getattr(self.shared_state, "tp", 0),
+                    self.shared_state.tp or 0,
                 )
                 reverted.append({**cand, "reason": "aiter_ck_moe_shape_unsupported"})
                 continue
@@ -3400,8 +3494,7 @@ class KernelPhase(CoordinatorCollaborator):
                 continue
             extra_server_args = (
                 "--moe-runner-backend aiter"
-                if tuner_name == "fmoe_ck"
-                and str(getattr(self.shared_state, "framework", "") or "").lower() == "sglang"
+                if tuner_name == "fmoe_ck" and str(self.shared_state.framework or "").lower() == "sglang"
                 else ""
             )
             # Merge with previously KEEP'd envs.
@@ -3432,7 +3525,7 @@ class KernelPhase(CoordinatorCollaborator):
                 "source": "forge_gemm_tuning",
                 "base_tput": running_tput,
                 "model_path": resolve_session_model_path(
-                    state_model_path=str(getattr(self.shared_state, "model_path", "") or ""),
+                    state_model_path=str(self.shared_state.model_path or ""),
                     for_serving=True,
                 ),
                 "extra_server_args": extra_server_args,
@@ -3596,7 +3689,7 @@ class KernelPhase(CoordinatorCollaborator):
 
             if decision == "KEEP" and new_tput > 0 and not apply_blockers:
                 tuned_file = _candidate_tuned_file(env, cand.get("env_var", ""))
-                lifted = self._lift_to_current_best(
+                lifted = self._coord.writeback.lift_to_current_best(
                     "gemm_tuning",
                     new_tput,
                     {
@@ -3649,7 +3742,7 @@ class KernelPhase(CoordinatorCollaborator):
                 config_path=paired_config_path,
                 budget_minutes=per_tuner_budget_minutes,
             )
-            if baseline_tput > 0 and self._update_cumulative_gain_validated(
+            if self._coord.writeback.validate(
                 running_tput,
                 accepted_measurement,
                 source="forge_gemm_tuning_e2e",
@@ -3727,7 +3820,7 @@ class KernelPhase(CoordinatorCollaborator):
         # already initialized, and the handoff rides inside it so each attempt keeps the evidence it was given.
         attempt_dir = next_forge_attempt_dir(
             self.session_dir,
-            int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            int(self.shared_state.macro_cycle or 0),
         )
         handoff_dir = attempt_dir / "handoff"
         # Sealed before the handoff is written and before the controller starts,
@@ -3742,8 +3835,8 @@ class KernelPhase(CoordinatorCollaborator):
 
             baselines = seal_campaign_baseline(
                 self.shared_state,
-                session_id=str(getattr(self.shared_state, "session_id", "") or self.session_dir.name),
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                session_id=str(self.shared_state.session_id or self.session_dir.name),
+                macro_cycle=int(self.shared_state.macro_cycle or 0),
             )
             if baselines:
                 log.info(
@@ -3755,7 +3848,7 @@ class KernelPhase(CoordinatorCollaborator):
         try:
             from ..kernel.forge_handoff import write_forge_handoff
 
-            env_spec = self.build_env_spec()
+            env_spec = self._coord.writeback.build_env_spec()
             handoff_dir = write_forge_handoff(
                 self.session_dir,
                 self.shared_state,
@@ -3780,7 +3873,7 @@ class KernelPhase(CoordinatorCollaborator):
             run_controller_subprocess,
         )
 
-        cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        cycle = int(self.shared_state.macro_cycle or 0)
         controller_budget_sec, hard_timeout_sec = self._kernel_rewrite_controller_timeouts()
 
         if controller_budget_sec <= 0 or hard_timeout_sec <= 0:
@@ -3843,7 +3936,7 @@ class KernelPhase(CoordinatorCollaborator):
                     patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
                     session_dir=self.session_dir,
                     shared_state=self.shared_state,
-                    record_keep=self._record_integrate_keep,
+                    record_keep=self._coord.writeback.record_integrate_keep,
                 )
                 result["integration"] = integration.to_dict()
             except Exception as error:
@@ -3882,9 +3975,6 @@ class KernelPhase(CoordinatorCollaborator):
                         "error": "; ".join(x for x in ([str(_integration.get("reason") or "")] + _skipped) if x)[:800],
                     },
                 )
-        self.shared_state.set_pending_escalate_hint(
-            ESCALATE_HINT_SKIP_TO_SWEEP,
-        )
         self.shared_state.save(self.session_dir)
         await self.bus.append_and_seq(
             Message.new(
@@ -3905,23 +3995,23 @@ class KernelPhase(CoordinatorCollaborator):
         """Gate the forge-fusion step in KERNEL entry."""
         if env_bool("HYPERLOOM_SKIP_FUSION"):
             return False
-        framework = str(getattr(self.shared_state, "framework", "") or "sglang").strip().lower()
+        framework = str(self.shared_state.framework or "sglang").strip().lower()
         if framework not in ("sglang", "vllm", "vllm-aiter"):
             return False
-        trace = str(getattr(self.shared_state, "last_profile_trace", "") or "").strip()
+        trace = str(self.shared_state.last_profile_trace or "").strip()
         if not trace:
             log.info("KERNEL entry: skip forge-fusion (no decode trace yet)")
             return False
-        last = getattr(self.shared_state, "last_fusion", None)
+        last = self.shared_state.last_fusion
         if isinstance(last, dict) and str(last.get("status") or "").strip() in ("ok", "complete", "kept"):
             # A round that kept nothing and left targets unfunded answers only for the ones it ran, so it re-arms
             # fusion until the retry cap is spent.
             if not last.get("kept") and _withheld_targets(last) > 0:
-                return _as_int(getattr(self.shared_state, "fusion_withheld_retries", 0)) < MAX_FUSION_WITHHELD_RETRIES
+                return _as_int(self.shared_state.fusion_withheld_retries) < MAX_FUSION_WITHHELD_RETRIES
             return False
         if isinstance(last, dict) and last.get("infrastructure_abort"):
             # An abort judged nothing, so it must stay retryable -- but not forever.
-            spent = _as_int(getattr(self.shared_state, "fusion_infra_aborts", 0))
+            spent = _as_int(self.shared_state.fusion_infra_aborts)
             if spent >= MAX_FUSION_INFRA_RETRIES:
                 log.info(
                     "KERNEL entry: skip forge-fusion (aborted on infrastructure %d time(s): %s)",
@@ -3978,15 +4068,15 @@ class KernelPhase(CoordinatorCollaborator):
             # Counted on the session, not on the record: ``last_fusion`` is replaced by every run, so a timeout or a
             # handler crash landing between two aborts would carry no count forward and hand the cap back a clean
             # slate on every other entry.
-            spent = _as_int(getattr(self.shared_state, "fusion_infra_aborts", 0))
+            spent = _as_int(self.shared_state.fusion_infra_aborts)
             self.shared_state.fusion_infra_aborts = spent + 1
         if isinstance(result, dict) and not result.get("kept") and _withheld_targets(result) > 0:
             # Counted on the session for the same reason as the aborts above.
-            withheld_spent = _as_int(getattr(self.shared_state, "fusion_withheld_retries", 0))
+            withheld_spent = _as_int(self.shared_state.fusion_withheld_retries)
             self.shared_state.fusion_withheld_retries = withheld_spent + 1
         try:
             if isinstance(result, dict) and not str(result.get("fusion_run_id") or "").strip():
-                cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+                cycle = int(self.shared_state.macro_cycle or 0)
                 result["fusion_run_id"] = f"fusion-c{cycle}-{time.time_ns():x}"
             self.shared_state.last_fusion = result if isinstance(result, dict) else {"status": status}
             self.shared_state.save(self.session_dir)
@@ -4017,8 +4107,6 @@ class KernelPhase(CoordinatorCollaborator):
 
     async def _integrate_fusion(self, result: dict) -> None:
         """Queue every KEPT forge-fusion sibling for the shared e2e integrate lane."""
-        import os
-
         from ..kernel._kernel_decisions import enqueue_nominated_patch
         from ..kernel.nomination_result import parse_outcome
 
@@ -4041,10 +4129,7 @@ class KernelPhase(CoordinatorCollaborator):
                     refused or "none",
                 )
             return
-        try:
-            keep_pct = float(os.environ.get("HYPERLOOM_FUSION_KEEP_PCT", "1.0"))
-        except (TypeError, ValueError):
-            keep_pct = 1.0
+        keep_pct = env_float("HYPERLOOM_FUSION_KEEP_PCT", default=1.0)
         queued = 0
         for patch in outcome.patches:
             record = enqueue_nominated_patch(
@@ -4065,7 +4150,7 @@ class KernelPhase(CoordinatorCollaborator):
         except Exception:  # noqa: BLE001 - best-effort persist; drain reloads state
             pass
 
-    def _current_tput_from_validated_gain(self) -> float:
+    def current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed)."""
         state = self.shared_state
         try:
@@ -4082,7 +4167,7 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _last_measured_roofline_tput(self) -> float:
         """Measured tok/s of the most recent roofline snapshot; 0.0 when none."""
-        snaps = getattr(self.shared_state, "roofline_snapshots", None) or []
+        snaps = self.shared_state.roofline_snapshots or []
         for snap in reversed(snaps):
             if not isinstance(snap, dict):
                 continue
@@ -4097,7 +4182,7 @@ class KernelPhase(CoordinatorCollaborator):
     def _needs_roofline_for_watermark(self) -> bool:
         """True iff projected tput crossed the watermark over ``last_roofline_tput`` (False until PRELUDE roofline ran, or while auto_roofline_pending_task_id is in-flight)."""
         state = self.shared_state
-        if str(getattr(state, "gpu_trace_unsupported_reason", "") or ""):
+        if str(state.gpu_trace_unsupported_reason or ""):
             return False
         try:
             last_rl = float(state.last_roofline_tput or 0.0)
@@ -4107,12 +4192,12 @@ class KernelPhase(CoordinatorCollaborator):
             return False
         if last_rl <= 0:
             try:
-                failure_streak = int(getattr(state, "roofline_failure_streak", 0) or 0)
+                failure_streak = int(state.roofline_failure_streak or 0)
             except (TypeError, ValueError):
                 failure_streak = 0
             if failure_streak <= 0:
                 return False
-            if failure_streak > _MAX_ROOFLINE_FAILURE_RETRIES:
+            if failure_streak > MAX_ROOFLINE_FAILURE_RETRIES:
                 return False
             try:
                 last_rl = float(state.baseline_tput or 0.0)
@@ -4120,7 +4205,7 @@ class KernelPhase(CoordinatorCollaborator):
                 last_rl = 0.0
             if last_rl <= 0:
                 return False
-        cur = self._current_tput_from_validated_gain()
+        cur = self.current_tput_from_validated_gain()
         if cur <= 0:
             return False
         return cur / last_rl >= ROOFLINE_WATERMARK_RATIO
@@ -4142,17 +4227,22 @@ class KernelPhase(CoordinatorCollaborator):
             pending,
         )
 
-    async def _maybe_enqueue_watermark_roofline(
+    async def maybe_enqueue_watermark_roofline(
         self,
         *,
         reason: str,
     ) -> bool:
-        """Enqueue a fresh roofline if the watermark crossed; idempotency-keyed via ``reason``, stamps auto_roofline_pending_task_id. Returns True when enqueued."""
+        """Enqueue a fresh roofline if the watermark crossed; idempotency-keyed via ``reason`` and the roofline tput it crossed from, stamps auto_roofline_pending_task_id. Returns True when enqueued."""
         await self._release_finished_roofline_gate()
         if not self._needs_roofline_for_watermark():
             return False
+        # Crossings share a reason; the anchor separates this crossing's task from an earlier one's.
+        anchor = self.shared_state.last_roofline_tput
         try:
-            task = await self._enqueue_internal_analysis_task(reason=reason)
+            task = await self._coord.phase_prelude.enqueue_internal_analysis_task(
+                reason=reason,
+                idem_scope=f"-from{anchor:.0f}" if anchor > 0 else "",
+            )
         except Exception as exc:
             log.exception(
                 "watermark-roofline (%s): failed to enqueue: %r",
@@ -4167,13 +4257,13 @@ class KernelPhase(CoordinatorCollaborator):
             "watermark-roofline (%s): enqueued task=%s (cur=%.2f, last_roofline=%.2f, ratio>=%.2f)",
             reason,
             task.task_id,
-            self._current_tput_from_validated_gain(),
+            self.current_tput_from_validated_gain(),
             float(self.shared_state.last_roofline_tput or 0.0),
             ROOFLINE_WATERMARK_RATIO,
         )
         return True
 
-    def _cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    def cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         """Return a cached programmatic_handler result if applicable (cache key last_trace_analyze)."""
         if kind != "trace_analyze":
             return None

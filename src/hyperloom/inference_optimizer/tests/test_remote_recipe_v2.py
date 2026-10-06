@@ -59,6 +59,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     has_replay_material,
 )
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _remote_result_type
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 
 _DOWNLOAD_BYTES = b"verified artifact"
@@ -1169,12 +1170,21 @@ def test_degraded_kb_skips_remote_close_writer(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    coordinator = WritebackCollaborator()
-    vars(coordinator).update(
-        shared_state=SimpleNamespace(current_best={"tput": 10.0}),
+    class _Journal:
+        def finalize(self, **kwargs) -> None:
+            pass
+
+    _ss = SharedState()
+    _ss.current_best = {"tput": 10.0}
+    coordinator = SimpleNamespace(
         session_dir=tmp_path,
+        shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=SimpleNamespace(kb_disabled=True),
+        _journal=type(
+            "_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None}
+        )(),
+        ensure_journal=lambda: _Journal(),
     )
     from hyperloom.orchestrator.knowledge import remote_recipe
 
@@ -1185,7 +1195,7 @@ def test_degraded_kb_skips_remote_close_writer(
         classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("degraded CLOSE constructed HyperloomRemoteKB"))),
     )
 
-    outcome = coordinator.finalize_recipe_and_journal()
+    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
     assert outcome == {
         "status": "skipped",
         "reason": "degraded_kb",
@@ -1198,13 +1208,21 @@ def test_local_close_ignores_ambient_kb_store(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    coordinator = WritebackCollaborator()
-    vars(coordinator).update(
-        shared_state=SimpleNamespace(current_best={}),
+    class _Journal:
+        def finalize(self, **kwargs) -> None:
+            pass
+
+    _ss = SharedState()
+    coordinator = SimpleNamespace(
         session_dir=tmp_path,
+        shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=None,
-        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
+        _journal=type(
+            "_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None}
+        )(),
+        ensure_journal=lambda: _Journal(),
+        workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
     )
     calls: list[tuple] = []
     from hyperloom.orchestrator.knowledge import remote_recipe
@@ -1217,7 +1235,7 @@ def test_local_close_ignores_ambient_kb_store(
         "from_env",
         classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("local CLOSE constructed HyperloomRemoteKB"))),
     )
-    outcome = coordinator.finalize_recipe_and_journal()
+    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
     assert outcome == {
         "status": "skipped",
         "reason": "no_recipe_backend",
@@ -1231,6 +1249,10 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    class _Journal:
+        def finalize(self, **kwargs) -> None:
+            pass
+
     class _LegacyRecipe:
         def get_authoritative_recipe(self, **kwargs):
             raise AssertionError("remote CLOSE read legacy RecipeKB")
@@ -1238,15 +1260,13 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
         def put_recipe(self, **kwargs):
             raise AssertionError("remote CLOSE wrote legacy RecipeKB")
 
-    coordinator = WritebackCollaborator()
-    vars(coordinator).update(
-        shared_state=SimpleNamespace(
-            current_best={"tput": 10.0},
-        ),
+    coordinator = SimpleNamespace(
         session_dir=tmp_path,
-        recipe_kb=_LegacyRecipe(),
-        knowledge_plane=None,
-        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
+        shared_state=SharedState(current_best={"tput": 10.0}),
+        knowledge_plane=SimpleNamespace(recipe_kb=_LegacyRecipe()),
+        _journal=None,
+        ensure_journal=lambda: _Journal(),
+        proposals=SimpleNamespace(workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
     )
     calls: list[tuple] = []
     from hyperloom.orchestrator.knowledge import remote_recipe
@@ -1271,7 +1291,7 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
         "from_env",
         classmethod(lambda cls: _Facade()),
     )
-    outcome = coordinator.finalize_recipe_and_journal()
+    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
     assert outcome == {
         "status": "written",
         "reason": "",
@@ -1306,13 +1326,20 @@ def test_remote_close_transport_failure_is_nonfatal(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    coordinator = WritebackCollaborator()
-    vars(coordinator).update(
-        shared_state=SimpleNamespace(current_best={"tput": 10.0}),
+    class _Journal:
+        def finalize(self, **kwargs) -> None:
+            pass
+
+    coordinator = SimpleNamespace(
         session_dir=tmp_path,
+        shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=None,
-        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
+        _journal=type(
+            "_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None}
+        )(),
+        ensure_journal=lambda: _Journal(),
+        proposals=SimpleNamespace(workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
     )
     from hyperloom.orchestrator.knowledge import remote_recipe
 
@@ -1324,7 +1351,7 @@ def test_remote_close_transport_failure_is_nonfatal(
         "from_env",
         classmethod(lambda cls: (_ for _ in ()).throw(OSError("transport down"))),
     )
-    outcome = coordinator.finalize_recipe_and_journal()
+    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
     assert outcome == {
         "status": "error",
         "reason": "OSError",
@@ -1358,14 +1385,14 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
         working_recipe_generation=2,
         validated_recipe_generation=1,
     )
-    coordinator = WritebackCollaborator()
-    vars(coordinator).update(
-        shared_state=state,
+    coordinator = SimpleNamespace(
         session_dir=tmp_path,
+        shared_state=state,
         recipe_kb=None,
         knowledge_plane=None,
-        _ensure_journal=lambda: (_ for _ in ()).throw(AssertionError("journal must not be finalized")),
-        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
+        _journal=None,
+        ensure_journal=lambda: (_ for _ in ()).throw(AssertionError("journal must not be finalized")),
+        proposals=SimpleNamespace(workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
     )
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
@@ -1376,7 +1403,7 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
         classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("remote writer must not be reached"))),
     )
 
-    outcome = coordinator.finalize_recipe_and_journal()
+    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
 
     assert outcome["reason"] == "unvalidated_recipe_stack"
     assert outcome["result_type"] == "unvalidated_recipe"
@@ -1384,18 +1411,19 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
 
 def test_unvalidated_write_back_audit_omits_mismatched_metrics(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
-    collaborator = WritebackCollaborator()
-    vars(collaborator).update(
-        shared_state=SimpleNamespace(
-            current_best={"tput": 2200.0},
-            cumulative_gain_validated=20.0,
-            kernel_optimizer="forge",
-            tp=8,
-            conc=64,
-            isl=1024,
-            osl=256,
-        ),
-        session_dir=tmp_path,
+    collaborator = WritebackCollaborator(
+        SimpleNamespace(
+            shared_state=SimpleNamespace(
+                current_best={"tput": 2200.0},
+                cumulative_gain_validated=20.0,
+                kernel_optimizer="forge",
+                tp=8,
+                conc=64,
+                isl=1024,
+                osl=256,
+            ),
+            session_dir=tmp_path,
+        )
     )
     monkeypatch.setattr(
         "hyperloom.orchestrator.loop.writeback._close_out.record_write_back_settled",

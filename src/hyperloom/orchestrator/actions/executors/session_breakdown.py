@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ...loop.coordinator_helpers import format_exc_brief
+from hyperloom.common.timeutil import format_exc_brief
 
 log = logging.getLogger(__name__)
 

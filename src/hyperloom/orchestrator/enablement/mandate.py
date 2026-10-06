@@ -25,11 +25,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import PurePath
 from typing import Sequence
 
 from hyperloom.common.failure_signature import EnablementRequest, FailureSignature
 from hyperloom.agents.framework.keywords import extract_keywords, score_title_with_anti_signal
-from hyperloom.agents.framework.repo_map import bridge_repo_urls
+from hyperloom.agents.framework.repo_map import bridge_repo_urls, upstream_repo_urls
 from hyperloom.inference_optimizer.framework_paths import (
     resolve_kernel_search_roots,
     summarise_framework_root_discovery,
@@ -122,25 +123,27 @@ def build_search_plan(
 ) -> EnablementSearchPlan:
     """Build the repo set + ranking keywords for an enablement failure.
 
-    Includes the framework repo plus the bridge repos (ROCm / HIP / aiter) for
-    the signature's ``bridge_layer``.
+    Includes the framework repo, its upstream when the framework repo is a fork,
+    and the bridge repos (ROCm / HIP / aiter) for the signature's ``bridge_layer``.
 
     Args:
         signature: The classified failure.
         framework_repo_url: Canonical serving-framework repo URL.
-        model: Model id/path — mined for extra keyword signal.
+        model: Model id/path — its name is mined for extra keyword signal.
 
     Returns:
-        EnablementSearchPlan: The deduped repo list and ranking keywords.
+        EnablementSearchPlan: The deduped repo list and ranking keywords,
+            most discriminating first.
     """
     repos: list[str] = []
     if framework_repo_url.strip():
         repos.append(framework_repo_url.strip())
+    repos.extend(upstream_repo_urls(framework_repo_url))
     repos.extend(bridge_repo_urls(signature.bridge_layer))
 
     keywords: list[str] = []
-    keywords.extend(extract_keywords(model))
     keywords.extend(_symbol_tokens(signature.offending_symbol))
+    keywords.extend(extract_keywords(PurePath(model).name))
     keywords.extend(_KIND_SEED_KEYWORDS.get(signature.kind, ()))
 
     return EnablementSearchPlan(
@@ -547,8 +550,8 @@ def _render_task_description(
 
 def build_mandate(
     req: EnablementRequest,
+    signature: FailureSignature,
     *,
-    signature: FailureSignature | None = None,
     candidate_refs: Sequence[str] = (),
     source_context: str = "",
     source_root_hints: Sequence[str] | None = None,
@@ -557,7 +560,8 @@ def build_mandate(
 
     Args:
         req: The enablement request.
-        signature: Pre-computed signature; defaults to ``req.signature``.
+        signature: The verdict the round was dispatched on. The caller owns it;
+            the mandate never re-derives a signature from prompt text.
         candidate_refs: Ranked bridging refs to suggest (best first).
         source_context: Optional source snippet near the offending site to
             ground the authoring sub-agent (best-effort; empty omits it).
@@ -568,17 +572,16 @@ def build_mandate(
         EnablementMandate: The authoring contract, ready to hand to the
         specialist runner.
     """
-    sig = signature if signature is not None else req.signature
     if source_root_hints is not None:
         hints: list[str] = list(source_root_hints) or [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
     else:
         hints = _resolve_actual_root_hints(req.framework)
     refs = tuple(r for r in candidate_refs if r)
-    task = _render_task_description(req, sig, refs, hints, source_context)
+    task = _render_task_description(req, signature, refs, hints, source_context)
     return EnablementMandate(
         framework=req.framework,
         model=req.model,
-        signature=sig,
+        signature=signature,
         source_root_hints=tuple(hints),
         candidate_refs=refs,
         task_description=task,

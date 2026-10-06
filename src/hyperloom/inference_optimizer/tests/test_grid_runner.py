@@ -1266,7 +1266,7 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
             _resolve_reference_recipe(SimpleNamespace(reference_script=str(session / "current_setting.sh")))
         assert exc.value.code == 2
         return
-    args, envs, model, source, controls = _resolve_reference_recipe(
+    args, envs, model, controls = _resolve_reference_recipe(
         SimpleNamespace(reference_script=str(session / "current_setting.sh"))
     )
     assert "PYTHONPATH" not in envs
@@ -1276,7 +1276,6 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
         reference_server_args=args,
         reference_envs=envs,
         reference_model=model,
-        reference_source=source,
         reference_launch_controls=controls,
     )
     imported.save(session)

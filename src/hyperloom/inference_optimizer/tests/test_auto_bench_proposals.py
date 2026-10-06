@@ -46,13 +46,12 @@ def _phase(*, phase="FRAMEWORK_AGENT", rounds=(), queued=(), running=(), frozen=
     state.baseline_config_path = "/cfg.yaml"
     state.last_baseline = {"benchmark_script": "bench.sh"}
     state.specialist_rounds = list(rounds)
-    coord = SimpleNamespace(
-        shared_state=state,
-        tasks=_Tasks(queued, running),
+    dispatcher = SimpleNamespace(
         admission_frozen=frozen,
-        _dispatch_paused_for_phase_budget=lambda: paused,
-        _registry_lanes_ttl=lambda kind: (["benchmark_lane"], 1800),
+        dispatch_paused_for_phase_budget=lambda: paused,
+        registry_lanes_ttl=lambda kind: (["benchmark_lane"], 1800),
     )
+    coord = SimpleNamespace(shared_state=state, tasks=_Tasks(queued, running), dispatcher=dispatcher)
     return FrameworkPhase(coord)
 
 

@@ -16,6 +16,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
@@ -28,21 +29,6 @@ _BASELINE_LOGGER = "hyperloom.orchestrator.actions.executors.baseline"
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-
-
-class _StopRecorder:
-    """Minimal SharedState stub capturing ``set_stop_reason`` calls."""
-
-    def __init__(self, enablement_mode: str = "off") -> None:
-        self.stop_reason = ""
-        self.baseline_accuracy = 0.0
-        self.enablement_mode = enablement_mode
-        # Mirrors the SharedState default so ctx-backed runs keep the cold+hot pair.
-        self.baseline_double_run = True
-
-    def set_stop_reason(self, value, **_kwargs):
-        self.stop_reason = value
-        return value
 
 
 def _write_yaml(path: Path) -> None:
@@ -94,7 +80,7 @@ def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
 
 def _make_ctx(params: dict, *, enablement_mode: str = "off") -> SimpleNamespace:
     task = SimpleNamespace(task_id="t-eval-1", params=params)
-    return SimpleNamespace(task=task, extra={"shared_state": _StopRecorder(enablement_mode)})
+    return SimpleNamespace(task=task, extra={"shared_state": SharedState(enablement_mode=enablement_mode)})
 
 
 def _run(coro):
@@ -631,7 +617,7 @@ def _stopped(
 ) -> str:
     """Run ``_maybe_stop_on_missing_baseline_accuracy`` and return the reason."""
     executor = BaselineExecutor()
-    rec = _StopRecorder()
+    rec = SharedState(enablement_mode="off")
     rec.eval_disabled = eval_disabled
     executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx(framework, rec, params), result)
     return rec.stop_reason
@@ -717,7 +703,7 @@ def test_no_stop_valid_accuracy():
 
 def test_no_stop_when_not_genuine_baseline():
     executor = BaselineExecutor()
-    rec = _StopRecorder()
+    rec = SharedState(enablement_mode="off")
     task = SimpleNamespace(task_id="t", kind="replay_warm_recipe", params={"framework": "sglang"})
     ctx = SimpleNamespace(task=task, extra={"shared_state": rec})
     executor._maybe_stop_on_missing_baseline_accuracy(ctx, {"status": "succeeded", "run_eval_disabled": False})
@@ -843,7 +829,7 @@ def test_salvage_sibling_attempt_accuracy_prevents_stop(tmp_path):
     deciding.mkdir(parents=True, exist_ok=True)
 
     executor = BaselineExecutor()
-    rec = _StopRecorder()
+    rec = SharedState(enablement_mode="off")
     result = {
         "status": "succeeded",
         "run_eval_disabled": False,
@@ -873,7 +859,7 @@ def test_an_unreachable_server_does_not_discard_a_salvaged_under_floor_accuracy(
     deciding.mkdir(parents=True, exist_ok=True)
 
     executor = BaselineExecutor()
-    rec = _StopRecorder("eval")
+    rec = SharedState(enablement_mode="eval")
     result = {
         "status": "failed",
         "run_eval_disabled": False,
@@ -913,7 +899,7 @@ def test_the_double_run_handoff_is_not_reported_as_a_recovery(tmp_path, caplog):
     deciding.mkdir(parents=True, exist_ok=True)
 
     executor = BaselineExecutor()
-    rec = _StopRecorder()
+    rec = SharedState(enablement_mode="off")
     result = {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)}
     with caplog.at_level(logging.INFO, logger=_BASELINE_LOGGER):
         executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
@@ -933,7 +919,7 @@ def test_an_unexpected_gap_is_still_reported_as_a_salvage(tmp_path, caplog):
     deciding.mkdir(parents=True, exist_ok=True)
 
     executor = BaselineExecutor()
-    rec = _StopRecorder()
+    rec = SharedState(enablement_mode="off")
     result = {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)}
     with caplog.at_level(logging.INFO, logger=_BASELINE_LOGGER):
         executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
@@ -1027,7 +1013,7 @@ def _route(monkeypatch, framework, result, *, nodes=None, tmp_path=None):
     if tmp_path is not None and "materialized_config" not in result:
         result["materialized_config"] = str(_write_minimal_route_yaml(tmp_path, framework))
     executor = BaselineExecutor()
-    rec = _StopRecorder("eval")
+    rec = SharedState(enablement_mode="eval")
     executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx(framework, rec), result)
     return rec.stop_reason
 
@@ -1116,7 +1102,7 @@ def test_eval_enablement_quality_ref_exempt_not_routed(monkeypatch):
     """Synthetic kernel-lane re-baselines are neither routed nor stopped."""
     result = {"status": "succeeded", "run_eval_disabled": True}
     executor = BaselineExecutor()
-    rec = _StopRecorder("eval")
+    rec = SharedState(enablement_mode="eval")
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("sglang", rec, {"quality_ref_exempt": True}), result)
     assert rec.stop_reason == ""

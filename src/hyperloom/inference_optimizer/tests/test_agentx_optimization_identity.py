@@ -247,9 +247,9 @@ def test_warm_native_replay_rejects_before_promoting_source_or_kernel(tmp_path, 
     def unexpected(*args, **kwargs):
         pytest.fail("invalid native replay reached source/kernel promotion")
 
-    monkeypatch.setattr(coord, "_resolve_promoted_recipe_checkout", unexpected)
-    monkeypatch.setattr(coord, "_book_combined_kernel_keep", unexpected)
-    coord._settle_warm_replay(result, task=_replay_task(), recorder=None)
+    monkeypatch.setattr(coord.phase_prelude, "_resolve_promoted_recipe_checkout", unexpected)
+    monkeypatch.setattr(coord.phase_prelude, "_book_combined_kernel_keep", unexpected)
+    coord.phase_prelude._settle_warm_replay(result, task=_replay_task(), recorder=None)
     assert state.warm_replay_outcome["status"] == "drift"
     assert not state.optimization_stack
     assert not state.current_best
@@ -274,7 +274,7 @@ def test_warm_native_replay_keeps_interactivity_winner_and_its_launch_identity(t
         "materialized_config": str(input_path),
         "e2e_norm_intvty_p50": baseline["e2e_norm_intvty_p50"] * 1.1,
     }
-    coord._settle_warm_replay(result, task=_replay_task(), recorder=None)
+    coord.phase_prelude._settle_warm_replay(result, task=_replay_task(), recorder=None)
     assert state.warm_replay_outcome["status"] == "reproduced"
     assert state.optimization_stack
     assert state.current_best["materialized_config"] == str(input_path)

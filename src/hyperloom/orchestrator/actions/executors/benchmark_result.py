@@ -2035,6 +2035,15 @@ def estimate_killed_variant_throughput(
     return None
 
 
+def double_run_requested(params: dict | None) -> bool:
+    """Whether baseline double-run is enabled; defaults to True when not in params."""
+    from hyperloom.common.env import is_truthy
+
+    if params and "baseline_double_run" in params:
+        return is_truthy(params["baseline_double_run"])
+    return True
+
+
 __all__ = [
     "LATENCY_DERIVED",
     "LATENCY_FROM_RAW",
@@ -2046,6 +2055,7 @@ __all__ = [
     "estimate_output_throughput_from_server_log",
     "extract_benchmark_measurement",
     "harvest_leaked_artifacts",
+    "double_run_requested",
     "is_valid_measurement",
     "served_complete_protocol",
     "_materialize_rescue_into_workspace",

@@ -25,7 +25,7 @@ objective progress.
 
 The CLI starts a Python Coordinator that coordinates:
 
-- Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, Kernel requests, `report`).
+- Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, Kernel requests). In CLOSE, the Coordinator auto-enqueues `report` at session end; Orchestration may also propose it.
 - Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `integrate`, and related request kinds directly to Python handlers without an LLM turn. The `run_gemm_tuning` and `run_fusion` lanes are Coordinator-owned: they run inside the `kernel_agent` task at KERNEL entry and PolicyGate rejects an agent request for either.
 - Critic: proposal review (default `--critic-agent`; see
   [Critic Backend Selection](#critic-backend-selection) for modes).
@@ -391,12 +391,11 @@ brief:
   (any port that is not the production serving port 8888), profile, autotune,
   and run real benchmark loops. The one invariant is that they must not touch
   the production serving process, its cards, or port 8888.
-- **Plateau**: both arms' signals and KERNEL_AGENT's are computed every tick
-  and rendered in the orchestration prompt. One arm dry is advisory — the
-  phase stays open on the other lever. **Both arms dry advances the phase**
-  via `optimize_no_more_leverage`. A KERNEL_AGENT plateau stays advisory. The
-  LLM may also emit
-  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'}` when it judges
+- **Plateau**: both arms' signals are computed every tick and rendered in the
+  orchestration prompt. One arm dry is advisory — the phase stays open on the
+  other lever. **Both arms dry advances the phase** via
+  `optimize_no_more_leverage`. The LLM may also emit
+  `escalate_strategy_change{hint='skip_to_kernel'}` when it judges
   further effort unproductive. `skip_to_close` is not a phase advance: it abandons
   the remaining budget and is reserved for genuine early abandonment.
 
@@ -1551,9 +1550,8 @@ The optimizer should:
   (`current_tput / last_roofline_tput >= 1.10`; compound). Default is
   `roofline` (profile + trace_analyze + analysis.md); `--no-enable-roofline`
   switches to plain `profile`. The LLM cannot propose either —
-  both names are Coordinator-managed and absent from
-  `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 returns
-  `rule='phase_incompatible'`. Concurrent GPU work is
+  both names are Coordinator-managed and a proposal for either is denied with
+  `rule="coordinator_managed_action"`. Concurrent GPU work is
   serialised by the lane / GPU lease rather than a policy deny, so
   explore / kernel dispatches keep flowing while analysis refreshes.
   Each analysis also stamps a decode roofline ceiling

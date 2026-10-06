@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -124,8 +125,10 @@ def _coord(tmp_path: Path, *, framework: str = "sglang", agentx: bool = True, me
             },
         },
     )
-    coord.shared_state.current_best["measurement"]["launch_identity"] = coord.build_env_spec()["launch_identity"]
-    coord._record_geak_kernel_journey = lambda _result: None
+    coord.shared_state.current_best["measurement"]["launch_identity"] = coord.writeback.build_env_spec()[
+        "launch_identity"
+    ]
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
     return coord
 
 
@@ -134,7 +137,7 @@ async def _handoff(coord: Coordinator, monkeypatch: pytest.MonkeyPatch) -> dict:
         "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         Mock(side_effect=RuntimeError("stop after handoff write")),
     )
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
     return json.loads((coord.session_dir / "geak" / "handoff.json").read_text(encoding="utf-8"))
 
 
@@ -204,7 +207,7 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
         "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         lambda _name: tmp_path / "mock_geak_runner.py",
     )
-    coord._geak_timeouts = lambda: (60, 90, False)
+    coord.phase_kernel._geak_timeouts = lambda: (60, 90, False)
     captured_env = {}
 
     def _start_runner(_cmd, *, env, **_kwargs):
@@ -215,7 +218,7 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
 
     monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", _start_runner)
     with caplog.at_level("INFO", logger="hyperloom.orchestrator.phases.kernel"):
-        await coord._run_geak_kernel_phase(from_phase="KERNEL")
+        await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert (handoff["e2e_metric"], captured_env["E2E_METRIC"]) == (expected_metric, expected_metric)
@@ -269,6 +272,7 @@ async def test_native_agentx_skips_geak_before_writing_a_handoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, framework: str
 ) -> None:
     coord = _coord(tmp_path, framework=framework)
+    coord.shared_state.phase = machine_state.PHASE_KERNEL_AGENT
     recipe_path = Path(coord.shared_state.baseline_config_path)
     config = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
     config["benchmark"]["agentx"] = "enable"
@@ -284,7 +288,7 @@ async def test_native_agentx_skips_geak_before_writing_a_handoff(
         "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         Mock(side_effect=AssertionError("native AgentX must not resolve or launch GEAK")),
     )
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert not (tmp_path / "geak" / "handoff.json").exists()
     assert coord.shared_state.geak_result == {
@@ -295,4 +299,7 @@ async def test_native_agentx_skips_geak_before_writing_a_handoff(
             "InferenceX exposes a fingerprinted optimizer-argv hook"
         ),
     }
-    assert coord.shared_state.pending_escalate_hint == "skip_to_sweep"
+    assert coord.shared_state.pending_escalate_hint == ""
+    transition = machine_state.compute_next_phase(coord.shared_state)
+    assert transition is not None
+    assert transition[:2] == (machine_state.PHASE_SWEEP, "kernel_no_more_leverage")

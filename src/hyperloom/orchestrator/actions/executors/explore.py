@@ -64,6 +64,7 @@ from ._grid_base import (
     TS_KILLED_OVERTIME,
     TS_SKIPPED_DEDUP,
 )
+from .benchmark_result import double_run_requested
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     _MN_BACKENDS_PRIORITY,
@@ -101,6 +102,12 @@ log = logging.getLogger(__name__)
 
 
 _now_iso = functools.partial(now_iso, "auto")
+
+STACK_REVALIDATE_SOURCE: str = "stack_revalidate"
+
+
+def is_stack_revalidation(params: dict | None) -> bool:
+    return str((params or {}).get("source") or "") == STACK_REVALIDATE_SOURCE
 
 
 # Audit/provenance metadata stashed on a GridVariant that must survive being rebuilt into a derived variant.
@@ -514,7 +521,7 @@ class ExploreExecutor:
         # Revalidation reproduces the saved stack, so it never re-anchors.
         anchor, anchor_drifted = (
             (snapshot_tput, False)
-            if params.get("source") == "resume_stack_revalidate"
+            if params.get("source") == STACK_REVALIDATE_SOURCE
             else resolve_anchor_with_drift(snapshot_tput, ss)
         )
         if anchor > snapshot_tput:
@@ -807,7 +814,8 @@ class ExploreExecutor:
         lifecycle_port = int(lifecycle.get("port") or 0)
 
         # Warm-decision mode.
-        use_warm_decision = lifecycle_eligible and bool(getattr(ss, "baseline_double_run", True))
+        _double_run = double_run_requested(params)
+        use_warm_decision = lifecycle_eligible and _double_run
         # Admission uses the measured warm duration when this round reuses a server.
         decision_anchor_sec = (
             baseline_warm_runtime_sec if (use_warm_decision and baseline_warm_runtime_sec > 0) else baseline_runtime_sec
@@ -1095,7 +1103,7 @@ class ExploreExecutor:
                         gain = None
                         reason = (r.error or "")[-1200:] or "no_measurement"
                     elif graded.degrade_reason:
-                        # Same fail-closed rule as ``_lift_to_current_best``: an
+                        # Same fail-closed rule as ``lift_to_current_best``: an
                         # AgentX session that could not grade on interactivity
                         # does not KEEP on output throughput instead.
                         gain = None

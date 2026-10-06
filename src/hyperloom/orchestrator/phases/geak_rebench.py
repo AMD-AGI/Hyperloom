@@ -30,7 +30,7 @@ _TERMINAL_REVALIDATION_STATUSES: frozenset[str] = frozenset({"no_material", "no_
 def geak_harness_replays_workload(state: Any) -> bool:
     """Whether GEAK's own harness can replay this session's workload.
 
-    The canonical AgentX workload it cannot: ``_validate_geak_via_geak_harness``
+    The canonical AgentX workload it cannot: ``validate_geak_via_geak_harness``
     refuses before launch, which is what makes a refusal there structural rather
     than a run that might land next time. Persisted mode wins over the ambient
     switch, matching that refusal, so a session recorded as synthetic keeps
@@ -39,7 +39,7 @@ def geak_harness_replays_workload(state: Any) -> bool:
     from hyperloom.common.perf_metric import is_agentx_mode
     from ..actions.executors._workload_envs import agentx_enabled
 
-    mode = str(getattr(state, "benchmark_mode", "") or "").strip()
+    mode = str(state.benchmark_mode or "").strip()
     return not (is_agentx_mode(mode) if mode else agentx_enabled())
 
 
@@ -108,7 +108,7 @@ def geak_candidate_is_adjudicated(persisted: Any, recovered: Any, *, harness_can
                 return False
     blocked_overlay = str(prev.get("revalidation_blocked_overlay") or "")
     if blocked_overlay:
-        from ..loop.coordinator_helpers import _geak_overlay_is_loadable, _normalize_geak_overlay_dir
+        from ..kernel.geak_config import _geak_overlay_is_loadable, _normalize_geak_overlay_dir
 
         if _geak_overlay_is_loadable(_normalize_geak_overlay_dir(blocked_overlay)):
             return False

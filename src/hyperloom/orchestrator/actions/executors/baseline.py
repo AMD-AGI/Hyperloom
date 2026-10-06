@@ -128,6 +128,7 @@ from ._patch_snapshot import (
     _restore_patch_snapshot,
 )
 from .benchmark_result import (
+    double_run_requested,
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
     select_run_workspace,
@@ -2577,11 +2578,8 @@ class BenchmarkRunExecutor:
         # Cold-start "warmup artifact" guard: the freshly-booted server's first benchmark window pays one-time cold
         # costs that inflate later gains into fictitious "improvements".
         lifecycle = _lifecycle.resolve_lifecycle_params(materialized_config_path)
-        double_run_requested = self._double_run_enabled(
-            params=params,
-            ctx_extra=extra,
-        )
-        double_run = double_run_requested and lifecycle["eligible"]
+        double_run_wanted = double_run_requested(params)
+        double_run = double_run_wanted and lifecycle["eligible"]
         if defer_accuracy_until_after_measure and double_run:
             # Only the lifecycle path can reuse the hot server for a staged accuracy round.
             _set_materialized_run_eval(
@@ -2823,7 +2821,7 @@ class BenchmarkRunExecutor:
         }
 
         if not double_run:
-            if double_run_requested and not lifecycle["eligible"]:
+            if double_run_wanted and not lifecycle["eligible"]:
                 log.info(
                     "baseline_executor: cold-start double-run not eligible (%s); running single round.",
                     lifecycle["reason"],
@@ -3192,35 +3190,6 @@ class BenchmarkRunExecutor:
             **evidence,
         }
         return headroom_sec >= cost, priced
-
-    def _double_run_enabled(
-        self,
-        *,
-        params: dict[str, Any] | None = None,
-        ctx_extra: dict[str, Any] | None = None,
-    ) -> bool:
-        """Whether baseline double-run is enabled."""
-        params = params or {}
-        if "baseline_double_run" in params:
-            return is_truthy(params.get("baseline_double_run"))
-
-        extra = ctx_extra or {}
-        state = extra.get("shared_state") or self.shared_state
-        if state is not None:
-            return bool(getattr(state, "baseline_double_run", False))
-
-        try:
-            from ...state.shared_state import SharedState
-
-            session_dir = Path(str(extra.get("session_dir") or self.session_dir))
-            state = SharedState.load_or_init(session_dir)
-            return bool(getattr(state, "baseline_double_run", False))
-        except Exception:
-            log.debug(
-                "baseline_executor: could not resolve baseline_double_run from session state",
-                exc_info=True,
-            )
-            return True
 
     def _write_lifecycle_config(
         self,
@@ -3693,7 +3662,9 @@ class BenchmarkRunExecutor:
             """
             from ...bringup import observe_bringup, write_boot_observation
 
-            read = read_bringup_log(server_log)
+            # Magpie writes the server log into the workspace it creates, not to $SERVER_LOG.
+            workspace = select_run_workspace(output_dir, known_before=workspaces_before)
+            read = read_bringup_log(workspace / "server.log" if workspace is not None else server_log)
             verdict = observe_bringup(
                 server_log=read.text,
                 server_elapsed_sec=server_child_elapsed_sec(read.text),

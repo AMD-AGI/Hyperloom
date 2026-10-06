@@ -8,8 +8,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from hyperloom.orchestrator.knowledge import static_recon_checklist as src
-from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.phases.internal import InternalTasksPhase
 from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAIN_KEYS,
     get_domain,
@@ -157,7 +157,7 @@ def test_consume_static_recon_seeds_gaps(tmp_path):
             ],
         },
     }
-    Coordinator._consume_static_recon(stub, payload)
+    InternalTasksPhase.consume_static_recon(stub, payload)
     gap = stub.shared_state.find_gap("gap.static_recon.rocm.fp8.cutlass_only_guard")
     assert gap is not None
     assert gap["layer"] == "static_recon"
@@ -177,13 +177,13 @@ def test_consume_static_recon_drops_incomplete_candidates(tmp_path):
             ],
         },
     }
-    Coordinator._consume_static_recon(stub, payload)
+    InternalTasksPhase.consume_static_recon(stub, payload)
     assert stub.shared_state.gaps == []
 
 
 def test_consume_static_recon_handles_missing_recon_block(tmp_path):
     stub = _stub_coord(tmp_path)
-    Coordinator._consume_static_recon(stub, {"domain": "static_recon_specialist"})
+    InternalTasksPhase.consume_static_recon(stub, {"domain": "static_recon_specialist"})
     assert stub.shared_state.gaps == []
 
 
@@ -200,7 +200,7 @@ def test_consume_static_recon_sanitizes_id_into_canonical(tmp_path):
             ],
         },
     }
-    Coordinator._consume_static_recon(stub, payload)
+    InternalTasksPhase.consume_static_recon(stub, payload)
     cids = [g["canonical_id"] for g in stub.shared_state.gaps]
     assert len(cids) == 1
     assert cids[0].startswith("gap.static_recon.")

@@ -22,9 +22,7 @@ from hyperloom.orchestrator.state.task_registry import Task
 async def test_public_native_explore_keeps_comparable_candidates_without_reapplying_snapshot(tmp_path, monkeypatch):
     config = tmp_path / "native.yaml"
     config.write_text(yaml.safe_dump({"benchmark": _benchmark()}))
-    state = SharedState(
-        framework="sglang", benchmark_mode="agentx", agentx_epoch=3, agentx_backend="native", baseline_double_run=False
-    )
+    state = SharedState(framework="sglang", benchmark_mode="agentx", agentx_epoch=3, agentx_backend="native")
     state.baseline_tput = 200.0
     state.baseline_perf = {
         "output_throughput": 200.0,

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Collection, Final, Mapping
 
+from hyperloom.inference_optimizer.grid_server_args import compose_server_args, dedupe_extra_server_args
 from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_ENABLEMENT,
@@ -367,9 +368,6 @@ def _apply_recipe_delta(
     config: dict[str, Any],
     delta: Mapping[str, Any],
 ) -> dict[str, Any]:
-    from hyperloom.inference_optimizer.grid_server_args import compose_server_args
-    from ...loop.coordinator_helpers import _dedupe_extra_server_args
-
     mode = str(delta.get("args_mode") or "append").strip().lower()
     if mode not in {"append", "replace"}:
         raise RemoteRecipeValidationError(f"unsupported recipe args_mode: {mode!r}")
@@ -391,7 +389,7 @@ def _apply_recipe_delta(
         )
     envs.update(raw_envs)
     return {
-        "extra_server_args": _dedupe_extra_server_args(args),
+        "extra_server_args": dedupe_extra_server_args(args),
         "extra_envs": envs,
     }
 

@@ -16,7 +16,7 @@ from typing import Any
 from hyperloom.common.io import atomic_write_json
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.orchestrator.bus.message_bus import Message
-from hyperloom.orchestrator.loop.coordinator_helpers import (
+from hyperloom.orchestrator.kernel.geak_config import (
     _geak_overlay_is_loadable,
     geak_spec_is_env,
 )
@@ -225,7 +225,7 @@ def _record_canonical_adoption(coord: Any, params: dict[str, Any], measurement: 
 
     graded = resolve_graded_comparison(coord.shared_state, measurement, against_baseline=True)
     if graded.comparable:
-        coord._record_geak_adopted_kernels(
+        coord.phase_kernel._record_geak_adopted_kernels(
             coord.shared_state.geak_result,
             measured_tput=graded.candidate,
             baseline_tput=graded.reference,
@@ -233,7 +233,6 @@ def _record_canonical_adoption(coord: Any, params: dict[str, Any], measurement: 
             overlay_loaded=bool(params.get("overlay_pythonpath")),
             source_applied=True,
         )
-    coord.shared_state.resume_pending_revalidation = False
 
 
 async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
@@ -279,10 +278,10 @@ async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
     result = await coord.sub.execute_covered(task)
     measurement = result.get("bench_result") or result
     stack_before = len(coord.shared_state.optimization_stack or [])
-    if coord._is_promotable_result("integrate_patch", result):
-        await coord._promote_to_shared_state("integrate_patch", result, task=task)
+    if coord.writeback.is_promotable_result("integrate_patch", result):
+        await coord.writeback.promote_to_shared_state("integrate_patch", result, task=task)
     else:
-        await coord._handle_unpromotable_result(task, result)
+        await coord.writeback.handle_unpromotable_result(task, result)
     kept = result.get("status") == "kept" and len(coord.shared_state.optimization_stack or []) > stack_before
     if kept:
         _record_canonical_adoption(coord, params, measurement)

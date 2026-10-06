@@ -341,7 +341,6 @@ async def test_epoch_three_baseline_applies_and_attests_warm_source_transaction(
         benchmark_mode="agentx",
         agentx_epoch=3,
         agentx_backend="native",
-        baseline_double_run=False,
         model_path="/models/glm",
     )
     executor = BaselineExecutor(default_config_path=base, session_dir=tmp_path, shared_state=state)

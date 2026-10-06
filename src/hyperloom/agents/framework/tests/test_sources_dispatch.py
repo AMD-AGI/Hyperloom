@@ -126,7 +126,7 @@ def test_dispatch_unions_pr_monitor_and_github(monkeypatch) -> None:
             GitHubPr(number=2, title="b", html_url="u2"),
         ]
 
-    def fake_github(repo_url, *, limit, states=("open",)):
+    def fake_github(repo_url, *, limit, states=("open",), terms=()):
         return [
             GitHubPr(number=2, title="dup", html_url="dup"),
             GitHubPr(number=3, title="c", html_url="u3"),
@@ -142,6 +142,34 @@ def test_dispatch_unions_pr_monitor_and_github(monkeypatch) -> None:
     by_ref = {c.ref: c.source for c in out}
     assert by_ref["PR:2"] == "pr_monitor"
     assert by_ref["PR:3"] == "github"
+
+
+def test_github_searches_for_the_request_keywords(monkeypatch) -> None:
+    """An enablement request names the failure, so the GitHub query must carry it."""
+    captured: dict[str, object] = {}
+
+    def fake_github(repo_url, *, limit, states=("open",), terms=()):
+        captured["terms"] = terms
+        return []
+
+    monkeypatch.setattr(src.github_backend, "search_perf_prs", fake_github)
+    src.enumerate_candidates(
+        _minimal_request(search_modes=("github",), keywords=("deepseekv4", "causallm", "architectures"))
+    )
+    assert captured["terms"] == ("deepseekv4", "causallm", "architectures")
+
+
+def test_github_without_keywords_searches_the_perf_terms(monkeypatch) -> None:
+    """Perf discovery names no failure and keeps the perf term set."""
+    captured: dict[str, object] = {}
+
+    def fake_github(repo_url, *, limit, states=("open",), terms=()):
+        captured["terms"] = terms
+        return []
+
+    monkeypatch.setattr(src.github_backend, "search_perf_prs", fake_github)
+    src.enumerate_candidates(_minimal_request(search_modes=("github",)))
+    assert captured["terms"] == src.github_backend.PERF_TERMS
 
 
 def test_pr_monitor_uses_search_endpoint_when_keywords_present(monkeypatch) -> None:

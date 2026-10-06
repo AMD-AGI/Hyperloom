@@ -54,7 +54,6 @@ from ..specialists.profile import (
 )
 from ..specialists.patch_safety import parse_patch_targets
 from ..state._shared_state.phase_state import gap_actionability_key
-from ..state.shared_state import SharedState
 
 if TYPE_CHECKING:  # pragma: no cover — type-only
     from ..roles.agent_role import AgentRole
@@ -332,8 +331,6 @@ class PolicyGate:
             self._validate_delegate(role, payload)
         elif intent.type == IntentType.PROPOSE_ACTION:
             self._validate_propose_action(role, payload)
-        elif intent.type == IntentType.UPDATE_STATE:
-            self._validate_state_transition(payload)
         elif intent.type == IntentType.SEND_MESSAGE:
             self._validate_send_message_topic(payload)
         elif intent.type == IntentType.REQUEST:
@@ -428,8 +425,7 @@ class PolicyGate:
         capability, presence of ``action_name``, the
         kernel_agent-owned-action guard, the per-action specialised paths
         (``specialist`` / ``integrate_patch`` / ``sweep``), the GEMM-tuning
-        ownership gate, the action-catalogue unknown-action lookup, per-action
-        source and required-payload guards, the phase-compatibility check,
+        ownership gate, per-action source and required-payload guards,
         and the external-tool collision guard (R5).
 
         Args:
@@ -580,35 +576,6 @@ class PolicyGate:
             rule=RULE_ROUND_IN_FLIGHT,
             hint="Let the round settle; a second bring-up would fight it for the same cards and ports.",
         )
-
-    def _validate_state_transition(self, payload: dict[str, Any]) -> None:
-        """Admit ``changes`` only when every key is in :data:`SharedState.AGENT_UPDATE_FIELDS` with its declared type.
-
-        One bad key refuses the whole intent, so an update never lands half of
-        itself and leaves the agent guessing which half.
-        """
-        changes = payload.get("changes")
-        if not isinstance(changes, dict) or not changes:
-            raise PolicyDenied(
-                "update_state.payload.changes must be a non-empty dict",
-                rule="payload",
-                hint=("include at least one allowed field, e.g. {'changes': {'current_action': '<action_name>'}}"),
-            )
-        writable = sorted(SharedState.AGENT_UPDATE_FIELDS)
-        for key, value in changes.items():
-            expected = SharedState.AGENT_UPDATE_FIELDS.get(key)
-            if expected is None:
-                raise PolicyDenied(
-                    f"{key!r} is not agent-writable; writable: {writable!r}",
-                    rule="state_field",
-                    hint="the whole update is refused, so re-send it carrying only the writable fields.",
-                )
-            if not isinstance(value, expected):
-                raise PolicyDenied(
-                    f"{key!r} must be {expected.__name__}, got {type(value).__name__}",
-                    rule="state_field",
-                    hint="the whole update is refused, so re-send it with a value of the declared type.",
-                )
 
     def _validate_send_message_topic(self, payload: dict[str, Any]) -> None:
         """Require a non-empty ``topic`` on a ``SEND_MESSAGE`` intent.

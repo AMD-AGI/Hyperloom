@@ -795,7 +795,7 @@ async def test_legacy_agentx_baseline_keeps_candidate_runtime(tmp_path, monkeypa
     monkeypatch.setenv("INFERENCEX_PATH", str(checkout))
     base = tmp_path / "legacy.yaml"
     _write_yaml(base, framework="sglang")
-    state = SharedState(benchmark_mode="agentx", agentx_epoch=1, baseline_double_run=False)
+    state = SharedState(benchmark_mode="agentx", agentx_epoch=1)
     executor = BaselineExecutor(default_config_path=base, session_dir=tmp_path, shared_state=state)
     captured = {}
 
