@@ -368,9 +368,9 @@ def test_select_anchor_rejects_insane_anchor(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     "raw, mode",
-    [(None, "simulate"), ("", "simulate"), ("simulate", "simulate"), ("Benchmark", "benchmark")],
+    [(None, "auto"), ("", "auto"), ("simulate", "simulate"), ("Benchmark", "benchmark"), ("AUTO", "auto")],
 )
-def test_projection_mode_defaults_to_simulate(monkeypatch, raw, mode):
+def test_projection_mode_defaults_to_auto(monkeypatch, raw, mode):
     if raw is None:
         monkeypatch.delenv(ib.ENV_MODE, raising=False)
     else:
@@ -531,7 +531,7 @@ def test_harvest_runs_once_indexes_and_selects(tmp_path, monkeypatch):
     indexed: list[str] = []
 
     class FakeStore:
-        def __init__(self, root):
+        def __init__(self, root, discover=True):
             assert root == str(store)
 
         def add_artifact(self, path):
@@ -601,3 +601,145 @@ def test_a_corrupt_harvest_is_not_indexed(tmp_path, monkeypatch):
     monkeypatch.setattr(ib.subprocess, "run", fake_run)
     monkeypatch.setattr(ib, "_ensure_infera_importable", lambda: pytest.fail("indexed a corrupt anchor"))
     assert ib.harvest_anchor(_spec()) is None
+
+
+# ── closed-loop replay ───────────────────────────────────────────────────────
+
+
+def test_the_replay_is_the_default_estimator(monkeypatch):
+    monkeypatch.delenv(ib.ENV_ESTIMATOR, raising=False)
+    spec = _spec(framework="sglang", conc=32, extra_server_args="--chunked-prefill-size 8192 --max-running-requests 64")
+    argv = ib._build_argv(spec, "w.yaml")
+    arg = lambda flag: argv[argv.index(flag) + 1]  # noqa: E731
+    assert "--des-closed-loop" in argv
+    assert arg("--des-num-requests") == "320"  # ten requests per client
+    assert arg("--des-warmup-frac") == "0"
+    assert arg("--chunked-prefill-size") == "8192"
+    assert arg("--max-num-seqs") == "64"
+    assert "--des-exclusive-prefill" in argv  # SGLang prefills alone
+
+
+def test_the_replay_sizes_to_the_client_and_vllm_co_schedules_prefill(monkeypatch):
+    monkeypatch.delenv(ib.ENV_ESTIMATOR, raising=False)
+    argv = ib._build_argv(_spec(framework="vllm", conc=4, num_prompts=1000000), "w.yaml")
+    assert argv[argv.index("--des-num-requests") + 1] == "4000"
+    assert "--des-exclusive-prefill" not in argv
+    argv = ib._build_argv(_spec(framework="vllm", conc=2), "w.yaml")
+    assert argv[argv.index("--des-num-requests") + 1] == "64"
+
+
+def test_the_closed_form_is_still_selectable(monkeypatch):
+    monkeypatch.setenv(ib.ENV_ESTIMATOR, "analytical")
+    assert "--des-closed-loop" not in ib._build_argv(_spec(), "w.yaml")
+    monkeypatch.setenv(ib.ENV_ESTIMATOR, "replay")
+    with pytest.raises(ib.InferasimBridgeError):
+        ib.estimator()
+
+
+def test_replayed_metrics_come_from_the_replay():
+    from types import SimpleNamespace
+
+    perf = SimpleNamespace(decode_throughput_tps=9999.0, ttft_ms=1.0, itl_ms=1.0, request_latency_ms=1.0, extras={})
+    point = SimpleNamespace(
+        system_throughput_tps=1200.0,
+        ttft={"mean": 300.0},
+        ttft_arrival={"mean": 450.0},
+        tpot={"mean": 12.5},
+        itl={"mean": 11.0},
+        e2e={"mean": 13000.0},
+    )
+    m = ib._metrics_from_results(_spec(osl=1000, isl=1000), perf, None, des={"point": point})
+    assert m.output_throughput == pytest.approx(1200.0)
+    assert (m.ttft_ms, m.tpot_ms, m.itl_ms, m.e2el_ms) == (450.0, 12.5, 11.0, 13000.0)
+    assert m.extras["estimator"] == "des"
+    closed = ib._metrics_from_results(_spec(), perf, None)
+    assert closed.output_throughput == pytest.approx(9999.0)
+    assert closed.extras["estimator"] == "analytical"
+
+
+# ── auto mode ────────────────────────────────────────────────────────────────
+
+
+def test_auto_calibrates_only_on_an_in_regime_anchor(monkeypatch):
+    monkeypatch.delenv(ib.ENV_MODE, raising=False)
+    monkeypatch.setattr(ib, "select_anchor", lambda spec: None)
+    assert ib.resolve_mode(_spec()) == ib.MODE_SIMULATE
+    monkeypatch.setattr(ib, "select_anchor", lambda spec: ib.AnchorChoice(path="/a", regime_distance=1))
+    assert ib.resolve_mode(_spec()) == ib.MODE_SIMULATE
+    monkeypatch.setattr(ib, "select_anchor", lambda spec: ib.AnchorChoice(path="/a", regime_distance=0))
+    assert ib.resolve_mode(_spec()) == ib.MODE_BENCHMARK
+    monkeypatch.setenv(ib.ENV_MODE, "simulate")
+    assert ib.resolve_mode(_spec()) == ib.MODE_SIMULATE
+
+
+def test_a_miss_without_harvest_fails_closed_and_boots_nothing(monkeypatch):
+    monkeypatch.setattr(ib, "select_anchor", lambda spec: ib.AnchorChoice(path="/a", regime_distance=1))
+    monkeypatch.setattr(ib, "harvest_anchor", lambda spec: pytest.fail("auto mode harvested"))
+    with pytest.raises(ib.InferasimBridgeError, match="could be found$"):
+        ib.resolve_anchor(_spec(), harvest=False)
+
+
+# ── decision rounds as anchors ───────────────────────────────────────────────
+
+
+@pytest.fixture
+def anchor_store(tmp_path, monkeypatch):
+    store = tmp_path / "anchors"
+    monkeypatch.setenv(ib.ENV_ANCHOR_STORE, str(store))
+    indexed: list[str] = []
+    monkeypatch.setattr(ib, "_index_artifact", lambda root, path: indexed.append(path))
+    return store, indexed
+
+
+def test_a_decision_round_is_recorded_as_a_served_single_point_anchor(anchor_store):
+    store, indexed = anchor_store
+    spec = _spec(
+        framework="sglang", conc=64, extra_server_args="--attention-backend aiter", runtime={"image_digest": "x"}
+    )
+    path = ib.record_measured_anchor(spec, tpot_mean_ms=14.0, gpu="MI355X", source={"round_id": "explore-001"})
+    assert path and indexed == [path]
+    doc = json.loads(Path(path).read_text())
+    assert doc["backend"] == "sglang"
+    assert doc["sweep"] == [{"batch": 64, "decode_ms": 14.0}]
+    meta = doc["meta"]
+    assert (meta["tp"], meta["attention_backend"], meta["gpu_arch"]) == (8, "aiter", "mi355x")
+    assert meta["runtime"] == {"image_digest": "x"}
+    assert meta["sources"] == [{"batch": 64, "round_id": "explore-001"}]
+    assert ib.anchor_curve_is_sane(path) and ib._anchor_is_served(path) and ib._anchor_is_real_weights(path)
+
+
+def test_concurrencies_of_one_launch_build_a_ladder(anchor_store):
+    first = ib.record_measured_anchor(_spec(conc=64), tpot_mean_ms=14.0)
+    ib.record_measured_anchor(_spec(conc=16), tpot_mean_ms=9.0)
+    again = ib.record_measured_anchor(_spec(conc=64), tpot_mean_ms=15.0)
+    other = ib.record_measured_anchor(_spec(conc=16, extra_server_args="--max-num-seqs 16"), tpot_mean_ms=8.0)
+    assert first == again != other
+    sweep = json.loads(Path(first).read_text())["sweep"]
+    assert sweep == [{"batch": 16, "decode_ms": 9.0}, {"batch": 64, "decode_ms": 15.0}]
+
+
+def test_an_impossible_ladder_is_not_recorded(anchor_store):
+    ib.record_measured_anchor(_spec(conc=16), tpot_mean_ms=20.0)
+    assert ib.record_measured_anchor(_spec(conc=64), tpot_mean_ms=5.0) is None
+
+
+def test_nothing_is_recorded_without_a_store_or_a_tpot(monkeypatch, anchor_store):
+    assert ib.record_measured_anchor(_spec(), tpot_mean_ms=None) is None
+    monkeypatch.delenv(ib.ENV_ANCHOR_STORE)
+    assert ib.record_measured_anchor(_spec(), tpot_mean_ms=10.0) is None
+
+
+def test_a_measured_anchor_from_another_image_conflicts(tmp_path):
+    path = tmp_path / "a.json"
+    path.write_text(json.dumps({"meta": {"runtime": {"image_digest": "old", "framework_version": "0.5"}}}))
+    assert ib._runtime_conflicts(str(path), {"image_digest": "new"})
+    assert not ib._runtime_conflicts(str(path), {"image_digest": "old"})
+    assert not ib._runtime_conflicts(str(path), {"rocm": "7"})
+    assert not ib._runtime_conflicts(str(path), {})
+
+
+def test_gpu_arch_is_canonical(monkeypatch):
+    monkeypatch.delenv(ib.ENV_GPU_ARCH, raising=False)
+    assert ib.gpu_arch() == "mi355x"
+    assert ib.gpu_arch("AMD Instinct MI300X") == "mi300x"
+    assert ib.recipe_from_spec(_spec())["gpu_arch"] == "mi355x"
