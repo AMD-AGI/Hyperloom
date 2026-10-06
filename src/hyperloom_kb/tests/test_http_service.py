@@ -49,6 +49,8 @@ from hyperloom_kb import (
 )
 from hyperloom_kb.config import PACKAGED_DECLARATION
 from hyperloom_kb.http_service import code_digest
+from hyperloom_kb.database import Database
+from hyperloom_kb.tests.conftest import fresh_database
 
 NOW = datetime(2026, 9, 28, tzinfo=timezone.utc)
 TOKEN = "service-secret"
@@ -139,11 +141,14 @@ def _read_context() -> dict[str, Any]:
 def _app(
     home: Path,
     schema: ExperienceDeclaration | None = None,
+    *,
+    database: Database | None = None,
 ) -> ExperienceHTTPService:
     return ExperienceHTTPService(
         HTTPServiceConfig(home, TOKEN),
         schema or _declaration(),
         LLMQueryPlanner(FakePlannerBackend(), PlannerConfiguration.create("test-planner")),
+        database=database or fresh_database(),
     )
 
 
@@ -434,9 +439,10 @@ def test_empty_service_reads_without_planning(tmp_path: Path) -> None:
     assert (read["status"], read["prompt_block"], read["eligible_count"]) == ("completed", "", 0)
 
 
-def test_list_pages_in_write_order_and_rebuilds_index_after_restart(tmp_path: Path) -> None:
+def test_list_pages_in_write_order_and_keeps_them_across_a_restart(tmp_path: Path) -> None:
     schema = _declaration()
     home = tmp_path / "service"
+    database = fresh_database()
     experiences = tuple(_experience(schema, seq=seq, knob=f"knob_{seq}") for seq in (3, 0, 4, 1, 2))
 
     def all_ids(url: str) -> tuple[list[str], list[int]]:
@@ -452,26 +458,20 @@ def test_list_pages_in_write_order_and_rebuilds_index_after_restart(tmp_path: Pa
                 return ids, sequences
             cursor = page.next_cursor
 
-    with RunningServer(_app(home, schema)) as url:
+    with RunningServer(_app(home, schema, database=database)) as url:
         for experience in experiences:
             _client(url, tmp_path).publish(experience)
         written, sequences = all_ids(url)
         bad_limit = _http(url, "GET", "/v1/list?limit=501")
         bad_cursor = _http(url, "GET", "/v1/list?after=-1")
 
-    with RunningServer(_app(home, schema)) as url:
+    with RunningServer(_app(home, schema, database=database)) as url:
         reopened, _ = all_ids(url)
-
-    for path in home.glob("kb.sqlite3*"):
-        path.unlink()
-    with RunningServer(_app(home, schema)) as url:
-        rebuilt, _ = all_ids(url)
         health = _client(url, tmp_path).health()
 
     assert written == [item.id for item in experiences]
     assert sequences == sorted(sequences)
     assert reopened == written
-    assert rebuilt == [item.id for item in sorted(experiences, key=lambda item: item.seq)]
     assert health["experience_count"] == 5
     assert (bad_limit[0], bad_cursor[0]) == (400, 400)
 
@@ -537,10 +537,10 @@ def test_storage_failure_is_retryable_and_spooled(
     schema = _declaration()
     app = _app(tmp_path / "service", schema)
 
-    def unavailable_disk(_experience: Experience) -> None:
+    def unavailable_disk(_experience_id: str, _data: bytes) -> None:
         raise OSError("disk unavailable")
 
-    monkeypatch.setattr(app._store, "insert_complete", unavailable_disk)
+    monkeypatch.setattr(app._records, "write", unavailable_disk)
     experience = _experience(schema)
     with RunningServer(app) as url:
         status, body = _http(

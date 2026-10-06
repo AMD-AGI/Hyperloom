@@ -5,13 +5,12 @@
 
 from __future__ import annotations
 
-import sqlite3
-import threading
 from collections import Counter
 from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any, Protocol
+
+from hyperloom_kb.database import Database, WriteSource
 
 from hyperloom_kb.remote import RemoteClient, RemoteClientError, RemoteConfig
 from hyperloom_kb.schema import Experience, ExperienceDeclaration, JsonValue
@@ -43,163 +42,154 @@ def global_config_from_env(env: Mapping[str, str]) -> RemoteConfig | None:
 
 
 class SyncLedger:
-    """What this service knows of each global KB it syncs with: the KB's identity, push and pull cursors, the
-    Experiences pulled here, which are never pushed back, the ones a push held back because reads here did not see
-    them, every Experience known to be on that global KB, and the state of each schema there as a pull last saw it."""
+    """What one KB knows of each global KB it syncs with: the KB's identity, push and pull cursors, the Experiences
+    pulled here, which are never pushed back, the ones a push held back because reads here did not see them, every
+    Experience known to be on that global KB, and the state of each schema there as a pull last saw it."""
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connection() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS cursors (
-                    global_url TEXT NOT NULL,
-                    direction TEXT NOT NULL,
-                    position INTEGER NOT NULL,
-                    PRIMARY KEY (global_url, direction)
-                );
-                CREATE TABLE IF NOT EXISTS pulled (experience_id TEXT PRIMARY KEY);
-                CREATE TABLE IF NOT EXISTS held_back (
-                    global_url TEXT NOT NULL,
-                    experience_id TEXT NOT NULL,
-                    PRIMARY KEY (global_url, experience_id)
-                );
-                CREATE TABLE IF NOT EXISTS identities (global_url TEXT PRIMARY KEY, kb_id TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS on_global (
-                    global_url TEXT NOT NULL,
-                    schema_ref TEXT NOT NULL,
-                    experience_id TEXT NOT NULL,
-                    PRIMARY KEY (global_url, schema_ref, experience_id)
-                );
-                CREATE TABLE IF NOT EXISTS pulls_in_progress (
-                    global_url TEXT NOT NULL,
-                    schema_ref TEXT NOT NULL,
-                    PRIMARY KEY (global_url, schema_ref)
-                );
-                CREATE TABLE IF NOT EXISTS pulled_states (
-                    global_url TEXT NOT NULL,
-                    schema_ref TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    PRIMARY KEY (global_url, schema_ref)
-                );
-                """
-            )
+    def __init__(self, database: Database, kb_id: str) -> None:
+        self._database = database
+        self.kb_id = kb_id
 
     @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=30)
-        try:
-            with connection:
-                yield connection
-        finally:
-            connection.close()
+    def exclusive(self) -> Iterator[None]:
+        """Hold this KB's sync against every other push or pull of it, in any process sharing the database."""
+
+        with self._database.exclusive(f"hyperloom-kb:sync:{self.kb_id}"):
+            yield
+
+    def _execute(self, query: str, *args: Any) -> None:
+        with self._database.transaction() as connection:
+            connection.execute(query, (self.kb_id, *args))
+
+    def _rows(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        with self._database.transaction() as connection:
+            return connection.execute(query, (self.kb_id, *args)).fetchall()
 
     def cursor(self, global_url: str, direction: str) -> int:
-        with self._connection() as connection:
-            row = connection.execute(
-                "SELECT position FROM cursors WHERE global_url = ? AND direction = ?",
-                (global_url, direction),
-            ).fetchone()
-        return int(row[0]) if row else 0
+        rows = self._rows(
+            "SELECT position FROM sync_cursors WHERE kb_id = %s AND global_url = %s AND direction = %s",
+            global_url,
+            direction,
+        )
+        return int(rows[0]["position"]) if rows else 0
 
     def advance(self, global_url: str, direction: str, position: int) -> None:
-        with self._connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO cursors(global_url, direction, position) VALUES (?, ?, ?)
-                ON CONFLICT(global_url, direction) DO UPDATE SET position = excluded.position
-                """,
-                (global_url, direction, position),
-            )
+        self._execute(
+            """
+            INSERT INTO sync_cursors(kb_id, global_url, direction, position) VALUES (%s, %s, %s, %s)
+            ON CONFLICT (kb_id, global_url, direction) DO UPDATE SET position = excluded.position
+            """,
+            global_url,
+            direction,
+            position,
+        )
 
     def mark_pulled(self, experience_id: str) -> None:
-        with self._connection() as connection:
-            connection.execute("INSERT OR IGNORE INTO pulled(experience_id) VALUES (?)", (experience_id,))
+        self._execute(
+            "INSERT INTO sync_pulled(kb_id, experience_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", experience_id
+        )
 
     def pulled(self, experience_id: str) -> bool:
-        with self._connection() as connection:
-            row = connection.execute("SELECT 1 FROM pulled WHERE experience_id = ?", (experience_id,)).fetchone()
-        return row is not None
+        return bool(self._rows("SELECT 1 FROM sync_pulled WHERE kb_id = %s AND experience_id = %s", experience_id))
 
     def hold_back(self, global_url: str, experience_id: str) -> None:
-        with self._connection() as connection:
-            connection.execute(
-                "INSERT OR IGNORE INTO held_back(global_url, experience_id) VALUES (?, ?)", (global_url, experience_id)
-            )
+        self._execute(
+            "INSERT INTO sync_held_back(kb_id, global_url, experience_id) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+            global_url,
+            experience_id,
+        )
 
     def release(self, global_url: str, experience_id: str) -> None:
-        with self._connection() as connection:
-            connection.execute(
-                "DELETE FROM held_back WHERE global_url = ? AND experience_id = ?", (global_url, experience_id)
-            )
+        self._execute(
+            "DELETE FROM sync_held_back WHERE kb_id = %s AND global_url = %s AND experience_id = %s",
+            global_url,
+            experience_id,
+        )
 
     def held_back(self, global_url: str) -> tuple[str, ...]:
-        with self._connection() as connection:
-            rows = connection.execute(
-                "SELECT experience_id FROM held_back WHERE global_url = ? ORDER BY experience_id", (global_url,)
-            ).fetchall()
-        return tuple(str(row[0]) for row in rows)
+        rows = self._rows(
+            "SELECT experience_id FROM sync_held_back WHERE kb_id = %s AND global_url = %s ORDER BY experience_id",
+            global_url,
+        )
+        return tuple(str(row["experience_id"]) for row in rows)
 
     def identity(self, global_url: str) -> str:
         """The identity of the global KB first synced with at ``global_url``; empty before the first sync."""
 
-        with self._connection() as connection:
-            row = connection.execute("SELECT kb_id FROM identities WHERE global_url = ?", (global_url,)).fetchone()
-        return str(row[0]) if row else ""
+        rows = self._rows("SELECT remote_kb_id FROM sync_identities WHERE kb_id = %s AND global_url = %s", global_url)
+        return str(rows[0]["remote_kb_id"]) if rows else ""
 
     def bind(self, global_url: str, kb_id: str) -> None:
-        with self._connection() as connection:
-            connection.execute("INSERT OR IGNORE INTO identities(global_url, kb_id) VALUES (?, ?)", (global_url, kb_id))
+        self._execute(
+            "INSERT INTO sync_identities(kb_id, global_url, remote_kb_id) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+            global_url,
+            kb_id,
+        )
 
     def note_on_global(self, global_url: str, schema_ref: str, experience_ids: Collection[str]) -> None:
-        with self._connection() as connection:
-            connection.executemany(
-                "INSERT OR IGNORE INTO on_global(global_url, schema_ref, experience_id) VALUES (?, ?, ?)",
-                ((global_url, schema_ref, experience_id) for experience_id in experience_ids),
+        with self._database.transaction() as connection, connection.cursor() as cursor:
+            cursor.executemany(
+                """
+                INSERT INTO sync_on_global(kb_id, global_url, schema_ref, experience_id) VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                [(self.kb_id, global_url, schema_ref, experience_id) for experience_id in experience_ids],
             )
 
     def on_global(self, global_url: str, schema_ref: str) -> frozenset[str]:
-        with self._connection() as connection:
-            rows = connection.execute(
-                "SELECT experience_id FROM on_global WHERE global_url = ? AND schema_ref = ?", (global_url, schema_ref)
-            ).fetchall()
-        return frozenset(str(row[0]) for row in rows)
+        rows = self._rows(
+            "SELECT experience_id FROM sync_on_global WHERE kb_id = %s AND global_url = %s AND schema_ref = %s",
+            global_url,
+            schema_ref,
+        )
+        return frozenset(str(row["experience_id"]) for row in rows)
 
     def pulled_state(self, global_url: str, schema_ref: str) -> str:
         """The state of ``schema_ref`` on the global KB as the last pull batch saw it; empty before the first."""
 
-        with self._connection() as connection:
-            row = connection.execute(
-                "SELECT state FROM pulled_states WHERE global_url = ? AND schema_ref = ?", (global_url, schema_ref)
-            ).fetchone()
-        return str(row[0]) if row else ""
+        rows = self._rows(
+            "SELECT state FROM sync_pulled_states WHERE kb_id = %s AND global_url = %s AND schema_ref = %s",
+            global_url,
+            schema_ref,
+        )
+        return str(rows[0]["state"]) if rows else ""
 
     def note_pulled_state(self, global_url: str, schema_ref: str, state: str) -> None:
-        with self._connection() as connection:
-            connection.execute(
-                "INSERT OR REPLACE INTO pulled_states(global_url, schema_ref, state) VALUES (?, ?, ?)",
-                (global_url, schema_ref, state),
-            )
+        self._execute(
+            """
+            INSERT INTO sync_pulled_states(kb_id, global_url, schema_ref, state) VALUES (%s, %s, %s, %s)
+            ON CONFLICT (kb_id, global_url, schema_ref) DO UPDATE SET state = excluded.state
+            """,
+            global_url,
+            schema_ref,
+            state,
+        )
 
     def pull_in_progress(self, global_url: str, schema_ref: str) -> bool:
-        with self._connection() as connection:
-            row = connection.execute(
-                "SELECT 1 FROM pulls_in_progress WHERE global_url = ? AND schema_ref = ?", (global_url, schema_ref)
-            ).fetchone()
-        return row is not None
+        return bool(
+            self._rows(
+                "SELECT 1 FROM sync_pulls_in_progress WHERE kb_id = %s AND global_url = %s AND schema_ref = %s",
+                global_url,
+                schema_ref,
+            )
+        )
 
     def mark_pull_in_progress(self, global_url: str, schema_ref: str, in_progress: bool) -> None:
-        with self._connection() as connection:
-            if in_progress:
-                connection.execute(
-                    "INSERT OR IGNORE INTO pulls_in_progress(global_url, schema_ref) VALUES (?, ?)",
-                    (global_url, schema_ref),
-                )
-            else:
-                connection.execute(
-                    "DELETE FROM pulls_in_progress WHERE global_url = ? AND schema_ref = ?", (global_url, schema_ref)
-                )
+        if in_progress:
+            self._execute(
+                """
+                INSERT INTO sync_pulls_in_progress(kb_id, global_url, schema_ref) VALUES (%s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                global_url,
+                schema_ref,
+            )
+        else:
+            self._execute(
+                "DELETE FROM sync_pulls_in_progress WHERE kb_id = %s AND global_url = %s AND schema_ref = %s",
+                global_url,
+                schema_ref,
+            )
 
 
 def _report(
@@ -241,8 +231,8 @@ class SyncedService(Protocol):
     def declaration_for(self, schema_ref: str) -> ExperienceDeclaration:
         """The declaration registered for ``schema_ref``."""
 
-    def write(self, experience: Experience) -> dict[str, JsonValue]:
-        """Store one Experience; the result carries its ``status``."""
+    def write(self, experience: Experience, *, source: WriteSource) -> dict[str, JsonValue]:
+        """Store one Experience ``source`` sent; the result carries its ``status``."""
 
     def records_after(self, after: int, limit: int) -> tuple[tuple[tuple[int, Experience], ...], int, bool]:
         """Up to ``limit`` records written after sequence ``after``, the next cursor, and whether more remain."""
@@ -267,10 +257,9 @@ class GlobalSync:
         self._service = service
         self._ledger = ledger
         self._target = target
-        self._lock = threading.Lock()
 
-    def _connected(self) -> RemoteClient:
-        """The global KB, once it is the one this service synced with before, or the first one."""
+    def _connected(self) -> tuple[RemoteClient, str]:
+        """The global KB and its identity, once it is the one this service synced with before, or the first one."""
 
         if self._target is None:
             raise SyncUnavailable(
@@ -287,7 +276,7 @@ class GlobalSync:
                 "global KB"
             )
         self._ledger.bind(url, kb_id)
-        return self._target
+        return self._target, kb_id
 
     def _send(
         self, target: RemoteClient, experience: Experience, counts: Counter[str], rejected: list[JsonValue]
@@ -308,10 +297,10 @@ class GlobalSync:
     def push(self) -> dict[str, JsonValue]:
         """Send the Experiences written here that reads here see; one they do not see waits until they do."""
 
-        with self._lock:
+        with self._ledger.exclusive():
             url = self._target.config.base_url if self._target is not None else ""
             try:
-                target = self._connected()
+                target, _ = self._connected()
             except RemoteClientError as exc:
                 return _report("incomplete", url, error=str(exc))
             except SyncRefused as exc:
@@ -351,10 +340,10 @@ class GlobalSync:
         Exclusions stand. Other schemas stay as they are.
         """
 
-        with self._lock:
+        with self._ledger.exclusive():
             url = self._target.config.base_url if self._target is not None else ""
             try:
-                target = self._connected()
+                target, global_kb_id = self._connected()
             except RemoteClientError as exc:
                 return _report("incomplete", url, error=str(exc))
             except SyncRefused as exc:
@@ -392,7 +381,7 @@ class GlobalSync:
                     experience = Experience.from_dict(item.get("experience"))
                     if experience.schema_ref != schema_ref:
                         raise ValueError(f"exported under {schema_ref} but belongs to {experience.schema_ref}")
-                    status = str(self._service.write(experience)["status"])
+                    status = str(self._service.write(experience, source=WriteSource(global_kb_id))["status"])
                 except (KeyError, TypeError, ValueError, StorageContractError) as exc:
                     rejected.append({"experience_id": _record_id(item), "detail": str(exc)})
                     continue

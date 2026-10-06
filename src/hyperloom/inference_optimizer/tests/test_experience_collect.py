@@ -40,6 +40,9 @@ from hyperloom_kb import (
     load_declaration,
 )
 
+# Spawned services run their own embedded database under ``tmp_path``.
+pytestmark = pytest.mark.usefixtures("reachable_tmp_path")
+
 _AUTHORING_REF = {"id": "exp-00000000000000000000000000000002", "purpose": "representative"}
 
 
@@ -411,12 +414,14 @@ def _stop_workspace_service() -> None:
 
 
 def test_an_auto_pushed_run_reaches_another_workspace_that_pulls(
-    monkeypatch, session_dir: Path, tmp_path: Path
+    monkeypatch, session_dir: Path, tmp_path: Path, new_database
 ) -> None:
     for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
         monkeypatch.delenv(key, raising=False)
     declaration = load_declaration(PACKAGED_DECLARATION)
-    global_kb = ExperienceHTTPService(HTTPServiceConfig(tmp_path / "global", "global-token"), declaration, None)
+    global_kb = ExperienceHTTPService(
+        HTTPServiceConfig(tmp_path / "global", "global-token"), declaration, None, database=new_database()
+    )
     server = create_http_server(global_kb, "127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
     thread.start()
