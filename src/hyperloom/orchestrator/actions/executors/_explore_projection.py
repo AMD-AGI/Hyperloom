@@ -22,20 +22,29 @@ The comparison is always projection against projection, with the stack and the
 variant materialized exactly as the round would launch them, so the
 projection's own bias is common to both sides.
 
-How decisive "decisive" is depends on the mode (``HYPERLOOM_INFERASIM_MODE``):
+The round is projected in one mode, resolved on the stack
+(``HYPERLOOM_INFERASIM_MODE``, default ``auto``):
 
-* ``simulate`` -- analytical. A variant is dropped when it projects more than
+* ``benchmark`` -- calibrated against an in-regime anchor. Under ``auto`` this
+  is chosen whenever the anchor store already holds one for the stack, which
+  includes the single-point anchors earlier decision rounds recorded; it is
+  never harvested for. Kernel-regime levers (attention backend, speculative
+  decoding) become visible because each regime has its own anchor, and the
+  margin tightens to ``CALIBRATED_MARGIN_PCT`` -- but only for a comparison in
+  which both sides are calibrated at regime distance 0. Otherwise the simulate
+  margin applies. A variant whose regime has no anchor is benchmarked.
+* ``simulate`` -- no anchor. A variant is dropped when it projects more than
   ``SIMULATE_MARGIN_PCT`` behind the stack, a margin above the 9.7% median
   output-throughput error simulate mode scored on held-out AgentX
   configurations.
-* ``benchmark`` -- calibrated against an in-regime anchor (harvested on a
-  miss). Kernel-regime levers (attention backend, speculative decoding) become
-  visible because each regime gets its own anchor, and the margin tightens to
-  ``CALIBRATED_MARGIN_PCT`` -- but only for a comparison in which both sides
-  are calibrated at regime distance 0. Otherwise the simulate margin applies.
 
 Of the visible variants that survive, at most ``HYPERLOOM_EXPLORE_PROJECTION_TOP_K``
-(by projected gain) are forwarded; ``0`` forwards all of them.
+(by projected gain) are forwarded; ``0`` forwards all of them. The default of
+5 is where the replay's shortlist held the measured best on 94% of held-out
+sets, against 47% for its single pick.
+
+Variants the caller names in ``exempt`` (an exact past measurement answers
+them) are passed through untouched.
 
 Off unless ``HYPERLOOM_EXPLORE_PROJECTION=1``.
 """
@@ -64,7 +73,7 @@ SIMULATE_MARGIN_PCT = 15.0
 # Placeholder until the projected-gap error between two calibrated configs
 # sharing an anchor has been measured; tune with the env above.
 CALIBRATED_MARGIN_PCT = 5.0
-DEFAULT_TOP_K = 3
+DEFAULT_TOP_K = 5
 
 REASON_SLOWER = "projection_decisively_slower"
 REASON_OUTRANKED = "projection_outranked"
@@ -190,13 +199,19 @@ def _anchor_distance(metrics: Any) -> int | None:
     return int(value) if value is not None else None
 
 
+def _estimator(metrics: Any) -> str | None:
+    return (getattr(metrics, "extras", None) or {}).get("estimator")
+
+
 def route_variants(
     variants: list[GridVariant],
     *,
     materialize: Callable[[GridVariant, Path], Path],
     output_root: Path,
     grade_on_intvty: bool = False,
-    project: Callable[[Any], Any] | None = None,
+    project: Callable[..., Any] | None = None,
+    runtime: dict[str, str] | None = None,
+    exempt: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[list[GridVariant], list[dict[str, str]], dict[str, Any] | None]:
     """Return the variants to benchmark, the dropped ones, and an audit summary.
 
@@ -208,8 +223,11 @@ def route_variants(
         output_root: Where the materialized configs and ``summary.json`` go.
         grade_on_intvty: The session grades on interactivity, so a variant is
             only decisively behind when it is behind on both axes.
-        project: Projection callable (``inferasim_bridge.project``); injectable
-            for tests.
+        project: Projection callable (``inferasim_bridge.project``, called as
+            ``project(spec, mode=...)``); injectable for tests.
+        runtime: Image digest / engine version of the deployment; measured
+            anchors recorded on another are not used.
+        exempt: Names of variants to pass through without projecting.
 
     Any failure that leaves the stack without a projection returns the round
     untouched: the failure mode is the round we already run.
@@ -221,7 +239,7 @@ def route_variants(
 
     project = project or bridge.project
     try:
-        mode = bridge.projection_mode()
+        bridge.projection_mode()
     except bridge.InferasimBridgeError as exc:
         log.warning("explore projection: %s; benchmarking the full round", exc)
         return list(variants), [], None
@@ -232,11 +250,14 @@ def route_variants(
         cfg_path = materialize(variant, root / label)
         with Path(cfg_path).open(encoding="utf-8") as fh:
             bench = (yaml.safe_load(fh) or {}).get("benchmark") or {}
-        return bridge.spec_from_benchmark(bench, ambient=False)
+        spec = bridge.spec_from_benchmark(bench, ambient=False)
+        spec.runtime = dict(runtime or {})
+        return spec
 
     try:
         stack_spec = spec_for(GridVariant(name=STACK), "stack")
-        stack = project(stack_spec)
+        mode = bridge.resolve_mode(stack_spec)
+        stack = project(stack_spec, mode=mode)
     except Exception as exc:  # noqa: BLE001 - never fail the round over a projection
         log.warning("explore projection: stack projection failed (%s); benchmarking the full round", exc)
         return list(variants), [], None
@@ -252,6 +273,9 @@ def route_variants(
     for idx, variant in enumerate(variants):
         rec = VariantProjection(name=variant.name, route="measure")
         records.append(rec)
+        if variant.name in exempt:
+            rec.reason = "measured_before"
+            continue
         if not only_visible_levers(variant, mode):
             rec.reason = "lever_not_projected"
             continue
@@ -264,9 +288,13 @@ def route_variants(
             rec.reason = "projects_as_stack"
             continue
         try:
-            metrics = project(spec)
+            metrics = project(spec, mode=mode)
         except Exception as exc:  # noqa: BLE001
             rec.reason, rec.detail = "projection_failed", str(exc)[-300:]
+            continue
+        if _estimator(metrics) != _estimator(stack):
+            rec.reason = "projection_unreadable"
+            rec.detail = f"estimator {_estimator(metrics)} against the stack's {_estimator(stack)}"
             continue
 
         rec.calibrated = bool(metrics.calibrated)
@@ -308,6 +336,7 @@ def route_variants(
     dropped = [{"name": rec.name, "reason": rec.reason, "detail": rec.detail} for rec in records if rec.route == "drop"]
     summary = {
         "mode": mode,
+        "estimator": _estimator(stack),
         "stack": {
             "output_throughput": stack.output_throughput,
             "interactivity": stack_intvty,

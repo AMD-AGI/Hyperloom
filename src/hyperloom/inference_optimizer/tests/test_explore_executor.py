@@ -352,7 +352,7 @@ async def test_explore_projection_drops_a_variant_before_it_is_benchmarked(sub_a
     monkeypatch.setenv("HYPERLOOM_EXPLORE_PROJECTION", "1")
     monkeypatch.delenv(ib.ENV_MODE, raising=False)
 
-    def _project(spec):
+    def _project(spec, mode=None):
         # The stack runs at CONC=8; CONC=2 projects 75% behind it.
         tput = {8: 1000.0, 2: 250.0}[spec.conc]
         return ib.ProjMetrics(
@@ -405,6 +405,118 @@ async def test_explore_projection_drops_a_variant_before_it_is_benchmarked(sub_a
     rows = {r["variant_name"]: r["outcome"] for r in out["per_variant_outcomes"]}
     assert rows == {"v_keep": "KEEP", "v_c2": "SKIPPED_DEDUP"}
     assert out["projection"]["dropped"] == 1
+
+
+async def _explore_round(sub, tr, tmp_path, name: str, *, base_tput: float, grid: list, fake_run) -> dict:
+    base = tmp_path / f"{name}.yaml"
+    _write_baseline_yaml(base)
+    task = await tr.create(
+        kind="explore",
+        params={"config_path": str(base), "output_dir": str(tmp_path / name), "base_tput": base_tput, "grid": grid},
+        idempotency_key=f"ex-{name}",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path / f"session-{name}"))
+    with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=fake_run):
+        res = await sub.run_task(task)
+    assert res.result["status"] == "succeeded"
+    return res.result
+
+
+@pytest.mark.asyncio
+async def test_an_exact_past_measurement_answers_a_variant_without_running_it(sub_agent_runner, tmp_path, monkeypatch):
+    """Another session on the same image re-proposes the round: both verdicts replay, nothing boots."""
+    sub, tr, _ = sub_agent_runner
+    monkeypatch.setenv("HYPERLOOM_MEASUREMENT_STORE", str(tmp_path / "measurements"))
+    monkeypatch.delenv("HYPERLOOM_INFERASIM_ANCHOR_STORE", raising=False)
+    state = SharedState()
+    state.stack_fingerprint_meta = {"image_digest": "sha256:aaa", "sglang": "0.5.1"}
+    sub.shared_state = state
+
+    benchmarked: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        slug = slot.parent.name + "/" + slot.name
+        benchmarked.append(slug)
+        _fake_workspace(slot, tput=840.0 if "v_keep" in slug else 840.4)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    grid = [
+        {"name": "v_keep", "extra_args": "--keep-flag", "extra_envs": {}, "provenance": "llm_direct"},
+        {"name": "v_revert", "extra_args": "--revert-flag", "extra_envs": {}, "provenance": "llm_direct"},
+    ]
+    first = await _explore_round(sub, tr, tmp_path, "a", base_tput=800.0, grid=grid, fake_run=_fake_run)
+    assert {w["name"] for w in first["winners"]} == {"v_keep"}
+    assert first["reused_measurements"] == []
+    assert benchmarked
+
+    benchmarked.clear()
+    second = await _explore_round(sub, tr, tmp_path, "b", base_tput=1000.0, grid=grid, fake_run=_fake_run)
+    assert benchmarked == []
+    assert second["reused_measurements"] == ["v_keep", "v_revert"]
+    winner = second["winners"][0]
+    assert winner["name"] == "v_keep"
+    # The paired +5% against this session's anchor, not the 840 measured against 800.
+    assert winner["tput"] == pytest.approx(1050.0)
+    assert winner["decided_by"] == "reused_measurement"
+    assert winner["reused_measurement"]["base_tput"] == pytest.approx(800.0)
+    tested = {row["name"]: row for row in second["explore_search_update"]["tested"].values()}
+    assert tested["v_revert"]["outcome"] == "REVERT"
+    assert tested["v_revert"]["decided_by"] == "reused_measurement"
+
+
+@pytest.mark.asyncio
+async def test_a_different_image_measures_again(sub_agent_runner, tmp_path, monkeypatch):
+    sub, tr, _ = sub_agent_runner
+    monkeypatch.setenv("HYPERLOOM_MEASUREMENT_STORE", str(tmp_path / "measurements"))
+    state = SharedState()
+    state.stack_fingerprint_meta = {"image_digest": "sha256:aaa"}
+    sub.shared_state = state
+
+    benchmarked: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        benchmarked.append(slot.name)
+        _fake_workspace(slot, tput=840.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    grid = [{"name": "v_keep", "extra_args": "--keep-flag", "extra_envs": {}, "provenance": "llm_direct"}]
+    await _explore_round(sub, tr, tmp_path, "a", base_tput=800.0, grid=grid, fake_run=_fake_run)
+    benchmarked.clear()
+    state.stack_fingerprint_meta = {"image_digest": "sha256:bbb"}
+    second = await _explore_round(sub, tr, tmp_path, "b", base_tput=800.0, grid=grid, fake_run=_fake_run)
+    assert benchmarked
+    assert second["reused_measurements"] == []
+    assert second["winners"][0]["decided_by"] == "measured"
+
+
+@pytest.mark.asyncio
+async def test_a_decision_round_becomes_an_inferasim_anchor(sub_agent_runner, tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import inferasim_bridge as ib
+
+    sub, tr, _ = sub_agent_runner
+    store = tmp_path / "anchors"
+    monkeypatch.setenv(ib.ENV_ANCHOR_STORE, str(store))
+    monkeypatch.setattr(ib, "_index_artifact", lambda root, path: None)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        ws = _fake_workspace(slot, tput=840.0)
+        report = json.loads((ws / "benchmark_report.json").read_text())
+        report["latency"]["tpot"] = {"mean_ms": 11.5, "p90_ms": 12.0}
+        (ws / "benchmark_report.json").write_text(json.dumps(report))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    grid = [{"name": "v_keep", "extra_args": "--keep-flag", "extra_envs": {}, "provenance": "llm_direct"}]
+    await _explore_round(sub, tr, tmp_path, "a", base_tput=800.0, grid=grid, fake_run=_fake_run)
+    artifacts = list((store / "measured").glob("*.json"))
+    assert len(artifacts) == 1
+    doc = json.loads(artifacts[0].read_text())
+    assert doc["sweep"] == [{"batch": 8, "decode_ms": pytest.approx(11.5)}]
+    assert "--keep-flag" in doc["meta"]["server_args"]
+    assert doc["meta"]["derived_from"] == ib.MEASURED_DERIVED_FROM
+    assert ib.anchor_curve_is_sane(str(artifacts[0]))
 
 
 @pytest.mark.asyncio
