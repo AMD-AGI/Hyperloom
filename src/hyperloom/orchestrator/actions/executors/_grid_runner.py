@@ -83,6 +83,7 @@ from ._server_argv import seal_server_argv
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
     DEFAULT_KEEP_THRESHOLD_PCT as DEFAULT_KEEP_THRESHOLD_PCT,
+    default_keep_threshold_pct as default_keep_threshold_pct,
     GridVariant as GridVariant,
     coerce_extra_envs as coerce_extra_envs,
     VariantResult as VariantResult,
