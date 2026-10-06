@@ -902,7 +902,7 @@ Use `--conc-sweep-concs` to override the synthetic ladder (`256,128,64,32,16,8,4
 ### Native Magpie AgentX contract
 
 Use Magpie-managed AgentX at commit
-`938bfd7a9bc1f3970f3fbce8b65ad88a8e0958f5` and InferenceX commit
+`cf805323f0a6db6c63a0aa4ffcce7acf4e830ea6` and InferenceX commit
 `408c015be4b22d14c69518643609669405507077`. Create a source Magpie YAML with
 the public model identity, framework, launcher, effective image pin, and fixed
 concurrency. Leave recipe internals in InferenceX:

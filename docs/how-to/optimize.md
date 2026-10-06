@@ -79,8 +79,8 @@ automatically selects Hyperloom's AgentX session and grading mode. Alternatively
 set `HYPERLOOM_AGENTX=1` and pass the usual model, framework, GPU, precision, and
 concurrency arguments; Magpie resolves the native recipe and launcher. This
 integration is pinned to Magpie
-[v0.3.0](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) plus native launch overrides, custom-model replay, and the generic
-eval source-path fix at commit `938bfd7a9bc1f3970f3fbce8b65ad88a8e0958f5` and InferenceX commit
+[v0.3.0](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) plus native launch overrides, custom-model replay, and generic
+client/eval compatibility fixes at commit `cf805323f0a6db6c63a0aa4ffcce7acf4e830ea6` and InferenceX commit
 `408c015be4b22d14c69518643609669405507077`.
 
 New AgentX sessions record native backend epoch 4 and retain Hyperloom's

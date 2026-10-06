@@ -38,12 +38,15 @@ is a patch release on top of 1.1.2. The per-change history is on the
   Existing epoch-1 sessions resume the legacy client; epoch-2 native sessions
   retain their measurement-only contract. No historical baseline or KEEP is
   migrated. Unsupported or ambiguous recipes fail before measurement. The
-  pinned pair is Magpie v0.3.0 plus native launch overrides, custom-model replay, and the eval source-path fix at commit
-  `938bfd7a9bc1f3970f3fbce8b65ad88a8e0958f5` and InferenceX commit
+  pinned pair is Magpie v0.3.0 plus native launch overrides, custom-model replay, and client/eval compatibility fixes at commit
+  `cf805323f0a6db6c63a0aa4ffcce7acf4e830ea6` and InferenceX commit
   `408c015be4b22d14c69518643609669405507077`. Both dependencies are pinned by
   immutable commit for reproducible AgentX measurements. The upstream hotfix
   keeps generic GSM8K evaluation and its probe files reachable after benchmark
-  directory changes. Install preserves the
+  directory changes. The packaged benchmark client uses Transformers 5 in its
+  own Python environment, without upgrading the serving framework. Client tokenizer
+  and trust settings are supported directly by the pinned scripts, preserving the
+  audited package during compatibility checks. Install preserves the
   audited package and launcher trees; preflight repairs Magpie files changed by an
   earlier compatibility patch. Fixed-sequence `ISL`, `OSL`, and
   `RANDOM_RANGE_RATIO` controls are removed by Magpie's AgentX configuration.

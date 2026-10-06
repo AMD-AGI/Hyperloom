@@ -296,6 +296,14 @@ _AUDITED_MAGPIE_EXECUTION_TREES = {
         "file_count": 79,
         "tree_sha256": "113f880b18ccd3ec26e6a432fcdf06a0c365520d51c3ed3c46069d33d7f07e93",
     },
+    "cf805323f0a6db6c63a0aa4ffcce7acf4e830ea6": {
+        "file_count": 87,
+        "tree_sha256": "65b4acccbe70c05c033f75a5054344bd2fead13dc81878f343427c6c04142e4a",
+    },
+    "311d56429a3aadc3cfe1e1e0e2e533482d224cf0": {
+        "file_count": 87,
+        "tree_sha256": "f8be61cf4566f4daaf3c2463a600e49b11d97bade6632a7bb5b99050b4ce5656",
+    },
     "938bfd7a9bc1f3970f3fbce8b65ad88a8e0958f5": {
         "file_count": 87,
         "tree_sha256": "af43bc3fcbe768b30b87cd5a23ff6f4d36e0e865a8db7375ca4e205970990768",

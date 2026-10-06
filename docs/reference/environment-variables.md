@@ -839,8 +839,8 @@ throughput moves along the frontier rather than violating a rule.
 Native AgentX measurements are materialized from that source YAML as Magpie
 `agentx: enable` runs.
 The canonical identity and launcher are intentionally separate from the local
-checkpoint path. The pinned pair is Magpie v0.3.0 plus native launch overrides, custom-model replay, and the eval source-path
-fix at commit `938bfd7a9bc1f3970f3fbce8b65ad88a8e0958f5` and InferenceX commit
+checkpoint path. The pinned pair is Magpie v0.3.0 plus native launch overrides, custom-model replay, and client/eval
+compatibility fixes at commit `cf805323f0a6db6c63a0aa4ffcce7acf4e830ea6` and InferenceX commit
 `408c015be4b22d14c69518643609669405507077`:
 
 | Variable | Required | Default | Description |
