@@ -342,6 +342,72 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
 
 
 @pytest.mark.asyncio
+async def test_explore_projection_drops_a_variant_before_it_is_benchmarked(sub_agent_runner, tmp_path, monkeypatch):
+    """A projected loser never boots; the survivor's KEEP comes from its own measurement."""
+    from hyperloom.orchestrator.actions.executors import inferasim_bridge as ib
+
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    monkeypatch.setenv("HYPERLOOM_EXPLORE_PROJECTION", "1")
+    monkeypatch.delenv(ib.ENV_MODE, raising=False)
+
+    def _project(spec):
+        # The stack runs at CONC=8; CONC=2 projects 75% behind it.
+        tput = {8: 1000.0, 2: 250.0}[spec.conc]
+        return ib.ProjMetrics(
+            output_throughput=tput,
+            request_throughput=0.0,
+            total_token_throughput=0.0,
+            ttft_ms=0.0,
+            tpot_ms=10.0,
+            itl_ms=10.0,
+            e2el_ms=0.0,
+            decode_tps_per_gpu=0.0,
+            memory_per_gpu_gb=0.0,
+            max_concurrency=0,
+        )
+
+    monkeypatch.setattr(ib, "project", _project)
+
+    benchmarked: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        benchmarked.append(slot.parent.name + "/" + slot.name)
+        _fake_workspace(slot, tput=840.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    grid = [
+        {"name": "v_keep", "extra_args": "--keep-flag", "extra_envs": {}, "provenance": "llm_direct"},
+        {"name": "v_c2", "extra_args": "", "extra_envs": {"CONC": "2"}, "provenance": "llm_direct"},
+    ]
+    task = await tr.create(
+        kind="explore",
+        params={"config_path": str(base), "output_dir": str(tmp_path / "out"), "base_tput": 800.0, "grid": grid},
+        idempotency_key="ex-projection",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    assert out["status"] == "succeeded"
+    assert benchmarked and not any("v_c2" in s for s in benchmarked)
+    assert {w["name"] for w in out["winners"]} == {"v_keep"}
+    assert out["winners"][0]["tput"] == pytest.approx(840.0)  # measured, not projected
+    assert [s["name"] for s in out["skipped_dup"]] == ["v_c2"]
+    assert out["skipped_dup"][0]["reason"] == "projection_decisively_slower"
+    assert set(out["explore_search_update"]["tested"]) == {canonical_fingerprint("--keep-flag", {})}
+    rows = {r["variant_name"]: r["outcome"] for r in out["per_variant_outcomes"]}
+    assert rows == {"v_keep": "KEEP", "v_c2": "SKIPPED_DEDUP"}
+    assert out["projection"]["dropped"] == 1
+
+
+@pytest.mark.asyncio
 async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
     sub_agent_runner, tmp_path, monkeypatch
 ):

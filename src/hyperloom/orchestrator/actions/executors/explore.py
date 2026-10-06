@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 import os
@@ -62,6 +63,7 @@ from ._grid_base import (
     TS_KILLED_OVERTIME,
     TS_SKIPPED_DEDUP,
 )
+from ._explore_projection import projection_enabled, route_variants
 from ._explore_screen import screen_variants
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
@@ -69,6 +71,7 @@ from ._grid_runner import (
     _MN_PARAMS_PRIORITY,
     GridVariant,
     SessionDirField,
+    _build_variant_yaml,
     _num_gpus_for_config,
     apply_aiter_moe_pin_filter,
     apply_compatibility_filter,
@@ -732,6 +735,34 @@ class ExploreExecutor:
         runnable, screened_out = screen_variants(runnable, config_path, session_dir=self.session_dir)
         skipped_dup.extend(screened_out)
 
+        # Drop the variants InferaSim projects decisively behind the stack. Off
+        # by default; it only removes variants, and a KEEP still rests on the
+        # survivor's own measured decision round.
+        def _materialize_for_projection(variant: GridVariant, subdir: Path) -> Path:
+            return _build_variant_yaml(
+                config_path,
+                base_extra_args,
+                variant,
+                output_subdir=subdir,
+                model_path=resolved_model,
+                gpu_type=resolved_gpu,
+                benchmark_script=override_script,
+                base_args_mode=base_args_mode,
+                base_extra_envs=dict(base_extra_envs),
+                base_remove_args=list(base_remove_args),
+                base_unset_envs=list(base_unset_envs),
+            )
+
+        projection_summary: dict[str, Any] | None = None
+        if runnable and projection_enabled():
+            runnable, projected_out, projection_summary = await asyncio.to_thread(
+                route_variants,
+                runnable,
+                materialize=_materialize_for_projection,
+                output_root=output_root / "_projection",
+                grade_on_intvty=bool(resolved_grading(ss)[0]),
+            )
+            skipped_dup.extend(projected_out)
 
         # Seeded by the Coordinator from the durable cursor: this executor holds no
         # history of its own, so it cannot count the rounds before this one.
@@ -1575,6 +1606,8 @@ class ExploreExecutor:
             # gain_pct for the audit trail (best gain of the batch).
             "gain_pct": best_gain_pct,
             "explore_grid_exhausted": not runnable,
+            # What the projection router did this round; None when it was off.
+            "projection": projection_summary,
         }
 
 
