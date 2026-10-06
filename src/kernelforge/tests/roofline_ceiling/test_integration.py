@@ -415,9 +415,7 @@ def test_each_iteration_logs_the_mean_attainment_against_the_target(tmp_path):
     # 12.8 / 40.0
     loop = _loop(str(path), target=0.86, case_times={"decode-t1": 40.0})
 
-    assert loop._render_roofline_progress() == (
-        "  [roofline] attainment 32.0% of the estimated ceiling (target 86%)"
-    )
+    assert loop._render_roofline_progress() == "  [roofline] attainment 32.0% of the estimated ceiling (target 86%)"
 
 
 def test_the_progress_line_names_no_target_when_none_was_set(tmp_path):
