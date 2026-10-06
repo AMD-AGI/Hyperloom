@@ -402,6 +402,7 @@ def _render_experience(experience: Experience, view: QueryView) -> str:
     group_key = view.experience_groups[experience.id]
     annotations = view.groups[group_key].annotations
     outcome = experience.outcome
+    notes = (f"Notes: {dict(sorted(experience.notes.items()))}",) if experience.notes else ()
     return "\n".join(
         (
             f"Experience {experience.id}",
@@ -423,6 +424,7 @@ def _render_experience(experience: Experience, view: QueryView) -> str:
             f"Change: {experience.change.summary if experience.change else ''}",
             (f"Outcome: decision={outcome.decision if outcome else ''}, value={outcome.value if outcome else None}"),
             f"Reflection: {experience.reflection}",
+            *notes,
         )
     )
 
@@ -440,6 +442,9 @@ def _free_text_slots(record: dict[str, JsonValue]) -> list[tuple[dict[str, JsonV
     for alternative in alternatives if isinstance(alternatives, list) else []:
         if isinstance(alternative, dict):
             slots += [(alternative, "option"), (alternative, "why_not")]
+    notes = record.get("notes")
+    if isinstance(notes, dict):
+        slots += [(notes, label) for label in notes]
     return [(container, key) for container, key in slots if key in container]
 
 
@@ -454,7 +459,7 @@ def render_complete_experience(
 
     The record's metadata, such as its provenance and the reads that shaped it, stays in the record and out of the
     prompt; the heading names the Experience so an agent can cite it. A free-text field (``reasoning``,
-    ``reflection``, ``change.summary``, ``change.content``, or an alternative) longer than ``inline_limit`` bytes
+    ``reflection``, ``change.summary``, ``change.content``, an alternative, or a note) longer than ``inline_limit`` bytes
     renders as a reference to its text, which is put in ``external`` under that reference: the field stays whole
     while the prompt carries only its size.
     """

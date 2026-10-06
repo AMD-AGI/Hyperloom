@@ -531,13 +531,17 @@ class RemoteExperienceSession:
         outcome: Outcome,
         reflection: str,
         completed_at: datetime | None = None,
+        notes: Mapping[str, str] | None = None,
     ) -> Experience:
+        """Finish the record; ``notes`` are labelled texts kept outside the schema, searched and shown to agents."""
+
         self._experience = replace(
             self._experience,
             status=ExperienceStatus.COMPLETE,
             outcome=outcome,
             reflection=reflection,
             completed_at=completed_at or datetime.now(timezone.utc),
+            notes=dict(notes or {}),
         )
         self._declaration.validate(self._experience)
         return self._experience

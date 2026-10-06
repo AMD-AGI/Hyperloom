@@ -342,13 +342,15 @@ content under an existing id is 409.
 | `schema_ref` | no | the service's `--declaration` | the one schema to search |
 | `outcome` | no | `mixed` | `keep`, `revert`, another declared decision, or `mixed` |
 | `limit` | no | `10` | maximum Experiences to return, 1–100 |
-| `content_inline_limit` | no | none (all inline) | bytes above which a free-text field (`reasoning`, `reflection`, `change.summary`, `change.content`, an alternative) is rendered as a reference instead of inline |
+| `content_inline_limit` | no | none (all inline) | bytes above which a free-text field (`reasoning`, `reflection`, `change.summary`, `change.content`, an alternative, a note) is rendered as a reference instead of inline |
 | `render_budget_chars` | no | none (every record) | characters the rendered records may fill; records are rendered whole, in rank order, while they fit |
 
 The service's planner turns `decision` and `context` into weighted query
 signals, then ranks candidates by exact field matches plus lexical fuzzy
-matches. Experiences that repeat the same change under the same identity form
-one Repeat Group, which contributes at most one Experience; `outcome` filters by
+matches over identity values, the change summary and kind, `reasoning`,
+[notes](experience-kb-schema.md#notes), and the outcome. Experiences that
+repeat the same change under the same identity form one Repeat Group, which
+contributes at most one Experience; `outcome` filters by
 decision without hiding history, because the group annotations still count
 every member.
 

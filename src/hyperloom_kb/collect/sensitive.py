@@ -68,6 +68,7 @@ FREE_TEXT_FIELDS = frozenset(
         "reflection",
         "change.summary",
         "alternatives",
+        "notes",
     }
 )
 
@@ -97,7 +98,7 @@ def _text_finding(text: str, *, free_text: bool) -> str | None:
 
 
 def _is_free_text(path: str) -> bool:
-    return any(path == name or path.startswith(f"{name}[") for name in FREE_TEXT_FIELDS)
+    return any(path == name or path.startswith((f"{name}[", f"{name}.")) for name in FREE_TEXT_FIELDS)
 
 
 def find_sensitive(value: JsonValue, path: str = "") -> str | None:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -251,6 +252,30 @@ def test_runner_rejects_provider_version_drift() -> None:
             retrieval,
             provider_refs=provider_refs((fuzzy,)),
         ).execute(QueryRequest(schema.schema_ref, intent="scheduler"), config, view=view)
+
+
+def test_fuzzy_finds_an_experience_by_its_notes() -> None:
+    schema = _declaration()
+    schemas = InMemorySchemaRegistry()
+    experiences = InMemoryExperienceStore()
+    views = InMemoryQueryViewStore()
+    service = ExperienceService(schemas, experiences)
+    service.register_schema(schema)
+    plain = _experience(schema, "run-plain", "page_size", "The measured bottleneck suggests this knob.")
+    noted = replace(
+        _experience(schema, "run-noted", "chunk", "The measured bottleneck suggests this knob."),
+        notes={"interconnect": "XGMI links saturate during the all-reduce."},
+    )
+    for item in (plain, noted):
+        service.submit_complete(item)
+    QueryViewMaintainer(schemas, experiences, views).rebuild(schema.schema_ref, fuzzy_ready=True)
+
+    first, second = LexicalFuzzyProvider(experiences).recall(
+        {"text": "xgmi links saturate"}, views.current_view(schema.schema_ref), limit=10
+    )
+
+    assert (first.experience_id, first.details["matched_tokens"]) == (noted.id, ["link", "saturate", "xgmi"])
+    assert (second.experience_id, second.details["matched_tokens"]) == (plain.id, [])
 
 
 def test_fuzzy_penalizes_explicit_model_size_mismatch() -> None:

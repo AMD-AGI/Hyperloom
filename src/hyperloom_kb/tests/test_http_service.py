@@ -334,6 +334,41 @@ def test_a_read_can_reference_large_change_content_instead_of_inlining_it(tmp_pa
     assert inline.contents == ()
 
 
+def test_notes_written_outside_the_schema_are_kept_and_rendered_like_other_text(tmp_path: Path) -> None:
+    schema = _declaration()
+    observed = " ".join(["XGMI links saturate during the all-reduce."] * 60)
+    ref = "sha256:" + hashlib.sha256(observed.encode()).hexdigest()
+
+    with RunningServer(_app(tmp_path / "service", schema)) as url:
+        client = _client(url, tmp_path)
+        session = RemoteExperienceKB(client, schema).begin(
+            run_id="run-notes",
+            seq=0,
+            identity={"model": "qwen3", "gpu": "mi325x"},
+            objective="throughput@v1",
+            baseline_identity={"config": "default"},
+            baseline_value=100.0,
+            provenance=Provenance("service-test", "1"),
+            created_at=NOW,
+        )
+        session.decide(
+            reasoning="Prior evidence supports testing page_size.", change=Change({"knob": "page_size"}, "P.")
+        )
+        session.complete(outcome=Outcome("keep", 110.0), reflection="Kept.", completed_at=NOW, notes={"xgmi": observed})
+        session.publish()
+        read = client.read(DECISION, _read_context(), content_inline_limit=2048)
+        [exported] = client.export_page().items
+        schemas = client.health()["schemas"]
+
+    written = session.record
+    assert schemas == {schema.schema_ref: 1}
+    assert exported["experience"] == written.to_dict()
+    assert _record_json(read.prompt_block, written.id)["notes"] == {
+        "xgmi": f"<external content {ref}, {len(observed.encode())} bytes>"
+    }
+    assert read.contents == ({"ref": ref, "bytes": len(observed.encode()), "content": observed},)
+
+
 def test_a_read_budget_carries_whole_records_and_only_the_contents_they_reference(tmp_path: Path) -> None:
     schema = _declaration()
     records = [

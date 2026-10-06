@@ -79,6 +79,7 @@ _EXPERIENCE_FIELDS: dict[str, bool | dict[str, bool]] = {
         "error_class": False,
     },
     "reflection": True,
+    "notes": False,
     "parent_id": False,
     "supersedes": False,
 }

@@ -292,6 +292,11 @@ def _project(mapping: CollectMapping, scope: Mapping[str, Any]) -> Experience:
         rendered_refs=tuple(RenderedRef.from_dict(item) for item in _items(value("rendered_refs"), "rendered_refs")),
         outcome=outcome,
         reflection=_text(value("reflection"), "reflection"),
+        notes={
+            str(label): _text(text, f"notes.{label}")
+            for label, text in _object(value("notes"), "notes").items()
+            if is_present(text)
+        },
     )
     mapping.declaration.validate(experience)
     return experience
@@ -354,6 +359,7 @@ def _publish(target: CollectionTarget, experience: Experience) -> str:
         outcome=experience.outcome,
         reflection=experience.reflection,
         completed_at=experience.completed_at,
+        notes=experience.notes,
     )
     result = session.publish()
     if result is None:

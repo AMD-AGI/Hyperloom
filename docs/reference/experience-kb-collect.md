@@ -92,6 +92,7 @@ experience:
     constraints: []                                          # optional: [{name, passed, value}]
     error_class: ""                                          # optional
   reflection: "Recorded outcome: {$attempt.after}"
+  notes: {object: {interconnect: $attempt.link_report}}       # optional; a note without text is left out
 ```
 
 Names are bound in order -- `doc`, each unit step, each lookup, each `let` --
@@ -146,8 +147,8 @@ A mapping cannot turn these off:
   tokens, JWTs, presigned URLs, and -- outside free-text fields -- credential
   assignments, credential CLI flags, and credential-shaped keys (a name containing
   `TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`, or `CREDENTIAL`, with `TOKENIZER`
-  exempt). `reasoning`, `reflection`, `change.summary`, and `alternatives` get
-  only the token formats, so prose is not mistaken for an assignment.
+  exempt). `reasoning`, `reflection`, `change.summary`, `alternatives`, and
+  `notes` get only the token formats, so prose is not mistaken for an assignment.
 - The Experience id is derived from producer, `run_id`, and `seq`, so collecting
   the same document again is idempotent: an Experience that already exists
   unchanged reports `unchanged`, and a different one under the same id is an error.

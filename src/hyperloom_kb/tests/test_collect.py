@@ -360,6 +360,8 @@ def test_credentials_are_never_collected() -> None:
 def test_prose_is_not_mistaken_for_a_credential_assignment() -> None:
     reasoning = "Decode is launch bound; cost per token: dominated by kernel launch overhead."
     assert find_sensitive({"reasoning": reasoning}) is None
+    assert find_sensitive({"notes": {"decode": reasoning}}) is None
+    assert find_sensitive({"notes": {"header": "Bearer abcdefghijklmnop"}}) == "notes.header: bearer token"
     assert find_sensitive({"preconditions": [f"note={reasoning}"]}) is not None
     assert find_sensitive({"content": '{"TOKENIZERS_PARALLELISM":"false"}'}) is None
 
@@ -514,17 +516,8 @@ def test_malformed_mappings_fail_at_load(override: dict[str, Any], message: str)
         compile_mapping(_mapping_document(**override))
 
 
-def test_custom_mapping_collects_a_custom_document() -> None:
-    mapping = compile_mapping(
-        _mapping_document(
-            experience={
-                **_mapping_document()["experience"],
-                "seq": {"hash48": ["$item.name"]},
-                "reasoning": "Tune {$item.name} because the item asked for it.",
-            }
-        )
-    )
-    document = {
+def _custom_document(**item: Any) -> dict[str, Any]:
+    return {
         "items": [
             {
                 "name": "alpha",
@@ -538,12 +531,36 @@ def test_custom_mapping_collects_a_custom_document() -> None:
                     "precision": "bf16",
                 },
                 "change": {"change_family": "config_variant", "change_fingerprint": "abc"},
+                **item,
             }
         ]
     }
-    report = collect(mapping, document, dry_run=True)
+
+
+def test_custom_mapping_collects_a_custom_document() -> None:
+    mapping = compile_mapping(
+        _mapping_document(
+            experience={
+                **_mapping_document()["experience"],
+                "seq": {"hash48": ["$item.name"]},
+                "reasoning": "Tune {$item.name} because the item asked for it.",
+            }
+        )
+    )
+    report = collect(mapping, _custom_document(), dry_run=True)
     assert report.skipped == ()
     assert report.collected[0].experience.reasoning == "Tune alpha because the item asked for it."
+
+
+def test_a_mapping_adds_notes_without_a_new_schema_and_drops_the_ones_without_text() -> None:
+    notes = {"object": {"interconnect": "XGMI saturated on {$item.name}.", "host": "$item.host"}}
+    mapping = compile_mapping(_mapping_document(experience={**_mapping_document()["experience"], "notes": notes}))
+
+    report = collect(mapping, _custom_document(), dry_run=True)
+
+    [row] = report.collected
+    assert row.experience.notes == {"interconnect": "XGMI saturated on alpha."}
+    assert row.experience.schema_ref == load_mapping(MAPPING).declaration.schema_ref
 
 
 def test_mapping_file_resolves_its_declaration_relative_to_itself(tmp_path: Path) -> None:

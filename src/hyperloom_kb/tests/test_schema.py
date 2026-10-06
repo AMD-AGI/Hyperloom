@@ -25,7 +25,9 @@ from hyperloom_kb import (
     SchemaValidationError,
     UnsupportedSchemaVersion,
     derive_experience_id,
+    experience_content_hash,
 )
+from hyperloom_kb.storage import canonical_experience_bytes
 
 NOW = datetime(2026, 9, 4, 20, 0, tzinfo=timezone.utc)
 
@@ -110,6 +112,7 @@ def complete_experience() -> Experience:
             constraints=(ConstraintResult("accuracy_delta", True, -0.2),),
         ),
         reflection="The change improved throughput without violating accuracy.",
+        notes={"interconnect": "XGMI links saturate during the all-reduce."},
     )
 
 
@@ -131,6 +134,48 @@ def test_every_record_field_is_either_knowledge_or_metadata() -> None:
     assert KNOWLEDGE_FIELDS | METADATA_FIELDS == set(record)
     assert not KNOWLEDGE_FIELDS & METADATA_FIELDS
     assert complete_experience().knowledge() == {name: record[name] for name in KNOWLEDGE_FIELDS}
+
+
+#: A record exactly as a service stored it before Experiences had notes.
+STORED_BEFORE_NOTES = (
+    '{"alternatives":[{"option":"Increase tensor parallelism.","why_not":"The workload fits on one GPU."}],'
+    '"baseline_identity":{"config":"default"},"baseline_value":2400.0,"change":{"content":"--kv-cache-dtype fp8_e4m3",'
+    '"identity":{"knob":"kv_cache_dtype"},"kind":"config_delta","resource_refs":["artifacts/measurement.json"],'
+    '"summary":"Use fp8_e4m3 for the KV cache."},"completed_at":"2026-09-04T20:12:00Z",'
+    '"created_at":"2026-09-04T20:00:00Z","id":"exp-68ac1daab7335dbb9348f2d369ef2c03","identity":{"framework":"sglang",'
+    '"gpu":"mi355x","model":"qwen3-8b","tenant":"extra-dimension-is-preserved"},"kind":"experience",'
+    '"objective":"throughput@v1","outcome":{"constraints":[{"name":"accuracy_delta","passed":true,"value":-0.2}],'
+    '"decision":"keep","error_class":"","value":2610.5},"parent_id":"","preconditions":["Baseline correctness passed."],'
+    '"provenance":{"extra":{},"model":"claude-sonnet","producer":"hyperloom","producer_version":"1.0.0",'
+    '"prompt_version":"7","snapshot_version":"","source_ref":""},"reasoning":"KV cache bandwidth dominates decode.",'
+    '"reflection":"The change improved throughput without violating accuracy.",'
+    '"rendered_refs":[{"id":"exp-100","purpose":"starting_point"}],"run_id":"run-456",'
+    '"schema_ref":"schema:sha256:30a7c5a213982dada742cebd3313b587d02e7bc49ad7a5a074c1a6188a3480b6","schema_version":1,'
+    '"seq":2,"status":"complete","supersedes":""}'
+)
+
+
+def test_a_record_stored_before_notes_keeps_its_bytes_and_content_hash() -> None:
+    record = Experience.from_dict(json.loads(STORED_BEFORE_NOTES))
+
+    assert record.notes == {}
+    assert canonical_experience_bytes(record) == STORED_BEFORE_NOTES.encode()
+    assert experience_content_hash(record) == "726960dad67d7d7d8ffd7d0ffb62cca7022dd8a09db86ce7df38130486cc64e4"
+
+
+def test_notes_need_no_new_schema_and_take_labelled_text_only() -> None:
+    noted = complete_experience()
+
+    assert noted.schema_ref == replace(noted, notes={}).schema_ref
+    declaration().validate(noted)
+    for notes, message in (
+        ({"Interconnect": "text"}, "lowercase name"),
+        ({"interconnect": ""}, "non-empty string"),
+        ({"interconnect": {"nested": "text"}}, "non-empty string"),
+        (["interconnect"], "must be an object"),
+    ):
+        with pytest.raises(SchemaValidationError, match=message):
+            replace(noted, notes=notes)
 
 
 def test_schema_ref_is_content_addressed_and_required() -> None:
