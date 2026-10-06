@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
-from types import SimpleNamespace
 from zipfile import ZipFile
 
 import pytest
@@ -53,13 +52,7 @@ def _writer_fixture(tmp_path, *, denied: bool) -> dict:
     state.set_stop_reason("baseline_failed" if denied else "target_reached")
     state.save(tmp_path)
     predicate_inputs = workflow_predicate_inputs(
-        SimpleNamespace(
-            phase="PRELUDE",
-            macro_cycle=0,
-            baseline_tput=100.0,
-            warm_replay_outcome={},
-        ),
-        budget_pct=None,
+        SharedState(phase="PRELUDE", macro_cycle=0, baseline_tput=100.0),
         kernel_enabled=True,
         optimize_enabled=True,
         enablement_enabled=True,

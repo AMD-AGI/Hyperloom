@@ -137,11 +137,6 @@ class _RenderMixin:
             if unvalidated
             else ""
         )
-        resume_revalidation_tag = (
-            " ⚠ resume_pending_revalidation=true — recheck current stack before trusting validated gain"
-            if bool(getattr(self, "resume_pending_revalidation", False))
-            else ""
-        )
         geak_pending_status = (
             str(self.geak_pending.get("status") or "") if isinstance(getattr(self, "geak_pending", None), dict) else ""
         )
@@ -172,7 +167,7 @@ class _RenderMixin:
             f"gain      : validated={self.cumulative_gain_validated:.2f}%{validated_age}",
             f"stack     : {len(self.optimization_stack)} entries "
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
-            f"{unvalidated_tag}{resume_revalidation_tag}{geak_pending_tag}",
+            f"{unvalidated_tag}{geak_pending_tag}",
         ]
         # Surface reusable hot kernels still owing a kernel_opt attempt.
         untried_hot = self.untried_hot_reusable_kernels()
@@ -554,7 +549,6 @@ class _RenderMixin:
                 f"(stack_len_at_validation={self.cumulative_gain_validated_stack_len}, "
                 f"ts={self.cumulative_gain_validated_ts or '(never)'})"
             ),
-            f"current_action={self.current_action or '(idle)'}",
             f"crash_count={self.crash_count}",
             f"pruned_families={self.pruned_families or '(none)'}",
             f"last_profile_trace={self.last_profile_trace or '(none)'}",
@@ -581,7 +575,7 @@ class _RenderMixin:
             f"last_action_failures={self._format_last_action_failures()}",
             f"agent_last_active={self._format_agent_last_active()}",
             f"gain_gated_action_count={int(self.gain_gated_action_count or 0)}",
-            f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
+            f"tick={int(self.tick or 0)}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
             f"closing_phase={self.closing_phase}  "

@@ -19,13 +19,10 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.coordinator_helpers import DEFAULT_REACTOR_TURN_TIMEOUT_SEC
-from hyperloom.orchestrator.loop.cycle_memory import CycleMemoryCollaborator
+from hyperloom.orchestrator.loop.coordinator import DEFAULT_REACTOR_TURN_TIMEOUT_SEC, Coordinator
 from hyperloom.orchestrator.roles import ClaudeBackend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles import claude as claude_mod
 from hyperloom.orchestrator.roles.base import LLMCallFailed, RetryPolicy
-from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 class _Options:
@@ -127,7 +124,7 @@ async def test_a_stalled_turn_ends_at_its_wall_clock_bound_and_closes_the_stream
 
     started = time.monotonic()
     with caplog.at_level("WARNING"), pytest.raises(LLMCallFailed) as raised:
-        await _guarded(backend.run("hi", allow_no_intent=True))
+        await _guarded(backend.run("hi"))
     elapsed = time.monotonic() - started
 
     # Ended by the 0.3 s wall-clock bound, not by the 30 s idle budget nor by a retry.
@@ -145,7 +142,7 @@ async def test_the_cli_retry_frames_are_logged_while_they_hold_the_stream_open(c
     backend = _backend(sdk, turn_timeout_s=0.2)
 
     with caplog.at_level("WARNING"), pytest.raises(LLMCallFailed):
-        await _guarded(backend.run("hi", allow_no_intent=True))
+        await _guarded(backend.run("hi"))
 
     assert "claude CLI retrying its API request (attempt 1/10, status=None, error=timeout)" in caplog.text
 
@@ -159,7 +156,7 @@ async def test_a_close_that_never_finishes_is_abandoned_after_the_grace(monkeypa
     started = time.monotonic()
     try:
         with pytest.raises(LLMCallFailed) as raised:
-            await _guarded(backend.run("hi", allow_no_intent=True))
+            await _guarded(backend.run("hi"))
         elapsed = time.monotonic() - started
 
         assert elapsed < 5.0
@@ -185,7 +182,7 @@ async def test_the_cli_left_behind_by_a_timed_out_turn_is_killed_and_nothing_els
     bystander = subprocess.Popen(sleeper, start_new_session=True)
     try:
         with pytest.raises(LLMCallFailed) as raised:
-            await _guarded(backend.run("hi", allow_no_intent=True))
+            await _guarded(backend.run("hi"))
 
         (cli,) = sdk.children
         assert await asyncio.to_thread(cli.wait, 10) == -9
@@ -210,7 +207,7 @@ async def test_the_clis_left_behind_by_a_turn_that_fails_on_its_own_are_killed()
     bystander = subprocess.Popen(sleeper, start_new_session=True)
     try:
         with pytest.raises(LLMCallFailed, match="stream idle"):
-            await _guarded(backend.run("hi", allow_no_intent=True))
+            await _guarded(backend.run("hi"))
 
         assert sdk.started == 3
         assert [await asyncio.to_thread(cli.wait, 10) for cli in sdk.children] == [-9, -9, -9]
@@ -232,7 +229,7 @@ async def test_a_turn_cancelled_by_its_caller_still_kills_its_cli():
     backend = _backend(sdk, turn_timeout_s=600.0)
     try:
         with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(backend.run("hi", allow_no_intent=True), timeout=0.5)  # the caller's own bound
+            await asyncio.wait_for(backend.run("hi"), timeout=0.5)  # the caller's own bound
         # The SDK call closes on the loop after its caller has gone; let it.
         for _ in range(500):
             if sdk.closed:
@@ -257,7 +254,7 @@ async def test_a_turn_that_does_not_take_its_cancellation_starts_no_further_cli(
     backend = _backend(sdk, turn_timeout_s=0.3)
 
     with pytest.raises(LLMCallFailed) as raised:
-        await _guarded(backend.run("hi", allow_no_intent=True))
+        await _guarded(backend.run("hi"))
 
     # The failed stream is retryable, but a turn being stopped never starts another CLI.
     assert sdk.started == 1
@@ -274,7 +271,7 @@ async def test_a_cancelled_caller_whose_close_never_finishes_still_gets_its_cli_
     backend = _backend(sdk, turn_timeout_s=600.0)
     try:
         with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(backend.run("hi", allow_no_intent=True), timeout=0.5)
+            await asyncio.wait_for(backend.run("hi"), timeout=0.5)
 
         (cli,) = sdk.children
         # Killed after the grace, although the SDK call is still closing.
@@ -329,13 +326,13 @@ async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(mode: 
     # Only the backend's own bound may end the turn here.
     coord.reactor_turn_timeout_sec = 600.0
     observations: list[dict[str, Any]] = []
-    record = coord._record_observation
+    record = coord.writeback.record_observation
 
     async def _capture(sender: str, kind: str, payload: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
         observations.append(payload)
         return await record(sender, kind, payload, *args, **kwargs)
 
-    coord._record_observation = _capture  # type: ignore[method-assign]
+    coord.writeback.record_observation = _capture  # type: ignore[method-assign]
     try:
         reason = await asyncio.wait_for(coord.run(max_ticks=2, tick_interval_sec=0.0), timeout=30.0)
     finally:
@@ -346,28 +343,3 @@ async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(mode: 
     errors = [o for o in observations if o.get("kind") == "backend_error" and o.get("agent") == "orchestration"]
     assert len(errors) == 2
     assert all("wall-clock bound" in o["error"] and "SDK closed the CLI" in o["error"] for o in errors)
-
-
-@pytest.mark.asyncio
-async def test_a_failed_memory_capture_keeps_the_previous_memory(caplog):
-    st = SharedState(session_id="t")
-    st.orchestration_memory = {"next_cycle_directive": "attack the KV cache"}
-
-    class _TimedOut:
-        async def run(self, **_kwargs: Any) -> Any:
-            raise LLMCallFailed("Claude backend timed out: turn exceeded its 1500s wall-clock bound")
-
-    memory = CycleMemoryCollaborator()
-    vars(memory).update(shared_state=st, session_dir=None, backends={"orchestration": _TimedOut()})
-
-    async def _stub(_agent: str) -> str:
-        return "STUB"
-
-    memory._compose_prompt = _stub  # type: ignore[method-assign]
-    memory._load_system_prompt = _stub  # type: ignore[method-assign]
-
-    with caplog.at_level("WARNING"):
-        assert await memory._capture_cycle_memory() is False
-
-    assert st.orchestration_memory == {"next_cycle_directive": "attack the KV cache"}
-    assert "orchestration turn failed" in caplog.text

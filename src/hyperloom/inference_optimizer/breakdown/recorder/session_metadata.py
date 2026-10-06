@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_unix
+from hyperloom.common.env_safety import redact_secret_env_values
 from hyperloom.common.timeutil import iso_z
 
 from ..session_facts import architecture_block, grading_block, recovery_block, workload_signature
@@ -190,7 +191,7 @@ def _launch_config(state: Any) -> dict[str, Any]:
         "osl": getattr(state, "osl", None),
         "precision": _text(getattr(state, "precision", "")),
         "max_model_len": getattr(state, "max_model_len", None),
-        "launch_env": dict(getattr(state, "operator_extra_env", None) or {}),
+        "launch_env": redact_secret_env_values(getattr(state, "operator_extra_env", None)),
         "launch_server_args": _text(server_args),
     }
     # The singleton merges leaf-by-leaf with no notion of an empty value, so

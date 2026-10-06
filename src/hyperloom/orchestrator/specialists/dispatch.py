@@ -45,7 +45,7 @@ FORCE_STALLED_KEEP_ROUNDS: int = 12
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     """Specialist dispatch: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
 
-    async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
+    async def warm_specialist_params(self, params: dict[str, Any]) -> None:
         """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); missing fields stay empty.
 
         Args:
@@ -166,7 +166,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 params["source_hint_directories"] = list(_dirs)
 
         if "target_gap_notes" not in params:
-            _gap_notes = self._target_gap_advisory_block()
+            _gap_notes = self._coord.conversation.target_gap_advisory_block()
             if _gap_notes:
                 params["target_gap_notes"] = _gap_notes
 
@@ -260,7 +260,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "hot_kernels_top15": hot_kernels,
             }
 
-    async def _maybe_auto_retry_specialist(
+    async def maybe_auto_retry_specialist(
         self,
         task: "Task",
         result: "SubAgentResult",
@@ -324,14 +324,14 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         retry_params["_auto_retry_attempt"] = next_attempt
         retry_params["_auto_retry_reason"] = f"{ftype.value}: {error}"[:300]
 
-        # Mirror _handle_delegate lane/ttl resolution so the retry task holds the
+        # Mirror handle_delegate lane/ttl resolution so the retry task holds the
         # same pools as the original and cannot run concurrently with serving.
-        lanes, ttl = self._registry_lanes_ttl("specialist")
+        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("specialist")
         from .profile import requires_gpu, specialist_lanes
 
         lanes = list(specialist_lanes(retry_params, list(lanes)))
         if requires_gpu(retry_params):
-            ttl = self._gpu_lease_ttl_sec(int(ttl or 0), params=retry_params)
+            ttl = self._coord.dispatcher.gpu_lease_ttl_sec(int(ttl or 0), params=retry_params)
 
         # Stable base key across attempts: strip any prior ``-autoretryN`` suffix.
         base_key = str(task.idempotency_key or task.task_id or "")
@@ -374,7 +374,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "reason": error[:200],
             },
         )
-        await self._record_observation(
+        await self._coord.writeback.record_observation(
             "coordinator",
             "observation",
             {
@@ -418,7 +418,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             detail: Why no further retry was scheduled.
         """
         params = task.params or {}
-        await self._record_observation(
+        await self._coord.writeback.record_observation(
             "coordinator",
             "observation",
             {
@@ -442,7 +442,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             detail,
         )
 
-    async def _fan_out_specialist_wave(
+    async def fan_out_specialist_wave(
         self,
         source: str,
         intent: Intent,
@@ -451,7 +451,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         """Fan a specialist delegate carrying ``params.tasks=[...]`` into N
         standard free-form specialist dispatches (scope=freeform, mode=research
         defaults). Each fanned task is re-dispatched through the
-        normal ``_handle_delegate`` path. Per-task idempotency keys derive from
+        normal ``handle_delegate`` path. Per-task idempotency keys derive from
         the wave key. Each entry must pass the same structural checks as
         :func:`validate_freeform_wave_task` (the PolicyGate runs these first).
 
@@ -493,13 +493,13 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             try:
                 self.policy.validate_intent(source, sub_intent)
             except PolicyDenied as denied:
-                await self._record_policy_denied(source, sub_intent, denied)
+                await self._coord.writeback.record_policy_denied(source, sub_intent, denied)
                 raise
             pending.append(sub_intent)
         for sub_intent in pending:
-            await self._handle_delegate(source, sub_intent)
+            await self._coord.router.handle_delegate(source, sub_intent)
 
-    async def _maybe_force_stalled_domain_specialist(self) -> None:
+    async def maybe_force_stalled_domain_specialist(self) -> None:
         """Force-dispatch a domain specialist for a domain untouched for too many
         config-arm rounds that still has an open gap in the gaps[] ledger.
 
@@ -512,7 +512,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         Note:
             Side-effecting: may dispatch a domain specialist via
-            ``_handle_intent``. Returns nothing.
+            ``handle_intent``. Returns nothing.
         """
         state = self.shared_state
         if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
@@ -556,13 +556,13 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             is_source_patch = resolve_specialist_profile(params, domain=dom).mode == MODE_PATCH
             if is_source_patch and state.is_pruned(_SOURCE_PATCH_FAMILY):
                 continue
-            idempotency_key = f"forced-stalled-{anchor}-round{round_id}{self._cycle_idem_suffix()}"
+            idempotency_key = f"forced-stalled-{anchor}-round{round_id}{self._coord.dispatcher.cycle_idem_suffix()}"
             lookup = getattr(self.tasks, "find_by_idempotency_key", None)
             if callable(lookup):
                 existing = await lookup(idempotency_key)
                 if existing is not None:
                     continue
-            await self._warm_specialist_params(params)
+            await self.warm_specialist_params(params)
             if is_source_patch:
                 preflight_error = specialist_patch_preflight_error(
                     params,
@@ -596,7 +596,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     "idempotency_key": idempotency_key,
                 },
             )
-            await self._handle_intent("orchestration", intent)
+            await self._coord.router.handle_intent("orchestration", intent)
             try:
                 state.save(self.session_dir)
             except Exception:
@@ -614,7 +614,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             return None
         return None
 
-    def _build_specialist_round_entry(
+    def build_specialist_round_entry(
         self,
         *,
         task: "Task",

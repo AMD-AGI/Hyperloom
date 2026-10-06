@@ -36,7 +36,6 @@ async def _build_coord(tmp_path: Path):
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=None,
         knowledge_plane=None,
     )
 
@@ -47,11 +46,11 @@ async def test_long_work_is_booked_without_a_supervisor_stamp(tmp_path, monkeypa
     entered = asyncio.Event()
     coord = await _build_coord(tmp_path)
     assert not hasattr(coord.reconciler, "stamp_progress")
-    reaped = AsyncMock(wraps=coord._reap_dispatched_task)
-    monkeypatch.setattr(coord, "_reap_dispatched_task", reaped)
-    monkeypatch.setattr(coord, "_is_promotable_result", lambda *_args: True)
-    monkeypatch.setattr(coord, "_promote_to_shared_state", AsyncMock())
-    monkeypatch.setattr(coord, "_fact_write_hook", AsyncMock())
+    reaped = AsyncMock(wraps=coord.dispatcher.reap_dispatched_task)
+    monkeypatch.setattr(coord.dispatcher, "reap_dispatched_task", reaped)
+    monkeypatch.setattr(coord.writeback, "is_promotable_result", lambda *_args: True)
+    monkeypatch.setattr(coord.writeback, "promote_to_shared_state", AsyncMock())
+    monkeypatch.setattr(coord.writeback, "fact_write_hook", AsyncMock())
     calls = []
 
     async def execute(ctx):
@@ -63,19 +62,19 @@ async def test_long_work_is_booked_without_a_supervisor_stamp(tmp_path, monkeypa
     coord.sub.register_executor("profile", execute)
     task = await coord.tasks.create(kind="profile", params={}, idempotency_key="long-profile")
     try:
-        await asyncio.wait_for(coord._pump_dispatcher_once(), 5)
+        await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), 5)
         await asyncio.wait_for(entered.wait(), 5)
         assert (await coord.tasks.get(task.task_id)).state == "running"
         reaped.assert_not_awaited()
     finally:
         release.set()
-        await pump_until_settled(coord)
+        await pump_until_settled(coord.dispatcher)
     try:
         assert calls == [task.task_id]
         reaped.assert_awaited_once()
         assert (await coord.tasks.get(task.task_id)).state == "succeeded"
         events = await coord.db.fetchall("SELECT payload FROM events WHERE topic='delegated_result'")
         assert len(events) == 1
-        assert not coord._executions
+        assert not coord.dispatcher._executions
     finally:
         await coord.stop()

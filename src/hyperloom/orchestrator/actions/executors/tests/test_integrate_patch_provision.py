@@ -24,6 +24,7 @@ from hyperloom.orchestrator.enablement.runtime.stack_actions import (
     ProvisionResult,
 )
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+from hyperloom.orchestrator.enablement.lane import EnablementLane
 
 _ARCH_LOG = "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
 _OOM_LOG = "torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB"
@@ -401,7 +402,7 @@ def test_opt_venv_path_never_replaced(tmp_path):
 async def test_kept_stack_action_survives_rearm(monkeypatch):
     from hyperloom.orchestrator.state.shared_state import SharedState
 
-    # Simulate a coordinator with just enough surface for _maybe_rearm_enablement.
+    # Simulate a coordinator with just enough surface for maybe_rearm_enablement.
     state = SharedState()
     coord = types.SimpleNamespace(shared_state=state, session_dir=Path("/tmp/does-not-matter"))
     coord.save = lambda *a, **k: None
@@ -413,7 +414,7 @@ async def test_kept_stack_action_survives_rearm(monkeypatch):
         """An empty ledger, which the rearm reads to stamp the round's row."""
         return 0
 
-    coord._settle_enablement_round = _no_round
+    coord.settle_enablement_round = _no_round
     coord.rounds = types.SimpleNamespace(consecutive_stalled=_no_stalls)
 
     action_state = _candidate()
@@ -425,11 +426,8 @@ async def test_kept_stack_action_survives_rearm(monkeypatch):
         "enablement_active_runtime": runtime_state,
     }
 
-    # Bind the real method to our fake coordinator (SimpleNamespace has no save-to-disk).
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
     monkeypatch.setattr(state, "save", lambda *a, **k: None, raising=False)
-    await Coordinator._maybe_rearm_enablement(coord, res)
+    await EnablementLane.maybe_rearm_enablement(coord, res)
 
     assert state.enablement.kept_stack_action == action_state
     assert state.enablement.active_runtime == runtime_state

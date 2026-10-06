@@ -14,7 +14,7 @@ import shlex
 import tempfile
 from pathlib import Path
 
-from ...loop.coordinator_helpers import format_exc_brief
+from hyperloom.common.timeutil import format_exc_brief
 from hyperloom.common.env import env_flag, env_int
 from hyperloom.inference_optimizer.multi_node._internal.env_safety import filter_forward_env
 from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import (
