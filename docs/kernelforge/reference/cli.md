@@ -479,10 +479,20 @@ reaching a profiler on an arbitrary image means installing packages and that is
 open-ended work code cannot enumerate. Two things bound it. A pre-tool hook
 refuses edits outside the analyst's output directory, a scratch directory
 outside the workspace whose contents are moved under `--output-dir` when the
-session ends. The workspace guard snapshots every workspace file before the
-session; anything the session changed or created in the workspace, through a
-shell or otherwise, is rolled back and the session rejected, so the kernel
-under optimization comes out as it went in.
+session ends. The workspace guard protects the measurement surface -- the
+kernel sources and driver, and the configuration, harnesses, references and
+tests -- and a change to it, through a shell or otherwise, is rolled back and
+the session rejected, so the kernel under optimization comes out as it went in.
+A change to any other tracked file fails the estimate, and so does any new file
+other than what running the kernel builds into ignored files and the
+profiler's own droppings. The guard snapshots only the protected files, so the
+campaign's JIT cache is neither read into memory nor counted against the
+session.
+
+The evidence runs -- the case-discovery run on the standalone command and the
+kernel trace -- each run in their own process group, and a run past
+`--run-timeout-sec` is killed with everything it started, so a driver under a
+profiler or a shell cannot outlive its budget and hold the device.
 
 The result dict (`ideal_ms` per case, `mean_ideal_ms`, `report_path`) is
 printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__` sentinels.

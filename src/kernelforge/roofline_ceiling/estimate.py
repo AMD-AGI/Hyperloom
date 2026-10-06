@@ -93,7 +93,7 @@ async def estimate_ceiling(
     destination = Path(output_dir) if output_dir is not None else root / WORKSPACE_SUBDIR
     artifacts = destination / EVIDENCE_DIRNAME
 
-    evidence, scored_cases = collect_evidence(
+    evidence, scored_cases = await collect_evidence(
         performance_command=performance_command,
         workdir=root,
         artifacts_dir=artifacts,

@@ -22,14 +22,15 @@ document rather than a field.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import shutil
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+from kernelforge.mcp_server.tools._subprocess import communicate_process_group
 from kernelforge.roofline_ceiling.device_profile import DeviceIdentity, describe_device
 
 log = logging.getLogger("kernelforge.roofline_ceiling")
@@ -66,7 +67,7 @@ class EvidenceBundle:
         )
 
 
-def _run(
+async def _run(
     argv: Sequence[str],
     *,
     cwd: str | Path,
@@ -74,37 +75,46 @@ def _run(
     env: dict[str, str] | None = None,
     log_path: Path | None = None,
 ) -> tuple[int, str]:
-    """Run one subprocess, returning ``(returncode, combined output)``.
+    """Run one subprocess in its own process group, returning ``(returncode, combined output)``.
+
+    The process started here is never the one doing the work -- it is a
+    profiler wrapping the driver, or a shell running it -- so a timeout or a
+    cancelled estimate kills the whole group. Killing the direct child alone
+    would leave the driver holding the device, and every latency the campaign
+    measured afterwards would be taken on a contended one.
 
     A missing binary, a crash and a timeout are all ordinary outcomes here: the
     caller decides what to do about them, so none of them raise.
     """
     merged = {**os.environ, **(env or {})}
     try:
-        completed = subprocess.run(
-            list(argv),
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
             cwd=str(cwd),
             env=merged,
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-            check=False,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
-        output = (completed.stdout or "") + (completed.stderr or "")
-        code = completed.returncode
-    except subprocess.TimeoutExpired as exc:
-        output = f"timed out after {timeout_sec:.0f}s: {exc}"
-        code = -1
     except OSError as exc:
         output = f"could not execute {argv[0]!r}: {exc}"
         code = -1
+    else:
+        try:
+            stdout, stderr = await communicate_process_group(proc, timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            output = f"timed out after {timeout_sec:.0f}s; its process group was killed"
+            code = -1
+        else:
+            output = stdout.decode(errors="replace") + stderr.decode(errors="replace")
+            code = proc.returncode if proc.returncode is not None else -1
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text(output, encoding="utf-8")
     return code, output
 
 
-def capture_kernel_trace(
+async def capture_kernel_trace(
     *,
     command: Sequence[str],
     workdir: str | Path,
@@ -131,7 +141,7 @@ def capture_kernel_trace(
     ):
         if not shutil.which(tool):
             continue
-        code, _output = _run(
+        code, _output = await _run(
             argv,
             cwd=workdir,
             timeout_sec=timeout_sec,
@@ -157,7 +167,7 @@ def resolve_identity(arch: str = "") -> DeviceIdentity:
     return describe_device(arch)
 
 
-def discover_scored_cases(
+async def discover_scored_cases(
     *,
     command: Sequence[str],
     workdir: str | Path,
@@ -175,7 +185,7 @@ def discover_scored_cases(
     """
     from kernelforge.mcp_server.tools.bench import parse_case_timings
 
-    code, output = _run(
+    code, output = await _run(
         command,
         cwd=workdir,
         timeout_sec=timeout_sec,
@@ -199,7 +209,7 @@ def discover_scored_cases(
     return scored, {case_id: case_times[case_id] for case_id in scored}, notes
 
 
-def collect_evidence(
+async def collect_evidence(
     *,
     performance_command: Sequence[str],
     workdir: str | Path,
@@ -232,7 +242,7 @@ def collect_evidence(
         observed_origin = OBSERVED_CAMPAIGN
         notes = ["scored case set and latencies supplied by the caller; no discovery run was made"]
     else:
-        scored, observed, notes = discover_scored_cases(
+        scored, observed, notes = await discover_scored_cases(
             command=performance_command,
             workdir=workdir,
             artifacts_dir=artifacts,
@@ -241,7 +251,7 @@ def collect_evidence(
         )
         observed_origin = OBSERVED_SINGLE_RUN
 
-    trace_provenance = capture_kernel_trace(
+    trace_provenance = await capture_kernel_trace(
         command=performance_command,
         workdir=workdir,
         artifacts_dir=artifacts,
