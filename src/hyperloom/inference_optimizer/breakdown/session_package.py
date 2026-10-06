@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Iterable
 
 from hyperloom.common.env import env_flag
+from hyperloom.common.env_safety import redact_secret_env_values
 
 from ..session.paths import is_path_within
 from ..session.session_paths import BRINGUP_SEGMENT, ENABLEMENT_SEGMENT
@@ -135,6 +136,33 @@ def _loose_enabled() -> bool:
     return env_flag(ENV_PACKAGE_LOOSE, default=True)
 
 
+# ``state.json`` keeps the operator's ``--extra-env`` values in plaintext because ``--resume`` re-exports them from
+# there, so the session dir copy cannot be masked; the copy that leaves the session can.
+_STATE_JSON_REL = "state.json"
+_STATE_ENV_FIELDS: tuple[str, ...] = ("operator_extra_env",)
+
+
+def _exported_state_bytes(path: Path) -> bytes:
+    """``state.json`` as it may leave the session: every operator env pin's credential masked.
+
+    Raises ``OSError`` when the file cannot be read or is not a JSON object, so the caller records it as not written
+    rather than shipping values it could not inspect.
+    """
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise OSError(f"{path.name} is not valid JSON") from exc
+    if not isinstance(state, dict):
+        raise OSError(f"{path.name} is not a JSON object")
+    for field in _STATE_ENV_FIELDS:
+        env = state.get(field)
+        if isinstance(env, dict):
+            state[field] = redact_secret_env_values(env)
+        elif env:
+            state[field] = "[REDACTED]"
+    return json.dumps(state, indent=2).encode("utf-8")
+
+
 def _copy_loose_tree(
     included: list[tuple[Path, str, int]],
     loose_dir: Path,
@@ -147,7 +175,12 @@ def _copy_loose_tree(
         dst = loose_dir / rel
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
+            if rel == _STATE_JSON_REL:
+                data = _exported_state_bytes(src)
+                dst.write_bytes(data)
+                sz = len(data)
+            else:
+                shutil.copy2(src, dst)
             copied.append((rel, sz))
         except OSError:
             failed.append(rel)
@@ -558,7 +591,12 @@ def package_session_artifacts(
                 write_failures: list[str] = []
                 for p, rel, sz in selected:
                     try:
-                        zf.write(p, arcname=rel)
+                        if rel == _STATE_JSON_REL:
+                            data = _exported_state_bytes(p)
+                            zf.writestr(rel, data)
+                            sz = len(data)
+                        else:
+                            zf.write(p, arcname=rel)
                         written.append((rel, sz))
                     except OSError:
                         write_failures.append(rel)

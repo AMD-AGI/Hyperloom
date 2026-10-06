@@ -318,6 +318,44 @@ def test_redact_env_redacts_custom_headers_and_value_shaped_secrets():
     assert "anothersecretvalue" not in snap["GATEWAY_HDR"]
 
 
+def test_session_start_masks_extra_env_pins_the_cli_exported(monkeypatch):
+    # The CLI serializes --extra-env into one JSON var whose name carries no marker; each pin is masked by its own name.
+    import os
+
+    from hyperloom.inference_optimizer import cli
+
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_EXTRA_ENV", raising=False)
+    cli._export_operator_launch_shape(
+        server_args="",
+        extra_env={
+            "HF_TOKEN": "hf_plaintextvalue",
+            "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=plaintextvalue",
+            "VLLM_MAX_NUM_BATCHED_TOKENS": "8192",
+            "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+        },
+    )
+    try:
+        payload = lfmap.session_start_payload({}, env=os.environ)
+    finally:
+        os.environ.pop("INFERENCE_OPTIMIZER_EXTRA_ENV", None)
+
+    raw = payload["env"]["INFERENCE_OPTIMIZER_EXTRA_ENV"]
+    assert "plaintextvalue" not in raw
+    assert json.loads(raw) == {
+        "HF_TOKEN": "[REDACTED]",
+        "OTEL_EXPORTER_OTLP_HEADERS": "[REDACTED]",
+        "VLLM_MAX_NUM_BATCHED_TOKENS": "8192",
+        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+    }
+
+
+@pytest.mark.parametrize("raw", ['{"HF_TOKEN": "hf_plaintextvalue"', '["HF_TOKEN=hf_plaintextvalue"]'])
+def test_extra_env_snapshot_that_is_not_a_json_object_is_masked_whole(raw):
+    snap = lfmap.redact_env({"INFERENCE_OPTIMIZER_EXTRA_ENV": raw})
+
+    assert snap == {"INFERENCE_OPTIMIZER_EXTRA_ENV": "***redacted***"}
+
+
 def test_session_start_is_idempotent(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()

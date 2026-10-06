@@ -162,6 +162,51 @@ def test_v6_blocks_are_additive_to_the_rest_of_the_document(tmp_path):
     assert all(event["type"] != "close" for event in after["timeline"])
 
 
+def test_the_exported_launch_env_never_carries_a_credential(tmp_path):
+    _write_json(
+        tmp_path / "state.json",
+        {"session_id": "session-v6", "operator_extra_env": {"TP": "8", "OPENAI_API_KEY": "plaintext"}},
+    )
+    _write_json(tmp_path / "manifest.json", {"session_id": "session-v6"})
+
+    launch_env = exporter.build(tmp_path)["metadata"]["task_config"]["launch_env"]
+
+    assert launch_env == {"TP": "8", "OPENAI_API_KEY": "[REDACTED]"}
+
+
+def test_the_exported_launch_env_masks_a_generic_custom_headers_env(tmp_path):
+    headers = "Authorization: Bearer placeholder-not-a-secret"
+    _write_json(
+        tmp_path / "state.json",
+        {"session_id": "session-v6", "operator_extra_env": {"TP": "8", "SERVICE_CUSTOM_HEADERS": headers}},
+    )
+    _write_json(tmp_path / "manifest.json", {"session_id": "session-v6"})
+
+    document = exporter.build(tmp_path)
+
+    assert document["metadata"]["task_config"]["launch_env"] == {"TP": "8", "SERVICE_CUSTOM_HEADERS": "[REDACTED]"}
+    assert "placeholder-not-a-secret" not in json.dumps(document)
+
+
+def test_a_re_export_masks_a_credential_a_legacy_fragment_recorded_in_plaintext(tmp_path):
+    from hyperloom.inference_optimizer.breakdown.recorder import recorder_for
+
+    _write_json(
+        tmp_path / "state.json",
+        {"session_id": "session-v6", "operator_extra_env": {"TP": "8", "OPENAI_API_KEY": "plaintext-test-value"}},
+    )
+    _write_json(tmp_path / "manifest.json", {"session_id": "session-v6"})
+    # A fragment recorded before the recorder masked values: written raw, as the old snapshot did.
+    legacy_env = {"TP": "8", "OPENAI_API_KEY": "plaintext-test-value", "HF_TOKEN": "plaintext-test-value"}
+    recorder_for(tmp_path, producer="coordinator").record_upsert_singleton(
+        "metadata", {"task_config": {"launch_env": legacy_env}}
+    )
+
+    launch_env = exporter.build(tmp_path)["metadata"]["task_config"]["launch_env"]
+
+    assert launch_env == {"TP": "8", "OPENAI_API_KEY": "[REDACTED]", "HF_TOKEN": "[REDACTED]"}
+
+
 def test_an_invalid_v6_event_is_reported_without_disturbing_the_rest(tmp_path):
     before = exporter.build(tmp_path)
     path = tmp_path / "reports" / "sbd_v6" / "timeline" / "000001-install.json"
