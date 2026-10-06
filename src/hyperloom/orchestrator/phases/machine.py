@@ -233,8 +233,9 @@ class MachinePhase(CoordinatorCollaborator):
         stopped = await dispatcher.cancel_inflight_actions(reason=barrier_reason)
         if cancelled or stopped:
             log.info(
-                "Coordinator.phase: %s cancelled %d queued and stopped %d running task(s)",
+                "Coordinator.phase: %s (reason=%s) cancelled %d queued and stopped %d running task(s)",
                 barrier_reason,
+                reason,
                 len(cancelled),
                 len(stopped),
             )
@@ -253,7 +254,10 @@ class MachinePhase(CoordinatorCollaborator):
         running = await self.tasks.running()
         if running or dispatcher.has_unbooked_completions():
             log.info(
-                "phase_machine: holding %s until %d running task(s) stop and are booked", barrier_reason, len(running)
+                "phase_machine: holding %s (reason=%s) until %d running task(s) stop and are booked",
+                barrier_reason,
+                reason,
+                len(running),
             )
             return
         dispatcher.admission_frozen = False

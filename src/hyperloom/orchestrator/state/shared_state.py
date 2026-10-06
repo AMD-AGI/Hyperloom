@@ -635,6 +635,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Durable watermark from the last real conc_sweep measurement; survives the macro-cycle reloop clearing
     # ``last_conc_sweep`` so redundant closeout is skipped when no validated gain landed since the prior conc_sweep.
     last_conc_sweep_watermark: dict[str, Any] = field(default_factory=dict)
+    # Wall-clock instant (unix seconds) until which the ``conc_sweep`` SWEEP enqueued is entitled to run: its granted
+    # budget plus the lease grace. SWEEP's own budget exits defer to it while no result has landed; 0 means no grant.
+    conc_sweep_granted_until_unix: float = 0.0
     # Most recent per-kernel optimization record.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
     # Most recent forge-fusion run result and its e2e integrate result; persisted so resume does not rerun a completed
