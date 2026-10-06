@@ -20,12 +20,15 @@ installing packages, and that is open-ended work code cannot enumerate -- so
 the workspace has to be defended rather than trusted. It is defended twice.
 
 The workspace guard is the real line: granting shell makes it active instead of
-skipped, and ``protected_globs=["*"]`` puts every file under it, so the kernel
-comes out of the session exactly as it went in. That strictness has a
-consequence worth stating, because it is not obvious and it cost a run to find:
-the guard counts *new* files in the workspace as violations too, and rolls the
-tree back when it finds any. An analyst writing its answer under the workspace
-would therefore have its answer deleted on the way out.
+skipped. It protects the measurement surface -- the kernel sources and driver by
+path, the configuration, harnesses, references and tests by the shared protected
+names -- and rolls the tree back and rejects the session on a change to any of
+it. A change to any other tracked file it lets through and reports, and this
+module fails the estimate on that report, because the analyst may only read.
+Build products of running the kernel are left alone: they land in ignored files
+or in the toolchain's own named droppings. Any other new file in the workspace
+is a violation too, so an analyst writing its answer under the workspace would
+have its answer deleted on the way out.
 
 So the analyst writes into a scratch directory outside the workspace, and this
 module moves the two deliverables into place afterwards. The hook is the second
@@ -52,6 +55,7 @@ from kernelforge.agent_backends.base import (
     AgentToolPolicy,
     watchdog_timeout_sec,
 )
+from kernelforge.llm.workspace_policy import TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.roofline_ceiling.contract import CeilingContractError, CeilingReport
 from kernelforge.roofline_ceiling.evidence import OBSERVED_CAMPAIGN, EvidenceBundle
 from kernelforge.roofline_ceiling.report import (
@@ -197,6 +201,7 @@ def _spec(
     model: str,
     timeout_sec: int,
     writable_dirs: Sequence[str],
+    protected_paths: Sequence[str],
     turns: int,
 ) -> AgentRunSpec:
     """One analyst session: reads the workspace, writes only where it is told."""
@@ -217,9 +222,16 @@ def _spec(
         ),
         # Two lines, because a shell gets past the first: the hook refuses the
         # editing tools outside the output directories, and the workspace guard
-        # snapshots every workspace file and restores it after.
+        # rejects and rolls back a change to the measurement surface -- the
+        # kernel sources and driver exactly, the configuration, harnesses,
+        # references and tests by the shared protected names. Not ``["*"]``:
+        # the guard snapshots every protected ignored file byte for byte and
+        # rejects any new one, and the ignored tree is where running the kernel
+        # compiles to, so that glob reads a multi-GiB JIT cache into memory and
+        # rejects the session for the build products of its own measurement.
         hooks=_writable_only_within(writable_dirs),
-        protected_globs=["*"],
+        protected_paths=[path for path in protected_paths if path],
+        ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
         additional_directories=list(writable_dirs),
         # The kernel under analysis is routinely a dirty checkout mid-campaign,
         # and an estimator has no business demanding a clean tree.
@@ -227,13 +239,24 @@ def _spec(
     )
 
 
-async def _ask(backend: Any, spec: AgentRunSpec) -> str:
-    """Run one session and return its final text."""
+async def _ask(backend: Any, spec: AgentRunSpec) -> None:
+    """Run one session, refusing it if it left a workspace file changed.
+
+    The guard rolls back the measurement surface itself. Any other tracked
+    file it lets through, and reports as the session's file changes; the
+    analyst may only read the workspace, so a change there fails the estimate
+    rather than being taken as part of it.
+    """
     result = await asyncio.wait_for(
         backend.run(spec),
         timeout=watchdog_timeout_sec(spec.timeout_sec or 0),
     )
-    return str(getattr(result, "text", "") or "").strip()
+    changed = list(getattr(result, "file_changes", None) or [])
+    if changed:
+        raise CeilingAnalysisError(
+            "the analyst session changed workspace files it may only read, and they were left as it changed "
+            "them: " + ", ".join(changed)
+        )
 
 
 def _derivation_problem(document_path: Path) -> str:
@@ -336,6 +359,7 @@ async def run_ceiling_analysis(
                     model=model,
                     timeout_sec=timeout_sec,
                     writable_dirs=[str(scratch)],
+                    protected_paths=[*kernel_files, driver_script],
                     turns=turns,
                 ),
             )

@@ -30,8 +30,9 @@ You may write only inside the output directory named in the request — put your
 profiler output, scratch scripts and logs there too. The workspace and the
 evidence directory are read-only. The editing tools refuse
 a path outside the output directory; a file a shell command creates or changes
-in the workspace is rolled back when the session ends, and the whole session
-is rejected with it, answer included. Anything you leave in the output
+in the workspace fails the whole session, answer included. Running the kernel
+is allowed: what it builds into ignored files and the profiler's own droppings
+are not counted. Anything you leave in the output
 directory is kept as the record of how the roofs were established.
 
 ## Step 0 — establish this machine's roofs

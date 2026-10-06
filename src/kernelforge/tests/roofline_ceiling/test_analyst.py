@@ -6,10 +6,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
+from kernelforge.llm.workspace_policy import TOOL_OWNED_UNTRACKED_GLOBS
+from kernelforge.roofline_ceiling import analyst as analyst_module
 from kernelforge.roofline_ceiling.analyst import (
     CeilingAnalysisError,
     build_request,
@@ -213,13 +217,102 @@ def test_the_session_writes_outside_the_workspace_so_the_guard_keeps_it(tmp_path
 
 
 def test_the_kernel_under_optimization_stays_out_of_reach(tmp_path):
-    """Two lines: the hook refuses the edit, the guard restores anything a shell touched."""
+    """Two lines: the hook refuses the edit, the guard protects the kernel and driver by path."""
     backend = _Backend(_GOOD)
 
     _analyse(backend, tmp_path)
 
-    assert backend.specs[0].protected_globs == ["*"]
-    assert backend.specs[0].hooks.pre_tool_use
+    spec = backend.specs[0]
+    assert spec.protected_paths == ["kernel.py", "driver.py"]
+    assert spec.protected_globs == []
+    assert spec.ignored_untracked_globs == list(TOOL_OWNED_UNTRACKED_GLOBS)
+    assert not spec.allow_untracked
+    assert spec.hooks.pre_tool_use
+
+
+def test_a_session_that_changed_a_workspace_file_fails_the_estimate(tmp_path):
+    """The guard lets a tracked file outside the measurement surface through; the analyst may only read it."""
+
+    class _Touches(_Backend):
+        async def run(self, spec, usage=None):
+            result = await super().run(spec, usage)
+            result.file_changes = ["src/helpers.py"]
+            return result
+
+    with pytest.raises(CeilingAnalysisError, match="changed workspace files it may only read.*src/helpers.py"):
+        _analyse(_Touches(_GOOD), tmp_path)
+
+
+def _git_workspace(root: Path) -> Path:
+    root.mkdir()
+    (root / "kernel.py").write_text("def kernel():\n    return 1\n", encoding="utf-8")
+    (root / "driver.py").write_text("print('case_ms: c0 40.0')\n", encoding="utf-8")
+    (root / "helpers.py").write_text("SCALE = 1\n", encoding="utf-8")
+    (root / ".gitignore").write_text("forge_experiments/\n", encoding="utf-8")
+    cache = root / "forge_experiments" / "aiter_cache" / "build"
+    cache.mkdir(parents=True)
+    (cache / "module.so").write_bytes(b"\0" * 4096)
+    for command in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+        ["git", "add", "-A"],
+        ["git", "commit", "-q", "-m", "base"],
+    ):
+        subprocess.run(command, cwd=root, check=True, capture_output=True)
+    return root
+
+
+def _guarded(workspace: Path, scratch: Path) -> WorkspaceGuard:
+    spec = analyst_module._spec(
+        system_prompt="",
+        user_prompt="",
+        workdir=str(workspace),
+        model="",
+        timeout_sec=60,
+        writable_dirs=[str(scratch)],
+        protected_paths=["kernel.py", "driver.py"],
+        turns=1,
+    )
+    guard = WorkspaceGuard(spec)
+    guard.prepare()
+    return guard
+
+
+def test_the_guard_leaves_the_campaigns_jit_cache_unread_and_uncounted(tmp_path):
+    """Running the kernel compiles into the ignored tree; that is neither snapshotted nor a violation."""
+    workspace = _git_workspace(tmp_path / "ws")
+
+    guard = _guarded(workspace, tmp_path / "scratch")
+    cache = workspace / "forge_experiments" / "aiter_cache" / "build"
+    (cache / "module.so").write_bytes(b"\1" * 4096)
+    (cache / "new_shard.so").write_bytes(b"\2" * 16)
+    (workspace / ".rocprofv3").mkdir()
+    (workspace / ".rocprofv3" / "trace.db").write_bytes(b"\3")
+
+    assert not any("aiter_cache" in str(path) for path in guard.snapshots)
+    assert guard.verify() == []
+
+
+def test_the_guard_rolls_back_and_rejects_an_edit_to_the_kernel(tmp_path):
+    workspace = _git_workspace(tmp_path / "ws")
+
+    guard = _guarded(workspace, tmp_path / "scratch")
+    (workspace / "kernel.py").write_text("def kernel():\n    return 2\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceSafetyError, match="kernel.py"):
+        guard.verify()
+    assert (workspace / "kernel.py").read_text(encoding="utf-8") == "def kernel():\n    return 1\n"
+
+
+def test_the_guard_reports_an_edit_to_any_other_tracked_file(tmp_path):
+    """Outside the measurement surface the guard reports rather than rejects, and the estimate fails on the report."""
+    workspace = _git_workspace(tmp_path / "ws")
+
+    guard = _guarded(workspace, tmp_path / "scratch")
+    (workspace / "helpers.py").write_text("SCALE = 2\n", encoding="utf-8")
+
+    assert guard.verify() == ["helpers.py"]
 
 
 def _deny_reason(hooks, tool_name: str, file_path: str):
