@@ -11,6 +11,8 @@ import logging
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from hyperloom.inference_optimizer.experience_collect import mapping_schema_ref
 from hyperloom.inference_optimizer.experience_kb import (
     CONTENT_INLINE_LIMIT,
@@ -249,8 +251,17 @@ def test_a_referenced_change_reaches_the_prompt_as_session_files(tmp_path) -> No
     assert reads == [CONTENT_INLINE_LIMIT, CONTENT_INLINE_LIMIT]
 
 
-def test_a_content_too_deeply_nested_to_parse_never_stops_a_turn_or_a_dispatch(tmp_path) -> None:
-    content = "[" * 100_000 + "]" * 100_000
+_UNWRITABLE_PATCH = json.dumps(
+    {"patches": [{"path": "a.diff", "content": "\ud800+x = 1\n"}, {"path": "b.diff", "content": "+y = 2\n"}]}
+)
+
+
+@pytest.mark.parametrize(
+    ("content", "patch_files"),
+    [("[" * 100_000 + "]" * 100_000, []), (_UNWRITABLE_PATCH, ["2-b.diff"])],
+    ids=["too-deeply-nested-to-parse", "patch-with-a-lone-surrogate"],
+)
+def test_a_content_hyperloom_cannot_split_never_stops_a_turn_or_a_dispatch(tmp_path, content, patch_files) -> None:
     ref = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
     block = (
         f"=== Relevant Experience KB ===\nExperience {_FIRST}\nRecord:\n<external content {ref}, {len(content)} bytes>"
@@ -276,8 +287,13 @@ def test_a_content_too_deeply_nested_to_parse_never_stops_a_turn_or_a_dispatch(t
     asyncio.run(coordinator.specialist_dispatch.warm_specialist_params(params))
 
     content_file = tmp_path / "experience_kb" / "contents" / f"{ref.removeprefix('sha256:')}.txt"
+    patch_dir = content_file.with_suffix("")
     assert content_file.read_text(encoding="utf-8") == content
     assert f"- {ref} ({len(content.encode())} bytes): {content_file}" in orchestration_block
+    assert sorted(path.name for path in patch_dir.glob("*")) == patch_files
+    assert [line for line in orchestration_block.splitlines() if "- patch:" in line] == [
+        f"  - patch: {patch_dir / name}" for name in patch_files
+    ]
     assert params["kb_read_id"] == "read-deep"
 
 

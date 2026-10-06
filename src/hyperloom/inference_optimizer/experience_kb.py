@@ -58,19 +58,12 @@ def _current_best_throughput(value: Any) -> float:
     return 0.0
 
 
-def _bottleneck(state: Any) -> str:
-    try:
-        return str(state.current_top_bottleneck() or "").strip()
-    except Exception:  # noqa: BLE001 — optional state helper
-        return ""
-
-
-def _write_once(path: Path, text: str) -> None:
+def _write_once(path: Path, data: bytes) -> None:
     if path.exists():
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(text, encoding="utf-8")
+    temporary.write_bytes(data)
     os.replace(temporary, path)
 
 
@@ -88,9 +81,14 @@ def _patch_files(directory: Path, content: str) -> list[Path]:
         text = patch.get("content") if isinstance(patch, dict) else None
         if not isinstance(text, str):
             continue
+        try:
+            data = text.encode("utf-8")
+        # JSON can escape a lone surrogate, which no UTF-8 file holds; the whole content file still carries the patch.
+        except UnicodeEncodeError:
+            continue
         name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(str(patch.get("path") or "")).name) or "change.patch"
         path = directory / f"{index}-{name}"
-        _write_once(path, text)
+        _write_once(path, data)
         paths.append(path)
     return paths
 
@@ -104,15 +102,15 @@ def _materialize_contents(root: Path, contents: Iterable[Mapping[str, Any]]) -> 
         digest = ref.removeprefix("sha256:")
         if not re.fullmatch(r"[0-9a-f]{64}", digest) or not isinstance(text, str):
             continue
-        path = root / f"{digest}.txt"
+        path, data = root / f"{digest}.txt", text.encode("utf-8")
         try:
-            _write_once(path, text)
+            _write_once(path, data)
             patches = _patch_files(root / digest, text)
         except OSError:
             log.warning("Experience KB content %s could not be written under %s", ref, root, exc_info=True)
-            lines.append(f"- {ref} ({len(text.encode())} bytes): not available in this session")
+            lines.append(f"- {ref} ({len(data)} bytes): not available in this session")
             continue
-        lines.append(f"- {ref} ({len(text.encode())} bytes): {path}")
+        lines.append(f"- {ref} ({len(data)} bytes): {path}")
         lines.extend(f"  - patch: {patch}" for patch in patches)
     if not lines:
         return ""
@@ -262,7 +260,7 @@ class ExperienceKBIntegration:
 
     def build_context(self, state: Any, untested_proposals: str = "") -> dict[str, Any]:
         observations: dict[str, str] = {}
-        bottleneck = _bottleneck(state)
+        bottleneck = state.current_top_bottleneck().strip()
         if bottleneck:
             observations["bottleneck"] = bottleneck
         if untested_proposals:
@@ -271,7 +269,7 @@ class ExperienceKBIntegration:
 
     def build_specialist_context(self, state: Any, params: dict[str, Any]) -> dict[str, Any]:
         observations: dict[str, str] = {}
-        bottleneck = _bottleneck(state)
+        bottleneck = state.current_top_bottleneck().strip()
         if bottleneck:
             observations["bottleneck"] = bottleneck
         pr_lead = params.get("pr_lead")
