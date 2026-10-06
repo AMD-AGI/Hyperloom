@@ -307,6 +307,7 @@ def test_no_estimator_is_built_while_the_ceiling_is_off():
             agent_provider="",
             agent_model="",
             session_timeout_sec=60,
+            sandbox_mode="bypass",
         )
         is None
     )
@@ -325,11 +326,14 @@ def test_the_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypa
         seen.update(kwargs)
         return "outcome"
 
+    from kernelforge.roofline_ceiling.command import resolve_analyst_backend as real_resolve
+
+    def _resolve(*args, **kwargs):
+        seen["resolver"] = inspect.signature(real_resolve).bind(*args, **kwargs).arguments
+        return SimpleNamespace()
+
     monkeypatch.setattr("kernelforge.roofline_ceiling.estimate.estimate_ceiling", _estimate)
-    monkeypatch.setattr(
-        "kernelforge.roofline_ceiling.command.resolve_analyst_backend",
-        lambda *args, **kwargs: SimpleNamespace(),
-    )
+    monkeypatch.setattr("kernelforge.roofline_ceiling.command.resolve_analyst_backend", _resolve)
 
     estimator = cli_module._make_ceiling_estimator(
         enabled=True,
@@ -339,16 +343,32 @@ def test_the_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypa
         agent_provider="",
         agent_model="",
         session_timeout_sec=60,
+        sandbox_mode="read-only",
     )
     assert estimator is not None
 
     result = asyncio.run(estimator(case_ids=["decode-t1"], case_ms={"decode-t1": 14.0}))
 
     assert result == "outcome"
+    assert seen.pop("resolver")["sandbox_mode"] == "read-only"
     assert seen["known_case_ids"] == ["decode-t1"]
     # Every keyword the estimator sends has to be one the signature declares.
     accepted = set(inspect.signature(real_estimate_ceiling).parameters)
     assert set(seen) <= accepted, sorted(set(seen) - accepted)
+
+
+@pytest.mark.parametrize(("deployment", "analyst"), [("bypass", "bypass"), ("read-only", "workspace-write")])
+def test_the_analyst_runs_in_the_deployments_sandbox_widened_only_to_write(monkeypatch, deployment, analyst):
+    """Every session honours the deployment's sandbox; the analyst writes its answer, so read-only is widened once."""
+    from kernelforge.roofline_ceiling import command as command_module
+
+    built = {}
+    monkeypatch.setattr(command_module, "create_registered_backend", lambda runtime: built.setdefault("rt", runtime))
+
+    command_module.resolve_analyst_backend("claude", "", 600, sandbox_mode=deployment)
+
+    assert built["rt"].provider == "claude"
+    assert built["rt"].sandbox_mode == analyst
 
 
 def test_the_target_ends_the_campaign_once_the_mean_reaches_it(tmp_path):

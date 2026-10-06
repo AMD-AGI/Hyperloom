@@ -15,6 +15,7 @@ from typing import Any, Sequence
 import click
 import yaml
 
+from kernelforge.agent_backends.base import with_writable_sandbox
 from kernelforge.agent_backends.registry import (
     create_registered_backend,
     get_agent_provider,
@@ -27,7 +28,7 @@ from kernelforge.roofline_ceiling.estimate import (
     estimate_ceiling,
 )
 from kernelforge.roofline_ceiling.report import WORKSPACE_SUBDIR
-from kernelforge.config import resolve_agent_model, resolve_agent_reasoning_effort
+from kernelforge.config import Config, resolve_agent_model, resolve_agent_reasoning_effort
 
 CONFIG_FILENAME = "config.yaml"
 
@@ -94,12 +95,17 @@ def _resolve_kernel_files(explicit: Sequence[str], document: dict[str, Any], wor
     return resolved
 
 
-def resolve_analyst_backend(provider: str, model: str, timeout_sec: int):
+def resolve_analyst_backend(provider: str, model: str, timeout_sec: int, *, sandbox_mode: str):
     """Build the backend the ceiling analyst session runs on.
 
     Follows the same provider/model ladder forge-loop reads, so a campaign that
     estimates its own ceiling reaches the same agent the standalone command
-    would have.
+    would have. ``sandbox_mode`` is the deployment's, so the analyst runs in the
+    sandbox every other session runs in. A ``read-only`` one is widened to
+    ``workspace-write`` and no further, as for every session that must write:
+    the analyst writes its answer, so read-only would leave it unable to. A
+    sandbox that hides the device nodes leaves the profiler without a GPU, and
+    the derivation then has to say its roofs were recalled rather than measured.
     """
     name = get_agent_provider(provider).name if provider.strip() else select_default_agent_provider().name
     registration = get_agent_provider(name)
@@ -109,17 +115,10 @@ def resolve_analyst_backend(provider: str, model: str, timeout_sec: int):
         model=selected,
         timeout_sec=timeout_sec,
         reasoning_effort=resolve_agent_reasoning_effort(),
-        # No sandbox is named, so the analyst runs under the same deployment
-        # default every other session does. It used to pin ``read-only``, which
-        # Claude ignores in favour of the spec and Codex honours: there the
-        # session could not write the answer it had derived, and a narrower
-        # sandbox could not reach /dev/kfd either, so the roofs silently fell
-        # back to datasheet figures. The analyst is already the more confined
-        # role -- it measures and writes two files, under a guard that
-        # snapshots the whole workspace -- so it needs no sandbox of its own.
+        sandbox_mode=sandbox_mode,
         fallback_provider="",
     )
-    return create_registered_backend(runtime)
+    return create_registered_backend(with_writable_sandbox(runtime))
 
 
 def _emit(report: CeilingReport, *, source: str, report_path: Path | None) -> None:
@@ -160,6 +159,11 @@ def _emit(report: CeilingReport, *, source: str, report_path: Path | None) -> No
 @click.option("--agent-provider", default="", help="Agent provider (claude, codex). Auto-selected when omitted.")
 @click.option("--agent-model", default="", help="Agent model. Falls back to the provider default.")
 @click.option("--agent-timeout-sec", default=3600, type=int, help="Wall-clock budget for the analyst session")
+@click.option(
+    "--agent-sandbox-mode",
+    default=None,
+    help="Provider sandbox mode. Defaults to FORGE_AGENT_SANDBOX_MODE, as for every other command.",
+)
 @click.option("--run-timeout-sec", default=1800, type=int, help="Wall-clock budget for each measurement subprocess")
 def roofline_ceiling_command(
     workspace_dir: str,
@@ -172,6 +176,7 @@ def roofline_ceiling_command(
     agent_provider: str,
     agent_model: str,
     agent_timeout_sec: int,
+    agent_sandbox_mode: str | None,
     run_timeout_sec: int,
 ) -> None:
     """Estimate the theoretical achievable latency of one kernel, per scored shape.
@@ -191,12 +196,15 @@ def roofline_ceiling_command(
     document = _load_config(config_file)
     command = _resolve_performance_command(performance_command, document, config_file)
     sources = _resolve_kernel_files(kernel_files, document, workspace)
+    sandbox_mode = Config.from_env(
+        **({"agent_sandbox_mode": agent_sandbox_mode} if agent_sandbox_mode is not None else {})
+    ).agent_sandbox_mode
 
     click.echo("[ceiling] collecting evidence (driver run, device profile, trace)...")
     try:
         outcome = asyncio.run(
             estimate_ceiling(
-                resolve_analyst_backend(agent_provider, agent_model, agent_timeout_sec),
+                resolve_analyst_backend(agent_provider, agent_model, agent_timeout_sec, sandbox_mode=sandbox_mode),
                 workspace=workspace,
                 performance_command=command,
                 kernel_files=sources,

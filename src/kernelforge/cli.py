@@ -347,6 +347,7 @@ def _make_ceiling_estimator(
     agent_provider: str,
     agent_model: str,
     session_timeout_sec: int,
+    sandbox_mode: str,
 ):
     """Build the callable the loop uses to estimate a ceiling, or ``None``.
 
@@ -371,7 +372,7 @@ def _make_ceiling_estimator(
         from kernelforge.roofline_ceiling.estimate import estimate_ceiling
 
         return await estimate_ceiling(
-            resolve_analyst_backend(agent_provider, agent_model, session_timeout_sec),
+            resolve_analyst_backend(agent_provider, agent_model, session_timeout_sec, sandbox_mode=sandbox_mode),
             workspace=workspace_dir,
             performance_command=bench_command(driver_script),
             kernel_files=[str(path) for path in source_files],
@@ -1612,6 +1613,7 @@ def forge_loop(
             agent_provider=agent_backend or "",
             agent_model=model or "",
             session_timeout_sec=session_timeout_sec,
+            sandbox_mode=config.agent_sandbox_mode,
         ),
     )
 

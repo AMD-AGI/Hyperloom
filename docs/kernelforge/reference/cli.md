@@ -453,6 +453,7 @@ configuration file, and cases the driver tags `unscored` get no ceiling.
 | `--agent-provider <name>` | auto-selected | Agent provider for the analyst session. |
 | `--agent-model <name>` | provider default | Analyst model. |
 | `--agent-timeout-sec <s>` | `3600` | Wall-clock budget for the analyst session. |
+| `--agent-sandbox-mode <mode>` | `FORGE_AGENT_SANDBOX_MODE` | Provider sandbox mode for the analyst session, as for every other session; `read-only` is widened to `workspace-write` so the analyst can write its answer. |
 | `--run-timeout-sec <s>` | `1800` | Wall-clock budget for each measurement subprocess. |
 
 Two files are published. `performance_ceiling.json` is the answer and nothing
@@ -479,15 +480,22 @@ reaching a profiler on an arbitrary image means installing packages and that is
 open-ended work code cannot enumerate. Two things bound it. A pre-tool hook
 refuses edits outside the analyst's output directory, a scratch directory
 outside the workspace whose contents are moved under `--output-dir` when the
-session ends. The workspace guard protects the measurement surface -- the
-kernel sources and driver, and the configuration, harnesses, references and
-tests -- and a change to it, through a shell or otherwise, is rolled back and
-the session rejected, so the kernel under optimization comes out as it went in.
-A change to any other tracked file fails the estimate, and so does any new file
-other than what running the kernel builds into ignored files and the
-profiler's own droppings. The guard snapshots only the protected files, so the
-campaign's JIT cache is neither read into memory nor counted against the
+session ends. The workspace guard treats the workspace as read-only: a change to
+any tracked file, or to the measurement surface -- the kernel sources and
+driver, and the configuration, harnesses, references and tests -- even where it
+is ignored, is rolled back to what the session found and the session rejected,
+through a shell or otherwise, so the campaign continues on the tree it had. So
+is any new file other than what running the kernel builds into ignored files
+and the profiler's own droppings. The guard snapshots only the protected files,
+so the campaign's JIT cache is neither read into memory nor counted against the
 session.
+
+The session runs in the deployment's sandbox (`--agent-sandbox-mode`, or
+`FORGE_AGENT_SANDBOX_MODE`), like every other session, widened from `read-only`
+to `workspace-write` because the analyst writes its answer. A sandbox that hides
+the GPU device nodes leaves the profiler without a device; the derivation then
+says its roofs were recalled, attainment reads low, and a target is slower to
+fire.
 
 The evidence runs -- the case-discovery run on the standalone command and the
 kernel trace -- each run in their own process group, and a run past
