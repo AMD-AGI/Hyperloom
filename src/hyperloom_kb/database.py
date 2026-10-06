@@ -24,6 +24,8 @@ from psycopg_pool import ConnectionPool
 SCHEMA_VERSION = 1
 _MIGRATION_LOCK = "hyperloom-kb:migrate"
 _POOL_MAX_SIZE = 16
+# Bounds one attempt to reach the server, so an unreachable one fails the attempt instead of hanging it.
+_CONNECT_TIMEOUT_SECONDS = 10
 
 _DDL_V1 = """
 CREATE TABLE kbs (
@@ -184,11 +186,14 @@ class Database:
     """A connection pool to one database, migrated to this code's tables when it opens."""
 
     def __init__(self, conninfo: str, *, max_size: int = _POOL_MAX_SIZE) -> None:
+        # A connection is checked as it is handed out, so the first request after the server restarts or fails over
+        # to a new primary gets a live one instead of failing on one the old server closed.
         self.pool = ConnectionPool(
             conninfo,
             min_size=1,
             max_size=max_size,
-            kwargs={"row_factory": dict_row},
+            kwargs={"row_factory": dict_row, "connect_timeout": _CONNECT_TIMEOUT_SECONDS},
+            check=ConnectionPool.check_connection,
             open=False,
         )
         try:
