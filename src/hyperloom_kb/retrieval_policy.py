@@ -562,6 +562,7 @@ class LexicalFuzzyProvider:
             "summary": 4.0,
             "identity": 3.0,
             "reasoning": 1.5,
+            "notes": 1.5,
             "outcome": 0.5,
         }
         max_field_weight = max(field_weights.values())
@@ -663,6 +664,7 @@ def _search_fields(experience: Experience) -> dict[str, set[str]]:
             )
         ),
         "reasoning": _tokens(_normalized_text(experience.reasoning)),
+        "notes": _tokens(_normalized_text(" ".join(f"{label} {text}" for label, text in experience.notes.items()))),
         "outcome": _tokens(
             _normalized_text(
                 " ".join(

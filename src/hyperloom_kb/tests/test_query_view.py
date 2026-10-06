@@ -114,6 +114,17 @@ def test_repeat_group_includes_baseline_identity() -> None:
     assert repeat_group_key(first) != repeat_group_key(other_baseline)
 
 
+def test_notes_neither_split_a_repeat_group_nor_enter_exact_lookup() -> None:
+    schema = declaration()
+    plain = experience(schema, run_id="run-1", seq=0)
+    noted = replace(experience(schema, run_id="run-2", seq=0), notes={"interconnect": "XGMI saturated."})
+
+    view = QueryViewBuilder().build(schema, stored(plain, noted))
+
+    assert view.groups[repeat_group_key(plain)].member_ids == tuple(sorted((plain.id, noted.id)))
+    assert not [field for field in view.field_lookup if field.startswith("notes")]
+
+
 def test_local_view_store_keeps_old_generation_and_moves_current(tmp_path: Path) -> None:
     schema = declaration()
     schemas = InMemorySchemaRegistry()

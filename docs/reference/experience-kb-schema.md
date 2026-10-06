@@ -56,6 +56,8 @@ numeric `value`, but its declared objective must define a numeric
 - `outcome`: disposition, optional measured value, constraint results, and
   optional error class.
 - `reflection`: post-measurement interpretation.
+- `notes`: optional labelled texts a producer adds without changing its
+  schema; see [Notes](#notes).
 - `provenance`: producer/version plus optional model, prompt, snapshot,
   migration source, and JSON-safe extra metadata.
 
@@ -70,7 +72,7 @@ Every top-level field is one of two kinds, fixed for every schema by
 
 | Kind | Fields | In a prompt |
 |---|---|---|
-| Knowledge: what was learned | `identity`, `objective`, `baseline_identity`, `baseline_value`, `preconditions`, `reasoning`, `alternatives`, `change`, `outcome`, `reflection` | yes |
+| Knowledge: what was learned | `identity`, `objective`, `baseline_identity`, `baseline_value`, `preconditions`, `reasoning`, `alternatives`, `change`, `outcome`, `reflection`, `notes` | yes |
 | Metadata: what keeps the record | `kind`, `id`, `schema_ref`, `schema_version`, `status`, `created_at`, `completed_at`, `run_id`, `seq`, `parent_id`, `supersedes`, `rendered_refs`, `provenance` | no |
 
 Both kinds are stored, exported, and synced whole. A read renders only the
@@ -78,6 +80,26 @@ knowledge fields, under a heading that names the Experience so an agent can
 cite it; `rendered_refs` and the citations and read a producer records in
 `provenance.extra` never reach a prompt. `Experience.knowledge()` returns the
 knowledge fields as the record holds them.
+
+## Notes
+
+A producer that finds new data worth keeping, after it has started writing
+under a schema, puts it in `notes` instead of changing the schema:
+
+```json
+"notes": {"interconnect": "XGMI links saturate during the all-reduce."}
+```
+
+Each label is a lowercase name (`[a-z][a-z0-9_.-]*`) and each value a non-empty
+text. Notes are knowledge, so a read renders them and fuzzy matching searches
+both labels and text, weighted like `reasoning`. They are not declared, so they
+leave `schema_ref` unchanged, and they take no part in Repeat Group keys or
+exact lookup: two records that differ only in their notes repeat the same
+change. Credential screening treats them as free text.
+
+A record without notes has no `notes` key at all, so every record written
+before notes existed keeps its exact bytes and content hash. A service from
+before notes rejects a record that has them.
 
 ## Declaration schema
 

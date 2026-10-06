@@ -52,6 +52,7 @@ class NoOpExperienceSession:
         outcome: Outcome,
         reflection: str,
         completed_at: datetime | None = None,
+        notes: Mapping[str, str] | None = None,
     ) -> None:
         return None
 

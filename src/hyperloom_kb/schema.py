@@ -190,6 +190,17 @@ def _reject_unknown(value: dict[str, Any], allowed: set[str], name: str) -> None
         raise SchemaValidationError(f"{name} contains unknown fields: {', '.join(unknown)}")
 
 
+def _notes(value: Any, name: str) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise SchemaValidationError(f"{name} must be an object")
+    notes: dict[str, str] = {}
+    for label, text in value.items():
+        if not isinstance(label, str) or not _FIELD_NAME_RE.fullmatch(label):
+            raise SchemaValidationError(f"{name} label {label!r} must be a lowercase name such as 'kv_cache_policy'")
+        notes[label] = _require_string(text, f"{name}.{label}")
+    return notes
+
+
 def _string_tuple(value: Any, name: str) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -644,8 +655,8 @@ class Provenance:
         )
 
 
-#: Top-level record fields that say what was learned: the conditions, the decision and why, what changed, and
-#: what came of it. A read shows an agent these.
+#: Top-level record fields that say what was learned: the conditions, the decision and why, what changed, what
+#: came of it, and the notes a producer adds outside its schema. A read shows an agent these.
 KNOWLEDGE_FIELDS = frozenset(
     {
         "identity",
@@ -658,6 +669,7 @@ KNOWLEDGE_FIELDS = frozenset(
         "change",
         "outcome",
         "reflection",
+        "notes",
     }
 )
 #: Top-level record fields that keep the record: its identity, lifecycle, lineage, and how it came to be,
@@ -705,6 +717,7 @@ class Experience:
     rendered_refs: tuple[RenderedRef, ...] = ()
     outcome: Outcome | None = None
     reflection: str = ""
+    notes: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", _require_token(self.id, "experience.id"))
@@ -781,6 +794,7 @@ class Experience:
             "reflection",
             _string_or_empty(self.reflection, "experience.reflection"),
         )
+        object.__setattr__(self, "notes", _notes(self.notes, "experience.notes"))
         if self.change is not None and not isinstance(self.change, Change):
             raise SchemaValidationError("experience.change is invalid")
         if (self.change is None) != (not self.reasoning):
@@ -807,7 +821,7 @@ class Experience:
             raise SchemaValidationError("complete Experience requires reflection")
 
     def to_dict(self) -> dict[str, JsonValue]:
-        return {
+        record: dict[str, JsonValue] = {
             "kind": "experience",
             "id": self.id,
             "schema_ref": self.schema_ref,
@@ -832,6 +846,10 @@ class Experience:
             "reflection": self.reflection,
             "provenance": self.provenance.to_dict(),
         }
+        # Absent rather than empty, so a record without notes keeps the bytes and content hash it had before notes.
+        if self.notes:
+            record["notes"] = dict(self.notes)
+        return record
 
     def knowledge(self) -> dict[str, JsonValue]:
         """The record's ``KNOWLEDGE_FIELDS``, exactly as ``to_dict`` holds them."""
@@ -864,6 +882,7 @@ class Experience:
             "rendered_refs",
             "outcome",
             "reflection",
+            "notes",
             "provenance",
         }
         _reject_unknown(data, allowed, "experience")
@@ -953,6 +972,7 @@ class Experience:
                 data.get("reflection", ""),
                 "experience.reflection",
             ),
+            notes=data.get("notes", {}),
             provenance=Provenance.from_dict(_required(data, "provenance", "experience.provenance")),
         )
 
