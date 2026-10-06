@@ -39,6 +39,7 @@ from hyperloom_kb import (
     is_loopback,
     load_declaration,
 )
+from hyperloom_kb import local_service
 from hyperloom_kb.http_service import code_digest
 from hyperloom_kb.tests.conftest import fresh_database
 
@@ -104,6 +105,27 @@ def test_a_missing_service_is_started_once_and_then_reused(tmp_path: Path) -> No
     finally:
         started.process.terminate()
         started.process.wait(timeout=10)
+
+
+def test_a_log_past_its_size_is_kept_once_and_the_next_service_starts_a_new_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(local_service, "LOG_ROTATE_BYTES", 64)
+    home = tmp_path / "home"
+    home.mkdir()
+    old = "an earlier service's log line\n" * 4
+    (home / "service.log").write_text(old, encoding="utf-8")
+    started = ensure_local_service(_config(_free_port(), tmp_path), home, env=_env_without_planner_gateway(tmp_path))
+    assert started.process is not None
+    try:
+        kept = (home / "service.log.1").read_text(encoding="utf-8")
+        current = (home / "service.log").read_text(encoding="utf-8")
+    finally:
+        started.process.terminate()
+        started.process.wait(timeout=10)
+
+    assert kept == old
+    assert "an earlier service" not in current and '"event": "listening"' in current
 
 
 def test_a_listener_with_another_token_is_refused_without_starting_a_service(tmp_path: Path) -> None:

@@ -225,6 +225,9 @@ def _record_id(item: Mapping[str, Any]) -> str:
 class SyncedService(Protocol):
     """What sync needs of the Experience service it pushes from and pulls into."""
 
+    kb_id: str
+    name: str
+
     def register(self, declaration: ExperienceDeclaration) -> None:
         """Hold ``declaration``'s schema."""
 
@@ -257,6 +260,8 @@ class GlobalSync:
         self._service = service
         self._ledger = ledger
         self._target = target
+        if target is not None:
+            target.identify(service.kb_id, service.name)
 
     def _connected(self) -> tuple[RemoteClient, str]:
         """The global KB and its identity, once it is the one this service synced with before, or the first one."""
