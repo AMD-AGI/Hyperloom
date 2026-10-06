@@ -187,7 +187,7 @@ class RemoteClient:
                 f"Experience service returned HTTP {exc.code}: {detail}",
                 retryable=exc.code not in _PERMANENT_HTTP_STATUSES,
             ) from exc
-        except (OSError, TimeoutError, ValueError, http.client.HTTPException) as exc:
+        except (OSError, TimeoutError, ValueError, RecursionError, http.client.HTTPException) as exc:
             raise RemoteClientError(f"Experience service request failed with {type(exc).__name__}") from exc
         if not isinstance(payload, dict):
             raise RemoteClientError("Experience service response is not an object")

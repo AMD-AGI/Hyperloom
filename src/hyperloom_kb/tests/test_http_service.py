@@ -575,6 +575,24 @@ def test_unavailable_service_fails_open_and_flushes_spool_idempotently(tmp_path:
     assert not tuple(spool.glob("spool-*.json"))
 
 
+def test_a_response_too_deeply_nested_to_decode_fails_open(tmp_path: Path) -> None:
+    class Response(io.BytesIO):
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            self.close()
+
+    def deep(_request: urllib.request.Request, **_options: Any) -> Any:
+        return Response(b"[" * 100_000 + b"]" * 100_000)
+
+    client = RemoteClient(RemoteConfig("http://kb.invalid", TOKEN, spool_root=tmp_path / "spool"), opener=deep)
+
+    assert client.read(DECISION, _read_context()).status == "unavailable"
+    with pytest.raises(RemoteClientError, match="RecursionError"):
+        client.health()
+
+
 @pytest.mark.parametrize(
     "cut", [http.client.IncompleteRead(b"{", 100), ConnectionResetError("reset"), TimeoutError("slow")]
 )

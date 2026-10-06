@@ -249,6 +249,38 @@ def test_a_referenced_change_reaches_the_prompt_as_session_files(tmp_path) -> No
     assert reads == [CONTENT_INLINE_LIMIT, CONTENT_INLINE_LIMIT]
 
 
+def test_a_content_too_deeply_nested_to_parse_never_stops_a_turn_or_a_dispatch(tmp_path) -> None:
+    content = "[" * 100_000 + "]" * 100_000
+    ref = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
+    block = (
+        f"=== Relevant Experience KB ===\nExperience {_FIRST}\nRecord:\n<external content {ref}, {len(content)} bytes>"
+    )
+
+    class _Client:
+        def read(self, decision, context, **_options):
+            return SimpleNamespace(
+                read_id="read-deep",
+                status="completed",
+                prompt_block=block,
+                rendered_refs=(FakeRef(),),
+                warnings=(),
+                experiences=(),
+                contents=({"ref": ref, "bytes": len(content.encode()), "content": content},),
+            )
+
+    state = SharedState(tick=3, phase="FRAMEWORK_AGENT")
+    coordinator = _kb_coordinator(tmp_path, state, ExperienceKBIntegration(_Client(), tmp_path, _SCHEMA))
+    params = {"domain": "serving_specialist"}
+
+    orchestration_block = asyncio.run(coordinator.conversation._kb_prompt_block("proposal"))
+    asyncio.run(coordinator.specialist_dispatch.warm_specialist_params(params))
+
+    content_file = tmp_path / "experience_kb" / "contents" / f"{ref.removeprefix('sha256:')}.txt"
+    assert content_file.read_text(encoding="utf-8") == content
+    assert f"- {ref} ({len(content.encode())} bytes): {content_file}" in orchestration_block
+    assert params["kb_read_id"] == "read-deep"
+
+
 def test_bootstrap_uses_only_service_url_and_token(tmp_path) -> None:
     assert ExperienceKBIntegration.from_env(tmp_path, {}) is None
     assert ExperienceKBIntegration.from_env(tmp_path, {"HYPERLOOM_KB_URL": "https://kb.example"}) is None

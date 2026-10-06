@@ -79,7 +79,8 @@ def _patch_files(directory: Path, content: str) -> list[Path]:
 
     try:
         value = json.loads(content)
-    except ValueError:
+    # change.content is an opaque string from any writer or a pull, so it may be neither JSON nor shallow JSON.
+    except (ValueError, RecursionError):
         return []
     patches = value.get("patches") if isinstance(value, dict) else None
     paths: list[Path] = []
