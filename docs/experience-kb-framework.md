@@ -106,6 +106,5 @@ optimize launch starts when it is not serving; its configuration, the global KB
 it can push to and pull from, and its HTTP API are in
 [Experience KB service](reference/experience-kb.md).
 
-Publication is disabled only when `HYPERLOOM_KB_URL` is unset. CLI startup
-fails when the packaged mapping cannot load or validates a different
-declaration than the mapping produces.
+Publication is disabled only when `HYPERLOOM_KB_URL` is unset. An optimize
+launch warns and continues when the packaged mapping cannot load.

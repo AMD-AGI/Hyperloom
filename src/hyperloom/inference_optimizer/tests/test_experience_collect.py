@@ -32,7 +32,6 @@ from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom_kb import (
     PACKAGED_DECLARATION,
-    ConfigurationError,
     ExperienceHTTPService,
     HTTPServiceConfig,
     RemoteClient,
@@ -111,8 +110,8 @@ def _unexpected_collect(*_args: Any, **_kwargs: Any) -> Any:
     raise AssertionError("an unconfigured Experience KB must not be contacted")
 
 
-def _configured_kb(monkeypatch, *, collect: Any, schema_ref: str | None = None) -> SimpleNamespace:
-    target = SimpleNamespace(schema_ref=schema_ref or experience_collect.mapping_schema_ref())
+def _configured_kb(monkeypatch, *, collect: Any) -> SimpleNamespace:
+    target = SimpleNamespace(schema_ref=experience_collect.mapping_schema_ref())
     monkeypatch.setattr(experience_collect, "collect", collect)
     monkeypatch.setattr(experience_collect, "experience_kb_from_env", lambda **_kwargs: target)
     monkeypatch.setenv("HYPERLOOM_KB_URL", "http://kb.invalid")
@@ -148,16 +147,17 @@ def test_collection_failure_leaves_the_breakdown_written(monkeypatch, session_di
     assert exporter.write_breakdown_json(session_dir).is_file()
 
 
-def test_startup_accepts_a_kb_that_validates_the_mapping_declaration(monkeypatch) -> None:
+def test_startup_accepts_a_configured_kb_and_a_loadable_mapping(monkeypatch) -> None:
     _configured_kb(monkeypatch, collect=_unexpected_collect)
 
     experience_collect.validate_config()
 
 
-def test_startup_rejects_a_kb_that_validates_another_declaration(monkeypatch) -> None:
-    _configured_kb(monkeypatch, collect=_unexpected_collect, schema_ref="schema:sha256:other")
+def test_startup_rejects_a_mapping_that_cannot_load(monkeypatch) -> None:
+    _configured_kb(monkeypatch, collect=_unexpected_collect)
+    monkeypatch.setattr(experience_collect, "MAPPING", "no-such-mapping")
 
-    with pytest.raises(ConfigurationError, match="hyperloom-sbd-v6 produces"):
+    with pytest.raises(kb_collect.MappingError):
         experience_collect.validate_config()
 
 
@@ -215,7 +215,7 @@ def test_auto_push_with_a_global_kb_is_quiet_at_launch(monkeypatch, caplog) -> N
     assert "auto push" not in caplog.text
 
 
-def _record_framework_attempts(session_dir: Path) -> list[dict[str, Any]]:
+def _record_framework_attempts(session_dir: Path, source_status: str = "kept") -> list[dict[str, Any]]:
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.phase_framework._open_framework_timeline()
@@ -240,7 +240,7 @@ def _record_framework_attempts(session_dir: Path) -> list[dict[str, Any]]:
             },
         ),
         result={
-            "status": "kept",
+            "status": source_status,
             "base_tput": 100.0,
             "output_throughput": 108.0,
             "delta_pct": 8.0,
@@ -253,7 +253,7 @@ def _record_framework_attempts(session_dir: Path) -> list[dict[str, Any]]:
             "target_files": ["vllm/attention.py"],
             "measured_against": {"throughput": 100.0, "extra_server_args": "--already-kept 1"},
         },
-        adopted=True,
+        adopted=source_status == "kept",
     )
     import asyncio
 
@@ -299,6 +299,23 @@ def test_recorded_framework_rows_only_carry_declared_fields(session_dir: Path) -
             assert set(patch) <= set(schema.V6FrameworkPatch.__annotations__)
     for proposal in ext["proposals"]:
         assert set(proposal) <= set(schema.V6FrameworkProposal.__annotations__)
+
+
+@pytest.mark.parametrize(
+    ("status", "decision"),
+    [("kept", "keep"), ("reverted", "revert"), ("accuracy_unavailable_reject", "revert")],
+)
+def test_a_source_attempt_keeps_its_integrate_status_and_publishes_its_decision(
+    session_dir: Path, status: str, decision: str
+) -> None:
+    timeline = _record_framework_attempts(session_dir, source_status=status)
+
+    [source_attempt] = [row for row in timeline[0]["ext"]["attempts"] if row["arm"] == "source"]
+    report = kb_collect.collect(experience_collect.MAPPING, _document(timeline), dry_run=True).to_dict()
+
+    assert source_attempt["outcome"] == status
+    experiences = {row["unit_id"]: row["experience"] for row in report["collected"]}
+    assert experiences["t-int-1"]["outcome"]["decision"] == decision
 
 
 def _breakdown(session_dir: Path) -> dict[str, Any]:

@@ -635,7 +635,7 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
         "estimated_output_throughput": None,
     }
     assert attempt["accuracy"]["passed"] is True
-    assert attempt["outcome"] == "KEEP"
+    assert attempt["outcome"] == "kept"
     assert attempt["reasoning"] == "Profiling shows redundant attention setup on every request."
     assert attempt["reasoning_origin"] == "action_params.reasoning"
     assert attempt["patch_path"] == str(patch)

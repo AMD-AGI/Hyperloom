@@ -53,6 +53,7 @@ let:
       KEEP_UNSTABLE: revert
       REVERT: revert
       REVERTED: revert
+      ACCURACY_UNAVAILABLE_REJECT: revert
       FAILED: failed
       KILLED_OVERTIME: failed
   baseline_value: {number: $attempt.measurement.before_tput}

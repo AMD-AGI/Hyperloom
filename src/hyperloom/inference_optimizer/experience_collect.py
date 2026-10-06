@@ -49,12 +49,8 @@ def validate_config() -> None:
 
     if not enabled():
         return
-    expected = mapping_schema_ref()
-    target = experience_kb_from_env(spool_root=spool_root(), timeout_seconds=REQUEST_TIMEOUT_SECONDS)
-    if target.schema_ref != expected:
-        raise ConfigurationError(
-            f"{MAPPING} produces {expected}, but the configured Experience KB validates {target.schema_ref}"
-        )
+    load_mapping(MAPPING)
+    experience_kb_from_env(spool_root=spool_root(), timeout_seconds=REQUEST_TIMEOUT_SECONDS)
     # Surfaces an unusable auto-push setting at launch rather than three hours later; it never stops the run.
     check_auto_push()
 

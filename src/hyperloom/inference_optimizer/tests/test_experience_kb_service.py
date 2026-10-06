@@ -15,7 +15,7 @@ import pytest
 import hyperloom
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
 from hyperloom.inference_optimizer import cli, experience_collect, experience_kb_service
-from hyperloom_kb import ConfigurationError, GLOBAL_TOKEN_ENV, GLOBAL_URL_ENV, LocalService, LocalServiceError
+from hyperloom_kb import GLOBAL_TOKEN_ENV, GLOBAL_URL_ENV, LocalService, LocalServiceError
 
 _PACKAGE = Path(hyperloom.__file__).parent
 
@@ -164,12 +164,11 @@ def test_a_launch_continues_when_the_workspace_names_a_service_without_its_token
     assert "the run continues without them" in caplog.text
 
 
-def test_a_launch_continues_when_the_service_validates_another_schema(monkeypatch, caplog) -> None:
-    def other_schema() -> None:
-        raise ConfigurationError("hyperloom-sbd-v6 produces schema:sha256:a, but the service validates schema:sha256:b")
-
+def test_a_launch_continues_when_the_packaged_mapping_cannot_load(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("HYPERLOOM_KB_URL", f"http://127.0.0.1:{_free_port()}")
+    monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "local-token")
     monkeypatch.setattr(experience_kb_service, "ensure_service", lambda: None)
-    monkeypatch.setattr(experience_collect, "validate_config", other_schema)
+    monkeypatch.setattr(experience_collect, "MAPPING", "no-such-mapping")
 
     with caplog.at_level(logging.WARNING):
         cli._start_experience_kb()

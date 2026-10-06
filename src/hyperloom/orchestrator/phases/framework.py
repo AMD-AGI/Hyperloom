@@ -468,12 +468,6 @@ def _record_source_attempt(
     # The levers the deliverable layered onto that stack: the whole change when the specialist returned no patch.
     levers = {"extra_server_args": params.get("extra_server_args"), "extra_envs": params.get("extra_envs")}
     config_delta = {"config_delta": levers} if any(levers.values()) else {}
-    normalized_status = {
-        "kept": "KEEP",
-        "reverted": "REVERT",
-        "accuracy_unavailable_reject": "REVERT",
-        "failed": "FAILED",
-    }.get(status, status)
     candidate = params.get("candidate")
     candidate_row = candidate if isinstance(candidate, Mapping) else {}
     reasoning, reasoning_origin = _source_action_reasoning(params, candidate_row, result)
@@ -485,7 +479,7 @@ def _record_source_attempt(
     error_class = str(result.get("error_class") or "")
     error_excerpt = str(result.get("error") or "")[:600]
     failure_attribution = ""
-    if normalized_status in UNMEASURED_OUTCOMES:
+    if status.upper() in UNMEASURED_OUTCOMES:
         failure_attribution = classify_failure_attribution(
             error_class=error_class,
             error_excerpt=error_excerpt,
@@ -499,7 +493,7 @@ def _record_source_attempt(
         proposal_ref=candidate_id,
         candidate_id=candidate_id,
         provenance=str(params.get("lever_kind") or ""),
-        outcome=normalized_status,
+        outcome=status,
         reason=str(result.get("reason") or ""),
         reasoning=reasoning,
         reasoning_origin=reasoning_origin,

@@ -83,8 +83,8 @@ and warn when its settings differ from theirs, so a push from a shell never
 stops the service a running session reads from.
 
 No Experience KB problem stops a run. An optimize launch whose service cannot
-start, whose `.env` names the service without its token, or whose service
-validates another schema logs a warning and continues: reads return nothing,
+start, whose `.env` names the service without its token, or whose packaged
+mapping cannot load logs a warning and continues: reads return nothing,
 and writes wait in the spool until a later launch finds the service serving.
 A read the service cannot answer, even one cut off mid-response, leaves the
 prompt as it would be without the Experience KB.
