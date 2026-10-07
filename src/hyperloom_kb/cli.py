@@ -83,6 +83,12 @@ def add_commands(
     default_schema = "the schema the service reads by default"
     command("health", "The service's identity, and what its reads see per schema.", lambda c, a: c.health())
     command("push", "Send what was written here and not pushed yet to the global KB.", lambda c, a: c.push())
+    command(
+        "rebind",
+        "Forget the global KB synced with, such as one redeployed at the same URL, so the next push and pull start "
+        "over with whichever KB answers there; what was pulled stays pulled and is never pushed.",
+        lambda c, a: c.rebind(),
+    )
     if pull := command(
         "pull",
         "Bring one schema to everything the global KB holds of it; a state no label holds is labelled first, so "

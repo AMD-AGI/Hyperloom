@@ -171,7 +171,7 @@ def test_a_tool_embeds_every_command_with_its_own_schema_and_its_own_versions(tm
     add_commands(commands, schema_ref=SCHEMA.schema_ref)
 
     assert set(commands.choices) == {
-        *("health", "push", "pull", "labels", "label", "restore", "exclude", "include", "exclusions"),
+        *("health", "push", "pull", "rebind", "labels", "label", "restore", "exclude", "include", "exclusions"),
         *("list", "export"),
     }
     assert parser.parse_args(["push"]).own and not hasattr(parser.parse_args(["push"]), "run")

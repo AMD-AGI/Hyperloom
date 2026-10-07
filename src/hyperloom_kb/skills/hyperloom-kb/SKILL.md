@@ -1,6 +1,6 @@
 ---
 name: hyperloom-kb
-description: Operates an Experience KB service, local or global, with the hyperloom-kb CLI. Checks its health, labels its state, restores a label to roll back or undo a pull, excludes or includes an Experience with a reason, pushes to and pulls one schema from its global KB, and lists or exports what was written to it. Use when asked to label, roll back, restore, undo a pull, exclude, include, push, pull, list, or export Experiences, or to embed these commands in another tool.
+description: Operates an Experience KB service, local or global, with the hyperloom-kb CLI. Checks its health, labels its state, restores a label to roll back or undo a pull, excludes or includes an Experience with a reason, pushes to and pulls one schema from its global KB, rebinds to a redeployed global KB, and lists or exports what was written to it. Use when asked to label, roll back, restore, undo a pull, exclude, include, push, pull, rebind, list, or export Experiences, or to embed these commands in another tool.
 ---
 
 # Operate an Experience KB
@@ -110,10 +110,24 @@ hyperloom-kb pull --schema REF
   the pull.
 - `status` is `completed`; `incomplete`, with an `error`, when the global KB
   stopped answering, and running the command again resumes it; or `refused`,
-  with the reason, when the URL answers as another KB than before, holds less
-  than was pulled, or reports no identity. A refused sync changes nothing:
-  report the reason rather than pointing the service at another global KB.
+  with the reason, when the URL answers as another KB than before or reports
+  no identity. A refused sync changes nothing: report the reason rather than
+  pointing the service at another global KB.
 - `rejected` lists the Experiences the global KB refused for good.
+- A global KB restored from an older backup needs nothing: the next pull
+  notices and reads the schema from its start, and the next push sends
+  everything again.
+
+```bash
+hyperloom-kb rebind
+```
+
+- When the user confirms that a global KB redeployed at the same URL replaced
+  the old one, `rebind` forgets the old one, so the next push and pull start
+  over with the new one. It answers the `forgotten_kb_id`. Experiences pulled
+  from the old one stay here and are never pushed to the new one. Never rebind
+  on your own judgement: a refusal can also mean the URL points at the wrong
+  KB.
 
 ## List and export
 

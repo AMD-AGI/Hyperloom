@@ -136,16 +136,25 @@ class ListPage:
 
 @dataclass(frozen=True)
 class ExportPage(ListPage):
-    """An export page, with the last write position of what it pages and, for one schema, that schema and its
-    ``state``, which changes whenever the service's exclusions or restores change what it shows of that schema."""
+    """An export page, with the last write position of what it pages, the Experiences written at the position it
+    paged after and at ``next_cursor`` (empty for none), and, for one schema, that schema and its ``state``, which
+    changes whenever the service's exclusions or restores change what it shows of that schema."""
 
     head: int = 0
+    after_id: str = ""
+    next_cursor_id: str = ""
     declaration: ExperienceDeclaration | None = None
     state: str = ""
 
 
 def _int(value: JsonValue, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
+        raise RemoteClientError(f"Experience service {name} is invalid")
+    return value
+
+
+def _text(value: JsonValue, name: str) -> str:
+    if not isinstance(value, str):
         raise RemoteClientError(f"Experience service {name} is invalid")
     return value
 
@@ -421,6 +430,8 @@ class RemoteClient:
             next_cursor=_int(payload.get("next_cursor"), "next_cursor"),
             has_more=payload.get("has_more") is True,
             head=_int(payload.get("head"), "head"),
+            after_id=_text(payload.get("after_id"), "after_id"),
+            next_cursor_id=_text(payload.get("next_cursor_id"), "next_cursor_id"),
             declaration=declaration,
             state=state,
         )
@@ -471,6 +482,12 @@ class RemoteClient:
         """
 
         return self._sync("/v1/pull", {"schema_ref": schema_ref})
+
+    def rebind(self) -> dict[str, JsonValue]:
+        """Ask this service to forget the global KB it synced with, so its next push and pull start over with
+        whichever KB its global URL reaches; ``forgotten_kb_id`` names the one it forgot."""
+
+        return self._request("POST", "/v1/rebind", {})
 
     def _sync(self, path: str, body: dict[str, JsonValue]) -> dict[str, JsonValue]:
         # Each request handles one bounded batch, so no single request outlives the client timeout.

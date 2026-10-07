@@ -127,6 +127,7 @@ CREATE TABLE sync_cursors (
     global_url TEXT NOT NULL,
     direction TEXT NOT NULL,
     position BIGINT NOT NULL,
+    anchor TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (kb_id, global_url, direction)
 );
 CREATE TABLE sync_pulled (
