@@ -131,6 +131,23 @@ def test_a_restore_saves_the_unlabelled_state_and_later_writes_continue_from_the
     assert [label["name"] for label in labels["labels"]][-1] == "three"
 
 
+def test_an_include_brings_back_what_a_restore_set_outside_once_no_label_holds_it(tmp_path: Path) -> None:
+    app = _service(tmp_path / "local")
+    with _serving(app) as client:
+        client.write(_experience(0))
+        one = client.create_label(name="one")
+        client.write(_experience(1))
+        restored = client.restore(str(one["label_id"]))
+        client.delete_label(str(restored["saved"]["label_id"]))
+        stranded = (_readable(app), client.labels()["labels"])
+        included = client.include(_id(1))
+        shown = (_readable(app), _listed(client))
+
+    assert stranded == (1, [one])
+    assert included == {"experience_id": _id(1), "status": "included"}
+    assert shown == (2, {_id(0), _id(1)})
+
+
 def test_an_exclusion_hides_an_experience_and_lifting_it_restores_the_labelled_state(tmp_path: Path) -> None:
     app = _service(tmp_path / "local")
     with _serving(app) as client:

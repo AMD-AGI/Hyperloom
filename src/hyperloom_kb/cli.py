@@ -122,7 +122,12 @@ def add_commands(
     ):
         exclude.add_argument("experience_id")
         exclude.add_argument("--reason", required=True, help="Why it is excluded; kept in the exclusion history.")
-    if include := command("include", "Lift an Experience's exclusion.", lambda c, a: c.include(a.experience_id)):
+    if include := command(
+        "include",
+        "Let reads see an Experience again: lift its exclusion, and put it back into the state if a restore set it "
+        "outside.",
+        lambda c, a: c.include(a.experience_id),
+    ):
         include.add_argument("experience_id")
     if exclusions := command(
         "exclusions",

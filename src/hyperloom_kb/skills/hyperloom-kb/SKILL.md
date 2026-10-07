@@ -85,8 +85,10 @@ hyperloom-kb exclusions [--schema REF]
   it, even when a restore to a label without the exclusion lets reads see it
   again. One already pushed stays on the global KB: an exclusion acts only on
   this service.
-- `include` answers `not_excluded` when the Experience was neither excluded
-  nor waiting for an include to be pushed.
+- `include` also puts back an Experience a restore set outside the state, so
+  one no label holds any more, after its label was deleted, can still be
+  brought back. It answers `not_excluded` when the Experience was neither
+  excluded, outside the state, nor waiting for an include to be pushed.
 - `exclusions` lists the current exclusions and every exclude and include.
 
 ## Push and pull
