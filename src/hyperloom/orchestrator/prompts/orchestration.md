@@ -377,6 +377,9 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   journal. Many of them before concluding the search is exhausted means the
   SLA is the binding limit, and the answer is a lever that buys throughput
   without spending per-request latency, not more of the same.
+  `=== Power budget (constraint) ===` works the same way for per-GPU power
+  (`power_budget_exceeded` / `power_unmeasured`); the power cap it names is
+  fixed for the session, so look for levers that buy throughput per watt.
 * **Config vs source patch.** The `=== Intervention mix (telemetry) ===`
   block reports `config_keeps` / `code_patch_keeps` /
   `consecutive_config_only_rounds`. Config tuning tends to plateau; when

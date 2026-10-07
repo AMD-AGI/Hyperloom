@@ -2245,9 +2245,9 @@ class PreludePhase(CoordinatorCollaborator):
         reproduced = graded.verdict == VERDICT_KEEP
         outcome["keep_threshold_pct"] = keep_threshold
         if graded.veto_reason:
-            # The grading applies the session's latency ceiling, so the drift branch below rolls the replay back
-            # rather than leaving a config the budget refused promoted on disk.
-            outcome["latency_veto"] = graded.veto_reason
+            # The grading applies the session's constraints (latency, power), so the drift branch below rolls the
+            # replay back rather than leaving a config a budget refused promoted on disk.
+            outcome["constraint_veto"] = graded.veto_reason
         if recorder is not None:
             recorder.record_gate(
                 GATE_KEEP_THRESHOLD,
@@ -2381,8 +2381,9 @@ class PreludePhase(CoordinatorCollaborator):
                 {
                     "name": "warm_replay",
                     **graded_axes_of(result),
-                    # The latency budget grades on this and fails closed without it.
+                    # The latency and power budgets grade on these and fail closed without them.
                     "e2el_mean_ms": result.get("e2el_mean_ms"),
+                    "gpu_power_avg_w": result.get("gpu_power_avg_w"),
                     "candidate_extra_server_args": warm_args,
                     "candidate_extra_envs": warm_envs,
                     "recipe_delta": {

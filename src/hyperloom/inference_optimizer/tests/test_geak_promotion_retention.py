@@ -486,3 +486,22 @@ def test_legacy_readdition_survives_retention_and_rematerialization(promotion, e
         )
         == best["extra_server_args"]
     )
+
+
+@pytest.mark.parametrize(("power_w", "promoted"), [(650.0, True), (812.0, False), (None, False)])
+def test_geak_promotion_honours_the_power_budget(promotion, power_w, promoted):
+    """The replay's measured-phase power reaches the lift, so GEAK is judged on it instead of always refused."""
+    coord, result, _ = promotion
+    coord.shared_state.power_budget_w = 700.0
+    measurement = {"output_throughput": 120.0, "fingerprint": "geak-power"}
+    if power_w is not None:
+        measurement["gpu_power_avg_w"] = power_w
+
+    assert (
+        coord.phase_kernel.promote_geak_from_candidate(
+            result, measured_tput=120.0, measurement_provenance=measurement, overlay_loaded=False
+        )
+        is promoted
+    )
+    if promoted:
+        assert coord.shared_state.current_best["gpu_power_avg_w"] == power_w

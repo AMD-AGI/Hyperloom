@@ -458,6 +458,10 @@ class ConversationCollaborator(CoordinatorCollaborator):
         if latency_block:
             sections.append("=== Latency budget (constraint) ===")
             sections.append(latency_block)
+        power_block = self.shared_state.to_power_budget_summary()
+        if power_block:
+            sections.append("=== Power budget (constraint) ===")
+            sections.append(power_block)
         sections.append("=== Resource pools ===")
         sections.append(resource_pools_summary(self.shared_state))
         if agent_name == "orchestration":

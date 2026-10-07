@@ -2808,3 +2808,68 @@ async def test_explore_mlperf_reverts_when_turns_went_unscored(sub_agent_runner,
     accuracy = {gate["gate"]: gate for gate in tested["gates"]}["accuracy"]
     assert accuracy["reason"] == "accuracy_drop"
     assert accuracy["observed"] == 0.0, "an unscored turn scores the run 0.0 rather than skipping the gate"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("power_w", "expected_outcome"),
+    [pytest.param(812.0, "REVERT", id="over-budget"), pytest.param(650.0, "KEEP", id="in-budget")],
+)
+async def test_explore_grades_the_rounds_own_gpu_power_against_the_budget(
+    sub_agent_runner, tmp_path, monkeypatch, power_w, expected_outcome
+):
+    """Power comes from the round's gpu_monitor through the real extraction, and a KEEP reaches current_best."""
+
+    from hyperloom.orchestrator.loop import writeback as wb
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", model_path="/models/m", gpu_type="mi355x")
+    state.baseline_tput = 200.0
+    state.power_budget_w = 700.0
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        workspace = _fake_workspace(slot, tput=20000.0)
+        report_path = workspace / "benchmark_report.json"
+        report = json.loads(report_path.read_text())
+        report["gpu_monitor"] = [{"sample_count": 100, "power_watts": {"avg": power_w, "max": power_w + 50}}]
+        report_path.write_text(json.dumps(report))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-power"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_power", "extra_args": "--power-lever"}],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-power",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    tested = out["explore_search_update"]["tested"][canonical_fingerprint("--power-lever", {})]
+    assert tested["outcome"] == expected_outcome
+    if expected_outcome == "REVERT":
+        assert out["losers"][0]["reason"] == "power_budget_exceeded"
+        return
+    assert out["winners"][0]["gpu_power_avg_w"] == pytest.approx(power_w)
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = state
+    await coord.writeback._promote_explore(out, None, wb._PromoteOutcome(verdict=wb.Verdict.RECORDED))
+    assert state.current_best["variant_name"] == "v_power"

@@ -3520,6 +3520,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
             "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
+            "gpu_power_avg_w": bv.get("gpu_power_avg_w") if isinstance(bv, dict) else None,
             "tpot_mean_ms": bv.get("tpot_mean_ms") if isinstance(bv, dict) else None,
             "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
         }
@@ -3834,6 +3835,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 ),
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
+                "gpu_power_avg_w": result.get("gpu_power_avg_w"),
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
                 "input_throughput": result.get("input_throughput"),
                 "total_throughput": result.get("total_token_throughput"),
@@ -3892,6 +3894,23 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     ),
                 )
                 self.shared_state.set_stop_reason("baseline_over_latency_budget")
+            from hyperloom.common.perf_metric import power_veto_reason
+
+            power_budget = float(getattr(self.shared_state, "power_budget_w", 0.0) or 0.0)
+            power_veto = "" if baseline_veto else power_veto_reason(result.get("gpu_power_avg_w"), power_budget)
+            if power_veto:
+                log.error(
+                    "baseline does not satisfy --max-power-w (%s): budget %.0f W per GPU, baseline %s. "
+                    "No candidate can clear a ceiling the reference already breaks; stopping.",
+                    power_veto,
+                    power_budget,
+                    (
+                        f"{float(result['gpu_power_avg_w']):.0f} W"
+                        if isinstance(result.get("gpu_power_avg_w"), (int, float))
+                        else "reported no GPU power"
+                    ),
+                )
+                self.shared_state.set_stop_reason("baseline_over_power_budget")
         if anchor_accepted:
             audit_decision = "promoted"
             outcome.verdict = Verdict.ADOPTED
@@ -5605,9 +5624,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "extra_envs": dict(result.get("extra_envs_applied") or {}),
                 "tput": float(tput),
                 **graded_axes_of(result.get("bench_result") or result),
-                # ``graded_axes_of`` carries the throughput axes only; the latency
-                # budget grades on this one and fails closed without it.
+                # ``graded_axes_of`` carries the throughput axes only; the latency and
+                # power budgets grade on these and fail closed without them.
                 "e2el_mean_ms": (result.get("bench_result") or result).get("e2el_mean_ms"),
+                "gpu_power_avg_w": (result.get("bench_result") or result).get("gpu_power_avg_w"),
                 "workspace": result.get("workspace"),
                 "provenance": provenance or "integrate_patch",
                 "scope": "source_patch",

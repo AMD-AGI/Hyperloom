@@ -36,7 +36,7 @@
               "const": "hyperloom.workflow_evaluation.v2"
             },
             "contract_digest": {
-              "const": "691c681d2d8abbac8953bad1e30deea3e3c9891e82f9ef9ff6ac45b2cde8ef09"
+              "const": "5888f7c14895acdc33e6b0acc2869400400e392d414ef13fbf3c6212f62077e7"
             },
             "run_flags": {
               "type": "object",
@@ -720,6 +720,7 @@
             "baseline_arg_error",
             "baseline_failed",
             "baseline_over_latency_budget",
+            "baseline_over_power_budget",
             "coordinator_exception",
             "custom",
             "emergency",
