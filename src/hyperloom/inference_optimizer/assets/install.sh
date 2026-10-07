@@ -134,23 +134,15 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # $REPO_ROOT/.cache, cloned per revision (<name>@<sha>). Not /tmp (a reaper can
 # wipe it mid-run, leaving TRACELENS_ROOT dangling — #722).
 _open_source_root="${HYPERLOOM_CACHE_DIR:-${REPO_ROOT}/.cache}"
-# tree-reform.MD P2.5: kernel-agent/framework-agent live under the hyperloom
-# package tree in both source and pip-installed layouts. A missing pyproject at
-# REPO_ROOT means setup is running from a pip --target workspace rather than a
-# source checkout, so the editable self-install step below is skipped.
+# kernel-agent and other sub-agents live under the hyperloom package tree.
+# A missing pyproject at REPO_ROOT means setup is running from a pip --target
+# workspace rather than a source checkout, so the editable self-install step below is skipped.
 _hyperloom_pkg_root="$(cd "${_script_dir}/../.." && pwd)"
 HYPERLOOM_PACKAGED_INSTALL=0
 if [ ! -f "${REPO_ROOT}/pyproject.toml" ] && [ -d "${_hyperloom_pkg_root}/agents/kernel" ]; then
   HYPERLOOM_PACKAGED_INSTALL=1
 fi
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/kernel}"
-FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/framework}"
-# tree-reform.MD P2.5: framework-agent was promoted from a sibling
-# ``framework-agent/`` checkout into the in-tree ``hyperloom`` src-layout
-# namespace (``src/hyperloom/agents/framework``); it no longer has its own
-# installer/venv, so FRAMEWORK_AGENT_ROOT now just points at that in-tree
-# package (still overridable) and the old chain_framework_agent() delegation
-# below is a no-op.
 # Resolve a git ref to a commit SHA: 7-40 hex passes through; branch/tag via
 # ls-remote (falls back to the raw ref). The SHA keys the per-revision cache.
 _resolve_ref_sha() {
@@ -265,9 +257,7 @@ Installs:
   - Clones InferenceX pinned to INFERENCEX_REF and exports INFERENCEX_PATH
   - Chains to src/hyperloom/agents/kernel/scripts/install.sh for Ray + ray-head start,
     TraceLens, GEAK, and LLM gateway env.
-  - The `fa` CLI is provided by this same editable install; framework-agent
-    lives in src/hyperloom/agents/framework/ and has no separate
-    installer/venv to chain to.
+  - src/hyperloom/agents/framework/ is part of this editable install (PR discovery, isolation helpers).
 
 Options:
   --check-only           Verify only, do not install
@@ -281,7 +271,7 @@ Options:
   -h, --help             Show this help
 
 Env overrides:
-  REPO_ROOT, KERNEL_AGENT_ROOT, FRAMEWORK_AGENT_ROOT, MAGPIE_REPO,
+  REPO_ROOT, KERNEL_AGENT_ROOT, MAGPIE_REPO,
   MAGPIE_REF (commit SHA / tag / branch the Magpie package is pinned to;
     default is a commit that already copies benchmark scripts atomically),
   MAGPIE_PACKAGE_SPEC, MAGPIE_PATH, INFERENCEX_REPO,
@@ -859,11 +849,37 @@ ensure_torch_compatible_with_gpu() {
   if ! command -v rocm-smi >/dev/null 2>&1; then
     return 0
   fi
-  if ! rocm-smi --showid >/dev/null 2>&1; then
+  # Both probes below touch the GPU, so both hang forever on a wedged driver --
+  # and this gate runs before the session directory exists, so a hang here leaves
+  # no state.json, no breakdown and nothing for the caller to time out on: the
+  # workload just holds its nodes until the scheduler's wall clock kills it
+  # (observed: 14h on 8xMI355X, job 174683, only `PYTHON=` in the log).
+  #
+  # A timeout is fatal rather than a skip. It is the strongest "this node's GPU
+  # is wedged" signal install.sh gets, and the default path below this gate keeps
+  # touching the driver with no time-box of its own -- `import lpips` in
+  # ensure_scriptable_quality_deps, _torch_hip_version, and kernel-agent's
+  # ensure_ray_started, which calls torch.cuda.device_count() and so initialises
+  # the HIP runtime. Falling through would only move the same hang a minute or
+  # two later and point the next reader at Ray. Dying here releases the
+  # allocation and names the cause; SKIP_TORCH_GATE covers a node that is merely
+  # slow, the same way it already covers this gate's other verdicts.
+  local smi_rc=0
+  timeout 60 rocm-smi --showid >/dev/null 2>&1 || smi_rc=$?
+  if [ "$smi_rc" -eq 124 ]; then
+    warn "rocm-smi --showid did not answer within 60s -- the GPU driver on this node looks wedged"
+    if [ "${INFERENCE_OPTIMIZER_SKIP_TORCH_GATE:-0}" != "1" ]; then
+      die "refusing to install on a node whose GPU probe hangs (INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 to continue anyway)"
+    fi
+    warn "INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 set; continuing despite the hanging GPU probe"
     return 0
   fi
+  [ "$smi_rc" -eq 0 ] || return 0
+  # `local` stays on its own line: folding it into the assignment would mask the
+  # command's exit status behind `local`'s own.
   local probe
-  probe="$("$PYTHON" - <<'PY' 2>/dev/null || true
+  local probe_rc=0
+  probe="$(timeout 180 "$PYTHON" - <<'PY' 2>/dev/null
 import json, sys
 out = {"rc": 0}
 try:
@@ -876,7 +892,15 @@ except Exception as exc:
     out["error"] = type(exc).__name__ + ": " + str(exc)[:200]
 print(json.dumps(out))
 PY
-)"
+)" || probe_rc=$?
+  if [ "$probe_rc" -eq 124 ]; then
+    warn "import torch did not finish within 180s (PYTHON=${PYTHON}) -- a wedged GPU driver or a stalled shared mount"
+    if [ "${INFERENCE_OPTIMIZER_SKIP_TORCH_GATE:-0}" != "1" ]; then
+      die "refusing to install: the torch probe hangs on this node (INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 to continue anyway)"
+    fi
+    warn "INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 set; continuing despite the hanging torch probe"
+    return 0
+  fi
   if [ -z "$probe" ]; then
     warn "torch probe produced no output (PYTHON=${PYTHON})"
     return 0
@@ -2230,10 +2254,6 @@ persist_vllm_image_source_env
 # Unconditional (not gated on the backend): the default-geak install a later
 # forge session inherits still gets rocprof-compute + pandas<3.
 ensure_rocprof_compute
-# tree-reform.MD P2.5: framework-agent was promoted into
-# src/hyperloom/agents/framework/ (single hyperloom distribution), so the
-# `fa` CLI is already installed by ensure_inference_optimizer() above; no
-# more separate chain_framework_agent() delegation to a standalone installer.
 
 _write_specialist_secret_env_opt_in() {
   if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then

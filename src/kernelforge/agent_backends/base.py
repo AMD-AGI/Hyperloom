@@ -243,12 +243,11 @@ class AgentRunSpec:
     def resolved(self, runtime: AgentRuntimeConfig) -> AgentRunSpec:
         """Settle this session's model, effort and environment.
 
-        The runtime's reasoning effort wins over the spec's, which is the
-        reverse of how these two used to rank. Under the old order every call
-        site that wrote an effort of its own -- most of them -- was immune to
-        ``FORGE_AGENT_REASONING_EFFORT``, so an operator who set it watched two
-        thirds of the sessions ignore them and then read the campaign as
-        evidence about a setting it never ran under. An effort written in code
+        The runtime's reasoning effort wins over the spec's. With the spec
+        winning, every call site that wrote an effort of its own -- most of
+        them -- would be immune to ``FORGE_AGENT_REASONING_EFFORT``, and an
+        operator who set it would read the campaign as evidence about a setting
+        most sessions never ran under. An effort written in code
         is this repository's opinion; one written in the environment is the
         operator's decision about the run in front of them, and the operator has
         to win or the variable is decorative. The spec's own value survives only

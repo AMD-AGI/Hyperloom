@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Mapping
 
 from hyperloom.common.env import env_bool, env_float, env_str
@@ -47,6 +48,11 @@ DURATION_DRIFT_PCT = 5.0
 # measurement did not supply. Absent and null are not the same fact: a recorder that omits an axis leaves a reader
 # unable to tell an unmeasured axis from one the framework failed to report, and zero reads as "measured, and it
 # was zero".
+#
+# Duration and error rate are members because they are decision inputs, not decoration: ``rounds_are_comparable``
+# refuses a pair whose windows differ by more than ``DURATION_DRIFT_PCT`` or whose candidate dropped more requests,
+# and a published verdict that omits them cannot be re-derived from the record. The objective and its two guards
+# are here for the same reason -- every input the verdict reads is recoverable from one block.
 GRADED_AXIS_KEYS = (
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
@@ -57,6 +63,8 @@ GRADED_AXIS_KEYS = (
     "ttft_p90_ms",
     "tpot_p50_ms",
     "tpot_p90_ms",
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
 )
 
 # Upstream reports run-to-run noise on this workload as 1-5% depending on the concurrency regime, so the band opens
@@ -89,6 +97,13 @@ def intvty_grading_enabled(*, benchmark_mode: str = "") -> bool:
     """True when interactivity grading applies; ``benchmark_mode`` is a parameter to keep this module a leaf."""
     # Passing the mode matters: the env var describes only the shell that happens to be running, so a re-baseline or
     # integrate round in a subprocess would otherwise grade an agentic measurement on the synthetic axis.
+    # The MLPerf harness publishes no per-request OSL/E2EL series, so its sessions grade on output throughput;
+    # asking for interactivity there would only degrade every round. Adding that series upstream in
+    # mlcommons/endpoints is future work, if MLPerf mandates grading on interactivity.
+    from hyperloom.common.agentx_workload import is_mlperf_backend
+
+    if is_mlperf_backend():
+        return False
     raw = env_str("HYPERLOOM_PERF_METRIC").strip().lower()
     if raw:
         return raw == INTVTY_V1
@@ -298,12 +313,35 @@ def holds_within_band(
     return _within_band(axis_of(candidate, key), axis_of(anchor, key), band)
 
 
+def latency_veto_reason(observed_ms: Any, budget_ms: float) -> str:
+    """Why the latency budget refuses this candidate, or "" when it does not.
+
+    The budget is a ceiling on mean end-to-end latency, so unlike the gain gates
+    it refuses a candidate whose throughput won: a lever that buys throughput by
+    making each stream slower is exactly the case a throughput-only comparison
+    selects for. Off entirely when *budget_ms* is not positive.
+
+    Fails closed on an unmeasured candidate — a constraint nobody measured is not
+    one anybody satisfied — which is why every lane copies ``e2el_mean_ms`` onto
+    the dict it promotes.
+    """
+    if not budget_ms or budget_ms <= 0:
+        return ""
+    if isinstance(observed_ms, bool) or not isinstance(observed_ms, (int, float)):
+        return "latency_unmeasured"
+    observed = float(observed_ms)
+    if not isfinite(observed) or observed <= 0:
+        return "latency_unmeasured"
+    return "latency_budget_exceeded" if observed > float(budget_ms) else ""
+
+
 @dataclass(frozen=True)
 class GradedComparison:
     """A candidate, the figure it must beat, and the verdict on that pair.
 
     ``candidate`` and ``reference`` are both read on ``objective``. ``tput_*`` carry total throughput and are 0.0 off
     AgentX. ``degrade_reason`` names why the interactivity axis did not apply on a session that asked for it.
+    ``veto_reason`` names a constraint that refused a candidate its throughput would otherwise have kept.
     """
 
     objective: str
@@ -313,6 +351,7 @@ class GradedComparison:
     tput_candidate: float = 0.0
     tput_reference: float = 0.0
     degrade_reason: str = ""
+    veto_reason: str = ""
 
     @property
     def comparable(self) -> bool:
@@ -355,6 +394,7 @@ __all__ = [
     "intvty_of",
     "intvty_serving_grading_enabled",
     "is_agentx_mode",
+    "latency_veto_reason",
     "output_tput_of",
     "parse_intvty_noise_pct",
     "perf_snapshot_from_mapping",

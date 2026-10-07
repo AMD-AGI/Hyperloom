@@ -5,9 +5,8 @@
 
 A leaf module on purpose: it imports nothing from the recorder, so both the
 assembler and the per-event modules that read through the assembler can name
-these without an import cycle. That cycle is why the tuples used to be spelled
-out twice, once here and once in the module that owns the event -- two lists
-that had to be edited together and could only be checked by eye.
+these without an import cycle, and each tuple is spelled out once rather than
+also in the module that owns the event.
 """
 
 from __future__ import annotations
@@ -107,6 +106,7 @@ PHASE_EVENT_SECTIONS: tuple[str, ...] = (
     "phase_action",
     "phase_marker",
     "phase_proposal",
+    "phase_denial",
 )
 
 STACK_EVENT_SECTIONS: tuple[str, ...] = (

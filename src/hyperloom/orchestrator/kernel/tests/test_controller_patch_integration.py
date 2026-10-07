@@ -213,7 +213,7 @@ async def _integrate(
         patches_root=patches_root,
         session_dir=session_dir,
         shared_state=shared_state,
-        record_keep=coordinator.writeback._record_integrate_keep,
+        record_keep=coordinator.writeback.record_integrate_keep,
         validator=validator,
     )
 
@@ -1207,7 +1207,7 @@ async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, 
     await phase._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output")
 
     assert len(callbacks) == 1
-    assert callbacks[0].__func__ is WritebackCollaborator._record_integrate_keep
+    assert callbacks[0].__func__ is WritebackCollaborator.record_integrate_keep
     assert callbacks[0].__self__.shared_state is coordinator.shared_state
 
 
@@ -1271,7 +1271,7 @@ async def test_synthetic_controller_keep_updates_state_and_stack_ledger(tmp_path
             patches_root=patches,
             session_dir=session_dir,
             shared_state=state,
-            record_keep=coordinator.writeback._record_integrate_keep,
+            record_keep=coordinator.writeback.record_integrate_keep,
             validator=_validate,
         )
         ledger, _status = stack_event.assemble_stack_ext(

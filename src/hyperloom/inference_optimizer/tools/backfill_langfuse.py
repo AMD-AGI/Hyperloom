@@ -10,8 +10,9 @@ path mirrors calls into Langfuse while a run is in flight, this CLI replays
 one finished session's ``reports/trace/`` after the fact. Both share the same
 projection (:mod:`hyperloom.inference_optimizer.trace.langfuse_mapping`), so the spans
 this CLI does emit are shaped like the live ones. Not replayed here: ext token
-shards (``reports/trace/ext/*.jsonl``), specialist-intel, forge-step and
-GEMM-tuning spans, which only the live emitter's ``flush_session`` backfills.
+shards (``reports/trace/ext/*.jsonl``), specialist-intel, forge-step,
+GEMM-tuning and trajectory (``reports/trace/trajectory/*.jsonl``) spans, which
+only the live emitter's ``flush_session`` backfills.
 
 Mapping (trace -> phase span -> agent span -> generation)::
 
@@ -84,6 +85,7 @@ from hyperloom.common.jsonio import read_json, read_jsonl
 from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_NO_PROMOTE,
+    OUTCOME_RECORDED,
     OUTCOME_REVERT,
     OUTCOME_SKIP,
 )
@@ -217,10 +219,11 @@ def print_plan(plan: dict[str, Any]) -> None:
     rev = outcomes.count(OUTCOME_REVERT)
     nop = outcomes.count(OUTCOME_NO_PROMOTE)
     skipped = outcomes.count(OUTCOME_SKIP)
+    recorded = outcomes.count(OUTCOME_RECORDED)
     gainful = sum(1 for d in plan["decisions"] if (d.get("decision") or {}).get("gain_pct") is not None)
     print(
         f"  Scores: {len(plan['decisions'])} decisions "
-        f"(KEEP={keep} REVERT={rev} no_promote={nop} skipped={skipped}; gain_pct set={gainful})"
+        f"(KEEP={keep} REVERT={rev} no_promote={nop} skipped={skipped} recorded={recorded}; gain_pct set={gainful})"
     )
     recipe_rows = plan.get("recipe_audit") or []
     recipe_writes = sum(1 for r in recipe_rows if lfmap.recipe_audit_is_write(r))

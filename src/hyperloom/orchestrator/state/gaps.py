@@ -8,10 +8,15 @@ from __future__ import annotations
 import logging as _logging
 from datetime import datetime, timezone
 from hashlib import sha1
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.common.timeutil import now_iso
+
+from .failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome
+
+if TYPE_CHECKING:
+    from .task_registry import Task
 
 log = _logging.getLogger(__name__)
 
@@ -36,7 +41,7 @@ class GapsStateMixin:
         return None
 
     def upsert_gap(self, entry: dict[str, Any]) -> dict[str, Any]:
-        """Insert or update one gap row, keyed by ``canonical_id``. Coordinator-only writer (Inv-1 single-writer + CORE_STATE_FIELDS lock). Returns the merged entry."""
+        """Insert or update one gap row, keyed by ``canonical_id``. Coordinator-only writer. Returns the merged entry."""
         if not isinstance(entry, dict):
             return {}
         cid = str(entry.get("canonical_id") or "").strip()
@@ -109,22 +114,33 @@ class GapsStateMixin:
         return gap
 
 
+# Artifact references copied from a per-variant outcome onto its gap attempt.
+_GAP_ATTEMPT_ARTIFACT_KEYS: tuple[str, ...] = (
+    "failure_id",
+    "fingerprint",
+    "stage",
+    "workspace",
+    "server_log_path",
+)
+
+
 class GapRefreshCollaborator(CoordinatorCollaborator):
     """Gap-signal extraction from baselines, attempt history, and research hints."""
 
-    async def _refresh_gaps(self, *, reason: str) -> None:
+    async def refresh_gaps(self, *, reason: str, workload_id: str) -> None:
         """Refresh :attr:`SharedState.gaps` from observable signals. Additive upsert deduped by canonical_id.
 
         Args:
             reason: Tag describing the refresh trigger, used only in logging.
+            workload_id: The workload's canonical Recipe id that the derived gap rows are keyed on.
         """
         state = self.shared_state
-        for entry in self._extract_gaps_from_baseline():
+        for entry in self._extract_gaps_from_baseline(workload_id):
             state.upsert_gap(entry)
-        for entry in self._extract_gaps_from_attempts():
+        for entry in self._extract_gaps_from_attempts(workload_id):
             state.upsert_gap(entry)
 
-        plane = getattr(self, "knowledge_plane", None)
+        plane = self.knowledge_plane
         if plane is not None and hasattr(plane, "recipe_kb_traverse_issues"):
             try:
                 traverse = getattr(plane, "recipe_kb_traverse_issues")
@@ -150,8 +166,8 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             len(state.gaps),
         )
 
-    def _extract_gaps_from_baseline(self) -> list[dict[str, Any]]:
-        """Derive initial gap rows from the baseline snapshot (throughput_below_target, baseline_unstable); reuse the workload canonical_id (``_workload_canonical_id``, matching ``recipe_kb_t0.run_t0_anchor``) so traverse rows align.
+    def _extract_gaps_from_baseline(self, workload_id: str) -> list[dict[str, Any]]:
+        """Derive initial gap rows from the baseline snapshot (throughput_below_target, baseline_unstable); key the rows on ``workload_id`` (matching ``recipe_kb_t0.run_t0_anchor``) so traverse rows align.
 
         Returns:
             A list of gap row dicts derived from the baseline; empty when no
@@ -161,13 +177,12 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         gaps: list[dict[str, Any]] = []
         if state.baseline_tput <= 0:
             return gaps
-        anchor = self._workload_canonical_id()
-        target_gap = float(getattr(state, "target_gap_pct", 0.0) or 0.0)
+        target_gap = self._coord.target_gap_pct()
         if target_gap > 0.0:
             severity = "high" if target_gap >= 10.0 else "medium" if target_gap >= 3.0 else "low"
             gaps.append(
                 {
-                    "canonical_id": f"{anchor}#throughput_below_target",
+                    "canonical_id": f"{workload_id}#throughput_below_target",
                     "symptom": (f"current_best is {target_gap:.1f}% short of the run objective target"),
                     "layer": "framework",
                     "severity": severity,
@@ -178,7 +193,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         if state.baseline_failure_streak > 0:
             gaps.append(
                 {
-                    "canonical_id": f"{anchor}#baseline_unstable",
+                    "canonical_id": f"{workload_id}#baseline_unstable",
                     "symptom": (f"baseline crashed {state.baseline_failure_streak} consecutive time(s)"),
                     "layer": "system",
                     "severity": ("high" if state.baseline_failure_streak >= 2 else "medium"),
@@ -188,7 +203,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             )
         return gaps
 
-    def _extract_gaps_from_attempts(self) -> list[dict[str, Any]]:
+    def _extract_gaps_from_attempts(self, workload_id: str) -> list[dict[str, Any]]:
         """Derive gaps from rolling failures + winners history (recurring (action, error_class[, variant]) + explore plateau).
 
         Returns:
@@ -196,7 +211,6 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             an explore-plateau signal.
         """
         state = self.shared_state
-        anchor = self._workload_canonical_id()
         gaps: list[dict[str, Any]] = []
 
         # Already capped by ``record_action_failure``; read the whole log.
@@ -225,7 +239,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             else:
                 cid_variant = f":{variant}" if variant else ""
                 seen_failures[key] = {
-                    "canonical_id": f"{anchor}#fail:{action}:{err}{cid_variant}",
+                    "canonical_id": f"{workload_id}#fail:{action}:{err}{cid_variant}",
                     "symptom": symptom,
                     "layer": layer,
                     "severity": "medium",
@@ -246,7 +260,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         if no_promote >= 3 and recent_promotions == 0:
             gaps.append(
                 {
-                    "canonical_id": f"{anchor}#explore_plateau",
+                    "canonical_id": f"{workload_id}#explore_plateau",
                     "symptom": (f"{no_promote} consecutive grid rounds without a new current_best"),
                     "layer": "framework",
                     "severity": "high" if no_promote >= 6 else "medium",
@@ -256,7 +270,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             )
         return gaps
 
-    def _seed_gaps_from_research_hints(self) -> None:
+    def seed_gaps_from_research_hints(self) -> None:
         """Inject research hints as advisory gaps[] seeds (idempotent)."""
         from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
@@ -323,3 +337,98 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         if a in {"baseline"}:
             return ("system", "system_specialist")
         return ("framework", authoring_domain_for_framework(framework))
+
+    def record_explore_round_gaps(
+        self,
+        *,
+        task: "Task | None",
+        result: dict[str, Any],
+        workload_id: str,
+    ) -> None:
+        """Append per-variant KEEP/REVERT outcomes to the matching gap (or the anchor gap as fallback).
+
+        Args:
+            task: The explore task whose params carry the gap canonical id;
+                ``None`` is a no-op.
+            result: The explore result; its ``per_variant_outcomes`` drive the
+                appended gap attempts.
+            workload_id: Canonical id of the anchor gap used when the task names no gap.
+        """
+        if task is None:
+            return
+        per_variant = result.get("per_variant_outcomes")
+        if not isinstance(per_variant, list) or not per_variant:
+            return
+        params = dict(task.params or {})
+        canonical = str(params.get("gap_canonical_id") or "").strip() or workload_id
+        state = self.shared_state
+        existing = state.find_gap(canonical)
+        if existing is None:
+            state.upsert_gap(
+                {
+                    "canonical_id": canonical,
+                    "symptom": "explore round outcomes",
+                    "layer": "framework",
+                    "severity": "medium",
+                    "domain_hint": self._framework_authoring_domain(),
+                    "source": "attempts",
+                }
+            )
+        for outcome in per_variant:
+            if not isinstance(outcome, dict):
+                continue
+            attempt: dict[str, Any] = {
+                "action": "explore",
+                "variant_name": str(outcome.get("variant_name") or ""),
+                "outcome": str(outcome.get("outcome") or "").upper(),
+                "gain_pct": outcome.get("gain_pct"),
+                "reason": str(outcome.get("reason") or ""),
+                "error_class": str(outcome.get("error_class") or ""),
+            }
+            for key in _GAP_ATTEMPT_ARTIFACT_KEYS:
+                value = outcome.get(key)
+                if value:
+                    attempt[key] = str(value)
+            state.append_gap_attempt(canonical, attempt)
+
+    def record_explore_variant_failures(
+        self,
+        *,
+        task: "Task | None",
+        result: dict[str, Any],
+    ) -> None:
+        """Record each unmeasured ``per_variant_outcomes`` row as failure evidence + ``last_action_failures``.
+
+        A crashed variant does not fail the round, so the round-level recorder
+        never sees it.
+
+        Args:
+            task: The completed explore task; ``None`` is a no-op.
+            result: The explore result dict carrying ``per_variant_outcomes``.
+        """
+        if task is None:
+            return
+        per_variant = result.get("per_variant_outcomes")
+        if not isinstance(per_variant, list):
+            return
+        task_id = str(task.task_id or "")
+        round_id = str(result.get("round_id") or "")
+        for vo in per_variant:
+            if not isinstance(vo, dict):
+                continue
+            if str(vo.get("outcome") or "").upper() not in UNMEASURED_OUTCOMES:
+                continue
+            fe = failure_from_variant_outcome(task_id=task_id, round_id=round_id, vo=vo)
+            self.shared_state.record_failure_evidence(fe)
+            self.shared_state.record_action_failure(
+                action="explore",
+                task_id=task_id,
+                result={
+                    "variant_name": str(vo.get("variant_name") or ""),
+                    "error_class": str(vo.get("error_class") or ""),
+                    "error": str(vo.get("reason") or ""),
+                    "workspace": vo.get("workspace"),
+                    "stderr_log_path": vo.get("server_log_path"),
+                    "failure_id": fe.get("failure_id"),
+                },
+            )

@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
-from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.framework.artifacts import candidate_key
+from hyperloom.orchestrator.state.task_registry import Task
+
+from .conftest import make_coordinator
 
 
 def test_candidate_key_precedence_and_fallbacks():
@@ -23,57 +24,29 @@ def test_candidate_key_precedence_and_fallbacks():
     assert candidate_key("not-a-dict") == ""  # type: ignore[arg-type]
 
 
-class _StateStub:
-    def __init__(self) -> None:
-        self.framework_agent_phase_progress: list[dict[str, Any]] = []
-        self.framework_agent_batches: list[dict[str, Any]] = []
-        self.framework_agent_review_counts: dict[str, int] = {}
-        self.saves = 0
-
-    def save(self, _session_dir: Path) -> None:
-        self.saves += 1
-
-    def record_action_failure(self, **_kw: Any) -> None:
-        return None
-
-
-class _MiniCoord:
-    """Minimal binding of the framework progress helpers under test."""
-
-    _MAX_REPEATED_REVIEW_SUBMISSIONS = Coordinator._MAX_REPEATED_REVIEW_SUBMISSIONS
-    _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
-    _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys
-    _stamp_framework_progress = Coordinator._stamp_framework_progress
-    _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
-    _select_next_framework_agent_candidate = Coordinator._select_next_framework_agent_candidate
-    _handle_unpromotable_result = Coordinator._handle_unpromotable_result
-
-    def __init__(self, tmp_path: Path) -> None:
-        self.session_dir = tmp_path
-        self.shared_state = _StateStub()
-
-
 def test_pr_url_only_candidate_dedups_against_progress_row(tmp_path: Path):
     """A candidate with only ``pr_url`` must dedup once its terminal row (keyed on the same pr_url) is written."""
-    coord = _MiniCoord(tmp_path)
+    coord = make_coordinator(tmp_path)
+    phase = coord.phase_framework
     cand_pr_only = {"pr_url": "https://example.com/pr/9", "batch_id": "b1"}
     cand_other = {"candidate_id": "cid-2", "batch_id": "b1"}
     coord.shared_state.framework_agent_batches = [
         {"batch_id": "b1", "candidates": [cand_pr_only, cand_other]},
     ]
-    assert len(coord._unprocessed_framework_agent_candidates()) == 2
-    coord._stamp_framework_progress(
-        candidate_id=coord._framework_candidate_key(cand_pr_only),
+    assert len(phase._unprocessed_framework_agent_candidates()) == 2
+    phase._stamp_framework_progress(
+        candidate_id=phase._framework_candidate_key(cand_pr_only),
         batch_id="b1",
         status="critic_denied",
     )
-    remaining = coord._unprocessed_framework_agent_candidates()
+    remaining = phase._unprocessed_framework_agent_candidates()
     assert [candidate_key(c) for c in remaining] == ["cid-2"]
 
 
 def test_stamp_writes_row_and_is_idempotent(tmp_path: Path):
-    coord = _MiniCoord(tmp_path)
-    first = coord._stamp_framework_progress(
+    coord = make_coordinator(tmp_path)
+    phase = coord.phase_framework
+    first = phase._stamp_framework_progress(
         candidate_id="cid-1",
         batch_id="b1",
         status="reauthor_cap",
@@ -92,7 +65,7 @@ def test_stamp_writes_row_and_is_idempotent(tmp_path: Path):
     assert row["rationale"] == "cap reached"
     assert row["error"] == "boom"
     assert row["ts"]
-    second = coord._stamp_framework_progress(
+    second = phase._stamp_framework_progress(
         candidate_id="cid-1",
         batch_id="b1",
         status="no_result_failed",
@@ -103,17 +76,19 @@ def test_stamp_writes_row_and_is_idempotent(tmp_path: Path):
 
 
 def test_stamp_empty_key_is_noop(tmp_path: Path):
-    coord = _MiniCoord(tmp_path)
-    assert coord._stamp_framework_progress(candidate_id="", status="x") is False
+    coord = make_coordinator(tmp_path)
+    assert coord.phase_framework._stamp_framework_progress(candidate_id="", status="x") is False
     assert coord.shared_state.framework_agent_phase_progress == []
 
 
 def test_failed_framework_task_stamps_no_result_failed(tmp_path: Path):
-    """An upstream-PR task settling ``status="failed"`` routes to ``_handle_unpromotable_result`` and must be stamped no_result_failed."""
-    coord = _MiniCoord(tmp_path)
-    task = SimpleNamespace(
-        kind="integrate_patch",
+    """An upstream-PR task settling ``status="failed"`` routes to ``handle_unpromotable_result`` and must be stamped no_result_failed."""
+    coord = make_coordinator(tmp_path)
+    task = Task(
         task_id="t-1",
+        kind="integrate_patch",
+        state="succeeded",
+        idempotency_key="t-1",
         params={
             "framework_agent_candidate_id": "https://example.com/pr/7",
             "candidate": {"pr_url": "https://example.com/pr/7"},
@@ -121,7 +96,7 @@ def test_failed_framework_task_stamps_no_result_failed(tmp_path: Path):
         },
     )
     result = {"status": "failed", "reason": "server never came up"}
-    asyncio.run(coord._handle_unpromotable_result(task, result))
+    asyncio.run(coord.writeback.handle_unpromotable_result(task, result))
     rows = coord.shared_state.framework_agent_phase_progress
     assert len(rows) == 1
     assert rows[0]["candidate_id"] == "https://example.com/pr/7"
@@ -129,41 +104,22 @@ def test_failed_framework_task_stamps_no_result_failed(tmp_path: Path):
     assert rows[0]["kept"] is False
 
 
-class _BusStub:
-    def __init__(self) -> None:
-        self.messages: list[Any] = []
-
-    async def append_and_seq(self, msg: Any) -> Any:
-        self.messages.append(msg)
-        return msg
-
-
-class _ReviewCoord(_MiniCoord):
-    # Borrowed alongside the method that reads it: the stub used to get away without it because the helper swallowed
-    # its own AttributeError.
-    _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
-    _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors
-    _submit_framework_agent_candidate_for_review = Coordinator._submit_framework_agent_candidate_for_review
-
-    def __init__(self, tmp_path: Path) -> None:
-        super().__init__(tmp_path)
-        self.bus = _BusStub()
-        self.state = SimpleNamespace(pending_proposals={})
-
-    async def _record_observation(self, *_a: Any, **_k: Any) -> None:
-        return None
-
-
-def _submit(coord: _ReviewCoord, cand: dict[str, Any]) -> None:
-    asyncio.run(
-        Coordinator._submit_framework_agent_candidate_for_review(coord, cand)  # type: ignore[arg-type]
-    )
+def _submit(coord: Any, cand: dict[str, Any]) -> None:
+    asyncio.run(coord.phase_framework._submit_framework_agent_candidate_for_review(cand))
 
 
 def test_repeated_review_aborts_after_cap(tmp_path: Path):
-    coord = _ReviewCoord(tmp_path)
+    coord = make_coordinator(tmp_path)
+    phase = coord.phase_framework
+    proposals: list[Any] = []
+
+    async def _append_and_seq(msg: Any) -> Any:
+        proposals.append(msg)
+        return msg
+
+    coord.bus.append_and_seq = _append_and_seq
     cand = {"candidate_id": "cid-loop", "batch_id": "b1"}
-    cap = coord._MAX_REPEATED_REVIEW_SUBMISSIONS
+    cap = phase._MAX_REPEATED_REVIEW_SUBMISSIONS
     # First ``cap`` submissions proceed (each drains its pending before the next).
     for _ in range(cap):
         coord.state.pending_proposals = {}
@@ -172,15 +128,15 @@ def test_repeated_review_aborts_after_cap(tmp_path: Path):
     assert coord.shared_state.framework_agent_phase_progress == []
     # The (cap+1)-th submission trips the backstop: terminal row, no proposal.
     coord.state.pending_proposals = {}
-    proposals_before = len(coord.bus.messages)
+    proposals_before = len(proposals)
     _submit(coord, cand)
     rows = coord.shared_state.framework_agent_phase_progress
     assert len(rows) == 1
     assert rows[0]["status"] == "repeated_review_abort"
     assert rows[0]["candidate_id"] == "cid-loop"
-    assert len(coord.bus.messages) == proposals_before
+    assert len(proposals) == proposals_before
     # Once stamped, the candidate is "processed" → never re-selected.
     coord.shared_state.framework_agent_batches = [
         {"batch_id": "b1", "candidates": [cand]},
     ]
-    assert coord._select_next_framework_agent_candidate() is None
+    assert phase._select_next_framework_agent_candidate() is None

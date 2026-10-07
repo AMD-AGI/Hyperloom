@@ -8,19 +8,26 @@ KB T4 safety net)."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.roles import (
     Backend,
     MockBackend,
     ScriptedPlan,
 )
+from hyperloom.orchestrator.roles.mcp_context_tools import ContextProvider
+from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+from hyperloom.orchestrator.actions.executors.explore import STACK_REVALIDATE_SOURCE
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.bus.message_bus import Message
+from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+from hyperloom.orchestrator.loop.writeback import IntegrateRecoveryIncomplete
 from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
@@ -33,26 +40,8 @@ def _silent_plan() -> ScriptedPlan:
     return ScriptedPlan(turns=[], default_intent=_idle_intent())
 
 
-def test_stale_delegated_method_raises_attribute_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    coord = Coordinator.__new__(Coordinator)
-    stale_name = "_stale_delegated_for_test"
-    monkeypatch.setitem(Coordinator._DELEGATED, stale_name, "phase_kernel")
-
-    with pytest.raises(AttributeError, match="does not define"):
-        getattr(coord, stale_name)
-
-
 def _build_backends() -> dict[str, Backend]:
     return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
-
-
-def test_delegated_missing_attr_raises_attribute_error_not_recursion(monkeypatch) -> None:
-    coord = object.__new__(Coordinator)
-    coord.__dict__["dummy_owner"] = object()
-    monkeypatch.setitem(Coordinator._DELEGATED, "_deleted_delegate", "dummy_owner")
-
-    with pytest.raises(AttributeError, match="delegates '_deleted_delegate'"):
-        getattr(coord, "_deleted_delegate")
 
 
 @pytest.mark.asyncio
@@ -164,20 +153,9 @@ def coord(session_dir) -> Coordinator:
     return Coordinator(session_dir, backends=_build_backends())
 
 
-def test_every_delegated_name_resolves_on_its_collaborator(coord: Coordinator) -> None:
-    """A map entry naming a method its collaborator never defined is a crash at first call, not at import."""
-    unresolved = []
-    for name in Coordinator._DELEGATED:
-        try:
-            getattr(coord, name)
-        except AttributeError as exc:
-            unresolved.append(f"{name}: {exc}")
-    assert unresolved == []
-
-
 # -- _context_inbox_reader --------------------------------------------------
 def test_context_inbox_reader_empty(coord: Coordinator) -> None:
-    out = coord._context_inbox_reader()
+    out = coord.conversation._context_inbox_reader()
     assert out == "(no inbox events)"
 
 
@@ -199,14 +177,14 @@ def test_trace_mcp_setup_persists_diagnostics(coord: Coordinator) -> None:
 @pytest.mark.asyncio
 async def test_context_inbox_reader_with_events(coord: Coordinator) -> None:
     await coord.bus.append_and_seq(Message.new("kernel_agent", "orchestration", "observation", {"body_md": "hi"}))
-    out = coord._context_inbox_reader()
+    out = coord.conversation._context_inbox_reader()
     assert "(no inbox events)" not in out
     assert isinstance(out, str)
 
 
 # -- _context_recent_outcomes_reader ----------------------------------------
 def test_recent_outcomes_reader_empty(coord: Coordinator) -> None:
-    assert coord._context_recent_outcomes_reader() == "(no recent outcomes)"
+    assert coord.conversation._context_recent_outcomes_reader() == "(no recent outcomes)"
 
 
 @pytest.mark.asyncio
@@ -214,18 +192,54 @@ async def test_recent_outcomes_reader_with_rows(coord: Coordinator) -> None:
     await coord.bus.append_and_seq(
         Message.new("kernel_agent", "*", "delegated_result", {"action_name": "explore", "status": "succeeded"})
     )
-    out = coord._context_recent_outcomes_reader(top_k=4)
+    out = coord.conversation._context_recent_outcomes_reader(top_k=4)
     assert "Recent action outcomes" in out
 
 
 def test_recent_outcomes_reader_clamps_top_k(coord: Coordinator) -> None:
-    assert isinstance(coord._context_recent_outcomes_reader(top_k=999), str)
-    assert isinstance(coord._context_recent_outcomes_reader(top_k=0), str)
+    assert isinstance(coord.conversation._context_recent_outcomes_reader(top_k=999), str)
+    assert isinstance(coord.conversation._context_recent_outcomes_reader(top_k=0), str)
+
+
+# -- context reader failure surface -----------------------------------------
+@pytest.mark.parametrize(
+    ("owner", "source", "tool"),
+    [
+        ("bus", "inbox_context_sync", "inbox"),
+        ("bus", "recent_outcomes_context_sync", "recent_outcomes"),
+        ("tasks", "running_context_sync", "running_tasks"),
+    ],
+)
+def test_context_reader_failure_carries_traceback_to_the_log(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    owner: str,
+    source: str,
+    tool: str,
+) -> None:
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("projection read exploded")
+
+    monkeypatch.setattr(getattr(coord, owner), source, _boom)
+    provider = ContextProvider(
+        shared_state=coord.shared_state,
+        inbox_reader=coord.conversation._context_inbox_reader,
+        recent_outcomes_reader=coord.conversation._context_recent_outcomes_reader,
+        running_tasks_reader=coord.conversation._context_running_tasks_reader,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="hyperloom.orchestrator.roles.mcp_context_tools"):
+        out = getattr(provider, tool)()
+
+    assert f"context tool {tool} unavailable" in out
+    assert "projection read exploded" in out
+    assert "Traceback (most recent call last)" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_resume_consistency_marks_unvalidated_keeps(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.optimization_stack = [
         {
             "action": "explore",
@@ -245,18 +259,17 @@ async def test_resume_consistency_marks_unvalidated_keeps(coord: Coordinator) ->
     coord.shared_state.cumulative_gain_validated_stack_len = 1
     coord.shared_state.current_best = {"extra_server_args": "--a 1 --b 2", "extra_envs": {"A": "1", "B": "2"}}
 
-    report = await coord._resume_consistency_pass()
+    report = await coord.writeback._resume_consistency_pass()
 
     warning_kinds = {w["kind"] for w in report["warnings"]}
     assert "resume_unvalidated_keeps" in warning_kinds
-    assert coord.shared_state.resume_pending_revalidation is True
-    assert any(isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
+    assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
 
 
 @pytest.mark.asyncio
 async def test_resume_consistency_leaves_current_best_alone(coord: Coordinator) -> None:
     """Resume must not rewrite the config; a stack replay loses ablated envs."""
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.optimization_stack = [
         {
             "action": "explore",
@@ -277,7 +290,7 @@ async def test_resume_consistency_leaves_current_best_alone(coord: Coordinator) 
     coord.shared_state.cumulative_gain_validated_stack_len = 2
     coord.shared_state.current_best = {"extra_server_args": "--b 2", "extra_envs": {"NEW": "1"}}
 
-    report = await coord._resume_consistency_pass()
+    report = await coord.writeback._resume_consistency_pass()
 
     assert coord.shared_state.current_best["extra_envs"] == {"NEW": "1"}
     assert coord.shared_state.current_best["extra_server_args"] == "--b 2"
@@ -295,20 +308,613 @@ async def test_resume_restores_promoted_inferencex_checkout(
 ) -> None:
     active = tmp_path / "active-inferencex"
     active.mkdir()
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.active_inferencex_path = str(active)
     # setenv, not delenv: delenv of an absent name arms no undo, so the value the resume pass exports below would leak
     # into every later test.
     monkeypatch.setenv("INFERENCEX_PATH", "")
 
-    await coord._resume_consistency_pass()
+    await coord.writeback._resume_consistency_pass()
 
     assert os.environ["INFERENCEX_PATH"] == str(active)
 
 
+@pytest.fixture
+def pending_candidate(coord: Coordinator, tmp_path: Path, monkeypatch):
+    """Apply real local files, then discard the live state before resume."""
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+    from hyperloom.orchestrator.actions.executors import _multi_node_env, integrate_patch as ip
+    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+    from hyperloom.orchestrator.state.shared_state import SharedState
+    from hyperloom.orchestrator.tests._helpers import init_git_repo
+
+    root = tmp_path / "candidate-framework"
+    init_git_repo(root, seed_file="cfg.json", seed_text="A\n")
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: (str(root),))
+    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: str(root))
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
+    workspace = runs_dir(coord.session_dir, "specialist", "spec-restore")
+    workspace.mkdir(parents=True)
+    output = tmp_path / "candidate-output"
+
+    async def apply(*, patches=False, two_artifacts=False):
+        params = {
+            "specialist_task_id": "spec-restore",
+            "framework_source_root": str(root),
+            "output_dir": str(output),
+            "apply_only": True,
+        }
+        if patches:
+            params["patches"] = []
+            for index, (before, after) in enumerate((("A", "B"), ("B", "C")), 1):
+                patch = workspace / f"p{index}.diff"
+                patch.write_text(
+                    "diff --git a/cfg.json b/cfg.json\n--- a/cfg.json\n+++ b/cfg.json\n"
+                    f"@@ -1 +1 @@\n-{before}\n+{after}\n",
+                    encoding="utf-8",
+                )
+                params["patches"].append(str(patch))
+        else:
+            source = workspace / "replacement.json"
+            source.write_text("B\n", encoding="utf-8")
+            params["artifacts"] = [{"source": str(source), "target": str(root / "cfg.json")}]
+            if two_artifacts:
+                params["artifacts"].append({"source": str(source), "target": str(root / "created.json")})
+        coord.shared_state.record_specialist_patch_verdict("spec-restore", "approve")
+        task = await coord.tasks.create(kind="integrate_patch", params=params, idempotency_key="pending-restore")
+        result = await ip.IntegratePatchExecutor(session_dir=coord.session_dir)(
+            RunnerContext(task=task, lease=None, extra={"shared_state": coord.shared_state})
+        )
+        assert result["status"] == "applied_no_bench", result
+        assert (root / "cfg.json").read_text(encoding="utf-8") == ("C\n" if patches else "B\n")
+        coord.shared_state = SharedState.load_or_init(coord.session_dir)
+        assert coord.shared_state.pending_integrate["task_id"] == task.task_id
+        return SimpleNamespace(root=root, output=output, task=task, result=result)
+
+    return apply
+
+
+@pytest.mark.asyncio
+async def test_pending_restore_unwinds_dependent_patches_to_original(coord: Coordinator, pending_candidate):
+    candidate = await pending_candidate(patches=True)
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
+    assert coord.shared_state.pending_integrate == {}
+    assert report["warnings"] == []
+
+
+@pytest.mark.asyncio
+async def test_pending_restore_artifact_only_survives_lost_memory_and_repeats(coord: Coordinator, pending_candidate):
+    candidate = await pending_candidate(two_artifacts=True)
+    report = {"fixes": [], "warnings": []}
+    candidate.result.clear()
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
+    assert not (candidate.root / "created.json").exists()
+    assert coord.shared_state.pending_integrate == {}
+    repeated = {"fixes": [], "warnings": []}
+    await coord.writeback._resume_recover_pending_integrate(repeated)
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
+    assert not (candidate.root / "created.json").exists()
+    assert repeated == {"fixes": [], "warnings": []}
+
+
+@pytest.mark.asyncio
+async def test_pending_restore_failure_keeps_sentinel_backup_and_runtime(coord: Coordinator, pending_candidate):
+    candidate = await pending_candidate(two_artifacts=True)
+    backup = Path(candidate.result["artifacts_applied"][0]["backup"])
+    backup_content = backup.read_bytes()
+    evidence = backup.parent / "retained-evidence.bak"
+    evidence.write_bytes(backup_content)
+    runtime = candidate.output / "attempt-runtime" / "venv"
+    runtime.mkdir(parents=True)
+    runtime_marker = runtime / "installed-package"
+    runtime_marker.write_bytes(b"runtime evidence")
+    coord.shared_state.pending_integrate["attempt_venv_root"] = str(runtime)
+    sentinel_task = coord.shared_state.pending_integrate["task_id"]
+    backup.unlink()
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    assert coord.shared_state.pending_integrate.get("task_id") == sentinel_task
+    assert evidence.read_bytes() == backup_content
+    assert runtime_marker.read_bytes() == b"runtime evidence"
+    assert report["warnings"], report
+    backup.write_bytes(backup_content)
+    retry_report = {"fixes": [], "warnings": []}
+    await coord.writeback._resume_recover_pending_integrate(retry_report)
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
+    assert not (candidate.root / "created.json").exists()
+    assert coord.shared_state.pending_integrate == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("newer_results", [0, 10_001])
+async def test_pending_restore_never_undoes_kept_patch_outside_tail_window(
+    coord: Coordinator, pending_candidate, newer_results: int
+):
+    candidate = await pending_candidate(patches=True)
+    kept = Message.new(
+        "coordinator",
+        "*",
+        "delegated_result",
+        {
+            "task_id": candidate.task.task_id,
+            "kind": "integrate_patch",
+            "state": "succeeded",
+            "result": {
+                "status": "kept",
+                "specialist_task_id": "spec-restore",
+                "output_throughput": 125.0,
+                "patches_applied": candidate.result["patches_applied"],
+                "workspace": str(candidate.output),
+            },
+        },
+    )
+    await coord.bus.append_and_seq(kept)
+    if newer_results:
+        async with coord.db.transaction() as cur:
+            cur.executemany(
+                "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts) VALUES (?,?,?,?,?,?,?)",
+                (
+                    Message.new("coordinator", "*", "delegated_result", {"task_id": f"unrelated-{index}"}).to_db_row()
+                    for index in range(newer_results)
+                ),
+            )
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "C\n"
+    assert coord.shared_state.pending_integrate == {}
+    assert any(entry.get("kind") == "replayed_pending_integrate" for entry in report["fixes"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence", ["task", "stack", "neither", "failed_with_keep_result"])
+async def test_pending_restore_never_treats_pruned_keep_as_rejection(coord, pending_candidate, evidence):
+    from hyperloom.orchestrator.bus.db_maintenance import prune_events, prune_tasks
+
+    candidate = await pending_candidate(patches=True)
+    await coord.tasks.transition(candidate.task.task_id, "running")
+    if evidence == "failed_with_keep_result":
+        await coord.tasks.transition(candidate.task.task_id, "failed")
+        await coord.tasks.append_completion_evidence(
+            candidate.task.task_id, {"outcome": {"result": {"status": "kept"}}}
+        )
+    else:
+        await coord.tasks.transition(candidate.task.task_id, "succeeded", evidence={"result_keys": ["status"]})
+    await coord.bus.append_and_seq(
+        Message.new(
+            "coordinator",
+            "*",
+            "delegated_result",
+            {
+                "task_id": candidate.task.task_id,
+                "kind": "integrate_patch",
+                "result": {"status": "kept"},
+            },
+        )
+    )
+    await coord.bus.append_and_seq(Message.new("coordinator", "*", "event", {"newer": True}))
+    assert await prune_events(coord.db, keep_recent=1) > 0
+    if evidence not in ("task", "failed_with_keep_result"):
+        await prune_tasks(coord.db, keep_done=0)
+    if evidence == "stack":
+        coord.shared_state.optimization_stack = [{"task_id": candidate.task.task_id}]
+    report = {"fixes": [], "warnings": []}
+    await coord.writeback._resume_recover_pending_integrate(report)
+    assert (candidate.root / "cfg.json").read_text() == "C\n"
+    if evidence == "stack":
+        assert coord.shared_state.pending_integrate == {}
+    else:
+        assert coord.shared_state.pending_integrate["task_id"] == candidate.task.task_id
+        assert report["warnings"]
+
+
+@pytest.mark.asyncio
+async def test_reused_output_directory_never_reuses_prior_attempt_preimages(coord, tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+    from hyperloom.orchestrator.actions.executors import _multi_node_env, integrate_patch as ip
+    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+
+    root = tmp_path / "plain-framework"
+    root.mkdir()
+    output = tmp_path / "reused-output"
+    target = root / "cfg.json"
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: (str(root),))
+    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: str(root))
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
+    executor = ip.IntegratePatchExecutor(session_dir=coord.session_dir)
+    for index, content in enumerate(("KEPT", "CANDIDATE")):
+        sid = f"reuse-{index}"
+        workspace = runs_dir(coord.session_dir, "specialist", sid)
+        workspace.mkdir(parents=True)
+        source = workspace / "cfg.json"
+        source.write_text(content)
+        coord.shared_state.record_specialist_patch_verdict(sid, "approve")
+        task = await coord.tasks.create(
+            kind="integrate_patch",
+            idempotency_key=sid,
+            params={
+                "specialist_task_id": sid,
+                "framework_source_root": str(root),
+                "output_dir": str(output),
+                "artifacts": [{"source": str(source), "target": str(target)}],
+                "apply_only": True,
+            },
+        )
+        result = await executor(RunnerContext(task=task, lease=None, extra={"shared_state": coord.shared_state}))
+        assert result["status"] == "applied_no_bench", result
+        if index == 0:
+            coord.shared_state.pending_integrate = {}
+    assert target.read_text() == "CANDIDATE"
+    report = {"fixes": [], "warnings": []}
+    await coord.writeback._resume_recover_pending_integrate(report)
+    assert report["warnings"] == []
+    assert target.read_text() == "KEPT"
+
+
+@pytest.mark.asyncio
+async def test_failed_pending_restore_blocks_resume_before_followup_actions(coord, pending_candidate, monkeypatch):
+    candidate = await pending_candidate(two_artifacts=True)
+    Path(candidate.result["artifacts_applied"][0]["backup"]).unlink()
+    coord.writeback._resumed_from["is_resume"] = True
+
+    async def forbidden(*_args, **_kwargs):
+        pytest.fail("resume continued after an incomplete restore")
+
+    monkeypatch.setattr(coord.writeback, "_resume_recover_pending_targeted_build", forbidden)
+    with pytest.raises(RuntimeError, match="refusing resume before measurement"):
+        await coord.writeback._resume_consistency_pass()
+    assert coord.shared_state.pending_integrate["task_id"] == candidate.task.task_id
+
+
+@pytest.mark.asyncio
+async def test_pending_restore_rejects_legacy_artifact_without_backup_evidence(coord: Coordinator, tmp_path: Path):
+    target = tmp_path / "unknown-original.json"
+    target.write_text("possibly-kept-content", encoding="utf-8")
+    coord.shared_state.pending_integrate = {
+        "task_id": "legacy-artifact",
+        "artifacts": [{"target": str(target), "rel_target": target.name}],
+        "patches": [],
+        "workspace": str(tmp_path / "missing-backups"),
+    }
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    assert target.read_text(encoding="utf-8") == "possibly-kept-content"
+    assert coord.shared_state.pending_integrate.get("task_id") == "legacy-artifact"
+    assert report["warnings"]
+    assert report["fixes"] == []
+
+
+@pytest.fixture
+def crashed_integrate_window(coord: Coordinator, pending_candidate):
+    """Crash a real integration at a chosen point between verdict and publish.
+
+    Drives a genuinely applied candidate to the durable phase the executor
+    would have written, then lays down exactly the task-row evidence the runner
+    writes before the bus sees anything. ``outcome_status=None`` is the crash
+    that happened first: the phase is on disk, the runner never finished.
+    """
+    from hyperloom.orchestrator.actions.executors.integrate_patch import restore_pending_integrate
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    async def crash(*, keep: bool, outcome_status: str | None = None, cleanup_confirmed: bool = True):
+        candidate = await pending_candidate(patches=True)
+        summary = restore_pending_integrate(coord.shared_state.pending_integrate, keep=keep)
+        assert summary["failed"] == [], summary
+        assert coord.shared_state.pending_integrate["recovery"]["phase"] == ("accepted" if keep else "restored")
+        coord.shared_state.save(coord.session_dir)
+        await coord.tasks.transition(candidate.task.task_id, "running")
+        if outcome_status is not None:
+            await coord.tasks.transition(
+                candidate.task.task_id,
+                "succeeded",
+                evidence={
+                    "outcome": {
+                        "task_id": candidate.task.task_id,
+                        "state": "succeeded",
+                        "result": {
+                            "kind": "integrate_patch",
+                            "status": outcome_status,
+                            "specialist_task_id": "spec-restore",
+                            "output_throughput": 130.0,
+                        },
+                        "error": None,
+                        "error_class": "",
+                    },
+                    "cleanup_confirmed": cleanup_confirmed,
+                },
+            )
+        coord.shared_state = SharedState.load_or_init(coord.session_dir)
+        coord.writeback._resumed_from["is_resume"] = True
+        return candidate
+
+    return crash
+
+
+@pytest.mark.asyncio
+async def test_resume_refuses_an_accepted_integrate_whose_outcome_was_lost(coord, crashed_integrate_window):
+    """An accepted phase with no trustworthy verdict keeps its obligation."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    candidate = await crashed_integrate_window(keep=True)
+
+    with pytest.raises(RuntimeError, match="refusing resume before measurement"):
+        await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.pending_integrate["task_id"] == candidate.task.task_id
+    assert coord.shared_state.optimization_stack == []
+    assert coord.shared_state.current_best == {}
+    # The candidate was retained on purpose, so recovery must not revert it.
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "C\n"
+    reloaded = SharedState.load_or_init(coord.session_dir)
+    assert reloaded.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    assert reloaded.pending_integrate["task_id"] == candidate.task.task_id
+
+
+@pytest.mark.asyncio
+async def test_resume_replays_an_accepted_integrate_from_its_task_row(coord, crashed_integrate_window):
+    """A KEEP that never reached the bus is still durable on the task row."""
+    from copy import deepcopy
+
+    candidate = await crashed_integrate_window(keep=True, outcome_status="kept")
+    coord.shared_state.baseline_tput = 100.0
+    marker = deepcopy(coord.shared_state.pending_integrate)
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert any(
+        isinstance(f, dict) and f.get("kind") == "replayed_pending_integrate" and f["appended"] is True
+        for f in report["fixes"]
+    )
+    assert coord.shared_state.pending_integrate == {}
+    assert [row["variant_name"] for row in coord.shared_state.optimization_stack] == ["spec-restore"]
+    assert coord.shared_state.current_best["tput"] == 130.0
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "C\n"
+    assert not coord.shared_state.stop_reason
+
+    coord.shared_state.pending_integrate = marker
+    repeated = {"fixes": [], "warnings": []}
+    await coord.writeback._resume_recover_pending_integrate(repeated)
+
+    assert [row["variant_name"] for row in coord.shared_state.optimization_stack] == ["spec-restore"]
+    assert coord.shared_state.pending_integrate == {}
+    assert repeated["warnings"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["reverted", "failed"])
+async def test_resume_settles_a_complete_non_keep_integrate(coord, crashed_integrate_window, status):
+    """A restored tree plus a confirmed non-KEEP verdict is a finished window."""
+    candidate = await crashed_integrate_window(keep=False, outcome_status=status)
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.pending_integrate == {}
+    assert coord.shared_state.optimization_stack == []
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
+    assert not coord.shared_state.stop_reason
+    assert any(
+        isinstance(f, dict) and f.get("kind") == "settled_pending_integrate" and f["status"] == status
+        for f in report["fixes"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_refuses_an_integrate_outcome_whose_cleanup_is_unconfirmed(coord, crashed_integrate_window):
+    """An unconfirmed cleanup makes the recorded verdict diagnostic only."""
+    candidate = await crashed_integrate_window(keep=False, outcome_status="reverted", cleanup_confirmed=False)
+
+    with pytest.raises(RuntimeError, match="refusing resume before measurement"):
+        await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.pending_integrate["task_id"] == candidate.task.task_id
+    assert coord.shared_state.optimization_stack == []
+
+
+@pytest.mark.asyncio
+async def test_resume_clears_a_restored_marker_whose_runner_never_finished(coord, crashed_integrate_window):
+    """The phase alone discharges the window when the runner never got to write."""
+    candidate = await crashed_integrate_window(keep=False)
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.pending_integrate == {}
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
+    assert not coord.shared_state.stop_reason
+    assert any(isinstance(f, dict) and f.get("kind") == "cleared_stale_pending_integrate" for f in report["fixes"])
+
+
+@pytest.fixture
+def ordinary_integrate_completion(coord: Coordinator, tmp_path: Path):
+    """Seed the durable marker and backup a completed executor hands to writeback."""
+    from copy import deepcopy
+
+    backup = tmp_path / "ordinary-integrate" / "before.bak"
+    backup.parent.mkdir()
+    backup.write_bytes(b"accepted source before candidate")
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.current_best = {"action": "baseline", "tput": 100.0, "extra_envs": {}, "extra_server_args": ""}
+    anchor = deepcopy(coord.shared_state.current_best)
+
+    async def prepare(*, phase="ready", status="kept", error_class="", recovery_errors=None, marker_task_id=None):
+        task = await coord.tasks.create(kind="integrate_patch", params={}, idempotency_key="ordinary-integrate")
+        pending = {
+            "task_id": task.task_id if marker_task_id is None else marker_task_id,
+            "workspace": str(backup.parent),
+        }
+        if phase is not None:
+            pending["recovery"] = {"phase": phase}
+        coord.shared_state.pending_integrate = pending
+        coord.shared_state.save(coord.session_dir)
+        result = {
+            "status": status,
+            "specialist_task_id": "ordinary-specialist",
+            "output_throughput": 125.0,
+        }
+        if error_class:
+            result["error_class"] = error_class
+        if recovery_errors:
+            result["recovery_errors"] = recovery_errors
+        return SimpleNamespace(task=task, result=result, pending=deepcopy(pending), backup=backup, anchor=anchor)
+
+    return prepare
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase,status,error_class",
+    [
+        ("ready", "kept", ""),
+        ("files_restored", "kept", ""),
+        ("files_restored", "failed", "integrate_restore_incomplete"),
+        ("ready", "reverted", ""),
+        ("accepted", "reverted", ""),
+        ("accepted", "applied_no_bench", ""),
+        ("restored", "kept", ""),
+        (None, "apply_failed", "git_apply_failed"),
+        ("accepted", "kept", "integrate_restore_incomplete"),
+    ],
+)
+async def test_ordinary_integrate_completion_blocks_unconfirmed_before_promotion(
+    coord, ordinary_integrate_completion, phase, status, error_class
+):
+    candidate = await ordinary_integrate_completion(phase=phase, status=status, error_class=error_class)
+    original_stack = list(coord.shared_state.optimization_stack)
+    original_levers = list(coord.shared_state.authored_framework_levers)
+    with pytest.raises(RuntimeError, match="integrate.*recovery") as caught:
+        await coord.writeback.promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+
+    assert isinstance(caught.value, IntegrateRecoveryIncomplete)
+    assert coord.shared_state.pending_integrate == candidate.pending
+    assert coord.shared_state.current_best == candidate.anchor
+    assert coord.shared_state.optimization_stack == original_stack
+    assert coord.shared_state.authored_framework_levers == original_levers
+    assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    persisted = json.loads((coord.session_dir / "state.json").read_text(encoding="utf-8"))
+    assert persisted["pending_integrate"] == candidate.pending
+    assert persisted["stop_reason"] == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    assert candidate.backup.read_bytes() == b"accepted source before candidate"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["accepted", "restored"])
+async def test_ordinary_integrate_completion_rejects_recovery_errors_even_with_terminal_phase(
+    coord, ordinary_integrate_completion, phase
+):
+    candidate = await ordinary_integrate_completion(
+        phase=phase, status="kept" if phase == "accepted" else "reverted", recovery_errors=["stash restore failed"]
+    )
+    with pytest.raises(RuntimeError, match="integrate.*recovery"):
+        await coord.writeback.promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+    assert coord.shared_state.pending_integrate == candidate.pending
+    assert coord.shared_state.current_best == candidate.anchor
+    assert candidate.backup.exists()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_integrate_completion_restore_error_blocks_without_marker(coord, ordinary_integrate_completion):
+    candidate = await ordinary_integrate_completion(error_class="integrate_restore_incomplete")
+    coord.shared_state.pending_integrate = {}
+    with pytest.raises(RuntimeError, match="integrate.*recovery"):
+        await coord.writeback.promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+    assert coord.shared_state.current_best == candidate.anchor
+    assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+
+
+@pytest.mark.asyncio
+async def test_ordinary_integrate_completion_legacy_keep_with_stash_error_retains_recovery(
+    coord, ordinary_integrate_completion
+):
+    candidate = await ordinary_integrate_completion(phase=None, status="kept")
+    candidate.result["stash_restore_error"] = "user changes remain in stash after restore failed"
+
+    with pytest.raises(RuntimeError, match="integrate.*recovery") as caught:
+        await coord.writeback.promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+
+    assert isinstance(caught.value, IntegrateRecoveryIncomplete)
+    assert coord.shared_state.pending_integrate == candidate.pending
+    assert coord.shared_state.current_best == candidate.anchor
+    assert coord.shared_state.optimization_stack == []
+    assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    persisted = json.loads((coord.session_dir / "state.json").read_text(encoding="utf-8"))
+    assert persisted["pending_integrate"] == candidate.pending
+    assert persisted["stop_reason"] == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    assert candidate.backup.read_bytes() == b"accepted source before candidate"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase,status,promoted",
+    [
+        ("accepted", "kept", True),
+        ("accepted", "advanced", False),
+        ("accepted", "kept_inert", False),
+        ("restored", "reverted", False),
+        ("restored", "apply_failed", False),
+        ("restored", "failed", False),
+        (None, "kept", True),
+    ],
+)
+async def test_ordinary_integrate_completion_clears_only_confirmed_matching_marker(
+    coord, ordinary_integrate_completion, phase, status, promoted
+):
+    candidate = await ordinary_integrate_completion(phase=phase, status=status)
+    await coord.writeback.promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+
+    assert coord.shared_state.pending_integrate == {}
+    assert not coord.shared_state.stop_reason
+    assert coord.shared_state.current_best["tput"] == (125.0 if promoted else 100.0)
+    assert bool(coord.shared_state.optimization_stack) is promoted
+    persisted = json.loads((coord.session_dir / "state.json").read_text(encoding="utf-8"))
+    assert persisted["pending_integrate"] == {}
+    assert candidate.backup.read_bytes() == b"accepted source before candidate"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["applied", "applied_with_restored_stash"])
+async def test_ordinary_integrate_completion_apply_only_retains_ungraded_recovery(
+    coord, ordinary_integrate_completion, phase
+):
+    candidate = await ordinary_integrate_completion(phase=phase, status="applied_no_bench")
+    await coord.writeback.promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+
+    assert coord.shared_state.pending_integrate == candidate.pending
+    assert coord.shared_state.current_best == candidate.anchor
+    assert coord.shared_state.optimization_stack == []
+    assert not coord.shared_state.stop_reason
+    persisted = json.loads((coord.session_dir / "state.json").read_text(encoding="utf-8"))
+    assert persisted["pending_integrate"] == candidate.pending
+    assert candidate.backup.read_bytes() == b"accepted source before candidate"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker_task_id,missing_task", [("other-task", False), ("", False), ("", True)])
+async def test_ordinary_integrate_completion_does_not_clear_unidentified_or_other_marker(
+    coord, ordinary_integrate_completion, marker_task_id, missing_task
+):
+    candidate = await ordinary_integrate_completion(phase="restored", status="reverted", marker_task_id=marker_task_id)
+    await coord.writeback.promote_to_shared_state(
+        "integrate_patch", candidate.result, task=None if missing_task else candidate.task
+    )
+    assert coord.shared_state.pending_integrate == candidate.pending
+    assert coord.shared_state.current_best == candidate.anchor
+    assert candidate.backup.exists()
+
+
 @pytest.mark.asyncio
 async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     await coord.bus.append_and_seq(
         Message.new(
             "coordinator",
@@ -333,7 +939,7 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
         )
     )
 
-    report = await coord._resume_consistency_pass()
+    report = await coord.writeback._resume_consistency_pass()
 
     replay = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "replayed_orphaned_keep")
     assert replay["orphan_kind"] == "integrate_patch"
@@ -346,12 +952,12 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
         "/session/optimization_stack/src/spec-orphan/manifest.json"
     )
     assert coord.shared_state.optimization_stack[-1]["target_files"] == ["vllm/model.py"]
-    assert coord.shared_state.resume_pending_revalidation is True
+    assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
 
 
 @pytest.mark.asyncio
 async def test_resume_consistency_replays_pending_integrate_keep(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.pending_integrate = {"task_id": "ti-pending", "specialist_task_id": "spec-pending"}
     await coord.bus.append_and_seq(
         Message.new(
@@ -371,7 +977,7 @@ async def test_resume_consistency_replays_pending_integrate_keep(coord: Coordina
         )
     )
 
-    report = await coord._resume_consistency_pass()
+    report = await coord.writeback._resume_consistency_pass()
 
     replay = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "replayed_pending_integrate")
     assert replay["task_id"] == "ti-pending"
@@ -382,12 +988,13 @@ async def test_resume_consistency_replays_pending_integrate_keep(coord: Coordina
     assert "domain" not in coord.shared_state.optimization_stack[-1]
     assert "framework_agent_authoring" not in coord.shared_state.optimization_stack[-1]
     assert coord.shared_state.optimization_stack[-1]["recipe_publishable"] is False
-    assert coord.shared_state.resume_pending_revalidation is True
+    assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
 
 
 @pytest.mark.asyncio
 async def test_resume_consistency_rolls_back_pending_integrate(coord: Coordinator, monkeypatch) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
+    await coord.tasks.create(kind="integrate_patch", params={}, idempotency_key="ti-roll", task_id="ti-roll")
     coord.shared_state.pending_integrate = {
         "task_id": "ti-roll",
         "framework_source_root": "/tmp/framework",
@@ -399,7 +1006,7 @@ async def test_resume_consistency_rolls_back_pending_integrate(coord: Coordinato
         lambda pending: {"reversed": list(pending["patches"]), "failed": []},
     )
 
-    report = await coord._resume_consistency_pass()
+    report = await coord.writeback._resume_consistency_pass()
 
     rolled = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "rolled_back_pending_integrate")
     assert rolled["task_id"] == "ti-roll"
@@ -409,10 +1016,10 @@ async def test_resume_consistency_rolls_back_pending_integrate(coord: Coordinato
 
 @pytest.mark.asyncio
 async def test_resume_consistency_clears_stale_pending_integrate(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.pending_integrate = {"task_id": "ti-stale"}
 
-    report = await coord._resume_consistency_pass()
+    report = await coord.writeback._resume_consistency_pass()
 
     cleared = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "cleared_stale_pending_integrate")
     assert cleared["task_id"] == "ti-stale"
@@ -425,7 +1032,7 @@ async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unreadable event log must not be treated as 'no KEEP exists'."""
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     sentinel = {
         "task_id": "ti-unreadable",
         "framework_source_root": "/tmp/framework",
@@ -445,16 +1052,11 @@ async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
         lambda pending: rolled_back.append(pending) or {"reversed": [], "failed": []},
     )
 
-    report = await coord._resume_consistency_pass()
+    with pytest.raises(RuntimeError, match="refusing resume before measurement"):
+        await coord.writeback._resume_consistency_pass()
 
     assert rolled_back == []
     assert coord.shared_state.pending_integrate == sentinel
-    warning = next(w for w in report["warnings"] if w.get("kind") == "pending_integrate_scan_failed")
-    assert warning["task_id"] == "ti-unreadable"
-    assert not any(
-        isinstance(f, dict) and f.get("kind") in {"rolled_back_pending_integrate", "cleared_stale_pending_integrate"}
-        for f in report["fixes"]
-    )
 
 
 @pytest.mark.asyncio
@@ -462,7 +1064,7 @@ async def test_resume_consistency_discards_orphaned_integrate_keep_missing_works
     coord: Coordinator,
     tmp_path: Path,
 ) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     missing_workspace = tmp_path / "missing-workspace"
     await coord.bus.append_and_seq(
         Message.new(
@@ -483,7 +1085,7 @@ async def test_resume_consistency_discards_orphaned_integrate_keep_missing_works
         )
     )
 
-    report = await coord._resume_consistency_pass()
+    report = await coord.writeback._resume_consistency_pass()
 
     discarded = next(w for w in report["warnings"] if w["kind"] == "orphaned_keep_discarded")
     assert discarded["orphan_kind"] == "integrate_patch"
@@ -493,7 +1095,7 @@ async def test_resume_consistency_discards_orphaned_integrate_keep_missing_works
 
 @pytest.mark.asyncio
 async def test_resume_consistency_discards_orphan_when_workspace_missing(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     await coord.bus.append_and_seq(
         Message.new(
             "coordinator",
@@ -513,7 +1115,7 @@ async def test_resume_consistency_discards_orphan_when_workspace_missing(coord: 
         )
     )
 
-    report = await coord._resume_consistency_pass()
+    report = await coord.writeback._resume_consistency_pass()
 
     assert any(w.get("kind") == "orphaned_keep_discarded" for w in report["warnings"])
     assert not any(
@@ -523,7 +1125,7 @@ async def test_resume_consistency_discards_orphan_when_workspace_missing(coord: 
 
 @pytest.mark.asyncio
 async def test_resume_consistency_explore_orphan_alerts_not_replayed(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     await coord.bus.append_and_seq(
         Message.new(
             "coordinator",
@@ -542,7 +1144,7 @@ async def test_resume_consistency_explore_orphan_alerts_not_replayed(coord: Coor
         )
     )
 
-    report = await coord._resume_consistency_pass()
+    report = await coord.writeback._resume_consistency_pass()
 
     assert any(w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "explore" for w in report["warnings"])
     assert not any(
@@ -553,7 +1155,7 @@ async def test_resume_consistency_explore_orphan_alerts_not_replayed(coord: Coor
 @pytest.mark.asyncio
 async def test_resume_consistency_framework_keep_in_stack_is_not_orphaned(coord: Coordinator) -> None:
     """A landed framework KEEP reconciles against its own stack entry."""
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.optimization_stack = [
         {
             "action": "framework",
@@ -581,7 +1183,7 @@ async def test_resume_consistency_framework_keep_in_stack_is_not_orphaned(coord:
         )
     )
 
-    report = await coord._resume_consistency_pass()
+    report = await coord.writeback._resume_consistency_pass()
 
     assert not [
         w for w in report["warnings"] if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
@@ -591,7 +1193,7 @@ async def test_resume_consistency_framework_keep_in_stack_is_not_orphaned(coord:
 @pytest.mark.asyncio
 async def test_resume_consistency_framework_keep_absent_from_stack_still_alerts(coord: Coordinator) -> None:
     """The reconciliation fix must not suppress a genuinely missing framework KEEP."""
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     await coord.bus.append_and_seq(
         Message.new(
             "coordinator",
@@ -610,7 +1212,7 @@ async def test_resume_consistency_framework_keep_absent_from_stack_still_alerts(
         )
     )
 
-    report = await coord._resume_consistency_pass()
+    report = await coord.writeback._resume_consistency_pass()
 
     orphan = next(
         w for w in report["warnings"] if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
@@ -620,7 +1222,7 @@ async def test_resume_consistency_framework_keep_absent_from_stack_still_alerts(
 
 @pytest.mark.asyncio
 async def test_resume_consistency_replays_pending_integrate_with_kept_result(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.pending_integrate = {"task_id": "ti-half", "specialist_task_id": "spec-half"}
     await coord.bus.append_and_seq(
@@ -641,7 +1243,7 @@ async def test_resume_consistency_replays_pending_integrate_with_kept_result(coo
         )
     )
 
-    report = await coord._resume_consistency_pass()
+    report = await coord.writeback._resume_consistency_pass()
 
     assert any(isinstance(f, dict) and f.get("kind") == "replayed_pending_integrate" for f in report["fixes"])
     assert coord.shared_state.pending_integrate == {}
@@ -651,7 +1253,7 @@ async def test_resume_consistency_replays_pending_integrate_with_kept_result(coo
 
 
 @pytest.mark.asyncio
-async def test_resume_consistency_rolls_back_pending_integrate_without_kept(coord: Coordinator, monkeypatch) -> None:
+async def test_resume_refuses_legacy_patch_without_task_evidence(coord: Coordinator, monkeypatch) -> None:
     import hyperloom.orchestrator.actions.executors.integrate_patch as ip
 
     reversed_calls: list[str] = []
@@ -661,7 +1263,7 @@ async def test_resume_consistency_rolls_back_pending_integrate_without_kept(coor
         return True, ""
 
     monkeypatch.setattr(ip, "_git_apply_reverse", _fake_reverse)
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.pending_integrate = {
         "task_id": "ti-crash",
         "specialist_task_id": "spec-crash",
@@ -669,27 +1271,28 @@ async def test_resume_consistency_rolls_back_pending_integrate_without_kept(coor
         "patches": ["/tmp/fw/p1.diff"],
     }
 
-    report = await coord._resume_consistency_pass()
+    report = {"fixes": [], "warnings": []}
+    await coord.writeback._resume_recover_pending_integrate(report)
 
-    assert reversed_calls == ["/tmp/fw/p1.diff"]
-    assert any(isinstance(f, dict) and f.get("kind") == "rolled_back_pending_integrate" for f in report["fixes"])
-    assert coord.shared_state.pending_integrate == {}
+    assert reversed_calls == []
+    assert coord.shared_state.pending_integrate["task_id"] == "ti-crash"
+    assert any(row["kind"] == "pending_integrate_outcome_unknown" for row in report["warnings"])
 
 
 @pytest.mark.asyncio
 async def test_resume_consistency_clears_stale_pending_integrate_with_specialist_id(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.pending_integrate = {"task_id": "ti-stale", "specialist_task_id": "spec-stale"}
 
-    report = await coord._resume_consistency_pass()
+    report = await coord.writeback._resume_consistency_pass()
 
     assert any(isinstance(f, dict) and f.get("kind") == "cleared_stale_pending_integrate" for f in report["fixes"])
     assert coord.shared_state.pending_integrate == {}
 
 
 @pytest.mark.asyncio
-async def test_resume_consistency_enqueues_stack_rebench_for_unvalidated(coord: Coordinator) -> None:
-    coord._resumed_from["is_resume"] = True
+async def test_resume_consistency_enqueues_stack_revalidate_for_unvalidated(coord: Coordinator) -> None:
+    coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.optimization_stack = [
         {
@@ -710,30 +1313,30 @@ async def test_resume_consistency_enqueues_stack_rebench_for_unvalidated(coord: 
         "extra_envs": {"A": "1"},
     }
 
-    report = await coord._resume_consistency_pass()
+    report = await coord.writeback._resume_consistency_pass()
 
-    assert coord.shared_state.resume_pending_revalidation is True
+    assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
     queued = await coord.tasks.queued()
-    assert any(t.kind == "explore" and t.params.get("source") == "resume_stack_revalidate" for t in queued)
-    assert any(isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
+    (rebench,) = [t for t in queued if t.kind == "explore" and t.params.get("source") == STACK_REVALIDATE_SOURCE]
+    assert rebench.params["reason"] == "resume_unvalidated_keeps"
+    assert any(f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
 
 
 @pytest.mark.asyncio
 async def test_resume_stack_revalidate_promote_clears_flag_and_sets_watermark(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 100.0
-    coord.shared_state.resume_pending_revalidation = True
     coord.shared_state.optimization_stack = [
         {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
     ]
     coord.shared_state.cumulative_gain_validated_stack_len = 0
-    task = SimpleNamespace(task_id="tr-1", params={"source": "resume_stack_revalidate"})
-    await coord._promote_to_shared_state(
+    task = SimpleNamespace(task_id="tr-1", params={"source": "stack_revalidate"})
+    await coord.writeback.promote_to_shared_state(
         "explore",
         {"winners": [], "best_variant": None, "output_throughput": 121.0},
         task=task,
     )
 
-    assert coord.shared_state.resume_pending_revalidation is False
+    assert not coord.shared_state.optimization_stack_has_unvalidated_keeps()
     assert coord.shared_state.cumulative_gain_validated_stack_len == 1
     assert coord.shared_state.cumulative_gain_validated == pytest.approx(21.0)
 
@@ -741,19 +1344,18 @@ async def test_resume_stack_revalidate_promote_clears_flag_and_sets_watermark(co
 @pytest.mark.asyncio
 async def test_resume_revalidate_failed_rebench_keeps_flag_set(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 100.0
-    coord.shared_state.resume_pending_revalidation = True
     coord.shared_state.optimization_stack = [
         {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
     ]
     coord.shared_state.cumulative_gain_validated_stack_len = 0
-    task = SimpleNamespace(task_id="tr-fail", params={"source": "resume_stack_revalidate"})
-    await coord._promote_to_shared_state(
+    task = SimpleNamespace(task_id="tr-fail", params={"source": "stack_revalidate"})
+    await coord.writeback.promote_to_shared_state(
         "explore",
         {"winners": [], "best_variant": None, "output_throughput": 0.0},
         task=task,
     )
 
-    assert coord.shared_state.resume_pending_revalidation is True
+    assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
     assert coord.shared_state.cumulative_gain_validated_stack_len == 0
 
 
@@ -762,7 +1364,7 @@ async def test_integrate_patch_keep_promotes_stack_and_clears_pending(coord: Coo
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.pending_integrate = {"task_id": "ti-1"}
     task = SimpleNamespace(task_id="ti-1", params={})
-    await coord._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "integrate_patch",
         {
             "status": "kept",
@@ -798,7 +1400,7 @@ async def test_replay_for_resume_rebuilds_undecided_proposals(coord: Coordinator
             "critic", "orchestration", "review_verdict", {"target_proposal_msg_id": p2.msg_id, "verdict": "approve"}
         )
     )
-    out = await coord.replay_for_resume()
+    out = await coord.writeback.replay_for_resume()
     assert out["pending_restored"] == 1
     assert p1.msg_id in coord.state.pending_proposals
     assert p2.msg_id not in coord.state.pending_proposals
@@ -816,7 +1418,7 @@ async def test_replay_for_resume_verdict_map_backcompat(coord: Coordinator) -> N
             {"target_proposal_msg_id": p1.msg_id, "verdict_map": {"x": "ok"}},
         )
     )
-    out = await coord.replay_for_resume()
+    out = await coord.writeback.replay_for_resume()
     assert out["verdicts_seen"] == 1
     assert p1.msg_id not in coord.state.pending_proposals
 
@@ -831,7 +1433,7 @@ def test_context_analysis_reader_falls_back_to_the_recorded_path(
     md.write_text("# roofline snapshot\n", encoding="utf-8")
     coord.shared_state.last_trace_analyze = {"analysis_md_path": str(md)}
     monkeypatch.setattr(coord.shared_state, "_format_analysis_md_full", lambda: "")
-    out = coord._context_analysis_reader()
+    out = coord.conversation._context_analysis_reader()
     assert "roofline snapshot" in out
 
 
@@ -841,14 +1443,14 @@ def test_context_analysis_reader_unreadable_path(
 ) -> None:
     coord.shared_state.last_trace_analyze = {"analysis_md_path": "/nonexistent/dir/analysis.md"}
     monkeypatch.setattr(coord.shared_state, "_format_analysis_md_full", lambda: "")
-    out = coord._context_analysis_reader()
+    out = coord.conversation._context_analysis_reader()
     assert "unreadable" in out or "no analysis.md" in out
 
 
 # -- _recipe_kb_t4_hook + stop -------------------------------------------------
 @pytest.mark.asyncio
 async def test_recipe_kb_t4_hook_noop_without_kb(coord: Coordinator) -> None:
-    coord.recipe_kb = None
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=None)
     await coord._recipe_kb_t4_hook()
 
 
@@ -858,7 +1460,7 @@ async def test_stop_cancels_and_closes(coord: Coordinator) -> None:
     assert coord._stop.is_set()
 
 
-# -- _pump_dispatcher_once --------------------------------------------------
+# -- pump_dispatcher_once --------------------------------------------------
 def _sub_result(task_id: str, *, state: str = "succeeded", result=None, error=None):
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
@@ -867,7 +1469,7 @@ def _sub_result(task_id: str, *, state: str = "succeeded", result=None, error=No
 
 @pytest.mark.asyncio
 async def test_pump_dispatcher_noop_when_empty(coord: Coordinator) -> None:
-    await coord._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
 
 @pytest.mark.asyncio
@@ -894,7 +1496,9 @@ async def test_pump_dispatcher_explore_promotes(coord: Coordinator, monkeypatch)
         )
 
     monkeypatch.setattr(coord.sub, "run_task", fake_run)
-    await coord._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
+    await coord.dispatcher.wait_for_running_work(timeout=5)
+    await coord.dispatcher._drain_completions()
     tail = await coord.bus.tail(topic="delegated_result", n=10)
     assert any(m.payload.get("task_id") == task.task_id for m in tail)
 
@@ -918,7 +1522,9 @@ async def test_pump_dispatcher_specialist_bookkeeping(coord: Coordinator, monkey
         )
 
     monkeypatch.setattr(coord.sub, "run_task", fake_run)
-    await coord._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
+    await coord.dispatcher.wait_for_running_work(timeout=5)
+    await coord.dispatcher._drain_completions()
     tail = await coord.bus.tail(topic="delegated_result", n=10)
     assert any(m.payload.get("kind") == "specialist" for m in tail)
 
@@ -935,7 +1541,7 @@ async def test_pump_dispatcher_absorbs_spawn_exception(coord: Coordinator, monke
         raise RuntimeError("spawn boom")
 
     monkeypatch.setattr(coord.sub, "run_task", fake_run)
-    await coord._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
 
 # -- specialist visibility contract -----------------------------------------
@@ -948,7 +1554,7 @@ async def test_compose_prompt_has_no_specialist_status_block(coord: Coordinator)
         idempotency_key="visible-spec",
     )
     await coord.tasks.transition(spec.task_id, "running")
-    out = await coord._compose_prompt("orchestration")
+    out = await coord.conversation.compose_prompt("orchestration")
     assert "Specialist health" not in out
     assert "stale" not in out.lower()
 
@@ -967,7 +1573,7 @@ async def test_running_tasks_reader_sees_live_specialist(coord: Coordinator) -> 
     assert "serving_specialist" in out
 
 
-# -- _fan_out_specialist_wave (valid entries) -------------------------------
+# -- fan_out_specialist_wave (valid entries) -------------------------------
 @pytest.mark.asyncio
 async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatch) -> None:
     seen: list[dict] = []
@@ -975,12 +1581,12 @@ async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatc
     async def _fake_delegate(source, intent):
         seen.append(dict(intent.payload.get("params") or {}))
 
-    monkeypatch.setattr(coord, "_handle_delegate", _fake_delegate)
+    monkeypatch.setattr(coord.router, "handle_delegate", _fake_delegate)
     intent = Intent(
         type=IntentType.DELEGATE,
         payload={"idempotency_key": "wave", "action_name": "specialist"},
     )
-    await coord._fan_out_specialist_wave(
+    await coord.specialist_dispatch.fan_out_specialist_wave(
         "orchestration",
         intent,
         {
@@ -996,7 +1602,7 @@ async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatc
     assert seen[0]["mode"] == "patch"
 
 
-# -- _warm_specialist_params (rich state) -----------------------------------
+# -- warm_specialist_params (rich state) -----------------------------------
 @pytest.mark.asyncio
 async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypatch) -> None:
     state = coord.shared_state
@@ -1021,7 +1627,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
             "attempts": [{"r": 1}],
         },
     )
-    monkeypatch.setattr(coord.conversation, "_target_gap_advisory_block", lambda: "GAP-NOTES")
+    monkeypatch.setattr(coord.conversation, "target_gap_advisory_block", lambda: "GAP-NOTES")
     from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-TEXT")
@@ -1034,7 +1640,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
     monkeypatch.setattr(fp, "resolve_framework_tree", lambda framework: "/src/root/vllm/")
 
     params: dict = {"domain": "kernel_agent", "gap_canonical_id": "g1"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert params["framework_version"] == "0.4.1"
     assert params["target_gap_notes"] == "GAP-NOTES"
     assert params["research_hints"] == "HINTS-TEXT"
@@ -1050,40 +1656,58 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
 async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
 
-    coord.recipe_kb = object()  # non-None -> KB amend path
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=object())  # non-None -> KB amend path
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
     task = Task(task_id="fact-keep", kind="explore", state="succeeded", params={}, idempotency_key="fk")
-    coord._record_fact_per_task(
+    coord.writeback._record_fact_per_task(
         task=task,
         source_session_id="sess",
         result_dict={"gain_pct": 6.0, "output_throughput": 950.0},
-        kept=True,
+        verdict=Verdict.ADOPTED,
     )
     assert amends and "append_lesson" in amends[0]
+
+
+@pytest.mark.asyncio
+async def test_record_fact_per_task_writes_no_lesson_for_an_unadopted_gain(coord: Coordinator, monkeypatch) -> None:
+    """A lesson is for a change the session adopted; a measured gain the lift refused teaches nothing."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=object())
+    amends: list[dict] = []
+    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
+    task = Task(task_id="fact-refused", kind="integrate_patch", state="succeeded", params={}, idempotency_key="fx")
+    coord.writeback._record_fact_per_task(
+        task=task,
+        source_session_id="sess",
+        result_dict={"status": "kept", "gain_pct": 6.0, "output_throughput": 950.0},
+        verdict=Verdict.REFUSED,
+    )
+    assert not any("append_lesson" in amend for amend in amends)
 
 
 @pytest.mark.asyncio
 async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
 
-    coord.recipe_kb = object()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=object())
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
     monkeypatch.setattr(coord.writeback, "_pitfall_severity_for", lambda rd: "high")
     task = Task(task_id="fact-revert", kind="integrate_patch", state="failed", params={}, idempotency_key="fr")
-    coord._record_fact_per_task(
+    coord.writeback._record_fact_per_task(
         task=task,
         source_session_id="sess",
         result_dict={"error_class": "oom", "reason": "bad"},
-        kept=False,
+        verdict=Verdict.FAILED,
     )
     assert amends and "append_pitfall" in amends[0]
 
 
-# -- _plateau_advisory_block (triggered) ------------------------------------
+# -- plateau_advisory_block (triggered) ------------------------------------
 @pytest.mark.asyncio
 async def test_plateau_advisory_reports_the_config_arm_alone_as_not_a_plateau(coord: Coordinator, monkeypatch) -> None:
     """One dry arm is not a plateau: the phase stays open on the other lever."""
@@ -1110,7 +1734,7 @@ async def test_plateau_advisory_reports_the_config_arm_alone_as_not_a_plateau(co
             },
         ),
     )
-    out = coord._plateau_advisory_block()
+    out = coord.conversation.plateau_advisory_block()
     assert "OPTIMIZE config arm plateaued" in out
     assert "Only one arm is dry" in out
 
@@ -1140,7 +1764,7 @@ async def test_plateau_advisory_reports_the_source_arm_alone_as_not_a_plateau(co
             },
         ),
     )
-    out = coord._plateau_advisory_block()
+    out = coord.conversation.plateau_advisory_block()
     assert "OPTIMIZE source arm plateaued" in out
     assert "Only one arm is dry" in out
 
@@ -1171,24 +1795,14 @@ async def test_plateau_advisory_both_arms_dry_states_the_advance(coord: Coordina
             },
         ),
     )
-    out = coord._plateau_advisory_block()
+    out = coord.conversation.plateau_advisory_block()
     assert "OPTIMIZE config arm plateaued" in out
     assert "OPTIMIZE source arm plateaued" in out
     assert "Only one arm is dry" not in out
     assert "KERNEL_AGENT" in out
 
 
-@pytest.mark.asyncio
-async def test_plateau_advisory_kernel_triggered(coord: Coordinator, monkeypatch) -> None:
-    import hyperloom.orchestrator.phases.machine_state as ps
-
-    coord.shared_state.phase = ps.PHASE_KERNEL_AGENT
-    monkeypatch.setattr(ps, "compute_plateau_kernel", lambda *a, **k: (True, {"revert_streak": 4}))
-    out = coord._plateau_advisory_block()
-    assert "KERNEL_AGENT plateau detected" in out
-
-
-# -- _record_specialist_result ----------------------------------------------
+# -- record_specialist_result ----------------------------------------------
 def _ptask(tid: str, kind: str) -> Task:
     return Task(task_id=tid, kind=kind, state="running", params={}, idempotency_key=f"{tid}-k")
 
@@ -1196,7 +1810,7 @@ def _ptask(tid: str, kind: str) -> Task:
 @pytest.mark.asyncio
 async def test_record_specialist_result_with_proposals(coord: Coordinator) -> None:
     task = _ptask("rec-spec-1", "specialist")
-    await coord._record_specialist_result(
+    await coord.writeback.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
@@ -1207,8 +1821,31 @@ async def test_record_specialist_result_with_proposals(coord: Coordinator) -> No
         },
         source="specialist:rec-spec-1",
     )
-    last = coord.shared_state.last_specialist
-    assert last.get("task_id") == "rec-spec-1"
+    (row,) = coord.shared_state.specialist_rounds
+    assert (row["task_id"], row["domain"], row["proposals_total"]) == ("rec-spec-1", "kernel_agent", 1)
+
+
+@pytest.mark.asyncio
+async def test_record_specialist_result_seeds_gaps_from_static_recon(coord: Coordinator) -> None:
+    task = _ptask("rec-spec-recon", "specialist")
+    await coord.writeback.record_specialist_result(
+        task=task,
+        done_payload={
+            "domain": "static_recon_specialist",
+            "proposal_set": [],
+            "recon": {
+                "bridge_candidates": [
+                    {
+                        "id": "fused-moe",
+                        "predicate_file": "vllm/model_executor/fused_moe.py",
+                        "why_disabled_here": "gated on a non-gfx950 arch",
+                    }
+                ]
+            },
+        },
+        source="specialist:rec-spec-recon",
+    )
+    assert "gap.static_recon.fused-moe" in {gap.get("canonical_id") for gap in coord.shared_state.gaps}
 
 
 @pytest.mark.asyncio
@@ -1219,7 +1856,7 @@ async def test_record_specialist_result_logs_ungrounded_patches(coord: Coordinat
     line for its task, which is rendered once.
     """
     task = _ptask("rec-spec-ug", "specialist")
-    await coord._record_specialist_result(
+    await coord.writeback.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
@@ -1244,7 +1881,7 @@ async def test_record_specialist_result_no_dead_research_evidence_log(
 
     task = _ptask("rec-spec-dead", "specialist")
     with caplog.at_level(logging.ERROR):
-        await coord._record_specialist_result(
+        await coord.writeback.record_specialist_result(
             task=task,
             done_payload={
                 "domain": "kernel_agent",
@@ -1264,8 +1901,8 @@ async def test_record_specialist_result_harvests_findings(coord: Coordinator, mo
     async def harvest(done_payload):
         harvested.append(done_payload)
 
-    monkeypatch.setattr(coord, "_harvest_specialist_findings", harvest)
-    await coord._record_specialist_result(
+    monkeypatch.setattr(coord.writeback, "_harvest_specialist_findings", harvest)
+    await coord.writeback.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
@@ -1286,9 +1923,9 @@ async def test_record_specialist_result_with_scorer(coord: Coordinator) -> None:
             calls.append({"proposals": proposals, "task_id": task_id})
             return {"models": ["m1"], "ranking": [0]}
 
-    coord._proposal_scorer = _Scorer()
+    coord.writeback._proposal_scorer = _Scorer()
     task = _ptask("rec-spec-3", "specialist")
-    await coord._record_specialist_result(
+    await coord.writeback.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
@@ -1317,53 +1954,26 @@ class _FakeRecipeKB:
 
 @pytest.mark.asyncio
 async def test_recipe_kb_finalize_skips_without_model(coord: Coordinator) -> None:
-    coord.recipe_kb = _FakeRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_FakeRecipeKB())
     coord.shared_state.model_name = ""  # missing model -> skip update_recipe
     coord.shared_state.gpu_type = "mi300x"
-    coord.finalize_recipe_and_journal()
+    coord.writeback.finalize_recipe_and_journal()
 
 
 @pytest.mark.asyncio
 async def test_recipe_kb_finalize_amends_recipe(coord: Coordinator, monkeypatch) -> None:
-    coord.recipe_kb = _FakeRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_FakeRecipeKB())
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     coord.shared_state.cumulative_gain_validated = 12.0
     coord.shared_state.current_best = {"tput": 950.0}
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
-    coord.finalize_recipe_and_journal()
+    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
+    coord.writeback.finalize_recipe_and_journal()
     assert amends and "recipe_overrides" in amends[0]
 
 
-# -- _run_action_now_sync ---------------------------------------------------
-def test_run_action_now_sync_disabled(coord: Coordinator) -> None:
-    coord._inline_fast_actions_enabled = False
-    out = coord._run_action_now_sync("report")
-    assert "disabled" in out
-
-
-def test_run_action_now_sync_requires_name(coord: Coordinator) -> None:
-    coord._inline_fast_actions_enabled = True
-    assert "action_name required" in coord._run_action_now_sync("")
-
-
-def test_run_action_now_sync_not_whitelisted(coord: Coordinator, monkeypatch) -> None:
-    coord._inline_fast_actions_enabled = True
-    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"report"})
-    out = coord._run_action_now_sync("explore")
-    assert "not inline-eligible" in out
-
-
-def test_run_action_now_sync_no_loop(coord: Coordinator, monkeypatch) -> None:
-    coord._inline_fast_actions_enabled = True
-    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"report"})
-    coord._coordinator_loop = None
-    out = coord._run_action_now_sync("report")
-    assert "coordinator loop not running" in out
-
-
-# -- _handle_intent routing -------------------------------------------------
+# -- handle_intent routing -------------------------------------------------
 @pytest.mark.asyncio
 async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.policy.gate import PolicyDenied
@@ -1378,8 +1988,8 @@ async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> N
     async def _rec(source, intent, denied):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
-    await coord._handle_intent("orchestration", _idle_intent())
+    monkeypatch.setattr(coord.writeback, "record_policy_denied", _rec)
+    await coord.router.handle_intent("orchestration", _idle_intent())
     assert recorded
 
 
@@ -1390,8 +2000,8 @@ async def test_handle_intent_handler_exception_is_recorded(coord: Coordinator, m
     async def _boom(source, intent):
         raise RuntimeError("handler boom")
 
-    monkeypatch.setattr(coord, "_handle_send_message", _boom)
-    await coord._handle_intent("orchestration", _idle_intent())
+    monkeypatch.setattr(coord.router, "_handle_send_message", _boom)
+    await coord.router.handle_intent("orchestration", _idle_intent())
 
 
 @pytest.mark.asyncio
@@ -1402,20 +2012,19 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
     routes = {
         IntentType.PRUNE_BRANCH: "_handle_prune_branch",
         IntentType.ALERT: "_handle_alert",
-        IntentType.UPDATE_STATE: "_handle_update_state",
     }
     for it, attr in routes.items():
 
         async def _h(source, intent, _n=attr):
             seen.append(_n)
 
-        monkeypatch.setattr(coord, attr, _h)
+        monkeypatch.setattr(coord.router, attr, _h)
     for it in routes:
-        await coord._handle_intent("orchestration", Intent(type=it, payload={}))
+        await coord.router.handle_intent("orchestration", Intent(type=it, payload={}))
     assert len(seen) == len(routes)
 
 
-# -- _advance_phase_if_needed -----------------------------------------------
+# -- advance_phase_if_needed -----------------------------------------------
 @pytest.mark.asyncio
 async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeypatch) -> None:
     import hyperloom.orchestrator.phases.machine_state as ps
@@ -1423,11 +2032,7 @@ async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeyp
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "x", {}))
 
-    async def _scout():
-        return None
-
-    monkeypatch.setattr(coord.phase_internal, "_maybe_enqueue_explore_research_scout", _scout)
-    await coord._advance_phase_if_needed()
+    await coord.phase_machine.advance_phase_if_needed()
 
 
 @pytest.mark.asyncio
@@ -1445,7 +2050,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord._advance_phase_if_needed()
+    await coord.phase_machine.advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
 
 
@@ -1463,7 +2068,7 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord._advance_phase_if_needed()
+    await coord.phase_machine.advance_phase_if_needed()
     assert coord.shared_state.stop_reason == "target_reached"
 
 
@@ -1480,7 +2085,7 @@ async def test_advance_phase_hint_survives_arrival_at_its_consumer(coord: Coordi
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord._advance_phase_if_needed()
+    await coord.phase_machine.advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
     assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
 
@@ -1498,12 +2103,11 @@ async def test_advance_phase_hint_discarded_when_not_headed_to_its_consumer(coor
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord._advance_phase_if_needed()
+    await coord.phase_machine.advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "SWEEP"
     assert coord.shared_state.pending_escalate_hint == ""
     assert coord.shared_state.last_discarded_escalate_hint == "skip_to_kernel"
     assert coord.shared_state.last_discarded_escalate_hint_ts
-    assert coord.shared_state.last_consumed_escalate_hint == ""
 
 
 @pytest.mark.asyncio
@@ -1525,15 +2129,13 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord._advance_phase_if_needed()
+    await coord.phase_machine.advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "KERNEL_AGENT"
     assert coord.shared_state.pending_escalate_hint == ""
-    assert coord.shared_state.last_consumed_escalate_hint == "skip_to_kernel"
-    assert coord.shared_state.last_consumed_escalate_hint_ts
     assert coord.shared_state.last_discarded_escalate_hint == ""
 
 
-# -- _materialize_approved_proposal -----------------------------------------
+# -- materialize_approved_proposal -----------------------------------------
 def _pending(action_name: str, payload: dict, msg_id: str = "prop-1"):
     from hyperloom.orchestrator.loop.proposals import PendingProposal
 
@@ -1561,11 +2163,11 @@ async def test_direct_integrate_proposal_inherits_specialist_owner(
         idempotency_key="owner-source",
     )
     monkeypatch.setattr(
-        coord.router,
-        "_admission_denial_for_action",
+        coord.dispatcher,
+        "admission_denial_for_action",
         lambda _action: None,
     )
-    await coord._handle_propose_action(
+    await coord.router._handle_propose_action(
         "orchestration",
         Intent(
             type=IntentType.PROPOSE_ACTION,
@@ -1606,13 +2208,14 @@ def test_forward_integrate_source_has_no_current_phase_fallback() -> None:
     from hyperloom.orchestrator.phases.framework import _forward_integrate_source
 
     forwarded: dict = {}
-    _forward_integrate_source({}, forwarded)
+    _forward_integrate_source({}, forwarded, {})
     assert "source_phase" not in forwarded
 
 
 @pytest.mark.asyncio
-async def test_materialize_explore_filters_grid(coord: Coordinator) -> None:
+async def test_materialize_explore_filters_grid(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
+    monkeypatch.setattr(coord.proposals, "phase_framework", coord.phase_framework, raising=False)
     pending = _pending(
         "explore",
         {
@@ -1625,12 +2228,40 @@ async def test_materialize_explore_filters_grid(coord: Coordinator) -> None:
             }
         },
     )
-    await coord._materialize_approved_proposal(
+    await coord.proposals.materialize_approved_proposal(
         pending,
         approved_variant_names={"v0"},
     )
     tail = await coord.bus.tail(topic="decision", n=10)
     assert any(m.payload.get("kind") == "approved_proposal" for m in tail)
+    task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
+    assert task.params["proposal_msg_id"] == pending.proposal_msg_id
+
+
+@pytest.mark.asyncio
+async def test_materialize_explore_proposal_id_does_not_break_content_dedup(
+    coord: Coordinator,
+    monkeypatch,
+) -> None:
+    coord.shared_state.baseline_tput = 800.0
+    monkeypatch.setattr(coord.proposals, "phase_framework", coord.phase_framework, raising=False)
+    first = _pending(
+        "explore",
+        {"params": {"grid": [{"name": "v0"}]}},
+        msg_id="prop-first",
+    )
+    duplicate = _pending(
+        "explore",
+        {"params": {"grid": [{"name": "v0"}]}},
+        msg_id="prop-duplicate",
+    )
+
+    await coord.proposals.materialize_approved_proposal(first)
+    await coord.proposals.materialize_approved_proposal(duplicate)
+
+    queued = [task for task in await coord.tasks.queued() if task.kind == "explore"]
+    assert len(queued) == 1
+    assert queued[0].params["proposal_msg_id"] == "prop-first"
 
 
 @pytest.mark.asyncio
@@ -1639,23 +2270,24 @@ async def test_materialize_sweep_stamps_base(coord: Coordinator) -> None:
     coord.shared_state.current_best = {"tput": 900.0, "extra_server_args": "--tp 1"}
     coord.shared_state.baseline_config_path = "/tmp/base.yaml"
     pending = _pending("sweep", {"params": {}}, msg_id="prop-sweep")
-    await coord._materialize_approved_proposal(pending)
+    await coord.proposals.materialize_approved_proposal(pending)
     task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
     assert task.kind == "sweep"
 
 
 @pytest.mark.asyncio
-async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator) -> None:
+async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator, monkeypatch) -> None:
     # Regression: explore must inherit current_best.extra_envs as its env base, else the accepted stack's envs
     # collapse to the last variant's delta.
     coord.shared_state.baseline_tput = 800.0
+    monkeypatch.setattr(coord.proposals, "phase_framework", coord.phase_framework, raising=False)
     coord.shared_state.current_best = {
         "tput": 900.0,
         "extra_server_args": "--kv-cache-dtype fp8",
         "extra_envs": {"VLLM_ROCM_USE_AITER_MHA": "1", "HIP_FORCE_DEV_KERNARG": "1"},
     }
     pending = _pending("explore", {"params": {"grid": [{"name": "v0"}]}}, msg_id="prop-env")
-    await coord._materialize_approved_proposal(pending)
+    await coord.proposals.materialize_approved_proposal(pending)
     task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
     assert task.params["base_extra_args"] == "--kv-cache-dtype fp8"
     assert task.params["base_extra_envs"] == {
@@ -1668,14 +2300,14 @@ async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator)
 async def test_materialize_duplicate_idempotency_skips(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
     pending = _pending("profile", {"params": {}}, msg_id="prop-dup")
-    await coord._materialize_approved_proposal(pending)
-    await coord._materialize_approved_proposal(pending)
+    await coord.proposals.materialize_approved_proposal(pending)
+    await coord.proposals.materialize_approved_proposal(pending)
 
 
 @pytest.mark.asyncio
 async def test_materialize_baseline_ignores_params_outside_fingerprint(coord: Coordinator) -> None:
-    await coord._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-b0"))
-    await coord._materialize_approved_proposal(
+    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-b0"))
+    await coord.proposals.materialize_approved_proposal(
         _pending("baseline", {"params": {"tag": "x"}}, msg_id="prop-b1"),
     )
     queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
@@ -1686,8 +2318,8 @@ async def test_materialize_baseline_ignores_params_outside_fingerprint(coord: Co
 
 @pytest.mark.asyncio
 async def test_materialize_baseline_distinct_envs_queue_separately(coord: Coordinator) -> None:
-    await coord._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-e0"))
-    await coord._materialize_approved_proposal(
+    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-e0"))
+    await coord.proposals.materialize_approved_proposal(
         _pending("baseline", {"params": {"extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"}}}, msg_id="prop-e1"),
     )
     queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
@@ -1696,17 +2328,17 @@ async def test_materialize_baseline_distinct_envs_queue_separately(coord: Coordi
 
 @pytest.mark.asyncio
 async def test_materialize_requeues_same_content_after_terminal_twin(coord: Coordinator) -> None:
-    await coord._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t0"))
+    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t0"))
     first = [t for t in await coord.tasks.queued() if t.kind == "baseline"][0]
     await coord.tasks.transition(first.task_id, "running")
     await coord.tasks.transition(first.task_id, "failed")
-    await coord._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t1"))
+    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t1"))
     queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
     assert len(queued) == 1
     assert queued[0].task_id != first.task_id
 
 
-# -- _handle_delegate branches ----------------------------------------------
+# -- handle_delegate branches ----------------------------------------------
 def _delegate(action_name: str, key: str, params=None) -> Intent:
     payload = {"action_name": action_name, "params": params or {}, "idempotency_key": key}
     return Intent(type=IntentType.DELEGATE, payload=payload)
@@ -1717,7 +2349,7 @@ async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) 
     coord.shared_state.baseline_tput = 800.0
     monkeypatch.setattr(coord.shared_state, "is_pruned", lambda a: True)
     monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
-    await coord._handle_delegate("orchestration", _delegate("explore", "d-pruned"))
+    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-pruned"))
     assert await coord.tasks.queued()
 
 
@@ -1739,8 +2371,8 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
     async def _rec(source, intent, denied, action_name=None):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
-    await coord._handle_delegate("orchestration", _delegate("explore", "d-seq"))
+    monkeypatch.setattr(coord.writeback, "record_policy_denied", _rec)
+    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-seq"))
     assert recorded
 
 
@@ -1748,19 +2380,19 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
 async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
     monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
-    await coord._handle_delegate("orchestration", _delegate("explore", "d-same"))
+    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-same"))
     recorded: list = []
 
     async def _rec(source, intent, denied, action_name=None):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
+    monkeypatch.setattr(coord.writeback, "record_policy_denied", _rec)
     # Same key while the first task is still queued (non-terminal) -> denied.
-    await coord._handle_delegate("orchestration", _delegate("explore", "d-same"))
+    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-same"))
     assert recorded
 
 
-# -- _maybe_autosubmit_specialist_patches early returns ---------------------
+# -- maybe_autosubmit_specialist_patches early returns ---------------------
 def _make_real_patch(coord: Coordinator, sid: str) -> None:
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
@@ -1778,7 +2410,7 @@ async def test_autosubmit_returns_when_verdict_exists(coord: Coordinator, monkey
     monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict", lambda s: {"verdict": "approve"})
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv1")
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": ["kernel.py"]},
     )
@@ -1801,14 +2433,14 @@ async def test_autosubmit_returns_when_review_in_flight(coord: Coordinator) -> N
     )
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv2")
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": ["kernel.py"]},
     )
     assert len(coord.state.pending_proposals) == n_before
 
 
-# -- _promote_warm_replay branches ------------------------------------------
+# -- promote_warm_replay branches ------------------------------------------
 def _warm_task():
     from hyperloom.orchestrator.state.task_registry import Task
 
@@ -1824,7 +2456,7 @@ def _warm_task():
 def test_promote_warm_replay_already_pushed(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
     coord.shared_state.optimization_stack = [{"action": "replay_warm_recipe"}]
-    coord._promote_warm_replay(
+    coord.phase_prelude.promote_warm_replay(
         {"status": "succeeded", "output_throughput": 900.0},
         task=_warm_task(),
     )
@@ -1857,20 +2489,20 @@ class _FakeRecipeKBRich:
 
 @pytest.mark.asyncio
 async def test_recipe_kb_finalize_merges_existing_row(coord: Coordinator, monkeypatch) -> None:
-    coord.recipe_kb = _FakeRecipeKBRich()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_FakeRecipeKBRich())
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     coord.shared_state.cumulative_gain_validated = 15.0
     coord.shared_state.current_best = {"tput": 999.0}
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
-    coord.finalize_recipe_and_journal()
+    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
+    coord.writeback.finalize_recipe_and_journal()
     assert amends
     overrides = amends[0]["recipe_overrides"]
     assert any(s.get("session_id") == "other-session" for s in overrides["sessions"])
 
 
-# -- _on_enter_close 7-step sequencer ---------------------------------------
+# -- on_enter_close 7-step sequencer ---------------------------------------
 @pytest.mark.asyncio
 async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch) -> None:
     async def _fake_run(task, **kw):
@@ -1879,7 +2511,12 @@ async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch
         return SubAgentResult(task_id=task.task_id, state="succeeded", result={}, error=None)
 
     monkeypatch.setattr(coord.sub, "run_task", _fake_run)
-    await coord._on_enter_close(from_phase="SWEEP")
+    from hyperloom.orchestrator.phases.machine import Transition
+
+    coord.shared_state.set_stop_reason("target_reached")
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="SWEEP", evidence={}, loopback=False)
+    )
     assert coord.shared_state.close_sequence_done is True
     assert coord.shared_state.stop_reason
 
@@ -1895,21 +2532,21 @@ def _enter_framework(coord: Coordinator) -> None:
 @pytest.mark.asyncio
 async def test_pump_framework_agent_wrong_phase_noop(coord: Coordinator) -> None:
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    await coord._pump_framework_agent_phase()
+    await coord.phase_framework._pump_framework_agent_phase()
 
 
 @pytest.mark.asyncio
 async def test_pump_framework_agent_phase_done_noop(coord: Coordinator) -> None:
     _enter_framework(coord)
     coord.shared_state.framework_agent_phase_done = True
-    await coord._pump_framework_agent_phase()
+    await coord.phase_framework._pump_framework_agent_phase()
 
 
 @pytest.mark.asyncio
 async def test_pump_framework_agent_skips_when_task_inflight(coord: Coordinator) -> None:
     _enter_framework(coord)
     await coord.tasks.create(kind="framework_agent", params={}, idempotency_key="fpr-inflight")
-    await coord._pump_framework_agent_phase()
+    await coord.phase_framework._pump_framework_agent_phase()
 
 
 @pytest.mark.asyncio
@@ -1923,9 +2560,9 @@ async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator
     coord.shared_state.framework_agent_discover_failures = 0
     # Discovery has spent its retry budget, so the upstream lane declines and the tick reaches the terminal rung.
     coord.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
-    monkeypatch.setattr(coord.phase_framework, "_select_next_framework_agent_candidate", lambda: None)
+    monkeypatch.setattr(coord.phase_framework, "_select_next_framework_agent_candidate", lambda **_k: None)
     monkeypatch.setattr(coord.phase_framework, "_record_framework_agent_phase_done", lambda **k: None)
-    await coord._pump_framework_agent_phase()
+    await coord.phase_framework._pump_framework_agent_phase()
     assert coord.shared_state.framework_agent_phase_done is True
 
 
@@ -1942,10 +2579,10 @@ async def test_pump_framework_agent_submits_candidate_proposal(coord: Coordinato
     monkeypatch.setattr(
         coord.phase_framework,
         "_select_next_framework_agent_candidate",
-        lambda: candidate,
+        lambda exclude_ids=(): None if candidate["candidate_id"] in exclude_ids else candidate,
     )
 
-    await coord._pump_framework_agent_phase()
+    await coord.phase_framework._pump_framework_agent_phase()
 
     pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "integrate_patch"]
     assert len(pendings) == 1
@@ -1965,18 +2602,19 @@ async def test_pump_framework_agent_dedup_does_not_resubmit(coord: Coordinator, 
     monkeypatch.setattr(
         coord.phase_framework,
         "_select_next_framework_agent_candidate",
-        lambda: candidate,
+        lambda exclude_ids=(): None if candidate["candidate_id"] in exclude_ids else candidate,
     )
 
-    await coord._pump_framework_agent_phase()
-    await coord._pump_framework_agent_phase()
+    await coord.phase_framework._pump_framework_agent_phase()
+    await coord.phase_framework._pump_framework_agent_phase()
     pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "integrate_patch"]
     assert len(pendings) == 1
 
 
 @pytest.mark.asyncio
-async def test_framework_agent_reject_records_critic_denied(coord: Coordinator) -> None:
+async def test_framework_agent_reject_records_critic_denied(coord: Coordinator, monkeypatch) -> None:
     """A reject verdict on a framework_agent candidate proposal writes a critic_denied progress row."""
+    monkeypatch.setattr(coord.router, "phase_framework", coord.phase_framework, raising=False)
     from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     pending = PendingProposal(
@@ -1987,7 +2625,7 @@ async def test_framework_agent_reject_records_critic_denied(coord: Coordinator) 
         payload={"framework_agent_candidate_id": "c1", "batch_id": "b1"},
     )
     coord.state.pending_proposals["m1"] = pending
-    await coord._handle_single_verdict(
+    await coord.router._handle_single_verdict(
         source="critic",
         pending=pending,
         verdict="reject",
@@ -2008,6 +2646,7 @@ async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, mon
         enq.append(cand)
 
     monkeypatch.setattr(coord.phase_framework, "_enqueue_framework_agent_task", _enqueue)
+    monkeypatch.setattr(coord.router, "phase_framework", coord.phase_framework, raising=False)
     pending = PendingProposal(
         proposal_msg_id="m2",
         from_agent="coordinator",
@@ -2021,7 +2660,7 @@ async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, mon
         },
     )
     coord.state.pending_proposals["m2"] = pending
-    await coord._handle_single_verdict(
+    await coord.router._handle_single_verdict(
         source="critic",
         pending=pending,
         verdict="approve",
@@ -2038,77 +2677,24 @@ async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, mon
 def test_post_opt_roofline_gate_true_for_kernel_level_actions(coord: Coordinator, action: str) -> None:
     """Any kernel-level optimization gates the post-opt roofline on."""
     coord.shared_state.optimization_stack = [{"action": action}]
-    assert coord._session_integrated_kernel_patch() is True
+    assert coord.phase_close._session_integrated_kernel_patch() is True
 
 
 def test_post_opt_roofline_gate_false_for_param_search_only(coord: Coordinator) -> None:
     """Pure param-search does not trigger the extra profile."""
     coord.shared_state.optimization_stack = [{"action": "explore"}, {"action": "sweep"}]
-    assert coord._session_integrated_kernel_patch() is False
+    assert coord.phase_close._session_integrated_kernel_patch() is False
 
 
 def test_post_opt_roofline_gate_false_for_empty_stack(coord: Coordinator) -> None:
     coord.shared_state.optimization_stack = []
-    assert coord._session_integrated_kernel_patch() is False
+    assert coord.phase_close._session_integrated_kernel_patch() is False
 
 
 def test_post_opt_roofline_gate_ignores_non_dict_entries(coord: Coordinator) -> None:
     """Malformed (non-dict) stack entries are skipped without raising."""
     coord.shared_state.optimization_stack = ["bad", {"action": "gemm_tuning"}]
-    assert coord._session_integrated_kernel_patch() is True
-
-
-@pytest.mark.asyncio
-async def test_run_action_now_async_does_not_starve_database_executor(coord: Coordinator, monkeypatch) -> None:
-    import asyncio
-    from concurrent.futures import ThreadPoolExecutor
-
-    loop = asyncio.get_running_loop()
-    previous_executor = loop._default_executor
-    pool = ThreadPoolExecutor(max_workers=1)
-    loop.set_default_executor(pool)
-    coord._inline_fast_actions_enabled = True
-    coord._coordinator_loop = loop
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S", "0.5")
-    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"inline_probe"})
-    calls = []
-
-    async def action(name, params):
-        row = await coord.db.fetchone("SELECT 1 AS value")
-        calls.append(params["index"])
-        return f"done:{row['value']}"
-
-    monkeypatch.setattr(coord.dispatcher, "_run_action_now", action)
-    try:
-        results = await asyncio.wait_for(
-            asyncio.gather(*(coord.dispatcher._run_action_now_wait("inline_probe", {"index": i}) for i in range(8))),
-            2.0,
-        )
-        assert results == ["done:1"] * 8
-        assert sorted(calls) == list(range(8))
-    finally:
-        loop._default_executor = previous_executor
-        pool.shutdown(wait=True)
-
-
-@pytest.mark.asyncio
-async def test_run_action_now_sync_on_loop_thread_rejects_without_scheduling(coord: Coordinator, monkeypatch) -> None:
-    import asyncio
-    from unittest.mock import Mock
-
-    coord._inline_fast_actions_enabled = True
-    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"inline_probe"})
-    coord._coordinator_loop = asyncio.get_running_loop()
-    create_action = Mock(side_effect=AssertionError("same-loop sync calls must not create an action coroutine"))
-    schedule = Mock(side_effect=AssertionError("same-loop sync calls must not schedule work"))
-    monkeypatch.setattr(coord.dispatcher, "_run_action_now", create_action)
-    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", schedule)
-
-    out = coord._run_action_now_sync("inline_probe")
-
-    assert "unavailable" in out and "coordinator loop thread" in out
-    create_action.assert_not_called()
-    schedule.assert_not_called()
+    assert coord.phase_close._session_integrated_kernel_patch() is True
 
 
 # -- atomic config levers ride with the patch they are inseparable from -----
@@ -2131,7 +2717,7 @@ async def test_autosubmit_patch_carries_atomic_config_lever(coord: Coordinator) 
     sid = "spec-atomic-lever"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-atomic")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2158,7 +2744,7 @@ async def test_autosubmit_patch_omits_non_atomic_config_lever(coord: Coordinator
     sid = "spec-plain-lever"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-plain")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2191,7 +2777,7 @@ async def test_enablement_patch_carries_its_companion_lever_even_when_not_atomic
         params={"enablement": True},
         idempotency_key="kv-enablement",
     )
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2217,7 +2803,7 @@ async def test_optimization_patch_still_omits_a_non_atomic_lever(coord: Coordina
     sid = "spec-opt-lever"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-opt")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2252,7 +2838,7 @@ async def test_enablement_round_inherits_the_flags_earlier_rounds_established(co
         params={"enablement": True},
         idempotency_key="kv-inherit",
     )
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2280,7 +2866,7 @@ async def test_this_round_overrides_an_inherited_flag(coord: Coordinator) -> Non
         params={"enablement": True},
         idempotency_key="kv-override",
     )
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2301,8 +2887,58 @@ async def test_optimization_rounds_inherit_nothing(coord: Coordinator) -> None:
     sid = "spec-no-inherit"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-noinherit")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": ["kernel.py"], "proposal_set": [{"name": "opt", "extra_args": ""}]},
     )
     assert "extra_server_args" not in _autosubmitted_integrate_params(coord)
+
+
+@pytest.mark.asyncio
+async def test_a_restored_tree_settles_even_when_the_task_carried_no_result(coord, pending_candidate):
+    """An attempt that died after putting the tree back has nothing left to roll back.
+
+    The verdict table needs a result to say "settled", and this task has an
+    empty one, so the sentinel used to be held until someone edited state.json.
+    """
+    candidate = await pending_candidate(patches=True)
+    pending = coord.shared_state.pending_integrate
+    coord.shared_state.pending_integrate = {
+        **pending,
+        "recovery": {**(pending.get("recovery") or {}), "phase": "restored"},
+    }
+    await coord.tasks.transition(candidate.task.task_id, "running")
+    await coord.tasks.transition(candidate.task.task_id, "failed")
+    await coord.tasks.append_completion_evidence(
+        candidate.task.task_id, {"outcome": {"result": {}}, "cleanup_confirmed": True}
+    )
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    assert coord.shared_state.pending_integrate == {}
+    assert any(entry.get("kind") == "settled_pending_integrate" for entry in report["fixes"])
+
+
+@pytest.mark.asyncio
+async def test_a_failed_online_restore_is_retried_not_held_forever(coord, pending_candidate):
+    """_finish_attempt returns normally on a failed restore, so the row reads succeeded.
+
+    That discharged nothing: the teardown is still owed and must be retried.
+    """
+    candidate = await pending_candidate(patches=True)
+    await coord.tasks.transition(candidate.task.task_id, "running")
+    await coord.tasks.transition(candidate.task.task_id, "succeeded")
+    await coord.tasks.append_completion_evidence(
+        candidate.task.task_id,
+        {
+            "outcome": {"result": {"status": "failed", "error_class": "integrate_restore_incomplete"}},
+            "cleanup_confirmed": True,
+        },
+    )
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    # The rollback ran, so the candidate's edits are gone from the tree.
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"

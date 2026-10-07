@@ -360,8 +360,8 @@ def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
     """Revert a kernel patch using its apply manifest.
 
     A manifest is enough; the apply's ``status`` is not required, so a partial
-    apply reverts the files it managed to touch. Gating on ``status == "ok"``
-    used to leave exactly those applied.
+    apply reverts the files it managed to touch; gating on ``status == "ok"``
+    would leave exactly those applied.
 
     Args:
         apply_result: Apply metadata carrying ``manifest_path``.

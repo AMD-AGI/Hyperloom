@@ -145,6 +145,43 @@ def test_save_is_atomic(tmp_path):
     assert leftovers == []
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"crash_count": "bad"},
+        {"crash_timestamps": "bad"},
+        {"crash_timestamps": [100.0, "bad"]},
+    ],
+)
+def test_load_rejects_corrupt_state_without_rewriting_evidence(tmp_path, invalid):
+    path = tmp_path / "state.json"
+    raw = {"session_id": "damaged", "schema_version": 1, "incident_evidence": {"traceback": "original"}, **invalid}
+    original = json.dumps(raw, indent=2).encode("utf-8") + b"\n"
+    path.write_bytes(original)
+    modified_ns = path.stat().st_mtime_ns
+
+    with pytest.raises(ValueError, match=next(iter(invalid))):
+        SharedState.load_or_init(tmp_path)
+
+    assert path.read_bytes() == original
+    assert path.stat().st_mtime_ns == modified_ns
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]
+
+
+def test_load_legacy_state_keeps_defaults_without_rewriting_file(tmp_path):
+    path = tmp_path / "state.json"
+    original = b'{"session_id": "legacy", "unknown_future_field": 42}\n'
+    path.write_bytes(original)
+
+    state = SharedState.load_or_init(tmp_path)
+
+    assert state.session_id == "legacy"
+    assert state.crash_count == 0
+    assert state.crash_timestamps == []
+    assert not hasattr(state, "unknown_future_field")
+    assert path.read_bytes() == original
+
+
 def test_from_dict_drops_unknown_fields():
     raw = {"session_id": "s", "unknown_future_field": 42, "baseline_tput": 100.0}
     s = SharedState.from_dict(raw)
@@ -152,17 +189,6 @@ def test_from_dict_drops_unknown_fields():
     assert s.baseline_tput == 100.0
     assert s.last_tick_exception == {}
     assert not hasattr(s, "unknown_future_field")
-
-
-def test_apply_changes_only_known_fields():
-    s = SharedState()
-    applied = s.apply_changes(
-        {"current_action": "baseline", "bogus": 1, "cumulative_gain_validated": 5.0},
-        allow_core=True,
-    )
-    assert applied == {"current_action": "baseline", "cumulative_gain_validated": 5.0}
-    assert s.current_action == "baseline"
-    assert s.cumulative_gain_validated == 5.0
 
 
 def test_add_pruned_family_idempotent():
@@ -191,7 +217,6 @@ def test_to_prompt_summary_contains_key_fields():
         model_name="Llama-3",
         baseline_tput=1840.0,
         cumulative_gain_validated=10.0,
-        current_action="backends",
         pruned_families=["deep_kernel"],
     )
     summary = s.to_prompt_summary()
@@ -199,7 +224,6 @@ def test_to_prompt_summary_contains_key_fields():
     assert "Llama-3" in summary
     assert "1840" in summary
     assert "10.0" in summary
-    assert "backends" in summary
     assert "deep_kernel" in summary
 
 
@@ -221,7 +245,7 @@ async def test_coordinator_loads_existing_shared_state(session_dir):
 async def test_coordinator_prune_branch_persists(session_dir):
     c = Coordinator(session_dir, backends=_backends_full())
     try:
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
@@ -239,7 +263,7 @@ async def test_coordinator_prune_branch_persists(session_dir):
 async def test_pruned_family_survives_coordinator_restart(session_dir):
     c1 = Coordinator(session_dir, backends=_backends_full())
     try:
-        await c1._handle_intent(
+        await c1.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
@@ -254,7 +278,7 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
     try:
         assert c2.shared_state.is_pruned("long")
         # Prune is advisory: proposals still reach the pending queue.
-        await c2._handle_intent(
+        await c2.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PROPOSE_ACTION,
@@ -268,60 +292,16 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
         await c2.stop()
 
 
-@pytest.mark.asyncio
-async def test_coordinator_update_state_persists_known_fields(session_dir):
-    """Orchestration may write non-core fields; core fields are gated by PolicyGate's CORE_STATE_FIELDS."""
-    c = Coordinator(session_dir, backends=_backends_full())
-    try:
-        await c._handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.UPDATE_STATE,
-                payload={"changes": {"current_action": "baseline", "target_summary": "GEMM-bound 8B model"}},
-            ),
-        )
-        assert c.shared_state.current_action == "baseline"
-        assert c.shared_state.target_summary == "GEMM-bound 8B model"
-        on_disk = json.loads((session_dir / "state.json").read_text())
-        assert on_disk["current_action"] == "baseline"
-        assert on_disk["target_summary"] == "GEMM-bound 8B model"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_coordinator_update_state_drops_unknown_fields(session_dir):
-    c = Coordinator(session_dir, backends=_backends_full())
-    try:
-        await c._handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.UPDATE_STATE,
-                payload={"changes": {"current_action": "baseline", "future_unknown_key": 42}},
-            ),
-        )
-        assert c.shared_state.current_action == "baseline"
-        obs = await c.bus.tail(topic="observation", n=20)
-        update_events = [m for m in obs if m.payload.get("kind") == "update_state"]
-        assert update_events
-        last = update_events[0]  # tail returns DESC
-        assert "future_unknown_key" in last.payload["rejected"]
-    finally:
-        await c.stop()
-
-
 def test_reference_fields_survive_resume(tmp_path):
     """R3: reference_* fields persist through save → from_dict (resume)."""
     s = SharedState(session_id="t", model_name="m", model_path="/x/m")
     s.reference_server_args = "--block-size 128"
     s.reference_envs = {"VLLM_USE_BREAKABLE_CUDAGRAPH": "0"}
     s.reference_model = "minimaxm3"
-    s.reference_source = "/recipes/minimaxm3_fp8_mi300x.sh"
     restored = SharedState.from_dict(s.to_dict())
     assert restored.reference_server_args == "--block-size 128"
     assert restored.reference_envs == {"VLLM_USE_BREAKABLE_CUDAGRAPH": "0"}
     assert restored.reference_model == "minimaxm3"
-    assert restored.reference_source == "/recipes/minimaxm3_fp8_mi300x.sh"
 
 
 def test_save_renders_current_setting_sh(tmp_path, monkeypatch):

@@ -1,10 +1,9 @@
 """Measurement driver for the MoRI-EP dispatch/combine forge-loop task.
 
-Read this for the operator, not for the launch. It predates ``dist_harness``
-and owns its own ranks -- ``mp.spawn``, a fixed master port, a hand-written
-``all_reduce(MAX)`` over per-round times -- which is exactly what a multi-rank
-driver may no longer do: preflight rejects a driver that did not measure inside
-the harness. Its correctness measurements were taken on real 8-GPU hardware in
+Read this for the operator, not for the launch. It owns its own ranks --
+``mp.spawn``, a fixed master port, a hand-written ``all_reduce(MAX)`` over
+per-round times -- which a multi-rank driver may not do: preflight rejects a
+driver that did not measure inside ``dist_harness``. Its correctness measurements were taken on real 8-GPU hardware in
 this shape, so it is kept as measured rather than ported blind; see
 ``dist_harness`` and the distributed section of the driver contract for the
 shape a new driver must have.

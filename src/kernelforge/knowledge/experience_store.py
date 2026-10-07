@@ -82,7 +82,7 @@ class KnowledgeConfig:
             required = (("KB_STORE_URL", store_url), ("KB_STORE_TOKEN", store_token))
             missing = [name for name, value in required if not value]
             if missing:
-                # GBRAIN_* stays set for the Framework PR client, so it is the likely mistaken substitute.
+                # GBRAIN_* is the credential pair operators most often set here by mistake.
                 raise ValueError(
                     "KNOWLEDGE_STORE_MODE=remote requires " + " and ".join(missing) + "; the remote experience "
                     "store is KB Store only, and GBRAIN_BASE_URL/GBRAIN_TOKEN do not configure it"

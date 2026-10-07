@@ -11,8 +11,9 @@ This guide walks through a complete kernel development workflow — from install
 | rocprofv3 | (included with ROCm) | `rocprofv3 --version` |
 | GPU | MI300X / MI355X | `rocm-smi --showproductname` |
 | Claude auth | API key, subscription token, **or** Claude Code Max | `echo $ANTHROPIC_API_KEY` / `echo $CLAUDE_CODE_OAUTH_TOKEN` **or** `claude --version` |
+| Codex auth (instead of Claude) | OpenAI-side key and endpoint | `echo $OPENAI_API_KEY` / `echo $OPENAI_BASE_URL` |
 
-**Billing choice.** `kernelforge forge-loop` drives its agent sessions through `claude-agent-sdk.query()`, which spawns the `claude` CLI as a subprocess, so whatever that CLI authenticates with is what gets billed. A `claude` logged in with Claude Code Max bills against your Max subscription and needs **no `ANTHROPIC_API_KEY`**. Where a login cannot persist — a container, CI — `CLAUDE_CODE_OAUTH_TOKEN` reaches the same subscription. Set `ANTHROPIC_API_KEY` only if you want API-credit billing instead; the CLI reads it ahead of the subscription token, so setting both bills the key.
+**Billing choice.** `kernelforge forge-loop` drives its agent sessions through `claude-agent-sdk.query()`, which spawns the `claude` CLI as a subprocess, so whatever that CLI authenticates with is what gets billed. A `claude` logged in with Claude Code Max bills against your Max subscription and needs **no `ANTHROPIC_API_KEY`**. Where a login cannot persist — a container, CI — `CLAUDE_CODE_OAUTH_TOKEN` reaches the same subscription. Set `ANTHROPIC_API_KEY` only if you want API-credit billing instead; the CLI reads it ahead of the subscription token, so setting both bills the key. To run on Codex instead, pass `--agent-backend codex` or configure only the OpenAI side (`OPENAI_BASE_URL` + `OPENAI_API_KEY`); sessions then run through the Codex SDK, billed to that key, with `CODEX_MODEL` as the model.
 
 Optional but recommended:
 - AITER repo cloned at `/work/aiter-amd` (or wherever your kernel workspace is)

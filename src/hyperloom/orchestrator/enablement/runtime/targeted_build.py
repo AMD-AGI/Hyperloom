@@ -328,18 +328,11 @@ def run_aiter_build(
             prepare_candidate_workspace,
             prepare_repo_cache,
         )
-        from hyperloom.agents.framework.models import Baseline, Candidate, ExploreRequest
+        from hyperloom.agents.framework.models import Candidate
 
-        req = ExploreRequest(
-            framework="aiter",
-            repo_url=repo_url,
-            work_dir=root,
-            baseline=Baseline(throughput=0.0),
-            prepare_candidate_env=True,
-        )
-        prepare_repo_cache(req)
+        prepare_repo_cache(repo_url, root)
         candidate = Candidate(ref=ref or "HEAD", repo=repo_url)
-        ws = prepare_candidate_workspace(req, candidate, index=0, execute=True)
+        ws = prepare_candidate_workspace(candidate, repo_url=repo_url, work_dir=root, index=0)
         worktree_dir = ws.worktree_dir
         venv_dir = ws.venv_dir
         attempt_py = str(venv_dir / "bin" / "python")
@@ -565,18 +558,11 @@ def run_sgl_kernel_build(
 
     try:
         from hyperloom.agents.framework.isolation import prepare_candidate_workspace, prepare_repo_cache
-        from hyperloom.agents.framework.models import Baseline, Candidate, ExploreRequest
+        from hyperloom.agents.framework.models import Candidate
 
-        req = ExploreRequest(
-            framework="sglang",
-            repo_url=repo_url,
-            work_dir=root,
-            baseline=Baseline(throughput=0.0),
-            prepare_candidate_env=True,
-        )
-        prepare_repo_cache(req)
+        prepare_repo_cache(repo_url, root)
         candidate = Candidate(ref=ref or "HEAD", repo=repo_url)
-        ws = prepare_candidate_workspace(req, candidate, index=0, execute=True)
+        ws = prepare_candidate_workspace(candidate, repo_url=repo_url, work_dir=root, index=0)
         worktree_dir = ws.worktree_dir
         venv_dir = ws.venv_dir
         attempt_py = str(venv_dir / "bin" / "python")
@@ -803,18 +789,11 @@ def run_vllm_source_build(
 
     try:
         from hyperloom.agents.framework.isolation import prepare_candidate_workspace, prepare_repo_cache
-        from hyperloom.agents.framework.models import Baseline, Candidate, ExploreRequest
+        from hyperloom.agents.framework.models import Candidate
 
-        req = ExploreRequest(
-            framework="vllm",
-            repo_url=repo_url,
-            work_dir=root,
-            baseline=Baseline(throughput=0.0),
-            prepare_candidate_env=True,
-        )
-        prepare_repo_cache(req)
+        prepare_repo_cache(repo_url, root)
         candidate = Candidate(ref=ref or "HEAD", repo=repo_url)
-        ws = prepare_candidate_workspace(req, candidate, index=0, execute=True)
+        ws = prepare_candidate_workspace(candidate, repo_url=repo_url, work_dir=root, index=0)
         worktree_dir = ws.worktree_dir
         venv_dir = ws.venv_dir
         attempt_py = str(venv_dir / "bin" / "python")
@@ -881,11 +860,17 @@ def run_vllm_source_build(
         build_log.write_text(pip_res.stderr_tail or pip_res.stdout_tail, encoding="utf-8")
         return _fail("compile_error", f"vLLM source pip install failed (rc={pip_res.returncode})")
 
+    # The probes import vllm the way the runtime will: the editable finder runs
+    # after sys.path, where the base image's system-site vllm would otherwise win.
+    pythonpath_prefixes = (str(worktree_dir),)
+    pythonpath = _os.pathsep.join(p for p in (*pythonpath_prefixes, _os.environ.get("PYTHONPATH", "")) if p)
+    probe_env = {**_os.environ, "PYTHONPATH": pythonpath}
+
     # ROCm platform verify (port of verify_vllm_rocm from installer)
     vllm_verify = run_argv(
         [attempt_py, "-c", _VERIFY_VLLM_ROCM_SCRIPT],
         cwd=str(root),
-        env=dict(_os.environ),
+        env=probe_env,
         timeout_sec=120,
         run=_run,
     )
@@ -900,7 +885,7 @@ def run_vllm_source_build(
     load_probe = run_argv(
         [attempt_py, "-c", load_probe_script],
         cwd=str(root),
-        env=dict(_os.environ),
+        env=probe_env,
         timeout_sec=60,
         run=_run,
     )
@@ -932,7 +917,7 @@ def run_vllm_source_build(
 
     # vLLM source overlay: prepend the worktree so the attempt venv's vllm wins.
     runtime = FrameworkRuntime(
-        pythonpath_prefixes=(str(worktree_dir),),
+        pythonpath_prefixes=pythonpath_prefixes,
         entrypoint_bin_dir=str(venv_dir / "bin") if venv_dir else "",
         runtime_python_exe=attempt_py,
         runtime_env={"PYTORCH_ROCM_ARCH": gpu_arch},
