@@ -158,6 +158,7 @@ class _PerGpuPowerAction(argparse.Action):
             watts = _positive_watts_arg(raw_w)
         except argparse.ArgumentTypeError as exc:
             parser.error(f"{option_string}: {exc}")
+            raise AssertionError("unreachable")
         limits = dict(getattr(namespace, self.dest, None) or {})
         if str(gpu) in limits:
             parser.error(f"{option_string}: GPU {gpu} is given more than once")
