@@ -77,7 +77,8 @@ the records by the policy:
 
 Before any candidate is committed, both policies start from the campaign's
 starting version: the pristine base commit, or the warm-start commit when one
-was applied.
+was applied. It is recorded once, when a fresh campaign starts, as
+`run_state.start_commit`.
 
 At the start of every iteration the loop requires the campaign branch's latest
 commit to equal the commit of the derived starting version. A mismatch stops

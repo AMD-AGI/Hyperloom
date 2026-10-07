@@ -5,10 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
 import kernelforge.loop.runner as runner_module
+import kernelforge.orchestrator.agent as agent_module
+from kernelforge.agent_backends.base import AgentCapabilities, AgentRunResult
+from kernelforge.config import Config
 from kernelforge.loop.archive import CandidateArchive
 from kernelforge.loop.run_state import LoopStateStore
 from kernelforge.loop.runner import IterationConfig, IterationLoop, IterationResult, _decision_label
@@ -99,7 +103,7 @@ def _head(workspace) -> str:
     ).stdout.strip()
 
 
-def _seqany_loop(workspace, kernel, driver, *, iterations, resume=False):
+def _seqany_loop(workspace, kernel, driver, *, iterations, resume=False, loop_config=None):
     config = IterationConfig(
         kernel_file=str(kernel),
         driver_script=str(driver),
@@ -111,7 +115,12 @@ def _seqany_loop(workspace, kernel, driver, *, iterations, resume=False):
         search_policy=SearchPolicy.SEQANY,
         lanes=1,
     )
-    loop = IterationLoop(config, ExperimentTracker(workspace / "forge_experiments"), config=object(), resume=resume)
+    loop = IterationLoop(
+        config,
+        ExperimentTracker(workspace / "forge_experiments"),
+        config=loop_config if loop_config is not None else object(),
+        resume=resume,
+    )
     loop._time_remaining = lambda: _AMPLE_BUDGET_SEC if len(loop.results) < iterations else 0.0
     return loop
 
@@ -255,6 +264,84 @@ def test_an_interrupted_accept_is_finished_on_resume_without_publishing_a_best(t
     assert not (root / "pending_keep.json").exists()
     assert not (root / "best" / "manifest.json").exists()
     assert CandidateArchive(str(workspace), str(kernel)).load_meta(1)["decision"] == "ACCEPT"
+
+
+def test_the_session_is_told_its_starting_score_only_when_it_is_not_the_best(tmp_path, monkeypatch):
+    workspace, kernel, driver = _workspace(tmp_path, monkeypatch)
+    monkeypatch.setattr(IterationLoop, "run_one_iteration", _scripted({1: "ACCEPT", 2: "KEEP", 3: "ACCEPT"}))
+    sessions: list[tuple[float | None, str]] = []
+
+    async def agent(kernel_path, history, session_sink, best_mean_case_speedup=None, starting_mean_case_speedup=None):
+        sessions.append((starting_mean_case_speedup, history))
+        return await _editing_agent(kernel_path, history, session_sink)
+
+    asyncio.run(_seqany_loop(workspace, kernel, driver, iterations=3).run(agent_fn=agent))
+
+    starting_scores = [score for score, _history in sessions]
+    assert starting_scores == [None, _SLOWER, None]
+    assert "Starting version: iter 1 (accepted, not the best)" in sessions[1][1]
+    assert "Starting version" not in sessions[2][1]
+
+
+@pytest.mark.parametrize("starting", [None, 0.9])
+def test_the_implementer_scoring_prompt_names_a_starting_score_only_when_given(tmp_path, monkeypatch, starting):
+    kernel = tmp_path / "kernel.py"
+    kernel.write_text("def kernel():\n    return 1\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("raise AssertionError('prompt tests must not execute the driver')\n")
+    specs = []
+
+    class RecordingBackend:
+        name = "claude"
+        capabilities = AgentCapabilities(stop_hooks=True)
+
+        def __init__(self, runtime):
+            self.runtime = runtime
+
+        async def run(self, spec, usage=None):
+            specs.append(spec)
+            return AgentRunResult(text="PLAN: inspect")
+
+    monkeypatch.setattr(agent_module, "create_registered_backend", lambda runtime, **_kw: RecordingBackend(runtime))
+    agent_fn = agent_module.make_agent_fn(
+        config=Config(gpu_target="gfx950", workspace=str(tmp_path), agent_backend="claude", agent_precheck=False),
+        program_md="Optimize the kernel.",
+        kernel_backend_name="triton",
+        insession_gate=True,
+        driver_script=str(driver),
+    )
+
+    asyncio.run(
+        agent_fn(
+            str(kernel),
+            "",
+            baseline_case_times={"case": 1.0},
+            best_mean_case_speedup=1.2,
+            starting_mean_case_speedup=starting,
+        )
+    )
+
+    prompt = " ".join(specs[0].system_prompt.split())
+    assert "Current best pristine-relative score: 1.2." in prompt
+    if starting is None:
+        assert "starts from an accepted version" not in prompt
+    else:
+        assert "This session starts from an accepted version that is not the best; its score is 0.9." in prompt
+
+
+def test_planning_evidence_describes_the_accepted_starting_version(tmp_path, monkeypatch):
+    """Case timings, current score and commit handed to planning are the kernel the next session edits."""
+    workspace, kernel, driver = _workspace(tmp_path, monkeypatch)
+    monkeypatch.setattr(IterationLoop, "run_one_iteration", _scripted({1: "ACCEPT"}))
+    loop = _seqany_loop(workspace, kernel, driver, iterations=1, loop_config=SimpleNamespace(gpu_target="gfx942"))
+    asyncio.run(loop.run(agent_fn=_editing_agent))
+
+    context = loop._build_orchestration_context()
+
+    assert context.canonical_commit == _head(workspace)
+    assert context.current_mean_case_speedup == pytest.approx(_SLOWER)
+    assert [case.latency_ms for case in context.cases] == [pytest.approx(1.0 / _SLOWER)]
+    assert loop.best_mean_case_speedup == pytest.approx(1.0)
 
 
 def test_a_head_that_moved_off_the_starting_version_stops_the_campaign(tmp_path, monkeypatch):

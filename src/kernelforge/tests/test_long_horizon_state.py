@@ -43,7 +43,7 @@ from kernelforge.loop.run_state import (
     start_session,
     starting_version,
 )
-from kernelforge.loop.search_policy import SearchCandidate, SearchPolicy
+from kernelforge.loop.search_policy import SearchCandidate, SearchPolicy, StartingVersion
 from kernelforge.loop.runner import (
     LONG_HORIZON_OUTCOME_WINDOW,
     _long_horizon_header,
@@ -605,6 +605,21 @@ def test_header_contains_best_and_retrieval_pointers():
     assert "forge_experiments/events.jsonl" in header
     assert "candidates/index.jsonl" in header
     assert "iter_NNN" in header
+
+
+def test_header_names_a_starting_version_only_when_it_is_not_the_best():
+    state = RunState(start_commit="base")
+    state.best = BestRecord(iteration=1, wall_ms=0.8, mean_case_speedup=1.25, commit_hash="c1", source="iteration")
+    accepted = StartingVersion(iteration=2, commit_hash="c2", mean_case_speedup=0.9, case_times={"case": 1.1})
+    best = StartingVersion(iteration=1, commit_hash="c1", mean_case_speedup=1.25, case_times={"case": 0.8})
+
+    behind = render_long_horizon_header(state, [], starting=accepted)
+    at_best = render_long_horizon_header(state, [], starting=best)
+
+    assert "Current best: iter 1" in behind
+    assert "Starting version: iter 2 (accepted, not the best), mean case speedup 0.900000x" in behind
+    assert "Starting version" not in at_best
+    assert render_long_horizon_header(state, []) == at_best
 
 
 def test_header_bounded_by_max_chars():

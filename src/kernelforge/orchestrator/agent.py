@@ -300,7 +300,7 @@ explain your rationale in one sentence.
    attempt + score, full diffs of the best/near-miss attempts, and a path to the
    solution archive (forge_experiments/candidates/iter_NNN/). Read prior kernels
    there to compare approaches, reuse a good idea, or COMBINE two — the file on
-   disk is only the current best, not the full search history.
+   disk is only the version this iteration starts from, not the full search history.
 3. Identify the highest-impact change(s) based on PMC data and past results.
 4. Use Edit to make your change(s) — you may edit multiple places this iteration,
    not just one. The target file may NOT be self-contained: if the
@@ -381,7 +381,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
    attempt + score, full diffs of the best/near-miss attempts, and a path to the
    solution archive (forge_experiments/candidates/iter_NNN/) where every prior
    kernel is saved in full. Read prior kernels there to compare, reuse, or COMBINE
-   approaches — the file on disk is only the current best, not the search history.
+   approaches — the file on disk is only the version this iteration starts from, not the search history.
 2. Use Edit to make a change with a clear hypothesis.
 3. VERIFY IT YOURSELF with Bash before finishing, using the driver documented
    above (run from the current directory):

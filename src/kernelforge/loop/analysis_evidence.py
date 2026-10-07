@@ -347,9 +347,9 @@ class AnalysisEvidenceMixin:
                 self._last_published_analysis_commit = commit
                 self.run_state.analysis.evidence_commit = commit
                 self.run_state.analysis.evidence_status = str(event.get("available_tier") or "published")
-                current_best_commit = self.run_state.best.commit_hash or self.run_state.head_commit
-                if commit == current_best_commit:
-                    self.run_state.analysis.evidence_mean_case_speedup = self.run_state.best.mean_case_speedup or 1.0
+                start = starting_version(self.run_state, self.ic.search_policy)
+                if commit == start.commit_hash:
+                    self.run_state.analysis.evidence_mean_case_speedup = start.mean_case_speedup or 1.0
                 return
         head_lines = self._git("rev-parse", "HEAD").splitlines()
         if head_lines and self._looks_like_git_commit(head_lines[0]):

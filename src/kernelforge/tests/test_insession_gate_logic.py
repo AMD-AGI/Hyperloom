@@ -354,6 +354,19 @@ def test_stop_blocks_when_correct_but_not_faster(tmp_path, monkeypatch):
     out = _run(gate._on_stop({}, None, None))
     assert out["decision"] == "block"
     assert "NOT faster" in out["reason"]
+    assert "started from an accepted version" not in out["reason"]
+    assert gate.passed is False
+
+
+def test_a_block_names_the_starting_version_when_it_is_not_the_best(tmp_path, monkeypatch):
+    """The bar is still the best; the session is told it began below it."""
+    gate, _ = _gate(tmp_path, best_mean_case_speedup=1.2, starting_mean_case_speedup=0.9)
+    _patch_canonical(monkeypatch, correct=True, wall_ms=1.0)
+
+    out = _run(gate._on_stop({}, None, None))
+
+    assert out["decision"] == "block"
+    assert "started from an accepted version scoring 0.900000x, which is not the best" in out["reason"]
     assert gate.passed is False
 
 
