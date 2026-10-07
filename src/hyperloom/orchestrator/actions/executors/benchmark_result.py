@@ -619,6 +619,17 @@ def _round_gpu_power_w(
     return watts if found else gpu_metrics_from_report(report).get("avg_power_w")
 
 
+def _round_gpu_power_by_gpu_w(workspace: Path | None, subprocess_started_unix: float | None) -> dict[str, float] | None:
+    """Each serving card's mean power over the round's measured phase, by physical GPU id.
+
+    Only Hyperloom's own sampler reads every serving card; the report's ``gpu_monitor`` reads one, so a round no
+    sampler ran on has no per-card figure and any per-card or total budget treats it as unmeasured.
+    """
+    from ._gpu_power import read_measured_gpu_power_by_gpu
+
+    return read_measured_gpu_power_by_gpu(workspace, subprocess_started_unix=subprocess_started_unix)[1]
+
+
 def extract_benchmark_measurement(
     report: dict[str, Any] | None,
     *,
@@ -681,6 +692,7 @@ def extract_benchmark_measurement(
         "e2el_mean_ms": to_float(e2el.get("mean_ms")),
         "e2el_p99_ms": to_float(e2el.get("p99_ms")),
         "gpu_power_avg_w": _round_gpu_power_w(report, workspace, subprocess_started_unix),
+        "gpu_power_by_gpu_w": _round_gpu_power_by_gpu_w(workspace, subprocess_started_unix),
         "raw_result_path": None,
         "nonfatal_warnings": [],
     }

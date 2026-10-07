@@ -495,7 +495,7 @@ def test_geak_promotion_honours_the_power_budget(promotion, power_w, promoted):
     coord.shared_state.power_budget_w = 700.0
     measurement = {"output_throughput": 120.0, "fingerprint": "geak-power"}
     if power_w is not None:
-        measurement["gpu_power_avg_w"] = power_w
+        measurement["gpu_power_by_gpu_w"] = {"4": power_w}
 
     assert (
         coord.phase_kernel.promote_geak_from_candidate(
@@ -504,4 +504,4 @@ def test_geak_promotion_honours_the_power_budget(promotion, power_w, promoted):
         is promoted
     )
     if promoted:
-        assert coord.shared_state.current_best["gpu_power_avg_w"] == power_w
+        assert coord.shared_state.current_best["gpu_power_by_gpu_w"] == {"4": power_w}

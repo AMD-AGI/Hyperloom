@@ -2118,6 +2118,7 @@ class KernelPhase(CoordinatorCollaborator):
             for key in (
                 "accuracy",
                 "gpu_power_avg_w",
+                "gpu_power_by_gpu_w",
                 "launch_evidence",
                 "launch_evidence_path",
                 "server_log_path",

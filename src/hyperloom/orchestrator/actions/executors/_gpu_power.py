@@ -40,6 +40,7 @@ __all__ = [
     "build_gpu_power_recorder",
     "parse_power_sample",
     "read_measured_gpu_power",
+    "read_measured_gpu_power_by_gpu",
 ]
 
 #: Artifact written beside the round's ``server.log``.
@@ -319,16 +320,10 @@ def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | 
         return None
 
 
-def read_measured_gpu_power(
-    workspace: Path | None, *, subprocess_started_unix: float | None = None
-) -> tuple[bool, float | None]:
-    """``(found, avg_power_w)`` from the round's ``gpu_power.json``, beside the report or one level up.
-
-    ``found`` is ``True`` whenever this round's artifact exists, even when it holds no reading, so a caller can tell
-    "the recorder ran and measured nothing" (fail closed) from "no recorder ran" (fall back to the report).
-    """
+def _read_round_artifact(workspace: Path | None, subprocess_started_unix: float | None) -> dict[str, Any] | None:
+    """This round's ``gpu_power.json``, beside the report or one level up; ``None`` when no recorder ran for it."""
     if workspace is None:
-        return False, None
+        return None
     for directory in (Path(workspace), Path(workspace).parent):
         path = directory / GPU_POWER_ARTIFACT_NAME
         try:
@@ -342,5 +337,36 @@ def read_measured_gpu_power(
             started is None or started < float(subprocess_started_unix) - _START_SLACK_SEC
         ):
             continue
-        return True, _value(payload.get("avg_power_w"))
-    return False, None
+        return payload
+    return None
+
+
+def read_measured_gpu_power(
+    workspace: Path | None, *, subprocess_started_unix: float | None = None
+) -> tuple[bool, float | None]:
+    """``(found, avg_power_w)`` from the round's ``gpu_power.json``.
+
+    ``found`` is ``True`` whenever this round's artifact exists, even when it holds no reading, so a caller can tell
+    "the recorder ran and measured nothing" (fail closed) from "no recorder ran" (fall back to the report).
+    """
+    payload = _read_round_artifact(workspace, subprocess_started_unix)
+    return (False, None) if payload is None else (True, _value(payload.get("avg_power_w")))
+
+
+def read_measured_gpu_power_by_gpu(
+    workspace: Path | None, *, subprocess_started_unix: float | None = None
+) -> tuple[bool, dict[str, float] | None]:
+    """``(found, {gpu_id: avg_power_w})`` for the round's serving cards; ``None`` when no serving card had a reading.
+
+    Keyed by the physical ``amd-smi`` index as a string, the same ids ``--max-per-gpu-power-w`` names.
+    """
+    payload = _read_round_artifact(workspace, subprocess_started_unix)
+    if payload is None:
+        return False, None
+    per_gpu = payload.get("per_gpu") if isinstance(payload.get("per_gpu"), dict) else {}
+    readings = {
+        str(gpu): watts
+        for gpu in payload.get("serving_gpus") or []
+        if (watts := _value((per_gpu.get(str(gpu)) or {}).get("avg_power_w"))) is not None
+    }
+    return True, (readings or None)

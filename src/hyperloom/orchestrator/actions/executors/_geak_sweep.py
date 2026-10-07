@@ -29,7 +29,12 @@ from hyperloom.orchestrator.actions.executors._gpu_pin import (
     _resolve_handoff_gpu_ids_space,
 )
 from ._accuracy_gate import parse_eval_results
-from ._gpu_power import ServerLogPhaseDriver, build_gpu_power_recorder, read_measured_gpu_power
+from ._gpu_power import (
+    ServerLogPhaseDriver,
+    build_gpu_power_recorder,
+    read_measured_gpu_power,
+    read_measured_gpu_power_by_gpu,
+)
 from ._subprocess_kill import _scan_logs_increment
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
@@ -311,9 +316,11 @@ async def sweep_via_geak(
             succeeded = False
             err: str | None = None
             entry["gpu_power_avg_w"] = None
+            entry["gpu_power_by_gpu_w"] = None
             try:
                 proc = await asyncio.to_thread(_run_with_power_sampling, _run, out_dir, env)
                 entry["gpu_power_avg_w"] = read_measured_gpu_power(out_dir)[1]
+                entry["gpu_power_by_gpu_w"] = read_measured_gpu_power_by_gpu(out_dir)[1]
                 summ = read_json(out_dir / "bench_summary.json", default={}, require_dict=True)
                 # ``throughput_tok_s_median`` is the metric-neutral median of
                 # whatever basis GEAK measured, and the only field populated in
