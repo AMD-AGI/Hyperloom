@@ -2662,7 +2662,7 @@ async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_di
     assert any("tracelens_analysis.py" in c for c in cmd)
     assert not any("bypass_trace_analysis.py" in c for c in cmd)
     assert "--tracelens-root" in cmd
-    assert "--skip-split" in cmd
+    assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "generic"
 
 
 @pytest.mark.asyncio
@@ -2699,7 +2699,7 @@ async def test_trace_analyze_handler_xdit_state_overrides_stale_payload_framewor
     assert res["status"] == "ok"
     cmd = captured["cmd"]
     assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "xdit"
-    assert "--skip-split" in cmd
+    assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "generic"
     assert "--analysis-mode" not in cmd
     warnings = res["trace_health_warnings"]
     assert warnings[0]["code"] == "stale_framework_overridden"
@@ -2741,7 +2741,7 @@ async def test_trace_analyze_handler_custom_state_overrides_stale_payload_framew
     assert res["status"] == "ok"
     cmd = captured["cmd"]
     assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "custom"
-    assert "--skip-split" in cmd
+    assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "generic"
     assert res["trace_health_warnings"][0]["code"] == "stale_framework_overridden"
 
 
@@ -2893,7 +2893,7 @@ async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_scriptable_converges_route_params(session_dir, monkeypatch):
-    """Scriptable (xDiT) params converge by route: --skip-split is TraceLens-only (must NOT reach bypass, which would crash argparse -> degraded), while --num-denoise-steps is forwarded to BOTH routes (bypass consumes it)."""
+    """Scriptable (xDiT) params converge by route: --steady-state-mode generic is TraceLens-only, while --num-denoise-steps is forwarded to BOTH routes (bypass consumes it)."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     monkeypatch.setattr(ta, "_resolve_tracelens_root", lambda: session_dir)
     monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
@@ -2923,7 +2923,7 @@ async def test_trace_analyze_handler_scriptable_converges_route_params(session_d
     await ta.trace_analyze_handler({**base, "analysis_route": "agent"}, session_dir=session_dir)
     cmd = captured["cmd"]
     assert any("tracelens_analysis.py" in c for c in cmd)
-    assert "--skip-split" in cmd
+    assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "generic"
     assert "--num-denoise-steps" in cmd
 
 

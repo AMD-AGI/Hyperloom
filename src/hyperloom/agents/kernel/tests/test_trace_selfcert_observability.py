@@ -128,9 +128,6 @@ def _verdict(**overrides):
         "capture_fragment": False,
         "attributed_pct": 91.0,
         "step_roots_sufficient": True,
-        "forecast_modelled": True,
-        "viable_modes": ["decode_only"],
-        "idle": {},
         "graph_under_recorded": False,
         "thresholds": effective_thresholds(),
     }
@@ -142,7 +139,7 @@ def test_verdict_severity_ranks_a_wrong_answer_above_a_doubtful_one():
     """An analysis that runs clean and concludes wrongly is worse than one that announces its own doubt."""
     assert _verdict()["severity"] == "ok"
     assert _verdict(graph_under_recorded=True)["severity"] == "silently_wrong"
-    assert _verdict(graph_under_recorded=None, forecast_modelled=False)["severity"] == "warn"
+    assert _verdict(graph_under_recorded=None)["severity"] == "silently_wrong"
     assert _verdict(parse_ok=False)["severity"] == "blocked"
 
 
@@ -157,7 +154,7 @@ def test_verdict_carries_the_numbers_behind_its_categorical_answer():
     assert measures["capture_op_meta_coverage"] == 0.02
     assert measures["attributed_pct"] == 91.0
     assert measures["kernel_count"] == 12
-    assert measures["viable_mode_count"] == 1
+
 
 
 def test_measures_do_not_change_any_decision():
