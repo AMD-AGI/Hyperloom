@@ -323,7 +323,12 @@ def _screen(mapping: CollectMapping, projected: _Projected) -> None:
     summary = mapping.declaration.role_field("change", FieldRole.SUMMARY)
     free_text = FREE_TEXT_FIELDS | ({f"change.{summary.name}"} if summary is not None else set())
     experience = projected.experience
-    finding = find_sensitive(experience.to_dict(), free_text=free_text)
+    declared = {
+        f"{category}.{field.name}"
+        for category in ("identity", *DECLARED_CATEGORIES)
+        for field in mapping.declaration.fields(category)
+    }
+    finding = find_sensitive(experience.to_dict(), free_text=free_text, declared=declared)
     if finding:
         raise _Skip(f"sensitive content in {finding}")
     for category in DECLARED_CATEGORIES:

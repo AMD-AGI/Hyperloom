@@ -636,6 +636,43 @@ def test_a_unit_whose_file_is_absent_or_holds_a_credential_is_skipped(tmp_path: 
     assert skipped["absent"].startswith("mapping evaluation failed: change.patch names")
 
 
+def test_a_declared_field_named_like_a_credential_is_screened_by_its_value_not_its_name(tmp_path: Path) -> None:
+    declaration = {
+        "schema_version": 2,
+        "objectives": [{"id": "throughput@v1", "description": "Maximize throughput."}],
+        "identity": [{"name": "model", "description": "Model."}],
+        "change": [{"name": "summary", "description": "What changed.", "role": "summary"}],
+        "outcome": [
+            {"name": "decision", "description": "D.", "role": "decision", "values": ["keep", "revert"]},
+            {"name": "output_tokens_per_s", "description": "Decode rate.", "kind": "number", "role": "measurement"},
+        ],
+    }
+    (tmp_path / "declaration.yaml").write_text(yaml.safe_dump(declaration), encoding="utf-8")
+    mapping = compile_mapping(
+        {
+            "format": "hyperloom-kb.collect.v2",
+            "declaration": str(tmp_path / "declaration.yaml"),
+            "producer": {"name": "demo", "version": "1"},
+            "units": [{"each": "$doc.items", "as": "item"}],
+            "unit_id": "$item.name",
+            "experience": {
+                "run_id": "run",
+                "seq": {"hash48": ["$item.name"]},
+                "completed_at": "2026-09-21T22:52:56Z",
+                "identity": {"object": {"model": "m"}},
+                "objective": "throughput@v1",
+                "change": {"summary": "Apply {$item.name}."},
+                "outcome": {"decision": "keep", "output_tokens_per_s": "$item.rate"},
+            },
+        }
+    )
+
+    report = collect(mapping, {"items": [{"name": "alpha", "rate": 412.5}]}, dry_run=True)
+
+    assert report.skipped == ()
+    assert report.collected[0].experience.outcome["output_tokens_per_s"] == 412.5
+
+
 def test_a_mapping_adds_notes_without_a_new_schema_and_drops_the_ones_without_text() -> None:
     notes = {"object": {"interconnect": "XGMI saturated on {$item.name}.", "host": "$item.host"}}
     mapping = compile_mapping(_mapping_document(experience={**_mapping_document()["experience"], "notes": notes}))
