@@ -314,7 +314,7 @@ def test_resume_recovers_keep_committed_before_state_checkpoint(tmp_path, monkey
 
     monkeypatch.setattr(
         first,
-        "_finalize_keep_checkpoint",
+        "_finalize_commit_checkpoint",
         interrupt_before_checkpoint,
     )
     with pytest.raises(asyncio.CancelledError):
@@ -390,7 +390,7 @@ def test_resume_clears_reconciled_pending_keep(
 
     monkeypatch.setattr(
         first,
-        "_finalize_keep_checkpoint",
+        "_finalize_commit_checkpoint",
         interrupt_before_checkpoint,
     )
     with pytest.raises(asyncio.CancelledError):

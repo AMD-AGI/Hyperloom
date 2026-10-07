@@ -58,12 +58,23 @@ from kernelforge.loop.jit_rebuild import (
 )
 from kernelforge.loop.analysis_runtime import AnalysisRuntimeMixin
 from kernelforge.loop.search_policy import (
+    COMMITTED_DECISIONS,
+    DECISION_ACCEPT,
+    DECISION_KEEP,
+    DEFAULT_SEARCH_POLICY,
+    SearchCandidate,
+    SearchPolicy,
+    StartingVersion,
+    accepts,
+    resolve_lanes,
+)
+from kernelforge.loop.search_mode import (
     MARGINAL_GAIN_SCAN_WINDOW,
     MARGINAL_GAIN_WINDOW,
     NO_CHANGES_STREAK_WINDOW,
     SEARCH_MODE_EXPLOIT,
-    SearchPolicyDecision,
-    SearchPolicyEngine,
+    SearchModeDecision,
+    SearchModeEngine,
 )
 from kernelforge.loop.round_budget import (
     admit_dispatch,
@@ -91,8 +102,10 @@ from kernelforge.loop.run_state import (
     make_event,
     measured_nothing,
     reconcile_stale_running_session,
+    best_version,
     should_resume,
     start_session,
+    starting_version,
 )
 from kernelforge.orchestrator.orchestration import (
     OrchestrationInfrastructureError,
@@ -165,6 +178,9 @@ LONG_HORIZON_OUTCOME_WINDOW = max(
 
 # Where a campaign writes its own output inside the workspace.
 LOOP_ARTIFACT_ROOT = "forge_experiments"
+
+# ``pending_keep.json``: the crash journal of a KEEP or ACCEPT commit.
+PENDING_COMMIT_SCHEMA_VERSION = 3
 
 # How far a KEEP has to improve a case's measured time before that case counts as one the KEEP's configuration was
 # chosen for.
@@ -457,6 +473,8 @@ class IterationConfig:
     # is measured on its own. 1 keeps the single fused plan and single session this loop has always run; fan-out also
     # needs an ``agent_factory``, because a session is bound to its workspace.
     lanes: int = 1
+    # Which measured candidates later iterations build on; fixed per campaign.
+    search_policy: SearchPolicy = DEFAULT_SEARCH_POLICY
     # Whether a stalled search may spend an iteration measuring two archived rejected gains applied together.
     merge_stacking: bool = True
     # Ranks the driver self-launches (via torchrun) for a collective task. >1 switches profiling to the per-rank
@@ -472,6 +490,7 @@ class IterationConfig:
         # Validated here rather than at the CLI boundary alone, so a pattern can never reach the commit/delete sites
         # unvalidated -- including via ``dataclasses.replace``.
         self.commit_new_paths = normalize_commit_new_paths(self.commit_new_paths)
+        self.lanes = resolve_lanes(self.search_policy, self.lanes)
 
 
 class CaseConfigCoverage(NamedTuple):
@@ -515,7 +534,10 @@ class IterationResult:
     snr_db: float | None = None
     pmc_diagnosis: str = ""
     vgpr: int | None = None
-    kept: bool = False  # True if change was kept, False if reverted
+    # A KEEP: the candidate cleared the KEEP bar and is the new best.
+    kept: bool = False
+    # An ACCEPT: committed as the next iteration's starting version without becoming the best.
+    accepted: bool = False
     commit_hash: str = ""
     agent_rationale: str = ""
     # Real error tail from the first failing validation stage (for the ledger); populated on validation failure so
@@ -618,8 +640,10 @@ class IterationLoop(AnalysisRuntimeMixin):
         self._last_published_analysis_commit = ""
         self._active_analysis_context = None
         self._analysis_diff_results = {}
-        self.search_policy_engine = SearchPolicyEngine()
-        self._search_policy_decision: SearchPolicyDecision | None = None
+        self.search_mode_engine = SearchModeEngine()
+        self._search_mode_decision: SearchModeDecision | None = None
+        # Derived at the start of every iteration; read by everything that records the iteration's candidate.
+        self._iteration_parent = StartingVersion(iteration=0, commit_hash="", mean_case_speedup=None, case_times={})
         self._reported_window_gain_faults: set[str] = set()
         self.handoff_store: HandoffStore | None = None
         # A committed KEEP recovered during synchronous resume preflight waits here until the async run can restore
@@ -787,7 +811,13 @@ class IterationLoop(AnalysisRuntimeMixin):
             pending = json.loads(path.read_text())
         except Exception as error:
             raise ValueError(f"invalid pending KEEP metadata: {path}") from error
-        if not isinstance(pending, dict) or pending.get("schema_version") != 2:
+        if (
+            not isinstance(pending, dict)
+            or pending.get("schema_version") != PENDING_COMMIT_SCHEMA_VERSION
+            or not isinstance(pending.get("promotes_best"), bool)
+            or isinstance(pending.get("parent_iteration"), bool)
+            or not isinstance(pending.get("parent_iteration"), int)
+        ):
             raise ValueError(f"invalid pending KEEP metadata: {path}")
         return pending
 
@@ -822,13 +852,13 @@ class IterationLoop(AnalysisRuntimeMixin):
         rationale: str,
         kernel_source: str,
     ) -> dict:
-        """Capture every fact needed to finish a verified KEEP after restart."""
+        """Capture every fact needed to finish a verified KEEP or ACCEPT after restart."""
         base_head = self._git("rev-parse", "HEAD").splitlines()[0]
         patch, changed_files = self._candidate_changes(base_head)
         # Keep the journal's existing fingerprint convention; export the raw diff below.
         patch = patch.strip()
         if not patch:
-            raise ValueError("verified KEEP has no candidate diff")
+            raise ValueError("verified candidate has no diff to commit")
         validation_text = result.validation_summary or "canonical validation passed"
         if result.error_output:
             validation_text = f"{validation_text}\n\n{result.error_output}".strip()
@@ -838,11 +868,13 @@ class IterationLoop(AnalysisRuntimeMixin):
         publication_patch, publication_changed_files = self._candidate_changes(publication_base)
         commit_message = f"iter-{result.iteration}: {rationale[:72]}"
         return {
-            "schema_version": 2,
+            "schema_version": PENDING_COMMIT_SCHEMA_VERSION,
             "campaign_id": self.run_state.campaign_id,
             "session_index": self.run_state.session_index,
             "experiment_id": (self.experiment.experiment_id if self.experiment else ""),
             "base_head": base_head,
+            "parent_iteration": self._iteration_parent.iteration,
+            "promotes_best": bool(result.kept),
             "iteration": result.iteration,
             "wall_ms": result.wall_ms,
             "mean_case_speedup": result.mean_case_speedup,
@@ -912,8 +944,9 @@ class IterationLoop(AnalysisRuntimeMixin):
                 f"branch mismatch: workspace is on {current_branch or 'detached HEAD'}, expected {self.ic.git_branch}"
             )
         current_head = self._git("rev-parse", "HEAD").splitlines()[0]
-        state_anchor = state.best.commit_hash or state.head_commit
-        already_finalized = state.best.iteration == iteration and state.best.commit_hash == current_head
+        state_anchor = starting_version(state, self.ic.search_policy).commit_hash
+        last = state.candidates[-1] if state.candidates else None
+        already_finalized = last is not None and last.iteration == iteration and last.commit_hash == current_head
         if not already_finalized and state.next_iteration != iteration:
             raise ValueError(f"pending KEEP iteration mismatch: expected {state.next_iteration}, got {iteration}")
         if not already_finalized and base_head != state_anchor:
@@ -985,11 +1018,13 @@ class IterationLoop(AnalysisRuntimeMixin):
             )
 
         current_head = self._git("rev-parse", "HEAD").splitlines()[0]
-        resume_head = expected_head or state.best.commit_hash or state.head_commit
+        resume_head = expected_head or starting_version(state, self.ic.search_policy).commit_hash
         if not resume_head:
             raise ValueError("resume state has no HEAD anchor")
         if current_head != resume_head:
             raise ValueError(f"HEAD mismatch: expected {resume_head}, got {current_head}")
+        if state.best.commit_hash and not self._is_ancestor(state.best.commit_hash, current_head):
+            raise ValueError(f"best commit {state.best.commit_hash} is not an ancestor of HEAD {current_head}")
 
         dirty = self._git("status", "--porcelain", "--untracked-files=no")
         if dirty and not allow_dirty:
@@ -1200,6 +1235,20 @@ class IterationLoop(AnalysisRuntimeMixin):
         if not after or after == before:
             raise RuntimeError("git commit did not advance HEAD")
         return after
+
+    def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        """Whether ``ancestor`` is ``descendant`` or reachable from it."""
+        return (
+            git(
+                "merge-base",
+                "--is-ancestor",
+                ancestor,
+                descendant,
+                cwd=self.ic.workspace_dir,
+                check=False,
+            ).returncode
+            == 0
+        )
 
     def _git_revert_last(self) -> None:
         """Revert the last commit, raising when the candidate stays on the tree."""
@@ -1505,7 +1554,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 log.debug("failed to publish best result", exc_info=True)
             return False
 
-    def _finalize_keep_checkpoint(
+    def _finalize_commit_checkpoint(
         self,
         result: IterationResult,
         *,
@@ -1513,12 +1562,13 @@ class IterationLoop(AnalysisRuntimeMixin):
         best_before: float | None,
         pending: dict,
     ) -> None:
-        """Durably finalize the compact state and event for one KEEP commit."""
+        """Durably finalize the compact state and event for one KEEP or ACCEPT commit."""
         self._record_iteration_outcome(
             result,
             plan=plan,
             require_durable=True,
             checkpoint_metadata=pending,
+            parent=self._iteration_parent,
         )
 
     def _archive_pending_keep(
@@ -1528,20 +1578,24 @@ class IterationLoop(AnalysisRuntimeMixin):
         *,
         result: IterationResult | None = None,
     ) -> None:
-        """Recover the candidate archive when a KEEP was interrupted post-commit."""
+        """Recover the candidate archive when a KEEP or ACCEPT was interrupted post-commit."""
         iteration = int(pending["iteration"])
+        decision = _pending_decision(pending)
         existing = self.archive.load_meta(iteration)
         if existing:
-            if existing.get("decision") != "KEEP" or existing.get("commit_hash") != commit_hash:
-                raise ValueError(f"candidate archive conflicts with pending KEEP iteration {iteration}")
+            if existing.get("decision") != decision or existing.get("commit_hash") != commit_hash:
+                raise ValueError(f"candidate archive conflicts with pending {decision} iteration {iteration}")
             return
         archived = self.archive.record(
             CandidateRecord(
                 iteration=iteration,
                 commit_hash=commit_hash,
-                decision="KEEP",
-                kept=True,
+                decision=decision,
+                kept=pending["promotes_best"],
+                accepted=not pending["promotes_best"],
                 validation_passed=True,
+                parent_iteration=pending["parent_iteration"],
+                parent_commit=str(pending["base_head"]),
                 wall_ms=pending.get("wall_ms"),
                 mean_case_speedup=pending.get("mean_case_speedup"),
                 bench_detail=pending.get("benchmark") or {},
@@ -1572,7 +1626,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         pending: dict,
         commit_hash: str,
     ) -> IterationResult:
-        """Rebuild the compact KEEP result represented by its journal."""
+        """Rebuild the compact KEEP or ACCEPT result represented by its journal."""
         return IterationResult(
             iteration=int(pending["iteration"]),
             duration_sec=0.0,
@@ -1582,7 +1636,8 @@ class IterationLoop(AnalysisRuntimeMixin):
             mean_case_speedup=pending.get("mean_case_speedup"),
             snr_db=pending.get("snr_db"),
             vgpr=pending.get("vgpr"),
-            kept=True,
+            kept=pending["promotes_best"],
+            accepted=not pending["promotes_best"],
             commit_hash=commit_hash,
             agent_rationale=str(pending.get("rationale") or ""),
             bench_detail=dict(pending.get("benchmark") or {}),
@@ -1596,9 +1651,9 @@ class IterationLoop(AnalysisRuntimeMixin):
         pending: dict,
         commit_hash: str,
     ) -> None:
-        """Reject a KEEP event that does not describe the pending journal."""
+        """Reject a KEEP or ACCEPT event that does not describe the pending journal."""
         expected = {
-            "decision": "KEEP",
+            "decision": _pending_decision(pending),
             "commit_hash": commit_hash,
             "plan": str(pending.get("plan") or "").strip()[:120],
             "wall_ms": pending.get("wall_ms"),
@@ -1609,7 +1664,9 @@ class IterationLoop(AnalysisRuntimeMixin):
             "experiment_id": str(pending.get("experiment_id") or "") or None,
             "turns": pending.get("turns"),
             "validation_passed": True,
-            "is_new_best": True,
+            "is_new_best": pending["promotes_best"],
+            "parent_iteration": pending["parent_iteration"],
+            "parent_commit": pending["base_head"],
         }
         conflicts = [key for key, value in expected.items() if event.get(key) != value]
         if conflicts:
@@ -2003,11 +2060,20 @@ class IterationLoop(AnalysisRuntimeMixin):
             pin_iteration(state, iteration)
 
     def _apply_replayed_non_keep(self, state: RunState, event: dict) -> None:
-        """Reduce one validated non-KEEP event without persisting state."""
+        """Reduce one validated uncommitted event without persisting state."""
         iteration = int(event["iter"])
         decision = str(event.get("decision") or "")
-        if not decision or decision == "KEEP":
-            raise ValueError(f"iteration {iteration} is not a replayable non-KEEP event")
+        if not decision or decision in COMMITTED_DECISIONS:
+            raise ValueError(f"iteration {iteration} is not a replayable uncommitted event")
+        candidate = None
+        if event.get("parent_commit"):
+            candidate = SearchCandidate(
+                iteration=iteration,
+                parent_iteration=int(event["parent_iteration"]),
+                parent_commit=str(event["parent_commit"]),
+                decision=decision,
+                mean_case_speedup=event.get("mean_case_speedup"),
+            )
         apply_iteration(
             state,
             iteration=iteration,
@@ -2022,6 +2088,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             best_mean_case_speedup=event.get("best_after_mean_case_speedup"),
             stall_threshold=self.ic.supervise_after,
             orchestration_error_threshold=(self.ic.max_consecutive_orchestration_errors),
+            candidate=candidate,
         )
         state.diversification_cycle_completed = event.get("diversification_cycle_completed") is True
         self._record_direction_verdict(
@@ -2063,8 +2130,10 @@ class IterationLoop(AnalysisRuntimeMixin):
             if iteration != cursor:
                 raise ValueError(f"iteration_result recovery gap: expected {cursor}, got {iteration}")
             event = events_by_iteration[iteration]
-            if event.get("decision") == "KEEP":
-                raise ValueError(f"uncheckpointed KEEP iteration {iteration} has no matching pending journal")
+            if event.get("decision") in COMMITTED_DECISIONS:
+                raise ValueError(
+                    f"uncheckpointed {event.get('decision')} iteration {iteration} has no matching pending journal"
+                )
             self._apply_replayed_non_keep(planned, event)
             cursor = planned.next_iteration
 
@@ -2075,8 +2144,10 @@ class IterationLoop(AnalysisRuntimeMixin):
                 if iteration != cursor:
                     raise ValueError(f"iteration_result recovery gap: expected {cursor}, got {iteration}")
                 event = events_by_iteration[iteration]
-                if event.get("decision") == "KEEP":
-                    raise ValueError(f"uncheckpointed KEEP iteration {iteration} has no pending journal")
+                if event.get("decision") in COMMITTED_DECISIONS:
+                    raise ValueError(
+                        f"uncheckpointed {event.get('decision')} iteration {iteration} has no pending journal"
+                    )
                 self._apply_replayed_non_keep(planned, event)
                 cursor = planned.next_iteration
             return planned, "", None, False
@@ -2094,16 +2165,25 @@ class IterationLoop(AnalysisRuntimeMixin):
             )
 
         status = self._inspect_pending_keep(planned, pending)
+        decision = _pending_decision(pending)
         keep_event = events_by_iteration.get(pending_iteration)
-        if keep_event is not None and keep_event.get("decision") != "KEEP":
-            raise ValueError(f"pending KEEP conflicts with iteration {pending_iteration} event")
+        if keep_event is not None and keep_event.get("decision") != decision:
+            raise ValueError(f"pending {decision} conflicts with iteration {pending_iteration} event")
         if status == "uncommitted":
             if keep_event is not None:
-                raise ValueError(f"uncommitted pending KEEP iteration {pending_iteration} already has a KEEP event")
+                raise ValueError(
+                    f"uncommitted pending {decision} iteration {pending_iteration} already has a {decision} event"
+                )
             return planned, status, None, False
 
         current_head = self._git("rev-parse", "HEAD").splitlines()[0]
         result = self._pending_keep_result(pending, current_head)
+        candidate = _search_candidate(
+            result,
+            decision,
+            parent_iteration=pending["parent_iteration"],
+            parent_commit=str(pending["base_head"]),
+        )
         if keep_event is not None:
             self._require_matching_keep_event(
                 keep_event,
@@ -2114,28 +2194,32 @@ class IterationLoop(AnalysisRuntimeMixin):
             apply_iteration(
                 planned,
                 iteration=result.iteration,
-                decision="KEEP",
-                kept=True,
+                decision=decision,
+                kept=result.kept,
                 wall_ms=result.wall_ms,
                 mean_case_speedup=result.mean_case_speedup,
                 commit_hash=result.commit_hash,
                 plan=str(pending.get("plan") or ""),
                 baseline_wall_ms=planned.baseline_wall_ms,
-                best_wall_ms=result.wall_ms,
-                best_mean_case_speedup=result.mean_case_speedup,
+                best_wall_ms=result.wall_ms if result.kept else planned.best.wall_ms,
+                best_mean_case_speedup=(result.mean_case_speedup if result.kept else planned.best.mean_case_speedup),
                 stall_threshold=self.ic.supervise_after,
                 orchestration_error_threshold=(self.ic.max_consecutive_orchestration_errors),
+                candidate=candidate,
             )
             control = pending.get("search_control")
             if isinstance(control, dict):
                 planned.diversification_cycle_completed = control.get("diversification_cycle_completed") is True
-        elif (
-            planned.best.iteration != result.iteration
-            or planned.best.commit_hash != result.commit_hash
-            or planned.best.wall_ms != result.wall_ms
-            or planned.best.mean_case_speedup != result.mean_case_speedup
+        elif planned.candidates[-1] != candidate or (
+            result.kept
+            and (
+                planned.best.iteration != result.iteration
+                or planned.best.commit_hash != result.commit_hash
+                or planned.best.wall_ms != result.wall_ms
+                or planned.best.mean_case_speedup != result.mean_case_speedup
+            )
         ):
-            raise ValueError(f"run state conflicts with KEEP iteration {result.iteration}")
+            raise ValueError(f"run state conflicts with {decision} iteration {result.iteration}")
         return planned, status, result, keep_event is None
 
     def _coordinate_resume_recovery(self, on_best_committed=None) -> None:
@@ -2160,6 +2244,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     result,
                     plan=str(pending.get("plan") or ""),
                     checkpoint_metadata=pending,
+                    candidate=self.run_state.candidates[-1],
                 )
             )
         self.state_store.save(self.run_state)
@@ -2168,10 +2253,11 @@ class IterationLoop(AnalysisRuntimeMixin):
             raise RuntimeError("resume recovery state was not persisted")
 
         if result is not None and pending is not None:
-            self._promote_best(result)
-            self.best_mean_case_speedup = result.mean_case_speedup
-            if on_best_committed is not None:
-                on_best_committed(result)
+            if result.kept:
+                self._promote_best(result)
+                self.best_mean_case_speedup = result.mean_case_speedup
+                if on_best_committed is not None:
+                    on_best_committed(result)
             self._recovered_pending_keep = (pending, result)
 
     async def _finish_recovered_pending_keep(self) -> None:
@@ -2992,7 +3078,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             head = head_out.splitlines()[0] if head_out else ""
             if self.resume and self.run_state.baseline_case_times:
                 self._baseline_case_times = dict(self.run_state.baseline_case_times)
-            if self.resume and should_resume(self.run_state, head):
+            if self.resume and should_resume(self.run_state, head, self.ic.search_policy):
                 self.best_wall_ms = self.run_state.best.wall_ms
                 self.best_mean_case_speedup = self.run_state.best.mean_case_speedup
                 print(
@@ -3018,6 +3104,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             if self.ic.pristine_baseline_wall_ms is not None:
                 self.run_state.pristine_baseline_wall_ms = self.ic.pristine_baseline_wall_ms
             if not self.resume:
+                self.run_state.start_commit = head
                 self.state_store.append_event(
                     make_event(
                         "baseline_measured",
@@ -3187,13 +3274,27 @@ class IterationLoop(AnalysisRuntimeMixin):
         decision_label: str | None = None,
         require_durable: bool = False,
         checkpoint_metadata: dict | None = None,
+        parent: StartingVersion | None = None,
     ) -> bool:
-        """Synchronize one completed attempt into live and durable control state."""
+        """Synchronize one completed attempt into live and durable control state.
+
+        ``parent`` is the version the iteration's candidate was made from, or ``None`` when it produced no candidate.
+        """
         plan = (plan or "").strip()
 
         try:
             if decision_label is None:
                 decision_label = _decision_label(result)
+            candidate = (
+                None
+                if parent is None
+                else _search_candidate(
+                    result,
+                    decision_label,
+                    parent_iteration=parent.iteration,
+                    parent_commit=parent.commit_hash,
+                )
+            )
 
             error_sig = ""
             if not result.validation_passed:
@@ -3211,7 +3312,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             if existing_events:
                 existing = existing_events[0]
                 if existing.get("decision") != decision_label or (
-                    result.kept and existing.get("commit_hash") != result.commit_hash
+                    (result.kept or result.accepted) and existing.get("commit_hash") != result.commit_hash
                 ):
                     raise ValueError(f"iteration_result conflicts with iteration {result.iteration}")
 
@@ -3231,6 +3332,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     best_mean_case_speedup=self.best_mean_case_speedup,
                     stall_threshold=self.ic.supervise_after,
                     orchestration_error_threshold=(self.ic.max_consecutive_orchestration_errors),
+                    candidate=candidate,
                 )
             elif result.kept and (
                 self.run_state.best.iteration != result.iteration
@@ -3257,6 +3359,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                         decision_label=decision_label,
                         error_sig=error_sig,
                         checkpoint_metadata=checkpoint_metadata,
+                        candidate=candidate,
                     )
                 )
             if newly_applied:
@@ -3290,6 +3393,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                             or persisted.best.wall_ms != result.wall_ms
                         )
                     )
+                    or (candidate is not None and (not persisted.candidates or persisted.candidates[-1] != candidate))
                 ):
                     raise RuntimeError(f"iteration {result.iteration} checkpoint was not durable")
             return True
@@ -3307,6 +3411,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         decision_label: str | None = None,
         error_sig: str = "",
         checkpoint_metadata: dict | None = None,
+        candidate: SearchCandidate | None = None,
     ) -> dict:
         """Build the canonical durable event for one completed iteration."""
         resolved_decision = decision_label or _decision_label(result)
@@ -3314,6 +3419,9 @@ class IterationLoop(AnalysisRuntimeMixin):
             "iteration_result",
             result.iteration,
             decision=resolved_decision,
+            parent_iteration=candidate.parent_iteration if candidate is not None else None,
+            parent_commit=candidate.parent_commit if candidate is not None else None,
+            accepted=result.accepted,
             plan=(plan or "").strip()[:120] or None,
             # The mode this iteration actually ran under, which is the direction identity the empty-diff streak is
             # counted against.
@@ -3355,14 +3463,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         if self.handoff_store is None:
             return None
         try:
-            head_lines = self._git("rev-parse", "HEAD").splitlines()
-            analysis_commit = (
-                self.run_state.best.commit_hash
-                or self.run_state.head_commit
-                or (head_lines[0] if head_lines else "")
-                or self.ic.campaign_base_commit
-                or "uncommitted"
-            )
+            analysis_commit = self._canonical_commit()
             lesson_path = ""
             handoff_plan = str(session_sink.get("plan") or "")
             if getattr(self, "lessons", None) is not None:
@@ -3754,15 +3855,21 @@ class IterationLoop(AnalysisRuntimeMixin):
             # A second-stage ASM result must also beat the original caller's aggregate time.
             source_ms = self.ic.pristine_baseline_wall_ms
             improved = source_ms is not None and selected_raw_mean_ms is not None and selected_raw_mean_ms < source_ms
+        accepted = not improved and accepts(
+            self.ic.search_policy,
+            valid=bool(bench_result.get("success")) and mean_case_speedup is not None,
+            improves_best=improved,
+        )
 
         # Step 7: the numerical contract, which only assembly declares and only it
         # needs. Every other backend was judged by the driver in Step 4 and measured
         # through it since; re-running that verdict here would answer the same
         # question with the same command, while reading a task configuration whose
         # shape the engine has no business knowing. The predicate is shared with the
-        # gate description every agent is given, so the two cannot disagree.
+        # gate description every agent is given, so the two cannot disagree. It runs for
+        # every candidate the search policy would commit, not only for a new best.
         canonical_summary = ""
-        if improved and runs_task_suite_acceptance(self.ic.kernel_backend):
+        if (improved or accepted) and runs_task_suite_acceptance(self.ic.kernel_backend):
             canonical_started = time.time()
             canonical = await accept_candidate(
                 self.ic.workspace_dir,
@@ -3807,6 +3914,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             pmc_diagnosis=pmc_diagnosis,
             vgpr=vgpr,
             kept=improved,
+            accepted=accepted,
             bench_detail=bench_result if isinstance(bench_result, dict) else {},
             pmc_full=pmc_full,
             error_output=bench_error_output,
@@ -3814,14 +3922,25 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         return result
 
-    def _update_search_policy(self, iteration: int) -> SearchPolicyDecision:
+    def _require_starting_version(self) -> StartingVersion:
+        """The version this iteration starts from, which the workspace HEAD must already be."""
+        start = starting_version(self.run_state, self.ic.search_policy)
+        head = self._git("rev-parse", "HEAD").splitlines()[0]
+        if head != start.commit_hash:
+            raise RuntimeError(
+                f"workspace HEAD {head} is not the {self.ic.search_policy.value} starting version "
+                f"{start.commit_hash or '(unrecorded)'} of iteration {start.iteration}"
+            )
+        return start
+
+    def _update_search_mode(self, iteration: int) -> SearchModeDecision:
         """Derive and persist the search mode before planning an iteration."""
         window_gain = self._exploit_window_gain(
             self.state_store.recent_results(MARGINAL_GAIN_SCAN_WINDOW),
             window=MARGINAL_GAIN_WINDOW,
             since_iteration=self.run_state.stall.last_supervisor_iter,
         )
-        decision = self.search_policy_engine.decide(
+        decision = self.search_mode_engine.decide(
             best_source=self.run_state.best.source,
             no_improvement_iters=self.run_state.stall.unresolved_stall_iters,
             stall_threshold=self.ic.supervise_after,
@@ -3840,11 +3959,11 @@ class IterationLoop(AnalysisRuntimeMixin):
         self.run_state.search_objective = decision.objective_kind
         self.run_state.search_mode_residence_remaining = decision.residence_iterations_remaining
         self.run_state.diversification_cycle_completed = False
-        self._search_policy_decision = decision
+        self._search_mode_decision = decision
         try:
             self.state_store.append_event(
                 make_event(
-                    "search_policy_decision",
+                    "search_mode_decision",
                     iteration,
                     mode=decision.mode,
                     reason_codes=list(decision.reason_codes),
@@ -3859,14 +3978,14 @@ class IterationLoop(AnalysisRuntimeMixin):
             )
             self.state_store.save(self.run_state)
         except Exception:
-            log.debug("search policy persistence failed", exc_info=True)
+            log.debug("search mode persistence failed", exc_info=True)
         # A window that has not filled yet is the ordinary state of a young campaign.
         fault = window_gain.unavailable
         if fault is not None and fault != "short_window" and fault not in self._reported_window_gain_faults:
             self._reported_window_gain_faults.add(fault)
-            print(f"  [search-policy] diminishing-returns trigger unavailable: {fault}")
+            print(f"  [search-mode] diminishing-returns trigger unavailable: {fault}")
         if decision.mode != previous_mode or decision.reason_codes != previous_reasons:
-            print(f"  [search-policy] {decision.mode}: " + ", ".join(decision.reason_codes))
+            print(f"  [search-mode] {decision.mode}: " + ", ".join(decision.reason_codes))
         return decision
 
     async def _plan_round(
@@ -4768,7 +4887,8 @@ class IterationLoop(AnalysisRuntimeMixin):
                                 exc_info=True,
                             )
 
-            self._update_search_policy(iteration)
+            self._update_search_mode(iteration)
+            self._iteration_parent = self._require_starting_version()
 
             print(
                 f"--- Iteration {iteration} "
@@ -4969,6 +5089,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     self.run_state,
                     self.state_store,
                     self.handoff_store,
+                    starting=self._iteration_parent,
                 )
 
                 # Lesson documents from the most recent iterations, verbatim, plus the absolute path of the directory
@@ -5016,18 +5137,18 @@ class IterationLoop(AnalysisRuntimeMixin):
                 new_file_block = self._render_uncommittable_new_paths()
                 if new_file_block:
                     history = f"{new_file_block}\n\n{history}"
-                if self._search_policy_decision is not None:
-                    policy = self._search_policy_decision
-                    policy_lines = [
-                        "## Search Policy (deterministic outer-loop decision)",
-                        f"Mode: {policy.mode}",
-                        f"Objective: {policy.objective_kind}",
-                        "Reasons: " + ", ".join(policy.reason_codes),
+                if self._search_mode_decision is not None:
+                    mode_decision = self._search_mode_decision
+                    mode_lines = [
+                        "## Search Mode (deterministic outer-loop decision)",
+                        f"Mode: {mode_decision.mode}",
+                        f"Objective: {mode_decision.objective_kind}",
+                        "Reasons: " + ", ".join(mode_decision.reason_codes),
                     ]
-                    policy_lines.append(
-                        f"Mode residence remaining after this iteration: {policy.residence_iterations_remaining}"
+                    mode_lines.append(
+                        f"Mode residence remaining after this iteration: {mode_decision.residence_iterations_remaining}"
                     )
-                    history = "\n".join(policy_lines) + "\n\n" + history
+                    history = "\n".join(mode_lines) + "\n\n" + history
                 # The latest free-form Supervisor Ruling is durable across KEEP and resume.
                 if self._supervisor_ruling:
                     history = (
@@ -5068,6 +5189,11 @@ class IterationLoop(AnalysisRuntimeMixin):
                         extra_kwargs["baseline_case_times"] = dict(self._baseline_case_times)
                     if "best_mean_case_speedup" in params:
                         extra_kwargs["best_mean_case_speedup"] = self.best_mean_case_speedup
+                    if (
+                        "starting_mean_case_speedup" in params
+                        and self._iteration_parent.commit_hash != best_version(self.run_state).commit_hash
+                    ):
+                        extra_kwargs["starting_mean_case_speedup"] = self._iteration_parent.mean_case_speedup
                     if "session_sink" in params:
                         extra_kwargs["session_sink"] = session_sink
                 except (ValueError, TypeError):
@@ -5319,9 +5445,9 @@ class IterationLoop(AnalysisRuntimeMixin):
                     optimization_plan_created=optimization_plan_executable,
                 )
 
-            # Keep or revert — detailed verdict
+            # Commit or revert — detailed verdict
             pending_keep: dict | None = None
-            keep_checkpoint_finalized = False
+            commit_checkpoint_finalized = False
             elapsed = result.duration_sec
             raw_wall_txt = f"{result.wall_ms:.3f} ms" if result.wall_ms is not None else "unavailable"
             if not result.validation_passed:
@@ -5332,7 +5458,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 label = "Iteration crashed" if result.crashed else "Validation failed"
                 print(f"  [REVERT] {label} ({elapsed:.0f}s)")
                 print(f"           {result.validation_summary.splitlines()[-1] if result.validation_summary else ''}")
-            elif not result.kept:
+            elif not (result.kept or result.accepted):
                 if commit_hash:
                     self._git_revert_last()
                 elif attempt_diff or self._new_paths_need_discard():
@@ -5343,8 +5469,8 @@ class IterationLoop(AnalysisRuntimeMixin):
                     f"  [REVERT] mean case speedup={speedup_txt} not better than "
                     f"best={best_txt}; raw mean={raw_wall_txt} ({elapsed:.0f}s)"
                 )
-            elif result.kept:
-                # Defer SIGTERM/SIGINT across the durable best-commit publication (main #hardening) so a kill
+            else:
+                # Defer SIGTERM/SIGINT across the durable commit publication (main #hardening) so a kill
                 # mid-checkpoint cannot leave the pending-keep/run-state half-written.
                 with _defer_termination_signals(bool(attempt_diff)):
                     if attempt_diff:
@@ -5358,8 +5484,9 @@ class IterationLoop(AnalysisRuntimeMixin):
                             )
                             self._persist_pending_keep(pending_keep)
                             commit_hash = self._git_commit(str(pending_keep["commit_message"]))
-                        except Exception as e:  # noqa: BLE001 - a KEEP that cannot be built is not a KEEP
+                        except Exception as e:  # noqa: BLE001 - a candidate that cannot be committed is reverted
                             result.kept = False
+                            result.accepted = False
                             result.validation_passed = False
                             result.crashed = True
                             result.validation_summary = f"COMMIT FAILED: {e}"
@@ -5370,17 +5497,19 @@ class IterationLoop(AnalysisRuntimeMixin):
                             print(f"           {str(e)[-300:]}")
                         else:
                             result.commit_hash = commit_hash
-                            self._promote_best(result)
-                            self.best_mean_case_speedup = result.mean_case_speedup
-                            self._finalize_keep_checkpoint(
+                            if result.kept:
+                                self._promote_best(result)
+                                self.best_mean_case_speedup = result.mean_case_speedup
+                            self._finalize_commit_checkpoint(
                                 result,
                                 plan=session_sink.get("plan", ""),
                                 best_before=best_before,
                                 pending=pending_keep,
                             )
-                            keep_checkpoint_finalized = True
-                            print(f"  [agent] Committed verified best: {commit_hash[:8]}")
-                    else:
+                            commit_checkpoint_finalized = True
+                            committed_what = "verified best" if result.kept else "next starting version"
+                            print(f"  [agent] Committed {committed_what}: {commit_hash[:8]}")
+                    elif result.kept:
                         # No-agent measurement path: there is no candidate diff to commit, but the measurement can
                         # still establish a best.
                         self._promote_best(result)
@@ -5389,7 +5518,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     # checkpoint JSON alongside our run-state durability.
                     if result.kept and on_best_committed:
                         on_best_committed(result)
-                    if keep_checkpoint_finalized:
+                    if commit_checkpoint_finalized:
                         self._clear_pending_keep()
                 if result.kept:
                     improvement = ""
@@ -5402,12 +5531,16 @@ class IterationLoop(AnalysisRuntimeMixin):
                         f"— NEW BEST{improvement}; raw mean={raw_wall_txt}"
                         f"{snr_str} ({elapsed:.0f}s)"
                     )
-            else:
-                print(f"  [SKIP]   wall_ms={result.wall_ms} ({elapsed:.0f}s)")
+                elif result.accepted and commit_checkpoint_finalized:
+                    best_txt = f"{self.best_mean_case_speedup:.6f}x" if self.best_mean_case_speedup is not None else "?"
+                    print(
+                        f"  [ACCEPT] mean case speedup={result.mean_case_speedup:.6f}x "
+                        f"(best={best_txt}) — next starting version; raw mean={raw_wall_txt} ({elapsed:.0f}s)"
+                    )
 
             # Remote/external work belongs outside the SIGTERM deferral window but still precedes potentially long
             # post-KEEP profiling.
-            if keep_checkpoint_finalized and pending_keep is not None:
+            if commit_checkpoint_finalized and result.kept and pending_keep is not None:
                 self._publish_best_result(
                     result,
                     plan=session_sink.get("plan", ""),
@@ -5426,17 +5559,18 @@ class IterationLoop(AnalysisRuntimeMixin):
                     mean_case_speedup=result.mean_case_speedup,
                     pmc_diagnosis=result.pmc_diagnosis,
                     vgpr=result.vgpr,
-                    decision="KEEP" if result.kept else "REVERT",
+                    decision=("KEEP" if result.kept else "ACCEPT" if result.accepted else "REVERT"),
                     notes=session_sink.get("plan", ""),
                 )
 
             self.results.append(result)
 
             # Reduce this finished iteration into the durable run state + append a factual event, then checkpoint.
-            if not keep_checkpoint_finalized:
+            if not commit_checkpoint_finalized:
                 self._record_iteration_outcome(
                     result,
                     plan=session_sink.get("plan", ""),
+                    parent=self._iteration_parent if attempt_diff else None,
                 )
 
             # The verdict is now known, so ask the just-finished implementer session to record what it explored, then
@@ -5480,6 +5614,12 @@ class IterationLoop(AnalysisRuntimeMixin):
                     outcome = f"CRASH: {last}" if result.crashed else f"REVERT (validation failed): {last}"
                 elif result.kept:
                     outcome = f"KEPT — new best mean case speedup={result.mean_case_speedup:.6f}x"
+                elif result.accepted:
+                    best_txt = f"{self.best_mean_case_speedup:.6f}x" if self.best_mean_case_speedup is not None else "?"
+                    outcome = (
+                        f"ACCEPTED (correct, not faster than best; next starting version): "
+                        f"mean case speedup={result.mean_case_speedup:.6f}x vs best={best_txt}"
+                    )
                 else:
                     best_txt = f"{self.best_mean_case_speedup:.6f}x" if self.best_mean_case_speedup is not None else "?"
                     speedup_txt = f"{result.mean_case_speedup:.6f}x" if result.mean_case_speedup is not None else "?"
@@ -5510,7 +5650,10 @@ class IterationLoop(AnalysisRuntimeMixin):
                             commit_hash=commit_hash,
                             decision=decision,
                             kept=result.kept,
+                            accepted=result.accepted,
                             validation_passed=result.validation_passed,
+                            parent_iteration=self._iteration_parent.iteration,
+                            parent_commit=self._iteration_parent.commit_hash,
                             wall_ms=result.wall_ms,
                             mean_case_speedup=result.mean_case_speedup,
                             bench_detail=result.bench_detail,
@@ -5533,16 +5676,18 @@ class IterationLoop(AnalysisRuntimeMixin):
                             turns=result.turns,
                         )
                     )
-                    if keep_checkpoint_finalized and archived_path is None:
+                    if commit_checkpoint_finalized and archived_path is None:
                         raise RuntimeError("candidate archive returned no published path")
                 except Exception as e:  # noqa: BLE001
-                    if keep_checkpoint_finalized:
+                    if commit_checkpoint_finalized:
                         self.persistence_degraded = True
-                        self.persistence_errors.append(f"archive derived KEEP view iteration {iteration}: {e}")
+                        self.persistence_errors.append(
+                            f"archive derived {decision_label} view iteration {iteration}: {e}"
+                        )
                         self.persistence_errors = self.persistence_errors[-10:]
                     log.debug("could not archive iteration %s: %s", iteration, e)
 
-            if not keep_checkpoint_finalized:
+            if not commit_checkpoint_finalized:
                 self._publish_best_result(
                     result,
                     plan=session_sink.get("plan", ""),
@@ -5560,8 +5705,8 @@ class IterationLoop(AnalysisRuntimeMixin):
             if on_iteration:
                 on_iteration(result)
 
-            # A KEEP makes the prior evidence stale but does not discard its paths.
-            if result.kept:
+            # A new starting version makes the prior evidence stale but does not discard its paths.
+            if result.kept or result.accepted:
                 self._analysis_bundle = None
 
         # Whatever the last iteration cost belongs to this campaign's history even though no further round will read
@@ -5609,7 +5754,16 @@ class IterationLoop(AnalysisRuntimeMixin):
         print(f"\n{'=' * 60}")
         print("Autonomous loop complete")
         print(f"  Iterations: {len(self.results)}")
-        print(f"  Kept: {kept_count}, Reverted: {len(self.results) - kept_count}")
+        if self.ic.search_policy is SearchPolicy.SEQUENTIAL:
+            print(f"  Kept: {kept_count}, Reverted: {len(self.results) - kept_count}")
+        else:
+            accepted_count = sum(1 for r in self.results if r.accepted)
+            print(
+                f"  Kept: {kept_count}, Accepted: {accepted_count}, "
+                f"Reverted: {len(self.results) - kept_count - accepted_count}"
+            )
+            print(f"  Best commit: {best_version(self.run_state).commit_hash or '(none)'}")
+            print(f"  Branch latest commit (next starting version): {self.run_state.head_commit or '(none)'}")
         if self.monitor is not None:
             print(f"  Supervisor interventions: {self.monitor.intervention_count}")
         print(f"  Best mean case speedup: {self.best_mean_case_speedup}x")
@@ -5675,13 +5829,42 @@ def _decision_label(result: IterationResult) -> str:
         if result.validation_outcome in {"driver_error", "invalid_result"}:
             return "REVERT_VALIDATION_ERROR"
         return "REVERT_VALIDATION"
-    return "KEEP" if result.kept else "REVERT_PERF"
+    if result.kept:
+        return DECISION_KEEP
+    return DECISION_ACCEPT if result.accepted else "REVERT_PERF"
+
+
+def _pending_decision(pending: dict) -> str:
+    """The decision a pending commit journal finishes."""
+    return DECISION_KEEP if pending["promotes_best"] else DECISION_ACCEPT
+
+
+def _search_candidate(
+    result: IterationResult,
+    decision: str,
+    *,
+    parent_iteration: int,
+    parent_commit: str,
+) -> SearchCandidate:
+    """The run-state record of one iteration's candidate."""
+    committed = decision in COMMITTED_DECISIONS
+    return SearchCandidate(
+        iteration=result.iteration,
+        parent_iteration=parent_iteration,
+        parent_commit=parent_commit,
+        decision=decision,
+        commit_hash=result.commit_hash if committed else "",
+        mean_case_speedup=result.mean_case_speedup,
+        case_times=dict((result.bench_detail or {}).get("case_times") or {}) if committed else {},
+    )
 
 
 def _long_horizon_header(
     state: RunState,
     store: LoopStateStore,
     handoff_store: HandoffStore | None = None,
+    *,
+    starting: StartingVersion | None = None,
 ) -> str:
     """The compact long-horizon header for the Implementer prompt, or \"\"."""
     outcomes = store.recent_results(LONG_HORIZON_OUTCOME_WINDOW)
@@ -5689,6 +5872,7 @@ def _long_horizon_header(
         state,
         outcomes,
         include_handoffs=bool(handoff_store and handoff_store.latest()),
+        starting=starting,
     )
 
 
@@ -5702,7 +5886,7 @@ def _compact_history_entry(r: IterationResult) -> str:
             if lines:
                 last = lines[-1][:60]
         return f"iter {r.iteration} REVERT(validation) last='{last}' rat='{rat}'"
-    parts = [f"iter {r.iteration}", "KEEP" if r.kept else "REVERT(perf)"]
+    parts = [f"iter {r.iteration}", "KEEP" if r.kept else "ACCEPT" if r.accepted else "REVERT(perf)"]
     if r.mean_case_speedup is not None:
         parts.append(f"mean_case_speedup={r.mean_case_speedup:.4f}x")
     if r.wall_ms is not None:

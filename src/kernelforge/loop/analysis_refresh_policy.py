@@ -93,6 +93,9 @@ def decide_analysis_refresh(
     reasons: list[str] = []
     if stale and gain is not None and gain + 1e-12 >= ANALYSIS_REFRESH_THRESHOLD:
         reasons.append("CUMULATIVE_GAIN")
+    # A starting version that fell behind its evidence has changed as much as one that pulled ahead of it.
+    if stale and gain is not None and -gain + 1e-12 >= ANALYSIS_REFRESH_THRESHOLD:
+        reasons.append("CUMULATIVE_DECLINE")
     if stale and supervisor_due:
         reasons.append("SUPERVISOR_STALE_EVIDENCE")
     if reasons:

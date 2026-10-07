@@ -1,116 +1,140 @@
-"""Deterministic search-mode policy for forge-loop planning."""
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Which kernel version each forge-loop iteration starts from."""
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from enum import Enum
 
 
-SEARCH_MODE_EXPLOIT = "EXPLOIT"
-SEARCH_MODE_DIVERSIFY = "DIVERSIFY"
-SEARCH_MODES = frozenset({SEARCH_MODE_EXPLOIT, SEARCH_MODE_DIVERSIFY})
+class SearchPolicy(str, Enum):
+    """The rule that decides which measured candidates later iterations build on."""
 
-OBJECTIVE_IMMEDIATE_CANONICAL_GAIN = "IMMEDIATE_CANONICAL_GAIN"
-OBJECTIVE_DISCOVER_NEW_MECHANISM = "DISCOVER_NEW_MECHANISM"
+    SEQUENTIAL = "sequential"
+    SEQANY = "seqany"
 
-# One empty diff can be a session that honestly found nothing worth changing.
-NO_CHANGES_ESCALATION_THRESHOLD = 2
 
-# How many recent iteration outcomes are scanned for that streak.
-NO_CHANGES_STREAK_WINDOW = 16
+DEFAULT_SEARCH_POLICY = SearchPolicy.SEQUENTIAL
 
-# The smallest total gain a run of exploit iterations can produce and still be worth another one.
-MARGINAL_GAIN_FLOOR = 0.05
+# Implementer lanes a sequential round runs when the caller does not choose.
+SEQUENTIAL_DEFAULT_LANES = 3
 
-# How many measured steps that window spans, counted in outcomes rather than iterations so the ones that measured
-# nothing do not shorten it.
-MARGINAL_GAIN_WINDOW = 6
+DECISION_KEEP = "KEEP"
+DECISION_ACCEPT = "ACCEPT"
+# Decisions whose candidate is committed on the campaign branch.
+COMMITTED_DECISIONS = frozenset({DECISION_KEEP, DECISION_ACCEPT})
 
-# How many recent outcomes are scanned to fill that window.
-MARGINAL_GAIN_SCAN_WINDOW = 16
+
+def parse_search_policy(value: str) -> SearchPolicy:
+    """Resolve a configured policy name, refusing anything the loop cannot run."""
+    try:
+        return SearchPolicy(str(value).strip().lower())
+    except ValueError:
+        known = ", ".join(policy.value for policy in SearchPolicy)
+        raise ValueError(f"unsupported search policy {value!r}; expected one of {known}") from None
+
+
+def resolve_lanes(policy: SearchPolicy, requested: int | None) -> int:
+    """How many Implementer lanes a round runs under ``policy``; ``None`` asks for the policy's default.
+
+    ``seqany`` is a single chain: every valid lane candidate would be accepted and applied over the others without a
+    speed check, so it runs exactly one lane.
+    """
+    if requested is not None and requested < 1:
+        raise ValueError(f"lanes must be at least 1, got {requested}")
+    if policy is SearchPolicy.SEQANY:
+        if requested not in (None, 1):
+            raise ValueError(f"search policy 'seqany' runs a single lane; got {requested} lanes")
+        return 1
+    return SEQUENTIAL_DEFAULT_LANES if requested is None else requested
 
 
 @dataclass(frozen=True)
-class SearchPolicyDecision:
-    """One auditable search-mode decision."""
+class SearchCandidate:
+    """One iteration's candidate: the version it was made from and what became of it."""
 
-    mode: str
-    reason_codes: tuple[str, ...]
-    objective_kind: str
-    residence_iterations_remaining: int = 0
+    iteration: int
+    parent_iteration: int
+    parent_commit: str
+    decision: str
+    # Set for a KEEP or an ACCEPT, the decisions that commit the candidate.
+    commit_hash: str = ""
+    # Set whenever the candidate was scored.
+    mean_case_speedup: float | None = None
+    # Per-case times of a committed candidate, which a later iteration may start from.
+    case_times: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.mode not in SEARCH_MODES:
-            raise ValueError(f"unsupported search mode: {self.mode}")
-        if not self.reason_codes:
-            raise ValueError("search policy reason_codes must not be empty")
-
-
-class SearchPolicyEngine:
-    """Choose EXPLOIT or DIVERSIFY from durable, measured state."""
-
-    def decide(
-        self,
-        *,
-        best_source: str,
-        no_improvement_iters: int,
-        stall_threshold: int,
-        current_mode: str = SEARCH_MODE_EXPLOIT,
-        residence_iterations_remaining: int = 0,
-        diversification_cycle_completed: bool = False,
-        consecutive_no_changes: int = 0,
-        window_gain_ratio: float | None = None,
-    ) -> SearchPolicyDecision:
-        """Return a deterministic mode with stable reason codes."""
-        threshold = max(1, int(stall_threshold))
-        residence = max(0, int(residence_iterations_remaining))
-        empty_diffs = max(0, int(consecutive_no_changes))
-        window_gain = None if window_gain_ratio is None else float(window_gain_ratio)
-        if window_gain is not None and not math.isfinite(window_gain):
-            raise ValueError(f"window_gain_ratio must be finite: {window_gain_ratio!r}")
-
-        # Outranks every other signal, mode residence included: those weigh how promising the current direction is,
-        # while repeated empty diffs are evidence it cannot be turned into a candidate at all, so staying in EXPLOIT
-        # spends another session on a direction that produces no edit.
-        if empty_diffs >= NO_CHANGES_ESCALATION_THRESHOLD:
-            mode = SEARCH_MODE_DIVERSIFY
-            reason = "REPEATED_NO_CHANGES"
-        elif current_mode == SEARCH_MODE_EXPLOIT and residence > 0:
-            mode = SEARCH_MODE_EXPLOIT
-            reason = "MODE_RESIDENCE"
-        elif diversification_cycle_completed:
-            mode = SEARCH_MODE_EXPLOIT
-            reason = "DIVERSIFY_PLAN_CREATED"
-        elif no_improvement_iters >= threshold:
-            mode = SEARCH_MODE_DIVERSIFY
-            reason = "NO_IMPROVEMENT_STALL"
-        elif window_gain is not None and window_gain < MARGINAL_GAIN_FLOOR:
-            mode = SEARCH_MODE_DIVERSIFY
-            reason = "DIMINISHING_RETURNS"
-        elif (best_source or "").strip().lower() == "warm_start":
-            mode = SEARCH_MODE_EXPLOIT
-            reason = "KB_WARM_START_EXPLOIT"
-        else:
-            mode = SEARCH_MODE_EXPLOIT
-            reason = "CANONICAL_GAIN_AVAILABLE"
-
-        if mode == SEARCH_MODE_DIVERSIFY:
-            return SearchPolicyDecision(
-                mode=mode,
-                reason_codes=(reason,),
-                objective_kind=OBJECTIVE_DISCOVER_NEW_MECHANISM,
-                residence_iterations_remaining=0,
+        if isinstance(self.iteration, bool) or not isinstance(self.iteration, int) or self.iteration <= 0:
+            raise ValueError(f"candidate iteration must be a positive integer: {self.iteration!r}")
+        if (
+            isinstance(self.parent_iteration, bool)
+            or not isinstance(self.parent_iteration, int)
+            or not 0 <= self.parent_iteration < self.iteration
+        ):
+            raise ValueError(f"candidate {self.iteration} parent iteration must precede it: {self.parent_iteration!r}")
+        if not str(self.parent_commit or "").strip():
+            raise ValueError(f"candidate {self.iteration} has no parent commit")
+        if not str(self.decision or "").strip():
+            raise ValueError(f"candidate {self.iteration} has no decision")
+        committed = self.decision in COMMITTED_DECISIONS
+        if committed != bool(str(self.commit_hash or "").strip()):
+            raise ValueError(
+                f"candidate {self.iteration} decision {self.decision} "
+                f"{'requires' if committed else 'must not carry'} a commit"
             )
+        if self.mean_case_speedup is not None and (
+            isinstance(self.mean_case_speedup, bool)
+            or not math.isfinite(float(self.mean_case_speedup))
+            or float(self.mean_case_speedup) <= 0
+        ):
+            raise ValueError(f"candidate {self.iteration} score must be a positive finite number")
 
-        if reason == "DIVERSIFY_PLAN_CREATED":
-            next_residence = max(0, threshold - 1)
-        elif reason == "MODE_RESIDENCE":
-            next_residence = residence - 1
-        else:
-            next_residence = 0
-        return SearchPolicyDecision(
-            mode=mode,
-            reason_codes=(reason,),
-            objective_kind=OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
-            residence_iterations_remaining=next_residence,
-        )
+    @property
+    def committed(self) -> bool:
+        return self.decision in COMMITTED_DECISIONS
+
+
+@dataclass(frozen=True)
+class StartingVersion:
+    """The committed kernel version an iteration's candidate is made from."""
+
+    iteration: int
+    commit_hash: str
+    mean_case_speedup: float | None
+    case_times: dict[str, float]
+
+
+def accepts(policy: SearchPolicy, *, valid: bool, improves_best: bool) -> bool:
+    """Whether a measured candidate becomes the next iteration's starting version."""
+    if policy is SearchPolicy.SEQUENTIAL:
+        return valid and improves_best
+    if policy is SearchPolicy.SEQANY:
+        return valid
+    raise ValueError(f"unsupported search policy: {policy!r}")
+
+
+def select_starting_version(
+    policy: SearchPolicy,
+    *,
+    candidates: Sequence[SearchCandidate],
+    best: StartingVersion,
+) -> StartingVersion:
+    """The version the next iteration starts from, derived from the candidate records."""
+    if policy is SearchPolicy.SEQUENTIAL:
+        return best
+    if policy is SearchPolicy.SEQANY:
+        for record in reversed(candidates):
+            if record.committed:
+                return StartingVersion(
+                    iteration=record.iteration,
+                    commit_hash=record.commit_hash,
+                    mean_case_speedup=record.mean_case_speedup,
+                    case_times=dict(record.case_times),
+                )
+        return best
+    raise ValueError(f"unsupported search policy: {policy!r}")

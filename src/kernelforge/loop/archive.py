@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from kernelforge.durable_io import atomic_write_text, fsync_directory
+from kernelforge.loop.search_policy import COMMITTED_DECISIONS
 
 log = logging.getLogger(__name__)
 
@@ -25,9 +26,13 @@ class CandidateRecord:
 
     iteration: int
     commit_hash: str = ""
-    decision: str = ""  # KEEP / REVERT_PERF / REVERT_VALIDATION* / BUILD_FAILED
+    decision: str = ""  # KEEP / ACCEPT / REVERT_PERF / REVERT_VALIDATION* / BUILD_FAILED
     kept: bool = False
+    accepted: bool = False
     validation_passed: bool = False
+    # The version the candidate was made from.
+    parent_iteration: int | None = None
+    parent_commit: str = ""
 
     # Measurement
     wall_ms: float | None = None
@@ -377,7 +382,10 @@ class CandidateArchive:
                 "commit_hash": rec.commit_hash,
                 "decision": rec.decision,
                 "kept": rec.kept,
+                "accepted": rec.accepted,
                 "validation_passed": rec.validation_passed,
+                "parent_iteration": rec.parent_iteration,
+                "parent_commit": rec.parent_commit,
                 "wall_ms": rec.wall_ms,
                 "mean_case_speedup": rec.mean_case_speedup,
                 "bench": rec.bench_detail or {},
@@ -540,7 +548,7 @@ class CandidateArchive:
         recent_count: int,
     ) -> list[dict]:
         """Pick which iterations get a full diff in the prompt (AVO-style Sample)."""
-        keeps = [e for e in index if e.get("decision") == "KEEP"]
+        keeps = [e for e in index if e.get("decision") in COMMITTED_DECISIONS]
         near = sorted(
             [e for e in index if e.get("decision") == "REVERT_PERF" and e.get("mean_case_speedup") is not None],
             key=lambda e: e["mean_case_speedup"],
@@ -561,10 +569,10 @@ class CandidateArchive:
         return selected
 
     def _table_entries(self, index: list[dict], max_rows: int) -> tuple[list[dict], bool]:
-        """Trajectory rows to show: all if within budget, else KEEPs + latest."""
+        """Trajectory rows to show: all if within budget, else committed candidates + latest."""
         if len(index) <= max_rows:
             return index, False
-        keeps = [e for e in index if e.get("decision") == "KEEP"]
+        keeps = [e for e in index if e.get("decision") in COMMITTED_DECISIONS]
         tail_n = max(0, max_rows - len(keeps))
         tail = index[-tail_n:] if tail_n else []
         seen: set = set()
@@ -609,7 +617,7 @@ class CandidateArchive:
         out.append(f"  {self.root}/iter_NNN/")
         out.append("    kernel.py  change.diff  meta.json  validation.txt")
         out.append("Read any of them (Read tool, or `git show <commit>`) to study, reuse, or")
-        out.append("COMBINE prior approaches — the file on disk is only the current best.")
+        out.append("COMBINE prior approaches — the file on disk is only the version this iteration starts from.")
         out.append("")
 
         # Layer 1 — trajectory table.

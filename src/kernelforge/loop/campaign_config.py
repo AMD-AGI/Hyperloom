@@ -29,11 +29,10 @@ from kernelforge.loop.new_path_allowlist import normalize_commit_new_paths
 from kernelforge.mcp_server.tools.pmc import derive_kernel_names
 from kernelforge.durable_io import atomic_write_text
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.loop.search_policy import DEFAULT_SEARCH_POLICY, SearchPolicy, parse_search_policy
 
 
-SCHEMA_VERSION = 7
-# Versions a campaign on disk may be written in and still be read back.
-READABLE_SCHEMA_VERSIONS = (6, 7)
+SCHEMA_VERSION = 8
 _GPU_TARGET_RE = re.compile(r"\bgfx[0-9a-f]+\b", re.IGNORECASE)
 _AMDGPU_ASSEMBLY_RE = re.compile(
     r"^\s*\.(?:amdgcn_target\s+[\"']?amdgcn-amd-amdhsa\b|amdhsa_kernel\b|amdgpu_hsa_kernel\b)",
@@ -77,20 +76,23 @@ class CampaignConfig:
     # Paths the Implementer may CREATE and still have committed with a KEEP (see
     # ``IterationConfig.commit_new_paths``).
     commit_new_paths: list[str] = field(default_factory=list)
+    # Fixed per campaign: it decides what the campaign branch's latest commit means.
+    search_policy: SearchPolicy = DEFAULT_SEARCH_POLICY
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        payload = asdict(self)
+        payload["search_policy"] = self.search_policy.value
+        return payload
 
     @classmethod
     def from_dict(cls, payload: dict) -> "CampaignConfig":
         if not isinstance(payload, dict):
             raise ValueError("campaign config must be a JSON object")
         version = int(payload.get("schema_version", 0) or 0)
-        if version not in READABLE_SCHEMA_VERSIONS:
-            raise ValueError(
-                f"unsupported campaign config schema {version}; expected one "
-                "of " + ", ".join(str(known) for known in READABLE_SCHEMA_VERSIONS)
-            )
+        if version != SCHEMA_VERSION:
+            raise ValueError(f"unsupported campaign config schema {version}; expected {SCHEMA_VERSION}")
+        if "search_policy" not in payload:
+            raise ValueError("campaign config has no search policy")
         unknown_fields = set(payload) - {item.name for item in fields(cls)}
         if unknown_fields:
             raise ValueError("unsupported campaign config fields: " + ", ".join(sorted(unknown_fields)))
@@ -124,6 +126,7 @@ class CampaignConfig:
             # hand-edited pattern the loop would read differently than its author meant is refused here rather than
             # acted on later.
             commit_new_paths=normalize_commit_new_paths(payload.get("commit_new_paths") or []),
+            search_policy=parse_search_policy(payload["search_policy"]),
         )
         if config.program_md_path and not config.program_md_sha256:
             raise ValueError("campaign program context digest is missing")
@@ -444,6 +447,7 @@ def create_campaign_config(
     nproc_per_node: int = 1,
     bench_repeat: int = 1,
     commit_new_paths: list[str] | None = None,
+    search_policy: SearchPolicy = DEFAULT_SEARCH_POLICY,
 ) -> CampaignConfig:
     """Resolve and normalize all immutable inputs for a fresh/legacy campaign."""
     workspace = Path(workspace_dir).resolve()
@@ -556,4 +560,5 @@ def create_campaign_config(
         nproc_per_node=max(1, int(nproc_per_node or 1)),
         bench_repeat=max(1, int(bench_repeat or 1)),
         commit_new_paths=normalize_commit_new_paths(commit_new_paths or []),
+        search_policy=search_policy,
     )

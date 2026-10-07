@@ -17,16 +17,23 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TextIO
 
-from kernelforge.loop.search_policy import (
+from kernelforge.loop.search_mode import (
     OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
     SEARCH_MODE_EXPLOIT,
     SEARCH_MODES,
+)
+from kernelforge.loop.search_policy import (
+    DECISION_ACCEPT,
+    SearchCandidate,
+    SearchPolicy,
+    StartingVersion,
+    select_starting_version,
 )
 from kernelforge.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 # How many trailing events the store keeps in memory to serve ``recent_events`` without re-reading ``events.jsonl``
 # each iteration (see LoopStateStore).
@@ -91,6 +98,7 @@ class CumulativeCounters:
 
     iterations: int = 0
     kept: int = 0
+    accepted: int = 0
     reverted: int = 0
     api_errors: int = 0
     orchestration_errors: int = 0
@@ -212,6 +220,11 @@ class RunState:
     # the workspace has moved on.
     search_start_mean_case_speedup: float | None = None
     best: BestRecord = field(default_factory=BestRecord)
+    # The commit the campaign's first iteration started from: the pristine base or the applied warm start.
+    start_commit: str = ""
+    # One record per candidate-producing iteration, in iteration order; the search policy derives each iteration's
+    # starting version from them.
+    candidates: list[SearchCandidate] = field(default_factory=list)
     stall: StallState = field(default_factory=StallState)
     analysis: AnalysisRefreshState = field(default_factory=AnalysisRefreshState)
     last_critic: CriticRuling = field(default_factory=CriticRuling)
@@ -232,61 +245,9 @@ class RunState:
         if not isinstance(d, dict):
             raise ValueError("run state must be a JSON object")
         version = d.get("schema_version")
-        payload = dict(d)
-        if version == 13:
-            # v13 predates the durable Analysis refresh anchor.
-            payload["analysis"] = asdict(AnalysisRefreshState())
-            version = 14
-        if version == 14:
-            # v14 predates the durable Plan Critic ruling.
-            payload["last_critic"] = asdict(CriticRuling())
-            version = 15
-        if version == 15:
-            # v15 predates the round cost history.
-            payload["round_costs"] = asdict(RoundCostState())
-            version = 16
-        if version == 16:
-            # v16 recorded what a round spent planning but not what its canonical measurement cost, which was then
-            # priced from the per-step timeout ceilings rather than from observation.
-            costs = payload.get("round_costs")
-            if isinstance(costs, dict):
-                for entry in costs.get("recent") or []:
-                    if isinstance(entry, dict):
-                        entry.setdefault("measurement_sec", 0.0)
-            version = 17
-        if version == 17:
-            # v17 accumulated campaign-cumulative planning with no campaign wall-clock to divide it by, so the report
-            # divided it by the CURRENT process's elapsed time -- the wrong span on any resumed campaign, and the
-            # reason a 10-minute session against 45 minutes of cumulative planning published "450% of the run".
-            costs = payload.get("round_costs")
-            if isinstance(costs, dict):
-                costs.setdefault(
-                    "campaign_sec",
-                    max(
-                        float(costs.get("total_sec", 0.0) or 0.0),
-                        float(costs.get("planning_total_sec", 0.0) or 0.0),
-                    ),
-                )
-            version = 18
-        if version == 18:
-            # v18 read one counter for both the supervisor cooldown and the search-mode switch.
-            stall = payload.get("stall")
-            if isinstance(stall, dict):
-                stall.setdefault(
-                    "unresolved_stall_iters",
-                    int(stall.get("no_improvement_iters", 0) or 0),
-                )
-            version = 19
-        if version == 19:
-            # v19 had no caller-supplied scoring anchor, so the kernel a campaign started from was always the anchor
-            # and always scored 1.0 against it. Left absent rather than backfilled to 1.0: a checkpoint that never
-            # recorded the score did not measure one, and the KEEP bar does not read this field -- it is derived from
-            # the incumbent's own per-case times -- so only incremental reporting sees the difference.
-            payload.setdefault("search_start_mean_case_speedup", None)
-            version = SCHEMA_VERSION
         if version != SCHEMA_VERSION:
             raise ValueError(f"unsupported run state schema: expected v{SCHEMA_VERSION}, got {version!r}")
-        payload["schema_version"] = SCHEMA_VERSION
+        payload = dict(d)
 
         expected = set(cls.__dataclass_fields__)
         missing = expected - set(payload)
@@ -340,6 +301,14 @@ class RunState:
             nested(entry, RoundCost, f"round_costs.recent[{index}]") for index, entry in enumerate(round_costs.recent)
         ]
         payload["round_costs"] = round_costs
+        if not isinstance(payload["candidates"], list):
+            raise ValueError("run state candidates must be a list")
+        payload["candidates"] = [
+            nested(entry, SearchCandidate, f"candidates[{index}]") for index, entry in enumerate(payload["candidates"])
+        ]
+        iterations = [record.iteration for record in payload["candidates"]]
+        if iterations != sorted(set(iterations)):
+            raise ValueError("run state candidates must be in strictly increasing iteration order")
         state = cls(**payload)
         _validate_round_costs(state.round_costs)
         if state.search_mode not in SEARCH_MODES:
@@ -467,18 +436,32 @@ def apply_iteration(
     stall_threshold: int = _DEFAULT_STALL_PHASE_THRESHOLD,
     orchestration_error_threshold: int = 3,
     max_pinned: int = 8,
+    candidate: SearchCandidate | None = None,
 ) -> "RunState":
-    """Reduce one finished iteration's outcome into the run state (in place)."""
+    """Reduce one finished iteration's outcome into the run state (in place).
+
+    ``kept`` means the iteration produced a new best; an ``ACCEPT`` is committed without one and counts as an
+    iteration without improvement. ``candidate`` is the iteration's record when it produced a candidate diff.
+    """
     if iteration < state.next_iteration:
         raise ValueError(
             f"iteration {iteration} would reuse completed iteration; next iteration is {state.next_iteration}"
+        )
+    if candidate is not None and (candidate.iteration != iteration or candidate.decision != decision):
+        raise ValueError(
+            f"candidate record {candidate.iteration}/{candidate.decision} does not describe iteration "
+            f"{iteration}/{decision}"
         )
     infrastructure = is_infrastructure_decision(decision)
     state.iteration = iteration
     state.next_iteration = iteration + 1
     state.cumulative.iterations += 1
+    if candidate is not None:
+        state.candidates.append(candidate)
     if kept:
         state.cumulative.kept += 1
+    elif str(decision or "").strip().upper() == DECISION_ACCEPT:
+        state.cumulative.accepted += 1
     elif infrastructure:
         if str(decision or "").strip().upper() == "API_ERROR":
             state.cumulative.api_errors += 1
@@ -609,11 +592,30 @@ def apply_supervisor_intervention(
     return state
 
 
-def should_resume(state: "RunState", head_commit: str) -> bool:
-    """Whether a loaded state is a safe resume point for the current HEAD."""
-    recorded = (state.best.commit_hash or "").strip()
+def best_version(state: "RunState") -> StartingVersion:
+    """The best version as a starting version: before any KEEP, the version the campaign started from."""
+    return StartingVersion(
+        iteration=state.best.iteration,
+        commit_hash=state.best.commit_hash or state.start_commit,
+        mean_case_speedup=state.best.mean_case_speedup,
+        case_times=dict(state.best_case_times),
+    )
+
+
+def starting_version(state: "RunState", policy: SearchPolicy) -> StartingVersion:
+    """The version the next iteration starts from under ``policy``."""
+    return select_starting_version(policy, candidates=state.candidates, best=best_version(state))
+
+
+def should_resume(state: "RunState", head_commit: str, policy: SearchPolicy) -> bool:
+    """Whether a loaded state's best record can be restored at the current HEAD."""
     head = (head_commit or "").strip()
-    return bool(recorded and state.best.mean_case_speedup is not None and head and head == recorded)
+    return bool(
+        state.best.commit_hash
+        and state.best.mean_case_speedup is not None
+        and head
+        and head == starting_version(state, policy).commit_hash
+    )
 
 
 # How many iterations the retrieval map can hold at once.
@@ -694,7 +696,7 @@ class LoopStateStore:
         self.degraded = False
         self.persistence_errors: list[str] = []
         # Bounded in-memory tails of recent events so ``recent_events`` and ``recent_results`` (called once per
-        # iteration for the prompt header and the search policy) are O(1) and never re-parse the whole, ever-growing
+        # iteration for the prompt header and the search mode) are O(1) and never re-parse the whole, ever-growing
         # ``events.jsonl``.
         self._recent: collections.deque[dict] = collections.deque(maxlen=_RECENT_CACHE)
         self._recent_results: collections.deque[dict] = collections.deque(maxlen=_RECENT_RESULT_CACHE)

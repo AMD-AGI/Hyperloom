@@ -383,6 +383,7 @@ class InSessionGate:
         snr_threshold: float,
         baseline_case_times: dict | None = None,
         best_mean_case_speedup: float | None = None,
+        starting_mean_case_speedup: float | None = None,
         kernel_file: str = "",
         max_blocks: int = 10,
         stage_timeout_sec: int = 1800,
@@ -404,6 +405,8 @@ class InSessionGate:
         self.bench_repeat = bench_repeat
         self.baseline_case_times = dict(baseline_case_times or {})
         self.best_mean_case_speedup = best_mean_case_speedup
+        # The score of the version the session started from, set only when that version is not the best.
+        self.starting_mean_case_speedup = starting_mean_case_speedup
         # Correctness-only phase (e.g. PORT): the gate requires ONLY correctness and never runs the perf gate (no
         # benchmark; best score unused).
         self.correctness_only = correctness_only
@@ -1222,12 +1225,19 @@ class InSessionGate:
                 f"raw mean {wall_txt} ms) "
                 f"edit={self.edit_count}"
             )
+            starting_txt = (
+                f"This session started from an accepted version scoring {self.starting_mean_case_speedup:.6f}x, "
+                "which is not the best.\n"
+                if self.starting_mean_case_speedup is not None
+                else ""
+            )
             return self._block(
                 "The kernel is CORRECT but NOT faster than the current best, so it "
                 "is not good enough to finish.\n"
                 f"Measured mean case speedup={speedup_txt}; required="
                 f"{required:.6f}x; "
                 f"raw mean={wall_txt} ms.\n"
+                f"{starting_txt}"
                 "Keep the kernel correct and try a DIFFERENT optimization to reduce "
                 "wall time, then continue."
             )

@@ -448,6 +448,7 @@ Never `cat` a whole file — use the Read tool.
         session_sink: dict | None = None,
         baseline_case_times: dict | None = None,
         best_mean_case_speedup: float | None = None,
+        starting_mean_case_speedup: float | None = None,
     ) -> str:
         # Mark the session before entering the provider.
         progress_log: list[str] = []
@@ -541,6 +542,7 @@ Make your change(s) now.
                 snr_threshold=snr_threshold,
                 baseline_case_times=baseline_case_times,
                 best_mean_case_speedup=best_mean_case_speedup,
+                starting_mean_case_speedup=starting_mean_case_speedup,
                 kernel_file=kernel_path,
                 max_blocks=max_blocks,
                 stage_timeout_sec=validation_timeout_sec,
@@ -581,7 +583,13 @@ Make your change(s) now.
                     "one does not; repeatability is worth as much as speed.\n"
                     f"Fixed pristine per-case ms: {dict(baseline_case_times or {})}\n"
                     f"Current best pristine-relative score: {best_mean_case_speedup}.\n"
-                    "Raw `mean_ms` is diagnostic and never decides KEEP/REVERT."
+                    + (
+                        f"This session starts from an accepted version that is not the best; its score is "
+                        f"{starting_mean_case_speedup}. The bar above is still the best.\n"
+                        if starting_mean_case_speedup is not None
+                        else ""
+                    )
+                    + "Raw `mean_ms` is diagnostic and never decides KEEP/REVERT."
                 )
                 system_prompt = gate_system_prompt + scoring_context
 

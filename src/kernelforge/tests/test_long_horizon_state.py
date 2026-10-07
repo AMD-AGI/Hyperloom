@@ -26,7 +26,7 @@ from kernelforge.loop.run_state import (
     SCHEMA_VERSION,
     SESSION_RUNNING,
     _RECENT_RESULT_CACHE,
-    CriticRuling,
+    BestRecord,
     LoopStateStore,
     RunState,
     WorkspaceLockError,
@@ -41,7 +41,9 @@ from kernelforge.loop.run_state import (
     reconcile_stale_running_session,
     should_resume,
     start_session,
+    starting_version,
 )
+from kernelforge.loop.search_policy import SearchCandidate, SearchPolicy
 from kernelforge.loop.runner import (
     LONG_HORIZON_OUTCOME_WINDOW,
     _long_horizon_header,
@@ -134,117 +136,16 @@ def test_load_noncurrent_schema_fails_closed(tmp_path):
         LoopStateStore(str(tmp_path)).load()
 
 
-def test_load_v13_migrates_with_empty_analysis_anchor(tmp_path):
-    """A v13 checkpoint crosses every version added since, not just the next."""
-    store = LoopStateStore(str(tmp_path))
+def test_load_the_previous_schema_fails_closed(tmp_path):
+    """Checkpoints are not migrated; a workspace written by an older loop starts a fresh campaign."""
     payload = RunState().to_dict()
-    payload["schema_version"] = 13
-    payload.pop("analysis")
-    payload.pop("last_critic")
+    payload["schema_version"] = SCHEMA_VERSION - 1
     root = tmp_path / "forge_experiments"
     root.mkdir(parents=True, exist_ok=True)
     (root / "run_state.json").write_text(json.dumps(payload))
 
-    migrated = store.load()
-
-    assert migrated.schema_version == SCHEMA_VERSION
-    assert migrated.analysis.evidence_commit == ""
-    assert migrated.analysis.evidence_mean_case_speedup is None
-    assert migrated.last_critic == CriticRuling()
-
-
-def test_load_v14_migrates_with_no_critic_ruling(tmp_path):
-    """What such a campaign knows is that it never recorded a verdict."""
-    store = LoopStateStore(str(tmp_path))
-    payload = RunState().to_dict()
-    payload["schema_version"] = 14
-    payload.pop("last_critic")
-    root = tmp_path / "forge_experiments"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "run_state.json").write_text(json.dumps(payload))
-
-    migrated = store.load()
-
-    assert migrated.schema_version == SCHEMA_VERSION
-    assert migrated.last_critic == CriticRuling()
-
-
-def test_load_v17_migrates_with_a_campaign_clock_that_covers_its_planning(
-    tmp_path,
-):
-    """A v17 checkpoint banked planning with no span to divide it by."""
-    store = LoopStateStore(str(tmp_path))
-    payload = RunState().to_dict()
-    payload["schema_version"] = 17
-    payload["round_costs"]["rounds"] = 3
-    payload["round_costs"]["planning_total_sec"] = 2700.0
-    payload["round_costs"]["total_sec"] = 3300.0
-    payload["round_costs"].pop("campaign_sec")
-    root = tmp_path / "forge_experiments"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "run_state.json").write_text(json.dumps(payload))
-
-    migrated = store.load()
-
-    assert migrated.schema_version == SCHEMA_VERSION
-    assert migrated.round_costs.campaign_sec == 3300.0
-    # A share, not a number several times its own definition.
-    assert migrated.round_costs.planning_share_pct() == pytest.approx(100.0 * 2700.0 / 3300.0)
-
-
-def test_load_v17_without_round_wall_clock_still_covers_its_planning(tmp_path):
-    """The degenerate v17 shape: planning recorded, round totals missing."""
-    store = LoopStateStore(str(tmp_path))
-    payload = RunState().to_dict()
-    payload["schema_version"] = 17
-    payload["round_costs"]["rounds"] = 2
-    payload["round_costs"]["planning_total_sec"] = 2700.0
-    payload["round_costs"]["total_sec"] = 0.0
-    payload["round_costs"].pop("campaign_sec")
-    root = tmp_path / "forge_experiments"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "run_state.json").write_text(json.dumps(payload))
-
-    migrated = store.load()
-
-    assert migrated.round_costs.campaign_sec == 2700.0
-    assert migrated.round_costs.planning_share_pct() == pytest.approx(100.0)
-
-
-def test_load_v18_seeds_the_stall_counter_from_the_shared_streak(tmp_path):
-    """A v18 checkpoint held one counter for two questions."""
-    store = LoopStateStore(str(tmp_path))
-    payload = RunState().to_dict()
-    payload["schema_version"] = 18
-    payload["stall"]["no_improvement_iters"] = 4
-    payload["stall"].pop("unresolved_stall_iters")
-    root = tmp_path / "forge_experiments"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "run_state.json").write_text(json.dumps(payload))
-
-    migrated = store.load()
-
-    assert migrated.schema_version == SCHEMA_VERSION
-    assert migrated.stall.no_improvement_iters == 4
-    assert migrated.stall.unresolved_stall_iters == 4
-
-
-def test_load_v19_migrates_without_a_recorded_search_start_score(tmp_path):
-    """Every workspace in the field holds a v19 checkpoint, and the loop loads it whether or not it is resuming."""
-    store = LoopStateStore(str(tmp_path))
-    payload = RunState().to_dict()
-    payload["schema_version"] = 19
-    payload.pop("search_start_mean_case_speedup")
-    root = tmp_path / "forge_experiments"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "run_state.json").write_text(json.dumps(payload))
-
-    migrated = store.load()
-
-    assert migrated.schema_version == SCHEMA_VERSION
-    # Absent rather than 1.0: a campaign that never had a caller-supplied anchor never measured this, and only
-    # incremental reporting reads it -- the KEEP bar is derived from the incumbent's own per-case times.
-    assert migrated.search_start_mean_case_speedup is None
+    with pytest.raises(ValueError, match=f"expected v{SCHEMA_VERSION}, got {SCHEMA_VERSION - 1}"):
+        LoopStateStore(str(tmp_path)).load()
 
 
 def test_a_keep_clears_both_stall_counters():
@@ -849,7 +750,7 @@ def _store_with_live_iteration_events(tmp_path, iterations: range) -> LoopStateS
     """A store fed the events a live iteration writes, for each iteration."""
     store = LoopStateStore(str(tmp_path))
     for iteration in iterations:
-        store.append_event(make_event("search_policy_decision", iteration, mode="EXPLOIT"))
+        store.append_event(make_event("search_mode_decision", iteration, mode="EXPLOIT"))
         store.append_event(make_event("iteration_started", iteration, phase=PHASE_EXPLOIT))
         store.append_event(make_event("analysis_result", iteration, status="ready"))
         store.append_event(
@@ -999,19 +900,109 @@ def test_no_best_recorded_before_first_keep():
 
 def test_should_resume_only_when_commit_is_head():
     fresh = RunState()
-    assert should_resume(fresh, "abc123") is False  # no recorded best
+    assert should_resume(fresh, "abc123", SearchPolicy.SEQUENTIAL) is False  # no recorded best
 
     state = RunState()
     state.best.commit_hash = "abc123"
     state.best.wall_ms = 0.5
     state.best.mean_case_speedup = 2.0
-    assert should_resume(state, "abc123") is True
-    assert should_resume(state, "def456") is False
-    assert should_resume(state, "") is False
+    assert should_resume(state, "abc123", SearchPolicy.SEQUENTIAL) is True
+    assert should_resume(state, "def456", SearchPolicy.SEQUENTIAL) is False
+    assert should_resume(state, "", SearchPolicy.SEQUENTIAL) is False
 
     no_wall = RunState()
     no_wall.best.commit_hash = "abc123"  # commit but never measured
-    assert should_resume(no_wall, "abc123") is False
+    assert should_resume(no_wall, "abc123", SearchPolicy.SEQUENTIAL) is False
+
+
+def test_seqany_resumes_at_the_latest_accepted_commit_not_at_the_best():
+    state = RunState(start_commit="base")
+    state.best = BestRecord(iteration=1, wall_ms=0.5, mean_case_speedup=2.0, commit_hash="c1", source="iteration")
+    state.best_case_times = {"a": 5.0}
+    state.candidates = [
+        SearchCandidate(1, 0, "base", "KEEP", "c1", 2.0, {"a": 5.0}),
+        SearchCandidate(2, 1, "c1", "ACCEPT", "c2", 1.8, {"a": 5.5}),
+    ]
+
+    assert should_resume(state, "c2", SearchPolicy.SEQANY) is True
+    assert should_resume(state, "c1", SearchPolicy.SEQANY) is False
+    assert should_resume(state, "c1", SearchPolicy.SEQUENTIAL) is True
+
+
+def test_the_starting_version_before_any_keep_is_the_campaign_start():
+    state = RunState(start_commit="base", best_case_times={"a": 10.0})
+
+    for policy in SearchPolicy:
+        start = starting_version(state, policy)
+        assert (start.iteration, start.commit_hash, start.case_times) == (0, "base", {"a": 10.0})
+
+
+def test_candidate_records_round_trip_and_an_accept_counts_as_no_improvement():
+    state = RunState(start_commit="base")
+    record = SearchCandidate(1, 0, "base", "ACCEPT", "c1", 0.9, {"a": 11.0})
+
+    apply_iteration(
+        state,
+        iteration=1,
+        decision="ACCEPT",
+        kept=False,
+        wall_ms=1.1,
+        mean_case_speedup=0.9,
+        commit_hash="c1",
+        plan="restructure the tile loop",
+        baseline_wall_ms=1.0,
+        best_wall_ms=1.0,
+        candidate=record,
+    )
+
+    assert state.candidates == [record]
+    assert (state.cumulative.accepted, state.cumulative.kept, state.cumulative.reverted) == (1, 0, 0)
+    assert state.stall.unresolved_stall_iters == 1
+    assert state.best.commit_hash == ""
+    assert RunState.from_dict(state.to_dict()) == state
+
+
+def test_a_candidate_record_must_describe_the_iteration_it_is_applied_with():
+    with pytest.raises(ValueError, match="does not describe iteration"):
+        apply_iteration(
+            RunState(),
+            iteration=2,
+            decision="REVERT_PERF",
+            kept=False,
+            wall_ms=1.0,
+            commit_hash="",
+            plan="",
+            baseline_wall_ms=1.0,
+            best_wall_ms=1.0,
+            candidate=SearchCandidate(1, 0, "base", "REVERT_PERF", "", 1.0, {"a": 1.0}),
+        )
+
+
+def test_candidate_records_out_of_order_are_refused():
+    payload = RunState().to_dict()
+    payload["candidates"] = [
+        {
+            "iteration": 2,
+            "parent_iteration": 0,
+            "parent_commit": "b",
+            "decision": "REVERT_VALIDATION",
+            "commit_hash": "",
+            "mean_case_speedup": None,
+            "case_times": {},
+        },
+        {
+            "iteration": 1,
+            "parent_iteration": 0,
+            "parent_commit": "b",
+            "decision": "REVERT_VALIDATION",
+            "commit_hash": "",
+            "mean_case_speedup": None,
+            "case_times": {},
+        },
+    ]
+
+    with pytest.raises(ValueError, match="strictly increasing"):
+        RunState.from_dict(payload)
 
 
 def test_supervisor_intervention_resets_the_cooldown_but_not_the_stall():

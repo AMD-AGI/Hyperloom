@@ -37,6 +37,12 @@ from kernelforge.loop.recovery import (
     rollback_unpublished_warm_start,
 )
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.loop.search_policy import (
+    SEQUENTIAL_DEFAULT_LANES,
+    SearchPolicy,
+    parse_search_policy,
+    resolve_lanes,
+)
 
 if TYPE_CHECKING:
     # Imported lazily at runtime to keep CLI startup off the knowledge stack.
@@ -780,17 +786,31 @@ def _make_lane_agent_factory(
     "(single-GPU, unchanged behavior).",
 )
 @click.option(
+    "--search-policy",
+    default=None,
+    type=click.Choice([policy.value for policy in SearchPolicy], case_sensitive=False),
+    help="Which measured candidates later iterations build on. "
+    "'sequential' (default) continues only from a candidate that beats "
+    "the current best; 'seqany' continues from every correct candidate "
+    "whose benchmark completed, while the published best still only "
+    "moves on a KEEP. Immutable per campaign: snapshotted into "
+    "campaign_config.json, used on --resume when omitted, and a "
+    "different value on --resume is refused.",
+)
+@click.option(
     "--lanes",
-    default=3,
+    default=None,
     type=click.IntRange(min=1, max=8),
     help="Implementer lanes per round. Above 1 the round's analysis is "
     "partitioned into that many non-overlapping plans, each run "
     "concurrently in its own workspace copy, and each candidate is "
-    "measured on its own. Default 3: the lanes of a round run "
+    f"measured on its own. Default {SEQUENTIAL_DEFAULT_LANES} under the "
+    "sequential search policy: the lanes of a round run "
     "concurrently, so a lane costs a session rather than a share "
     "of the round's wall clock, and three is what the three "
     "specialist analyses can be divided into. The partition "
-    "returns fewer when the evidence supports fewer. Above 1 "
+    "returns fewer when the evidence supports fewer. The seqany "
+    "search policy runs exactly one lane and refuses more. Above 1 "
     "needs a provider that declares session_env and is refused on "
     "one that does not; a provider without stop_hooks runs and is "
     "warned, because it can waste a round but not misreport one.",
@@ -803,7 +823,9 @@ def _make_lane_agent_factory(
     "together, chosen for winning on different cases. Costs a "
     "measurement but no Implementer session. Default on; this "
     "applies at every --lanes setting, so turn it off to compare "
-    "against a run that predates it.",
+    "against a run that predates it. Has no effect under the seqany "
+    "search policy, which accepts every valid candidate and so never "
+    "has a rejected gain to stack.",
 )
 @click.option(
     "--bench-repeat",
@@ -1010,6 +1032,7 @@ def forge_loop(
     resume,
     nproc_per_node,
     bench_repeat,
+    search_policy,
     lanes,
     merge_stacking,
     specialist_probe,
@@ -1114,6 +1137,7 @@ def forge_loop(
             nproc_per_node=nproc_per_node,
             bench_repeat=bench_repeat,
             commit_new_paths=list(commit_new_paths),
+            search_policy=(parse_search_policy(search_policy) if search_policy is not None else None),
         )
     except (OSError, ValueError) as error:
         raise click.ClickException(str(error)) from error
@@ -1152,6 +1176,10 @@ def forge_loop(
     # From the campaign for the same reason: a resumed session that fell back to an empty allowlist could neither ship
     # nor remove the new file an earlier session was configured to.
     commit_new_paths = list(campaign.commit_new_paths)
+    try:
+        lanes = resolve_lanes(campaign.search_policy, lanes)
+    except ValueError as error:
+        raise click.ClickException(f"--lanes: {error}") from error
     profiling_enabled = bool(profiling and long_horizon)
 
     overrides = {"gpu_target": gpu_target}
@@ -1253,6 +1281,7 @@ def forge_loop(
         # Measurement fidelity: in-process repeats within each independent bench.
         bench_repeat=bench_repeat,
         lanes=lanes,
+        search_policy=campaign.search_policy,
         merge_stacking=merge_stacking,
         # New files a KEEP may carry; a REVERT removes exactly the same set.
         commit_new_paths=commit_new_paths,

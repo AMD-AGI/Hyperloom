@@ -10,7 +10,7 @@ from typing import Any
 from kernelforge.durable_io import atomic_write_text
 
 
-HANDOFF_SCHEMA_VERSION = 2
+HANDOFF_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -51,7 +51,7 @@ class IterationHandoff:
             "iteration": self.iteration,
             "analysis_commit": self.analysis_commit,
             "canonical_verdict": self.canonical_verdict,
-            "search_policy": {
+            "search_mode": {
                 "mode": self.search_mode,
                 "reason_codes": list(self.search_reason_codes),
                 "objective_kind": self.search_objective,
@@ -125,7 +125,7 @@ class HandoffStore:
             "iteration",
             "analysis_commit",
             "canonical_verdict",
-            "search_policy",
+            "search_mode",
             "optimization_plan_path",
             "supervisor_ruling_path",
             "plan",
