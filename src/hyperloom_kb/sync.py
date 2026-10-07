@@ -8,12 +8,14 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any, Protocol
+from functools import partial
+from pathlib import Path
+from typing import Any, BinaryIO, Protocol
 
 from hyperloom_kb.database import Database, WriteSource
 
 from hyperloom_kb.remote import RemoteClient, RemoteClientError, RemoteConfig
-from hyperloom_kb.schema import Experience, ExperienceDeclaration, JsonValue
+from hyperloom_kb.schema import Experience, ExperienceDeclaration, FileRef, JsonValue
 from hyperloom_kb.storage import StorageContractError
 
 GLOBAL_URL_ENV = "HYPERLOOM_GLOBAL_KB_URL"
@@ -148,8 +150,8 @@ class SyncLedger:
                 )
 
     def note_on_global(self, global_url: str, schema_ref: str, experience_ids: Collection[str]) -> None:
-        with self._database.transaction() as connection, connection.cursor() as cursor:
-            cursor.executemany(
+        with self._database.transaction() as connection:
+            connection.executemany(
                 """
                 INSERT INTO sync_on_global(kb_id, global_url, schema_ref, experience_id) VALUES (%s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
@@ -273,6 +275,15 @@ class SyncedService(Protocol):
     def bring_in(self, schema_ref: str, experience_ids: Collection[str]) -> None:
         """Put stored Experiences of ``schema_ref`` back into its current state."""
 
+    def file_path(self, ref: FileRef) -> Path:
+        """Where the held file ``ref`` names is read from."""
+
+    def missing_files(self, refs: Collection[FileRef]) -> tuple[str, ...]:
+        """The sha256 of each of ``refs`` not held here."""
+
+    def put_file(self, sha256: str, size: int, stream: BinaryIO) -> dict[str, JsonValue]:
+        """Store ``size`` bytes of ``stream`` as the file ``sha256``."""
+
 
 class GlobalSync:
     """One service's sync with its global KB; one push or pull batch runs at a time."""
@@ -325,8 +336,9 @@ class GlobalSync:
         """Write one Experience to the global KB; returns the error that should stop this push, if any."""
 
         declaration = self._service.declaration_for(experience.schema_ref)
+        files = {ref.sha256: self._service.file_path(ref) for ref in experience.files()}
         try:
-            counts[target.write(experience, declaration=declaration).status] += 1
+            counts[target.write(experience, declaration=declaration, files=files).status] += 1
         except RemoteClientError as exc:
             if exc.retryable:
                 return str(exc)
@@ -415,29 +427,55 @@ class GlobalSync:
             counts: Counter[str] = Counter()
             rejected: list[JsonValue] = []
             fetched: list[str] = []
+            # Where the next batch resumes: past this page, or past the last record handled before a file that could
+            # not be fetched yet.
+            resume, resume_id, error = page.next_cursor, page.next_cursor_id, ""
+            reached, reached_id = position, anchor
             for item in page.items:
                 try:
                     experience = Experience.from_dict(item.get("experience"))
                     if experience.schema_ref != schema_ref:
                         raise ValueError(f"exported under {schema_ref} but belongs to {experience.schema_ref}")
+                    self._fetch_files(target, experience)
                     status = str(self._service.write(experience, source=WriteSource(global_kb_id))["status"])
+                except RemoteClientError as exc:
+                    if exc.retryable:
+                        resume, resume_id, error = reached, reached_id, str(exc)
+                        break
+                    rejected.append({"experience_id": _record_id(item), "detail": str(exc)})
                 except (KeyError, TypeError, ValueError, StorageContractError) as exc:
                     rejected.append({"experience_id": _record_id(item), "detail": str(exc)})
-                    continue
-                if status == "created":
-                    self._ledger.mark_pulled(experience.id)
-                fetched.append(experience.id)
-                counts[status] += 1
+                else:
+                    if status == "created":
+                        self._ledger.mark_pulled(experience.id)
+                    fetched.append(experience.id)
+                    counts[status] += 1
+                sequence = item.get("sequence")
+                reached = sequence if isinstance(sequence, int) and not isinstance(sequence, bool) else reached
+                reached_id = _record_id(item)
             self._ledger.note_on_global(url, schema_ref, fetched)
             self._service.bring_in(schema_ref, fetched)
-            self._ledger.advance(url, direction, page.next_cursor, page.next_cursor_id)
+            self._ledger.advance(url, direction, resume, resume_id)
             self._ledger.note_pulled_state(url, schema_ref, page.state)
-            self._ledger.mark_pull_in_progress(url, schema_ref, page.has_more)
+            self._ledger.mark_pull_in_progress(url, schema_ref, bool(error) or page.has_more)
             return {
-                **_report("completed", url, counts, rejected, has_more=page.has_more),
+                **_report(
+                    "incomplete" if error else "completed",
+                    url,
+                    counts,
+                    rejected,
+                    has_more=bool(error) or page.has_more,
+                    error=error,
+                ),
                 "schema_ref": schema_ref,
                 "saved": saved,
             }
+
+    def _fetch_files(self, target: RemoteClient, experience: Experience) -> None:
+        """Bring each file ``experience`` names that is not held here from the global KB, before the record."""
+
+        for sha256 in self._service.missing_files(experience.files()):
+            target.fetch_file(sha256, partial(self._service.put_file, sha256))
 
 
 __all__ = [

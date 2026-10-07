@@ -3,7 +3,7 @@
 # One Experience per timeline[type=framework_agent].ext.attempts[] row. Source-arm attempts
 # carry their patches in attempts[].patch_material: [{path, sha256, content}], ordered as
 # patch_path, patches_applied, patches_reverted with duplicate paths removed.
-format: hyperloom-kb.collect.v1
+format: hyperloom-kb.collect.v2
 description: Hyperloom SBD V6 Framework attempts
 declaration: inference-recipe-v1
 producer:
@@ -175,6 +175,10 @@ let:
             - {not_in: [accuracy, {each: $gate_constraints, as: row, value: $row.name}]}
         then:
           - {object: {name: accuracy, passed: $attempt.accuracy.passed, value: $attempt.accuracy.value}}
+  constraint_lines:
+    each: $constraints
+    as: row
+    value: "{$row.name}: passed={$row.passed}, observed={$row.value}"
   outcome_facts:
     object:
       attempt_id: $attempt_id
@@ -238,14 +242,15 @@ experience:
   completed_at: $attempt.ts
   identity: $identity
   objective: e2e_throughput@v1
-  baseline_value: $baseline_value
-  baseline_identity:
-    object:
-      baseline_fingerprint: {sha256: $baseline_configuration}
-  preconditions:
-    - "measured_baseline_tput={$baseline_value}"
-    - "schema_identity={$identity}"
-    - "materialized_baseline_configuration={$baseline_configuration}"
+  baseline:
+    baseline_fingerprint: {sha256: $baseline_configuration}
+    value: $baseline_value
+  rationale:
+    preconditions:
+      - "measured_baseline_tput={$baseline_value}"
+      - "schema_identity={$identity}"
+      - "materialized_baseline_configuration={$baseline_configuration}"
+    reasoning: $reasoning
   provenance:
     source_ref: "session:{$run_id}:attempt:{$attempt_id}"
     extra:
@@ -276,24 +281,17 @@ experience:
           then: {lower: $attempt.failure.attribution}
           else: ""
         failure_stage: {text: $attempt.stage}
-  reasoning: $reasoning
   change:
-    identity:
-      object:
-        change_family: $change_family
-        change_fingerprint:
-          if: {eq: [$change_family, config_variant]}
-          then: {sha256: $change_content}
-          else: $patch_fingerprint
+    change_family: $change_family
+    change_fingerprint:
+      if: {eq: [$change_family, config_variant]}
+      then: {sha256: $change_content}
+      else: $patch_fingerprint
     summary:
       if: {eq: [$change_family, config_variant]}
       then: {first: [{text: $attempt.variant_name}, Framework configuration variant]}
       else: $source_summary
-    kind: $change_family
     content: $change_content
-    resource_refs:
-      if: {eq: [$change_family, source_patch]}
-      then: {each: $patches, as: patch, value: $patch.path}
   rendered_refs:
     each: $proposal.rendered_refs
     as: ref
@@ -305,9 +303,10 @@ experience:
   outcome:
     decision: $decision
     value: $outcome_value
-    constraints: $constraints
+    constraints: $constraint_lines
     error_class:
       if: {eq: [$decision, failed]}
       then: {token: {first: [$attempt.failure.error_class, {lower: $outcome_code}]}}
       else: ""
-  reflection: "Recorded outcome: {$outcome_facts}"
+  reflection:
+    text: "Recorded outcome: {$outcome_facts}"

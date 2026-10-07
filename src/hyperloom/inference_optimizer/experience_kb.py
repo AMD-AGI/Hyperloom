@@ -9,8 +9,6 @@ import hashlib
 import json
 import logging
 import os
-import re
-from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,14 +22,11 @@ log = logging.getLogger(__name__)
 
 _FRAMEWORK_DECISION = "Select the next framework optimization to benchmark."
 _SPECIALIST_DECISION = "Propose framework optimizations for this specialist investigation."
-# A free-text field over this many bytes reaches the prompt as a file under the session, not inline.
-CONTENT_INLINE_LIMIT = 2048
 # The injected records, rendered whole, stop before this many characters in every prompt that carries them.
 RENDER_BUDGET_CHARS = 40_000
 # A service or planner gateway this many reads in a row could not answer stays unread for the session, so a hung
 # gateway costs a run a few read timeouts rather than one per orchestration turn and specialist dispatch.
 READS_OFF_AFTER_FAILURES = 3
-CONTENT_DIR = Path("experience_kb") / "contents"
 
 
 def _json_safe(value: Any) -> Any:
@@ -55,71 +50,6 @@ def _current_best_throughput(value: Any) -> float:
         if not isinstance(throughput, bool) and isinstance(throughput, (int, float)) and throughput > 0:
             return float(throughput)
     return 0.0
-
-
-def _write_once(path: Path, data: bytes) -> None:
-    if path.exists():
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_bytes(data)
-    os.replace(temporary, path)
-
-
-def _patch_files(directory: Path, content: str) -> list[Path]:
-    """Write each patch of a ``hyperloom-sbd-v6`` source change as its own file, ready to apply."""
-
-    try:
-        value = json.loads(content)
-    # change.content is an opaque string from any writer or a pull, so it may be neither JSON nor shallow JSON.
-    except (ValueError, RecursionError):
-        return []
-    patches = value.get("patches") if isinstance(value, dict) else None
-    paths: list[Path] = []
-    for index, patch in enumerate(patches if isinstance(patches, list) else [], start=1):
-        text = patch.get("content") if isinstance(patch, dict) else None
-        if not isinstance(text, str):
-            continue
-        try:
-            data = text.encode("utf-8")
-        # JSON can escape a lone surrogate, which no UTF-8 file holds; the whole content file still carries the patch.
-        except UnicodeEncodeError:
-            continue
-        name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(str(patch.get("path") or "")).name) or "change.patch"
-        path = directory / f"{index}-{name}"
-        _write_once(path, data)
-        paths.append(path)
-    return paths
-
-
-def _materialize_contents(root: Path, contents: Iterable[Mapping[str, Any]]) -> str:
-    """Write each ``change.content`` a read referenced instead of inlining, and return the block's file legend."""
-
-    lines: list[str] = []
-    for item in contents:
-        ref, text = str(item.get("ref") or ""), item.get("content")
-        digest = ref.removeprefix("sha256:")
-        if not re.fullmatch(r"[0-9a-f]{64}", digest) or not isinstance(text, str):
-            continue
-        path, data = root / f"{digest}.txt", text.encode("utf-8")
-        try:
-            _write_once(path, data)
-            patches = _patch_files(root / digest, text)
-        except OSError:
-            log.warning("Experience KB content %s could not be written under %s", ref, root, exc_info=True)
-            lines.append(f"- {ref} ({len(data)} bytes): not available in this session")
-            continue
-        lines.append(f"- {ref} ({len(data)} bytes): {path}")
-        lines.extend(f"  - patch: {patch}" for patch in patches)
-    if not lines:
-        return ""
-    return "\n".join(
-        [
-            "Each `<external content sha256:...>` above is that Experience's complete change.content, "
-            "kept out of this prompt because of its size. Read its file when you need the change itself:",
-            *lines,
-        ]
-    )
 
 
 @dataclass(frozen=True)
@@ -311,7 +241,6 @@ class ExperienceKBIntegration:
             decision,
             context,
             schema_ref=self.schema_ref,
-            content_inline_limit=CONTENT_INLINE_LIMIT,
             render_budget_chars=RENDER_BUDGET_CHARS,
         )
         self._failed_in_a_row = 0 if result.status == "completed" else self._failed_in_a_row + 1
@@ -321,12 +250,11 @@ class ExperienceKBIntegration:
                 READS_OFF_AFTER_FAILURES,
                 "; ".join(result.warnings) or result.status,
             )
-        legend = _materialize_contents(self.session_dir / CONTENT_DIR, result.contents)
         evidence = ExperienceKBEvidence(
             tick=tick,
             read_id=result.read_id,
             status=result.status,
-            prompt_block="\n\n".join(part for part in (result.prompt_block, legend) if part),
+            prompt_block=result.prompt_block,
             rendered_refs=tuple(item.to_dict() for item in result.rendered_refs),
             warnings=tuple(result.warnings),
             experiences=tuple(dict(item) for item in result.experiences),

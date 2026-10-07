@@ -17,12 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from hyperloom_kb.tests.postgres_fixtures import (  # noqa: F401
-    new_database,
-    postgres_conninfo,
-    reachable_tmp_path,
-    requires_embedded_postgres,
-)
+from hyperloom_kb.tests.database_fixtures import new_database, postgres_conninfo  # noqa: F401
 
 import hyperloom_kb.collect as kb_collect
 from hyperloom.inference_optimizer import experience_collect, experience_kb_service
@@ -45,9 +40,6 @@ from hyperloom_kb import (
     create_http_server,
     load_declaration,
 )
-
-# Spawned services run their own embedded database under ``tmp_path``.
-pytestmark = pytest.mark.usefixtures("reachable_tmp_path")
 
 _AUTHORING_REF = {"id": "exp-00000000000000000000000000000002", "purpose": "representative"}
 
@@ -367,7 +359,6 @@ def test_writes_the_service_cannot_take_wait_under_user_data_path(
     assert len(spooled) == len(receipt["collected"])
 
 
-@requires_embedded_postgres
 def test_a_later_run_reads_what_an_earlier_run_wrote_after_the_service_restarts(
     monkeypatch, session_dir: Path, tmp_path: Path
 ) -> None:
@@ -420,7 +411,6 @@ def _stop_workspace_service() -> None:
     os.kill(int(service.health["pid"]), signal.SIGTERM)
 
 
-@requires_embedded_postgres
 def test_an_auto_pushed_run_reaches_another_workspace_that_pulls(
     monkeypatch, session_dir: Path, tmp_path: Path, new_database
 ) -> None:
@@ -474,16 +464,16 @@ def test_recorded_framework_attempts_satisfy_the_packaged_mapping(session_dir: P
     assert report["skipped"] == []
     experiences = {row["unit_id"]: row["experience"] for row in report["collected"]}
     source = experiences["t-int-1"]
-    assert source["change"]["kind"] == "source_patch"
-    assert source["change"]["resource_refs"] == ["artifacts/source.patch"]
+    assert source["change"]["change_family"] == "source_patch"
+    assert json.loads(source["change"]["content"])["patches"][0]["path"] == "artifacts/source.patch"
     assert "optimized = True" in source["change"]["content"]
-    assert source["reasoning"] == "Profiling shows redundant attention setup on every request."
+    assert source["rationale"]["reasoning"] == "Profiling shows redundant attention setup on every request."
     assert source["rendered_refs"] == [_AUTHORING_REF]
     assert source["provenance"]["extra"]["kb_read_id"] == "read-authoring"
     config = experiences["t-exp-1:explore-001:fp1"]
-    assert config["change"]["kind"] == "config_variant"
+    assert config["change"]["change_family"] == "config_variant"
     assert config["outcome"]["decision"] == "revert"
-    assert '"extra_server_args":"--already-kept 1"' in config["preconditions"][2]
+    assert '"extra_server_args":"--already-kept 1"' in config["rationale"]["preconditions"][2]
 
 
 def test_an_auto_benched_specialist_proposal_publishes_its_reasoning_citations_and_read(session_dir: Path) -> None:
@@ -542,7 +532,7 @@ def test_an_auto_benched_specialist_proposal_publishes_its_reasoning_citations_a
     assert report["skipped"] == []
     [row] = report["collected"]
     experience = row["experience"]
-    assert experience["reasoning"] == reasoning.strip()
+    assert experience["rationale"]["reasoning"] == reasoning.strip()
     assert experience["rendered_refs"] == [shown]
     assert experience["provenance"]["extra"]["experience_citations"] == [citation]
     assert experience["provenance"]["extra"]["kb_read_id"] == "read-specialist"
@@ -618,10 +608,10 @@ def test_a_specialists_config_only_deliverable_is_published_as_a_config_experien
     assert report["skipped"] == []
     [row] = report["collected"]
     experience = row["experience"]
-    assert experience["change"]["kind"] == "config_variant"
+    assert experience["change"]["change_family"] == "config_variant"
     assert json.loads(experience["change"]["content"])["extra_server_args"] == "--enable-fused-moe"
     assert json.loads(experience["change"]["content"])["extra_envs"] == {"VLLM_FUSED_MOE": "1"}
     assert experience["outcome"]["decision"] == "keep"
-    assert experience["reasoning"] == discovery_reasoning
+    assert experience["rationale"]["reasoning"] == discovery_reasoning
     assert experience["provenance"]["extra"]["arm"] == "source"
     assert experience["provenance"]["extra"]["kb_read_id"] == "read-authoring"

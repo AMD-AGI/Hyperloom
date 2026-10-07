@@ -16,7 +16,7 @@ import signal
 import threading
 import time
 import uuid
-from collections.abc import Collection, Iterator, Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -24,15 +24,12 @@ from functools import cache, partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, TextIO, cast
+from typing import Any, BinaryIO, TextIO, cast
 from urllib.parse import parse_qs, urlsplit
 
-from psycopg.types.json import Jsonb
-
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
-from hyperloom_kb.database import Database, WriteSource
-from hyperloom_kb.embedded_postgres import EmbeddedPostgresError, start_embedded_postgres, unavailable_reason
-from hyperloom_kb.legacy_home import LegacyHome
+from hyperloom_kb.database import Connection, Database, DatabaseError, WriteSource, open_database
+from hyperloom_kb.files import FileStore, file_sha256
 from hyperloom_kb.observability import (
     PROBE_ROUTES,
     REQUEST_ID_HEADER,
@@ -43,7 +40,7 @@ from hyperloom_kb.observability import (
     event,
     route_of,
 )
-from hyperloom_kb.local_state import LABEL_BEFORE_PULL, LABEL_MANUAL, Connection, LocalState, UnknownStateItem
+from hyperloom_kb.local_state import LABEL_BEFORE_PULL, LABEL_MANUAL, LocalState, UnknownStateItem
 from hyperloom_kb.knowledge_read import (
     AnthropicPlannerBackend,
     KnowledgeReadService,
@@ -68,7 +65,15 @@ from hyperloom_kb.retrieval_policy import (
     RetrievalConfiguration,
 )
 from hyperloom_kb.records import RecordFiles
-from hyperloom_kb.schema import Experience, ExperienceDeclaration, ExperienceStatus, JsonValue
+from hyperloom_kb.schema import (
+    Experience,
+    ExperienceDeclaration,
+    ExperienceStatus,
+    FieldRole,
+    FieldValue,
+    FileRef,
+    JsonValue,
+)
 from hyperloom_kb.service import CompleteExperienceRequired
 from hyperloom_kb.storage import (
     ImmutableExperienceConflict,
@@ -89,10 +94,11 @@ MAX_LIST_LIMIT = 500
 MAX_EXPORT_LIMIT = 100
 READ_POLICY_VERSION = "shared-experience-read@v1"
 DEFAULT_HOME = Path("~/.local/share/hyperloom-kb").expanduser()
-# Held by the one service process that runs a home's embedded database, for as long as it serves it.
+# Held by the one service process that serves a home's SQLite database, for as long as it serves it.
 SERVICE_LOCK = "service.lock"
 DATABASE_URL_ENV = "HYPERLOOM_KB_DATABASE_URL"
 _CONFLICT = "conflict"
+_MISSING_FILES = "missing_files"
 # Below this a write could fail for space, so the service stops reporting ready.
 MIN_FREE_DISK_BYTES = 512 * 1024 * 1024
 # A SIGTERM lets requests in flight finish this long; below an orchestrator's usual 30 s grace period.
@@ -100,16 +106,26 @@ DRAIN_SECONDS = 25.0
 # How long a probe or a metrics scrape waits on the database: inside the few seconds an orchestrator or a scraper
 # waits for the answer, so a database that is gone reads as unready instead of as a probe that timed out.
 PROBE_TIMEOUT_SECONDS = 2.0
-# A transport guard, not a data policy: Experiences of any size are stored.
+# Transport guards, not data policies: a record's text fields are bounded by its schema, and files of any size up to
+# this are stored.
 _MAX_REQUEST_BYTES = 256 * 1024 * 1024
-_READ_FIELDS = frozenset(
-    {"decision", "context", "outcome", "limit", "schema_ref", "content_inline_limit", "render_budget_chars"}
-)
+MAX_FILE_BYTES = 4 * 1024 * 1024 * 1024
+_READ_FIELDS = frozenset({"decision", "context", "outcome", "limit", "schema_ref", "render_budget_chars"})
 _WRITE_FIELDS = frozenset({"experience", "declaration"})
+_FILES_PREFIX = "/v1/files/"
+_FILES_MISSING = "/v1/files/missing"
 
 
 class HTTPServiceError(ValueError):
     """Raised when a request or service configuration is invalid."""
+
+
+class MissingFiles(RuntimeError):
+    """Raised when a write names files this KB does not hold; send them first."""
+
+    def __init__(self, missing: Collection[str]) -> None:
+        super().__init__(f"send the files this record names before it: {', '.join(sorted(missing))}")
+        self.missing = tuple(sorted(missing))
 
 
 @cache
@@ -149,7 +165,7 @@ class ServiceSettings:
     planner_problem: str
     global_kb: RemoteConfig | None
     global_problem: str
-    # Empty runs the home's own embedded database.
+    # Empty keeps the database in a SQLite file in the home.
     database_url: str = ""
 
     @classmethod
@@ -245,14 +261,26 @@ class HTTPServiceConfig:
             raise HTTPServiceError("HYPERLOOM_KB_TOKEN must be configured")
 
 
-def _summary(experience: Experience) -> dict[str, JsonValue]:
+def _role_value(
+    declaration: ExperienceDeclaration, experience: Experience, category: str, role: FieldRole
+) -> FieldValue | None:
+    field = declaration.role_field(category, role)
+    return None if field is None else getattr(experience, category).get(field.name)
+
+
+def _summary(declaration: ExperienceDeclaration, experience: Experience) -> dict[str, JsonValue]:
+    """A list line: the record's id and run, and the values its schema gives the summary, decision, and
+    measurement roles."""
+
+    summary = _role_value(declaration, experience, "change", FieldRole.SUMMARY)
+    decision = _role_value(declaration, experience, "outcome", FieldRole.DECISION)
     return {
         "experience_id": experience.id,
         "source_run_id": experience.run_id,
-        "change_summary": experience.change.summary if experience.change is not None else "",
-        "decision": experience.outcome.decision if experience.outcome is not None else "",
-        "baseline_value": experience.baseline_value,
-        "outcome_value": experience.outcome.value if experience.outcome is not None else None,
+        "change_summary": summary if isinstance(summary, str) else "",
+        "decision": decision if isinstance(decision, str) else "",
+        "baseline_value": cast(JsonValue, _role_value(declaration, experience, "baseline", FieldRole.MEASUREMENT)),
+        "outcome_value": cast(JsonValue, _role_value(declaration, experience, "outcome", FieldRole.MEASUREMENT)),
     }
 
 
@@ -289,11 +317,11 @@ class ExperienceHTTPService:
         self.name = name
         self._database = database
         config.home.mkdir(parents=True, exist_ok=True)
-        legacy = LegacyHome.find(config.home)
-        self.kb_id = database.resolve_kb(adopt_kb_id=legacy.kb_id if legacy is not None else "")
+        self.kb_id = database.resolve_kb()
         self._config_digest = config_digest
         self._code_digest = code_digest()
         self._records = RecordFiles(config.home, self.kb_id)
+        self._files = FileStore(config.home, self.kb_id)
         self._state = LocalState(self.kb_id)
         self._ledger = SyncLedger(database, self.kb_id)
         self._planner = planner
@@ -301,9 +329,8 @@ class ExperienceHTTPService:
         self._views: dict[str, _ReadView] = {}
         self.metrics = Metrics()
         self.register(declaration)
-        if legacy is not None:
-            self._adopt(legacy)
         self._missing_records = self._verify_records()
+        self._missing_files = self._verify_files()
         self._sync = GlobalSync(self, self._ledger, global_kb)
 
     def _verify_records(self) -> int:
@@ -324,32 +351,32 @@ class ExperienceHTTPService:
         )
         return missing
 
-    def _adopt(self, legacy: LegacyHome) -> None:
-        """Bring a home an older service kept on disk into the database, once."""
+    def _verify_files(self) -> int:
+        """How many files the database holds that are missing from the home or of another size; reported as
+        unready."""
 
         with self._database.transaction() as connection:
-            row = connection.execute("SELECT adopted_home FROM kbs WHERE kb_id = %s", (self.kb_id,)).fetchone()
-        if row is not None and row["adopted_home"]:
-            return
-        for declaration in legacy.schemas():
-            self.register(declaration)
-        for experience in legacy.experiences():
-            self.write(experience)
-        for experience_id in legacy.pulled():
-            self._ledger.mark_pulled(experience_id)
-        with self._database.transaction() as connection:
-            connection.execute(
-                "UPDATE kbs SET adopted_home = %s WHERE kb_id = %s", (str(legacy.home.resolve()), self.kb_id)
-            )
+            rows = connection.execute("SELECT sha256, bytes FROM files WHERE kb_id = %s", (self.kb_id,)).fetchall()
+        missing = sum(1 for row in rows if not self._files.holds(str(row["sha256"]), int(row["bytes"])))
+        event(
+            log,
+            "files_verified",
+            level=logging.WARNING if missing else logging.INFO,
+            kb_id=self.kb_id,
+            files=len(rows),
+            missing=missing,
+        )
+        return missing
 
     def _schema_row(self, connection: Connection, schema_ref: str, *, changes_reads: bool) -> None:
         """Lock ``schema_ref`` for this transaction; ``changes_reads`` also moves on what cached reads were built at."""
 
-        if changes_reads:
-            query = "UPDATE schemas SET version = version + 1 WHERE kb_id = %s AND schema_ref = %s RETURNING version"
-        else:
-            query = "SELECT version FROM schemas WHERE kb_id = %s AND schema_ref = %s FOR UPDATE"
-        if connection.execute(query, (self.kb_id, schema_ref)).fetchone() is None:
+        # An update locks the row in either database, and an unchanged version leaves cached reads standing.
+        version = "version + 1" if changes_reads else "version"
+        locked = connection.execute(
+            f"UPDATE schemas SET version = {version} WHERE kb_id = %s AND schema_ref = %s", (self.kb_id, schema_ref)
+        ).rowcount
+        if not locked:
             raise HTTPServiceError(f"schema_ref {schema_ref} is not registered; write it with its declaration")
 
     def _schema_of(self, connection: Connection, experience_id: str) -> str:
@@ -408,7 +435,7 @@ class ExperienceHTTPService:
             ).fetchone()
         if row is None:
             raise HTTPServiceError(f"schema_ref {schema_ref} is not registered; write it with its declaration")
-        declaration = ExperienceDeclaration.from_dict(row["declaration"])
+        declaration = ExperienceDeclaration.from_dict(json.loads(row["declaration"]))
         self._declarations[schema_ref] = declaration
         return declaration
 
@@ -421,23 +448,81 @@ class ExperienceHTTPService:
                 INSERT INTO schemas(kb_id, schema_ref, declaration, registered_at) VALUES (%s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 """,
-                (self.kb_id, declaration.schema_ref, Jsonb(declaration.to_dict()), _utc_now()),
+                (self.kb_id, declaration.schema_ref, _canonical(declaration.to_dict()), _utc_now()),
             ).rowcount
         if registered:
             event(log, "audit", action="register_schema", schema_ref=declaration.schema_ref)
         self._declarations[declaration.schema_ref] = declaration
 
-    def _decision(self, store: InMemoryExperienceStore, experience_id: str) -> str:
+    def _decision(self, declaration: ExperienceDeclaration, store: InMemoryExperienceStore, experience_id: str) -> str:
         stored = store.get_experience(experience_id)
-        outcome = stored.experience.outcome if stored is not None else None
-        return outcome.decision if outcome is not None else ""
+        if stored is None:
+            return ""
+        value = _role_value(declaration, stored.experience, "outcome", FieldRole.DECISION)
+        return value if isinstance(value, str) else ""
 
     def _outcome(self, value: Any, declaration: ExperienceDeclaration) -> str:
+        """The decision a read restricts to, or ``mixed`` for none; only a schema with a decision field restricts."""
+
         outcome = MIXED_OUTCOME if value is None else _required_text(value, "outcome")
-        allowed = (*declaration.decisions, MIXED_OUTCOME)
+        allowed = (*declaration.decision_values, MIXED_OUTCOME)
         if outcome not in allowed:
             raise HTTPServiceError(f"outcome must be one of: {', '.join(allowed)}")
         return outcome
+
+    def _missing_files_of(self, connection: Connection, refs: Iterable[FileRef]) -> tuple[str, ...]:
+        """The sha256 of each of ``refs`` this KB does not hold; a ref of another size than the one held is invalid."""
+
+        wanted = {ref.sha256: ref.bytes for ref in refs}
+        if not wanted:
+            return ()
+        held = {
+            str(row["sha256"]): int(row["bytes"])
+            for row in connection.execute(
+                f"SELECT sha256, bytes FROM files WHERE kb_id = %s AND sha256 IN ({', '.join(['%s'] * len(wanted))})",
+                (self.kb_id, *wanted),
+            )
+        }
+        for sha256, size in held.items():
+            if wanted[sha256] != size:
+                raise HTTPServiceError(f"file {sha256} is {size} bytes, not the {wanted[sha256]} the record names")
+        return tuple(sorted(set(wanted) - set(held)))
+
+    def missing_files(self, refs: Iterable[FileRef]) -> tuple[str, ...]:
+        with self._database.transaction() as connection:
+            return self._missing_files_of(connection, refs)
+
+    def put_file(self, sha256: str, size: int, stream: BinaryIO) -> dict[str, JsonValue]:
+        """Store the ``size`` bytes of ``stream`` as the file ``sha256``; storing a held file again changes nothing."""
+
+        sha256 = file_sha256(sha256)
+        size = _bounded_int(size, "file size", minimum=0, maximum=MAX_FILE_BYTES)
+        self._files.receive(sha256, size, stream)
+        with self._database.transaction() as connection:
+            created = connection.execute(
+                "INSERT INTO files(kb_id, sha256, bytes, stored_at) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                (self.kb_id, sha256, size, _utc_now()),
+            ).rowcount
+        status = InsertStatus.CREATED.value if created else InsertStatus.UNCHANGED.value
+        self.metrics.count("hyperloom_kb_file_writes_total", result=status)
+        return {"status": status, "sha256": sha256, "bytes": size}
+
+    def held_file(self, sha256: str) -> tuple[Path, int]:
+        """Where the held file ``sha256`` is read from, and its size."""
+
+        sha256 = file_sha256(sha256)
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                "SELECT bytes FROM files WHERE kb_id = %s AND sha256 = %s", (self.kb_id, sha256)
+            ).fetchone()
+        if row is None:
+            raise UnknownStateItem(f"file {sha256} is not held here")
+        return self._files.path(sha256), int(row["bytes"])
+
+    def file_path(self, ref: FileRef) -> Path:
+        """Where an agent on this host reads the file ``ref`` names."""
+
+        return self._files.path(ref.sha256)
 
     def _existing(self, connection: Connection, experience_id: str, content_hash: str) -> str:
         """``unchanged`` or ``conflict`` for an id already stored with that or other content, ``""`` for a new one."""
@@ -458,7 +543,8 @@ class ExperienceHTTPService:
     ) -> dict[str, JsonValue]:
         """Store one complete Experience ``source`` sent; ``declaration`` registers its schema when this KB lacks it.
 
-        Every write is recorded with its source and result, a refused one included.
+        Every file the record names must be held here first. Every write is recorded with its source and result, a
+        refused one included.
         """
 
         if declaration is not None:
@@ -471,15 +557,20 @@ class ExperienceHTTPService:
         schema.validate(experience)
         data = canonical_experience_bytes(experience)
         content_hash = hashlib.sha256(data).hexdigest()
+        missing: tuple[str, ...] = ()
         with self._database.transaction() as connection:
             status = self._existing(connection, experience.id, content_hash)
             if not status:
-                connection.execute("SELECT 1 FROM kbs WHERE kb_id = %s FOR UPDATE", (self.kb_id,))
+                missing = self._missing_files_of(connection, experience.files())
+                status = _MISSING_FILES if missing else ""
+            if not status:
+                # Taking the KB's row before looking again serializes writers of the same id across processes.
+                connection.execute("UPDATE kbs SET last_sequence = last_sequence WHERE kb_id = %s", (self.kb_id,))
                 status = self._existing(connection, experience.id, content_hash)
             if not status:
+                connection.execute("UPDATE kbs SET last_sequence = last_sequence + 1 WHERE kb_id = %s", (self.kb_id,))
                 position = connection.execute(
-                    "UPDATE kbs SET last_sequence = last_sequence + 1 WHERE kb_id = %s RETURNING last_sequence",
-                    (self.kb_id,),
+                    "SELECT last_sequence FROM kbs WHERE kb_id = %s", (self.kb_id,)
                 ).fetchone()
                 assert position is not None, "the KB row resolve_kb made is never deleted"
                 self._records.write(experience.id, data)
@@ -520,6 +611,8 @@ class ExperienceHTTPService:
         self.metrics.count("hyperloom_kb_writes_total", schema_ref=experience.schema_ref, result=status)
         if status == _CONFLICT:
             raise ImmutableExperienceConflict("Experience id already exists with different content")
+        if status == _MISSING_FILES:
+            raise MissingFiles(missing)
         return {"status": status, "experience_id": experience.id, "content_hash": content_hash}
 
     def seed(self, path: Path) -> dict[str, int]:
@@ -574,22 +667,19 @@ class ExperienceHTTPService:
         outcome: str | None = None,
         limit: int = DEFAULT_READ_LIMIT,
         schema_ref: str | None = None,
-        content_inline_limit: int | None = None,
         render_budget_chars: int | None = None,
     ) -> dict[str, JsonValue]:
         """Search one schema's Experiences, this service's default schema unless ``schema_ref`` names another.
 
-        With ``content_inline_limit``, a free-text field over that many bytes is rendered as a reference and its
-        text is returned under ``contents``. With ``render_budget_chars``, the block carries whole records while
-        they fit and names only those in ``rendered_refs``.
+        Each record renders whole; a file field renders as the path on this host its file is read from. With
+        ``render_budget_chars``, the block carries whole records while they fit and names only those in
+        ``rendered_refs``.
         """
 
         decision = _required_text(decision, "decision")
         declaration = self.declaration_for(schema_ref or self.declaration.schema_ref)
         selected_outcome = self._outcome(outcome, declaration)
         limit = _bounded_int(limit, "limit", minimum=1, maximum=MAX_READ_LIMIT)
-        if content_inline_limit is not None:
-            content_inline_limit = _bounded_int(content_inline_limit, "content_inline_limit", minimum=0)
         if render_budget_chars is not None:
             render_budget_chars = _bounded_int(render_budget_chars, "render_budget_chars", minimum=1)
         read_view = self._read_view(declaration)
@@ -600,7 +690,7 @@ class ExperienceHTTPService:
                 (
                     experience_id
                     for experience_id in view.visible_experience_ids
-                    if self._decision(store, experience_id) == selected_outcome
+                    if self._decision(declaration, store, experience_id) == selected_outcome
                 ),
             )
         eligible_count = len(view.visible_experience_ids)
@@ -615,11 +705,9 @@ class ExperienceHTTPService:
             "eligible_count": eligible_count,
             "rendered_count": 0,
             "warnings": [],
-            "contents": [],
         }
         if eligible_count == 0:
             return response
-        external: dict[str, str] = {}
 
         views = InMemoryQueryViewStore()
         views.publish_view(view)
@@ -637,8 +725,8 @@ class ExperienceHTTPService:
             LocalRetrievalService(
                 store,
                 views,
-                providers=(LexicalFuzzyProvider(store),),
-                renderer=partial(render_complete_experience, inline_limit=content_inline_limit, external=external),
+                providers=(LexicalFuzzyProvider(store, declaration),),
+                renderer=partial(render_complete_experience, file_path=self.file_path),
             ),
             provider_refs=provider_refs,
         )
@@ -658,7 +746,7 @@ class ExperienceHTTPService:
         experiences: list[JsonValue] = []
         for reference in result.rendered_refs:
             stored = store.get_experience(reference.id)
-            item = _summary(stored.experience if stored is not None else self.held(reference.id))
+            item = _summary(declaration, stored.experience if stored is not None else self.held(reference.id))
             group = groups.get(reference.id)
             item["score"] = group.score if group is not None else 0.0
             item["why_matched"] = [
@@ -667,12 +755,6 @@ class ExperienceHTTPService:
                 if contribution.experience_id == reference.id
             ]
             experiences.append(item)
-        # Records the budget left out were rendered too; only what the block references comes back.
-        contents: list[JsonValue] = [
-            {"ref": ref, "bytes": len(text.encode()), "content": text}
-            for ref, text in external.items()
-            if ref in result.prompt_block
-        ]
         response.update(
             {
                 "status": result.status.value,
@@ -681,7 +763,6 @@ class ExperienceHTTPService:
                 "experiences": experiences,
                 "rendered_count": len(result.rendered_refs),
                 "warnings": list(result.warnings),
-                "contents": contents,
             }
         )
         return response
@@ -703,7 +784,7 @@ class ExperienceHTTPService:
         limit = _bounded_int(limit, "limit", minimum=1, maximum=MAX_LIST_LIMIT)
         records, next_cursor, has_more = self.records_after(after, limit, schema_ref)
         items: list[JsonValue] = [
-            {"sequence": sequence, **_summary(experience)}
+            {"sequence": sequence, **_summary(self.declaration_for(experience.schema_ref), experience)}
             for sequence, experience in records
             if self._listed(experience, include_excluded)
         ]
@@ -718,7 +799,7 @@ class ExperienceHTTPService:
             rows = connection.execute(
                 """
                 SELECT sequence, experience_id, content_hash FROM experiences
-                WHERE kb_id = %s AND (%s::text IS NULL OR schema_ref = %s) AND sequence > %s
+                WHERE kb_id = %s AND (CAST(%s AS TEXT) IS NULL OR schema_ref = %s) AND sequence > %s
                 ORDER BY sequence LIMIT %s
                 """,
                 (self.kb_id, schema_ref, schema_ref, after, limit + 1),
@@ -736,7 +817,7 @@ class ExperienceHTTPService:
         row = connection.execute(
             """
             SELECT COALESCE(MAX(sequence), 0) AS head FROM experiences
-            WHERE kb_id = %s AND (%s::text IS NULL OR schema_ref = %s)
+            WHERE kb_id = %s AND (CAST(%s AS TEXT) IS NULL OR schema_ref = %s)
             """,
             (self.kb_id, schema_ref, schema_ref),
         ).fetchone()
@@ -938,6 +1019,7 @@ class ExperienceHTTPService:
             "home_writable": os.access(home, os.W_OK),
             "disk_space": shutil.disk_usage(home).free >= MIN_FREE_DISK_BYTES,
             "records": self._missing_records == 0,
+            "files": self._missing_files == 0,
         }
 
     def metric_gauges(self) -> list[tuple[str, dict[str, str], float]]:
@@ -951,12 +1033,13 @@ class ExperienceHTTPService:
         gauges: list[tuple[str, dict[str, str], float]] = [
             ("hyperloom_kb_build_info", {"kb_id": self.kb_id, "name": self.name, "code_digest": self._code_digest}, 1),
             ("hyperloom_kb_records_missing", {}, self._missing_records),
+            ("hyperloom_kb_files_missing", {}, self._missing_files),
             ("hyperloom_kb_disk_free_bytes", {}, shutil.disk_usage(self.config.home).free),
         ]
         gauges += [("hyperloom_kb_ready", {"check": check}, float(ok)) for check, ok in readiness.items()]
         gauges += [
             ("hyperloom_kb_database_pool", {"stat": stat}, float(value))
-            for stat, value in sorted(self._database.pool.get_stats().items())
+            for stat, value in sorted(self._database.connection_stats().items())
             if stat in ("pool_size", "pool_available", "requests_waiting")
         ]
         if readiness["database"]:
@@ -969,7 +1052,8 @@ class ExperienceHTTPService:
             for row in connection.execute(
                 """
                 SELECT experiences.schema_ref,
-                    COUNT(*) FILTER (WHERE outside.experience_id IS NULL AND exclusions.experience_id IS NULL) AS visible,
+                    SUM(CASE WHEN outside.experience_id IS NULL AND exclusions.experience_id IS NULL THEN 1 ELSE 0 END)
+                        AS visible,
                     COUNT(exclusions.experience_id) AS excluded,
                     COUNT(outside.experience_id) AS outside
                 FROM experiences
@@ -984,16 +1068,19 @@ class ExperienceHTTPService:
                         ("hyperloom_kb_experiences", {"schema_ref": row["schema_ref"], "state": state}, row[state])
                     )
             sizes = connection.execute(
-                """
-                SELECT COALESCE(SUM(bytes), 0) AS records, MAX(stored_at) AS last_write,
-                    pg_database_size(current_database()) AS database
-                FROM experiences WHERE kb_id = %s
-                """,
+                "SELECT COALESCE(SUM(bytes), 0) AS records, MAX(stored_at) AS last_write FROM experiences WHERE kb_id = %s",
                 (self.kb_id,),
             ).fetchone()
+            files = connection.execute(
+                "SELECT COUNT(*) AS count, COALESCE(SUM(bytes), 0) AS bytes FROM files WHERE kb_id = %s",
+                (self.kb_id,),
+            ).fetchone()
+        if files is not None:
+            gauges.append(("hyperloom_kb_files", {}, float(files["count"])))
+            gauges.append(("hyperloom_kb_file_bytes", {}, float(files["bytes"])))
+        gauges.append(("hyperloom_kb_database_bytes", {}, float(self._database.size_bytes())))
         if sizes is not None:
             gauges.append(("hyperloom_kb_record_bytes", {}, float(sizes["records"])))
-            gauges.append(("hyperloom_kb_database_bytes", {}, float(sizes["database"])))
             if sizes["last_write"]:
                 written = datetime.fromisoformat(str(sizes["last_write"]).replace("Z", "+00:00"))
                 gauges.append(("hyperloom_kb_last_write_timestamp_seconds", {}, written.timestamp()))
@@ -1031,14 +1118,49 @@ class RequestHandler(BaseHTTPRequestHandler):
         supplied = self.headers.get("Authorization", "")
         return hmac.compare_digest(supplied, f"Bearer {self.server.app.config.token}")
 
-    def _body(self) -> dict[str, JsonValue]:
+    def _length(self, maximum: int) -> int:
         try:
             length = int(self.headers.get("Content-Length", ""))
         except ValueError as exc:
             raise HTTPServiceError("Content-Length is required") from exc
-        if not 0 <= length <= _MAX_REQUEST_BYTES:
+        if not 0 <= length <= maximum:
             raise HTTPServiceError("request body is too large")
-        return _json_object(json.loads(self.rfile.read(length)), "request body")
+        return length
+
+    def _body(self) -> dict[str, JsonValue]:
+        return _json_object(json.loads(self.rfile.read(self._length(_MAX_REQUEST_BYTES))), "request body")
+
+    def _send_file(self, path: Path, size: int) -> None:
+        context = current_request.get()
+        with path.open("rb") as stream:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(size))
+            if context is not None:
+                self.send_header(REQUEST_ID_HEADER, context.request_id)
+            self.end_headers()
+            shutil.copyfileobj(stream, self.wfile)
+        self._answered = (int(HTTPStatus.OK), size)
+
+    def _dispatch_files(self, app: ExperienceHTTPService, path: str) -> bool:
+        """Serve the file routes; ``False`` when ``path`` is none of them."""
+
+        if self.command == "POST" and path == _FILES_MISSING:
+            body = self._body()
+            _reject_unknown(body, frozenset({"files"}))
+            files = body.get("files")
+            if not isinstance(files, list):
+                raise HTTPServiceError("files must be a list of file references")
+            missing = app.missing_files(FileRef.from_dict(item) for item in files)
+            self._write(HTTPStatus.OK, {"missing": list(missing)})
+        elif self.command == "PUT" and path.startswith(_FILES_PREFIX):
+            sha256 = path.removeprefix(_FILES_PREFIX)
+            self._write(HTTPStatus.OK, app.put_file(sha256, self._length(MAX_FILE_BYTES), cast(BinaryIO, self.rfile)))
+        elif self.command == "GET" and path.startswith(_FILES_PREFIX):
+            self._send_file(*app.held_file(path.removeprefix(_FILES_PREFIX)))
+        else:
+            return False
+        return True
 
     def _probe(self, path: str) -> bool:
         """Answer the unauthenticated probes an orchestrator and a metrics scraper send; ``False`` for any other path.
@@ -1098,7 +1220,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 ),
             )
             return
-        if self._dispatch_state(app, parsed.path, query):
+        if self._dispatch_state(app, parsed.path, query) or self._dispatch_files(app, parsed.path):
             return
         if self.command == "POST" and parsed.path == "/v1/push":
             _reject_unknown(self._body(), frozenset())
@@ -1131,7 +1253,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                         maximum=MAX_READ_LIMIT,
                     ),
                     schema_ref=None if schema_ref is None else _required_text(schema_ref, "schema_ref"),
-                    content_inline_limit=cast(int | None, body.get("content_inline_limit")),
                     render_budget_chars=cast(int | None, body.get("render_budget_chars")),
                 ),
             )
@@ -1238,6 +1359,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._write(HTTPStatus.NOT_FOUND, {"error": "not_found", "detail": str(exc)})
         except ImmutableExperienceConflict as exc:
             self._write(HTTPStatus.CONFLICT, {"error": "conflict", "detail": str(exc)})
+        except MissingFiles as exc:
+            self._write(
+                HTTPStatus.CONFLICT, {"error": _MISSING_FILES, "detail": str(exc), "missing": list(exc.missing)}
+            )
         except SyncUnavailable as exc:
             self._write(HTTPStatus.CONFLICT, {"error": "sync_unavailable", "detail": str(exc)})
         except (ValueError, StorageContractError) as exc:
@@ -1277,8 +1402,8 @@ def create_http_server(
 def _sole_service(home: Path) -> Iterator[TextIO]:
     """Hold ``home`` for this process, or exit naming the service that does.
 
-    The holder starts the home's embedded database and stops it when it stops serving, so a second service on the
-    same home would lose its database under it.
+    The home's SQLite database holds a push's or a pull's lock within one process only, so a second service on the
+    same home could interleave its syncs with the holder's.
     """
 
     import fcntl
@@ -1344,27 +1469,16 @@ def main(argv: list[str] | None = None) -> int:
         )
     if settings.global_problem:
         log.warning("Push and pull are unavailable: %s", settings.global_problem)
-    # A service manager stops the service with SIGTERM: it stops taking requests, lets the ones in flight finish, and
-    # stops the database this process started rather than orphaning it.
+    # A service manager stops the service with SIGTERM: it stops taking requests and lets the ones in flight finish.
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda _signum, _frame: stop.set())
     home = args.home.expanduser()
     with ExitStack() as stack:
-        lock: TextIO | None = None
-        database_url = settings.database_url
-        if not database_url:
-            reason = unavailable_reason()
-            if reason:
-                raise SystemExit(f"{reason}; set {DATABASE_URL_ENV} to a PostgreSQL server")
-            lock = stack.enter_context(_sole_service(home))
-            try:
-                embedded = start_embedded_postgres(home)
-            except EmbeddedPostgresError as exc:
-                raise SystemExit(f"{exc}; or set {DATABASE_URL_ENV} to a PostgreSQL server") from None
-            if embedded.started:
-                stack.callback(embedded.stop)
-            database_url = embedded.conninfo
-        database = Database(database_url)
+        lock = None if settings.database_url else stack.enter_context(_sole_service(home))
+        try:
+            database = open_database(home, settings.database_url)
+        except DatabaseError as exc:
+            raise SystemExit(str(exc)) from None
         stack.callback(database.close)
         app = ExperienceHTTPService(
             HTTPServiceConfig(home, os.environ.get("HYPERLOOM_KB_TOKEN", "")),
@@ -1406,6 +1520,8 @@ __all__ = [
     "ExperienceHTTPService",
     "HTTPServiceConfig",
     "HTTPServiceError",
+    "MAX_FILE_BYTES",
+    "MissingFiles",
     "RequestHandler",
     "ServiceSettings",
     "code_digest",

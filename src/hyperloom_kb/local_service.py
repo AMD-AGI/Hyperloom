@@ -153,7 +153,7 @@ def _require_home(health: Mapping[str, JsonValue], home: Path, host: str, port: 
 
 
 def _home_released(home: Path) -> bool:
-    """Whether no service holds ``home``, whose lock its holder keeps until it has stopped the home's database."""
+    """Whether no service holds ``home``, whose lock its holder keeps until it has stopped serving."""
 
     import fcntl
 
@@ -176,8 +176,7 @@ def _stop(health: Mapping[str, JsonValue], host: str, port: int, home: Path, tim
     except PermissionError as exc:
         raise LocalServiceError(f"cannot stop the Experience service process {pid} on {host}:{port}") from exc
     deadline = time.monotonic() + timeout_seconds
-    # A stopping service closes its port before it drains and stops the home's database; one started in between
-    # would find the home held and exit.
+    # A stopping service closes its port before it drains; one started in between would find the home held and exit.
     while _listening(host, port) or not _home_released(home):
         if time.monotonic() >= deadline:
             raise LocalServiceError(f"the Experience service process {pid} still serves {home} on {host}:{port}")

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import threading
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol, TypeAlias, runtime_checkable
 
 from hyperloom_kb.query_view import (
@@ -19,7 +19,15 @@ from hyperloom_kb.query_view import (
     RepeatAnnotations,
     RetrievalCapability,
 )
-from hyperloom_kb.schema import Experience, JsonScalar, JsonValue, RenderedRef
+from hyperloom_kb.schema import (
+    CATEGORIES,
+    Experience,
+    FieldValue,
+    FileRef,
+    JsonScalar,
+    JsonValue,
+    RenderedRef,
+)
 from hyperloom_kb.storage import ExperienceStore
 
 
@@ -165,7 +173,7 @@ class LocalRetrievalService:
     ) -> None:
         self._experiences = experiences
         self._views = views
-        self._renderer = renderer or _render_experience
+        self._renderer = renderer or render_complete_experience
         self._providers = {provider.capability: provider for provider in providers}
         if any(
             capability not in {RetrievalCapability.FUZZY, RetrievalCapability.SEMANTIC}
@@ -398,82 +406,39 @@ def _value_key(value: JsonScalar) -> str:
     )
 
 
-def _render_experience(experience: Experience, view: QueryView) -> str:
-    group_key = view.experience_groups[experience.id]
-    annotations = view.groups[group_key].annotations
-    outcome = experience.outcome
-    notes = (f"Notes: {dict(sorted(experience.notes.items()))}",) if experience.notes else ()
-    return "\n".join(
-        (
-            f"Experience {experience.id}",
-            f"Repeat Group: {group_key}",
-            f"Conditions: {dict(sorted(experience.identity.items()))}",
-            f"Objective: {experience.objective}",
-            (
-                "Baseline: "
-                f"identity={dict(sorted(experience.baseline_identity.items()))}, "
-                f"value={experience.baseline_value}"
-            ),
-            (
-                "Annotations: "
-                f"members={annotations.member_count}, "
-                f"runs={annotations.distinct_run_count}, "
-                f"decisions={dict(sorted(annotations.decision_counts.items()))}"
-            ),
-            f"Reasoning: {experience.reasoning}",
-            f"Change: {experience.change.summary if experience.change else ''}",
-            (f"Outcome: decision={outcome.decision if outcome else ''}, value={outcome.value if outcome else None}"),
-            f"Reflection: {experience.reflection}",
-            *notes,
-        )
-    )
+#: Where a file's content can be read on this host.
+FilePath: TypeAlias = Callable[[FileRef], Path]
 
 
-def content_ref(content: str) -> str:
-    return "sha256:" + hashlib.sha256(content.encode()).hexdigest()
-
-
-def _free_text_slots(record: dict[str, JsonValue]) -> list[tuple[dict[str, JsonValue], str]]:
-    change = record.get("change")
-    alternatives = record.get("alternatives")
-    slots: list[tuple[dict[str, JsonValue], str]] = [(record, "reasoning"), (record, "reflection")]
-    if isinstance(change, dict):
-        slots += [(change, "summary"), (change, "content")]
-    for alternative in alternatives if isinstance(alternatives, list) else []:
-        if isinstance(alternative, dict):
-            slots += [(alternative, "option"), (alternative, "why_not")]
-    notes = record.get("notes")
-    if isinstance(notes, dict):
-        slots += [(notes, label) for label in notes]
-    return [(container, key) for container, key in slots if key in container]
+def _rendered(value: FieldValue, file_path: FilePath | None) -> JsonValue:
+    if isinstance(value, tuple):
+        return [_rendered(item, file_path) for item in value]
+    if not isinstance(value, FileRef):
+        return value
+    if file_path is None:
+        return {"file": value.name, "bytes": value.bytes, "sha256": value.sha256}
+    return {"file": value.name, "bytes": value.bytes, "path": str(file_path(value))}
 
 
 def render_complete_experience(
     experience: Experience,
     view: QueryView,
     *,
-    inline_limit: int | None = None,
-    external: dict[str, str] | None = None,
+    file_path: FilePath | None = None,
 ) -> str:
     """Render every knowledge field of the record, never condensed, plus full Repeat Group annotations.
 
     The record's metadata, such as its provenance and the reads that shaped it, stays in the record and out of the
-    prompt; the heading names the Experience so an agent can cite it. A free-text field (``reasoning``,
-    ``reflection``, ``change.summary``, ``change.content``, an alternative, or a note) longer than ``inline_limit`` bytes
-    renders as a reference to its text, which is put in ``external`` under that reference: the field stays whole
-    while the prompt carries only its size.
+    prompt; the heading names the Experience so an agent can cite it. A text field renders whole. A file field renders
+    as its name, size, and the ``file_path`` an agent reads its content from, never as the content itself.
     """
 
     group_key = view.experience_groups[experience.id]
     annotations = view.groups[group_key].annotations
-    record = experience.knowledge()
-    if inline_limit is not None and external is not None:
-        for container, key in _free_text_slots(record):
-            text = container[key]
-            if isinstance(text, str) and len(text.encode()) > inline_limit:
-                ref = content_ref(text)
-                external[ref] = text
-                container[key] = f"<external content {ref}, {len(text.encode())} bytes>"
+    record: dict[str, JsonValue] = {"objective": experience.objective}
+    for category in CATEGORIES:
+        record[category] = {name: _rendered(value, file_path) for name, value in getattr(experience, category).items()}
+    record["notes"] = dict(experience.notes)
     return "\n".join(
         (
             f"Experience {experience.id}",
@@ -491,6 +456,7 @@ __all__ = [
     "CandidateProvider",
     "CapabilityUnavailable",
     "ExperienceRenderer",
+    "FilePath",
     "GroupCandidate",
     "LeaseExpired",
     "LocalRetrievalService",
@@ -501,6 +467,5 @@ __all__ = [
     "RetrievalError",
     "RetrievalResult",
     "ViewUnavailable",
-    "content_ref",
     "render_complete_experience",
 ]

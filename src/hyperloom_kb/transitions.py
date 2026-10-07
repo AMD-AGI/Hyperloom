@@ -28,15 +28,12 @@ _BEGIN_FIELDS = (
     "supersedes",
     "identity",
     "objective",
-    "baseline_identity",
-    "baseline_value",
-    "preconditions",
+    "baseline",
     "provenance",
 )
 
 _DECISION_FIELDS = (
-    "reasoning",
-    "alternatives",
+    "rationale",
     "change",
     "rendered_refs",
 )
@@ -61,14 +58,14 @@ def classify_transition(previous: Experience, incoming: Experience) -> Transitio
     if changed_begin:
         raise ExperienceConflictError(f"begin-time fields cannot change: {', '.join(changed_begin)}")
 
-    if previous.change is not None:
+    if previous.change:
         changed_decision = [name for name in _DECISION_FIELDS if getattr(previous, name) != getattr(incoming, name)]
         if changed_decision:
             raise ExperienceConflictError(f"decision-time fields cannot change: {', '.join(changed_decision)}")
 
     if incoming.status is ExperienceStatus.COMPLETE:
         return TransitionKind.COMPLETED
-    if previous.change is None and incoming.change is not None:
+    if not previous.change and incoming.change:
         return TransitionKind.DECIDED
 
     raise ExperienceConflictError("in_progress write is not a valid monotonic transition")

@@ -11,29 +11,29 @@ import ipaddress
 import json
 import logging
 import os
+import shutil
 import tempfile
 import urllib.error
 import uuid
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, TypeAlias, TypeVar
 
+from hyperloom_kb.files import file_ref
 from hyperloom_kb.identity import derive_experience_id
 from hyperloom_kb.observability import REQUEST_ID_HEADER, client_headers
 from hyperloom_kb.schema import (
-    Alternative,
-    Change,
     Experience,
     ExperienceDeclaration,
     ExperienceStatus,
-    JsonScalar,
+    FieldValue,
+    FileRef,
     JsonValue,
-    Outcome,
     Provenance,
     RenderedRef,
 )
@@ -54,6 +54,13 @@ _PERMANENT_HTTP_STATUSES = frozenset(
 )
 _SYNC_COUNTS = ("created", "unchanged", "skipped", "held_back")
 _DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_SPOOLED_FILES = "files"
+_T = TypeVar("_T")
+
+#: Where each file a record names is read from on this host, by its sha256.
+LocalFiles: TypeAlias = Mapping[str, Path]
+#: A field value an SDK caller gives: a ``Path`` stands for a local file, which the record names by its ``FileRef``.
+SessionValue: TypeAlias = FieldValue | Path | tuple[str | FileRef | Path, ...] | list[str | FileRef | Path]
 
 
 def is_loopback(url: str) -> bool:
@@ -116,8 +123,6 @@ class RemoteReadResult:
     rendered_refs: tuple[RenderedRef, ...]
     warnings: tuple[str, ...]
     experiences: tuple[dict[str, JsonValue], ...] = ()
-    # ``{"ref", "bytes", "content"}`` for each ``change.content`` the prompt block references instead of inlining.
-    contents: tuple[dict[str, JsonValue], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -181,31 +186,32 @@ class RemoteClient:
 
         self._identity = client_headers(kb_id, name)
 
-    def _request(
+    def _exchange(
         self,
         method: str,
         path: str,
-        body: dict[str, JsonValue] | None = None,
-    ) -> dict[str, JsonValue]:
-        data = None if body is None else json.dumps(body).encode()
+        answer: Callable[[Any], _T],
+        *,
+        data: bytes | BinaryIO | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> _T:
+        """Send one request and hand its response to ``answer``; a failure either way raises ``RemoteClientError``."""
+
         request_id = uuid.uuid4().hex
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {self.config.token}",
-            REQUEST_ID_HEADER: request_id,
-            **self._identity,
-        }
-        if data is not None:
-            headers["Content-Type"] = "application/json"
         request = urllib.request.Request(
             f"{self.config.base_url}{path}",
             data=data,
-            headers=headers,
+            headers={
+                "Authorization": f"Bearer {self.config.token}",
+                REQUEST_ID_HEADER: request_id,
+                **self._identity,
+                **(headers or {}),
+            },
             method=method,
         )
         try:
             with self._opener(request, timeout=self.config.timeout_seconds) as response:
-                payload = json.loads(response.read())
+                return answer(response)
         except urllib.error.HTTPError as exc:
             with exc:
                 try:
@@ -219,11 +225,79 @@ class RemoteClient:
             ) from exc
         except (OSError, TimeoutError, ValueError, RecursionError, http.client.HTTPException) as exc:
             raise RemoteClientError(
-                f"Experience service request {request_id} failed with {type(exc).__name__}"
+                f"Experience service request {request_id} failed with {type(exc).__name__}: {exc}"
             ) from exc
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, JsonValue] | None = None,
+    ) -> dict[str, JsonValue]:
+        headers = {"Accept": "application/json"}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        payload = self._exchange(
+            method,
+            path,
+            lambda response: json.loads(response.read()),
+            data=None if body is None else json.dumps(body).encode(),
+            headers=headers,
+        )
         if not isinstance(payload, dict):
             raise RemoteClientError("Experience service response is not an object")
         return payload
+
+    def missing_files(self, refs: tuple[FileRef, ...]) -> tuple[str, ...]:
+        """The sha256 of each of ``refs`` the service does not hold."""
+
+        if not refs:
+            return ()
+        payload = self._request("POST", "/v1/files/missing", {"files": [ref.to_dict() for ref in refs]})
+        missing = payload.get("missing")
+        if not isinstance(missing, list):
+            raise RemoteClientError("Experience file check response is invalid")
+        return tuple(str(item) for item in missing)
+
+    def put_file(self, ref: FileRef, path: Path) -> dict[str, JsonValue]:
+        """Send the local file at ``path`` as the file ``ref`` names."""
+
+        with path.open("rb") as stream:
+            payload = self._exchange(
+                "PUT",
+                f"/v1/files/{ref.sha256}",
+                lambda response: json.loads(response.read()),
+                data=stream,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(ref.bytes),
+                },
+            )
+        if not isinstance(payload, dict):
+            raise RemoteClientError("Experience file write response is not an object")
+        return payload
+
+    def fetch_file(self, sha256: str, receive: Callable[[int, BinaryIO], object]) -> None:
+        """Hand the file ``sha256`` to ``receive`` as its size and a stream of its bytes."""
+
+        def answer(response: Any) -> None:
+            receive(int(response.headers["Content-Length"]), response)
+
+        self._exchange("GET", f"/v1/files/{sha256}", answer)
+
+    def send_files(self, experience: Experience, files: LocalFiles) -> None:
+        """Send each file ``experience`` names that the service does not hold, from where ``files`` says it is."""
+
+        refs = {ref.sha256: ref for ref in experience.files()}
+        for sha256 in self.missing_files(tuple(refs.values())):
+            path = files.get(sha256)
+            if path is None:
+                raise RemoteClientError(
+                    f"Experience {experience.id} names file {sha256}, which neither the service nor this client has",
+                    retryable=False,
+                )
+            self.put_file(refs[sha256], path)
 
     def health(self) -> dict[str, JsonValue]:
         return self._request("GET", "/health")
@@ -236,7 +310,6 @@ class RemoteClient:
         outcome: str | None = None,
         limit: int | None = None,
         schema_ref: str | None = None,
-        content_inline_limit: int | None = None,
         render_budget_chars: int | None = None,
     ) -> RemoteReadResult:
         body: dict[str, JsonValue] = {"decision": decision, "context": dict(context)}
@@ -246,8 +319,6 @@ class RemoteClient:
             body["limit"] = limit
         if schema_ref is not None:
             body["schema_ref"] = schema_ref
-        if content_inline_limit is not None:
-            body["content_inline_limit"] = content_inline_limit
         if render_budget_chars is not None:
             body["render_budget_chars"] = render_budget_chars
         try:
@@ -255,13 +326,7 @@ class RemoteClient:
             refs = payload.get("rendered_refs")
             experiences = payload.get("experiences")
             warnings = payload.get("warnings")
-            contents = payload.get("contents", [])
-            if not (
-                isinstance(refs, list)
-                and isinstance(experiences, list)
-                and isinstance(warnings, list)
-                and isinstance(contents, list)
-            ):
+            if not (isinstance(refs, list) and isinstance(experiences, list) and isinstance(warnings, list)):
                 raise RemoteClientError("Experience read response is invalid")
             return RemoteReadResult(
                 read_id=str(payload.get("read_id") or ""),
@@ -270,7 +335,6 @@ class RemoteClient:
                 rendered_refs=tuple(RenderedRef.from_dict(item) for item in refs),
                 warnings=tuple(str(item) for item in warnings),
                 experiences=tuple(item for item in experiences if isinstance(item, dict)),
-                contents=tuple(item for item in contents if isinstance(item, dict)),
             )
         except (RemoteClientError, ValueError) as exc:
             return RemoteReadResult(
@@ -288,14 +352,31 @@ class RemoteClient:
             body["declaration"] = declaration.to_dict()
         return body
 
-    def write(self, experience: Experience, *, declaration: ExperienceDeclaration | None = None) -> RemoteWriteResult:
-        """Write one complete Experience, raising on any failure; ``declaration`` registers a schema the service lacks."""
+    def write(
+        self,
+        experience: Experience,
+        *,
+        declaration: ExperienceDeclaration | None = None,
+        files: LocalFiles | None = None,
+    ) -> RemoteWriteResult:
+        """Write one complete Experience, raising on any failure; ``declaration`` registers a schema the service lacks.
 
+        Each file the record names that the service lacks is sent first, from where ``files`` says it is.
+        """
+
+        self.send_files(experience, files or {})
         payload = self._request("PUT", f"/v1/experiences/{experience.id}", self._write_body(experience, declaration))
         return self._write_result(payload, experience.id)
 
-    def publish(self, experience: Experience, *, declaration: ExperienceDeclaration | None = None) -> RemoteWriteResult:
-        """Write one complete Experience; spool only retryable failures, with the declaration they need later.
+    def publish(
+        self,
+        experience: Experience,
+        *,
+        declaration: ExperienceDeclaration | None = None,
+        files: LocalFiles | None = None,
+    ) -> RemoteWriteResult:
+        """Write one complete Experience; spool only retryable failures, with the declaration and files they need
+        later.
 
         Once a write on this client fails retryably, later publishes spool without a request until ``flush_spool``
         delivers one.
@@ -303,18 +384,21 @@ class RemoteClient:
 
         if not self._spooling:
             try:
-                return self.write(experience, declaration=declaration)
+                return self.write(experience, declaration=declaration, files=files)
             except RemoteClientError as exc:
                 if not exc.retryable:
                     raise
                 self._spooling = True
-        self._spool(experience.id, self._write_body(experience, declaration))
+        self._spool(experience, self._write_body(experience, declaration), files or {})
         return RemoteWriteResult("spooled", experience.id)
 
-    def _spool(self, experience_id: str, body: dict[str, JsonValue]) -> None:
+    def _spool(self, experience: Experience, body: dict[str, JsonValue], files: LocalFiles) -> None:
         root = self.config.spool_root
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        digest = hashlib.sha256(experience_id.encode()).hexdigest()
+        # The spool keeps its own copy of each file, so a flush does not depend on the producer keeping them.
+        for ref in experience.files():
+            self._spool_file(ref, files.get(ref.sha256))
+        digest = hashlib.sha256(experience.id.encode()).hexdigest()
         target = root / f"spool-{digest}.json"
         encoded = (json.dumps(body, sort_keys=True, separators=(",", ":")) + "\n").encode()
         with tempfile.NamedTemporaryFile(
@@ -329,6 +413,33 @@ class RemoteClient:
             os.fsync(stream.fileno())
         os.chmod(temporary, 0o600)
         os.replace(temporary, target)
+
+    def _spool_file(self, ref: FileRef, source: Path | None) -> None:
+        directory = self.config.spool_root / _SPOOLED_FILES
+        target = directory / ref.sha256
+        if target.is_file() and target.stat().st_size == ref.bytes:
+            return
+        if source is None:
+            raise RemoteClientError(f"cannot spool file {ref.sha256}: this client has no copy of it", retryable=False)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with tempfile.NamedTemporaryFile(mode="wb", prefix=f".{ref.sha256}.", dir=directory, delete=False) as stream:
+            temporary = Path(stream.name)
+            with source.open("rb") as original:
+                shutil.copyfileobj(original, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, target)
+
+    def _spooled_files(self) -> dict[str, Path]:
+        directory = self.config.spool_root / _SPOOLED_FILES
+        return {path.name: path for path in directory.iterdir() if path.is_file()} if directory.is_dir() else {}
+
+    def _prune_spooled_files(self, still_spooled: list[Experience]) -> None:
+        needed = {ref.sha256 for experience in still_spooled for ref in experience.files()}
+        for sha256, path in self._spooled_files().items():
+            if sha256 not in needed:
+                path.unlink(missing_ok=True)
 
     def _reject_spooled(self, path: Path, reason: str) -> None:
         rejected = self.config.spool_root / "rejected"
@@ -358,6 +469,9 @@ class RemoteClient:
         if not root.exists():
             return ()
         results: list[RemoteWriteResult] = []
+        files = self._spooled_files()
+        still_spooled: list[Experience] = []
+        unavailable = False
         for path in sorted(root.glob("spool-*.json")):
             try:
                 value = json.loads(path.read_text(encoding="utf-8"))
@@ -368,17 +482,23 @@ class RemoteClient:
             except (KeyError, TypeError, ValueError) as exc:
                 self._reject_spooled(path, f"unreadable spool file: {exc}")
                 continue
+            if unavailable:
+                still_spooled.append(experience)
+                continue
             try:
-                result = self.write(experience, declaration=declaration)
+                result = self.write(experience, declaration=declaration, files=files)
             except RemoteClientError as exc:
                 if exc.retryable:
-                    self._spooling = True
-                    break
+                    self._spooling = unavailable = True
+                    still_spooled.append(experience)
+                    continue
                 self._reject_spooled(path, str(exc))
                 continue
             self._spooling = False
             path.unlink()
             results.append(result)
+        # A rejected record's files go with it; its spool file keeps the record for inspection.
+        self._prune_spooled_files(still_spooled)
         return tuple(results)
 
     @staticmethod
@@ -508,18 +628,40 @@ class RemoteClient:
                 return result
 
 
+def _attached(values: Mapping[str, SessionValue] | None, files: dict[str, Path]) -> dict[str, FieldValue]:
+    """``values`` as a record holds them: each ``Path`` becomes the ``FileRef`` of its file, noted in ``files``."""
+
+    def one(value: str | int | float | bool | FileRef | Path) -> str | int | float | bool | FileRef:
+        if not isinstance(value, Path):
+            return value
+        ref = file_ref(value)
+        files[ref.sha256] = value
+        return ref
+
+    return {
+        name: tuple(one(item) for item in value) if isinstance(value, (list, tuple)) else one(value)  # type: ignore[misc]
+        for name, value in (values or {}).items()
+    }
+
+
 class RemoteExperienceSession:
-    """Lifecycle builder that publishes one complete remote Experience."""
+    """Lifecycle builder that publishes one complete remote Experience.
+
+    Each stage takes the fields of its categories as the schema declares them; a file field takes the ``Path`` of a
+    local file, which the record names by its ``FileRef`` and the publish sends.
+    """
 
     def __init__(
         self,
         client: RemoteClient,
         declaration: ExperienceDeclaration,
         experience: Experience,
+        files: dict[str, Path],
     ) -> None:
         self._client = client
         self._declaration = declaration
         self._experience = experience
+        self._files = files
 
     @property
     def record(self) -> Experience:
@@ -528,35 +670,34 @@ class RemoteExperienceSession:
     def decide(
         self,
         *,
-        reasoning: str,
-        change: Change,
-        alternatives: tuple[Alternative, ...] = (),
+        change: Mapping[str, SessionValue],
+        rationale: Mapping[str, SessionValue] | None = None,
         rendered_refs: tuple[RenderedRef, ...] = (),
     ) -> Experience:
         self._experience = replace(
             self._experience,
-            reasoning=reasoning,
-            change=change,
-            alternatives=tuple(alternatives),
+            rationale=_attached(rationale, self._files),
+            change=_attached(change, self._files),
             rendered_refs=tuple(rendered_refs),
         )
+        self._declaration.validate(self._experience)
         return self._experience
 
     def complete(
         self,
         *,
-        outcome: Outcome,
-        reflection: str,
+        outcome: Mapping[str, SessionValue],
+        reflection: Mapping[str, SessionValue] | None = None,
         completed_at: datetime | None = None,
         notes: Mapping[str, str] | None = None,
     ) -> Experience:
-        """Finish the record; ``notes`` are labelled texts kept outside the schema, searched and shown to agents."""
+        """Finish the record; ``notes`` are labelled texts no schema declares, searched and shown to agents."""
 
         self._experience = replace(
             self._experience,
             status=ExperienceStatus.COMPLETE,
-            outcome=outcome,
-            reflection=reflection,
+            outcome=_attached(outcome, self._files),
+            reflection=_attached(reflection, self._files),
             completed_at=completed_at or datetime.now(timezone.utc),
             notes=dict(notes or {}),
         )
@@ -564,7 +705,7 @@ class RemoteExperienceSession:
         return self._experience
 
     def publish(self) -> RemoteWriteResult:
-        return self._client.publish(self._experience, declaration=self._declaration)
+        return self._client.publish(self._experience, declaration=self._declaration, files=self._files)
 
 
 class RemoteExperienceKB:
@@ -602,33 +743,30 @@ class RemoteExperienceKB:
         *,
         run_id: str,
         seq: int,
-        identity: dict[str, JsonScalar],
         objective: str,
-        baseline_identity: dict[str, JsonScalar],
-        baseline_value: float,
         provenance: Provenance,
-        preconditions: tuple[str, ...] = (),
+        identity: Mapping[str, FieldValue] | None = None,
+        baseline: Mapping[str, SessionValue] | None = None,
         parent_id: str = "",
         supersedes: str = "",
         created_at: datetime | None = None,
     ) -> RemoteExperienceSession:
+        files: dict[str, Path] = {}
         experience = Experience(
             id=derive_experience_id(provenance.producer, run_id, seq),
             run_id=run_id,
             seq=seq,
             created_at=created_at or datetime.now(timezone.utc),
-            identity=identity,
             objective=objective,
-            baseline_identity=baseline_identity,
-            baseline_value=baseline_value,
             provenance=provenance,
             schema_ref=self.declaration.schema_ref,
-            preconditions=tuple(preconditions),
+            identity=dict(identity or {}),
+            baseline=_attached(baseline, files),
             parent_id=parent_id,
             supersedes=supersedes,
         )
         self.declaration.validate(experience)
-        return RemoteExperienceSession(self.client, self.declaration, experience)
+        return RemoteExperienceSession(self.client, self.declaration, experience, files)
 
     def read(
         self,
@@ -643,6 +781,7 @@ class RemoteExperienceKB:
 
 __all__ = [
     "ListPage",
+    "LocalFiles",
     "RemoteClient",
     "RemoteClientError",
     "RemoteConfig",
@@ -650,5 +789,6 @@ __all__ = [
     "RemoteExperienceSession",
     "RemoteReadResult",
     "RemoteWriteResult",
+    "SessionValue",
     "is_loopback",
 ]

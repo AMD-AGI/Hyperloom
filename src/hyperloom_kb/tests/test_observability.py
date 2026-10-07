@@ -18,21 +18,43 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-import psycopg
 import pytest
-from psycopg.conninfo import conninfo_to_dict
 
-from hyperloom_kb import ExperienceHTTPService, HTTPServiceConfig, RemoteClient, RemoteClientError, RemoteConfig
+from hyperloom_kb import (
+    ExperienceHTTPService,
+    HTTPServiceConfig,
+    RemoteClient,
+    RemoteClientError,
+    RemoteConfig,
+    file_ref,
+)
+from hyperloom_kb.database import Database, PostgresDatabase, SqliteDatabase
 from hyperloom_kb.http_service import create_http_server, serve_until_stopped
 from hyperloom_kb.observability import JsonLogFormatter, event
 from hyperloom_kb.tests.conftest import fresh_database
-from hyperloom_kb.tests.postgres_fixtures import requires_embedded_postgres
+from hyperloom_kb.tests.database_fixtures import TEST_DATABASE_URL_ENV
 from hyperloom_kb.tests.test_http_service import TOKEN, RunningServer, _declaration, _experience, _http
 
 SCHEMA = _declaration()
+
+
+def _lose(database: Database) -> None:
+    """Take the database away from a service still serving it: its file is removed, or its server drops it."""
+
+    if isinstance(database, SqliteDatabase):
+        for suffix in ("", "-wal", "-shm"):
+            database.path.with_name(database.path.name + suffix).unlink(missing_ok=True)
+        return
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict
+
+    assert isinstance(database, PostgresDatabase)
+    with psycopg.connect(os.environ[TEST_DATABASE_URL_ENV], autocommit=True) as admin:
+        admin.execute(f'DROP DATABASE "{conninfo_to_dict(database.conninfo)["dbname"]}" WITH (FORCE)')
 
 
 def _service(home: Path, *, global_url: str | None = None, name: str = "") -> ExperienceHTTPService:
@@ -70,23 +92,22 @@ def test_probes_answer_without_a_token_and_name_only_their_checks(tmp_path: Path
     with RunningServer(app) as url:
         live = _get(url, "/livez")
         ready = _get(url, "/readyz")
-        app._database.pool.close()
+        _lose(app._database)
         unready = _get(url, "/readyz")
 
     assert (live[0], json.loads(live[2])) == (200, {"status": "alive"})
-    checks = {"database": "ok", "home_writable": "ok", "disk_space": "ok", "records": "ok"}
+    checks = {"database": "ok", "home_writable": "ok", "disk_space": "ok", "records": "ok", "files": "ok"}
     assert (ready[0], json.loads(ready[2])) == (200, {"ready": True, "checks": checks})
     assert (unready[0], json.loads(unready[2])) == (503, {"ready": False, "checks": {**checks, "database": "failed"}})
 
 
-def test_probes_and_metrics_answer_promptly_while_the_database_is_gone(tmp_path: Path, postgres_conninfo: str) -> None:
+def test_probes_and_metrics_answer_promptly_while_the_database_is_gone(tmp_path: Path) -> None:
     database = fresh_database()
     app = ExperienceHTTPService(HTTPServiceConfig(tmp_path / "home", TOKEN), SCHEMA, None, database=database)
     app.write(_experience(SCHEMA))
     with RunningServer(app) as url:
         before = _metrics(_get(url, "/metrics")[2].decode())
-        with psycopg.connect(postgres_conninfo, autocommit=True) as admin:
-            admin.execute(f'DROP DATABASE "{conninfo_to_dict(database.pool.conninfo)["dbname"]}" WITH (FORCE)')
+        _lose(database)
         started = time.monotonic()
         ready = _get(url, "/readyz")
         status, _, body = _get(url, "/metrics")
@@ -116,6 +137,27 @@ def test_a_record_file_lost_since_the_last_start_makes_the_next_start_unready(tm
 
     assert (status, json.loads(body)["checks"]["records"]) == (503, "failed")
     assert metrics["hyperloom_kb_records_missing"] == 1
+
+
+def test_a_file_lost_since_the_last_start_makes_the_next_start_unready(tmp_path: Path) -> None:
+    home, database = tmp_path / "home", fresh_database()
+    first = ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), SCHEMA, None, database=database)
+    artifact = tmp_path / "trace.json"
+    artifact.write_bytes(b"[0.41]\n")
+    ref = file_ref(artifact)
+    with artifact.open("rb") as stream:
+        first.put_file(ref.sha256, ref.bytes, stream)
+    first.write(replace(_experience(SCHEMA), change={**_experience(SCHEMA).change, "artifact": ref}))
+    first.file_path(ref).unlink()
+
+    restarted = ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), SCHEMA, None, database=database)
+    with RunningServer(restarted) as url:
+        status, _, body = _get(url, "/readyz")
+        metrics = _metrics(_get(url, "/metrics")[2].decode())
+
+    assert (status, json.loads(body)["checks"]["files"]) == (503, "failed")
+    assert (metrics["hyperloom_kb_files_missing"], metrics["hyperloom_kb_files"]) == (1, 1)
+    assert metrics["hyperloom_kb_file_bytes"] == ref.bytes
 
 
 def test_metrics_count_requests_writes_and_refusals_and_sample_what_the_kb_holds(tmp_path: Path) -> None:
@@ -272,9 +314,7 @@ def test_a_stopped_service_finishes_the_request_in_flight(tmp_path: Path) -> Non
     assert answer == {"status": 200}
 
 
-@pytest.mark.usefixtures("reachable_tmp_path")
-@requires_embedded_postgres
-def test_sigterm_stops_the_service_and_the_database_it_started(tmp_path: Path) -> None:
+def test_sigterm_stops_the_service_once_it_drained(tmp_path: Path) -> None:
     home, port = tmp_path / "home", _free_port()
     env = {key: value for key, value in os.environ.items() if not key.startswith(("ANTHROPIC_", "HYPERLOOM_"))} | {
         "HYPERLOOM_KB_TOKEN": TOKEN,
@@ -306,5 +346,5 @@ def test_sigterm_stops_the_service_and_the_database_it_started(tmp_path: Path) -
     ]
 
     assert returncode == 0
-    assert not (home / "postgres" / "postmaster.pid").exists()
+    assert (home / "kb.sqlite3").is_file()
     assert "listening" in events and "stopped" in events

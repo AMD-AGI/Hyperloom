@@ -1,36 +1,65 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A service's database answers its next request once the server is back, as after a failover to a new primary."""
+"""The database contract the service relies on, the same whether a SQLite file or a PostgreSQL server keeps it."""
 
 from __future__ import annotations
 
-import shutil
-import tempfile
+import sqlite3
 from pathlib import Path
 
-from hyperloom_kb.database import Database
-from hyperloom_kb.tests.postgres_fixtures import requires_embedded_postgres
-from hyperloom_kb.embedded_postgres import start_embedded_postgres
+import pytest
+
+from hyperloom_kb.database import SCHEMA_VERSION, DatabaseError, SqliteDatabase, open_database
+from hyperloom_kb.tests.conftest import fresh_database
 
 
-@requires_embedded_postgres
-def test_the_first_request_after_the_server_restarts_is_answered() -> None:
-    home = Path(tempfile.mkdtemp(prefix="hyperloom-kb-restart-"))
-    home.chmod(0o755)
-    server = start_embedded_postgres(home)
-    database = Database(server.conninfo, max_size=2)
-    try:
+def test_a_transaction_that_raises_leaves_nothing_behind() -> None:
+    database = fresh_database()
+    kb_id = database.resolve_kb()
+
+    with pytest.raises(RuntimeError, match="abandoned"):
         with database.transaction() as connection:
-            connection.execute("CREATE TABLE kept (value TEXT)")
-            connection.execute("INSERT INTO kept VALUES ('before the restart')")
-        server.stop()
-        server = start_embedded_postgres(home)
-        with database.transaction() as connection:
-            kept = connection.execute("SELECT value FROM kept").fetchall()
-    finally:
-        database.close()
-        server.stop()
-        shutil.rmtree(home, ignore_errors=True)
+            connection.execute("UPDATE kbs SET last_sequence = %(next)s WHERE kb_id = %(kb)s", {"next": 7, "kb": kb_id})
+            raise RuntimeError("abandoned")
+    with database.transaction() as connection:
+        row = connection.execute("SELECT last_sequence FROM kbs WHERE kb_id = %s", (kb_id,)).fetchone()
 
-    assert kept == [{"value": "before the restart"}]
+    assert row["last_sequence"] == 0
+
+
+def test_a_database_keeps_its_one_kb_across_every_open() -> None:
+    database = fresh_database()
+
+    assert database.resolve_kb() == database.resolve_kb()
+    assert database.resolve_kb().startswith("kb-")
+    assert database.answers(2.0)
+
+
+def test_a_workspace_home_keeps_its_database_in_sqlite(tmp_path: Path) -> None:
+    first = open_database(tmp_path / "home")
+    kb_id = first.resolve_kb()
+    reopened = open_database(tmp_path / "home")
+
+    assert isinstance(first, SqliteDatabase)
+    assert first.path == (tmp_path / "home" / "kb.sqlite3").resolve()
+    assert reopened.resolve_kb() == kb_id
+    assert reopened.size_bytes() > 0
+
+
+def test_a_database_newer_than_this_code_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "kb.sqlite3"
+    SqliteDatabase(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute("INSERT INTO kb_migrations(version, applied_at) VALUES (?, 'later')", (SCHEMA_VERSION + 1,))
+
+    with pytest.raises(DatabaseError, match=f"newer than this code's {SCHEMA_VERSION}"):
+        SqliteDatabase(path)
+
+
+def test_an_unreachable_sqlite_home_is_a_database_error(tmp_path: Path) -> None:
+    blocked = tmp_path / "file"
+    blocked.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(DatabaseError, match="cannot open the Experience KB database"):
+        SqliteDatabase(blocked / "kb.sqlite3")
