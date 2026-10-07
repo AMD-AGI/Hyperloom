@@ -22,7 +22,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any, BinaryIO, TypeAlias, TypeVar
+from typing import Any, BinaryIO, TypeAlias, TypeVar, cast
 
 from hyperloom_kb.files import file_ref
 from hyperloom_kb.identity import derive_experience_id
@@ -164,6 +164,22 @@ def _text(value: JsonValue, name: str) -> str:
     return value
 
 
+class _WholeBody:
+    """A response body that raises ``IncompleteRead`` when it ends before its ``Content-Length``; ``http.client``
+    returns the short read instead, which would read as a file whose bytes are wrong rather than a dropped transfer."""
+
+    def __init__(self, response: Any, size: int) -> None:
+        self._response = response
+        self._left = size
+
+    def read(self, amount: int = -1) -> bytes:
+        chunk: bytes = self._response.read(amount)
+        if self._left and not chunk and amount != 0:
+            raise http.client.IncompleteRead(b"", self._left)
+        self._left -= len(chunk)
+        return chunk
+
+
 class RemoteClient:
     """Authenticated client with fail-open reads and durably spooled writes."""
 
@@ -282,7 +298,8 @@ class RemoteClient:
         """Hand the file ``sha256`` to ``receive`` as its size and a stream of its bytes."""
 
         def answer(response: Any) -> None:
-            receive(int(response.headers["Content-Length"]), response)
+            size = int(response.headers["Content-Length"])
+            receive(size, cast(BinaryIO, _WholeBody(response, size)))
 
         self._exchange("GET", f"/v1/files/{sha256}", answer)
 
