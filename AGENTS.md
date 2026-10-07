@@ -118,6 +118,16 @@ doc is the authority on where that boundary lives.
   an entry point is unused. If the migration has to be staged, name the consumer still on
   the old path and the condition that retires it, and keep the adapter narrow enough that
   it does not become the new general entry point.
+- **Kernelforge workspace state is unversioned.** Files kernelforge writes under a
+  campaign's `forge_experiments/` and reads back itself — run state, campaign config,
+  pending KEEP, handoffs, candidate archive, best manifest, Analysis journal, assembly
+  preparation record — are not persisted data in the sense above. Their reader accepts
+  exactly the shape the current writer produces and rejects anything else. Change such a
+  format by changing writer and reader together: no version field, no migration, no
+  fallback to an old field name; a workspace written by other code starts a fresh
+  campaign. Contracts that cross a process or package boundary — controller publications,
+  the rewrite protocol, fusion and tuning manifests, task-author configs, remote KB
+  records — keep their explicit version, and still accept only one.
 - **Comment below the local average.** Python explains most of itself; prefer a clearer
   name or a smaller function over a sentence about it. A comment earns its place only by
   saying what the code cannot — an invariant, a constraint from outside the file, why the

@@ -26,8 +26,6 @@ from kernelforge.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 20
-
 # How many trailing events the store keeps in memory to serve ``recent_events`` without re-reading ``events.jsonl``
 # each iteration (see LoopStateStore).
 _RECENT_CACHE = 64
@@ -179,7 +177,6 @@ def _validate_round_costs(costs: "RoundCostState") -> None:
 class RunState:
     """Small, resumable control checkpoint for one forge-loop campaign."""
 
-    schema_version: int = SCHEMA_VERSION
     campaign_id: str = ""
     session_index: int = 0
     session_status: str = ""
@@ -223,70 +220,15 @@ class RunState:
     termination_reason: str = ""
 
     def to_dict(self) -> dict:
-        """Serialize the current durable state schema."""
+        """Serialize the durable state."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> "RunState":
-        """Rebuild a RunState from the exact current schema."""
+        """Rebuild a RunState from exactly the fields this code writes."""
         if not isinstance(d, dict):
             raise ValueError("run state must be a JSON object")
-        version = d.get("schema_version")
         payload = dict(d)
-        if version == 13:
-            # v13 predates the durable Analysis refresh anchor.
-            payload["analysis"] = asdict(AnalysisRefreshState())
-            version = 14
-        if version == 14:
-            # v14 predates the durable Plan Critic ruling.
-            payload["last_critic"] = asdict(CriticRuling())
-            version = 15
-        if version == 15:
-            # v15 predates the round cost history.
-            payload["round_costs"] = asdict(RoundCostState())
-            version = 16
-        if version == 16:
-            # v16 recorded what a round spent planning but not what its canonical measurement cost, which was then
-            # priced from the per-step timeout ceilings rather than from observation.
-            costs = payload.get("round_costs")
-            if isinstance(costs, dict):
-                for entry in costs.get("recent") or []:
-                    if isinstance(entry, dict):
-                        entry.setdefault("measurement_sec", 0.0)
-            version = 17
-        if version == 17:
-            # v17 accumulated campaign-cumulative planning with no campaign wall-clock to divide it by, so the report
-            # divided it by the CURRENT process's elapsed time -- the wrong span on any resumed campaign, and the
-            # reason a 10-minute session against 45 minutes of cumulative planning published "450% of the run".
-            costs = payload.get("round_costs")
-            if isinstance(costs, dict):
-                costs.setdefault(
-                    "campaign_sec",
-                    max(
-                        float(costs.get("total_sec", 0.0) or 0.0),
-                        float(costs.get("planning_total_sec", 0.0) or 0.0),
-                    ),
-                )
-            version = 18
-        if version == 18:
-            # v18 read one counter for both the supervisor cooldown and the search-mode switch.
-            stall = payload.get("stall")
-            if isinstance(stall, dict):
-                stall.setdefault(
-                    "unresolved_stall_iters",
-                    int(stall.get("no_improvement_iters", 0) or 0),
-                )
-            version = 19
-        if version == 19:
-            # v19 had no caller-supplied scoring anchor, so the kernel a campaign started from was always the anchor
-            # and always scored 1.0 against it. Left absent rather than backfilled to 1.0: a checkpoint that never
-            # recorded the score did not measure one, and the KEEP bar does not read this field -- it is derived from
-            # the incumbent's own per-case times -- so only incremental reporting sees the difference.
-            payload.setdefault("search_start_mean_case_speedup", None)
-            version = SCHEMA_VERSION
-        if version != SCHEMA_VERSION:
-            raise ValueError(f"unsupported run state schema: expected v{SCHEMA_VERSION}, got {version!r}")
-        payload["schema_version"] = SCHEMA_VERSION
 
         expected = set(cls.__dataclass_fields__)
         missing = expected - set(payload)

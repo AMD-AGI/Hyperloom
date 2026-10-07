@@ -77,12 +77,11 @@ def test_applyback_contract_query_uses_the_producer_schema():
     assert json.loads(result.output) == protocol.applyback_contract_example()
 
 
-def test_the_logical_op_name_and_its_deprecated_alias_are_one_option():
+def test_the_logical_op_name_is_one_required_option():
     parameters = {parameter.name: parameter for parameter in _rewrite_command().params}
     logical = parameters["op_name"]
 
-    assert "--logical-op-name" in logical.opts
-    assert "--op-name" in logical.opts
+    assert logical.opts == ["--logical-op-name"]
     assert logical.required is True
 
 
@@ -121,18 +120,15 @@ def _invoke_rewrite(monkeypatch, tmp_path, name_flag, extra_args=()):
     return result, captured
 
 
-def test_the_deprecated_alias_still_selects_the_same_workload(monkeypatch, tmp_path):
-    modern, from_modern = _invoke_rewrite(monkeypatch, tmp_path, "--logical-op-name")
-    legacy, from_legacy = _invoke_rewrite(monkeypatch, tmp_path, "--op-name")
+def test_the_logical_op_name_selects_the_workload(monkeypatch, tmp_path):
+    result, captured = _invoke_rewrite(monkeypatch, tmp_path, "--logical-op-name")
 
-    assert modern.exit_code == 0
-    assert legacy.exit_code == 0
-    assert from_modern["op_name"] == "vllm::softmax"
-    assert from_legacy["op_name"] == from_modern["op_name"]
-    assert from_modern["prepare_driver"] is True
-    assert from_modern["invocation_spec_file"] == ""
-    assert from_modern["applyback_import_modules"] == ()
-    assert from_modern["max_applyback_attempts"] == 2
+    assert result.exit_code == 0
+    assert captured["op_name"] == "vllm::softmax"
+    assert captured["prepare_driver"] is True
+    assert captured["invocation_spec_file"] == ""
+    assert captured["applyback_import_modules"] == ()
+    assert captured["max_applyback_attempts"] == 2
 
 
 def test_gpu_type_cli_override_reaches_rewrite_config(monkeypatch, tmp_path):
@@ -323,15 +319,3 @@ def test_an_advertised_framework_is_accepted(monkeypatch, tmp_path, framework):
 
     assert result.exit_code == 0
     assert captured["framework"] == framework
-
-
-def test_the_deprecated_alias_warns_without_touching_the_result(
-    monkeypatch,
-    tmp_path,
-):
-    monkeypatch.setattr("sys.argv", ["kernelforge", "--op-name", "vllm::softmax"])
-    result, _captured = _invoke_rewrite(monkeypatch, tmp_path, "--op-name")
-
-    assert result.exit_code == 0
-    assert "--op-name is deprecated" in result.output
-    assert protocol.RESULT_SENTINEL not in result.output

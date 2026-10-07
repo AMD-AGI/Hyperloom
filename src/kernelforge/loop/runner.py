@@ -166,6 +166,45 @@ LONG_HORIZON_OUTCOME_WINDOW = max(
 # Where a campaign writes its own output inside the workspace.
 LOOP_ARTIFACT_ROOT = "forge_experiments"
 
+# The exact key set ``_build_pending_keep`` writes to ``pending_keep.json``; recovery refuses any other shape.
+PENDING_KEEP_FIELDS = frozenset(
+    {
+        "campaign_id",
+        "session_index",
+        "experiment_id",
+        "base_head",
+        "iteration",
+        "wall_ms",
+        "mean_case_speedup",
+        "snr_db",
+        "vgpr",
+        "plan",
+        "rationale",
+        "validation_text",
+        "benchmark",
+        "changed_files",
+        "patch",
+        "patch_sha256",
+        "publication_base_commit",
+        "publication_changed_files",
+        "publication_patch",
+        "kernel_source",
+        "kernel_file",
+        "shape",
+        "baseline_wall_ms",
+        "pristine_baseline_wall_ms",
+        "best_wall_ms_before",
+        "best_mean_case_speedup_before",
+        "session_end_reason",
+        "turns",
+        "search_control",
+        "commit_message",
+        "commit_subject",
+        "task_fingerprint",
+        "git_branch",
+    }
+)
+
 # How far a KEEP has to improve a case's measured time before that case counts as one the KEEP's configuration was
 # chosen for.
 CONFIG_COVERAGE_MIN_MOVE_RATIO = 0.01
@@ -787,7 +826,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             pending = json.loads(path.read_text())
         except Exception as error:
             raise ValueError(f"invalid pending KEEP metadata: {path}") from error
-        if not isinstance(pending, dict) or pending.get("schema_version") != 2:
+        if not isinstance(pending, dict) or set(pending) != PENDING_KEEP_FIELDS:
             raise ValueError(f"invalid pending KEEP metadata: {path}")
         return pending
 
@@ -838,7 +877,6 @@ class IterationLoop(AnalysisRuntimeMixin):
         publication_patch, publication_changed_files = self._candidate_changes(publication_base)
         commit_message = f"iter-{result.iteration}: {rationale[:72]}"
         return {
-            "schema_version": 2,
             "campaign_id": self.run_state.campaign_id,
             "session_index": self.run_state.session_index,
             "experiment_id": (self.experiment.experiment_id if self.experiment else ""),
@@ -935,8 +973,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         if hashlib.sha256(committed_patch.encode()).hexdigest() != expected_hash:
             raise ValueError("pending KEEP committed patch mismatch")
         subject = self._git("show", "-s", "--format=%s", current_head)
-        expected_subject = pending.get("commit_subject") or str(pending.get("commit_message") or "").splitlines()[0]
-        if subject != expected_subject:
+        if subject != pending["commit_subject"]:
             raise ValueError("pending KEEP commit message mismatch")
         return "committed"
 
@@ -957,10 +994,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         if state.session_status == SESSION_COMPLETED:
             raise ValueError("completed campaign cannot be resumed")
         if state.best.commit_hash and state.best.mean_case_speedup is None:
-            raise ValueError(
-                "resume state predates mean-case-speedup scoring; start a fresh "
-                "campaign so pristine per-case timings can be captured"
-            )
+            raise ValueError("resume state has a best commit without its mean case speedup; start a fresh campaign")
         if not state.baseline_case_times:
             raise ValueError(
                 "resume state has no pristine per-case timings; start a fresh "
@@ -1482,12 +1516,11 @@ class IterationLoop(AnalysisRuntimeMixin):
                 validation_text=validation_text,
                 benchmark=benchmark,
                 changed_files=(
-                    list((pending or {}).get("publication_changed_files") or (pending or {}).get("changed_files") or [])
+                    list((pending or {}).get("publication_changed_files") or [])
                     or self._publication_changed_files(result.commit_hash)
                 ),
                 patch=(
-                    str((pending or {}).get("publication_patch") or (pending or {}).get("patch") or "")
-                    or self._publication_patch(result.commit_hash)
+                    str((pending or {}).get("publication_patch") or "") or self._publication_patch(result.commit_hash)
                 ),
                 round_budget=self._round_budget_summary(),
             )

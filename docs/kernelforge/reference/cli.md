@@ -177,7 +177,7 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 |:--|:--|:--|
 | `--source-kernel <file>` | required | The kernel to rewrite (a Triton `.py`, a `.hip`, …). |
 | `--driver <file>` | required | Rewrite measurement driver. A conforming driver is used unchanged. |
-| `--logical-op-name <name>` | required | Stable logical identity of the workload; a namespace or punctuation is allowed. The FlyDSL factory symbol is derived from it and reported in the result — never re-derive it downstream. `--op-name` is a deprecated alias. |
+| `--logical-op-name <name>` | required | Stable logical identity of the workload; a namespace or punctuation is allowed. The FlyDSL factory symbol is derived from it and reported in the result — never re-derive it downstream. |
 | `--workspace <dir>` | required | Git workspace directory. |
 | `--experiments-dir <dir>` | required | Where to write `forge_experiments`. |
 | `--source-entry <fn>` | auto | Host callable in the source that runs the kernel, used as the live oracle and baseline: `ref(x) -> y`. |
