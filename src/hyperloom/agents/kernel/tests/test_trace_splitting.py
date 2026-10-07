@@ -335,11 +335,9 @@ class TestSplitterE2E:
 
 def _request_handlers_importable() -> bool:
     try:
-        from hyperloom.orchestrator.actions.executors.trace_analyze import (
-            _build_trace_analyze_cmd,
-        )  # noqa: F401
+        import importlib.util
 
-        return True
+        return importlib.util.find_spec("hyperloom.orchestrator.actions.executors.trace_analyze") is not None
     except ImportError:
         return False
 
