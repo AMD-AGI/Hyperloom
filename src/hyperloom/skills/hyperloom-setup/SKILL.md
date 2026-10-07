@@ -455,21 +455,21 @@ PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.exper
 ```
 
 It reads `HYPERLOOM_RUN_MODE` and prints one line. When it exits 1, report
-that line and offer a `USER_DATA_PATH` outside the directory it names, or a
-workspace outside it when it names the Hyperloom install or the PostgreSQL
-binaries; rewrite `.env` and rerun the check. Do not continue to a demo until
-it passes.
+that line and offer the fix it points to: a `USER_DATA_PATH` outside the
+directory it names, a workspace outside it when it names the Hyperloom install
+or the PostgreSQL binaries, or `HYPERLOOM_KB_DATABASE_URL` in `.env` naming a
+PostgreSQL server when it names the Python. When the user takes one, rewrite
+`.env` and rerun the check. Otherwise continue without the Experience KB, which
+never stops a run: skip starting it below, and report it as unavailable with
+that line.
 
 The service's embedded database installs on Python 3.12 or newer: the host's
-Python in `baremetal` mode, the container's in `docker` mode. On an older one
-the check names that, and the workspace's service starts only with
-`HYPERLOOM_KB_DATABASE_URL` in `.env` naming a PostgreSQL server; ask the user
-for one, or continue without the Experience KB, which never stops a run.
+Python in `baremetal` mode, the container's in `docker` mode.
 
 In `docker` mode, stop here: the service starts inside the container at the
 first optimize launch.
 
-In `baremetal` mode, start it now and check its health:
+In `baremetal` mode, once the check passes, start it now and check its health:
 
 ```bash
 PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.experience_kb_service ensure
@@ -522,8 +522,9 @@ Report:
 - Whether setup completed or failed (in `docker` mode, report that host setup was skipped).
 - The detected `FRAMEWORK` value (or that it is unset).
 - Experience KB service: in `baremetal` mode, `ready` with its URL once the
-  service step succeeds, or `failed`; in `docker` mode, the `check-home` line
-  and that it starts inside the container at the first optimize launch.
+  service step succeeds, `failed`, or `unavailable` with the `check-home` line;
+  in `docker` mode, the `check-home` line and that it starts inside the
+  container at the first optimize launch.
 - Global Experience KB: `not configured`, or its URL, whether it pushes after
   every run or on request, and the `pull` summary line in `baremetal` mode.
 - The last relevant error lines on failure.

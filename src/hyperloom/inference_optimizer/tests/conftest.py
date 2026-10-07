@@ -22,7 +22,6 @@ from hyperloom.orchestrator.tests._fixtures import (  # noqa: F401
     launch_backend,
     virtual_clock,
 )
-from hyperloom_kb.tests.postgres_fixtures import new_database, postgres_conninfo, reachable_tmp_path  # noqa: F401
 
 
 @pytest.fixture(autouse=True)

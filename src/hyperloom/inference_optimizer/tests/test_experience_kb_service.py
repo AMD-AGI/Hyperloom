@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from hyperloom_kb.tests.postgres_fixtures import requires_embedded_postgres
+from hyperloom_kb.tests.postgres_fixtures import (  # noqa: F401
+    new_database,
+    postgres_conninfo,
+    reachable_tmp_path,
+    requires_embedded_postgres,
+)
 
 import hyperloom
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL

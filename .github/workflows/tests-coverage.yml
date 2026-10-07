@@ -93,14 +93,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The floor, and the first Python the Experience KB's embedded PostgreSQL (pgembed) installs on.
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.10", "3.11"]
         # NOTE: keep this list length in sync with ``total_shards`` in
         # pyproject.toml ([tool.hyperloom.tests_coverage]). GitHub matrices
         # cannot read that value dynamically, so it is mirrored here.
         shard: [1, 2, 3, 4, 5, 6]
-    # Without pgembed, on 3.10, the Experience KB tests make their databases on this server; on 3.12 they run the
-    # embedded one, which their own tests also cover.
+    # The Experience KB tests make their databases on this server: its embedded PostgreSQL (pgembed) installs only on
+    # Python 3.12 and newer, so the tests of that server itself are skipped here.
     services:
       postgres:
         image: postgres:17
@@ -113,7 +112,7 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     env:
-      HYPERLOOM_KB_TEST_DATABASE_URL: ${{ matrix.python-version == '3.10' && 'postgresql://postgres@localhost:5432/postgres' || '' }}
+      HYPERLOOM_KB_TEST_DATABASE_URL: postgresql://postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v7
 
@@ -462,7 +461,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.10", "3.11"]
     steps:
       - uses: actions/checkout@v7
 

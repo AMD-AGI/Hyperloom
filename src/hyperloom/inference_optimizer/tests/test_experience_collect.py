@@ -17,7 +17,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from hyperloom_kb.tests.postgres_fixtures import requires_embedded_postgres
+from hyperloom_kb.tests.postgres_fixtures import (  # noqa: F401
+    new_database,
+    postgres_conninfo,
+    reachable_tmp_path,
+    requires_embedded_postgres,
+)
 
 import hyperloom_kb.collect as kb_collect
 from hyperloom.inference_optimizer import experience_collect, experience_kb_service
