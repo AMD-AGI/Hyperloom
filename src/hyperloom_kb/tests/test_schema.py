@@ -288,6 +288,19 @@ def test_declaration_round_trips_and_its_schema_ref_is_content_addressed() -> No
         Experience.from_dict(missing_ref)
 
 
+def test_a_string_that_is_not_utf_8_fails_validation_like_any_invalid_value() -> None:
+    valid = complete_experience()
+    split_emoji = "the patch \ud83d helped"
+
+    for changed in (
+        {"rationale": {**valid.rationale, "reasoning": split_emoji}},
+        {"identity": {**valid.identity, "model": split_emoji}},
+        {"notes": {"interconnect": split_emoji}},
+    ):
+        with pytest.raises(SchemaValidationError, match="not valid UTF-8"):
+            declaration().validate(replace(valid, **changed))
+
+
 def test_notes_take_labelled_text_only() -> None:
     noted = complete_experience()
 

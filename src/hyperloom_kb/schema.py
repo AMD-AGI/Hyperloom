@@ -96,10 +96,20 @@ def default_search_weight(category: str) -> float:
     return _DEFAULT_SEARCH.get(category, 0.0)
 
 
+def _utf8(value: str, name: str) -> str:
+    """``value``, once it encodes as UTF-8, as a record's canonical bytes need; a lone surrogate does not."""
+
+    try:
+        value.encode()
+    except UnicodeEncodeError as exc:
+        raise SchemaValidationError(f"{name} is not valid UTF-8 text: {exc.reason} at {exc.start}") from None
+    return value
+
+
 def _require_string(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise SchemaValidationError(f"{name} must be a non-empty string")
-    return value.strip()
+    return _utf8(value, name).strip()
 
 
 def _require_token(value: Any, name: str) -> str:
@@ -287,7 +297,7 @@ def _single_value(value: Any, name: str) -> str | int | float | bool | FileRef:
             return value
         return number
     if isinstance(value, str):
-        return value
+        return _utf8(value, name)
     raise SchemaValidationError(f"{name} must be a string, number, boolean, or file")
 
 
