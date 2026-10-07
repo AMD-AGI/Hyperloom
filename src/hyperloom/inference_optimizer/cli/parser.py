@@ -134,17 +134,26 @@ def _positive_watts_arg(value: str) -> float:
     return parsed
 
 
+def _non_negative_gpu_id_arg(value: str) -> int:
+    """argparse type for a non-negative GPU id."""
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"expected an integer GPU id, got {value!r}") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"expected a non-negative GPU id, got {value!r}")
+    return parsed
+
+
 class _PerGpuPowerAction(argparse.Action):
     """Collect ``--max-per-gpu-power-w GPU_ID W`` pairs into ``{gpu_id: watts}``; a bad or repeated id stops the launch."""
 
     def __call__(self, parser, namespace, values, option_string=None):
         raw_id, raw_w = values
         try:
-            gpu = int(str(raw_id).strip())
-        except ValueError:
-            parser.error(f"{option_string}: expected an integer GPU id, got {raw_id!r}")
-        if gpu < 0:
-            parser.error(f"{option_string}: expected a non-negative GPU id, got {raw_id!r}")
+            gpu = _non_negative_gpu_id_arg(raw_id)
+        except argparse.ArgumentTypeError as exc:
+            parser.error(f"{option_string}: {exc}")
         try:
             watts = _positive_watts_arg(raw_w)
         except argparse.ArgumentTypeError as exc:
