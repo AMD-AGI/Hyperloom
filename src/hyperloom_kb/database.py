@@ -28,7 +28,8 @@ from typing import Any, Protocol
 
 SCHEMA_VERSION = 1
 #: The SQLite file a service without a PostgreSQL server keeps under its home.
-SQLITE_FILE = "kb.sqlite3"
+# Not main's kb.sqlite3, whose tables of the same names hold another shape: a home from main keeps that file unread.
+SQLITE_FILE = "database.sqlite3"
 _MIGRATION_LOCK = "hyperloom-kb:migrate"
 _POOL_MAX_SIZE = 16
 # Bounds one attempt to reach a server or a busy file, so one that does not answer fails instead of hanging.

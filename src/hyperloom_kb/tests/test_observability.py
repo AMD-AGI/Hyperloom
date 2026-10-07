@@ -32,7 +32,7 @@ from hyperloom_kb import (
     RemoteConfig,
     file_ref,
 )
-from hyperloom_kb.database import Database, PostgresDatabase, SqliteDatabase
+from hyperloom_kb.database import SQLITE_FILE, Database, PostgresDatabase, SqliteDatabase
 from hyperloom_kb.http_service import create_http_server, serve_until_stopped
 from hyperloom_kb.observability import JsonLogFormatter, event
 from hyperloom_kb.tests.conftest import fresh_database
@@ -346,5 +346,5 @@ def test_sigterm_stops_the_service_once_it_drained(tmp_path: Path) -> None:
     ]
 
     assert returncode == 0
-    assert (home / "kb.sqlite3").is_file()
+    assert (home / SQLITE_FILE).is_file()
     assert "listening" in events and "stopped" in events
