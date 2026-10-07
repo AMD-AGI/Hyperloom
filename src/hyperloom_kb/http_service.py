@@ -66,6 +66,7 @@ from hyperloom_kb.retrieval_policy import (
 )
 from hyperloom_kb.records import RecordFiles
 from hyperloom_kb.schema import (
+    MAX_FILE_BYTES,
     Experience,
     ExperienceDeclaration,
     ExperienceStatus,
@@ -106,10 +107,9 @@ DRAIN_SECONDS = 25.0
 # How long a probe or a metrics scrape waits on the database: inside the few seconds an orchestrator or a scraper
 # waits for the answer, so a database that is gone reads as unready instead of as a probe that timed out.
 PROBE_TIMEOUT_SECONDS = 2.0
-# Transport guards, not data policies: a record's text fields are bounded by its schema, and files of any size up to
-# this are stored.
+# A transport guard, not a data policy: a record's text fields and the size of each file it names are bounded by its
+# schema.
 _MAX_REQUEST_BYTES = 256 * 1024 * 1024
-MAX_FILE_BYTES = 4 * 1024 * 1024 * 1024
 _READ_FIELDS = frozenset({"decision", "context", "outcome", "limit", "schema_ref", "render_budget_chars"})
 _WRITE_FIELDS = frozenset({"experience", "declaration"})
 _FILES_PREFIX = "/v1/files/"
@@ -1520,7 +1520,6 @@ __all__ = [
     "ExperienceHTTPService",
     "HTTPServiceConfig",
     "HTTPServiceError",
-    "MAX_FILE_BYTES",
     "MissingFiles",
     "RequestHandler",
     "ServiceSettings",

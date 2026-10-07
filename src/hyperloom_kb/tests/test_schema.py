@@ -10,6 +10,7 @@ from hyperloom_kb import (
     KNOWLEDGE_FIELDS,
     METADATA_FIELDS,
     RATIONALE_DEFAULTS,
+    MAX_FILE_BYTES,
     TEXT_MAX_BYTES,
     Experience,
     ExperienceDeclaration,
@@ -286,6 +287,13 @@ def test_declaration_round_trips_and_its_schema_ref_is_content_addressed() -> No
     missing_ref.pop("schema_ref")
     with pytest.raises(SchemaValidationError, match="schema_ref"):
         Experience.from_dict(missing_ref)
+
+
+def test_a_file_over_the_size_a_kb_stores_is_refused_by_the_record_naming_it() -> None:
+    FileRef("profile.bin", "a" * 64, MAX_FILE_BYTES)
+
+    with pytest.raises(SchemaValidationError, match="file.bytes"):
+        FileRef("profile.bin", "a" * 64, MAX_FILE_BYTES + 1)
 
 
 def test_a_string_that_is_not_utf_8_fails_validation_like_any_invalid_value() -> None:
