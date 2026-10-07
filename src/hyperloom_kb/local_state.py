@@ -107,17 +107,21 @@ class LocalState:
         self._log(connection, schema_ref, experience_id, "exclude", reason, at)
 
     def include(self, connection: Connection, schema_ref: str, experience_id: str) -> bool:
-        """Lift an exclusion and release what it withheld; ``False`` when the Experience was neither excluded nor
-        withheld."""
+        """Let reads see an Experience again: lift its exclusion, release what that withheld, and put it back into
+        the state when a restore set it outside; ``False`` when it was none of these."""
 
         lifted = connection.execute(
             "DELETE FROM exclusions WHERE kb_id = %s AND schema_ref = %s AND experience_id = %s",
             (self.kb_id, schema_ref, experience_id),
         ).rowcount
+        brought_in = connection.execute(
+            "DELETE FROM outside WHERE kb_id = %s AND schema_ref = %s AND experience_id = %s",
+            (self.kb_id, schema_ref, experience_id),
+        ).rowcount
         released = bool(lifted) or experience_id in self.withheld(connection, schema_ref)
         if released:
             self._log(connection, schema_ref, experience_id, "include", "", utc_now())
-        return released
+        return released or bool(brought_in)
 
     def withheld(self, connection: Connection, schema_ref: str) -> frozenset[str]:
         """The Experiences last excluded and not included since; a restore that lifts an exclusion releases none."""

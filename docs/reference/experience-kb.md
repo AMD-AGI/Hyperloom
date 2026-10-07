@@ -199,8 +199,11 @@ written here or pulled, minus the ones excluded. Reads see exactly that state.
 Writing an Experience adds it to the state; nothing is ever deleted.
 
 - **Exclude** an Experience, with a reason, to hide it from reads; **include**
-  lifts the exclusion. Either kind of Experience can be excluded, and every
-  exclude and include is kept in the schema's exclusion history.
+  lets reads see it again: it lifts the exclusion and, when a restore set the
+  Experience outside the state, puts it back, so deleting the only label that
+  holds an Experience never loses it. Either kind of Experience can be
+  excluded, and every exclude and include of an exclusion is kept in the
+  schema's exclusion history.
 - **Label** the current state to keep it. A label is identified by its
   `label_id`; its name is only for people and need not be unique.
 - **Restore** a label to make its state current again: the Experiences it held,
@@ -335,7 +338,7 @@ network, put a TLS-terminating proxy in front of it and hand out its
 | `POST /v1/restore` | make a label's state current | `restore()` |
 | `GET /v1/exclusions` | a schema's exclusions and their history | `exclusions()` |
 | `POST /v1/exclusions` | exclude an Experience from reads | `exclude()` |
-| `DELETE /v1/exclusions/{experience_id}` | lift an exclusion | `include()` |
+| `DELETE /v1/exclusions/{experience_id}` | let reads see an Experience again | `include()` |
 | `GET /health` | identity, liveness, schemas, corpus size, process, settings digest | `health()` |
 | `GET /livez` | the process answers; no token | |
 | `GET /readyz` | the service can take traffic; no token | |
