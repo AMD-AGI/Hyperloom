@@ -32,7 +32,7 @@ Experiences from other logs in [Experience collection](experience-kb-collect.md)
 | `HYPERLOOM_GLOBAL_KB_TOKEN` | the user | The global KB's access token. Required with `HYPERLOOM_GLOBAL_KB_URL`. |
 | `HYPERLOOM_KB_AUTO_PUSH` | the user | `1` pushes after every run's Experiences are written locally. Default off. |
 | `USER_DATA_PATH` | `hyperloom-setup` | The local service keeps its data under `$USER_DATA_PATH/experience-kb`. |
-| `HYPERLOOM_KB_DATABASE_URL` | the operator | The PostgreSQL database a service keeps its index and state in, as a global KB served by several processes does. Unset, which is what a workspace leaves it, the service keeps them in SQLite in its home. |
+| `HYPERLOOM_KB_DATABASE_URL` | the operator | A PostgreSQL database the service keeps its index and state in instead of SQLite; needs the `kb-service` extra. Unset, which is what a workspace leaves it, the service keeps them in SQLite in its home. |
 | `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_MODEL` | `hyperloom-setup` | The gateway and model the service plans reads with; `LOCAL_KB_PLANNER_MODEL` overrides the model. Without a gateway the service still accepts writes and reads report `unavailable`. |
 
 All of these live in the workspace `.env`. The service reads them when it
@@ -291,27 +291,8 @@ A global KB is the same service as a local one, with the same labels,
 restores, and exclusions; its state decides what its export, and so every pull,
 brings.
 
-A global KB served by one process keeps its database in SQLite in its `--home`,
-as a workspace's does. Given `HYPERLOOM_KB_DATABASE_URL`, a service keeps its
-index and state in that PostgreSQL database instead, and any number of services may
-serve one KB from one database and one `--home` its record files and files live under,
-such as several replicas behind one URL. Every write takes the KB's next
-position under that KB's row lock, so positions commit in order and a pull
-paging by position, through whichever replica, never passes one still to
-commit. Labels, restores, and exclusions of a schema hold its row for their
-transaction, and each push or pull of a KB holds a database-wide lock, so
-replicas never interleave them. A database holds one KB for now; serving one of
-several is left for when requests carry who they act for. Such a service
-installs with `pip install ".[kb-service]"`, and its replicas share `--home`,
-records and files alike, on one file system they all mount with atomic rename,
-such as CephFS or NFS.
-
-The database must never lose a write it committed: a workspace pulls and
-pushes everything again once it notices, but what only the lost writes held is
-gone. A failover may therefore promote only a replica that confirmed every
-commit, as synchronous replication guarantees.
-The pool checks each connection as it hands it out, so the first request after
-a failover or restart gets a live connection.
+Deployed this way, a global KB keeps its database in SQLite in its `--home`, as
+a workspace's does.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -581,15 +562,9 @@ each scrape.
 | `hyperloom_kb_files`, `hyperloom_kb_file_bytes` | | Files the KB holds, and their bytes. |
 | `hyperloom_kb_files_missing` | | Files the database holds that were missing from the home at start. |
 | `hyperloom_kb_ready` | `check` | Each readiness check, `1` or `0`. |
-| `hyperloom_kb_database_pool` | `stat` | `pool_size`, `pool_available`, `requests_waiting`. |
+| `hyperloom_kb_database_pool` | `stat` | On PostgreSQL, the connection pool's `pool_size`, `pool_available`, and `requests_waiting`. |
 | `hyperloom_kb_build_info` | `kb_id`, `name`, `code_digest` | Always `1`; names the KB and the code serving it. |
 | `hyperloom_kb_start_time_seconds` | | When the process started. |
-
-Replicas of one KB each count their own requests, writes, and batches, so those
-add up across replicas; `hyperloom_kb_experiences`, `hyperloom_kb_record_bytes`,
-`hyperloom_kb_files`, `hyperloom_kb_file_bytes`, `hyperloom_kb_database_bytes`,
-and `hyperloom_kb_last_write_timestamp_seconds` describe the KB, which every
-replica reports the same, so take their maximum.
 
 **Logs.** A service logs one JSON object per line, to standard error; a
 workspace's service writes them to `service.log`. Every line has `ts`,
