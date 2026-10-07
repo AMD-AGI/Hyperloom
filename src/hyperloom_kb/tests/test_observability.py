@@ -160,6 +160,19 @@ def test_every_answer_carries_its_request_id(tmp_path: Path) -> None:
     assert re.fullmatch(r"[0-9a-f]{32}", unusable[1]["X-Request-ID"])
 
 
+def _logged(caplog: pytest.LogCaptureFixture, name: str) -> dict[str, Any]:
+    """The first ``name`` event captured; a request is logged on the server's thread after its answer is sent."""
+
+    deadline = time.monotonic() + 5
+    while True:
+        for record in caplog.records:
+            fields = getattr(record, "fields", {})
+            if fields.get("event") == name:
+                return fields
+        assert time.monotonic() < deadline, f"no {name} event was logged"
+        time.sleep(0.01)
+
+
 def test_a_request_and_the_state_it_changes_are_logged_with_its_id_and_client(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -171,9 +184,8 @@ def test_a_request_and_the_state_it_changes_are_logged_with_its_id_and_client(
         client.write(experience, declaration=SCHEMA)
         with caplog.at_level(logging.INFO, logger="hyperloom_kb.http_service"):
             client.exclude(experience.id, reason="measured on a noisy node")
-    fields = [record.fields for record in caplog.records if hasattr(record, "fields")]
-    audit = next(entry for entry in fields if entry["event"] == "audit")
-    request = next(entry for entry in fields if entry["event"] == "http_request")
+            request = _logged(caplog, "http_request")
+    audit = _logged(caplog, "audit")
 
     assert audit["action"] == "exclude" and audit["experience_id"] == experience.id
     assert audit["reason"] == "measured on a noisy node"
