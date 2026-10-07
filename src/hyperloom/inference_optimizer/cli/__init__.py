@@ -48,6 +48,7 @@ from .model_gate import (
 from ..gpu_types import (
     _autodetect_gpu_type,
     _gpu_runner_type,
+    _resolve_amd_gpu_type,
     _resolve_gpu_type,
 )
 from ..model_config_utils import (
@@ -1535,6 +1536,25 @@ def _persist_preflight_failure_artifacts(
     return session_dir
 
 
+def _start_experience_kb() -> None:
+    """Bring the workspace's Experience KB service to serving, then check its Experiences can be collected."""
+    from hyperloom_kb import ConfigurationError, LocalServiceError, RemoteClientError
+    from hyperloom_kb.collect import MappingError
+
+    from ..experience_collect import validate_config as validate_experience_collection
+    from ..experience_kb_service import ensure_service
+
+    # The run must not depend on the Experience KB: reads come back empty and writes are spooled or skipped.
+    try:
+        ensure_service()
+    except (LocalServiceError, RemoteClientError) as exc:
+        log.warning("Experience KB service is not serving (%s); Experience writes are spooled until it is", exc)
+    try:
+        validate_experience_collection()
+    except (ConfigurationError, MappingError, RemoteClientError) as exc:
+        log.warning("Experience KB cannot take this run's Experiences (%s); the run continues without them", exc)
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
     # Surface --nodes (CLI flag wins) before _preflight runs.
@@ -1667,6 +1687,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         claude_follows_codex=claude_follows_codex,
         codex_follows_claude=codex_follows_claude,
     )
+    _start_experience_kb()
     # Before either session branch: these are read by the fresh-launch seeding AND by the resume path, so this is the
     # one place that covers both.
     _preflight_agentx_backend(args)
@@ -2065,7 +2086,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             _apply_atom_auto_tighten(args)
 
         # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
-        user_specified = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
+        user_specified = _resolve_amd_gpu_type(args.gpu_type) or ""
         if _should_remote_probe_gpu(args):
             from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type
 

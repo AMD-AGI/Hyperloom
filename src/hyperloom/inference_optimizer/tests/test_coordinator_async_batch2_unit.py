@@ -2208,7 +2208,7 @@ def test_forward_integrate_source_has_no_current_phase_fallback() -> None:
     from hyperloom.orchestrator.phases.framework import _forward_integrate_source
 
     forwarded: dict = {}
-    _forward_integrate_source({}, forwarded)
+    _forward_integrate_source({}, forwarded, {})
     assert "source_phase" not in forwarded
 
 

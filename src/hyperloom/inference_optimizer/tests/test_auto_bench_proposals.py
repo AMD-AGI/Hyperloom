@@ -52,7 +52,8 @@ def _phase(*, phase="FRAMEWORK_AGENT", rounds=(), queued=(), running=(), frozen=
         registry_lanes_ttl=lambda kind: (["benchmark_lane"], 1800),
     )
     coord = SimpleNamespace(shared_state=state, tasks=_Tasks(queued, running), dispatcher=dispatcher)
-    return FrameworkPhase(coord)
+    coord.phase_framework = FrameworkPhase(coord)
+    return coord.phase_framework
 
 
 def _explores(fp) -> list[dict[str, Any]]:
