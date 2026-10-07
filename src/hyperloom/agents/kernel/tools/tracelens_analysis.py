@@ -448,6 +448,8 @@ def _build_trace_split_warning(
             "NUM_PROMPTS to reach the requested start_step/num_steps window."
         ),
     }
+
+
 _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO = 0.05  # 5%
 # Alternate must beat the requested mode by this margin to avoid thrashing.
 _CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10  # 10 ppt
@@ -769,11 +771,6 @@ def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> in
             if count >= max_events:
                 break
     return count
-
-
-
-
-
 
 
 #: Categories that live on the device timeline. Everything else in a torch
@@ -4494,7 +4491,6 @@ def _default_workspace_path() -> str:
     return workspace_root()
 
 
-
 def _build_split_cmd(
     args,
     split_input_path: "Path",
@@ -4543,6 +4539,7 @@ def _collect_split_chunks(
 
     Returns ``(selected_chunk, split_meta, mode_to_chunks)``.
     """
+
     def _collect(pattern: str) -> "list[Path]":
         out: list[Path] = []
         for ext in ("trace.json.gz", "json.gz", "trace.json", "json"):
@@ -4647,7 +4644,11 @@ def _run_trace_split(
     split_num_steps = max(8, int(args.split_num_steps or 32))
     split_input_path = analysis_trace_path
     split_cmd = _build_split_cmd(
-        args, split_input_path, split_dir, split_num_steps, log_path,
+        args,
+        split_input_path,
+        split_dir,
+        split_num_steps,
+        log_path,
     )
     split_rc = run_command(
         split_cmd,
@@ -4657,24 +4658,32 @@ def _run_trace_split(
     )
     if split_rc != 0:
         raise RuntimeError(
-            f"trace_split_failed: TraceLens splitter exited with code {split_rc}; "
-            f"see {log_path} for subprocess output."
+            f"trace_split_failed: TraceLens splitter exited with code {split_rc}; see {log_path} for subprocess output."
         )
 
     selected_chunk, split_meta, mode_to_chunks = _collect_split_chunks(
-        split_dir, args.steady_state_mode, analysis_trace_path,
+        split_dir,
+        args.steady_state_mode,
+        analysis_trace_path,
     )
-    split_meta.update({
-        "split_input": str(split_input_path),
-        "split_dir": str(split_dir),
-        "num_steps": split_num_steps,
-        "returncode": split_rc,
-    })
+    split_meta.update(
+        {
+            "split_input": str(split_input_path),
+            "split_dir": str(split_dir),
+            "num_steps": split_num_steps,
+            "returncode": split_rc,
+        }
+    )
 
     warnings = _validate_selected_chunk(
-        split_dir, selected_chunk, args.steady_state_mode, mode_to_chunks,
+        split_dir,
+        selected_chunk,
+        args.steady_state_mode,
+        mode_to_chunks,
     )
     return selected_chunk, split_meta, warnings
+
+
 def _trajectory_scope(args: argparse.Namespace) -> contextlib.AbstractContextManager[Any]:
     """Scope the SDK run to the launching session's trajectory ledger, when the launcher named one.
 
@@ -5310,17 +5319,23 @@ def main() -> int:
                 )
                 split_dir = tracelens_dir / "trace_split"
                 cli_trace_path, split_meta, split_warnings = _run_trace_split(
-                    args, analysis_trace_path, split_dir, tl_root, log_path,
+                    args,
+                    analysis_trace_path,
+                    split_dir,
+                    tl_root,
+                    log_path,
                 )
                 run_meta["split"].update(split_meta)
-                run_meta["selection"].update({
-                    "requested_mode": args.steady_state_mode,
-                    "chunk_label": split_meta.get("chunk_label"),
-                    "selected_chunk": str(cli_trace_path),
-                    "selected_chunk_count": split_meta.get("selected_chunk_count"),
-                    "available_modes": split_meta.get("available_modes"),
-                    "fell_back_to_full_trace": False,
-                })
+                run_meta["selection"].update(
+                    {
+                        "requested_mode": args.steady_state_mode,
+                        "chunk_label": split_meta.get("chunk_label"),
+                        "selected_chunk": str(cli_trace_path),
+                        "selected_chunk_count": split_meta.get("selected_chunk_count"),
+                        "available_modes": split_meta.get("available_modes"),
+                        "fell_back_to_full_trace": False,
+                    }
+                )
                 _note_step(
                     "split_trace",
                     category="split",

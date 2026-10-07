@@ -455,6 +455,8 @@ def _details(kind: str, batch: int, ctx_req: int, ctx_sum: int, gen_req: int, ge
         "generation_sum": gen_sum,
         "is_prefill": ctx_req > 0,
     }
+
+
 def annotation_report(sp: StepPass, *, framework: str, min_repeats: int) -> dict[str, Any]:
     """Group 6: reproduce the window selector's view of the annotations."""
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -511,6 +513,8 @@ def annotation_report(sp: StepPass, *, framework: str, min_repeats: int) -> dict
         "steps_with_gpu": sum(1 for s in sp.steps if s["kernel_count"] > 0),
         "step_gpu_coverage": _ratio(sum(1 for s in sp.steps if s["kernel_count"] > 0), len(sp.steps)),
     }
+
+
 def certify_chunks(chunk_files: Iterable[Path], source_kernel_corrs: set[Any]) -> list[dict[str, Any]]:
     """Check each existing chunk for kernels it should have carried but did not."""
     out: list[dict[str, Any]] = []
@@ -665,7 +669,6 @@ def build_verdict(
             "graph_launch_coverage_max": thresholds.get("graph_launch_coverage_max"),
             "op_meta_coverage": op_meta_coverage,
             "capture_op_meta_coverage": capture_op_meta_coverage,
-
         },
     }
 
@@ -731,7 +734,6 @@ def certify_trace_dir(
                 },
                 "time_structure": {},
                 "annotations": {},
-
             }
         )
         record["verdict"] = build_verdict(
@@ -783,7 +785,6 @@ def certify_trace_dir(
         )
 
     ann = annotation_report(sp, framework=framework, min_repeats=min_repeats)
-
 
     kernel_count = attribution.get("kernel_count", 0)
     graph_launch_count = coverage_block.get("graph_launch_count", 0)
@@ -846,7 +847,6 @@ def certify_trace_dir(
             "stream_overlap": timeline.get("stream_overlap") or {},
         },
         "annotations": ann,
-
     }
     record["rank_level"].append(rank_record)
 

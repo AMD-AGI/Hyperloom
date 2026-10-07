@@ -156,7 +156,6 @@ def test_verdict_carries_the_numbers_behind_its_categorical_answer():
     assert measures["kernel_count"] == 12
 
 
-
 def test_measures_do_not_change_any_decision():
     """The continuous values are reported, never compared: the same inputs must still resolve the same way."""
     plain = _verdict()

@@ -82,10 +82,12 @@ def _make_chunk_files(split_dir: Path) -> dict[str, Path]:
 def split_dir(tmp_path):
     return tmp_path / "trace_split"
 
+
 def _run_help():
     proc = subprocess.run(
         [sys.executable, str(TL_PATH), "--help"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     return proc.stdout + proc.stderr
 

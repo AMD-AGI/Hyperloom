@@ -299,7 +299,11 @@ class TestSplitterE2E:
         tl_root = Path(tla.__file__).resolve().parent.parent.parent.parent.parent
 
         chunk, meta, warnings = tla._run_trace_split(
-            args, trace_path, split_dir, tl_root, log_path,
+            args,
+            trace_path,
+            split_dir,
+            tl_root,
+            log_path,
         )
         assert meta["chunks_by_mode"]["mixed"] >= 1
         assert chunk.exists()
@@ -321,7 +325,11 @@ class TestSplitterE2E:
         tl_root = Path(tla.__file__).resolve().parent.parent.parent.parent.parent
 
         chunk, meta, warnings = tla._run_trace_split(
-            args, trace_path, split_dir, tl_root, log_path,
+            args,
+            trace_path,
+            split_dir,
+            tl_root,
+            log_path,
         )
         assert meta["chunks_by_mode"]["generic"] >= 1
         assert chunk.exists()
