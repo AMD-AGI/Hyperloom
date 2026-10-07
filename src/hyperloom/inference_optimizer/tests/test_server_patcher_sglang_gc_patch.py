@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import shutil
 import sys
 import types
 from pathlib import Path
@@ -76,15 +77,34 @@ def test_gc_patch_applies_and_is_idempotent(tmp_path: Path, monkeypatch):
     assert ensure_sglang_patched_for_tracelens() is True
 
 
-def test_newer_sglang_uses_nearest_not_newer_gc_set(tmp_path: Path, monkeypatch):
+def test_newer_sglang_without_exact_gc_set_is_left_alone(tmp_path: Path, monkeypatch):
     repo = tmp_path / "sglang"
     target = _editable_install(repo)
     _gc_tree(tmp_path / "TraceLens", "sglang_0_5_21")
     _fake_sglang(monkeypatch, repo / "python" / "sglang", "0.5.22")
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "TraceLens"))
 
-    assert ensure_sglang_patched_for_tracelens() is True
-    assert "_set_profile_trace_tag" in target.read_text(encoding="utf-8")
+    assert ensure_sglang_patched_for_tracelens() is False
+    assert target.read_text(encoding="utf-8") == _SOURCE
+
+
+def test_drifted_source_is_not_fuzzy_patched(tmp_path: Path, monkeypatch):
+    """A hunk whose context drifted would pass ``patch --fuzz=2``; the gc set must refuse it."""
+    repo = tmp_path / "sglang"
+    target = _editable_install(repo)
+    drifted = _SOURCE.replace("    return 1", "    return 2")
+    target.write_text(drifted, encoding="utf-8")
+    _gc_tree(tmp_path / "TraceLens")
+    _fake_sglang(monkeypatch, repo / "python" / "sglang", "0.5.21")
+    monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "TraceLens"))
+
+    patch_bin = shutil.which("patch")
+    if patch_bin:
+        patch_file = next((tmp_path / "TraceLens").rglob("*.patch"))
+        assert _server_patcher._patch_dry_run(patch_bin, patch_file, repo, 1), "fixture must be fuzz-applicable"
+
+    assert ensure_sglang_patched_for_tracelens() is False
+    assert target.read_text(encoding="utf-8") == drifted
 
 
 def test_older_than_gate_does_not_touch_the_tree(tmp_path: Path, monkeypatch):

@@ -371,11 +371,16 @@ async def restart_server_for_round(
         else:
             os.environ.pop("HYPERLOOM_MN_UNSET_FWD_ENV", None)
 
-        # Multi-node TraceLens SGLang patch fan-out (fail-soft). Each pod picks
-        # roofline (< 0.5.18) or sglang_gc_patch (>= 0.5.18) from its own SGLang.
+        # Multi-node TraceLens SGLang patch fan-out (fail-soft). The patch set
+        # (roofline vs sglang_gc_patch) follows this controller's shape mode;
+        # sglang_gc_patch only matters while capturing, so it waits for a profiling round.
+        from ._server_patcher import resolve_sglang_patch_set
         from ._workload_envs import _tracelens_patch_enabled
 
-        if _tracelens_patch_enabled() and (os.environ.get("TRACELENS_ROOT", "").strip()):
+        patch_set = resolve_sglang_patch_set()
+        if patch_set == "graph-capture" and not torch_profiler_dir:
+            log.info("restart_server_for_round: not a profiling round; skipping sglang_gc_patch fan-out")
+        elif _tracelens_patch_enabled() and (os.environ.get("TRACELENS_ROOT", "").strip()):
             try:
                 from hyperloom.inference_optimizer.multi_node.cli import cmd_apply_tracelens_patch
 
@@ -386,6 +391,7 @@ async def restart_server_for_round(
                         "",
                     ).strip()
                     or None,
+                    patch_set=patch_set,
                     print_logs=False,
                     poll_interval=poll_interval_s,
                     poll_timeout=int(

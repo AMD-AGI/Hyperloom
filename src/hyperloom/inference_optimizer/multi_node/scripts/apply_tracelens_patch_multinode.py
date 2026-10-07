@@ -5,8 +5,10 @@
 """Multi-node TraceLens SGLang patch fan-out.
 
 Fans out one NodeAffinity-pinned actor per alive pod to apply the
-TraceLens patches where SGLang lives: the roofline set below 0.5.18,
-``sglang_gc_patch`` from 0.5.18 on. Each actor resolves the
+TraceLens patches where SGLang lives: the roofline set or
+``sglang_gc_patch``, as chosen by the controller's ``--patch-set`` (when
+omitted, roofline below 0.5.18 and ``sglang_gc_patch`` from 0.5.18 on,
+gated on each pod's own SGLang). Each actor resolves the
 sglang version + apply root, skips if the sentinel markers are already
 present (idempotent), ``git apply --check``s then applies every
 ``$TRACELENS_ROOT/.../sglang_<X_Y_Z>/*.patch`` (rolling back on mid-set
@@ -62,6 +64,10 @@ _GC_SENTINEL_MARKERS: tuple[str, ...] = (
     "_set_profile_trace_tag",
     "_profile_runner_name",
 )
+# ``--patch-set`` values; the controller resolves its shape mode once and passes one of these.
+_PATCH_SET_ROOFLINE = "roofline"
+_PATCH_SET_GRAPH_CAPTURE = "graph-capture"
+_PATCH_SETS: tuple[str, ...] = (_PATCH_SET_ROOFLINE, _PATCH_SET_GRAPH_CAPTURE)
 
 # Per ``git apply`` timeout.
 _GIT_TIMEOUT_SEC = 30
@@ -102,7 +108,7 @@ def _numeric_version_prefix(version: str) -> tuple[int, ...] | None:
 
 
 def _uses_gc_patch(version: str) -> bool:
-    """Pod-side mirror of the SGLang shape gate: sitecustomize mode gets ``sglang_gc_patch``."""
+    """Fallback when no ``--patch-set`` is given: mirror the SGLang shape gate from the pod's own env and version."""
     override = os.environ.get("HYPERLOOM_SGLANG_SHAPE_MODE", "auto").strip().lower()
     if override in {"patch", "patched"}:
         return False
@@ -112,22 +118,12 @@ def _uses_gc_patch(version: str) -> bool:
     return running is not None and running >= _SGLANG_GC_MIN_VERSION
 
 
-def _subdir_version_tuple(name: str) -> tuple[int, ...] | None:
-    """``sglang_0_5_21`` -> ``(0, 5, 21)``. A ``_sgldev`` suffix stops the run."""
-    head = "sglang_"
-    if not name.startswith(head):
-        return None
-    numeric: list[int] = []
-    for part in name[len(head) :].split("_"):
-        if part.isdigit():
-            numeric.append(int(part))
-        else:
-            break
-    return tuple(numeric) if len(numeric) >= 2 else None
-
-
 def _resolve_gc_patches_dir(patches_root: Path, version: str) -> Path | None:
-    """Exact ``sglang_<X_Y_Z>`` dir, else the nearest not-newer one."""
+    """Exact ``sglang_<X_Y_Z>`` dir (``_sgldev`` first for dev builds), else ``None``.
+
+    No nearest-version fallback: the patch adds an unconditional call to the
+    capture loop, and a newer release may already carry the upstream fix.
+    """
     running = _numeric_version_prefix(version)
     if running is None or not patches_root.is_dir():
         return None
@@ -140,23 +136,6 @@ def _resolve_gc_patches_dir(patches_root: Path, version: str) -> Path | None:
         candidate = patches_root / name
         if candidate.is_dir() and any(candidate.glob("*.patch")):
             return candidate
-    available: dict[tuple[int, ...], Path] = {}
-    for entry in sorted(patches_root.iterdir()):
-        if not entry.is_dir() or entry.name.endswith("_sgldev"):
-            continue
-        if not any(entry.glob("*.patch")):
-            continue
-        vt = _subdir_version_tuple(entry.name)
-        if vt:
-            available[vt] = entry
-    if not available:
-        return None
-    same_minor = [vt for vt in available if vt[:2] == running[:2] and vt <= running]
-    if same_minor:
-        return available[max(same_minor)]
-    older = [vt for vt in available if vt <= running]
-    if older:
-        return available[max(older)]
     return None
 
 
@@ -226,8 +205,12 @@ def _apply_on_pod(
     tracelens_root: str,
     tracelens_internal_root: str,
     sglang_version_pin: str | None,
+    patch_set: str | None = None,
 ) -> dict[str, Any]:
-    """Apply (or verify) the TraceLens SGLang patch set on this pod; never raises (failures become ``status=failed``)."""
+    """Apply (or verify) the TraceLens SGLang patch set on this pod; never raises (failures become ``status=failed``).
+
+    ``patch_set`` is the controller's choice and wins over the pod-side gate.
+    """
     host = socket.gethostname()
     started = time.time()
     result: dict[str, Any] = {
@@ -301,8 +284,11 @@ def _apply_on_pod(
             )
             return result
         apply_root, strip = layout
-        graph_capture = _uses_gc_patch(version)
-        result["patch_set"] = "graph-capture" if graph_capture else "roofline"
+        if patch_set:
+            graph_capture = patch_set == _PATCH_SET_GRAPH_CAPTURE
+        else:
+            graph_capture = _uses_gc_patch(version)
+        result["patch_set"] = _PATCH_SET_GRAPH_CAPTURE if graph_capture else _PATCH_SET_ROOFLINE
         sentinel_rel = _GC_SENTINEL_RELPATH if graph_capture else _SENTINEL_RELPATH
         sentinel_markers = _GC_SENTINEL_MARKERS if graph_capture else _SENTINEL_MARKERS
         # strip=1: apply_root is the repo root; strip=3: the wheel sglang/ dir.
@@ -322,10 +308,12 @@ def _apply_on_pod(
         if graph_capture:
             patches_dir = _resolve_gc_patches_dir(Path(tracelens_root, *_GC_PATCH_TREE_REL), version)
             if patches_dir is None:
-                result["status"] = "failed"
-                result["error"] = (
+                # Not an error: releases without a TraceLens gc set run unpatched.
+                result["status"] = "skipped"
+                result["skip_reason"] = (
                     f"no sglang_gc_patch set for SGLang {version!r} under {Path(tracelens_root, *_GC_PATCH_TREE_REL)}"
                 )
+                _log(f"{result['skip_reason']}; continuing unpatched")
                 return result
         else:
             subdir = _versioned_patches_subdir_name(version)
@@ -394,6 +382,7 @@ def _fanout_to_all_nodes(
     tracelens_root: str,
     tracelens_internal_root: str,
     sglang_version_pin: str | None,
+    patch_set: str | None = None,
 ) -> list[dict[str, Any]]:
     """Spawn one actor per alive node; collect all summaries."""
     import ray
@@ -420,6 +409,7 @@ def _fanout_to_all_nodes(
                 tracelens_root=tracelens_root,
                 tracelens_internal_root=tracelens_internal_root,
                 sglang_version_pin=sglang_version_pin,
+                patch_set=patch_set,
             )
         )
     results = ray.get(actors)
@@ -444,6 +434,12 @@ def main() -> int:
         "--sglang-version-pin",
         default=os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "") or None,
         help="optional advisory pin (e.g. '0.5.11'); logged on mismatch",
+    )
+    parser.add_argument(
+        "--patch-set",
+        choices=_PATCH_SETS,
+        default=None,
+        help="patch set resolved by the controller; when omitted each pod gates on its own SGLang version",
     )
     parser.add_argument(
         "--local",
@@ -486,6 +482,7 @@ def main() -> int:
             tracelens_root=args.tracelens_root,
             tracelens_internal_root=args.tracelens_internal_root,
             sglang_version_pin=args.sglang_version_pin or None,
+            patch_set=args.patch_set,
         )
         overall = r.get("status") if r.get("status") in ("applied", "skipped") else "failed"
         print(json.dumps({"status": overall, "per_pod": [r]}, indent=2, sort_keys=True))
@@ -496,6 +493,7 @@ def main() -> int:
             tracelens_root=args.tracelens_root,
             tracelens_internal_root=args.tracelens_internal_root,
             sglang_version_pin=args.sglang_version_pin or None,
+            patch_set=args.patch_set,
         )
     except Exception as e:  # noqa: BLE001
         print(
