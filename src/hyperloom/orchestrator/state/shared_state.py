@@ -126,8 +126,8 @@ def resolve_graded_comparison(
         VERDICT_REVERT,
         axis_of,
         holds_within_band,
+        constraint_veto_reason,
         incomparability_reason,
-        latency_veto_reason,
         output_tput_of,
         perf_snapshot_from_mapping,
         resolve_grading_anchor_perf,
@@ -136,10 +136,8 @@ def resolve_graded_comparison(
     from hyperloom.inference_optimizer.grading import resolved_grading
 
     on_intvty, noise_pct = resolved_grading(state)
-    # The session's latency ceiling vetoes a candidate the gain gates would KEEP, on whichever axis graded it. A
-    # candidate that already lost carries no veto, so the ledger names the gate that actually refused it.
-    budget_ms = float(getattr(state, "latency_budget_ms", 0.0))
-    observed_ms = measurement.get("e2el_mean_ms") if isinstance(measurement, Mapping) else None
+    # The session's constraints (latency, power) veto a candidate the gain gates would KEEP, on whichever axis graded
+    # it. A candidate that already lost carries no veto, so the ledger names the gate that actually refused it.
     degrade_reason = ""
     if on_intvty:
         if anchor_perf is not None:
@@ -163,7 +161,7 @@ def resolve_graded_comparison(
             incomparable = incomparability_reason(cand_perf, ref_perf)
             if incomparable:
                 refused.append(incomparable)
-            sla_veto = "" if refused else latency_veto_reason(observed_ms, budget_ms)
+            sla_veto = "" if refused else constraint_veto_reason(measurement, state)
             return GradedComparison(
                 objective=GRADED_INTVTY_P50,
                 candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
@@ -190,7 +188,7 @@ def resolve_graded_comparison(
         verdict = VERDICT_REVERT
     else:
         verdict = VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT
-    sla_veto = latency_veto_reason(observed_ms, budget_ms) if verdict == VERDICT_KEEP else ""
+    sla_veto = constraint_veto_reason(measurement, state) if verdict == VERDICT_KEEP else ""
     return GradedComparison(
         objective=GRADED_OUTPUT,
         candidate=candidate,
@@ -395,8 +393,12 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Ceiling on mean end-to-end latency (ms) from ``--max-latency-ms``; 0.0 leaves KEEP behaviour unchanged. The
     # only copy of the budget: it is written once at launch and archived with the session, so a resume restores it.
     latency_budget_ms: float = 0.0
+    # Ceiling on per-GPU mean power (W) over a measured round, from ``--max-power-w``; 0.0 leaves KEEP behaviour
+    # unchanged. Written once at launch and archived, like the latency budget.
+    power_budget_w: float = 0.0
     # The GPU power settings the session is measured under: {"declared": {power_cap_w, perf_level}, "observed":
-    # {gpu: {power_cap_w, perf_level}}}. Read at launch and asserted on resume; never set by the optimizer.
+    # {gpu: {power_cap_w, perf_level}}, and "applied": {by, gpus, originals} when --apply-gpu-power-settings set them}.
+    # Fixed for the session: read (or applied) at launch, never changed by the optimizer.
     gpu_power_settings: dict[str, Any] = field(default_factory=dict)
     # AgentX corpus shape: written at seed from canonical constants, overwritten with measured values after every
     # AgentX measurement. Read by semantic consumers (prompts, manifest, reports) instead of the inert state.isl /

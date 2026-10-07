@@ -123,6 +123,7 @@ class VariantResult:
     duration_seconds: float | None = None
     ttft_mean_ms: float | None = None
     e2el_mean_ms: float | None = None
+    gpu_power_avg_w: float | None = None
     tpot_mean_ms: float | None = None
     input_throughput: float | None = None
     tpot_p90_ms: float | None = None
@@ -164,6 +165,7 @@ class VariantResult:
             "duration_seconds": self.duration_seconds,
             "ttft_mean_ms": self.ttft_mean_ms,
             "e2el_mean_ms": self.e2el_mean_ms,
+            "gpu_power_avg_w": self.gpu_power_avg_w,
             "tpot_mean_ms": self.tpot_mean_ms,
             "input_throughput": self.input_throughput,
             "tpot_p90_ms": self.tpot_p90_ms,
