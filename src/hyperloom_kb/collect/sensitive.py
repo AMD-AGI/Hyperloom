@@ -96,10 +96,17 @@ def _is_free_text(path: str, free_text: Collection[str]) -> bool:
     return any(path == name or path.startswith((f"{name}[", f"{name}.")) for name in free_text)
 
 
-def find_sensitive(value: JsonValue, path: str = "", *, free_text: Collection[str] = FREE_TEXT_FIELDS) -> str | None:
+def find_sensitive(
+    value: JsonValue,
+    path: str = "",
+    *,
+    free_text: Collection[str] = FREE_TEXT_FIELDS,
+    declared: Collection[str] = (),
+) -> str | None:
     """Return ``"<field path>: <finding>"`` for the first credential-shaped content.
 
-    A string at or below a path in ``free_text`` is screened as prose.
+    A string at or below a path in ``free_text`` is screened as prose. A key at a path in ``declared`` is a field a
+    declaration names, not data, so only its value is screened.
     """
 
     if isinstance(value, str):
@@ -108,15 +115,15 @@ def find_sensitive(value: JsonValue, path: str = "", *, free_text: Collection[st
     if isinstance(value, Mapping):
         for key, item in value.items():
             child = f"{path}.{key}" if path else str(key)
-            if is_secret_shaped_name(str(key)):
+            if child not in declared and is_secret_shaped_name(str(key)):
                 return f"{child}: credential-shaped key"
-            finding = find_sensitive(item, child, free_text=free_text)
+            finding = find_sensitive(item, child, free_text=free_text, declared=declared)
             if finding:
                 return finding
         return None
     if isinstance(value, list):
         for index, item in enumerate(value):
-            finding = find_sensitive(item, f"{path}[{index}]", free_text=free_text)
+            finding = find_sensitive(item, f"{path}[{index}]", free_text=free_text, declared=declared)
             if finding:
                 return finding
     return None
