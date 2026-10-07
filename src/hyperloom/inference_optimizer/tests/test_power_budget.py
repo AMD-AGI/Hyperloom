@@ -40,7 +40,9 @@ class TestPredicate:
         assert power_veto_reason({"4": 760.0}, per_gpu_budget_w={"4": 700.0}) == "gpu_power_budget_exceeded"
         assert power_veto_reason({"4": 650.0}, per_gpu_budget_w={"4": 700.0}) == ""
 
-    @pytest.mark.parametrize("missing", [None, {}, 700.0, {"4": "700"}, {"4": float("nan")}, {"4": True}])
+    @pytest.mark.parametrize(
+        "missing", [None, {}, 700.0, {"4": "700"}, {"4": float("nan")}, {"4": float("inf")}, {"4": True}]
+    )
     def test_an_unmeasured_round_is_refused_not_admitted(self, missing):
         assert power_veto_reason(missing, total_budget_w=1400.0) == "power_unmeasured"
 
