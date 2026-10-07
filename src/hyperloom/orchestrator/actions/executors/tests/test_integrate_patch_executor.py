@@ -2817,7 +2817,7 @@ async def test_a_source_patch_over_the_power_budget_is_reverted(
         extra_envs={},
         status="succeeded",
         output_throughput=200.0,
-        gpu_power_avg_w=power_w,
+        gpu_power_by_gpu_w={"4": power_w},
         workspace=str(workspace),
     )
 

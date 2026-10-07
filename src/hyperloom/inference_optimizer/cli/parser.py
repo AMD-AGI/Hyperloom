@@ -134,6 +134,28 @@ def _positive_watts_arg(value: str) -> float:
     return parsed
 
 
+class _PerGpuPowerAction(argparse.Action):
+    """Collect ``--max-per-gpu-power-w GPU_ID W`` pairs into ``{gpu_id: watts}``; a bad or repeated id stops the launch."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        raw_id, raw_w = values
+        try:
+            gpu = int(str(raw_id).strip())
+        except ValueError:
+            parser.error(f"{option_string}: expected an integer GPU id, got {raw_id!r}")
+        if gpu < 0:
+            parser.error(f"{option_string}: expected a non-negative GPU id, got {raw_id!r}")
+        try:
+            watts = _positive_watts_arg(raw_w)
+        except argparse.ArgumentTypeError as exc:
+            parser.error(f"{option_string}: {exc}")
+        limits = dict(getattr(namespace, self.dest, None) or {})
+        if str(gpu) in limits:
+            parser.error(f"{option_string}: GPU {gpu} is given more than once")
+        limits[str(gpu)] = watts
+        setattr(namespace, self.dest, limits)
+
+
 def _default_claude_model_env() -> str:
     """Resolve the default Claude model from env."""
     explicit = (os.environ.get("CLAUDE_MODEL") or "").strip()
@@ -606,9 +628,23 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_positive_watts_arg,
         default=None,
         help=(
-            "Refuse any KEEP whose per-GPU mean power over the measured round exceeds N W. "
-            "Off by default. A candidate whose round reported no GPU power is refused too, "
-            "since an unmeasured constraint is not a satisfied one."
+            "Refuse any KEEP whose serving GPUs together draw more than N W, summed over their mean power across "
+            "the measured round (e.g. 2800 for four cards budgeted at 700 W each). Off by default. A candidate "
+            "whose round reported no per-GPU power is refused too, since an unmeasured constraint is not a "
+            "satisfied one."
+        ),
+    )
+    opt.add_argument(
+        "--max-per-gpu-power-w",
+        nargs=2,
+        action=_PerGpuPowerAction,
+        default=None,
+        metavar=("GPU_ID", "W"),
+        help=(
+            "Refuse any KEEP in which GPU_ID (the physical amd-smi index) draws more than W watts, as its mean "
+            "power over the measured round. Repeat once per card; a serving card with no entry is bound only by "
+            "--max-power-w. The session refuses to start if a listed GPU is not one it can use, or if the "
+            "per-GPU limits add up to more than --max-power-w."
         ),
     )
     opt.add_argument(

@@ -2995,7 +2995,7 @@ def test_promote_warm_replay_honours_the_power_budget(tmp_path, power_w, expecte
     coord.shared_state.warm_replay_outcome = {"status": "in_flight", "expected_gain_pct": 25.0}
     task = _StubTask(params={"extra_server_args": "--split 8", "baseline_tput_anchor": 600.0})
     coord.phase_prelude.promote_warm_replay(
-        {"status": "succeeded", "output_throughput": 738.0, "gpu_power_avg_w": power_w}, task=task
+        {"status": "succeeded", "output_throughput": 738.0, "gpu_power_by_gpu_w": {"4": power_w}}, task=task
     )
 
     outcome = coord.shared_state.warm_replay_outcome

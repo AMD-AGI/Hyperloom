@@ -66,6 +66,8 @@ from .bootstrap import (
     agentx_state_is_stale,
     latency_budget_resume_conflict,
     power_budget_resume_conflict,
+    per_gpu_power_budget_error,
+    per_gpu_power_budget_resume_conflict,
     apply_declared_gpu_power_settings,
     orphaned_power_settings_warning,
     resolve_gpu_power_settings,
@@ -1849,6 +1851,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             latency_budget_scope_error(state.framework, getattr(args, "max_latency_ms", None))
             or latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
             or power_budget_resume_conflict(state, getattr(args, "max_power_w", None))
+            or per_gpu_power_budget_resume_conflict(state, getattr(args, "max_per_gpu_power_w", None))
         )
         if _latency_conflict:
             session_lock.release()
@@ -2282,6 +2285,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
         if _gpu_power_error:
             print(f"ERROR: {_gpu_power_error}.", file=sys.stderr)
+            sys.exit(2)
+        from hyperloom.common.gpu_power_settings import visible_gpu_indices
+
+        _observed_gpus = {int(g) for g in (gpu_power.get("observed") or {})} or None
+        _per_gpu_error = per_gpu_power_budget_error(
+            getattr(args, "max_per_gpu_power_w", None),
+            total_w=getattr(args, "max_power_w", None),
+            nodes=nodes_resolved,
+            available_gpus=visible_gpu_indices() or _observed_gpus,
+        )
+        if _per_gpu_error:
+            print(f"ERROR: {_per_gpu_error}.", file=sys.stderr)
             sys.exit(2)
         _publish_gpu_power_settings(gpu_power)
         state = _seed_shared_state(
