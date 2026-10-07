@@ -10,9 +10,11 @@ import tempfile
 from pathlib import Path
 
 from hyperloom_kb.database import Database
+from hyperloom_kb.tests.postgres_fixtures import requires_embedded_postgres
 from hyperloom_kb.embedded_postgres import start_embedded_postgres
 
 
+@requires_embedded_postgres
 def test_the_first_request_after_the_server_restarts_is_answered() -> None:
     home = Path(tempfile.mkdtemp(prefix="hyperloom-kb-restart-"))
     home.chmod(0o755)

@@ -26,7 +26,9 @@ from hyperloom_kb.embedded_postgres import (
     root_run_problem,
     start_embedded_postgres,
 )
+from hyperloom_kb.tests.postgres_fixtures import requires_embedded_postgres
 
+pytestmark = requires_embedded_postgres
 as_root = pytest.mark.skipif(os.geteuid() != 0, reason="only a root caller runs the server as another user")
 
 

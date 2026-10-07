@@ -39,7 +39,7 @@ def test_matrix_matches_configured_shards_and_workers():
     total = CONFIG["tool"]["hyperloom"]["tests_coverage"]["total_shards"]
     assert total == 6
     matrix = WORKFLOW["jobs"]["test"]["strategy"]["matrix"]
-    assert matrix["python-version"] == ["3.10", "3.11"]
+    assert matrix["python-version"] == ["3.10", "3.12"]
     assert matrix["shard"] == list(range(1, total + 1))
     assert WORKFLOW["jobs"]["test"]["name"].endswith(f"/{total})")
     assert CONFIG["tool"]["hyperloom"]["tests_coverage"]["xdist_workers"] == 2
@@ -295,7 +295,7 @@ def test_failed_shards_and_missing_data_still_fail():
     assert CONFIG["tool"]["coverage"]["report"]["fail_under"] == 90
 
 
-@pytest.mark.parametrize("python_version", ["3.10", "3.11"])
+@pytest.mark.parametrize("python_version", ["3.10", "3.12"])
 @pytest.mark.parametrize("failure", [None, "coverage", "outcome", "test"])
 def test_aggregation_requires_every_configured_shard(tmp_path, python_version, failure):
     total = CONFIG["tool"]["hyperloom"]["tests_coverage"]["total_shards"]

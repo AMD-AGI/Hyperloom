@@ -52,9 +52,9 @@ kb-service = [
 runtime = [
     "PyYAML>=6.0",
     # A workspace's Experience KB service runs the embedded PostgreSQL pgembed ships, so no database is installed
-    # separately.
+    # separately. Its wheels start at Python 3.12; on an older Python the service needs HYPERLOOM_KB_DATABASE_URL.
     "hyperloom-inference_optimizer[kb-service]",
-    "pgembed==0.2.0",
+    "pgembed==0.2.0; python_version >= '3.12'",
     "hyperloom-inference_optimizer[llm,web,forge]",
 ]
 # Built-in kernel-opt agent (``kernelforge``). ``torch`` is deliberately absent:

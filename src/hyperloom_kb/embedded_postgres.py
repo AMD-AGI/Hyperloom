@@ -6,7 +6,8 @@
 PostgreSQL refuses to run as root, so a root caller runs it as a dedicated system user. The user follows the data
 directory: an existing directory keeps the uid that owns it, so a recreated container that mounts the same home still
 starts it. No directory's permissions are ever widened; a home the database user cannot reach is refused instead, as is
-a home on a file system that cannot keep the data directory private to that user. It runs on Linux and macOS.
+a home on a file system that cannot keep the data directory private to that user. It runs on Linux and macOS, on the
+Python 3.12 or newer the pgembed wheel installs on; elsewhere a service is given a PostgreSQL server instead.
 """
 
 from __future__ import annotations
@@ -57,7 +58,20 @@ class _DatabaseUser:
         return self.uid is None or path.stat().st_uid == self.uid
 
 
+def unavailable_reason() -> str:
+    """Why this system cannot run an embedded server, or ``""`` when it can."""
+
+    if os.name != "posix":
+        return "the embedded database runs on Linux and macOS"
+    if importlib.util.find_spec("pgembed") is None:
+        return "the embedded database needs the pgembed package, which installs on Python 3.12 or newer"
+    return ""
+
+
 def _binaries() -> Path:
+    reason = unavailable_reason()
+    if reason:
+        raise EmbeddedPostgresError(reason)
     spec = importlib.util.find_spec("pgembed")
     if spec is None or not spec.submodule_search_locations:
         raise EmbeddedPostgresError("the pgembed package that provides the embedded PostgreSQL is not installed")
@@ -304,4 +318,5 @@ __all__ = [
     "EmbeddedPostgresError",
     "root_run_problem",
     "start_embedded_postgres",
+    "unavailable_reason",
 ]

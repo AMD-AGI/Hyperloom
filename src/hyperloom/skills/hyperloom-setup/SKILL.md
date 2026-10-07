@@ -460,6 +460,12 @@ workspace outside it when it names the Hyperloom install or the PostgreSQL
 binaries; rewrite `.env` and rerun the check. Do not continue to a demo until
 it passes.
 
+The service's embedded database installs on Python 3.12 or newer: the host's
+Python in `baremetal` mode, the container's in `docker` mode. On an older one
+the check names that, and the workspace's service starts only with
+`HYPERLOOM_KB_DATABASE_URL` in `.env` naming a PostgreSQL server; ask the user
+for one, or continue without the Experience KB, which never stops a run.
+
 In `docker` mode, stop here: the service starts inside the container at the
 first optimize launch.
 

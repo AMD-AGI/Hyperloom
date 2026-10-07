@@ -32,7 +32,7 @@ Experiences from other logs in [Experience collection](experience-kb-collect.md)
 | `HYPERLOOM_GLOBAL_KB_TOKEN` | the user | The global KB's access token. Required with `HYPERLOOM_GLOBAL_KB_URL`. |
 | `HYPERLOOM_KB_AUTO_PUSH` | the user | `1` pushes after every run's Experiences are written locally. Default off. |
 | `USER_DATA_PATH` | `hyperloom-setup` | The local service keeps its data under `$USER_DATA_PATH/experience-kb`. |
-| `HYPERLOOM_KB_DATABASE_URL` | the operator | The PostgreSQL database a service keeps its index and state in. Unset, the service runs an embedded PostgreSQL in its home, which is what a workspace does. |
+| `HYPERLOOM_KB_DATABASE_URL` | the operator | The PostgreSQL database a service keeps its index and state in. Unset, the service runs an embedded PostgreSQL in its home, which is what a workspace on Python 3.12 or newer does. |
 | `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_MODEL` | `hyperloom-setup` | The gateway and model the service plans reads with; `LOCAL_KB_PLANNER_MODEL` overrides the model. Without a gateway the service still accepts writes and reads report `unavailable`. |
 
 All of these live in the workspace `.env`. The service reads them when it
@@ -120,17 +120,19 @@ Two workspaces therefore need their own `USER_DATA_PATH`, or the second gets no
 service of its own.
 
 The embedded server is the PostgreSQL the `pgembed` wheel ships for Linux and
-macOS, reachable only through a socket in the home, or in `/tmp` when the
-home's path is too long for one. A root service runs it as the system user
-`hyperloom-kb-db`, or as the user owning a database directory made earlier, so
-a recreated container that mounts the same home starts it again. No directory's
-permissions are changed for it: a home or a PostgreSQL install that user cannot
-traverse to, such as one under a `700` `/root`, is refused with the directory
-that blocks it, and the workspace and `USER_DATA_PATH` belong somewhere every
-user may traverse. `experience_kb_service check-home` says before a launch
-whether the workspace's service could start there; setup runs it in both
-modes, since a `docker` run is always root and a container image keeps its own
-`/root` private.
+macOS on Python 3.12 or newer; on an older Python, Hyperloom installs without
+it, and a workspace's service starts only once `HYPERLOOM_KB_DATABASE_URL`
+names a PostgreSQL server. It is reachable only through a socket in the home,
+or in `/tmp` when the home's path is too long for one. A root service runs it
+as the system user `hyperloom-kb-db`, or as the user owning a database
+directory made earlier, so a recreated container that mounts the same home
+starts it again. No directory's permissions are changed for it: a home or a
+PostgreSQL install that user cannot traverse to, such as one under a `700`
+`/root`, is refused with the directory that blocks it, and the workspace and
+`USER_DATA_PATH` belong somewhere every user may traverse.
+`experience_kb_service check-home` says before a launch whether the workspace's
+service could start there; setup runs it in both modes, since a `docker` run is
+always root and a container image keeps its own `/root` private.
 
 The database directory must stay private to that user, so a home whose file
 system keeps no permissions (a Windows drive mounted into WSL) or refuses a

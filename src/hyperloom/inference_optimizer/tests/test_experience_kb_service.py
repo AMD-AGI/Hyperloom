@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from hyperloom_kb.tests.postgres_fixtures import requires_embedded_postgres
 
 import hyperloom
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
@@ -158,8 +160,26 @@ def test_check_home_refuses_a_docker_workspace_under_root_and_names_it(monkeypat
     assert experience_kb_service.main(["check-home"]) == 0
 
     assert "the KB home /root/workspace/session/experience-kb is under /root" in refused
-    assert "Move the workspace and USER_DATA_PATH" in refused
+    assert "move the workspace and USER_DATA_PATH" in refused
     assert f"under {tmp_path / 'experience-kb'} in docker mode" in capsys.readouterr().out
+
+
+def test_check_home_names_a_python_the_embedded_database_cannot_install_on(monkeypatch, tmp_path: Path, capsys) -> None:
+    find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util, "find_spec", lambda name, *args: None if name == "pgembed" else find_spec(name, *args)
+    )
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.delenv("HYPERLOOM_KB_DATABASE_URL", raising=False)
+
+    assert experience_kb_service.main(["check-home", "--run-mode", "baremetal"]) == 1
+    refused = capsys.readouterr().err
+    monkeypatch.setenv("HYPERLOOM_KB_DATABASE_URL", "postgresql://kb@db.invalid/kb")
+    assert experience_kb_service.main(["check-home", "--run-mode", "baremetal"]) == 0
+
+    assert "pgembed package, which installs on Python 3.12 or newer" in refused
+    assert "or set HYPERLOOM_KB_DATABASE_URL to a PostgreSQL server" in refused
+    assert "keeps its database on the PostgreSQL server HYPERLOOM_KB_DATABASE_URL names" in capsys.readouterr().out
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="a run as another user starts its database as itself")
@@ -294,6 +314,7 @@ def test_push_without_a_global_kb_explains_what_is_missing(monkeypatch, capsys) 
     assert "HYPERLOOM_GLOBAL_KB_URL is not configured" in capsys.readouterr().err
 
 
+@requires_embedded_postgres
 def test_setup_then_launch_start_one_service_for_the_workspace(monkeypatch, tmp_path: Path, capsys) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(f"HYPERLOOM_KB_URL=http://127.0.0.1:{_free_port()}\n", encoding="utf-8")
@@ -315,6 +336,7 @@ def test_setup_then_launch_start_one_service_for_the_workspace(monkeypatch, tmp_
         service.process.wait(timeout=10)
 
 
+@requires_embedded_postgres
 def test_a_push_never_stops_the_service_a_run_may_be_reading_from(monkeypatch, tmp_path: Path, caplog, capsys) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(f"HYPERLOOM_KB_URL=http://127.0.0.1:{_free_port()}\n", encoding="utf-8")
@@ -347,6 +369,7 @@ def test_a_push_never_stops_the_service_a_run_may_be_reading_from(monkeypatch, t
                 service.process.wait(timeout=10)
 
 
+@requires_embedded_postgres
 def test_workspace_labels_restores_and_exclusions_act_on_the_schema_its_runs_write(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:

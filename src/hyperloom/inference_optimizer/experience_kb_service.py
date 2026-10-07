@@ -32,7 +32,8 @@ from hyperloom_kb import (
 )
 from hyperloom_kb.cli import add_commands, run_command
 from hyperloom_kb.collect import load_mapping
-from hyperloom_kb.embedded_postgres import EmbeddedPostgresError, root_run_problem
+from hyperloom_kb.embedded_postgres import EmbeddedPostgresError, root_run_problem, unavailable_reason
+from hyperloom_kb.http_service import DATABASE_URL_ENV
 from hyperloom_kb.schema import JsonValue
 
 log = logging.getLogger(__name__)
@@ -51,6 +52,9 @@ AUTO_PUSH_ENV = "HYPERLOOM_KB_AUTO_PUSH"
 RUN_MODE_ENV = "HYPERLOOM_RUN_MODE"
 # The directory ``hyperloom`` is installed in: the workspace a ``pip install --target``, or its ``src`` checkout.
 _INSTALL_ROOT = Path(__file__).resolve().parents[2]
+_RELOCATE = (
+    "move the workspace and USER_DATA_PATH under a directory every user may traverse, such as /workspace or /data"
+)
 _PLACEHOLDER = "<PLEASE_FILL_IN>"
 _PLANNER_MODEL_KEYS = ("LOCAL_KB_PLANNER_MODEL", "CLAUDE_MODEL", "ANTHROPIC_MODEL")
 
@@ -138,22 +142,30 @@ def ensure_service(*, restart: bool = True) -> LocalService | None:
 
 
 def home_problem(run_mode: str) -> str:
-    """Why the service this workspace runs could not keep its database under its home, or ``""`` when it can.
+    """Why the service this workspace runs could not keep its database, or ``""`` when it can.
 
-    A run as root starts the database as a dedicated user, which must be able to traverse every directory on the way
-    to the home and to the PostgreSQL binaries. Docker mode always runs as root, in a container that mounts the
-    workspace, where Hyperloom and the binaries are installed, and the home where the host has them; the directories
-    above a mount come from the image, which keeps ``/root`` private.
+    Given ``HYPERLOOM_KB_DATABASE_URL`` it keeps it on that server. Otherwise it runs an embedded server in its home,
+    which needs a Python that installs pgembed: this one in baremetal mode, the container's in docker mode. A run as
+    root starts that server as a dedicated user, which must be able to traverse every directory on the way to the home
+    and to the PostgreSQL binaries. Docker mode always runs as root, in a container that mounts the workspace, where
+    Hyperloom and the binaries are installed, and the home where the host has them; the directories above a mount
+    come from the image, which keeps ``/root`` private.
     """
 
+    if os.environ.get(DATABASE_URL_ENV, "").strip():
+        return ""
     if run_mode == "docker":
         root = Path("/root")
         for path, what in ((service_home(), "the KB home"), (_INSTALL_ROOT, "the Hyperloom install")):
             absolute = path.expanduser().absolute()
             if absolute == root or root in absolute.parents:
-                return f"{what} {absolute} is under /root, which a container image keeps private to root"
+                return f"{what} {absolute} is under /root, which a container image keeps private to root; {_RELOCATE}"
         return ""
-    return root_run_problem(service_home()) if os.geteuid() == 0 else ""
+    reason = unavailable_reason()
+    if reason:
+        return f"{reason}; run Hyperloom on Python 3.12 or newer, or set {DATABASE_URL_ENV} to a PostgreSQL server"
+    problem = root_run_problem(service_home()) if os.geteuid() == 0 else ""
+    return f"{problem}; {_RELOCATE}" if problem else ""
 
 
 def _workspace_client(command: str) -> RemoteClient:
@@ -258,13 +270,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"The Experience KB cannot run its database: {exc}", file=sys.stderr)
             return 1
         if problem:
-            print(
-                f"The Experience KB cannot keep its database here in {args.run_mode} mode: {problem}. Move the "
-                "workspace and USER_DATA_PATH under a directory every user may traverse, such as /workspace or /data.",
-                file=sys.stderr,
-            )
+            print(f"The Experience KB cannot keep its database in {args.run_mode} mode: {problem}.", file=sys.stderr)
             return 1
-        print(f"The Experience KB can keep its database under {service_home()} in {args.run_mode} mode")
+        if os.environ.get(DATABASE_URL_ENV, "").strip():
+            print(f"The Experience KB keeps its database on the PostgreSQL server {DATABASE_URL_ENV} names")
+        else:
+            print(f"The Experience KB can keep its database under {service_home()} in {args.run_mode} mode")
         return 0
     if hasattr(args, "run"):
         try:
