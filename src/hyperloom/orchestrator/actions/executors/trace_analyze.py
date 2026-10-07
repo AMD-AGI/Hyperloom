@@ -450,8 +450,8 @@ def _build_trace_analyze_cmd(
             except (TypeError, ValueError):
                 pass
 
-    # LLM inference-specific splitter flags (serving frameworks only).
-    if not scriptable:
+    # LLM inference-specific splitter flags (serving frameworks only; bypass has no splitter).
+    if not scriptable and not is_bypass:
         cmd += ["--split-llm-inference"]
         split_conc = payload.get("split_conc") or workload.get("conc")
         if split_conc not in (None, ""):
