@@ -102,8 +102,7 @@ iteration event that was durably appended before the corresponding state save.
 
 Resume is fail-closed. It requires:
 
-- A valid current or explicitly migratable `campaign_config.json` and
-  `run_state.json`.
+- A valid current `campaign_config.json` and `run_state.json`.
 - Matching task fingerprint, driver digest, Git branch, and a HEAD equal to the
   search policy's starting version, with the best commit as its ancestor or
   itself.

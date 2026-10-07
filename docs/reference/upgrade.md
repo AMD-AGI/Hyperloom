@@ -224,6 +224,23 @@ Deployments that explicitly keep `--local-kb-root` or
 
 ---
 
+## Required: read the forge-loop search mode under its new names
+
+Forge-loop's EXPLOIT/DIVERSIFY state is now called the search mode, so that
+"search policy" names only the new `--search-policy` option. Tools that read
+forge-loop artifacts must use the new names:
+
+```diff
+# forge_experiments/events.jsonl
+- {"type": "search_policy_decision", ...}
++ {"type": "search_mode_decision", ...}
+# forge_experiments/handoffs/iter_NNN.json and the orchestration context
+- "search_policy": {"mode": "EXPLOIT", ...}
++ "search_mode": {"mode": "EXPLOIT", ...}
+```
+
+---
+
 ## Generic upgrade procedure
 
 For any minor or patch upgrade:
