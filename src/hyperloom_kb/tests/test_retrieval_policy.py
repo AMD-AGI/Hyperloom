@@ -289,9 +289,9 @@ def test_fuzzy_reads_only_the_fields_the_declaration_weights(content_search, mat
     )
     experiences, view = _views(schema, record)
 
-    [hit] = LexicalFuzzyProvider(experiences, schema).recall({"text": "fragmentation"}, view, limit=10)
+    hits = LexicalFuzzyProvider(experiences, schema).recall({"text": "fragmentation"}, view, limit=10)
 
-    assert hit.details["matched_tokens"] == matched
+    assert [hit.details["matched_tokens"] for hit in hits] == [matched]
 
 
 def test_fuzzy_penalizes_explicit_model_size_mismatch() -> None:

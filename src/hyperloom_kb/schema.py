@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import re
+from collections import Counter
 from collections.abc import Iterator
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
@@ -572,8 +573,9 @@ class ExperienceDeclaration:
                 )
             for item in fields:
                 self._check_field(category, item)
-            for role in FieldRole:
-                if sum(1 for item in fields if item.role is role) > 1:
+            roles = Counter(item.role for item in fields if item.role is not None)
+            for role, count in roles.items():
+                if count > 1:
                     raise SchemaValidationError(f"declaration.{category} gives role {role.value} to several fields")
 
     @staticmethod
