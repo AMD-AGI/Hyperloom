@@ -112,6 +112,13 @@ else
     vllm) export VLLM_HTTP_TIMEOUT_KEEP_ALIVE="${VLLM_HTTP_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
     sglang) export SGLANG_TIMEOUT_KEEP_ALIVE="${SGLANG_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
   esac
+  # A framework whose keep-alive variable this script does not know -- atom's is not published -- takes it by name
+  # here rather than by a guess hard-coded above. An agentic turn can idle for minutes between tool results, so a
+  # server defaulting to a short keep-alive will drop the connection mid-trajectory.
+  if [ -n "${AGENTX_KEEP_ALIVE_ENV:-}" ]; then
+    export "${AGENTX_KEEP_ALIVE_ENV}"="$(eval "echo \"\${${AGENTX_KEEP_ALIVE_ENV}:-$_KEEPALIVE_S}\"")"
+    log "keep-alive: ${AGENTX_KEEP_ALIVE_ENV}=$(eval "echo \"\$${AGENTX_KEEP_ALIVE_ENV}\"")"
+  fi
 
   log "delegating server boot -> ${BUILTIN} (PROFILE=${PROFILE:-0}) PORT=${PORT}"
   MAGPIE_RUN_PHASE=server MAGPIE_SERVER_PID_FILE="$PIDFILE" \
