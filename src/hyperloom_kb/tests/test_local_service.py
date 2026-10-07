@@ -217,6 +217,64 @@ def test_a_service_started_with_other_settings_is_restarted_with_the_launch_sett
         _stop(second)
 
 
+# A stale service that, like a real one, closes its port on SIGTERM and only then lets go of its home: here it holds
+# the home's lock for 3 s more, as a real one does while it drains and stops its database.
+_SLOW_TO_RELEASE = """
+import fcntl, json, os, signal, sys, threading, time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+home, port = sys.argv[1], int(sys.argv[2])
+os.makedirs(home, exist_ok=True)
+lock = open(os.path.join(home, "service.lock"), "a+")
+fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+
+
+class Health(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"status": "ok", "pid": os.getpid(), "home": home, "schema_ref": "stale"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+server = HTTPServer(("127.0.0.1", port), Health)
+stopping = threading.Event()
+signal.signal(signal.SIGTERM, lambda *_: stopping.set())
+threading.Thread(target=lambda: (stopping.wait(), server.shutdown()), daemon=True).start()
+server.serve_forever()
+server.server_close()
+time.sleep(3)
+"""
+
+
+def test_a_restart_waits_until_the_stopped_service_lets_go_of_the_home(tmp_path: Path) -> None:
+    port = _free_port()
+    config = _config(port, tmp_path)
+    home = tmp_path / "home"
+    script = tmp_path / "slow_to_release.py"
+    script.write_text(_SLOW_TO_RELEASE, encoding="utf-8")
+    old = subprocess.Popen([sys.executable, str(script), str(home), str(port)])
+    restarted = LocalService({})
+    try:
+        while not _reachable(port):
+            assert old.poll() is None
+        restarted = ensure_local_service(config, home, env=_env_without_planner_gateway(tmp_path))
+
+        assert old.wait(timeout=10) == 0
+        assert restarted.restarted and restarted.process is not None
+        assert restarted.health["pid"] == restarted.process.pid
+    finally:
+        if old.poll() is None:
+            old.kill()
+            old.wait(timeout=10)
+        _stop(restarted)
+
+
 def test_the_same_settings_spelled_differently_reuse_the_running_service(tmp_path: Path) -> None:
     config = _config(_free_port(), tmp_path)
     gateway = {"ANTHROPIC_BASE_URL": "https://gateway.example", "ANTHROPIC_API_KEY": "key", "CLAUDE_MODEL": "m"}
