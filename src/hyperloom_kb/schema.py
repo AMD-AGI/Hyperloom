@@ -25,6 +25,8 @@ CURRENT_SCHEMA_VERSION = 2
 MAX_SAFE_INTEGER = (1 << 53) - 1
 #: The most one text value holds; a read injects text whole, so a longer one belongs in a file.
 TEXT_MAX_BYTES = 32 * 1024
+#: The most one file holds; a record naming a larger one is invalid, so no client ever tries to send it.
+MAX_FILE_BYTES = 4 * 1024 * 1024 * 1024
 
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
@@ -261,8 +263,8 @@ class FileRef:
         object.__setattr__(self, "name", path.as_posix())
         if not isinstance(self.sha256, str) or not _SHA256_RE.fullmatch(self.sha256):
             raise SchemaValidationError("file.sha256 must be 64 lowercase hex characters")
-        if isinstance(self.bytes, bool) or not isinstance(self.bytes, int) or not 0 <= self.bytes <= MAX_SAFE_INTEGER:
-            raise SchemaValidationError("file.bytes must be a non-negative integer")
+        if isinstance(self.bytes, bool) or not isinstance(self.bytes, int) or not 0 <= self.bytes <= MAX_FILE_BYTES:
+            raise SchemaValidationError(f"file.bytes must be a non-negative integer of at most {MAX_FILE_BYTES}")
 
     def to_dict(self) -> dict[str, JsonValue]:
         return {"name": self.name, "sha256": self.sha256, "bytes": self.bytes}
@@ -947,6 +949,7 @@ __all__ = [
     "CATEGORIES",
     "CURRENT_SCHEMA_VERSION",
     "KNOWLEDGE_FIELDS",
+    "MAX_FILE_BYTES",
     "METADATA_FIELDS",
     "RATIONALE_DEFAULTS",
     "SCALAR_KINDS",

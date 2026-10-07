@@ -7,7 +7,6 @@ from hyperloom_kb.config import (
 )
 from hyperloom_kb.files import FileMismatch, FileStore, file_ref
 from hyperloom_kb.http_service import (
-    MAX_FILE_BYTES,
     ExperienceHTTPService,
     HTTPServiceConfig,
     HTTPServiceError,
@@ -120,6 +119,7 @@ from hyperloom_kb.schema import (
     CATEGORIES,
     CURRENT_SCHEMA_VERSION,
     KNOWLEDGE_FIELDS,
+    MAX_FILE_BYTES,
     METADATA_FIELDS,
     RATIONALE_DEFAULTS,
     SCALAR_KINDS,
