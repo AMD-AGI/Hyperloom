@@ -944,12 +944,13 @@ def test_seqany_resumes_at_the_latest_accepted_commit_not_at_the_best():
     assert should_resume(state, "c1", SearchPolicy.SEQUENTIAL) is True
 
 
-def test_the_starting_version_before_any_keep_is_the_campaign_start():
+@pytest.mark.parametrize("policy", [SearchPolicy.SEQUENTIAL, SearchPolicy.SEQANY])
+def test_the_starting_version_before_any_keep_is_the_campaign_start(policy):
     state = RunState(start_commit="base", best_case_times={"a": 10.0})
 
-    for policy in SearchPolicy:
-        start = starting_version(state, policy)
-        assert (start.iteration, start.commit_hash, start.case_times) == (0, "base", {"a": 10.0})
+    start = starting_version(state, policy)
+
+    assert (start.iteration, start.commit_hash, start.case_times) == (0, "base", {"a": 10.0})
 
 
 def test_candidate_records_round_trip_and_an_accept_counts_as_no_improvement():

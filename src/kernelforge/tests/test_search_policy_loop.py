@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-import kernelforge.loop.runner as runner_module
 import kernelforge.orchestrator.agent as agent_module
 from kernelforge.agent_backends.base import AgentCapabilities, AgentRunResult
 from kernelforge.config import Config
@@ -93,7 +93,7 @@ def _workspace(tmp_path, monkeypatch):
         ["git", "commit", "-m", "initial"],
     ):
         subprocess.run(command, cwd=workspace, check=True, capture_output=True)
-    monkeypatch.setattr(runner_module, "force_jit_rebuild", lambda _files: None)
+    monkeypatch.setattr("kernelforge.loop.runner.force_jit_rebuild", lambda _files: None)
     return workspace, kernel, driver
 
 
@@ -152,7 +152,7 @@ def _scripted(outcomes: dict[int, str]):
 
 
 async def _editing_agent(kernel_path, _history, session_sink):
-    path = runner_module.Path(kernel_path)
+    path = Path(kernel_path)
     edits = path.read_text().count("# edit") + 1
     session_sink["plan"] = f"edit {edits}"
     path.write_text(path.read_text() + f"# edit {edits}\n")
