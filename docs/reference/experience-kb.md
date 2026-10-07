@@ -154,12 +154,12 @@ collection spools without waiting on the service. Requests to a loopback service
 | `<kb_id>/files/` | One file per content a record's file field names, under its SHA-256; see [Files](#files). |
 | `spool/` | Writes the service has not accepted yet, with its own copy of each file they name under `spool/files/`. |
 | `service.log` | The service's log. |
+| `service.lock` | Held by the one service serving this home; names its pid and port. |
 
 A home a service from `main` kept also holds that service's `kb.sqlite3`,
 `sync.sqlite3`, and `canonical/`. Their records are of the shape this schema
 version replaced, so a service leaves them unread and starts a new KB beside
 them.
-| `service.lock` | Held by the one service serving this home; names its pid and port. |
 
 ## Files
 
