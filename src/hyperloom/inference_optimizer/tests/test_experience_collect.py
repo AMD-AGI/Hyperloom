@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from hyperloom_kb.tests.postgres_fixtures import requires_embedded_postgres
 
 import hyperloom_kb.collect as kb_collect
 from hyperloom.inference_optimizer import experience_collect, experience_kb_service
@@ -361,6 +362,7 @@ def test_writes_the_service_cannot_take_wait_under_user_data_path(
     assert len(spooled) == len(receipt["collected"])
 
 
+@requires_embedded_postgres
 def test_a_later_run_reads_what_an_earlier_run_wrote_after_the_service_restarts(
     monkeypatch, session_dir: Path, tmp_path: Path
 ) -> None:
@@ -413,6 +415,7 @@ def _stop_workspace_service() -> None:
     os.kill(int(service.health["pid"]), signal.SIGTERM)
 
 
+@requires_embedded_postgres
 def test_an_auto_pushed_run_reaches_another_workspace_that_pulls(
     monkeypatch, session_dir: Path, tmp_path: Path, new_database
 ) -> None:

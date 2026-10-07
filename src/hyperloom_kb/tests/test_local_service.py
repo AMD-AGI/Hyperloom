@@ -42,9 +42,10 @@ from hyperloom_kb import (
 from hyperloom_kb import local_service
 from hyperloom_kb.http_service import code_digest
 from hyperloom_kb.tests.conftest import fresh_database
+from hyperloom_kb.tests.postgres_fixtures import requires_embedded_postgres
 
 # Spawned services run their own embedded database under ``tmp_path``.
-pytestmark = pytest.mark.usefixtures("reachable_tmp_path")
+pytestmark = [pytest.mark.usefixtures("reachable_tmp_path"), requires_embedded_postgres]
 
 TOKEN = "local-service-token"
 

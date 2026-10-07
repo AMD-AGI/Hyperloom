@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from hyperloom_kb.tests.postgres_fixtures import requires_embedded_postgres
 
 from hyperloom_kb import ExperienceHTTPService, HTTPServiceConfig, RemoteClient, RemoteClientError, RemoteConfig
 from hyperloom_kb.http_service import create_http_server, serve_until_stopped
@@ -235,6 +236,7 @@ def test_a_stopped_service_finishes_the_request_in_flight(tmp_path: Path) -> Non
 
 
 @pytest.mark.usefixtures("reachable_tmp_path")
+@requires_embedded_postgres
 def test_sigterm_stops_the_service_and_the_database_it_started(tmp_path: Path) -> None:
     home, port = tmp_path / "home", _free_port()
     env = {key: value for key, value in os.environ.items() if not key.startswith(("ANTHROPIC_", "HYPERLOOM_"))} | {
