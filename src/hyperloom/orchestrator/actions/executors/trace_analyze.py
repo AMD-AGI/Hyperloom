@@ -440,7 +440,8 @@ def _build_trace_analyze_cmd(
     # Scriptable frameworks still forward denoise-step count for per-step
     # roofline timings. Priority: payload override > baseline workload metadata.
     if scriptable:
-        cmd += ["--steady-state-mode", "generic"]
+        if not is_bypass:
+            cmd += ["--steady-state-mode", "generic"]
         num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
         if num_denoise not in (None, ""):
             try:

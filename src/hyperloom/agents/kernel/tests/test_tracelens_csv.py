@@ -2230,6 +2230,7 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, t
         "--no-llm-orchestrator",
         "--capture-folder",
         str(capture),
+        "--split-llm-inference",
         *extra_argv,
     ]
 
