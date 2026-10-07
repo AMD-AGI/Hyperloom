@@ -106,8 +106,8 @@ KEEP/REVERT decisions answer another objective.
 ## Configuration
 
 Publications go to the workspace's local Experience KB service, which every
-optimize launch starts when it is not serving and its database can run; while
-it cannot, publications wait in the workspace's spool. Its configuration, the global KB
+optimize launch starts when it is not serving; while it cannot start,
+publications wait in the workspace's spool. Its configuration, the global KB
 it can push to and pull from, and its HTTP API are in
 [Experience KB service](reference/experience-kb.md).
 
