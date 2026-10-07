@@ -4630,6 +4630,7 @@ class IntegratePatchExecutor:
                     # Canonical name: the latency budget fails closed, so a lane that
                     # does not carry this refuses every KEEP it would ever have made.
                     "e2el_mean_ms": r.e2el_mean_ms,
+                    "gpu_power_avg_w": r.gpu_power_avg_w,
                     # Benchmark dir; ``grade_accuracy`` locates accuracy artifacts here.
                     "workspace": r.workspace or "",
                     "error": r.error or "",

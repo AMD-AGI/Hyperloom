@@ -209,3 +209,79 @@ def test_round_recorders_combine_kv_and_power(monkeypatch, tmp_path):
     assert kv.calls == power.calls == ["phase:measured"]
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._gpu_power.build_gpu_power_recorder", lambda *a: None)
     assert _subprocess_kill._build_round_recorders(str(tmp_path / "server.log"), {}) is kv
+
+
+class _PhaseLog:
+    def __init__(self) -> None:
+        self.phases: list[str] = []
+
+    def note_phase(self, phase, mono):
+        self.phases.append(phase)
+
+
+def _ready_line() -> str:
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import _SERVER_READY_MARKERS
+
+    return _SERVER_READY_MARKERS[0] + "\n"
+
+
+def test_replay_logs_drive_boot_and_measured_per_replica(tmp_path):
+    """Each replica boots its own server: a new log is a boot, its ready marker opens the measured phase."""
+    from hyperloom.orchestrator.actions.executors._gpu_power import ServerLogPhaseDriver
+    from hyperloom.orchestrator.actions.executors._geak_sweep import _replay_server_logs
+
+    phases = _PhaseLog()
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import _scan_logs_increment
+
+    driver = ServerLogPhaseDriver(phases, lambda: _replay_server_logs(tmp_path), scan=_scan_logs_increment)
+    first = tmp_path / "replica_0" / "attempt_0" / "server.log"
+    first.parent.mkdir(parents=True)
+    first.write_text("loading weights\n")
+    driver.poll()
+    assert phases.phases == ["boot"]
+    with first.open("a") as fh:
+        fh.write(_ready_line())
+    driver.poll()
+    assert phases.phases[-1] == "measured"
+    second = tmp_path / "replica_1" / "attempt_0" / "server.log"
+    second.parent.mkdir(parents=True)
+    second.write_text("loading weights\n")
+    driver.poll()
+    assert phases.phases[-1] == "boot"
+    with second.open("a") as fh:
+        fh.write(_ready_line())
+    driver.stop()
+    assert phases.phases[-1] == "measured"
+
+
+def test_a_geak_replay_is_sampled_over_its_measured_phase(tmp_path, monkeypatch):
+    """The replay subprocess runs under the recorder; gpu_power.json lands in its output directory."""
+    import subprocess as sp
+
+    from hyperloom.orchestrator.actions.executors import _geak_sweep, _gpu_power
+
+    monkeypatch.setenv("HYPERLOOM_GPU_POWER_SAMPLING", "1")
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/amd-smi")
+    real = _gpu_power.GpuPowerRecorder
+
+    def _recorder(**kwargs):
+        rec = real(**{**kwargs, "query": lambda: _tp4_on_eight(780.0)})
+        rec._interval = 0.01
+        return rec
+
+    monkeypatch.setattr(_gpu_power, "GpuPowerRecorder", _recorder)
+
+    def _replay() -> sp.CompletedProcess:
+        log_path = tmp_path / "server.log"
+        log_path.write_text("loading weights\n")
+        time.sleep(2.2)
+        with log_path.open("a") as fh:
+            fh.write(_ready_line())
+        time.sleep(2.5)
+        return sp.CompletedProcess(["bash"], 0, "", "")
+
+    proc = _geak_sweep._run_with_power_sampling(_replay, tmp_path, {})
+    assert proc.returncode == 0
+    found, watts = read_measured_gpu_power(tmp_path)
+    assert found is True
+    assert watts == 780.0

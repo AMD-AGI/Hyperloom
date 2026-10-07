@@ -2117,6 +2117,7 @@ class KernelPhase(CoordinatorCollaborator):
                     promotion_measurement[key] = measurement_provenance[key]
             for key in (
                 "accuracy",
+                "gpu_power_avg_w",
                 "launch_evidence",
                 "launch_evidence_path",
                 "server_log_path",

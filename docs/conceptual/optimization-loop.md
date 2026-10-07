@@ -250,6 +250,51 @@ cap and perf level are recorded in the platform fingerprint whether or not
 they are asserted. Neither can be checked on a multi-node session, so asserting
 one there refuses.
 
+### Power budget (constraint on KEEP)
+
+`--max-power-w` sets a ceiling on per-GPU mean power over a measured round, for
+every framework. It rides the same verdict as `--max-latency-ms`: a candidate
+that would otherwise KEEP and draws more than the ceiling is a REVERT with
+`veto_reason` `power_budget_exceeded`, or `power_unmeasured` when its round
+reported no GPU power (fail closed). Every KEEP decision point reads that
+verdict, so a lane reverts its own over-budget change. If the baseline itself
+is over the ceiling, or reported no power, the run stops with
+`baseline_over_power_budget`. The reading is the measured-phase
+`gpu_power_avg_w` described above. A GEAK replay boots its own server once per
+replica, so its phases are read from the server logs the replay writes, with
+the same markers, and each new log counts as a fresh boot.
+
+The ceiling is a budget on average draw at the deployed cap, the shape of a
+power-provisioned rack where cards keep their full cap for headroom. To tune
+for a lower hardware cap instead, set that cap with `amd-smi set` and assert it
+with `--gpu-power-cap-w`; no ceiling is needed.
+
+### Applying the power settings (opt-in)
+
+`--apply-gpu-power-settings` permits the session to set the declared
+`--gpu-power-cap-w` / `--gpu-perf-level` itself, once at launch, on the cards in
+its visible-device mask, and to keep them for the whole session. Without it the
+settings are only asserted. The same read-back check then verifies them, and
+the fingerprint records them as applied by Hyperloom along with the originals.
+It needs `amd-smi set` privileges and refuses rather than continuing
+unchecked when a set fails. It also refuses on multi-node, on a card that
+already holds more than 2 GB of VRAM before the session starts (someone else's
+resident model, which a card-wide cap would change too), and on a card whose
+current value cannot be read, since nothing could restore it.
+
+Only the settings that were declared are changed, and only those are put back.
+The originals are written to a per-card record under
+`$HYPERLOOM_RUNTIME_DIR/gpu_power_settings/` before anything is set, and the
+session holds an exclusive `flock` on that record until it exits. That lock
+keeps two sessions from setting the same card, and it survives container
+boundaries, where process IDs do not. The originals are restored at exit,
+including after a stop reason or an operator stop. A session killed outright
+leaves its record behind with the lock free. The next launch that passes the
+flag restores those cards before doing anything else. A launch without the
+flag warns that the cards were left changed and names their original values.
+On resume the flag must be passed again, since the settings were restored when
+the previous leg exited.
+
 ### Runnable gate (earned KEEP)
 
 A verified build does not KEEP on artifact verification alone. After a
