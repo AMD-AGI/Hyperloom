@@ -273,7 +273,8 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "marked. Resume with more budget to measure a comparable baseline."
     ),
     "baseline_over_power_budget": (
-        "The baseline's per-GPU mean power exceeded --max-power-w, or the baseline round reported no GPU power, so "
+        "The baseline's serving GPUs drew more than --max-power-w in total, or a card drew more than its "
+        "--max-per-gpu-power-w limit, or the baseline round reported no per-GPU power, so "
         "the run stopped before optimizing. Every candidate is measured against that reference, so none could have "
         "been promoted. If the round reported no power, read the round's gpu_power.json: an empty serving_gpus means "
         "no card held a model during the measured phase, and query_errors means amd-smi could not be read (or "

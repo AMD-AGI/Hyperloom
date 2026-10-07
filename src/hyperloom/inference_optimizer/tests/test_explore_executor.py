@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -2818,7 +2819,8 @@ async def test_explore_mlperf_reverts_when_turns_went_unscored(sub_agent_runner,
 async def test_explore_grades_the_rounds_own_gpu_power_against_the_budget(
     sub_agent_runner, tmp_path, monkeypatch, power_w, expected_outcome
 ):
-    """Power comes from the round's gpu_monitor through the real extraction, and a KEEP reaches current_best."""
+    """Power comes from the round's own gpu_power.json through the real extraction; the total of the serving cards
+    is graded against the budget, and a KEEP reaches current_best."""
 
     from hyperloom.orchestrator.loop import writeback as wb
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -2838,9 +2840,18 @@ async def test_explore_grades_the_rounds_own_gpu_power_against_the_budget(
         slot = Path(cmd[cmd.index("--output-dir") + 1])
         workspace = _fake_workspace(slot, tput=20000.0)
         report_path = workspace / "benchmark_report.json"
-        report = json.loads(report_path.read_text())
-        report["gpu_monitor"] = [{"sample_count": 100, "power_watts": {"avg": power_w, "max": power_w + 50}}]
-        report_path.write_text(json.dumps(report))
+        assert report_path.exists()
+        half = power_w / 2
+        (workspace / "gpu_power.json").write_text(
+            json.dumps(
+                {
+                    "started_unix": time.time(),
+                    "serving_gpus": [4, 5],
+                    "avg_power_w": half,
+                    "per_gpu": {"4": {"avg_power_w": half}, "5": {"avg_power_w": half}},
+                }
+            )
+        )
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
     task = await tr.create(
@@ -2867,7 +2878,7 @@ async def test_explore_grades_the_rounds_own_gpu_power_against_the_budget(
     if expected_outcome == "REVERT":
         assert out["losers"][0]["reason"] == "power_budget_exceeded"
         return
-    assert out["winners"][0]["gpu_power_avg_w"] == pytest.approx(power_w)
+    assert out["winners"][0]["gpu_power_by_gpu_w"] == {"4": pytest.approx(power_w / 2), "5": pytest.approx(power_w / 2)}
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = state

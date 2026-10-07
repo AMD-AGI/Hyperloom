@@ -2384,6 +2384,7 @@ class PreludePhase(CoordinatorCollaborator):
                     # The latency and power budgets grade on these and fail closed without them.
                     "e2el_mean_ms": result.get("e2el_mean_ms"),
                     "gpu_power_avg_w": result.get("gpu_power_avg_w"),
+                    "gpu_power_by_gpu_w": result.get("gpu_power_by_gpu_w"),
                     "candidate_extra_server_args": warm_args,
                     "candidate_extra_envs": warm_envs,
                     "recipe_delta": {

@@ -89,7 +89,9 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--max-latency-ms` is a constraint on KEEP rather than a target, and applies
   to scriptable frameworks (`xdit`, `custom`) only; the CLI refuses it for a
   serving framework, including on resume. `--max-power-w` is the same kind of
-  constraint on per-GPU mean power, for every framework. That power is sampled
+  constraint on the serving GPUs' total mean power, for every framework, and
+  `--max-per-gpu-power-w GPU_ID W` (repeatable) adds a limit for one card; the
+  per-GPU limits must add up to no more than the total. That power is sampled
   by Hyperloom over the measured phase into each round's `gpu_power.json`;
   `HYPERLOOM_GPU_POWER_SAMPLING=0` turns the sampler off (the round then falls
   back to the benchmark report's reading) and `HYPERLOOM_GPU_POWER_INTERVAL_S`

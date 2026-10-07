@@ -17,6 +17,7 @@ from hyperloom.orchestrator.actions.executors._gpu_power import (
     build_gpu_power_recorder,
     parse_power_sample,
     read_measured_gpu_power,
+    read_measured_gpu_power_by_gpu,
 )
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 
@@ -75,6 +76,17 @@ def test_averages_only_the_serving_cards(tmp_path):
     assert 800.0 <= out["avg_power_w"] <= 900.0
     assert out["max_power_w"] == 900.0
     assert json.loads((tmp_path / GPU_POWER_ARTIFACT_NAME).read_text())["serving_gpus"] == [0, 1, 2, 3]
+
+
+def test_the_by_gpu_reading_names_each_serving_card_and_no_idle_one(tmp_path):
+    query = _Replay(_tp4_on_eight(800.0))
+    recorder = GpuPowerRecorder(output_path=str(tmp_path / GPU_POWER_ARTIFACT_NAME), query=query, interval_sec=0.5)
+    recorder._interval = 0.01
+    _run_measured(recorder, query, samples=3)
+    recorder.close()
+    found, by_gpu = read_measured_gpu_power_by_gpu(tmp_path)
+    assert found is True
+    assert by_gpu == {str(g): pytest.approx(800.0) for g in range(4)}
 
 
 def test_samples_nothing_outside_the_measured_phase(tmp_path):
@@ -153,7 +165,14 @@ def test_measurement_keeps_a_sampled_but_unmeasured_round_unmeasured(tmp_path):
 
 
 def test_measurement_falls_back_to_the_report_when_no_recorder_ran(tmp_path):
-    assert extract_benchmark_measurement(_MAGPIE_REPORT, workspace=tmp_path)["gpu_power_avg_w"] == 313.7
+    measurement = extract_benchmark_measurement(_MAGPIE_REPORT, workspace=tmp_path)
+    assert measurement["gpu_power_avg_w"] == 313.7
+    assert measurement["gpu_power_by_gpu_w"] is None, "Magpie's host-wide mean cannot be split per card"
+
+
+def test_a_sampled_round_with_no_serving_card_has_no_by_gpu_reading(tmp_path):
+    _write_artifact(tmp_path, avg=None, started_unix=time.time())
+    assert read_measured_gpu_power_by_gpu(tmp_path) == (True, None)
 
 
 def test_builder_follows_amd_smi_and_the_switch(tmp_path, monkeypatch):

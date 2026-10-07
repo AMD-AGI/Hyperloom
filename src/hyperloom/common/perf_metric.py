@@ -340,14 +340,36 @@ def latency_veto_reason(observed_ms: Any, budget_ms: float) -> str:
     return _ceiling_veto(observed_ms, budget_ms, exceeded="latency_budget_exceeded", unmeasured="latency_unmeasured")
 
 
-def power_veto_reason(observed_w: Any, budget_w: float) -> str:
-    """Why the power budget refuses this candidate, or "" when it does not.
+def power_veto_reason(
+    by_gpu_w: Any,
+    *,
+    total_budget_w: float = 0.0,
+    per_gpu_budget_w: Mapping[str, float] | None = None,
+) -> str:
+    """Why the power budgets refuse this candidate, or "" when they do not.
 
-    The budget is a ceiling on per-GPU mean power over the measured round. A throughput gain bought by drawing more
-    power than the deployment can supply is not one it can use. Off entirely when *budget_w* is not positive. Every
-    lane copies ``gpu_power_avg_w`` onto the dict it promotes.
+    *by_gpu_w* is each serving card's mean power over the measured round, keyed by physical GPU id. *total_budget_w*
+    caps their sum (``--max-power-w``); *per_gpu_budget_w* caps individual cards (``--max-per-gpu-power-w``). A card
+    with no limit of its own is bound only by the total, and a limited card that did not serve this round is not
+    judged on it. Off entirely when neither budget is set. Fails closed on a candidate with no per-card reading: a
+    constraint nobody measured is not one anybody satisfied.
     """
-    return _ceiling_veto(observed_w, budget_w, exceeded="power_budget_exceeded", unmeasured="power_unmeasured")
+    limits = {str(gpu): float(watts) for gpu, watts in (per_gpu_budget_w or {}).items() if watts and watts > 0}
+    total = float(total_budget_w or 0.0)
+    if total <= 0 and not limits:
+        return ""
+    if not isinstance(by_gpu_w, Mapping) or not by_gpu_w:
+        return "power_unmeasured"
+    readings: dict[str, float] = {}
+    for gpu, watts in by_gpu_w.items():
+        if isinstance(watts, bool) or not isinstance(watts, (int, float)) or watts != watts:
+            return "power_unmeasured"
+        readings[str(gpu)] = float(watts)
+    if any(gpu in readings and readings[gpu] > limit for gpu, limit in limits.items()):
+        return "gpu_power_budget_exceeded"
+    if total > 0 and sum(readings.values()) > total:
+        return "power_budget_exceeded"
+    return ""
 
 
 def constraint_veto_reason(measurement: Any, state: Any) -> str:
@@ -355,7 +377,11 @@ def constraint_veto_reason(measurement: Any, state: Any) -> str:
     source = measurement if isinstance(measurement, Mapping) else {}
     return latency_veto_reason(
         source.get("e2el_mean_ms"), float(getattr(state, "latency_budget_ms", 0.0) or 0.0)
-    ) or power_veto_reason(source.get("gpu_power_avg_w"), float(getattr(state, "power_budget_w", 0.0) or 0.0))
+    ) or power_veto_reason(
+        source.get("gpu_power_by_gpu_w"),
+        total_budget_w=float(getattr(state, "power_budget_w", 0.0) or 0.0),
+        per_gpu_budget_w=getattr(state, "power_budget_per_gpu_w", None),
+    )
 
 
 @dataclass(frozen=True)

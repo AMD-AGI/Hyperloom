@@ -3521,6 +3521,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
             "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
             "gpu_power_avg_w": bv.get("gpu_power_avg_w") if isinstance(bv, dict) else None,
+            "gpu_power_by_gpu_w": bv.get("gpu_power_by_gpu_w") if isinstance(bv, dict) else None,
             "tpot_mean_ms": bv.get("tpot_mean_ms") if isinstance(bv, dict) else None,
             "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
         }
@@ -3836,6 +3837,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
                 "gpu_power_avg_w": result.get("gpu_power_avg_w"),
+                "gpu_power_by_gpu_w": result.get("gpu_power_by_gpu_w"),
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
                 "input_throughput": result.get("input_throughput"),
                 "total_throughput": result.get("total_token_throughput"),
@@ -3897,18 +3899,28 @@ class WritebackCollaborator(CoordinatorCollaborator):
             from hyperloom.common.perf_metric import power_veto_reason
 
             power_budget = float(getattr(self.shared_state, "power_budget_w", 0.0) or 0.0)
-            power_veto = "" if baseline_veto else power_veto_reason(result.get("gpu_power_avg_w"), power_budget)
+            per_gpu_budget = dict(getattr(self.shared_state, "power_budget_per_gpu_w", None) or {})
+            by_gpu = result.get("gpu_power_by_gpu_w")
+            power_veto = (
+                ""
+                if baseline_veto
+                else power_veto_reason(by_gpu, total_budget_w=power_budget, per_gpu_budget_w=per_gpu_budget)
+            )
             if power_veto:
+                measured = (
+                    f"{sum(by_gpu.values()):.0f} W total ("
+                    + ", ".join(f"GPU {gpu} {watts:.0f} W" for gpu, watts in sorted(by_gpu.items()))
+                    + ")"
+                    if isinstance(by_gpu, dict) and by_gpu
+                    else "reported no per-GPU power"
+                )
                 log.error(
-                    "baseline does not satisfy --max-power-w (%s): budget %.0f W per GPU, baseline %s. "
-                    "No candidate can clear a ceiling the reference already breaks; stopping.",
+                    "baseline does not satisfy the power budget (%s): --max-power-w %s, --max-per-gpu-power-w %s; "
+                    "baseline %s. No candidate can clear a budget the reference already breaks; stopping.",
                     power_veto,
-                    power_budget,
-                    (
-                        f"{float(result['gpu_power_avg_w']):.0f} W"
-                        if isinstance(result.get("gpu_power_avg_w"), (int, float))
-                        else "reported no GPU power"
-                    ),
+                    f"{power_budget:.0f} W" if power_budget > 0 else "unset",
+                    ", ".join(f"GPU {gpu} {watts:.0f} W" for gpu, watts in sorted(per_gpu_budget.items())) or "unset",
+                    measured,
                 )
                 self.shared_state.set_stop_reason("baseline_over_power_budget")
         if anchor_accepted:
@@ -5628,6 +5640,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 # power budgets grade on these and fail closed without them.
                 "e2el_mean_ms": (result.get("bench_result") or result).get("e2el_mean_ms"),
                 "gpu_power_avg_w": (result.get("bench_result") or result).get("gpu_power_avg_w"),
+                "gpu_power_by_gpu_w": (result.get("bench_result") or result).get("gpu_power_by_gpu_w"),
                 "workspace": result.get("workspace"),
                 "provenance": provenance or "integrate_patch",
                 "scope": "source_patch",

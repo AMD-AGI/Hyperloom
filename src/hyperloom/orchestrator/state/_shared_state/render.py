@@ -205,9 +205,10 @@ class _RenderMixin:
         )
 
     def to_power_budget_summary(self) -> str:
-        """One line stating the power budget and the cap the cards are at; empty when no budget is set."""
+        """One line stating the power budgets and the cap the cards are at; empty when no budget is set."""
         budget = float(getattr(self, "power_budget_w", 0.0) or 0.0)
-        if budget <= 0:
+        per_gpu = dict(getattr(self, "power_budget_per_gpu_w", None) or {})
+        if budget <= 0 and not per_gpu:
             return ""
         caps = sorted(
             {
@@ -216,10 +217,17 @@ class _RenderMixin:
                 if isinstance(row, dict) and isinstance(row.get("power_cap_w"), (int, float))
             }
         )
+        parts = []
+        if budget > 0:
+            parts.append(f"{budget:g} W total across the serving GPUs")
+        if per_gpu:
+            parts.append(
+                "per-GPU " + ", ".join(f"GPU {g} {w:g} W" for g, w in sorted(per_gpu.items(), key=lambda i: int(i[0])))
+            )
         cap = f", cards capped at {'/'.join(f'{c:g}' for c in caps)} W" if caps else ""
         return (
-            f"{budget:g} W per-GPU mean power{cap}: a KEEP over it, or with no GPU power reported, is refused "
-            "(reason power_budget_exceeded / power_unmeasured in explore_search and the journal)"
+            f"{'; '.join(parts)}{cap}: a KEEP over a budget, or with no per-GPU power reported, is refused (reason "
+            "power_budget_exceeded / gpu_power_budget_exceeded / power_unmeasured in explore_search and the journal)"
         )
 
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:

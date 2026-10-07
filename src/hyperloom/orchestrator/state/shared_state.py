@@ -394,9 +394,12 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Ceiling on mean end-to-end latency (ms) from ``--max-latency-ms``; 0.0 leaves KEEP behaviour unchanged. The
     # only copy of the budget: it is written once at launch and archived with the session, so a resume restores it.
     latency_budget_ms: float = 0.0
-    # Ceiling on per-GPU mean power (W) over a measured round, from ``--max-power-w``; 0.0 leaves KEEP behaviour
-    # unchanged. Written once at launch and archived, like the latency budget.
+    # Ceiling on the serving cards' total mean power (W) over a measured round, from ``--max-power-w``; 0.0 leaves KEEP
+    # behaviour unchanged. Written once at launch and archived, like the latency budget.
     power_budget_w: float = 0.0
+    # Per-card ceilings {physical GPU id: W} from ``--max-per-gpu-power-w``; a card with no entry is bound only by the
+    # total. Validated at launch against the visible mask and the total, and archived with the session.
+    power_budget_per_gpu_w: dict[str, float] = field(default_factory=dict)
     # The GPU power settings the session is measured under: {"declared": {power_cap_w, perf_level}, "observed":
     # {gpu: {power_cap_w, perf_level}}, and "applied": {by, gpus, originals} when --apply-gpu-power-settings set them}.
     # Fixed for the session: read (or applied) at launch, never changed by the optimizer.
