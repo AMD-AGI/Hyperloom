@@ -270,12 +270,14 @@ def test_fuzzy_finds_an_experience_by_its_notes() -> None:
         service.submit_complete(item)
     QueryViewMaintainer(schemas, experiences, views).rebuild(schema.schema_ref, fuzzy_ready=True)
 
-    first, second = LexicalFuzzyProvider(experiences).recall(
+    hits = LexicalFuzzyProvider(experiences).recall(
         {"text": "xgmi links saturate"}, views.current_view(schema.schema_ref), limit=10
     )
 
-    assert (first.experience_id, first.details["matched_tokens"]) == (noted.id, ["link", "saturate", "xgmi"])
-    assert (second.experience_id, second.details["matched_tokens"]) == (plain.id, [])
+    assert [(hit.experience_id, hit.details["matched_tokens"]) for hit in hits] == [
+        (noted.id, ["link", "saturate", "xgmi"]),
+        (plain.id, []),
+    ]
 
 
 def test_fuzzy_penalizes_explicit_model_size_mismatch() -> None:
