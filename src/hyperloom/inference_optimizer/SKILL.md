@@ -618,7 +618,8 @@ metadata: its provenance, including the citations and read that shaped it, and
 its `rendered_refs` stay in the record. A text field, such as the complete
 change in `change.content`, appears inline and whole; a file field appears as
 its name, size, and the local path to read it from. Records are injected whole
-while they fit 40,000 characters; the rest of a read is left out, never cut. The injected agents
+within 40,000 characters; one that does not fit is left out, never cut, and the
+ones after it that fit are still injected. The injected agents
 cite the Experiences that shaped a proposal in its `experience_citations`,
 which reach the measured Experience's `provenance.extra`. `experiences` holds one
 summary per injected Experience, in `experience_ids` order: `experience_id`,

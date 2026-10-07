@@ -261,9 +261,11 @@ def test_a_render_budget_keeps_whole_records_and_names_only_those_it_shows() -> 
     both = (first.id, other.id)
     full = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=None)
     first_only = read.render((first.id,), view=ref, lease_id=lease.lease_id, budget_chars=None)
+    other_only = read.render((other.id,), view=ref, lease_id=lease.lease_id, budget_chars=None)
+    smallest = min(len(first_only.text), len(other_only.text))
 
     fits_one = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=len(full.text) - 1)
-    fits_none = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=len(first_only.text) - 1)
+    fits_none = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=smallest - 1)
     fits_all = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=len(full.text))
 
     assert (fits_one.text, [item.id for item in fits_one.rendered_refs], fits_one.truncated) == (
@@ -273,6 +275,22 @@ def test_a_render_budget_keeps_whole_records_and_names_only_those_it_shows() -> 
     )
     assert (fits_none.text, fits_none.rendered_refs, fits_none.truncated) == ("", (), True)
     assert (fits_all.text, fits_all.truncated) == (full.text, False)
+
+
+def test_a_record_too_large_for_the_budget_does_not_keep_out_the_records_after_it() -> None:
+    schema, experiences, views, ref, first, _, other = setup()
+    read = LocalRetrievalService(experiences, views)
+    lease = read.acquire_view(schema.schema_ref)
+    alone = {
+        experience.id: read.render((experience.id,), view=ref, lease_id=lease.lease_id, budget_chars=None).text
+        for experience in (first, other)
+    }
+    large, small = sorted(alone, key=lambda experience_id: len(alone[experience_id]), reverse=True)
+    assert len(alone[large]) > len(alone[small])
+
+    shown = read.render((large, small), view=ref, lease_id=lease.lease_id, budget_chars=len(alone[small]))
+
+    assert (shown.text, [item.id for item in shown.rendered_refs], shown.truncated) == (alone[small], [small], True)
 
 
 def test_complete_renderer_without_budget_keeps_every_knowledge_field_and_no_metadata() -> None:

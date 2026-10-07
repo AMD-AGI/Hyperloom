@@ -427,9 +427,10 @@ on this host to read it from (see [Files](#files)). Its metadata, such as
 acts on a read records the returned `rendered_refs` in the resulting
 Experience.
 
-With `render_budget_chars`, a record is never cut: the first one that does not
-fit, and every one ranked after it, is left out, `rendered_refs` names only the
-records rendered, and `warnings` carries `render_budget_reached`. Hyperloom asks
+With `render_budget_chars`, a record is never cut: one that does not fit is
+left out and the records ranked after it that still fit are rendered,
+`rendered_refs` names only the records rendered, and `warnings` carries
+`render_budget_reached`. Hyperloom asks
 for 40,000 characters, so the block an orchestration turn or a specialist
 prompt carries stays bounded whatever the records hold.
 
