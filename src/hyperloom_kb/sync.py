@@ -21,6 +21,14 @@ GLOBAL_TOKEN_ENV = "HYPERLOOM_GLOBAL_KB_TOKEN"
 SYNC_BATCH = 100
 _PUSH = "push"
 _PULL = "pull"
+_PER_GLOBAL_TABLES = (
+    "sync_identities",
+    "sync_cursors",
+    "sync_held_back",
+    "sync_on_global",
+    "sync_pulls_in_progress",
+    "sync_pulled_states",
+)
 
 
 class SyncUnavailable(RuntimeError):
@@ -28,7 +36,7 @@ class SyncUnavailable(RuntimeError):
 
 
 class SyncRefused(RuntimeError):
-    """Raised when the global KB is not the one this service synced with, or no longer holds what it pulled."""
+    """Raised when the global KB is not the one this service synced with, or names no identity."""
 
 
 def global_config_from_env(env: Mapping[str, str]) -> RemoteConfig | None:
@@ -65,23 +73,27 @@ class SyncLedger:
         with self._database.transaction() as connection:
             return connection.execute(query, (self.kb_id, *args)).fetchall()
 
-    def cursor(self, global_url: str, direction: str) -> int:
+    def cursor(self, global_url: str, direction: str) -> tuple[int, str]:
+        """The position a push or pull resumes after, and the Experience a pull found there; ``(0, "")`` before."""
+
         rows = self._rows(
-            "SELECT position FROM sync_cursors WHERE kb_id = %s AND global_url = %s AND direction = %s",
+            "SELECT position, anchor FROM sync_cursors WHERE kb_id = %s AND global_url = %s AND direction = %s",
             global_url,
             direction,
         )
-        return int(rows[0]["position"]) if rows else 0
+        return (int(rows[0]["position"]), str(rows[0]["anchor"])) if rows else (0, "")
 
-    def advance(self, global_url: str, direction: str, position: int) -> None:
+    def advance(self, global_url: str, direction: str, position: int, anchor: str = "") -> None:
         self._execute(
             """
-            INSERT INTO sync_cursors(kb_id, global_url, direction, position) VALUES (%s, %s, %s, %s)
-            ON CONFLICT (kb_id, global_url, direction) DO UPDATE SET position = excluded.position
+            INSERT INTO sync_cursors(kb_id, global_url, direction, position, anchor) VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (kb_id, global_url, direction) DO UPDATE SET position = excluded.position,
+                anchor = excluded.anchor
             """,
             global_url,
             direction,
             position,
+            anchor,
         )
 
     def mark_pulled(self, experience_id: str) -> None:
@@ -125,6 +137,15 @@ class SyncLedger:
             global_url,
             kb_id,
         )
+
+    def forget(self, global_url: str) -> None:
+        """Drop all this KB knows of the global KB at ``global_url``; what it pulled from there stays pulled."""
+
+        with self._database.transaction() as connection:
+            for table in _PER_GLOBAL_TABLES:
+                connection.execute(
+                    f"DELETE FROM {table} WHERE kb_id = %s AND global_url = %s", (self.kb_id, global_url)
+                )
 
     def note_on_global(self, global_url: str, schema_ref: str, experience_ids: Collection[str]) -> None:
         with self._database.transaction() as connection, connection.cursor() as cursor:
@@ -278,10 +299,25 @@ class GlobalSync:
         if bound and bound != kb_id:
             raise SyncRefused(
                 f"the Experience KB at {url} is {kb_id}, not {bound} that this service synced with; it is another "
-                "global KB"
+                "global KB. If it replaced that one, rebind this service (hyperloom-kb rebind) to sync with it from "
+                "the start"
             )
         self._ledger.bind(url, kb_id)
         return self._target, kb_id
+
+    def rebind(self) -> dict[str, JsonValue]:
+        """Forget the global KB this service synced with at its URL, so the next push and pull sync from the start
+        with whichever KB answers there; Experiences pulled before stay pulled and are never pushed."""
+
+        with self._ledger.exclusive():
+            if self._target is None:
+                raise SyncUnavailable(
+                    f"this service was started without a global Experience KB ({GLOBAL_URL_ENV}, {GLOBAL_TOKEN_ENV})"
+                )
+            url = self._target.config.base_url
+            forgotten = self._ledger.identity(url)
+            self._ledger.forget(url)
+            return {"global_url": url, "forgotten_kb_id": forgotten}
 
     def _send(
         self, target: RemoteClient, experience: Experience, counts: Counter[str], rejected: list[JsonValue]
@@ -320,7 +356,7 @@ class GlobalSync:
                 if error:
                     return _report("incomplete", url, counts, rejected, error=error)
                 self._ledger.release(url, experience_id)
-            position = self._ledger.cursor(url, _PUSH)
+            position, _ = self._ledger.cursor(url, _PUSH)
             records, _, has_more = self._service.records_after(position, SYNC_BATCH)
             for sequence, experience in records:
                 if self._ledger.pulled(experience.id):
@@ -342,7 +378,8 @@ class GlobalSync:
 
         The first batch of a pull labels the current state when no label holds it, so the pull can be undone, and
         puts back every Experience of the schema known to be on the global KB that a restore set outside.
-        Exclusions stand. Other schemas stay as they are.
+        Exclusions stand. Other schemas stay as they are. The cursor remembers the Experience it stopped at; when the
+        global KB holds another one there, or none, the pull pages the schema from its start again.
         """
 
         with self._ledger.exclusive():
@@ -354,24 +391,21 @@ class GlobalSync:
             except SyncRefused as exc:
                 return _report("refused", url, error=str(exc))
             direction = f"{_PULL} {schema_ref}"
-            position = self._ledger.cursor(url, direction)
+            position, anchor = self._ledger.cursor(url, direction)
             try:
                 page = target.export_page(after=position, limit=SYNC_BATCH, schema_ref=schema_ref)
-                if position and page.state != self._ledger.pulled_state(url, schema_ref):
-                    # The global KB's exclusions or restores changed, so Experiences the cursor passed while they
-                    # were hidden may show now; the ones already here come back unchanged.
+                lost = bool(position) and page.after_id != anchor
+                if lost or (position and page.state != self._ledger.pulled_state(url, schema_ref)):
+                    # Either the global KB no longer holds at the cursor what this service pulled there, as after a
+                    # restore from an older backup, so what it holds now may sit before the cursor; or its exclusions
+                    # or restores changed, so Experiences the cursor passed while they were hidden may show now.
+                    # The ones already here come back unchanged.
                     page = target.export_page(after=0, limit=SYNC_BATCH, schema_ref=schema_ref)
             except RemoteClientError as exc:
                 return _report("incomplete", url, error=str(exc))
-            if page.head < position:
-                return _report(
-                    "refused",
-                    url,
-                    error=(
-                        f"the Experience KB at {url} holds {schema_ref} up to {page.head}, short of the {position} "
-                        "this service pulled; it lost Experiences, such as by a restore from an older backup"
-                    ),
-                )
+            if lost:
+                # What it lost may include what this service pushed, so the next push sends everything again.
+                self._ledger.advance(url, _PUSH, 0)
             if page.declaration is not None:
                 self._service.register(page.declaration)
             saved: dict[str, JsonValue] | None = None
@@ -396,7 +430,7 @@ class GlobalSync:
                 counts[status] += 1
             self._ledger.note_on_global(url, schema_ref, fetched)
             self._service.bring_in(schema_ref, fetched)
-            self._ledger.advance(url, direction, page.next_cursor)
+            self._ledger.advance(url, direction, page.next_cursor, page.next_cursor_id)
             self._ledger.note_pulled_state(url, schema_ref, page.state)
             self._ledger.mark_pull_in_progress(url, schema_ref, page.has_more)
             return {

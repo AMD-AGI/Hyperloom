@@ -43,6 +43,7 @@ _FIXED_ROUTES = frozenset(
         "/v1/export",
         "/v1/push",
         "/v1/pull",
+        "/v1/rebind",
         "/v1/labels",
         "/v1/restore",
         "/v1/exclusions",

@@ -742,6 +742,14 @@ class ExperienceHTTPService:
         ).fetchone()
         return int(row["head"]) if row else 0
 
+    def _written_at(self, connection: Connection, sequence: int) -> str:
+        """The Experience written at ``sequence``; empty when none was, as for 0."""
+
+        row = connection.execute(
+            "SELECT experience_id FROM experiences WHERE kb_id = %s AND sequence = %s", (self.kb_id, sequence)
+        ).fetchone()
+        return str(row["experience_id"]) if row else ""
+
     def export(
         self,
         *,
@@ -764,6 +772,8 @@ class ExperienceHTTPService:
                 "next_cursor": next_cursor,
                 "has_more": has_more,
                 "head": self._head(connection, schema_ref),
+                "after_id": self._written_at(connection, after),
+                "next_cursor_id": self._written_at(connection, next_cursor),
             }
             if schema_ref is not None:
                 page["declaration"] = self.declaration_for(schema_ref).to_dict()
@@ -867,6 +877,11 @@ class ExperienceHTTPService:
 
     def pull(self, schema_ref: str) -> dict[str, JsonValue]:
         return self._synced("pull", self._sync.pull(schema_ref))
+
+    def rebind(self) -> dict[str, JsonValue]:
+        result = self._sync.rebind()
+        event(log, "audit", action="rebind", **result)
+        return result
 
     def begin_pull(self, schema_ref: str) -> dict[str, JsonValue] | None:
         with self._database.transaction() as connection:
@@ -1093,6 +1108,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             body = self._body()
             _reject_unknown(body, frozenset({"schema_ref"}))
             self._write(HTTPStatus.OK, app.pull(_required_text(body.get("schema_ref"), "schema_ref")))
+            return
+        if self.command == "POST" and parsed.path == "/v1/rebind":
+            _reject_unknown(self._body(), frozenset())
+            self._write(HTTPStatus.OK, app.rebind())
             return
         if self.command == "POST" and parsed.path == "/v1/read":
             body = self._body()

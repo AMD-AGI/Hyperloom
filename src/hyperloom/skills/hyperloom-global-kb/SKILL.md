@@ -24,8 +24,9 @@ KB: a `pip install --target .` workspace or a source checkout.
   directory holds the data, the `kb_id`, and the service token; it survives
   restarts and upgrades. Redeploying on a new data directory makes a new KB:
   every workspace that synced with the old one refuses to sync with it at the
-  same URL. Reuse the existing state directory unless the user asks for a new
-  KB.
+  same URL until it runs `hyperloom-kb rebind`. Reuse the existing state
+  directory unless the user asks for a new KB, and when they do, tell them each
+  workspace has to rebind.
 
 ```bash
 export REPO_ROOT="$(pwd -P)"

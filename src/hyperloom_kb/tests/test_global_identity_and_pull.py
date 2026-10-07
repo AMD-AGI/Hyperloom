@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from hyperloom_kb import (
     Change,
     Experience,
@@ -25,6 +27,7 @@ from hyperloom_kb import (
     Outcome,
     Provenance,
     RemoteClient,
+    RemoteClientError,
     RemoteConfig,
     create_http_server,
     derive_experience_id,
@@ -240,26 +243,71 @@ def test_sync_refuses_another_global_kb_at_the_same_url(tmp_path: Path) -> None:
     for report in refused:
         assert report["status"] == "refused"
         assert "it is another global KB" in str(report["error"])
+        assert "hyperloom-kb rebind" in str(report["error"])
 
 
-def test_a_pull_refuses_a_global_kb_that_lost_experiences_it_pulled(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("backed_up", "written_since"),
+    [(2, 3), (1, 0)],
+    ids=["new-writes-carry-it-past-the-cursor", "it-stays-below-the-cursor"],
+)
+def test_a_global_kb_restored_from_an_older_backup_is_pulled_and_pushed_to_again_in_full(
+    tmp_path: Path, backed_up: int, written_since: int
+) -> None:
     with _serving(_service(tmp_path / "global")) as global_client:
-        _seed(global_client, 3)
+        _seed(global_client, 5)
         port = _port(global_client)
         global_kb_id = str(global_client.health()["kb_id"])
         local_app = _service(tmp_path / "local", global_client.config.base_url)
         with _serving(local_app) as local:
-            assert local.pull(SCHEMA.schema_ref)["created"] == 3
-    # The same KB serves again from a backup taken when it held only its first Experience.
+            assert local.pull(SCHEMA.schema_ref)["created"] == 5
+            local.write(_experience(0))
+            assert local.push()["created"] == 1
+    # The same KB serves again from a backup taken before the last of these writes, then takes new ones.
     backup = fresh_database()
     backup.resolve_kb(adopt_kb_id=global_kb_id)
     with _serving(_service(tmp_path / "backup", database=backup), port=port) as restored:
-        _seed(restored, 1)
+        _seed(restored, backed_up)
+        _seed(restored, written_since, run_id="written-since")
         with _serving(local_app) as local:
-            refused = local.pull(SCHEMA.schema_ref)
+            pulled = local.pull(SCHEMA.schema_ref)
+            pushed = local.push()
+            held = _readable(local)
+        on_global = _readable(restored)
 
-    assert refused["status"] == "refused"
-    assert "it lost Experiences" in str(refused["error"])
+    assert (pulled["status"], pulled["created"], pulled["unchanged"]) == ("completed", written_since, backed_up)
+    assert (pushed["status"], pushed["created"]) == ("completed", 1)
+    assert (held, on_global) == (5 + 1 + written_since, backed_up + written_since + 1)
+
+
+def test_a_rebound_service_syncs_with_the_global_kb_that_replaced_the_old_one(tmp_path: Path) -> None:
+    with _serving(_service(tmp_path / "global-a")) as first:
+        _seed(first, 1)
+        port = _port(first)
+        first_kb_id = first.health()["kb_id"]
+        local_app = _service(tmp_path / "local", first.config.base_url)
+        with _serving(local_app) as local:
+            local.pull(SCHEMA.schema_ref)
+    with _serving(_service(tmp_path / "global-b"), port=port) as replacement:
+        _seed(replacement, 1, run_id="other-run")
+        with _serving(local_app) as local:
+            local.write(_experience(0))
+            assert local.push()["status"] == "refused"
+            rebound = local.rebind()
+            pulled = local.pull(SCHEMA.schema_ref)
+            pushed = local.push()
+        on_replacement = _readable(replacement)
+
+    assert rebound == {"global_url": first.config.base_url, "forgotten_kb_id": first_kb_id}
+    assert (pulled["status"], pulled["created"]) == ("completed", 1)
+    # What came from the old global KB stays pulled, so only what was written here is pushed to the new one.
+    assert (pushed["status"], pushed["created"], pushed["skipped"]) == ("completed", 1, 2)
+    assert on_replacement == 2
+
+
+def test_rebinding_a_service_with_no_global_kb_is_refused(tmp_path: Path) -> None:
+    with _serving(_service(tmp_path / "local")) as local, pytest.raises(RemoteClientError, match="409"):
+        local.rebind()
 
 
 def test_sync_refuses_a_global_kb_that_reports_no_identity(tmp_path: Path) -> None:

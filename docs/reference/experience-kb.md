@@ -59,7 +59,7 @@ saved the state under, and exit 1 when they stopped early, were refused, or
 rejected an Experience.
 
 The same entry point runs every other [`hyperloom-kb`](#the-hyperloom-kb-command)
-command on the workspace's service (`health`, `labels`, `label`, `restore`,
+command on the workspace's service (`health`, `rebind`, `labels`, `label`, `restore`,
 `exclude`, `include`, `exclusions`, `list`, `export`), starting it when
 nothing serves and defaulting to the schema the workspace's runs write. Its
 own `push` first delivers the workspace's spool.
@@ -75,6 +75,7 @@ a global service take the same commands. Each prints its JSON result.
 | `health` | `GET /health` |
 | `push` | `POST /v1/push`, repeated until done |
 | `pull --schema REF` | `POST /v1/pull`, repeated until done |
+| `rebind` | `POST /v1/rebind` |
 | `labels [--schema REF]` | `GET /v1/labels` |
 | `label [--schema REF] [--name NAME]` | `POST /v1/labels` |
 | `restore LABEL_ID` | `POST /v1/restore` |
@@ -244,15 +245,24 @@ schema from its start again, so an Experience the global KB shows again arrives
 too and the ones already here count as `unchanged`. A workspace `pull` names
 the schema its packaged mapping writes.
 
+A pull's cursor is a write position on the global KB together with the
+Experience it found there. When the global KB holds another Experience at that
+position, or none, as after its database was restored from an older backup and
+took new writes, the pull pages the schema from its start again, so nothing the
+global KB holds now is skipped, and the next push sends everything written here
+again, since the global KB may have lost what was pushed too. What was pulled
+before and the global KB no longer holds stays here.
+
 **Identity.** Every KB has a `kb_id`, made when its database is first served
 and kept in it, so every service of one database is the same KB and a new
 database is a new one. The first push or pull to a global KB records its
 `kb_id`; a later sync where that URL answers with another `kb_id`, such as a
-redeployed global KB, is refused, as is a pull from a global KB that holds
-less of the schema than this service already pulled, such as one restored from
-an older backup, and any sync with a service that reports no `kb_id`, which
-predates this. A refused sync reports `status: refused` with the reason and
-changes nothing.
+redeployed global KB, is refused, as is any sync with a service that reports
+no `kb_id`, which predates this. A refused sync reports `status: refused` with
+the reason and changes nothing. When the new global KB replaced the old one,
+`rebind` forgets the old one, its identity, cursors, and what the service knew
+of it, so the next push and pull start over with the KB that answers now. What
+was pulled from the old one stays pulled and is never pushed to the new one.
 
 Both run in bounded batches; the client repeats them until nothing is left, and
 a pull labels its state once, before its first batch.
@@ -289,10 +299,10 @@ installs with `pip install ".[kb-service]"`, which leaves out the embedded
 server, and its replicas share `--home` on one file system they all mount with
 atomic rename, such as CephFS or NFS.
 
-The database must never lose a write it committed. A pull refuses a KB whose
-positions went back, and a position given again to other content is one every
-workspace that pulled past it never sees, so a failover may promote only a
-replica that confirmed every commit, as synchronous replication guarantees.
+The database must never lose a write it committed: a workspace pulls and
+pushes everything again once it notices, but what only the lost writes held is
+gone. A failover may therefore promote only a replica that confirmed every
+commit, as synchronous replication guarantees.
 The pool checks each connection as it hands it out, so the first request after
 a failover or restart gets a live connection.
 
@@ -318,6 +328,7 @@ network, put a TLS-terminating proxy in front of it and hand out its
 | `GET /v1/export` | page through complete Experiences in write order | `export_page()` |
 | `POST /v1/push` | push one batch to this service's global KB | `push()` |
 | `POST /v1/pull` | pull one batch of one schema from this service's global KB | `pull()` |
+| `POST /v1/rebind` | forget the global KB synced with, to start over with the one at its URL | `rebind()` |
 | `GET /v1/labels` | a schema's labels, current label, and whether its state changed since | `labels()` |
 | `POST /v1/labels` | label a schema's current state | `create_label()` |
 | `DELETE /v1/labels/{label_id}` | delete a label | `delete_label()` |
@@ -341,7 +352,7 @@ request body may be up to 256 MiB; Experiences themselves have no size limit.
 | 401 | `unauthorized` | missing or wrong token | after fixing the token |
 | 404 | `not_found` | unknown path, label, or Experience | no |
 | 409 | `conflict` | the id already exists with different content | no |
-| 409 | `sync_unavailable` | push or pull on a service started without a global KB | after configuring one |
+| 409 | `sync_unavailable` | push, pull, or rebind on a service started without a global KB | after configuring one |
 | 500 | `internal_error` | storage or service failure | yes |
 
 400, 404, 409, and 500 bodies include a `detail` string.
@@ -431,15 +442,16 @@ only Experiences written to this service; `include_excluded=true` adds the ones
 reads do not see, so a page may hold fewer items than `limit`.
 
 ```json
-{"items": [{"sequence": 1, "experience_id": "exp-...", "...": "..."}], "next_cursor": 1, "has_more": false, "head": 1}
+{"items": [{"sequence": 1, "experience_id": "exp-...", "...": "..."}], "next_cursor": 1, "has_more": false}
 ```
 
 `/v1/list` items are summaries plus `sequence`; `/v1/export` items are
 `{"sequence": 1, "experience": <complete Experience>}`. An export page also
-carries `head`, the last write position of what it pages, and, with a
-`schema_ref`, that schema's `declaration` and its `state`, an opaque value that
-changes whenever exclusions or restores change which stored Experiences of the
-schema the service shows.
+carries `head`, the last write position of what it pages; `after_id` and
+`next_cursor_id`, the Experiences written at `after` and at `next_cursor`, or
+empty where none was; and, with a `schema_ref`, that schema's `declaration` and
+its `state`, an opaque value that changes whenever exclusions or restores change
+which stored Experiences of the schema the service shows.
 
 ### `POST /v1/push` and `POST /v1/pull`
 
@@ -456,8 +468,10 @@ pull also answers its `schema_ref` and `saved`: the label the state before the
 pull was saved under, or `null` when its label already held it. `status` is
 `incomplete`, with an `error`, when the global KB stopped answering; the batch
 up to that point is kept. It is `refused`, with the reason, when the global KB
-is another one than this service synced with, holds less than it pulled, or
-reports no identity.
+is another one than this service synced with or reports no identity.
+
+`POST /v1/rebind` takes `{}` and answers `{"global_url", "forgotten_kb_id"}`,
+the identity forgotten, empty when the service had not synced yet.
 
 ### Labels and exclusions
 
@@ -558,7 +572,7 @@ workspace's service writes them to `service.log`. Every line has `ts`,
 | `event` | When | Fields |
 |---|---|---|
 | `http_request` | every answered request but the probes | `method`, `route`, `status`, `duration_ms`, `bytes_in`, `bytes_out` |
-| `audit` | a schema registered, a label made or deleted, a restore, an exclude, an include | `action` and what it acted on: `schema_ref`, `label_id`, `experience_id`, `reason`, `saved_label_id` |
+| `audit` | a schema registered, a label made or deleted, a restore, an exclude, an include, a rebind | `action` and what it acted on: `schema_ref`, `label_id`, `experience_id`, `reason`, `saved_label_id`, `global_url`, `forgotten_kb_id` |
 | `sync` | a push or pull batch | `direction`, `status`, `global_url`, the counts, `error` |
 | `records_verified` | at start | `records`, `missing` |
 | `listening`, `stopped` | start and stop | `port`, `home`, `kb_id`, `code_digest` |
