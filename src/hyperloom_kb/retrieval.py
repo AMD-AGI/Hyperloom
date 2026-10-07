@@ -316,8 +316,9 @@ class LocalRetrievalService:
     ) -> RenderedResult:
         """Render representatives whole, in order, while they fit ``budget_chars``; ``None`` renders every one.
 
-        A record is never cut: the first one that does not fit and every one after it are left out, and only the
-        records rendered are named in ``rendered_refs``, so nothing reads as shown that the prompt did not carry.
+        A record is never cut: one that does not fit is left out and the ones after it that fit are still rendered,
+        and only the records rendered are named in ``rendered_refs``, so nothing reads as shown that the prompt did
+        not carry.
         """
 
         snapshot = self._leased_view(view, lease_id)
@@ -341,7 +342,7 @@ class LocalRetrievalService:
             block = self._renderer(experience, snapshot)
             size = len(block) + (len("\n\n") if blocks else 0)
             if budget_chars is not None and used + size > budget_chars:
-                break
+                continue
             blocks.append(block)
             shown.append(experience)
             used += size
