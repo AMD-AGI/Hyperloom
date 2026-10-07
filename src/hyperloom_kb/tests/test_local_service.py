@@ -29,7 +29,6 @@ from hyperloom_kb import (
     LocalService,
     LocalServiceError,
     ObjectiveDeclaration,
-    ObjectiveDirection,
     RemoteClient,
     RemoteClientError,
     RemoteConfig,
@@ -42,10 +41,6 @@ from hyperloom_kb import (
 from hyperloom_kb import local_service
 from hyperloom_kb.http_service import code_digest
 from hyperloom_kb.tests.conftest import fresh_database
-from hyperloom_kb.tests.postgres_fixtures import requires_embedded_postgres
-
-# Spawned services run their own embedded database under ``tmp_path``.
-pytestmark = [pytest.mark.usefixtures("reachable_tmp_path"), requires_embedded_postgres]
 
 TOKEN = "local-service-token"
 
@@ -139,11 +134,10 @@ def test_a_listener_with_another_token_is_refused_without_starting_a_service(tmp
 
 def _other_declaration() -> ExperienceDeclaration:
     return ExperienceDeclaration(
+        objectives=(ObjectiveDeclaration("throughput@v1", "T."),),
         identity=(FieldDeclaration("model", "Model."),),
-        baseline_identity=(FieldDeclaration("config", "Config."),),
-        change_identity=(FieldDeclaration("knob", "Knob."),),
-        objectives=(ObjectiveDeclaration("throughput@v1", ObjectiveDirection.HIGHER_IS_BETTER, "T."),),
-        decisions=("keep", "revert", "failed"),
+        baseline=(FieldDeclaration("config", "Config.", group=True),),
+        change=(FieldDeclaration("knob", "Knob.", group=True),),
     )
 
 
@@ -370,13 +364,12 @@ def test_a_data_home_another_service_serves_is_never_served_twice(tmp_path: Path
 
 def test_a_service_that_cannot_start_is_reported_with_its_log(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    home.mkdir()
-    (home / "postgres").write_text("not a database directory", encoding="utf-8")
+    (home / "kb.sqlite3").mkdir(parents=True)
 
     with pytest.raises(LocalServiceError, match="exited with status"):
         ensure_local_service(_config(_free_port(), tmp_path), home, env=_env_without_planner_gateway(tmp_path))
 
-    assert "Traceback" in (home / "service.log").read_text(encoding="utf-8")
+    assert "cannot open the Experience KB database" in (home / "service.log").read_text(encoding="utf-8")
 
 
 def test_a_home_that_cannot_hold_the_service_is_a_local_service_error(tmp_path: Path) -> None:

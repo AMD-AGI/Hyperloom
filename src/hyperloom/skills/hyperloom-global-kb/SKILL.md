@@ -35,8 +35,8 @@ STATE_DIR="${STATE_DIR:-$HOME/.local/share/hyperloom-global-kb}"
 PORT="${PORT:-8787}"
 GLOBAL_KB_URL="${GLOBAL_KB_URL:-http://$(hostname -f):$PORT}"
 KB_NAME="${KB_NAME:-}"
-PYTHONPATH="$KB_PYTHONPATH" python3 -c "import hyperloom_kb, yaml, psycopg, pgembed" || {
-  echo "hyperloom_kb, PyYAML, psycopg, or pgembed is not importable from $KB_PYTHONPATH (Python 3.12+)" >&2
+PYTHONPATH="$KB_PYTHONPATH" python3 -c "import hyperloom_kb, yaml" || {
+  echo "hyperloom_kb or PyYAML is not importable from $KB_PYTHONPATH" >&2
   return 1 2>/dev/null || exit 1
 }
 ```

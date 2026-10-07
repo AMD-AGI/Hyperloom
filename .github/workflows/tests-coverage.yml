@@ -98,8 +98,8 @@ jobs:
         # pyproject.toml ([tool.hyperloom.tests_coverage]). GitHub matrices
         # cannot read that value dynamically, so it is mirrored here.
         shard: [1, 2, 3, 4, 5, 6]
-    # The Experience KB tests make their databases on this server: its embedded PostgreSQL (pgembed) installs only on
-    # Python 3.12 and newer, so the tests of that server itself are skipped here.
+    # The Experience KB tests keep their databases in SQLite, as a workspace's service does, and on Python 3.11 on this
+    # PostgreSQL server instead, as a global KB served by several processes does, so both databases are tested.
     services:
       postgres:
         image: postgres:17
@@ -112,7 +112,7 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     env:
-      HYPERLOOM_KB_TEST_DATABASE_URL: postgresql://postgres@localhost:5432/postgres
+      HYPERLOOM_KB_TEST_DATABASE_URL: ${{ matrix.python-version == '3.11' && 'postgresql://postgres@localhost:5432/postgres' || '' }}
     steps:
       - uses: actions/checkout@v7
 

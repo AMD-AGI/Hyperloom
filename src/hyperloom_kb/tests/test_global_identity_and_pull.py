@@ -15,16 +15,15 @@ from typing import Any
 import pytest
 
 from hyperloom_kb import (
-    Change,
     Experience,
     ExperienceDeclaration,
     ExperienceHTTPService,
     ExperienceStatus,
     FieldDeclaration,
+    FieldKind,
+    FieldRole,
     HTTPServiceConfig,
     ObjectiveDeclaration,
-    ObjectiveDirection,
-    Outcome,
     Provenance,
     RemoteClient,
     RemoteClientError,
@@ -33,6 +32,7 @@ from hyperloom_kb import (
     derive_experience_id,
     sync,
 )
+from hyperloom_kb.database import utc_now
 from hyperloom_kb.tests.conftest import fresh_database
 
 TOKEN = "pull-token"
@@ -41,11 +41,18 @@ NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
 
 def _declaration(objective: str = "throughput@v1") -> ExperienceDeclaration:
     return ExperienceDeclaration(
+        objectives=(ObjectiveDeclaration(objective, "Maximize throughput."),),
         identity=(FieldDeclaration("model", "Model."),),
-        baseline_identity=(FieldDeclaration("config", "Baseline."),),
-        change_identity=(FieldDeclaration("knob", "Knob."),),
-        objectives=(ObjectiveDeclaration(objective, ObjectiveDirection.HIGHER_IS_BETTER, "Throughput."),),
-        decisions=("keep", "revert"),
+        baseline=(FieldDeclaration("config", "Baseline.", group=True),),
+        change=(
+            FieldDeclaration("knob", "Knob.", group=True),
+            FieldDeclaration("summary", "What changed.", role=FieldRole.SUMMARY),
+        ),
+        outcome=(
+            FieldDeclaration("decision", "Decision.", role=FieldRole.DECISION, values=("keep", "revert")),
+            FieldDeclaration("value", "Throughput.", kind=FieldKind.NUMBER, role=FieldRole.MEASUREMENT),
+        ),
+        reflection=(FieldDeclaration("text", "Reflection.", kind=FieldKind.TEXT),),
     )
 
 
@@ -61,15 +68,14 @@ def _experience(seq: int, *, run_id: str = "local-run", schema: ExperienceDeclar
         completed_at=NOW,
         identity={"model": "qwen3"},
         objective=schema.objectives[0].id,
-        baseline_identity={"config": "default"},
-        baseline_value=100.0,
+        baseline={"config": "default"},
         provenance=Provenance("pull-test", "1"),
         schema_ref=schema.schema_ref,
         status=ExperienceStatus.COMPLETE,
-        reasoning=f"Try knob {seq}.",
-        change=Change({"knob": f"knob_{seq}"}, f"Set knob {seq}.", kind="config"),
-        outcome=Outcome("keep", 110.0 + seq),
-        reflection="Measured.",
+        rationale={"reasoning": f"Try knob {seq}."},
+        change={"knob": f"knob_{seq}", "summary": f"Set knob {seq}."},
+        outcome={"decision": "keep", "value": 110.0 + seq},
+        reflection={"text": "Measured."},
     )
 
 
@@ -265,7 +271,8 @@ def test_a_global_kb_restored_from_an_older_backup_is_pulled_and_pushed_to_again
             assert local.push()["created"] == 1
     # The same KB serves again from a backup taken before the last of these writes, then takes new ones.
     backup = fresh_database()
-    backup.resolve_kb(adopt_kb_id=global_kb_id)
+    with backup.transaction() as connection:
+        connection.execute("INSERT INTO kbs(kb_id, created_at) VALUES (%s, %s)", (global_kb_id, utc_now()))
     with _serving(_service(tmp_path / "backup", database=backup), port=port) as restored:
         _seed(restored, backed_up)
         _seed(restored, written_since, run_id="written-since")

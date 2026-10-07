@@ -5,21 +5,14 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
-import os
 import socket
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from hyperloom_kb.tests.postgres_fixtures import (  # noqa: F401
-    new_database,
-    postgres_conninfo,
-    reachable_tmp_path,
-    requires_embedded_postgres,
-)
+from hyperloom_kb.tests.database_fixtures import new_database, postgres_conninfo  # noqa: F401
 
 import hyperloom
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
@@ -31,9 +24,6 @@ from hyperloom_kb import (
     LocalService,
     LocalServiceError,
 )
-
-# Spawned services run their own embedded database under ``tmp_path``.
-pytestmark = pytest.mark.usefixtures("reachable_tmp_path")
 
 _PACKAGE = Path(hyperloom.__file__).parent
 
@@ -155,56 +145,6 @@ def test_ensure_reports_a_service_that_cannot_serve(monkeypatch, capsys) -> None
     assert "workspace-token" not in captured.err + captured.out
 
 
-def test_check_home_refuses_a_docker_workspace_under_root_and_names_it(monkeypatch, tmp_path: Path, capsys) -> None:
-    monkeypatch.setenv("USER_DATA_PATH", "/root/workspace/session")
-
-    assert experience_kb_service.main(["check-home", "--run-mode", "docker"]) == 1
-    refused = capsys.readouterr().err
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv("HYPERLOOM_RUN_MODE", "docker")
-    assert experience_kb_service.main(["check-home"]) == 0
-
-    assert "the KB home /root/workspace/session/experience-kb is under /root" in refused
-    assert "move the workspace and USER_DATA_PATH" in refused
-    assert f"under {tmp_path / 'experience-kb'} in docker mode" in capsys.readouterr().out
-
-
-def test_check_home_names_a_python_the_embedded_database_cannot_install_on(monkeypatch, tmp_path: Path, capsys) -> None:
-    find_spec = importlib.util.find_spec
-    monkeypatch.setattr(
-        importlib.util, "find_spec", lambda name, *args: None if name == "pgembed" else find_spec(name, *args)
-    )
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.delenv("HYPERLOOM_KB_DATABASE_URL", raising=False)
-
-    assert experience_kb_service.main(["check-home", "--run-mode", "baremetal"]) == 1
-    refused = capsys.readouterr().err
-    monkeypatch.setenv("HYPERLOOM_KB_DATABASE_URL", "postgresql://kb@db.invalid/kb")
-    assert experience_kb_service.main(["check-home", "--run-mode", "baremetal"]) == 0
-
-    assert "pgembed package, which installs on Python 3.12 or newer" in refused
-    assert "or set HYPERLOOM_KB_DATABASE_URL to a PostgreSQL server" in refused
-    assert "keeps its database on the PostgreSQL server HYPERLOOM_KB_DATABASE_URL names" in capsys.readouterr().out
-
-
-@pytest.mark.skipif(os.geteuid() != 0, reason="a run as another user starts its database as itself")
-def test_check_home_refuses_a_baremetal_root_run_under_a_private_directory(monkeypatch, tmp_path: Path, capsys) -> None:
-    private = tmp_path / "private"
-    private.mkdir(mode=0o700)
-    monkeypatch.setenv("USER_DATA_PATH", str(private / "session"))
-
-    assert experience_kb_service.main(["check-home", "--run-mode", "baremetal"]) == 1
-    assert f"is under {private} (drwx------), which other users may not traverse" in capsys.readouterr().err
-
-
-def test_check_home_needs_a_run_mode(monkeypatch) -> None:
-    monkeypatch.delenv("HYPERLOOM_RUN_MODE", raising=False)
-
-    with pytest.raises(SystemExit) as exit_info:
-        experience_kb_service.main(["check-home"])
-    assert exit_info.value.code == 2
-
-
 def test_ensure_says_when_it_restarted_a_stale_service(monkeypatch, capsys) -> None:
     def restart(*_args: Any, **_kwargs: Any) -> LocalService:
         return LocalService({"experience_count": 14}, cast(Any, object()), restarted=True)
@@ -319,7 +259,6 @@ def test_push_without_a_global_kb_explains_what_is_missing(monkeypatch, capsys) 
     assert "HYPERLOOM_GLOBAL_KB_URL is not configured" in capsys.readouterr().err
 
 
-@requires_embedded_postgres
 def test_setup_then_launch_start_one_service_for_the_workspace(monkeypatch, tmp_path: Path, capsys) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(f"HYPERLOOM_KB_URL=http://127.0.0.1:{_free_port()}\n", encoding="utf-8")
@@ -341,7 +280,6 @@ def test_setup_then_launch_start_one_service_for_the_workspace(monkeypatch, tmp_
         service.process.wait(timeout=10)
 
 
-@requires_embedded_postgres
 def test_a_push_never_stops_the_service_a_run_may_be_reading_from(monkeypatch, tmp_path: Path, caplog, capsys) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(f"HYPERLOOM_KB_URL=http://127.0.0.1:{_free_port()}\n", encoding="utf-8")
@@ -374,7 +312,6 @@ def test_a_push_never_stops_the_service_a_run_may_be_reading_from(monkeypatch, t
                 service.process.wait(timeout=10)
 
 
-@requires_embedded_postgres
 def test_workspace_labels_restores_and_exclusions_act_on_the_schema_its_runs_write(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
@@ -425,7 +362,6 @@ def test_skills_describe_the_service_by_the_commands_and_variables_it_reads() ->
     # Every workspace gets its local service: setup generates its .env entries and starts it; nobody opts out.
     assert "hyperloom.inference_optimizer.experience_kb_service init-env" in setup
     assert "hyperloom.inference_optimizer.experience_kb_service ensure" in setup
-    assert "hyperloom.inference_optimizer.experience_kb_service check-home" in setup
     assert "No Experience KB" not in setup
     assert "pip install your_package.whl --target ." in setup
     assert "hyperloom_kb-" not in setup

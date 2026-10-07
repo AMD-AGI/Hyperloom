@@ -32,7 +32,7 @@ Experiences from other logs in [Experience collection](experience-kb-collect.md)
 | `HYPERLOOM_GLOBAL_KB_TOKEN` | the user | The global KB's access token. Required with `HYPERLOOM_GLOBAL_KB_URL`. |
 | `HYPERLOOM_KB_AUTO_PUSH` | the user | `1` pushes after every run's Experiences are written locally. Default off. |
 | `USER_DATA_PATH` | `hyperloom-setup` | The local service keeps its data under `$USER_DATA_PATH/experience-kb`. |
-| `HYPERLOOM_KB_DATABASE_URL` | the operator | The PostgreSQL database a service keeps its index and state in. Unset, the service runs an embedded PostgreSQL in its home, which is what a workspace on Python 3.12 or newer does. |
+| `HYPERLOOM_KB_DATABASE_URL` | the operator | The PostgreSQL database a service keeps its index and state in, as a global KB served by several processes does. Unset, which is what a workspace leaves it, the service keeps them in SQLite in its home. |
 | `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_MODEL` | `hyperloom-setup` | The gateway and model the service plans reads with; `LOCAL_KB_PLANNER_MODEL` overrides the model. Without a gateway the service still accepts writes and reads report `unavailable`. |
 
 All of these live in the workspace `.env`. The service reads them when it
@@ -114,34 +114,14 @@ It looks at what answers on `HYPERLOOM_KB_URL`:
   at, or anything else on the port, such as another user's service: it refuses
   without stopping it, and the user picks another port in `HYPERLOOM_KB_URL`.
 
-A data home has one service. A service runs its home's embedded PostgreSQL
-and holds `service.lock` while it serves; one started on a home another service
-holds exits, naming that service's pid and port, and `ensure` reports that line.
-Two workspaces therefore need their own `USER_DATA_PATH`, or the second gets no
-service of its own.
-
-The embedded server is the PostgreSQL the `pgembed` wheel ships for Linux and
-macOS on Python 3.12 or newer; on an older Python, Hyperloom installs without
-it, and a workspace's service starts only once `HYPERLOOM_KB_DATABASE_URL`
-names a PostgreSQL server. It is reachable only through a socket in the home,
-or in `/tmp` when the home's path is too long for one. A root service runs it
-as the system user `hyperloom-kb-db`, or as the user owning a database
-directory made earlier, so a recreated container that mounts the same home
-starts it again. No directory's permissions are changed for it: a home or a
-PostgreSQL install that user cannot traverse to, such as one under a `700`
-`/root`, is refused with the directory that blocks it, and the workspace and
-`USER_DATA_PATH` belong somewhere every user may traverse.
-`experience_kb_service check-home` says before a launch whether the workspace's
-service could start there; setup runs it in both modes, since a `docker` run is
-always root and a container image keeps its own `/root` private.
-
-The database directory must stay private to that user, so a home whose file
-system keeps no permissions (a Windows drive mounted into WSL) or refuses a
-root caller's change of owner (NFS exported with `root_squash`) is refused with
-that reason. Elsewhere, and on Windows, a service needs
-`HYPERLOOM_KB_DATABASE_URL`. Record files need only a file and an atomic
-rename; a directory is flushed after each rename where its file system can
-flush one.
+A data home has one service. A service keeps its database in the home's
+`kb.sqlite3`, using Python's own `sqlite3`, so a workspace installs no database
+and runs on every Python Hyperloom supports. It holds `service.lock` while it
+serves; one started on a home another service holds exits, naming that
+service's pid and port, and `ensure` reports that line. Two workspaces
+therefore need their own `USER_DATA_PATH`, or the second gets no service of its
+own. Record files and files need only a file and an atomic rename; a directory
+is flushed after each rename where its file system can flush one.
 
 Only an optimize launch and `ensure` restart a service. `push` and `pull`,
 including the automatic push at the end of a run, use the service as it runs
@@ -169,16 +149,39 @@ collection spools without waiting on the service. Requests to a loopback service
 
 | Path | Content |
 |---|---|
-| `postgres/` | The embedded PostgreSQL database: the KB's `kb_id`, its schemas, the index of its records in write order, labels, exclusions and their history, sync progress, and every write with the KB that sent it. |
+| `kb.sqlite3` | The database: the KB's `kb_id`, its schemas, the index of its records in write order and of the files it holds, labels, exclusions and their history, sync progress, and every write with the KB that sent it. |
 | `<kb_id>/records/` | One immutable file per Experience, read only against the content hash the database holds for it. |
-| `spool/` | Writes the service has not accepted yet. |
-| `service.log` | The service's log, and the embedded database's in `postgres/server.log`. |
+| `<kb_id>/files/` | One file per content a record's file field names, under its SHA-256; see [Files](#files). |
+| `spool/` | Writes the service has not accepted yet, with its own copy of each file they name under `spool/files/`. |
+| `service.log` | The service's log. |
 | `service.lock` | Held by the one service serving this home; names its pid and port. |
 
-A home an older service kept on disk, with `canonical/`, `identity.json`, and
-`sync.sqlite3`, is adopted the first time it is served: its Experiences, its
-`kb_id`, and the Experiences it pulled, which push never sends back, move into
-the database. The old files are left as they are.
+## Files
+
+A declaration can make any field but an identity field a `file`
+(see [Field kinds](experience-kb-schema.md#field-kinds)). The record holds the
+file's `{name, sha256, bytes}`; the service holds its content once, under
+`<kb_id>/files/<sha256>`, whichever records and schemas name it.
+
+- **Write.** A client sends each file a record names before the record: it asks
+  which ones the service lacks (`POST /v1/files/missing`) and sends those
+  (`PUT /v1/files/{sha256}`). The service stores a file only once its bytes hash
+  to its name, and refuses a record that names a file it does not hold with
+  409 `missing_files`. The SDK sessions take a local `Path` for a file field
+  and do all of this on `publish()`.
+- **Read.** A read renders a file as its name, size, and the absolute path of
+  its content on the host serving the read, never the content itself, so an
+  agent opens the file only when it needs it. A workspace's reads come from its
+  own local service, so the path is one its agents can read.
+- **Sync.** A push sends the files a record names with the record, before it;
+  a pull fetches them from the global KB before it stores the record. A file
+  the global KB cannot hand over yet stops the pull batch before that record,
+  and the next pull resumes there.
+- **Spool.** A write that spools copies its files into the spool, so a later
+  flush does not depend on the producer keeping them.
+
+Each file is checked against the size the database holds for it when the
+service starts; a missing one makes the service unready (the `files` check).
 
 ## Schemas
 
@@ -288,9 +291,10 @@ A global KB is the same service as a local one, with the same labels,
 restores, and exclusions; its state decides what its export, and so every pull,
 brings.
 
-Given `HYPERLOOM_KB_DATABASE_URL`, a service keeps its index and state in that
-PostgreSQL database instead of an embedded one, and any number of services may
-serve one KB from one database and one `--home` its record files live under,
+A global KB served by one process keeps its database in SQLite in its `--home`,
+as a workspace's does. Given `HYPERLOOM_KB_DATABASE_URL`, a service keeps its
+index and state in that PostgreSQL database instead, and any number of services may
+serve one KB from one database and one `--home` its record files and files live under,
 such as several replicas behind one URL. Every write takes the KB's next
 position under that KB's row lock, so positions commit in order and a pull
 paging by position, through whichever replica, never passes one still to
@@ -298,9 +302,9 @@ commit. Labels, restores, and exclusions of a schema hold its row for their
 transaction, and each push or pull of a KB holds a database-wide lock, so
 replicas never interleave them. A database holds one KB for now; serving one of
 several is left for when requests carry who they act for. Such a service
-installs with `pip install ".[kb-service]"`, which leaves out the embedded
-server, and its replicas share `--home` on one file system they all mount with
-atomic rename, such as CephFS or NFS.
+installs with `pip install ".[kb-service]"`, and its replicas share `--home`,
+records and files alike, on one file system they all mount with atomic rename,
+such as CephFS or NFS.
 
 The database must never lose a write it committed: a workspace pulls and
 pushes everything again once it notices, but what only the lost writes held is
@@ -326,6 +330,9 @@ network, put a TLS-terminating proxy in front of it and hand out its
 | Endpoint | Purpose | `RemoteClient` |
 |---|---|---|
 | `PUT /v1/experiences/{id}` | write one complete Experience | `write()`, `publish()` |
+| `POST /v1/files/missing` | which of the files a record names the service lacks | `missing_files()` |
+| `PUT /v1/files/{sha256}` | store one file | `put_file()` |
+| `GET /v1/files/{sha256}` | fetch one file | `fetch_file()` |
 | `POST /v1/read` | rank one schema's Experiences for a decision and render them | `read()` |
 | `GET /v1/list` | page through Experience summaries in write order | `list_experiences()` |
 | `GET /v1/export` | page through complete Experiences in write order | `export_page()` |
@@ -346,15 +353,17 @@ network, put a TLS-terminating proxy in front of it and hand out its
 
 Every other request, `/health` included, sends `Authorization: Bearer <token>`;
 see [Observability](#observability) for the three that need none.
-Unknown request fields are rejected, so a misspelled field fails loudly. A
-request body may be up to 256 MiB; Experiences themselves have no size limit.
+Unknown request fields are rejected, so a misspelled field fails loudly. A JSON
+request body may be up to 256 MiB and a file up to 4 GiB; a record's own size
+is bounded by its schema, each text field holding at most 32 KiB.
 
 | Status | Body `error` | Meaning | Retry? |
 |---|---|---|---|
 | 400 | `invalid_request` | malformed body, unknown field, invalid Experience, unregistered schema, out-of-range parameter | no |
 | 401 | `unauthorized` | missing or wrong token | after fixing the token |
-| 404 | `not_found` | unknown path, label, or Experience | no |
+| 404 | `not_found` | unknown path, label, Experience, or file | no |
 | 409 | `conflict` | the id already exists with different content | no |
+| 409 | `missing_files` | the record names files the service does not hold; `missing` lists their sha256 | after sending them |
 | 409 | `sync_unavailable` | push, pull, or rebind on a service started without a global KB | after configuring one |
 | 500 | `internal_error` | storage or service failure | yes |
 
@@ -366,11 +375,24 @@ Body: `{"experience": <complete Experience>, "declaration": <declaration>}`. The
 path id must equal `experience.id` and `status` must be `complete`.
 `declaration` is optional once the service holds the Experience's schema; when
 present it must derive the Experience's `schema_ref`, and the service registers
-it. The Experience is validated against its declaration before storage.
+it. The Experience is validated against its declaration before storage, and
+every file it names must already be held here.
 
 Response: `{"status": "created" | "unchanged", "experience_id": "exp-...", "content_hash": "..."}`.
 Experiences are immutable: the same content again is `unchanged`, different
 content under an existing id is 409.
+
+### Files
+
+| Request | Body | Response |
+|---|---|---|
+| `POST /v1/files/missing` | `{"files": [{"name", "sha256", "bytes"}, ...]}` | `{"missing": ["<sha256>", ...]}` |
+| `PUT /v1/files/{sha256}` | the file's bytes, with `Content-Length` | `{"status": "created" or "unchanged", "sha256", "bytes"}` |
+| `GET /v1/files/{sha256}` | | the file's bytes, `application/octet-stream` |
+
+Bytes that are not the size sent or do not hash to `{sha256}` are refused with
+400 and stored nowhere. A file reference of another size than the one held is
+invalid.
 
 ### `POST /v1/read`
 
@@ -379,15 +401,15 @@ content under an existing id is 409.
 | `decision` | yes | | the decision the caller is about to make |
 | `context` | no | `{}` | workload context (`identity`, `workload`, `objective`, `observations`, ...) |
 | `schema_ref` | no | the service's `--declaration` | the one schema to search |
-| `outcome` | no | `mixed` | `keep`, `revert`, another declared decision, or `mixed` |
+| `outcome` | no | `mixed` | one of the values the schema's decision field declares, or `mixed`; a schema without a decision field takes `mixed` only |
 | `limit` | no | `10` | maximum Experiences to return, 1–100 |
-| `content_inline_limit` | no | none (all inline) | bytes above which a free-text field (`reasoning`, `reflection`, `change.summary`, `change.content`, an alternative, a note) is rendered as a reference instead of inline |
 | `render_budget_chars` | no | none (every record) | characters the rendered records may fill; records are rendered whole, in rank order, while they fit |
 
 The service's planner turns `decision` and `context` into weighted query
-signals, then ranks candidates by exact field matches plus lexical fuzzy
-matches over identity values, the change summary and kind, `reasoning`,
-[notes](experience-kb-schema.md#notes), and the outcome. Experiences that
+signals, then ranks candidates by exact matches on the schema's
+[exact lookup fields](experience-kb-schema.md#field-attributes-and-roles) plus
+lexical fuzzy matches over each field by its declared `search` weight,
+[notes](experience-kb-schema.md#notes), and the objective. Experiences that
 repeat the same change under the same identity form one Repeat Group, which
 contributes at most one Experience; `outcome` filters by
 decision without hiding history, because the group annotations still count
@@ -411,30 +433,25 @@ every member.
 `status` is `completed`, `unavailable` (no planner gateway), or `failed`
 (planning or retrieval failed; `warnings` holds the reason); the HTTP status is
 200 either way. `prompt_block` holds each rendered Experience's knowledge
-fields and Repeat Group annotations, never condensed, under an
-`Experience <id>` heading; its metadata, such as `provenance` and
-`rendered_refs`, stays in the record and out of the prompt (see
-[Experience record](experience-kb-schema.md#knowledge-and-metadata)). A
-producer that acts on a read records the returned `rendered_refs` in the
-resulting Experience.
-
-With `content_inline_limit`, a longer free-text field appears in the record as
-`<external content sha256:<hex>, <n> bytes>`, and `contents` carries its text:
-`[{"ref": "sha256:<hex>", "bytes": <n>, "content": "..."}]`. Hyperloom asks for
-2048 bytes, writes each one under `<session>/experience_kb/contents/<hex>.txt`
-(and each patch of a source change as its own file beside it), and lists those
-paths at the end of the injected block, so an agent reads a large patch only
-when it needs it.
+and Repeat Group annotations, never condensed, under an `Experience <id>`
+heading: a text field whole, and a file field as its name, size, and the path
+on this host to read it from (see [Files](#files)). Its metadata, such as
+`provenance` and `rendered_refs`, stays in the record and out of the prompt
+(see [Experience schema](experience-kb-schema.md#metadata)). A producer that
+acts on a read records the returned `rendered_refs` in the resulting
+Experience.
 
 With `render_budget_chars`, a record is never cut: the first one that does not
-fit, and every one ranked after it, is left out, `rendered_refs` and `contents`
-name only the records rendered, and `warnings` carries `render_budget_reached`.
-Hyperloom asks for 40,000 characters, so the block an orchestration turn or a
-specialist prompt carries stays bounded whatever the records hold.
+fit, and every one ranked after it, is left out, `rendered_refs` names only the
+records rendered, and `warnings` carries `render_budget_reached`. Hyperloom asks
+for 40,000 characters, so the block an orchestration turn or a specialist
+prompt carries stays bounded whatever the records hold.
 
-Each item in `experiences`, and in `/v1/list`, is a summary:
-`experience_id`, `source_run_id`, `change_summary`, `decision`,
-`baseline_value`, and `outcome_value`; reads add `score` and `why_matched`.
+Each item in `experiences`, and in `/v1/list`, is a summary: `experience_id`,
+`source_run_id`, and the values the schema gives the change's summary role
+(`change_summary`), the outcome's decision role (`decision`), and the
+baseline's and outcome's measurement roles (`baseline_value`, `outcome_value`),
+empty or `null` where it declares none; reads add `score` and `why_matched`.
 
 ### `GET /v1/list` and `GET /v1/export`
 
@@ -515,14 +532,16 @@ Experience KB code it runs.
   with an empty `prompt_block` and the reason in `warnings`.
 - `publish()` raises `RemoteClientError` for permanent rejections (400, 409,
   413, 414, 415, 422).
-  Any other failure spools the write, with its declaration, and returns
-  `status="spooled"`; Hyperloom's spool is `$USER_DATA_PATH/experience-kb/spool`.
-  After that, the client spools every later `publish()` without a request until
-  `flush_spool()` delivers one.
+  Any other failure spools the write, with its declaration and a copy of each
+  file it names, and returns `status="spooled"`; Hyperloom's spool is
+  `$USER_DATA_PATH/experience-kb/spool`. After that, the client spools every
+  later `publish()` without a request until `flush_spool()` delivers one.
 - `flush_spool()` replays spooled writes and stops at the first retryable
-  failure; files the service rejects for good move to `spool/rejected/`.
-  Hyperloom flushes at every launch and before every workspace `push`.
-- `write()` raises on any failure and never spools; push uses it.
+  failure; spool files the service rejects for good move to `spool/rejected/`,
+  and a spooled file no remaining write names is removed. Hyperloom flushes at
+  every launch and before every workspace `push`.
+- `write()` sends the files the service lacks, then the record, raises on any
+  failure, and never spools; push uses it.
 - Every request carries a fresh `X-Request-ID`, and every `RemoteClientError`
   names it, so a failure a client reports is found in the service's log by
   that id.
@@ -539,7 +558,7 @@ holds:
 | Endpoint | Answer |
 |---|---|
 | `GET /livez` | `200 {"status": "alive"}` while the process answers. |
-| `GET /readyz` | `200` when every check passes, `503` otherwise, with each check `ok` or `failed`: `database` (a query answers), `home_writable`, `disk_space` (at least 512 MiB free under the home), and `records` (every record the database holds had its file, of its size, when the service started). |
+| `GET /readyz` | `200` when every check passes, `503` otherwise, with each check `ok` or `failed`: `database` (a query answers), `home_writable`, `disk_space` (at least 512 MiB free under the home), `records` (every record the database holds had its file, of its size, when the service started), and `files` (likewise for every file it holds). |
 | `GET /metrics` | The Prometheus text format. |
 
 **Metrics.** Counters count since the process started; gauges are sampled at
@@ -552,12 +571,15 @@ each scrape.
 | `hyperloom_kb_http_requests_in_flight` | | Requests being answered now. |
 | `hyperloom_kb_http_request_bytes_total`, `hyperloom_kb_http_response_bytes_total` | `route` | Body bytes received and sent. |
 | `hyperloom_kb_http_unauthorized_total` | | Requests refused for their token. |
-| `hyperloom_kb_writes_total` | `schema_ref`, `result` | Writes by result: `created`, `unchanged`, `conflict`. |
+| `hyperloom_kb_writes_total` | `schema_ref`, `result` | Writes by result: `created`, `unchanged`, `conflict`, `missing_files`. |
+| `hyperloom_kb_file_writes_total` | `result` | File writes by result: `created`, `unchanged`. |
 | `hyperloom_kb_sync_batches_total` | `direction`, `status` | Push and pull batches by status: `completed`, `incomplete`, `refused`. |
 | `hyperloom_kb_experiences` | `schema_ref`, `state` | Stored Experiences: `visible`, `excluded`, or `outside` the state after a restore. |
 | `hyperloom_kb_record_bytes`, `hyperloom_kb_database_bytes`, `hyperloom_kb_disk_free_bytes` | | Record files, database, and free disk. |
 | `hyperloom_kb_last_write_timestamp_seconds` | | When the KB last stored a new Experience. |
 | `hyperloom_kb_records_missing` | | Records whose file was missing at start. |
+| `hyperloom_kb_files`, `hyperloom_kb_file_bytes` | | Files the KB holds, and their bytes. |
+| `hyperloom_kb_files_missing` | | Files the database holds that were missing from the home at start. |
 | `hyperloom_kb_ready` | `check` | Each readiness check, `1` or `0`. |
 | `hyperloom_kb_database_pool` | `stat` | `pool_size`, `pool_available`, `requests_waiting`. |
 | `hyperloom_kb_build_info` | `kb_id`, `name`, `code_digest` | Always `1`; names the KB and the code serving it. |
@@ -565,8 +587,9 @@ each scrape.
 
 Replicas of one KB each count their own requests, writes, and batches, so those
 add up across replicas; `hyperloom_kb_experiences`, `hyperloom_kb_record_bytes`,
-`hyperloom_kb_database_bytes`, and `hyperloom_kb_last_write_timestamp_seconds`
-describe the KB, which every replica reports the same, so take their maximum.
+`hyperloom_kb_files`, `hyperloom_kb_file_bytes`, `hyperloom_kb_database_bytes`,
+and `hyperloom_kb_last_write_timestamp_seconds` describe the KB, which every
+replica reports the same, so take their maximum.
 
 **Logs.** A service logs one JSON object per line, to standard error; a
 workspace's service writes them to `service.log`. Every line has `ts`,
@@ -577,7 +600,7 @@ workspace's service writes them to `service.log`. Every line has `ts`,
 | `http_request` | every answered request but the probes | `method`, `route`, `status`, `duration_ms`, `bytes_in`, `bytes_out` |
 | `audit` | a schema registered, a label made or deleted, a restore, an exclude, an include, a rebind | `action` and what it acted on: `schema_ref`, `label_id`, `experience_id`, `reason`, `saved_label_id`, `global_url`, `forgotten_kb_id` |
 | `sync` | a push or pull batch | `direction`, `status`, `global_url`, the counts, `error` |
-| `records_verified` | at start | `records`, `missing` |
+| `records_verified`, `files_verified` | at start | `records` or `files`, `missing` |
 | `listening`, `stopped` | start and stop | `port`, `home`, `kb_id`, `code_digest` |
 
 A line logged while answering a request also has its `request_id`, and the
@@ -593,5 +616,5 @@ with its result, the KB that sent it, and its request id, in the database's
 
 **Log rotation and stopping.** A workspace's `service.log` past 8 MiB is kept
 as `service.log.1`, replacing the one kept before, when the next service
-starts. `SIGTERM` stops a service taking requests, lets those in flight finish
-for up to 25 seconds, and stops the embedded database the service started.
+starts. `SIGTERM` stops a service taking requests and lets those in flight
+finish for up to 25 seconds.

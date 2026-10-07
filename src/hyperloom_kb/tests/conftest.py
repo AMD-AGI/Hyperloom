@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterator
 import pytest
 
 from hyperloom_kb.database import Database
-from hyperloom_kb.tests.postgres_fixtures import database_url, new_database, postgres_conninfo, reachable_tmp_path
+from hyperloom_kb.tests.database_fixtures import database_url, new_database, postgres_conninfo
 
 _factory: list[Callable[[], Database]] = []
 
@@ -32,4 +32,4 @@ def _fresh_databases(new_database: Callable[[], Database]) -> Iterator[None]:
         _factory.pop()
 
 
-__all__ = ["database_url", "fresh_database", "new_database", "postgres_conninfo", "reachable_tmp_path"]
+__all__ = ["database_url", "fresh_database", "new_database", "postgres_conninfo"]

@@ -41,8 +41,9 @@ web = [
     "markdownify>=0.11",
     "cachetools>=5.3",
 ]
-# The Experience KB service on a PostgreSQL server of its own (``HYPERLOOM_KB_DATABASE_URL``), as a global KB runs.
-# The connection pool checks each connection it hands out, which needs psycopg-pool 3.2.
+# The Experience KB service on a PostgreSQL server (``HYPERLOOM_KB_DATABASE_URL``), as a global KB runs; a workspace's
+# service keeps its database in SQLite and needs none of this. The connection pool checks each connection it hands
+# out, which needs psycopg-pool 3.2.
 kb-service = [
     "PyYAML>=6.0",
     "psycopg[binary]>=3.2,<4",
@@ -51,10 +52,6 @@ kb-service = [
 # Full runtime dependency set installed by the packaged install.sh.
 runtime = [
     "PyYAML>=6.0",
-    # A workspace's Experience KB service runs the embedded PostgreSQL pgembed ships, so no database is installed
-    # separately. Its wheels start at Python 3.12; on an older Python the service needs HYPERLOOM_KB_DATABASE_URL.
-    "hyperloom-inference_optimizer[kb-service]",
-    "pgembed==0.2.0; python_version >= '3.12'",
     "hyperloom-inference_optimizer[llm,web,forge]",
 ]
 # Built-in kernel-opt agent (``kernelforge``). ``torch`` is deliberately absent:
@@ -101,6 +98,8 @@ forge-profiling = [
 test = [
     "hyperloom-inference_optimizer[runtime]",
     "hyperloom-inference_optimizer[ci]",
+    # The Experience KB tests run on PostgreSQL too when HYPERLOOM_KB_TEST_DATABASE_URL names a server.
+    "hyperloom-inference_optimizer[kb-service]",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
     "jsonschema>=4.18",

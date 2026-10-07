@@ -18,16 +18,15 @@ from typing import Any
 import pytest
 
 from hyperloom_kb import (
-    Change,
     Experience,
     ExperienceDeclaration,
     ExperienceHTTPService,
     ExperienceStatus,
     FieldDeclaration,
+    FieldKind,
+    FieldRole,
     HTTPServiceConfig,
     ObjectiveDeclaration,
-    ObjectiveDirection,
-    Outcome,
     Provenance,
     RemoteClient,
     RemoteConfig,
@@ -40,11 +39,18 @@ from hyperloom_kb.tests.conftest import fresh_database
 TOKEN = "cli-token"
 NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
 SCHEMA = ExperienceDeclaration(
+    objectives=(ObjectiveDeclaration("throughput@v1", "Maximize throughput."),),
     identity=(FieldDeclaration("model", "Model."),),
-    baseline_identity=(FieldDeclaration("config", "Baseline."),),
-    change_identity=(FieldDeclaration("knob", "Knob."),),
-    objectives=(ObjectiveDeclaration("throughput@v1", ObjectiveDirection.HIGHER_IS_BETTER, "Throughput."),),
-    decisions=("keep", "revert"),
+    baseline=(FieldDeclaration("config", "Baseline.", group=True),),
+    change=(
+        FieldDeclaration("knob", "Knob.", group=True),
+        FieldDeclaration("summary", "What changed.", role=FieldRole.SUMMARY),
+    ),
+    outcome=(
+        FieldDeclaration("decision", "Decision.", role=FieldRole.DECISION, values=("keep", "revert")),
+        FieldDeclaration("value", "Throughput.", kind=FieldKind.NUMBER, role=FieldRole.MEASUREMENT),
+    ),
+    reflection=(FieldDeclaration("text", "Reflection.", kind=FieldKind.TEXT),),
 )
 
 
@@ -57,15 +63,14 @@ def _experience(seq: int, run_id: str = "cli-run") -> Experience:
         completed_at=NOW,
         identity={"model": "qwen3"},
         objective="throughput@v1",
-        baseline_identity={"config": "default"},
-        baseline_value=100.0,
+        baseline={"config": "default"},
         provenance=Provenance("cli-test", "1"),
         schema_ref=SCHEMA.schema_ref,
         status=ExperienceStatus.COMPLETE,
-        reasoning=f"Try knob {seq}.",
-        change=Change({"knob": f"knob_{seq}"}, f"Set knob {seq}.", kind="config"),
-        outcome=Outcome("keep", 110.0 + seq),
-        reflection="Measured.",
+        rationale={"reasoning": f"Try knob {seq}."},
+        change={"knob": f"knob_{seq}", "summary": f"Set knob {seq}."},
+        outcome={"decision": "keep", "value": 110.0 + seq},
+        reflection={"text": "Measured."},
     )
 
 

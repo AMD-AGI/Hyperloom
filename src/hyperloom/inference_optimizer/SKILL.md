@@ -615,12 +615,10 @@ identify the specialist dispatch and are empty for orchestration.
 `prompt_block` is the injected text; each Experience appears in it under an
 `Experience <id>` heading with every knowledge field of its record, never its
 metadata: its provenance, including the citations and read that shaped it, and
-its `rendered_refs` stay in the record. A free-text field over
-2 KiB, typically a source patch in `change.content`, appears as
-`<external content sha256:...>` and is written whole under
-`<session>/experience_kb/contents/`, each patch also as its own file; the block
-ends with those paths. Records are injected whole while they fit 40,000
-characters; the rest of a read is left out, never cut. The injected agents
+its `rendered_refs` stay in the record. A text field, such as the complete
+change in `change.content`, appears inline and whole; a file field appears as
+its name, size, and the local path to read it from. Records are injected whole
+while they fit 40,000 characters; the rest of a read is left out, never cut. The injected agents
 cite the Experiences that shaped a proposal in its `experience_citations`,
 which reach the measured Experience's `provenance.extra`. `experiences` holds one
 summary per injected Experience, in `experience_ids` order: `experience_id`,

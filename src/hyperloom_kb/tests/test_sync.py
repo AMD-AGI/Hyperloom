@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from email.message import Message
 from pathlib import Path
@@ -19,16 +20,15 @@ from typing import Any
 import pytest
 
 from hyperloom_kb import (
-    Change,
     Experience,
     ExperienceDeclaration,
     ExperienceHTTPService,
     ExperienceStatus,
     FieldDeclaration,
+    FieldKind,
+    FieldRole,
     HTTPServiceConfig,
     ObjectiveDeclaration,
-    ObjectiveDirection,
-    Outcome,
     Provenance,
     RemoteClient,
     RemoteClientError,
@@ -36,6 +36,7 @@ from hyperloom_kb import (
     ServiceSettings,
     create_http_server,
     derive_experience_id,
+    file_ref,
     sync,
 )
 from hyperloom_kb.database import Database
@@ -48,11 +49,19 @@ NOW = datetime(2026, 9, 29, tzinfo=timezone.utc)
 
 def _declaration(objective: str = "throughput@v1") -> ExperienceDeclaration:
     return ExperienceDeclaration(
+        objectives=(ObjectiveDeclaration(objective, "Maximize throughput."),),
         identity=(FieldDeclaration("model", "Model."),),
-        baseline_identity=(FieldDeclaration("config", "Baseline."),),
-        change_identity=(FieldDeclaration("knob", "Knob."),),
-        objectives=(ObjectiveDeclaration(objective, ObjectiveDirection.HIGHER_IS_BETTER, "Throughput."),),
-        decisions=("keep", "revert"),
+        baseline=(FieldDeclaration("config", "Baseline.", group=True),),
+        change=(
+            FieldDeclaration("knob", "Knob.", group=True),
+            FieldDeclaration("summary", "What changed.", role=FieldRole.SUMMARY),
+            FieldDeclaration("artifact", "A file the change produced.", kind=FieldKind.FILE),
+        ),
+        outcome=(
+            FieldDeclaration("decision", "Decision.", role=FieldRole.DECISION, values=("keep", "revert")),
+            FieldDeclaration("value", "Throughput.", kind=FieldKind.NUMBER, role=FieldRole.MEASUREMENT),
+        ),
+        reflection=(FieldDeclaration("text", "Reflection.", kind=FieldKind.TEXT),),
     )
 
 
@@ -65,15 +74,14 @@ def _experience(schema: ExperienceDeclaration, seq: int, *, run_id: str = "local
         completed_at=NOW,
         identity={"model": "qwen3"},
         objective=schema.objectives[0].id,
-        baseline_identity={"config": "default"},
-        baseline_value=100.0,
+        baseline={"config": "default"},
         provenance=Provenance("sync-test", "1"),
         schema_ref=schema.schema_ref,
         status=ExperienceStatus.COMPLETE,
-        reasoning=f"Try knob {seq}.",
-        change=Change({"knob": f"knob_{seq}"}, f"Set knob {seq}.", kind="config"),
-        outcome=Outcome("keep", 110.0 + seq),
-        reflection="Measured.",
+        rationale={"reasoning": f"Try knob {seq}."},
+        change={"knob": f"knob_{seq}", "summary": f"Set knob {seq}."},
+        outcome={"decision": "keep", "value": 110.0 + seq},
+        reflection={"text": "Measured."},
     )
 
 
@@ -153,6 +161,58 @@ def test_pull_stores_the_global_kb_records_and_never_pushes_them_back(tmp_path: 
     # Reads see what was pulled; list and export name only what was written here.
     assert readable == 4
     assert listed == {_experience(schema, 0).id}
+
+
+def test_a_record_travels_with_its_files_from_one_workspace_through_the_global_kb_to_another(tmp_path: Path) -> None:
+    schema = _declaration()
+    artifact = tmp_path / "profile.json"
+    artifact.write_bytes(b'{"kernel": "paged_attention", "share": 0.41}\n')
+    ref = file_ref(artifact)
+    record = replace(_experience(schema, 0), change={**_experience(schema, 0).change, "artifact": ref})
+    with _serving(_service(tmp_path / "global", schema, GLOBAL_TOKEN)) as global_url:
+        with _serving(_service(tmp_path / "local", schema, LOCAL_TOKEN, global_url)) as local_url:
+            _client(local_url, LOCAL_TOKEN, tmp_path).write(record, files={ref.sha256: artifact})
+            pushed = _client(local_url, LOCAL_TOKEN, tmp_path).push()
+        on_global = _client(global_url, GLOBAL_TOKEN, tmp_path).missing_files((ref,))
+        teammate_app = _service(tmp_path / "teammate", schema, LOCAL_TOKEN, global_url)
+        with _serving(teammate_app) as teammate_url:
+            pulled = _client(teammate_url, LOCAL_TOKEN, tmp_path).pull(schema.schema_ref)
+
+    assert (pushed["created"], on_global) == (1, ())
+    assert (pulled["status"], pulled["created"]) == ("completed", 1)
+    assert teammate_app.held(record.id) == record
+    assert teammate_app.file_path(ref).read_bytes() == artifact.read_bytes()
+
+
+def test_a_pull_that_cannot_fetch_a_file_yet_stops_before_its_record_and_resumes_there(tmp_path: Path) -> None:
+    schema = _declaration()
+    artifact = tmp_path / "profile.json"
+    artifact.write_bytes(b"[0.41]\n")
+    ref = file_ref(artifact)
+    records = [_experience(schema, seq, run_id="teammate-run") for seq in range(3)]
+    records[1] = replace(records[1], change={**records[1].change, "artifact": ref})
+    failures = [urllib.error.URLError("global KB went away")]
+
+    def fails_the_first_download(request: urllib.request.Request, **options: Any) -> Any:
+        if request.get_method() == "GET" and "/v1/files/" in request.full_url and failures:
+            raise failures.pop()
+        return urllib.request.urlopen(request, **options)
+
+    with _serving(_service(tmp_path / "global", schema, GLOBAL_TOKEN)) as global_url:
+        shared = _client(global_url, GLOBAL_TOKEN, tmp_path)
+        for record in records:
+            shared.write(record, files={ref.sha256: artifact})
+        local_app = _service(tmp_path / "local", schema, LOCAL_TOKEN, global_url, opener=fails_the_first_download)
+        with _serving(local_app) as local_url:
+            local = _client(local_url, LOCAL_TOKEN, tmp_path)
+            interrupted = local.pull(schema.schema_ref)
+            resumed = local.pull(schema.schema_ref)
+            held = local.health()["experience_count"]
+
+    assert (interrupted["status"], interrupted["created"], interrupted["has_more"]) == ("incomplete", 1, True)
+    assert "URLError" in str(interrupted["error"])
+    assert (resumed["status"], resumed["created"], resumed["rejected"]) == ("completed", 2, [])
+    assert held == 3
 
 
 def test_a_push_the_global_kb_drops_resumes_where_it_stopped(tmp_path: Path) -> None:

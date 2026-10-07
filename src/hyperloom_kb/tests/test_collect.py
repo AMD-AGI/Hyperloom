@@ -13,15 +13,16 @@ import yaml
 
 from hyperloom_kb import (
     PACKAGED_DECLARATION,
+    TEXT_MAX_BYTES,
     ConfigurationError,
     ExperienceDeclaration,
     ExperienceHTTPService,
     FieldDeclaration,
+    FileRef,
     HTTPServiceConfig,
     LLMQueryPlanner,
     NoOpExperienceKB,
     ObjectiveDeclaration,
-    ObjectiveDirection,
     PlannerConfiguration,
     RemoteClient,
     RemoteConfig,
@@ -192,23 +193,26 @@ def test_config_attempt_projects_a_complete_experience() -> None:
         "unset_envs": [],
     }
     canonical = json.dumps(baseline, sort_keys=True, separators=(",", ":"))
-    assert experience["baseline_identity"] == {"baseline_fingerprint": hashlib.sha256(canonical.encode()).hexdigest()}
-    assert experience["preconditions"][2] == f"materialized_baseline_configuration={canonical}"
-    assert experience["preconditions"][0] == "measured_baseline_tput=4752.57"
+    assert experience["baseline"] == {
+        "baseline_fingerprint": hashlib.sha256(canonical.encode()).hexdigest(),
+        "value": 4752.57,
+    }
+    preconditions = experience["rationale"]["preconditions"]
+    assert preconditions[2] == f"materialized_baseline_configuration={canonical}"
+    assert preconditions[0] == "measured_baseline_tput=4752.57"
 
     change = experience["change"]
-    assert change["kind"] == "config_variant"
+    assert change["change_family"] == "config_variant"
     assert json.loads(change["content"])["extra_envs"] == {"VLLM_ROCM_USE_AITER_LINEAR_HIPBMM": "1"}
-    assert change["identity"]["change_fingerprint"] == hashlib.sha256(change["content"].encode()).hexdigest()
-    assert experience["reasoning"] == REASONING
+    assert change["change_fingerprint"] == hashlib.sha256(change["content"].encode()).hexdigest()
+    assert experience["rationale"]["reasoning"] == REASONING
     assert experience["rendered_refs"] == [{"id": "exp-000750a291015fe29cf702840d789dc7", "purpose": "representative"}]
     assert experience["outcome"] == {
         "decision": "revert",
         "value": 4745.71,
-        "constraints": [{"name": "keep_threshold", "passed": False, "value": -0.144}],
-        "error_class": "",
+        "constraints": ["keep_threshold: passed=false, observed=-0.144"],
     }
-    assert experience["reflection"].startswith('Recorded outcome: {"after_tput":4745.71,')
+    assert experience["reflection"]["text"].startswith('Recorded outcome: {"after_tput":4745.71,')
     assert experience["provenance"]["extra"]["kb_read_id"] == "kb-read-1"
     assert experience["provenance"]["source_ref"] == "session:run-mistral-1:attempt:revert-1"
 
@@ -232,9 +236,9 @@ def test_source_attempt_carries_patch_material_from_the_document() -> None:
             "content": PATCH,
         }
     ]
-    assert change["identity"]["change_fingerprint"] == hashlib.sha256(PATCH.encode()).hexdigest()
+    assert change["change_fingerprint"] == hashlib.sha256(PATCH.encode()).hexdigest()
     assert change["summary"] == "Enable the fused linear path"
-    assert change["resource_refs"] == ["patches/a.diff"]
+    assert change["change_family"] == "source_patch"
 
 
 def test_a_source_attempt_that_changed_only_configuration_is_a_config_experience() -> None:
@@ -243,12 +247,10 @@ def test_a_source_attempt_that_changed_only_configuration_is_a_config_experience
     experience = _collected(_dry(_sbd(attempt)))["levers-1"]
 
     change = experience["change"]
-    assert change["kind"] == "config_variant"
-    assert change["identity"]["change_family"] == "config_variant"
+    assert change["change_family"] == "config_variant"
     assert json.loads(change["content"]) == {**delta, "remove_args": [], "unset_envs": [], "args_mode": "append"}
-    assert change["identity"]["change_fingerprint"] == hashlib.sha256(change["content"].encode()).hexdigest()
+    assert change["change_fingerprint"] == hashlib.sha256(change["content"].encode()).hexdigest()
     assert change["summary"] == "fused-moe-routing"
-    assert change["resource_refs"] == []
     assert experience["provenance"]["extra"]["arm"] == "source"
 
 
@@ -259,7 +261,7 @@ def test_multi_patch_fingerprint_hashes_the_patch_list() -> None:
     change = _collected(_dry(_sbd(attempt)))["source-1"]["change"]
     patches = json.loads(change["content"])["patches"]
     canonical = json.dumps(patches, sort_keys=True, separators=(",", ":"))
-    assert change["identity"]["change_fingerprint"] == hashlib.sha256(canonical.encode()).hexdigest()
+    assert change["change_fingerprint"] == hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def test_quality_gates_skip_with_a_reason() -> None:
@@ -297,7 +299,7 @@ def test_quality_gates_skip_with_a_reason() -> None:
 
 def test_reasoning_falls_back_to_the_proposal() -> None:
     experience = _collected(_dry(_sbd(_attempt("fallback", reasoning="", reasoning_origin=""))))["fallback"]
-    assert experience["reasoning"] == "Proposal-level rationale for this configuration grid."
+    assert experience["rationale"]["reasoning"] == "Proposal-level rationale for this configuration grid."
     assert experience["provenance"]["extra"]["reasoning_origin"] == "proposal.reasoning"
 
 
@@ -310,12 +312,7 @@ def test_candidate_caused_failure_becomes_a_failed_experience() -> None:
         gates=[],
     )
     outcome = _collected(_dry(_sbd(attempt)))["failed"]["outcome"]
-    assert outcome == {
-        "decision": "failed",
-        "value": None,
-        "constraints": [],
-        "error_class": "capability_unsupported",
-    }
+    assert outcome == {"decision": "failed", "error_class": "capability_unsupported"}
 
 
 def test_accuracy_is_added_only_when_no_gate_ruled_on_it() -> None:
@@ -325,8 +322,8 @@ def test_accuracy_is_added_only_when_no_gate_ruled_on_it() -> None:
     )
     constraints = _collected(_dry(_sbd(attempt)))["accuracy"]["outcome"]["constraints"]
     assert constraints == [
-        {"name": "keep_threshold", "passed": False, "value": -0.144},
-        {"name": "accuracy", "passed": True, "value": 0.51},
+        "keep_threshold: passed=false, observed=-0.144",
+        "accuracy: passed=true, observed=0.51",
     ]
 
 
@@ -359,10 +356,13 @@ def test_credentials_are_never_collected() -> None:
 
 def test_prose_is_not_mistaken_for_a_credential_assignment() -> None:
     reasoning = "Decode is launch bound; cost per token: dominated by kernel launch overhead."
-    assert find_sensitive({"reasoning": reasoning}) is None
+    assert find_sensitive({"rationale": {"reasoning": reasoning}}) is None
+    assert find_sensitive({"reflection": {"text": reasoning}}) is None
     assert find_sensitive({"notes": {"decode": reasoning}}) is None
     assert find_sensitive({"notes": {"header": "Bearer abcdefghijklmnop"}}) == "notes.header: bearer token"
-    assert find_sensitive({"preconditions": [f"note={reasoning}"]}) is not None
+    assert find_sensitive({"rationale": {"preconditions": [f"note={reasoning}"]}}) is not None
+    assert find_sensitive({"change": {"content": f"note={reasoning}"}}) is not None
+    assert find_sensitive({"change": {"summary": f"note={reasoning}"}}, free_text={"change.summary"}) is None
     assert find_sensitive({"content": '{"TOKENIZERS_PARALLELISM":"false"}'}) is None
 
 
@@ -374,12 +374,16 @@ def test_an_attempts_experience_citations_reach_its_provenance() -> None:
     assert collected["revert-2"]["provenance"]["extra"]["experience_citations"] == []
 
 
-def test_a_large_patch_is_collected_whole() -> None:
-    huge = "+" * (3 * 1024 * 1024)
-    attempt = _source_attempt(patch_material=[{"path": "patches/a.diff", "sha256": "a" * 64, "content": huge}])
-    report = _dry(_sbd(attempt))
-    assert report["skipped"] == []
-    assert huge in _collected(report)["source-1"]["change"]["content"]
+def test_a_patch_over_the_text_limit_is_skipped_never_cut() -> None:
+    within = "+" * (TEXT_MAX_BYTES // 2)
+    huge = "+" * TEXT_MAX_BYTES
+    fits = _source_attempt("fits", patch_material=[{"path": "patches/a.diff", "sha256": "a" * 64, "content": within}])
+    over = _source_attempt("over", patch_material=[{"path": "patches/a.diff", "sha256": "a" * 64, "content": huge}])
+    report = _dry(_sbd(fits, over))
+
+    assert within in _collected(report)["fits"]["change"]["content"]
+    assert _skipped(report)["over"].startswith("schema validation failed: change.content holds")
+    assert "declare the field as a file" in _skipped(report)["over"]
 
 
 def test_evaluation_errors_skip_only_the_unit() -> None:
@@ -452,11 +456,8 @@ def test_unconfigured_target_writes_nothing(tmp_path: Path) -> None:
 
 def test_declaration_mismatch_fails_before_any_write(tmp_path: Path) -> None:
     other = ExperienceDeclaration(
+        objectives=(ObjectiveDeclaration("e2e_throughput@v1", "T."),),
         identity=(FieldDeclaration("model", "Model."),),
-        baseline_identity=(FieldDeclaration("config", "Config."),),
-        change_identity=(FieldDeclaration("knob", "Knob."),),
-        objectives=(ObjectiveDeclaration("e2e_throughput@v1", ObjectiveDirection.HIGHER_IS_BETTER, "T."),),
-        decisions=("keep", "revert", "failed"),
     )
     requests: list[Any] = []
 
@@ -473,7 +474,7 @@ def test_declaration_mismatch_fails_before_any_write(tmp_path: Path) -> None:
 
 def _mapping_document(**overrides: Any) -> dict[str, Any]:
     document: dict[str, Any] = {
-        "format": "hyperloom-kb.collect.v1",
+        "format": "hyperloom-kb.collect.v2",
         "declaration": str(PACKAGED_DECLARATION),
         "producer": {"name": "demo", "version": "1"},
         "units": [{"each": "$doc.items", "as": "item"}],
@@ -483,16 +484,25 @@ def _mapping_document(**overrides: Any) -> dict[str, Any]:
             "completed_at": "2026-09-21T22:52:56Z",
             "identity": "$item.identity",
             "objective": "e2e_throughput@v1",
-            "baseline_value": 1,
-            "baseline_identity": {"object": {"baseline_fingerprint": "base"}},
-            "reasoning": "reasoning text",
-            "change": {"identity": "$item.change", "summary": "summary"},
+            "baseline": {"baseline_fingerprint": "base", "value": 1},
+            "rationale": {"reasoning": "reasoning text"},
+            "change": {
+                "change_family": "$item.change.change_family",
+                "change_fingerprint": "$item.change.change_fingerprint",
+                "summary": "summary",
+                "content": "--flag",
+            },
             "outcome": {"decision": "keep", "value": 2},
-            "reflection": "reflection",
+            "reflection": {"text": "reflection"},
         },
     }
     document.update(overrides)
     return document
+
+
+def _experience_with(category: str, **fields: Any) -> dict[str, Any]:
+    experience = _mapping_document()["experience"]
+    return {**experience, category: {**experience[category], **fields}}
 
 
 @pytest.mark.parametrize(
@@ -508,6 +518,8 @@ def _mapping_document(**overrides: Any) -> dict[str, Any]:
         ({"let": {"x": {"map": "$item", "table": {}, "extra": 1}}}, "does not accept extra"),
         ({"surprise": 1}, "unknown keys"),
         ({"experience": {"run_id": "r"}}, "is required"),
+        ({"experience": _experience_with("change", kind="config")}, r"experience.change has unknown keys: kind"),
+        ({"experience": {**_experience_with("change"), "reasoning": "x"}}, "experience has unknown keys: reasoning"),
         ({"require": [{"check": True}]}, "reason must be a non-empty string"),
     ],
 )
@@ -541,15 +553,87 @@ def test_custom_mapping_collects_a_custom_document() -> None:
     mapping = compile_mapping(
         _mapping_document(
             experience={
-                **_mapping_document()["experience"],
+                **_experience_with("rationale", reasoning="Tune {$item.name} because the item asked for it."),
                 "seq": {"hash48": ["$item.name"]},
-                "reasoning": "Tune {$item.name} because the item asked for it.",
             }
         )
     )
     report = collect(mapping, _custom_document(), dry_run=True)
     assert report.skipped == ()
-    assert report.collected[0].experience.reasoning == "Tune alpha because the item asked for it."
+    assert report.collected[0].experience.rationale["reasoning"] == "Tune alpha because the item asked for it."
+
+
+def _file_mapping(tmp_path: Path) -> Any:
+    declaration = {
+        "schema_version": 2,
+        "objectives": [{"id": "throughput@v1", "description": "Maximize throughput."}],
+        "identity": [{"name": "model", "description": "Model."}],
+        "change": [
+            {"name": "summary", "description": "What changed.", "role": "summary"},
+            {"name": "patch", "description": "The patch applied.", "kind": "file", "required": True},
+        ],
+        "outcome": [{"name": "decision", "description": "D.", "role": "decision", "values": ["keep", "revert"]}],
+    }
+    (tmp_path / "declaration.yaml").write_text(yaml.safe_dump(declaration), encoding="utf-8")
+    return compile_mapping(
+        {
+            "format": "hyperloom-kb.collect.v2",
+            "declaration": str(tmp_path / "declaration.yaml"),
+            "producer": {"name": "demo", "version": "1"},
+            "units": [{"each": "$doc.items", "as": "item"}],
+            "unit_id": "$item.name",
+            "experience": {
+                "run_id": "run",
+                "seq": {"hash48": ["$item.name"]},
+                "completed_at": "2026-09-21T22:52:56Z",
+                "identity": {"object": {"model": "m"}},
+                "objective": "throughput@v1",
+                "change": {"summary": "Apply {$item.name}.", "patch": "$item.patch"},
+                "outcome": {"decision": "keep"},
+            },
+        }
+    )
+
+
+def test_a_file_field_reads_its_file_beside_the_document_and_publishing_sends_it(tmp_path: Path) -> None:
+    (tmp_path / "patches").mkdir()
+    (tmp_path / "patches" / "a.diff").write_text(PATCH, encoding="utf-8")
+    document = tmp_path / "document.json"
+    document.write_text(json.dumps({"items": [{"name": "alpha", "patch": "patches/a.diff"}]}), encoding="utf-8")
+    mapping = _file_mapping(tmp_path)
+    ref = FileRef("a.diff", hashlib.sha256(PATCH.encode()).hexdigest(), len(PATCH.encode()))
+
+    [dry] = collect(mapping, document, dry_run=True).collected
+    app = ExperienceHTTPService(
+        HTTPServiceConfig(tmp_path / "service", TOKEN), mapping.declaration, None, database=fresh_database()
+    )
+    server = create_http_server(app, "127.0.0.1", 0)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        client = RemoteClient(RemoteConfig(f"http://{host!s}:{port}", TOKEN, spool_root=tmp_path / "spool"))
+        report = collect(mapping, document, kb=RemoteExperienceKB(client, mapping.declaration))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert dry.experience.change["patch"] == ref
+    assert [row.status for row in report.collected] == ["created"]
+    assert app.file_path(ref).read_text(encoding="utf-8") == PATCH
+
+
+def test_a_unit_whose_file_is_absent_or_holds_a_credential_is_skipped(tmp_path: Path) -> None:
+    (tmp_path / "secret.diff").write_text("+HF_TOKEN=hf_abcdefgh\n", encoding="utf-8")
+    document = tmp_path / "document.json"
+    items = [{"name": "secret", "patch": "secret.diff"}, {"name": "absent", "patch": "absent.diff"}]
+    document.write_text(json.dumps({"items": items}), encoding="utf-8")
+
+    skipped = _skipped(collect(_file_mapping(tmp_path), document, dry_run=True).to_dict())
+
+    assert skipped["secret"] == "sensitive content in change.patch file secret.diff, line 1: credential assignment"
+    assert skipped["absent"].startswith("mapping evaluation failed: change.patch names")
 
 
 def test_a_mapping_adds_notes_without_a_new_schema_and_drops_the_ones_without_text() -> None:

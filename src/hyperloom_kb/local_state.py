@@ -18,17 +18,13 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
-import psycopg
-
-from hyperloom_kb.database import utc_now
+from hyperloom_kb.database import Connection, utc_now
 from hyperloom_kb.schema import JsonValue
 
 LABEL_MANUAL = "manual"
 LABEL_BEFORE_RESTORE = "before_restore"
 LABEL_BEFORE_PULL = "before_pull"
 _AUTOMATIC_NAMES = {LABEL_BEFORE_RESTORE: "before restore", LABEL_BEFORE_PULL: "before pull"}
-
-Connection = psycopg.Connection[dict[str, Any]]
 
 
 class UnknownStateItem(LookupError):
@@ -129,10 +125,12 @@ class LocalState:
         return self._ids(
             connection,
             """
-            SELECT experience_id FROM (
-                SELECT DISTINCT ON (experience_id) experience_id, action FROM exclusion_history
-                WHERE kb_id = %s AND schema_ref = %s ORDER BY experience_id, entry_id DESC
-            ) AS latest WHERE action = 'exclude'
+            SELECT experience_id FROM exclusion_history AS entry
+            WHERE kb_id = %s AND schema_ref = %s AND action = 'exclude' AND entry_id = (
+                SELECT MAX(latest.entry_id) FROM exclusion_history AS latest
+                WHERE latest.kb_id = entry.kb_id AND latest.schema_ref = entry.schema_ref
+                    AND latest.experience_id = entry.experience_id
+            )
             """,
             schema_ref,
         )
@@ -203,11 +201,10 @@ class LocalState:
             """,
             (self.kb_id, label_id, schema_ref, name, reason, created_at, _digest(members, excluded)),
         )
-        with connection.cursor() as cursor:
-            cursor.executemany(
-                "INSERT INTO label_members(kb_id, label_id, experience_id) VALUES (%s, %s, %s)",
-                [(self.kb_id, label_id, experience_id) for experience_id in sorted(members)],
-            )
+        connection.executemany(
+            "INSERT INTO label_members(kb_id, label_id, experience_id) VALUES (%s, %s, %s)",
+            [(self.kb_id, label_id, experience_id) for experience_id in sorted(members)],
+        )
         connection.execute(
             """
             INSERT INTO label_exclusions(kb_id, label_id, experience_id, reason, excluded_at)
@@ -284,14 +281,13 @@ class LocalState:
             connection, "SELECT experience_id FROM label_members WHERE kb_id = %s AND label_id = %s", label.label_id
         )
         connection.execute("DELETE FROM outside WHERE kb_id = %s AND schema_ref = %s", (self.kb_id, label.schema_ref))
-        with connection.cursor() as cursor:
-            cursor.executemany(
-                "INSERT INTO outside(kb_id, schema_ref, experience_id) VALUES (%s, %s, %s)",
-                [
-                    (self.kb_id, label.schema_ref, experience_id)
-                    for experience_id in sorted(self.stored(connection, label.schema_ref) - members)
-                ],
-            )
+        connection.executemany(
+            "INSERT INTO outside(kb_id, schema_ref, experience_id) VALUES (%s, %s, %s)",
+            [
+                (self.kb_id, label.schema_ref, experience_id)
+                for experience_id in sorted(self.stored(connection, label.schema_ref) - members)
+            ],
+        )
         connection.execute(
             "DELETE FROM exclusions WHERE kb_id = %s AND schema_ref = %s", (self.kb_id, label.schema_ref)
         )
@@ -309,11 +305,10 @@ class LocalState:
     def bring_in(self, connection: Connection, schema_ref: str, experience_ids: Collection[str]) -> None:
         """Put stored Experiences a restore set outside back into the state; their exclusions stand."""
 
-        with connection.cursor() as cursor:
-            cursor.executemany(
-                "DELETE FROM outside WHERE kb_id = %s AND schema_ref = %s AND experience_id = %s",
-                [(self.kb_id, schema_ref, experience_id) for experience_id in experience_ids],
-            )
+        connection.executemany(
+            "DELETE FROM outside WHERE kb_id = %s AND schema_ref = %s AND experience_id = %s",
+            [(self.kb_id, schema_ref, experience_id) for experience_id in experience_ids],
+        )
 
 
 __all__ = [

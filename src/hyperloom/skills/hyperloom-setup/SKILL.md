@@ -115,11 +115,6 @@ value.
    - If an existing `USER_DATA_PATH` is visible in the current shell or terminal context, offer that exact value as one option.
      Say that another workspace using the same value shares its Experience KB data home, which only one workspace's
      service can serve.
-   - The Experience KB keeps its database under `USER_DATA_PATH`, and runs it from programs installed in the
-     workspace. A run as root (every `docker` run, and a `baremetal` run as root) starts that database as a dedicated
-     user, which cannot reach anything under `/root` or under another directory other users may not traverse. When
-     the workspace or a proposed path is under `/root`, say so and recommend a workspace and `USER_DATA_PATH` outside
-     it, such as under `/workspace` or `/data`.
    - Always offer a custom path option.
    - Do not auto-select; write `USER_DATA_PATH` only after the user explicitly chooses (they may accept the default).
 
@@ -444,34 +439,16 @@ The workspace's Experience KB service runs wherever the optimizer runs. Its
 data and `service.log` live under `$USER_DATA_PATH/experience-kb`, and every
 optimize launch starts it again when nothing serves `HYPERLOOM_KB_URL`.
 
-In both modes, first check that the service can keep its database there,
-loading `.env` without printing any values:
+In `docker` mode, skip this step: the service starts inside the container at
+the first optimize launch.
+
+In `baremetal` mode, start it now and check its health, loading `.env` without
+printing any values:
 
 ```bash
 set -a
 . "$PWD/.env"
 set +a
-PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.experience_kb_service check-home
-```
-
-It reads `HYPERLOOM_RUN_MODE` and prints one line. When it exits 1, report
-that line and offer the fix it points to: a `USER_DATA_PATH` outside the
-directory it names, a workspace outside it when it names the Hyperloom install
-or the PostgreSQL binaries, or `HYPERLOOM_KB_DATABASE_URL` in `.env` naming a
-PostgreSQL server when it names the Python. When the user takes one, rewrite
-`.env` and rerun the check. Otherwise continue without the Experience KB, which
-never stops a run: skip starting it below, and report it as unavailable with
-that line.
-
-The service's embedded database installs on Python 3.12 or newer: the host's
-Python in `baremetal` mode, the container's in `docker` mode.
-
-In `docker` mode, stop here: the service starts inside the container at the
-first optimize launch.
-
-In `baremetal` mode, once the check passes, start it now and check its health:
-
-```bash
 PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.experience_kb_service ensure
 ```
 
@@ -522,9 +499,8 @@ Report:
 - Whether setup completed or failed (in `docker` mode, report that host setup was skipped).
 - The detected `FRAMEWORK` value (or that it is unset).
 - Experience KB service: in `baremetal` mode, `ready` with its URL once the
-  service step succeeds, `failed`, or `unavailable` with the `check-home` line;
-  in `docker` mode, the `check-home` line and that it starts inside the
-  container at the first optimize launch.
+  service step succeeds, or `failed`; in `docker` mode, that it starts inside
+  the container at the first optimize launch.
 - Global Experience KB: `not configured`, or its URL, whether it pushes after
   every run or on request, and the `pull` summary line in `baremetal` mode.
 - The last relevant error lines on failure.

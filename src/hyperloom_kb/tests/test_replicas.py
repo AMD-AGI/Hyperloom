@@ -25,9 +25,10 @@ from hyperloom_kb import (
     RemoteClientError,
     RemoteConfig,
 )
-from hyperloom_kb.database import Database
+from hyperloom_kb.database import Database, PostgresDatabase, SqliteDatabase
 from hyperloom_kb.http_service import DATABASE_URL_ENV
 from hyperloom_kb.tests.conftest import fresh_database
+from hyperloom_kb.tests.database_fixtures import requires_postgres
 from hyperloom_kb.tests.test_http_service import (
     DECISION,
     FakePlannerBackend,
@@ -35,9 +36,6 @@ from hyperloom_kb.tests.test_http_service import (
     _experience,
     _read_context,
 )
-
-# Spawned services run their own embedded database under ``tmp_path``.
-pytestmark = pytest.mark.usefixtures("reachable_tmp_path")
 
 TOKEN = "replica-token"
 SCHEMA = _declaration()
@@ -53,9 +51,16 @@ def _read_ids(replica: ExperienceHTTPService) -> set[str]:
     return {str(reference["id"]) for reference in read["rendered_refs"]}
 
 
+def _second_handle(database: Database) -> Database:
+    if isinstance(database, PostgresDatabase):
+        return PostgresDatabase(database.conninfo)
+    assert isinstance(database, SqliteDatabase)
+    return SqliteDatabase(database.path)
+
+
 def test_replicas_sharing_a_database_write_in_one_order_and_read_one_state(tmp_path: Path) -> None:
     database = fresh_database()
-    other_pool = Database(database.pool.conninfo)
+    other_pool = _second_handle(database)
     first, second = _replica(tmp_path / "home", database), _replica(tmp_path / "home", other_pool)
     try:
         experiences = [_experience(SCHEMA, seq=seq, knob=f"knob_{seq}") for seq in range(24)]
@@ -96,6 +101,7 @@ def _free_port() -> int:
         return int(probe.getsockname()[1])
 
 
+@requires_postgres
 def test_service_processes_sharing_a_database_and_a_home_serve_one_kb(tmp_path: Path, database_url: str) -> None:
     home = tmp_path / "home"
     env = {

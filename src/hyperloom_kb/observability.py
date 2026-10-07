@@ -47,10 +47,12 @@ _FIXED_ROUTES = frozenset(
         "/v1/labels",
         "/v1/restore",
         "/v1/exclusions",
+        "/v1/files/missing",
     }
 )
 _ROUTE_PATTERNS = (
     (re.compile(r"^/v1/experiences/[^/]+$"), "/v1/experiences/{experience_id}"),
+    (re.compile(r"^/v1/files/[^/]+$"), "/v1/files/{sha256}"),
     (re.compile(r"^/v1/labels/[^/]+$"), "/v1/labels/{label_id}"),
     (re.compile(r"^/v1/exclusions/[^/]+$"), "/v1/exclusions/{experience_id}"),
 )
@@ -66,7 +68,11 @@ _HELP = {
     "hyperloom_kb_http_request_bytes_total": ("counter", "Request body bytes received, by route."),
     "hyperloom_kb_http_response_bytes_total": ("counter", "Response body bytes sent, by route."),
     "hyperloom_kb_http_unauthorized_total": ("counter", "Requests refused for a missing or wrong token."),
-    "hyperloom_kb_writes_total": ("counter", "Experience writes by schema and result: created, unchanged, conflict."),
+    "hyperloom_kb_writes_total": (
+        "counter",
+        "Experience writes by schema and result: created, unchanged, conflict, missing_files.",
+    ),
+    "hyperloom_kb_file_writes_total": ("counter", "File writes by result: created, unchanged."),
     "hyperloom_kb_sync_batches_total": ("counter", "Push and pull batches by direction and status."),
     "hyperloom_kb_experiences": ("gauge", "Stored Experiences by schema and state: visible, excluded, outside."),
     "hyperloom_kb_record_bytes": ("gauge", "Bytes of the KB's record files."),
@@ -74,6 +80,9 @@ _HELP = {
     "hyperloom_kb_disk_free_bytes": ("gauge", "Free bytes on the file system of the service's home."),
     "hyperloom_kb_last_write_timestamp_seconds": ("gauge", "When the KB last stored a new Experience."),
     "hyperloom_kb_records_missing": ("gauge", "Records the database holds whose file was missing at start."),
+    "hyperloom_kb_files": ("gauge", "Files the KB holds."),
+    "hyperloom_kb_file_bytes": ("gauge", "Bytes of the files the KB holds."),
+    "hyperloom_kb_files_missing": ("gauge", "Files the database holds that were missing from the home at start."),
     "hyperloom_kb_ready": ("gauge", "Whether each readiness check passes, 1 or 0."),
     "hyperloom_kb_database_pool": ("gauge", "Database connection pool statistics."),
 }

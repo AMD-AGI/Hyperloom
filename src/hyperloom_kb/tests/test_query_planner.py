@@ -10,9 +10,9 @@ import pytest
 from hyperloom_kb import (
     ExperienceDeclaration,
     FieldDeclaration,
+    FieldRole,
     LLMQueryPlanner,
     ObjectiveDeclaration,
-    ObjectiveDirection,
     PlannerConfiguration,
     PlannerExecutionError,
     ReadRequest,
@@ -21,20 +21,14 @@ from hyperloom_kb import (
 
 def _declaration() -> ExperienceDeclaration:
     return ExperienceDeclaration(
+        objectives=(ObjectiveDeclaration("throughput@v1", "Maximize throughput."),),
         identity=(
             FieldDeclaration("model", "Model."),
             FieldDeclaration("precision", "Precision."),
         ),
-        baseline_identity=(FieldDeclaration("fingerprint", "Baseline."),),
-        change_identity=(FieldDeclaration("family", "Change family."),),
-        objectives=(
-            ObjectiveDeclaration(
-                "throughput@v1",
-                ObjectiveDirection.HIGHER_IS_BETTER,
-                "Throughput.",
-            ),
-        ),
-        decisions=("keep", "revert"),
+        baseline=(FieldDeclaration("fingerprint", "Baseline.", group=True),),
+        change=(FieldDeclaration("family", "Change family.", group=True),),
+        outcome=(FieldDeclaration("decision", "Decision.", role=FieldRole.DECISION, values=("keep", "revert")),),
     )
 
 

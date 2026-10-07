@@ -32,8 +32,6 @@ from hyperloom_kb import (
 )
 from hyperloom_kb.cli import add_commands, run_command
 from hyperloom_kb.collect import load_mapping
-from hyperloom_kb.embedded_postgres import EmbeddedPostgresError, root_run_problem, unavailable_reason
-from hyperloom_kb.http_service import DATABASE_URL_ENV
 from hyperloom_kb.schema import JsonValue
 
 log = logging.getLogger(__name__)
@@ -49,12 +47,6 @@ SERVICE_DIR = "experience-kb"
 # writes, reads, and syncs.
 MAPPING = "hyperloom-sbd-v6"
 AUTO_PUSH_ENV = "HYPERLOOM_KB_AUTO_PUSH"
-RUN_MODE_ENV = "HYPERLOOM_RUN_MODE"
-# The directory ``hyperloom`` is installed in: the workspace a ``pip install --target``, or its ``src`` checkout.
-_INSTALL_ROOT = Path(__file__).resolve().parents[2]
-_RELOCATE = (
-    "move the workspace and USER_DATA_PATH under a directory every user may traverse, such as /workspace or /data"
-)
 _PLACEHOLDER = "<PLEASE_FILL_IN>"
 _PLANNER_MODEL_KEYS = ("LOCAL_KB_PLANNER_MODEL", "CLAUDE_MODEL", "ANTHROPIC_MODEL")
 
@@ -141,33 +133,6 @@ def ensure_service(*, restart: bool = True) -> LocalService | None:
     return ensure_local_service(config, service_home(), env=env, restart=restart)
 
 
-def home_problem(run_mode: str) -> str:
-    """Why the service this workspace runs could not keep its database, or ``""`` when it can.
-
-    Given ``HYPERLOOM_KB_DATABASE_URL`` it keeps it on that server. Otherwise it runs an embedded server in its home,
-    which needs a Python that installs pgembed: this one in baremetal mode, the container's in docker mode. A run as
-    root starts that server as a dedicated user, which must be able to traverse every directory on the way to the home
-    and to the PostgreSQL binaries. Docker mode always runs as root, in a container that mounts the workspace, where
-    Hyperloom and the binaries are installed, and the home where the host has them; the directories above a mount
-    come from the image, which keeps ``/root`` private.
-    """
-
-    if os.environ.get(DATABASE_URL_ENV, "").strip():
-        return ""
-    if run_mode == "docker":
-        root = Path("/root")
-        for path, what in ((service_home(), "the KB home"), (_INSTALL_ROOT, "the Hyperloom install")):
-            absolute = path.expanduser().absolute()
-            if absolute == root or root in absolute.parents:
-                return f"{what} {absolute} is under /root, which a container image keeps private to root; {_RELOCATE}"
-        return ""
-    reason = unavailable_reason()
-    if reason:
-        return f"{reason}; run Hyperloom on Python 3.12 or newer, or set {DATABASE_URL_ENV} to a PostgreSQL server"
-    problem = root_run_problem(service_home()) if os.geteuid() == 0 else ""
-    return f"{problem}; {_RELOCATE}" if problem else ""
-
-
 def _workspace_client(command: str) -> RemoteClient:
     """The workspace's local service as it runs, started when nothing serves it; a run it may serve is never stopped."""
 
@@ -244,10 +209,6 @@ def main(argv: list[str] | None = None) -> int:
     init = commands.add_parser("init-env", help="Write the local service URL and a generated token into .env.")
     init.add_argument("--env-file", type=Path, default=Path(".env"))
     commands.add_parser("ensure", help="Start the local service unless it already serves, then check its health.")
-    check = commands.add_parser(
-        "check-home", help="Say whether the service this workspace runs can keep its database under its KB home."
-    )
-    check.add_argument("--run-mode", choices=("baremetal", "docker"), default=os.environ.get(RUN_MODE_ENV) or None)
     commands.add_parser("push", help="Send the Experiences written here and not yet pushed to the global KB.")
     commands.add_parser(
         "pull",
@@ -260,22 +221,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "init-env":
         for key, status in init_env(args.env_file).items():
             print(f"{key}: {status}")
-        return 0
-    if args.command == "check-home":
-        if args.run_mode is None:
-            parser.error(f"check-home needs --run-mode or {RUN_MODE_ENV}")
-        try:
-            problem = home_problem(args.run_mode)
-        except EmbeddedPostgresError as exc:
-            print(f"The Experience KB cannot run its database: {exc}", file=sys.stderr)
-            return 1
-        if problem:
-            print(f"The Experience KB cannot keep its database in {args.run_mode} mode: {problem}.", file=sys.stderr)
-            return 1
-        if os.environ.get(DATABASE_URL_ENV, "").strip():
-            print(f"The Experience KB keeps its database on the PostgreSQL server {DATABASE_URL_ENV} names")
-        else:
-            print(f"The Experience KB can keep its database under {service_home()} in {args.run_mode} mode")
         return 0
     if hasattr(args, "run"):
         try:
@@ -318,7 +263,6 @@ __all__ = [
     "SERVICE_DIR",
     "auto_push",
     "ensure_service",
-    "home_problem",
     "init_env",
     "local_url",
     "main",
