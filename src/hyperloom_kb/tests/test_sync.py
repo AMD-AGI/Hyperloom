@@ -251,6 +251,56 @@ def test_a_pull_reading_again_from_the_start_resumes_there_when_it_cannot_fetch_
     assert held == 3
 
 
+class _CutShort:
+    """A response whose body stops after ``left`` bytes, as one does when the connection drops mid-transfer."""
+
+    def __init__(self, response: Any, left: int) -> None:
+        self._response, self._left = response, left
+        self.headers = response.headers
+
+    def __enter__(self) -> _CutShort:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._response.close()
+
+    def read(self, amount: int = -1) -> bytes:
+        chunk = self._response.read(min(amount, self._left) if amount >= 0 else self._left)
+        self._left -= len(chunk)
+        return chunk
+
+
+def test_a_pull_whose_file_download_is_cut_short_resumes_at_that_record(tmp_path: Path) -> None:
+    schema = _declaration()
+    artifact = tmp_path / "profile.bin"
+    artifact.write_bytes(bytes(range(256)) * 16)
+    ref = file_ref(artifact)
+    records = [_experience(schema, seq, run_id="teammate-run") for seq in range(3)]
+    records[1] = replace(records[1], change={**records[1].change, "artifact": ref})
+    cuts = [100]
+
+    def cuts_the_first_download(request: urllib.request.Request, **options: Any) -> Any:
+        response = urllib.request.urlopen(request, **options)
+        if request.get_method() == "GET" and "/v1/files/" in request.full_url and cuts:
+            return _CutShort(response, cuts.pop())
+        return response
+
+    with _serving(_service(tmp_path / "global", schema, GLOBAL_TOKEN)) as global_url:
+        shared = _client(global_url, GLOBAL_TOKEN, tmp_path)
+        for record in records:
+            shared.write(record, files={ref.sha256: artifact})
+        local_app = _service(tmp_path / "local", schema, LOCAL_TOKEN, global_url, opener=cuts_the_first_download)
+        with _serving(local_app) as local_url:
+            local = _client(local_url, LOCAL_TOKEN, tmp_path)
+            interrupted = local.pull(schema.schema_ref)
+            resumed = local.pull(schema.schema_ref)
+            held = local.health()["experience_count"]
+
+    assert (interrupted["status"], interrupted["created"], interrupted["rejected"]) == ("incomplete", 1, [])
+    assert (resumed["status"], resumed["created"]) == ("completed", 2)
+    assert held == 3
+
+
 def test_a_push_the_global_kb_drops_resumes_where_it_stopped(tmp_path: Path) -> None:
     puts: list[str] = []
 
