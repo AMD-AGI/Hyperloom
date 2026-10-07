@@ -215,6 +215,42 @@ def test_a_pull_that_cannot_fetch_a_file_yet_stops_before_its_record_and_resumes
     assert held == 3
 
 
+def test_a_pull_reading_again_from_the_start_resumes_there_when_it_cannot_fetch_a_file_yet(tmp_path: Path) -> None:
+    schema = _declaration()
+    artifact = tmp_path / "profile.json"
+    artifact.write_bytes(b"[0.41]\n")
+    ref = file_ref(artifact)
+    records = [_experience(schema, seq, run_id="teammate-run") for seq in range(3)]
+    records[0] = replace(records[0], change={**records[0].change, "artifact": ref})
+    failures: list[Exception] = []
+
+    def fails_while_asked(request: urllib.request.Request, **options: Any) -> Any:
+        if request.get_method() == "GET" and "/v1/files/" in request.full_url and failures:
+            raise failures.pop()
+        return urllib.request.urlopen(request, **options)
+
+    with _serving(_service(tmp_path / "global", schema, GLOBAL_TOKEN)) as global_url:
+        shared = _client(global_url, GLOBAL_TOKEN, tmp_path)
+        for record in records:
+            shared.write(record, files={ref.sha256: artifact})
+        shared.exclude(records[0].id, reason="under review")
+        local_app = _service(tmp_path / "local", schema, LOCAL_TOKEN, global_url, opener=fails_while_asked)
+        with _serving(local_app) as local_url:
+            local = _client(local_url, LOCAL_TOKEN, tmp_path)
+            first = local.pull(schema.schema_ref)
+            shared.include(records[0].id)
+            failures.append(urllib.error.URLError("global KB went away"))
+            interrupted = local.pull(schema.schema_ref)
+            resumed = local.pull(schema.schema_ref)
+            held = local.health()["experience_count"]
+
+    assert first["created"] == 2
+    assert (interrupted["status"], interrupted["created"], interrupted["has_more"]) == ("incomplete", 0, True)
+    # The Experience the global KB shows again sits before the cursor, so the pull resumes at the start it read from.
+    assert (resumed["status"], resumed["created"]) == ("completed", 1)
+    assert held == 3
+
+
 def test_a_push_the_global_kb_drops_resumes_where_it_stopped(tmp_path: Path) -> None:
     puts: list[str] = []
 

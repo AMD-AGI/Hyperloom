@@ -413,6 +413,7 @@ class GlobalSync:
                     # or restores changed, so Experiences the cursor passed while they were hidden may show now.
                     # The ones already here come back unchanged.
                     page = target.export_page(after=0, limit=SYNC_BATCH, schema_ref=schema_ref)
+                    position, anchor = 0, ""
             except RemoteClientError as exc:
                 return _report("incomplete", url, error=str(exc))
             if lost:
