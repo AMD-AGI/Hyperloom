@@ -27,9 +27,7 @@ from pathlib import Path
 from typing import Any, TextIO, cast
 from urllib.parse import parse_qs, urlsplit
 
-import psycopg
 from psycopg.types.json import Jsonb
-from psycopg_pool import PoolTimeout
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
 from hyperloom_kb.database import Database, WriteSource
@@ -99,6 +97,9 @@ _CONFLICT = "conflict"
 MIN_FREE_DISK_BYTES = 512 * 1024 * 1024
 # A SIGTERM lets requests in flight finish this long; below an orchestrator's usual 30 s grace period.
 DRAIN_SECONDS = 25.0
+# How long a probe or a metrics scrape waits on the database: inside the few seconds an orchestrator or a scraper
+# waits for the answer, so a database that is gone reads as unready instead of as a probe that timed out.
+PROBE_TIMEOUT_SECONDS = 2.0
 # A transport guard, not a data policy: Experiences of any size are stored.
 _MAX_REQUEST_BYTES = 256 * 1024 * 1024
 _READ_FIELDS = frozenset(
@@ -916,35 +917,40 @@ class ExperienceHTTPService:
     def readiness(self) -> dict[str, bool]:
         """Each check a service must pass to take traffic; the names say what failed, never what the KB holds."""
 
-        try:
-            with self._database.transaction() as connection:
-                connection.execute("SELECT 1")
-            database = True
-        except (psycopg.Error, PoolTimeout):
-            database = False
         home = self.config.home
         return {
-            "database": database,
+            "database": self._database.answers(PROBE_TIMEOUT_SECONDS),
             "home_writable": os.access(home, os.W_OK),
             "disk_space": shutil.disk_usage(home).free >= MIN_FREE_DISK_BYTES,
             "records": self._missing_records == 0,
         }
 
     def metric_gauges(self) -> list[tuple[str, dict[str, str], float]]:
-        """The gauges a metrics scrape samples now: what the KB holds, how large it is, and how ready it is."""
+        """The gauges a metrics scrape samples now: what the KB holds, how large it is, and how ready it is.
 
+        While the database does not answer, the scrape still answers: its readiness gauge says so, and what only the
+        database knows is left out.
+        """
+
+        readiness = self.readiness()
         gauges: list[tuple[str, dict[str, str], float]] = [
             ("hyperloom_kb_build_info", {"kb_id": self.kb_id, "name": self.name, "code_digest": self._code_digest}, 1),
             ("hyperloom_kb_records_missing", {}, self._missing_records),
             ("hyperloom_kb_disk_free_bytes", {}, shutil.disk_usage(self.config.home).free),
         ]
-        gauges += [("hyperloom_kb_ready", {"check": check}, float(ok)) for check, ok in self.readiness().items()]
+        gauges += [("hyperloom_kb_ready", {"check": check}, float(ok)) for check, ok in readiness.items()]
         gauges += [
             ("hyperloom_kb_database_pool", {"stat": stat}, float(value))
             for stat, value in sorted(self._database.pool.get_stats().items())
             if stat in ("pool_size", "pool_available", "requests_waiting")
         ]
-        with self._database.transaction() as connection:
+        if readiness["database"]:
+            gauges += self._database_gauges()
+        return gauges
+
+    def _database_gauges(self) -> list[tuple[str, dict[str, str], float]]:
+        gauges: list[tuple[str, dict[str, str], float]] = []
+        with self._database.transaction(timeout=PROBE_TIMEOUT_SECONDS) as connection:
             for row in connection.execute(
                 """
                 SELECT experiences.schema_ref,

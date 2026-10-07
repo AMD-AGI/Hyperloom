@@ -21,13 +21,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
-from hyperloom_kb.tests.postgres_fixtures import requires_embedded_postgres
+from psycopg.conninfo import conninfo_to_dict
 
 from hyperloom_kb import ExperienceHTTPService, HTTPServiceConfig, RemoteClient, RemoteClientError, RemoteConfig
 from hyperloom_kb.http_service import create_http_server, serve_until_stopped
 from hyperloom_kb.observability import JsonLogFormatter, event
 from hyperloom_kb.tests.conftest import fresh_database
+from hyperloom_kb.tests.postgres_fixtures import requires_embedded_postgres
 from hyperloom_kb.tests.test_http_service import TOKEN, RunningServer, _declaration, _experience, _http
 
 SCHEMA = _declaration()
@@ -75,6 +77,29 @@ def test_probes_answer_without_a_token_and_name_only_their_checks(tmp_path: Path
     checks = {"database": "ok", "home_writable": "ok", "disk_space": "ok", "records": "ok"}
     assert (ready[0], json.loads(ready[2])) == (200, {"ready": True, "checks": checks})
     assert (unready[0], json.loads(unready[2])) == (503, {"ready": False, "checks": {**checks, "database": "failed"}})
+
+
+def test_probes_and_metrics_answer_promptly_while_the_database_is_gone(tmp_path: Path, postgres_conninfo: str) -> None:
+    database = fresh_database()
+    app = ExperienceHTTPService(HTTPServiceConfig(tmp_path / "home", TOKEN), SCHEMA, None, database=database)
+    app.write(_experience(SCHEMA))
+    with RunningServer(app) as url:
+        before = _metrics(_get(url, "/metrics")[2].decode())
+        with psycopg.connect(postgres_conninfo, autocommit=True) as admin:
+            admin.execute(f'DROP DATABASE "{conninfo_to_dict(database.pool.conninfo)["dbname"]}" WITH (FORCE)')
+        started = time.monotonic()
+        ready = _get(url, "/readyz")
+        status, _, body = _get(url, "/metrics")
+        elapsed = time.monotonic() - started
+
+    after = _metrics(body.decode())
+    assert (ready[0], json.loads(ready[2])["checks"]["database"]) == (503, "failed")
+    assert status == 200
+    assert (before['hyperloom_kb_ready{check="database"}'], after['hyperloom_kb_ready{check="database"}']) == (1, 0)
+    assert any(series.startswith("hyperloom_kb_experiences") for series in before)
+    assert not any(series.startswith("hyperloom_kb_experiences") for series in after)
+    assert any(series.startswith("hyperloom_kb_http_requests_total") for series in after)
+    assert elapsed < 10
 
 
 def test_a_record_file_lost_since_the_last_start_makes_the_next_start_unready(tmp_path: Path) -> None:
