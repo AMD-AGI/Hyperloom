@@ -19,7 +19,7 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolTimeout
 
 SCHEMA_VERSION = 1
 _MIGRATION_LOCK = "hyperloom-kb:migrate"
@@ -204,11 +204,24 @@ class Database:
             raise DatabaseError(f"cannot open the Experience KB database: {exc}") from exc
 
     @contextmanager
-    def transaction(self) -> Iterator[psycopg.Connection[dict[str, Any]]]:
-        """One transaction, committed when the block finishes and rolled back when it raises."""
+    def transaction(self, *, timeout: float | None = None) -> Iterator[psycopg.Connection[dict[str, Any]]]:
+        """One transaction, committed when the block finishes and rolled back when it raises.
 
-        with self.pool.connection() as connection:
+        ``timeout`` bounds the wait for a connection; unset, the pool's own applies.
+        """
+
+        with self.pool.connection(timeout=timeout) as connection:
             yield connection
+
+    def answers(self, timeout: float) -> bool:
+        """Whether the database answers a query within ``timeout`` seconds."""
+
+        try:
+            with self.transaction(timeout=timeout) as connection:
+                connection.execute("SELECT 1")
+        except (psycopg.Error, PoolTimeout):
+            return False
+        return True
 
     @contextmanager
     def exclusive(self, key: str) -> Iterator[None]:
