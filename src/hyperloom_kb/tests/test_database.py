@@ -19,10 +19,13 @@ def test_a_transaction_that_raises_leaves_nothing_behind() -> None:
     database = fresh_database()
     kb_id = database.resolve_kb()
 
-    with pytest.raises(RuntimeError, match="abandoned"):
+    def abandon() -> None:
         with database.transaction() as connection:
             connection.execute("UPDATE kbs SET last_sequence = %(next)s WHERE kb_id = %(kb)s", {"next": 7, "kb": kb_id})
             raise RuntimeError("abandoned")
+
+    with pytest.raises(RuntimeError, match="abandoned"):
+        abandon()
     with database.transaction() as connection:
         row = connection.execute("SELECT last_sequence FROM kbs WHERE kb_id = %s", (kb_id,)).fetchone()
 
