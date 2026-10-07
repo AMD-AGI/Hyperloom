@@ -362,7 +362,7 @@ def power_veto_reason(
         return "power_unmeasured"
     readings: dict[str, float] = {}
     for gpu, watts in by_gpu_w.items():
-        if isinstance(watts, bool) or not isinstance(watts, (int, float)) or watts != watts:
+        if isinstance(watts, bool) or not isinstance(watts, (int, float)) or not isfinite(float(watts)):
             return "power_unmeasured"
         readings[str(gpu)] = float(watts)
     if any(gpu in readings and readings[gpu] > limit for gpu, limit in limits.items()):
