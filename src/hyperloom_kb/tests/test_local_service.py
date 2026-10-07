@@ -39,6 +39,7 @@ from hyperloom_kb import (
     load_declaration,
 )
 from hyperloom_kb import local_service
+from hyperloom_kb.database import SQLITE_FILE
 from hyperloom_kb.http_service import code_digest
 from hyperloom_kb.tests.conftest import fresh_database
 
@@ -364,7 +365,7 @@ def test_a_data_home_another_service_serves_is_never_served_twice(tmp_path: Path
 
 def test_a_service_that_cannot_start_is_reported_with_its_log(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    (home / "kb.sqlite3").mkdir(parents=True)
+    (home / SQLITE_FILE).mkdir(parents=True)
 
     with pytest.raises(LocalServiceError, match="exited with status"):
         ensure_local_service(_config(_free_port(), tmp_path), home, env=_env_without_planner_gateway(tmp_path))

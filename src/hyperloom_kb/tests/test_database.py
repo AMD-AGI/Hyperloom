@@ -6,11 +6,12 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
-from hyperloom_kb.database import SCHEMA_VERSION, DatabaseError, SqliteDatabase, open_database
+from hyperloom_kb.database import SCHEMA_VERSION, SQLITE_FILE, DatabaseError, SqliteDatabase, open_database
 from hyperloom_kb.tests.conftest import fresh_database
 
 
@@ -42,13 +43,40 @@ def test_a_workspace_home_keeps_its_database_in_sqlite(tmp_path: Path) -> None:
     reopened = open_database(tmp_path / "home")
 
     assert isinstance(first, SqliteDatabase)
-    assert first.path == (tmp_path / "home" / "kb.sqlite3").resolve()
+    assert first.path == (tmp_path / "home" / SQLITE_FILE).resolve()
     assert reopened.resolve_kb() == kb_id
     assert reopened.size_bytes() > 0
 
 
+def test_a_home_from_main_starts_a_new_kb_and_keeps_main_s_database_unread(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    with closing(sqlite3.connect(home / "kb.sqlite3")) as main_index:
+        main_index.execute(
+            """
+            CREATE TABLE experiences (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                experience_id TEXT NOT NULL UNIQUE,
+                schema_ref TEXT NOT NULL,
+                indexed_at TEXT NOT NULL
+            )
+            """
+        )
+        main_index.execute(
+            "INSERT INTO experiences(experience_id, schema_ref, indexed_at) VALUES ('exp-main', 's', 't')"
+        )
+        main_index.commit()
+
+    kb_id = open_database(home).resolve_kb()
+
+    with closing(sqlite3.connect(home / "kb.sqlite3")) as main_index:
+        kept = main_index.execute("SELECT experience_id FROM experiences").fetchall()
+    assert kb_id.startswith("kb-")
+    assert kept == [("exp-main",)]
+
+
 def test_a_database_newer_than_this_code_is_refused(tmp_path: Path) -> None:
-    path = tmp_path / "kb.sqlite3"
+    path = tmp_path / SQLITE_FILE
     SqliteDatabase(path)
     with sqlite3.connect(path) as connection:
         connection.execute("INSERT INTO kb_migrations(version, applied_at) VALUES (?, 'later')", (SCHEMA_VERSION + 1,))
@@ -62,4 +90,4 @@ def test_an_unreachable_sqlite_home_is_a_database_error(tmp_path: Path) -> None:
     blocked.write_text("not a directory", encoding="utf-8")
 
     with pytest.raises(DatabaseError, match="cannot open the Experience KB database"):
-        SqliteDatabase(blocked / "kb.sqlite3")
+        SqliteDatabase(blocked / SQLITE_FILE)
