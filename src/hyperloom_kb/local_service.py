@@ -18,7 +18,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
-from hyperloom_kb.http_service import ServiceSettings, code_digest
+from hyperloom_kb.http_service import SERVICE_LOCK, ServiceSettings, code_digest
 from hyperloom_kb.remote import RemoteClient, RemoteClientError, RemoteConfig, is_loopback
 from hyperloom_kb.schema import JsonValue
 
@@ -152,7 +152,20 @@ def _require_home(health: Mapping[str, JsonValue], home: Path, host: str, port: 
         )
 
 
-def _stop(health: Mapping[str, JsonValue], host: str, port: int, timeout_seconds: float) -> None:
+def _home_released(home: Path) -> bool:
+    """Whether no service holds ``home``, whose lock its holder keeps until it has stopped the home's database."""
+
+    import fcntl
+
+    with (home / SERVICE_LOCK).open("a", encoding="utf-8") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+    return True
+
+
+def _stop(health: Mapping[str, JsonValue], host: str, port: int, home: Path, timeout_seconds: float) -> None:
     pid = health.get("pid")
     # A service in this very process (an embedded server) is never ours to signal.
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
@@ -163,9 +176,11 @@ def _stop(health: Mapping[str, JsonValue], host: str, port: int, timeout_seconds
     except PermissionError as exc:
         raise LocalServiceError(f"cannot stop the Experience service process {pid} on {host}:{port}") from exc
     deadline = time.monotonic() + timeout_seconds
-    while _listening(host, port):
+    # A stopping service closes its port before it drains and stops the home's database; one started in between
+    # would find the home held and exit.
+    while _listening(host, port) or not _home_released(home):
         if time.monotonic() >= deadline:
-            raise LocalServiceError(f"the Experience service process {pid} still listens on {host}:{port}")
+            raise LocalServiceError(f"the Experience service process {pid} still serves {home} on {host}:{port}")
         time.sleep(_POLL_SECONDS)
 
 
@@ -196,7 +211,7 @@ def ensure_local_service(
             return LocalService(health)
         if not restart:
             return LocalService(health, stale=reason)
-        _stop(health, host, port, timeout_seconds)
+        _stop(health, host, port, home, timeout_seconds)
         restarted = True
     process = _spawn(host, port, home, config.token, launch_env)
     _wait_until_listening(process, host, port, home / LOG_NAME, timeout_seconds)
