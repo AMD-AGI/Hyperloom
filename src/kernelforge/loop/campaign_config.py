@@ -34,7 +34,8 @@ from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 SCHEMA_VERSION = 7
 # Versions a campaign on disk may be written in and still be read back.
 READABLE_SCHEMA_VERSIONS = (6, 7)
-_GPU_TARGET_RE = re.compile(r"\bgfx[0-9a-f]+\b", re.IGNORECASE)
+# The trailing lookahead skips rocminfo's generic ISA names (``gfx12-generic``), listed beside the concrete target.
+_GPU_TARGET_RE = re.compile(r"\bgfx[0-9a-f]+\b(?!-)", re.IGNORECASE)
 _AMDGPU_ASSEMBLY_RE = re.compile(
     r"^\s*\.(?:amdgcn_target\s+[\"']?amdgcn-amd-amdhsa\b|amdhsa_kernel\b|amdgpu_hsa_kernel\b)",
     re.MULTILINE,
