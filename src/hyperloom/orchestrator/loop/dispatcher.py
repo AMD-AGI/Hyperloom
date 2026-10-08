@@ -1126,7 +1126,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             result_dict = result.result if isinstance(result.result, dict) else {}
             done_payload = result_dict.get("specialist_done") or {}
             if isinstance(done_payload, dict):
-                await self._coord.writeback.record_specialist_result(
+                await self._coord.specialist_dispatch.record_specialist_result(
                     task=task,
                     done_payload=done_payload,
                     source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),

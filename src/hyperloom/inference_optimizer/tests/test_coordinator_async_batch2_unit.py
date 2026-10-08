@@ -1810,7 +1810,7 @@ def _ptask(tid: str, kind: str) -> Task:
 @pytest.mark.asyncio
 async def test_record_specialist_result_with_proposals(coord: Coordinator) -> None:
     task = _ptask("rec-spec-1", "specialist")
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
@@ -1828,7 +1828,7 @@ async def test_record_specialist_result_with_proposals(coord: Coordinator) -> No
 @pytest.mark.asyncio
 async def test_record_specialist_result_seeds_gaps_from_static_recon(coord: Coordinator) -> None:
     task = _ptask("rec-spec-recon", "specialist")
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload={
             "domain": "static_recon_specialist",
@@ -1856,7 +1856,7 @@ async def test_record_specialist_result_logs_ungrounded_patches(coord: Coordinat
     line for its task, which is rendered once.
     """
     task = _ptask("rec-spec-ug", "specialist")
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
@@ -1881,7 +1881,7 @@ async def test_record_specialist_result_no_dead_research_evidence_log(
 
     task = _ptask("rec-spec-dead", "specialist")
     with caplog.at_level(logging.ERROR):
-        await coord.writeback.record_specialist_result(
+        await coord.specialist_dispatch.record_specialist_result(
             task=task,
             done_payload={
                 "domain": "kernel_agent",
@@ -1901,8 +1901,8 @@ async def test_record_specialist_result_harvests_findings(coord: Coordinator, mo
     async def harvest(done_payload):
         harvested.append(done_payload)
 
-    monkeypatch.setattr(coord.writeback, "_harvest_specialist_findings", harvest)
-    await coord.writeback.record_specialist_result(
+    monkeypatch.setattr(coord.specialist_dispatch, "_harvest_specialist_findings", harvest)
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
@@ -1923,9 +1923,9 @@ async def test_record_specialist_result_with_scorer(coord: Coordinator) -> None:
             calls.append({"proposals": proposals, "task_id": task_id})
             return {"models": ["m1"], "ranking": [0]}
 
-    coord.writeback._proposal_scorer = _Scorer()
+    coord.specialist_dispatch._proposal_scorer = _Scorer()
     task = _ptask("rec-spec-3", "specialist")
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",

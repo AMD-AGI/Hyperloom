@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_TASK_RETR
 from .runner import SpecialistFailureType, specialist_patch_preflight_error
 
 if TYPE_CHECKING:
+    from ..loop.coordinator import Coordinator
     from ..loop.sub_agent_runner import SubAgentResult
     from ..state.task_registry import Task
 
@@ -44,6 +45,11 @@ FORCE_STALLED_KEEP_ROUNDS: int = 12
 
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     """Specialist dispatch: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
+
+    def __init__(self, coordinator: "Coordinator", proposal_scorer: Any = None) -> None:
+        super().__init__(coordinator)
+        # Advisory only: scores proposals, never gates them.
+        self._proposal_scorer = proposal_scorer
 
     async def warm_specialist_params(self, params: dict[str, Any]) -> None:
         """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); missing fields stay empty.
@@ -739,3 +745,247 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if isinstance(specialist_notes, list) and specialist_notes:
             entry["notes"] = [str(n) for n in specialist_notes]
         return entry
+
+    def _record_specialist_round_product(self, *, task: Task, round_entry: dict[str, Any]) -> None:
+        """Record what a specialist round came back with, on the event that owns it.
+
+        The FRAMEWORK arm's dispatch already has a run row on the framework
+        event keyed by this same task id, so the product merges onto that. Every
+        other round merges onto the action row its dispatching phase opened.
+        """
+        product = {
+            "summary": round_entry.get("summary") or "",
+            "proposals_total": round_entry.get("proposals_total"),
+            "empty": round_entry.get("empty"),
+            "confidence": round_entry.get("confidence"),
+            "new_findings": round_entry.get("new_findings") or [],
+            "residual_questions": round_entry.get("residual_questions") or [],
+            "notes": round_entry.get("notes") or [],
+            "ensemble_scores": round_entry.get("ensemble_scores") or {},
+        }
+        source_phase = str(round_entry.get("source_phase") or "").strip().upper()
+        recorder = self._coord.phase_framework.timeline()
+        if recorder is not None and source_phase == _phase_state.PHASE_FRAMEWORK_AGENT:
+            recorder.record_run(str(task.task_id or ""), **product)
+            return
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+            phase_event.record_specialist_round(
+                task_id=str(task.task_id or ""),
+                phase=source_phase or str(self.shared_state.phase or ""),
+                macro_cycle=int(self.shared_state.macro_cycle or 0),
+                round_id=str(round_entry.get("round_id") or ""),
+                domain=round_entry.get("domain") or "",
+                gap_canonical_id=round_entry.get("gap_canonical_id") or "",
+                reason=round_entry.get("reason") or "",
+                source=round_entry.get("source") or "",
+                tags=round_entry.get("tags") or [],
+                **product,
+            )
+        except Exception:
+            log.debug("specialist bookkeeping: phase round product record failed", exc_info=True)
+
+    async def record_specialist_result(
+        self,
+        *,
+        task: Task,
+        done_payload: dict[str, Any],
+        source: str,
+        run_error: str = "",
+    ) -> None:
+        """Common bookkeeping for any specialist task termination (dispatcher loop + intent routing); idempotent on round_id, failures logged not raised.
+
+        Args:
+            task: The terminated specialist task.
+            done_payload: The specialist's done payload (proposal_set, domain,
+                summary, etc.).
+            source: The emitting agent string (``specialist:<task_id>``).
+            run_error: Dispatch failure text when the specialist produced no
+                usable payload.
+        """
+        task_params = task.params or {}
+        domain = str(done_payload.get("domain") or task_params.get("domain") or "").strip()
+        proposals = done_payload.get("proposal_set") or []
+        if not isinstance(proposals, list):
+            proposals = []
+        is_empty = len(proposals) == 0
+
+        round_entry = self.build_specialist_round_entry(
+            task=task,
+            done_payload=done_payload,
+            source=source,
+            run_error=run_error,
+        )
+        # Specialist notes reach the prompt only through this task's one inbox
+        # line; ``last_action_failures`` is rendered every SEED turn.
+        ungrounded = done_payload.get("patches_ungrounded")
+        if isinstance(ungrounded, list) and ungrounded:
+            self.shared_state.record_action_failure(
+                action="specialist",
+                task_id=task.task_id,
+                result={
+                    "error_class": "patch_targets_ungrounded",
+                    "error": "; ".join(str(d) for d in ungrounded[:4]),
+                },
+            )
+        # Advisory multi-model scoring of the proposal_set; informational only, gates nothing.
+        if self._proposal_scorer is not None and proposals:
+            scores = await self._proposal_scorer.score(
+                gap={
+                    "domain": domain,
+                    "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
+                    "gap_symptom": task_params.get("gap_symptom"),
+                    "gap_evidence": task_params.get("gap_evidence"),
+                    "summary": done_payload.get("summary", ""),
+                },
+                proposals=proposals,
+                task_id=task.task_id,
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+            )
+            if scores and (scores.get("models") or scores.get("errors")):
+                round_entry["ensemble_scores"] = scores
+                input_err = (scores.get("errors") or {}).get("input")
+                if input_err and not scores.get("models"):
+                    log.warning(
+                        "specialist bookkeeping: proposal scoring skipped for task=%s: %s",
+                        task.task_id,
+                        input_err,
+                    )
+        self.shared_state.record_specialist_round(round_entry)
+        self._record_specialist_round_product(task=task, round_entry=round_entry)
+
+        # Per-anchor coverage ledger: every specialist completion is
+        # one "round" — tick all anchors.
+        self.shared_state.bump_domain_round_counters()
+
+        # Persist so a resume picks up the bookkeeping without re-running the specialist.
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:
+            log.exception(
+                "specialist bookkeeping: SharedState.save failed for task=%s",
+                task.task_id,
+            )
+
+        # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain.
+        if done_payload.get("new_findings"):
+            await self._harvest_specialist_findings(done_payload)
+
+        # Consume static-recon bridge candidates into gaps[] so the
+        # freeform specialist picks them up with a precise mandate.
+        if domain == "static_recon_specialist":
+            self._coord.phase_internal.consume_static_recon(done_payload)
+
+        # Aggregate research evidence from any research domain that
+        # self-reports a ``research`` block, so FRAMEWORK / explore lanes
+        # reuse the session-wide seen-set. Idempotent for research_scout
+        # (already harvested above).
+        self._aggregate_research_evidence(done_payload)
+
+        # Refresh the gaps ledger after a specialist round closes; record the verdict as a gap attempt.
+        gap_cid = str(done_payload.get("gap_canonical_id") or "").strip()
+        if gap_cid:
+            self.shared_state.append_gap_attempt(
+                gap_cid,
+                {
+                    "action": "specialist",
+                    "variant_name": domain,
+                    "outcome": "EMPTY" if is_empty else "PROPOSALS",
+                    "proposals_total": len(proposals),
+                },
+            )
+        await self._coord.gap_refresh.refresh_gaps(
+            reason="specialist_done", workload_id=self._coord.recipe_journal.workload_canonical_id()
+        )
+        if bool((task.params or {}).get("enablement")) and isinstance(done_payload.get("needs_targeted_build"), dict):
+            await self._coord.enablement_build.maybe_enqueue_specialist_requested_build(
+                task_id=str(task.task_id or ""),
+                payload=done_payload,
+            )
+        # Push specialist-authored patches to the Critic so integrate_patch can pass.
+        await self._coord.phase_framework.maybe_autosubmit_specialist_patches(
+            task=task,
+            done_payload=done_payload,
+        )
+        # Relaxed FRAMEWORK rule: a config-lever deliverable (no source patch,
+        # but a proposal_set of serving flags / env vars) is routed through the
+        # same integrate_patch gate via its config_changes channel.
+        await self._coord.phase_framework.maybe_autosubmit_framework_config(
+            task=task,
+            done_payload=done_payload,
+        )
+
+    def _aggregate_research_evidence(self, done_payload: dict[str, Any]) -> None:
+        """Aggregate research evidence (PR ids / diffs / NVIDIA refs) into the
+        session-wide seen-set, de-duped across the session.
+
+        Applies to every domain that self-reports a ``research`` block
+        (candidate discovery + research_scout), so FRAMEWORK / explore lanes
+        do not re-fetch the same references.
+        """
+        block = done_payload.get("research")
+        if not isinstance(block, dict):
+            return
+        pr_ids: list[Any] = []
+        for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs"):
+            vals = block.get(key)
+            if isinstance(vals, list):
+                pr_ids.extend(vals)
+        if not pr_ids:
+            return
+        added = self.shared_state.register_seen_pr_ids(pr_ids)
+        if added:
+            log.info(
+                "depth: aggregated %d new research reference(s) into seen-set",
+                added,
+            )
+
+    async def _harvest_specialist_findings(self, done_payload: dict[str, Any]) -> None:
+        """Persist top-level specialist findings and re-seed Orchestration.
+
+        Any ``competitor_target`` numbers emitted are intentionally ignored here:
+        measured competitor baselines are sourced from InferenceX, not authored
+        by specialists, so LLM-written numbers must never be persisted as a
+        consumable target.
+
+        Args:
+            done_payload: The completed specialist task payload.
+        """
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
+
+        hints = done_payload.get("new_findings") or []
+        if not isinstance(hints, list):
+            hints = []
+        added, dropped = _research_hints.append_hints(
+            self.session_dir,
+            hints,
+        )
+        if dropped:
+            log.info(
+                "research-scout: dropped %d sourceless hint(s)",
+                dropped,
+            )
+        # Share inspected PR ids with the FRAMEWORK dedup set.
+        pr_ids: list[Any] = []
+        for hint in hints:
+            if isinstance(hint, dict) and hint.get("source"):
+                pr_ids.append(hint["source"])
+        proposals = done_payload.get("proposal_set") or []
+        if isinstance(proposals, list):
+            for proposal in proposals:
+                if not isinstance(proposal, dict):
+                    continue
+                for key in ("pr_evidence", "source_evidence"):
+                    refs = proposal.get(key)
+                    if isinstance(refs, list):
+                        pr_ids.extend(refs)
+        self.shared_state.register_seen_pr_ids(pr_ids)
+        # Seed high-priority hints as gaps[] so the config arm tries them early.
+        self._coord.gap_refresh.seed_gaps_from_research_hints()
+        log.info(
+            "specialist findings harvested: hints_added=%d seen_pr_ids=%d",
+            added,
+            len(self.shared_state.research_scout_seen_pr_ids or []),
+        )

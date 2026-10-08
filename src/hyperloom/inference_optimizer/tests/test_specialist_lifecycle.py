@@ -128,7 +128,7 @@ async def test_record_specialist_result_non_empty_proposal_set(coord):
     coord.tasks.register(task)
 
     payload = _done_payload(domain="serving_specialist")
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=payload,
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-1",
@@ -157,7 +157,7 @@ async def test_record_specialist_result_enqueues_build_request(coord):
         "ref": "v0.1.15.post2",
     }
 
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=payload,
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}build-spec",
@@ -176,7 +176,7 @@ async def test_record_specialist_result_empty_proposal_set(coord):
     coord.tasks.register(task)
 
     payload = _done_payload(no_proposals=True, domain="kernel_switch_specialist")
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=payload,
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-empty-1",
@@ -196,12 +196,12 @@ async def test_record_specialist_result_idempotent_on_round_id(coord):
     )
     coord.tasks.register(task)
 
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=_done_payload(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t-resume",
     )
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=_done_payload(proposals=[]),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t-resume",

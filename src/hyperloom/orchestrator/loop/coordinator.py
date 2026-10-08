@@ -241,9 +241,11 @@ class Coordinator:
         self.orch_prompt = OrchestrationPrompt(overrides={})
         # KnowledgePlane facade; pre-warms PR feed + advisory context.
         self.knowledge_plane: Any = knowledge_plane
-        from .writeback import WritebackCollaborator
+        from ..specialists.dispatch import SpecialistDispatchCollaborator
 
-        self._collaborator("_writeback", partial(WritebackCollaborator, proposal_scorer=proposal_scorer))
+        self._collaborator(
+            "_specialist_dispatch", partial(SpecialistDispatchCollaborator, proposal_scorer=proposal_scorer)
+        )
         self._model_class_override: str = (model_class or "").strip()
 
         # Validate every reactor has a backend wired.

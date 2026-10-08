@@ -438,7 +438,7 @@ async def test_harvest_specialist_findings_does_not_persist_llm_competitor_targe
     from hyperloom.inference_optimizer.session import session_paths
     from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
-    await coord.writeback._harvest_specialist_findings(
+    await coord.specialist_dispatch._harvest_specialist_findings(
         {
             "new_findings": [{"what": "try mtp", "source": "https://pr/1"}],
             "competitor_target": {

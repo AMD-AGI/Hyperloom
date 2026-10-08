@@ -26,7 +26,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
 )
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
 
 
 @pytest.fixture(autouse=True)
@@ -147,9 +147,9 @@ class _StubState:
 
 
 class _Seam:
-    """The writeback method under test, with only what it reads on it."""
+    """The specialist-dispatch method under test, with only what it reads on it."""
 
-    _record_specialist_round_product = WritebackCollaborator._record_specialist_round_product
+    _record_specialist_round_product = SpecialistDispatchCollaborator._record_specialist_round_product
 
     def __init__(self, *, phase: str, framework_recorder: Any = None) -> None:
         self.shared_state = _StubState(phase)
