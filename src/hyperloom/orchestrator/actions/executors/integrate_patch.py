@@ -117,6 +117,7 @@ from ._grid_variant_filter import (
     resolve_skip_spec,
 )
 from ._recipe_script import RecipeLeverUnavailableError
+from ._server_argv import ConfigUnreadable
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -3272,11 +3273,11 @@ class IntegratePatchExecutor:
                     bench_result=bench_result,
                 )
             )
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, ConfigUnreadable):
             # Every field this fills is one the decision refuses the replay for
-            # when absent, so a capture that cannot read the tree, spawn the
-            # probe, or see the durable stack leaves the recipe insufficient
-            # rather than failing the round.
+            # when absent, so a capture that cannot read the tree or the graded
+            # config, spawn the probe, or see the durable stack leaves the
+            # recipe insufficient rather than failing the round.
             log.exception("integrate_patch: enablement KEEP record capture failed")
         return kept_result
 
@@ -3516,11 +3517,12 @@ class IntegratePatchExecutor:
         one.
 
         Returns:
-            The lever names with no reader, ``[]`` when a scan found none, and
-            ``None`` when the tree could not be read -- which is not evidence
-            that every lever has one.
+            The lever names with no reader, ``[]`` when a scan found none or
+            there was nothing to scan for, and ``None`` when the tree was not
+            resolved or could not be read -- which is not evidence that every
+            lever has one.
         """
-        if framework_root is None or not framework.strip():
+        if not framework.strip():
             return []
         # This KEEP's own effective config first. The standing ``accepted_config``
         # is not replaced with it until the lane re-arms on the result, so a
@@ -3539,7 +3541,7 @@ class IntegratePatchExecutor:
         names = sorted({str(k).strip() for k in (envs or {}) if str(k).strip().startswith(prefix)})
         if not names:
             return []
-        if not framework_root.is_dir():
+        if framework_root is None or not framework_root.is_dir():
             # An empty walk over a tree that is not there would report every
             # lever as unread, which is a refusal built out of nothing.
             return None
@@ -3564,21 +3566,16 @@ class IntegratePatchExecutor:
         The build records them in its ``result.json`` as the prefixes a runtime
         would import from; that is the build's own statement of where its output
         lives, so it is read rather than guessed at. A result that cannot be
-        read falls back to the candidate worktrees the layout puts them in --
-        still narrower than the attempt root, which also holds cloned
-        dependencies and any provisioned virtual environment.
+        read, or names no prefix, names no tree.
         """
         result = attempt_root / "result.json"
         try:
             payload = json.loads(result.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            payload = {}
+            return []
         runtime = payload.get("runtime") if isinstance(payload, dict) else None
         prefixes = (runtime or {}).get("pythonpath_prefixes") if isinstance(runtime, dict) else None
-        trees = [Path(str(p)) for p in prefixes if str(p).strip()] if isinstance(prefixes, list) else []
-        if trees:
-            return trees
-        return sorted(d for d in attempt_root.glob("candidates/*/worktree") if d.is_dir())
+        return [Path(str(p)) for p in prefixes if str(p).strip()] if isinstance(prefixes, list) else []
 
     @staticmethod
     def _build_extensions_not_carried(
@@ -3613,12 +3610,11 @@ class IntegratePatchExecutor:
             The names left behind, ``[]`` only after at least one of the linked
             build's output trees was scanned and nothing was missing (or when no
             build is linked, there being nothing to carry), and ``None`` when a
-            build is linked whose outputs could not be read -- an absent tree, a
-            cleaned-up worktree or an unreadable file. None of those are
+            build is linked whose outputs could not be read -- a result that
+            names no output tree, a named tree that is gone, an unreadable file,
+            or no framework root to compare them against. None of those are
             evidence that anything was carried.
         """
-        if framework_root is None:
-            return []
         from ...enablement.recipe.projections import select_linked_build
 
         rounds = list(enablement.kept_rounds)
@@ -3637,6 +3633,8 @@ class IntegratePatchExecutor:
         attempt_root_text = str((row or {}).get("attempt_root") or "").strip()
         if not attempt_root_text:
             return []
+        if framework_root is None:
+            return None
         attempt_root = Path(attempt_root_text)
         if not attempt_root.is_dir():
             return None
@@ -3650,9 +3648,9 @@ class IntegratePatchExecutor:
                 if d.is_dir()
             ]
             if not package_roots:
-                # The build named output trees that are gone, or named none and
-                # the candidate worktrees have been cleaned up. Either way this
-                # scanned nothing, which is not the same as finding nothing.
+                # The build named no output tree, or named trees that are gone.
+                # Either way this scanned nothing, which is not the same as
+                # finding nothing.
                 return None
             built_files = sorted((package, built) for package in package_roots for built in package.rglob("*.so"))
         except OSError:
@@ -3673,16 +3671,13 @@ class IntegratePatchExecutor:
 
         The materialized config is what the launch read, so its own
         ``benchmark.framework`` outranks the round's params and the ambient
-        ``$FRAMEWORK``; those remain the fallback for a round whose config could
-        not be read.
+        ``$FRAMEWORK``; those decide only for a round that named no config, or
+        whose config declares no framework.
         """
         if materialized_config:
             from ._server_argv import _benchmark_envs
 
-            try:
-                declared, _envs = _benchmark_envs(materialized_config)
-            except (OSError, ValueError):
-                declared = None
+            declared, _envs = _benchmark_envs(materialized_config)
             if declared:
                 return str(declared).strip().lower()
         from hyperloom.inference_optimizer.framework_registry import DEFAULT_FRAMEWORK
@@ -3703,10 +3698,7 @@ class IntegratePatchExecutor:
             return env
         from ._server_argv import config_launch_env
 
-        try:
-            return config_launch_env(materialized_config, env)
-        except (OSError, ValueError):
-            return env
+        return config_launch_env(materialized_config, env)
 
     def _probe_keep_environment(
         self,

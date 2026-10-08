@@ -25,6 +25,7 @@ from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     replayed_stack_ops,
 )
 from hyperloom.orchestrator.actions.executors._git import _git_head_sha
+from hyperloom.orchestrator.actions.executors._server_argv import ConfigUnreadable
 from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.enablement.lane import _rearm_on_kept
@@ -2294,6 +2295,7 @@ def _built_attempt(tmp_path: Path, *, package: str, files: dict[str, bytes]) -> 
     pkg = root / "candidates" / "00_pr" / "worktree" / package
     pkg.mkdir(parents=True)
     for name, blob in files.items():
+        (pkg / name).parent.mkdir(parents=True, exist_ok=True)
         (pkg / name).write_bytes(blob)
     other = root / "_repos" / "somedep" / "somedep"
     other.mkdir(parents=True)
@@ -2493,16 +2495,17 @@ def test_an_extension_in_a_subpackage_is_judged_at_its_own_path(tmp_path: Path):
     comparing by basename would have matched it against an unrelated file of the
     same name at the top.
     """
-    root_dir = tmp_path / "builds" / "bA" / "candidates" / "00_pr" / "worktree" / "vllm"
-    (root_dir / "attention").mkdir(parents=True)
-    (root_dir / "_C.abi3.so").write_bytes(b"carried")
-    (root_dir / "attention" / "_ops.cpython-312-x86_64-linux-gnu.so").write_bytes(b"nested, left behind")
+    attempt = _built_attempt(
+        tmp_path,
+        package="vllm",
+        files={"_C.abi3.so": b"carried", "attention/_ops.cpython-312-x86_64-linux-gnu.so": b"nested, left behind"},
+    )
     root = tmp_path / "site-packages" / "vllm"
     (root / "attention").mkdir(parents=True)
     (root / "_C.abi3.so").write_bytes(b"carried")
 
     missing = IntegratePatchExecutor._build_extensions_not_carried(
-        _linked(tmp_path / "builds" / "bA"), root, specialist_task_id=PROBE_TASK
+        _linked(attempt), root, specialist_task_id=PROBE_TASK
     )
 
     assert missing == [str(Path("attention") / "_ops.cpython-312-x86_64-linux-gnu.so")]
@@ -2510,15 +2513,13 @@ def test_an_extension_in_a_subpackage_is_judged_at_its_own_path(tmp_path: Path):
 
 def test_a_same_named_file_at_the_top_does_not_satisfy_a_nested_one(tmp_path: Path):
     """The comparison is by relative path, not by basename."""
-    root_dir = tmp_path / "builds" / "bA" / "candidates" / "00_pr" / "worktree" / "vllm"
-    (root_dir / "attention").mkdir(parents=True)
-    (root_dir / "attention" / "_ops.abi3.so").write_bytes(b"the nested one")
+    attempt = _built_attempt(tmp_path, package="vllm", files={"attention/_ops.abi3.so": b"the nested one"})
     root = tmp_path / "site-packages" / "vllm"
     root.mkdir(parents=True)
     (root / "_ops.abi3.so").write_bytes(b"the nested one")  # right bytes, wrong place
 
     missing = IntegratePatchExecutor._build_extensions_not_carried(
-        _linked(tmp_path / "builds" / "bA"), root, specialist_task_id=PROBE_TASK
+        _linked(attempt), root, specialist_task_id=PROBE_TASK
     )
 
     assert missing == [str(Path("attention") / "_ops.abi3.so")]
@@ -2543,18 +2544,31 @@ def test_a_venv_copy_of_the_same_package_is_not_the_builds_output(tmp_path: Path
     assert missing == [], "only the build's own output tree is the recipe's to carry"
 
 
-def test_without_a_readable_result_the_candidate_worktrees_are_scanned(tmp_path: Path):
-    """Fallback stays narrower than the attempt root: still no venv, no deps."""
-    attempt = _built_attempt(tmp_path, package="vllm", files={"_moe_C.abi3.so": b"left behind"})
-    (attempt / "result.json").write_text("not json at all", encoding="utf-8")
+@pytest.mark.parametrize(
+    "result_text",
+    [None, "not json at all", "{}", '{"runtime": {"pythonpath_prefixes": []}}'],
+    ids=["absent", "corrupt", "no-runtime", "no-prefixes"],
+)
+def test_a_build_that_names_no_output_tree_is_unverified(tmp_path: Path, result_text: str | None):
+    """A candidate worktree is where a build may have written, not where it says it did.
+
+    Every extension the worktree holds matches the framework root here, so a
+    scan of it would certify the build as carried without the build ever
+    naming that tree as its output.
+    """
+    attempt = _built_attempt(tmp_path, package="vllm", files={"_C.abi3.so": b"same"})
+    if result_text is None:
+        (attempt / "result.json").unlink()
+    else:
+        (attempt / "result.json").write_text(result_text, encoding="utf-8")
     root = tmp_path / "site-packages" / "vllm"
     root.mkdir(parents=True)
+    (root / "_C.abi3.so").write_bytes(b"same")
 
-    missing = IntegratePatchExecutor._build_extensions_not_carried(
-        _linked(attempt), root, specialist_task_id=PROBE_TASK
+    assert (
+        IntegratePatchExecutor._build_extensions_not_carried(_linked(attempt), root, specialist_task_id=PROBE_TASK)
+        is None
     )
-
-    assert missing == ["_moe_C.abi3.so"]
 
 
 def test_a_named_output_tree_that_is_gone_is_unverified(tmp_path: Path):
@@ -2565,20 +2579,6 @@ def test_a_named_output_tree_that_is_gone_is_unverified(tmp_path: Path):
     """
     attempt = _built_attempt(tmp_path, package="vllm", files={"_C.abi3.so": b"carried"})
     shutil.rmtree(attempt / "candidates" / "00_pr" / "worktree")
-    root = tmp_path / "site-packages" / "vllm"
-    root.mkdir(parents=True)
-
-    assert (
-        IntegratePatchExecutor._build_extensions_not_carried(_linked(attempt), root, specialist_task_id=PROBE_TASK)
-        is None
-    )
-
-
-def test_an_empty_fallback_is_unverified(tmp_path: Path):
-    """No readable result and no candidate worktrees left to fall back to."""
-    attempt = _built_attempt(tmp_path, package="vllm", files={"_C.abi3.so": b"carried"})
-    (attempt / "result.json").write_text("not json at all", encoding="utf-8")
-    shutil.rmtree(attempt / "candidates")
     root = tmp_path / "site-packages" / "vllm"
     root.mkdir(parents=True)
 
@@ -2686,7 +2686,7 @@ def test_no_framework_named_judges_nothing(tmp_path: Path):
     root.mkdir(parents=True)
 
     assert IntegratePatchExecutor._levers_without_readers(_lever_state(VLLM_X="1"), root, framework="") == []
-    assert IntegratePatchExecutor._levers_without_readers(_lever_state(VLLM_X="1"), None, framework="vllm") == []
+    assert IntegratePatchExecutor._levers_without_readers(_lever_state(VLLM_X="1"), None, framework="vllm") is None
 
 
 def test_a_lever_this_keep_introduced_is_scanned(tmp_path: Path):
@@ -2731,6 +2731,43 @@ def test_a_malformed_effective_config_is_ignored(tmp_path: Path):
         assert IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm", effective_config=junk) == [
             "VLLM_HL_OLD"
         ], junk
+
+
+def test_levers_with_no_framework_tree_are_unverified_not_clean():
+    enablement = SimpleNamespace(accepted_config={"extra_envs": {"VLLM_HL_X": "1"}})
+
+    assert IntegratePatchExecutor._levers_without_readers(enablement, None, framework="vllm") is None
+
+
+def test_a_linked_build_with_no_framework_tree_is_unverified_not_carried(tmp_path: Path):
+    attempt_root = tmp_path / "builds" / "tb-1"
+    (attempt_root / "candidates" / "c1" / "worktree" / "vllm").mkdir(parents=True)
+    (attempt_root / "candidates" / "c1" / "worktree" / "vllm" / "_C.abi3.so").write_bytes(b"\x00built")
+    enablement = SimpleNamespace(
+        build_manifest=[{"ok": True, "task_id": "tb-1", "probe_task_id": "p-1", "attempt_root": str(attempt_root)}],
+        last_specialist_task_id="p-1",
+        kept_rounds=[],
+    )
+
+    assert IntegratePatchExecutor._build_extensions_not_carried(enablement, None) is None
+
+
+def test_no_levers_and_no_linked_build_stay_clean_without_a_tree():
+    """Nothing to verify is still ``[]``: only a skipped scan becomes ``None``."""
+    assert IntegratePatchExecutor._levers_without_readers(_lever_state(), None, framework="vllm") == []
+    empty = SimpleNamespace(build_manifest=[], last_specialist_task_id="", kept_rounds=[])
+    assert IntegratePatchExecutor._build_extensions_not_carried(empty, None) == []
+
+
+def test_an_unreadable_materialized_config_is_not_replaced_by_the_ambient_env(tmp_path: Path):
+    with pytest.raises(ConfigUnreadable):
+        IntegratePatchExecutor._graded_launch_env({}, str(tmp_path / "gone.yaml"))
+
+
+def test_an_unreadable_materialized_config_does_not_guess_the_framework(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    with pytest.raises(ConfigUnreadable):
+        IntegratePatchExecutor._graded_framework({"framework": "sglang"}, str(tmp_path / "gone.yaml"))
 
 
 def test_a_switch_set_to_off_is_not_a_credential_channel(tmp_path):

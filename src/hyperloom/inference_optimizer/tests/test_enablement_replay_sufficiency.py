@@ -2274,6 +2274,20 @@ def test_an_unscannable_tree_leaves_the_levers_unverified():
     assert "levers_unverified" in _codes(_decide({}, section={"levers_without_readers": None}))
 
 
+@pytest.mark.parametrize(
+    ("field", "code"),
+    [("levers_without_readers", "levers_unverified"), ("build_extensions_not_carried", "build_carry_unverified")],
+)
+def test_a_skipped_scan_alone_refuses_an_otherwise_sufficient_replay(field, code):
+    """``None`` is a scan that did not run, not one that found nothing."""
+    clean = _decide(_sufficient_state(), {**_sufficient_section(), field: []})
+    skipped = _decide(_sufficient_state(), {**_sufficient_section(), field: None})
+
+    assert clean["status"] == "sufficient", clean["reasons"]
+    assert skipped["reasons"] == [{"code": code, "blocks": "replay", "scope": field}]
+    assert skipped["status"] == "insufficient"
+
+
 def test_levers_all_read_name_nothing():
     codes = _codes(_decide({}, section={"levers_without_readers": []}))
 
