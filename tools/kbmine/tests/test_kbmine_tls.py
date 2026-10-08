@@ -17,6 +17,8 @@ from __future__ import annotations
 import inspect
 import re
 
+import pytest
+
 from kbmine.kb_store_client import KBStoreClient
 from kbmine.pulse import PulseClient
 
@@ -32,8 +34,8 @@ def test_a_bundle_produces_a_context_and_its_absence_does_not() -> None:
     plain = KBStoreClient("https://kb.invalid", "t")
     assert plain._ctx is None, "no bundle must leave stdlib defaults alone"
 
-    # Any readable PEM would do; the platform bundle is guaranteed present.
-    import certifi
+    # Any readable PEM would do; certifi's bundle is one, when certifi is installed.
+    certifi = pytest.importorskip("certifi")
 
     scoped = KBStoreClient("https://kb.invalid", "t", ca_bundle=certifi.where())
     assert scoped._ctx is not None

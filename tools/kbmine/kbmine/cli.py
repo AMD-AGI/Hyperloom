@@ -204,6 +204,8 @@ def _note_identity_coverage(report: dict[str, Any], counts: dict[str, Any], *, c
     fetched, matched = counts.get("fetched", 0), counts.get("matched")
     report["coverage"]["identities_fetched"] = fetched
     report["coverage"]["identities_matched"] = matched
+    if not counts.get("searched"):
+        return
     if matched is not None and matched > fetched:
         report["limitations"].append(
             f"read {fetched} of the {matched} identities matching the search (--max-identities {cap}); the rest are "
