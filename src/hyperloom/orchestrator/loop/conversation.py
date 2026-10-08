@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from ..bus.gpu_pool import gpus_by_task_sync
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
@@ -24,6 +24,10 @@ from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..collaborator import CoordinatorCollaborator
 import logging as _logging
+
+if TYPE_CHECKING:
+    from hyperloom.inference_optimizer.experience_kb import ExperienceKBEvidence
+    from .coordinator import Coordinator
 
 log = _logging.getLogger(__name__)
 
@@ -213,11 +217,16 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
 class ConversationCollaborator(CoordinatorCollaborator):
     """Manages conversation rounds: context tools, prompt injection, and round history."""
 
+    def __init__(self, coordinator: "Coordinator") -> None:
+        super().__init__(coordinator)
+        # The Experience KB read rendered into the latest orchestration prompt; proposals emitted on that tick cite it.
+        self.kb_last_read: ExperienceKBEvidence | None = None
+        # Per-agent (seq, msg_id) of the last message its prompt rendered.
+        self._rendered_cursor: dict[str, tuple[int, str]] = {}
+
     async def _kb_prompt_block(self, untested_proposals: str) -> str:
         """Read shared Experience evidence once per FRAMEWORK_AGENT orchestration tick."""
-        from hyperloom.inference_optimizer.experience_kb import integration_for
-
-        integration = integration_for(self._coord, self.session_dir)
+        integration = self._coord.experience_kb
         if integration is None:
             return ""
         evidence = await asyncio.to_thread(
@@ -225,7 +234,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             self.shared_state,
             untested_proposals=untested_proposals,
         )
-        self._coord._kb_last_read = evidence
+        self.kb_last_read = evidence
         if evidence.status != "completed" or not evidence.prompt_block:
             return ""
         block = "\n".join(
@@ -584,7 +593,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         last_seq = cursor.last_processed_seq
         if read:
             last_seq = int(read[-1].seq)
-            self._coord._rendered_cursor[agent_name] = (last_seq, str(read[-1].msg_id))
+            self._rendered_cursor[agent_name] = (last_seq, str(read[-1].msg_id))
         if inbox_lines:
             sections.append(f"=== Inbox for {agent_name} (newest last) ===")
             sections.extend(inbox_lines)
@@ -600,7 +609,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     async def advance_rendered_cursor(self, agent_name: str) -> None:
         """Advance an agent's read cursor to the last message its prompt rendered."""
-        entry = self._coord._rendered_cursor.get(agent_name)
+        entry = self._rendered_cursor.get(agent_name)
         if entry is None:
             return
         seq, msg_id = entry
@@ -632,7 +641,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     async def load_system_prompt(self, agent_name: str) -> str:
         """Load the system prompt for an agent, honoring overrides."""
-        override = self._coord.orch_prompt.get(agent_name)
+        override = self.orch_prompt.get(agent_name)
         if override is not None:
             return override
         role = self.role_registry[agent_name]

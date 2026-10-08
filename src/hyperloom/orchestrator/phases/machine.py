@@ -427,7 +427,7 @@ class MachinePhase(CoordinatorCollaborator):
     def _reseed_orch_prompt_for_phase(self, to_phase: str) -> bool:
         """Re-scope the orchestration system prompt to the phase being entered."""
         phase = (to_phase or "").strip().upper()
-        orch_prompt = self._coord.orch_prompt
+        orch_prompt = self.orch_prompt
         if not phase or orch_prompt.is_user_supplied:
             return False
         rebuild = orch_prompt.rebuild

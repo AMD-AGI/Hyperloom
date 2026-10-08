@@ -207,6 +207,7 @@ def _infer_model_class_from_config(model_path: str) -> str:
 
 
 if TYPE_CHECKING:
+    from hyperloom.inference_optimizer.experience_kb import ExperienceKBIntegration
     from .proposals import PendingProposal
 
 
@@ -343,8 +344,6 @@ class Coordinator:
             _cycle_hours = env_float("INFERENCE_OPTIMIZER_CYCLE_HOURS", default=DEFAULT_CYCLE_HOURS)
             self.shared_state.cycle_minutes = max(1.0, _cycle_hours * 60.0)
 
-        # Per-agent (seq, msg_id) of the last message its prompt rendered.
-        self._rendered_cursor: dict[str, tuple[int, str]] = {}
         self._prompt_snapshots = PromptSnapshotTracker()
 
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
@@ -382,6 +381,15 @@ class Coordinator:
         """RecipeKB owned by the knowledge plane."""
         plane = self.knowledge_plane
         return plane.recipe_kb if plane is not None else None
+
+    @property
+    def experience_kb(self) -> ExperienceKBIntegration | None:
+        """The session's one Experience service integration, built on first use; None when reads are off."""
+        if "_experience_kb" not in self.__dict__:
+            from hyperloom.inference_optimizer.experience_kb import integration_for
+
+            self.__dict__["_experience_kb"] = integration_for(self.shared_state, self.session_dir)
+        return self.__dict__["_experience_kb"]
 
     @property
     def run_deadline(self) -> Deadline | None:

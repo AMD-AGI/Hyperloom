@@ -135,7 +135,7 @@ def _stamp_kb_exposure(
     """
     if source != "orchestration":
         return
-    evidence = getattr(router._coord, "_kb_last_read", None)
+    evidence = router._coord.conversation.kb_last_read
     current = evidence is not None and int(getattr(evidence, "tick", -1)) == int(
         getattr(router.shared_state, "tick", 0) or 0
     )

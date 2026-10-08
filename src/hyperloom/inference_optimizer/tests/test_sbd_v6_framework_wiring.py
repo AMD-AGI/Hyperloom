@@ -937,7 +937,7 @@ def test_a_delegated_grid_is_a_proposal_carrying_its_read_and_relayed_citations(
     state = coord.shared_state
     state.phase = "FRAMEWORK_AGENT"
     coord.phase_framework._open_framework_timeline()
-    coord._kb_last_read = ExperienceKBEvidence(
+    coord.conversation.kb_last_read = ExperienceKBEvidence(
         tick=state.tick,
         read_id="read-orchestration",
         status="completed",
