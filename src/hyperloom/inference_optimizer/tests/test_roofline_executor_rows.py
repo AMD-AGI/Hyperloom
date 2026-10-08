@@ -246,6 +246,10 @@ async def test_a_recovered_profile_and_an_n26_retry_are_the_effective_runs(tmp_p
             "primary_rank_trace_missing",
         ),
         (
+            {"status": "failed", "error_class": "recipe_lever_unavailable", "error": "no primary rank trace"},
+            "recipe_lever_unavailable",
+        ),
+        (
             {
                 "status": "failed",
                 "error_class": "capture_failed",
@@ -255,7 +259,7 @@ async def test_a_recovered_profile_and_an_n26_retry_are_the_effective_runs(tmp_p
             "capture_failed",
         ),
     ],
-    ids=["error_class", "capture_reason"],
+    ids=["error_class", "recipe_lever_unavailable", "capture_reason"],
 )
 @pytest.mark.asyncio
 async def test_a_non_retryable_failure_rows_one_attempt_and_stops(tmp_path, monkeypatch, fatal, error_class):
