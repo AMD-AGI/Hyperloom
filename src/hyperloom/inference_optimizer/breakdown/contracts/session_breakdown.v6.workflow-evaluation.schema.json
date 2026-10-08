@@ -36,7 +36,7 @@
               "const": "hyperloom.workflow_evaluation.v1"
             },
             "contract_digest": {
-              "const": "51edcb99d1c16f83961757ecfd4da87666c186a5b2441a2d3575cec17713f99b"
+              "const": "1874f07b458e942a8a96ca32c1eb3dbe7423dedc3b5dec8f66dd121f5770dff7"
             },
             "run_flags": {
               "type": "object",
@@ -683,6 +683,7 @@
             "baseline_accuracy_failed",
             "baseline_arg_error",
             "baseline_failed",
+            "baseline_over_latency_budget",
             "coordinator_exception",
             "custom",
             "emergency",
@@ -1345,8 +1346,7 @@
         "phase_spent_sec",
         "runtime_sec",
         "post_ready_runtime_sec",
-        "warm_runtime_sec",
-        "double_run"
+        "warm_runtime_sec"
       ],
       "properties": {
         "failure_streak": {
@@ -1389,9 +1389,6 @@
             "number",
             "null"
           ]
-        },
-        "double_run": {
-          "type": "boolean"
         }
       },
       "additionalProperties": false

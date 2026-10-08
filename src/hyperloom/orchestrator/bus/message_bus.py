@@ -164,6 +164,10 @@ class MessageBus:
         rows = await self.db.fetchall(sql, params)
         return [Message.from_row(r) for r in rows]
 
+    def count_sync(self) -> int:
+        """Return how many events the log holds."""
+        return int(self.db.fetchone_sync("SELECT COUNT(*) FROM events")[0])
+
     def inbox_context_sync(self, to_agent: str, *, after_seq: int = 0) -> list[Message]:
         """Read an uncapped recipient inbox, including all topics and self-sent events."""
         rows = self.db.fetchall_sync(

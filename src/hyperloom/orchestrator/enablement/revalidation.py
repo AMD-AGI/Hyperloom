@@ -15,7 +15,6 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..collaborator import CoordinatorCollaborator
-from ..loop.coordinator_helpers import baseline_benchmark_script
 from ..state.task_registry import TerminalTaskReuse, create_in_cursor, task_dispatch_origin
 from .params import _enablement_carrier_params
 
@@ -34,7 +33,7 @@ class _RowAlreadyLive(Exception):
 class EnablementRevalidation(CoordinatorCollaborator):
     """Re-measures a kept enablement round against a real baseline."""
 
-    async def _maybe_enqueue_enablement_baseline_revalidation(self) -> str:
+    async def maybe_enqueue_enablement_baseline_revalidation(self) -> str:
         """Enqueue one genuine baseline to revalidate a KEEP'd eval-origin patch."""
         state = self.shared_state
         if not bool(state.enablement.validation_pending):
@@ -46,7 +45,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
                 if str(getattr(t, "task_id", "") or "") == tracked_tid:
                     return tracked_tid
         # Do not open a row the dispatcher would cancel on sight.
-        denied = self._time_budget_denial_for_action("baseline")
+        denied = self._coord.dispatcher.time_budget_denial_for_action("baseline")
         if denied is not None:
             log.info("ENABLEMENT revalidation: window held open, not enqueued -- %s", denied)
             return ""
@@ -56,7 +55,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
             "disable_run_eval": False,
             **_enablement_carrier_params(state),
         }
-        benchmark_script = baseline_benchmark_script(state)
+        benchmark_script = state.accepted_baseline_script()
         if benchmark_script:
             params["benchmark_script"] = benchmark_script
         accepted_cfg = str(state.enablement.accepted_config_path or "").strip()
@@ -107,7 +106,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
             stays open and the next tick tries again.
         """
         state = self.shared_state
-        baseline_lanes, baseline_ttl = self._registry_lanes_ttl("baseline")
+        baseline_lanes, baseline_ttl = self._coord.dispatcher.registry_lanes_ttl("baseline")
         task_id, generation = await self._open_round_past_spent_generations(
             params=params,
             key_for=lambda gen: f"enablement_revalidation:gen{gen}",
@@ -120,7 +119,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
         state.enablement.revalidation_generation = generation
         return task_id
 
-    async def _open_row_past_spent_generations(
+    async def open_row_past_spent_generations(
         self,
         *,
         kind: str,

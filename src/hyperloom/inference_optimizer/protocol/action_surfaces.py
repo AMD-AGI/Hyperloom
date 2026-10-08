@@ -162,7 +162,8 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             side_effects=("launches_server", "writes_results"),
             description=(
                 "Post-sweep concurrency comparison: benchmark baseline vs current_best across a CONC ladder. "
-                "On by default; opt out via --no-enable-conc-sweep; bounded by --conc-sweep-total-budget-sec "
+                "On by default, off under AgentX; force with --enable-conc-sweep / --no-enable-conc-sweep; "
+                "bounded by --conc-sweep-total-budget-sec "
                 "(default 2.5h)."
             ),
         ),
@@ -285,9 +286,8 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             requires_lanes=("server_lifecycle", "benchmark_lane"),
             side_effects=("launches_server", "reads_server", "writes_results"),
             description=(
-                "Coordinator-internal one-shot replay of T0 warm_start_recipe.best_config; reproducing "
-                "≥ --warm-replay-min-reproduce-pct of the historical gain pushes the warm config onto "
-                "optimization_stack."
+                "Coordinator-internal one-shot replay of T0 warm_start_recipe.best_config; "
+                "a measured gain clearing the keep threshold pushes the warm config onto optimization_stack."
             ),
         ),
         "report": ActionMetadata(

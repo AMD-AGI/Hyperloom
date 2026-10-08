@@ -32,6 +32,22 @@ def _runner(**over):
     return SpecialistRunner(**kwargs)
 
 
+def _checkout(path, *files):
+    """A git checkout tracking ``files``."""
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    for rel in files:
+        target = path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"], check=True
+    )
+    return path
+
+
 def test_safe_redact():
     line = "export ANTHROPIC_API_KEY=redact_me and GITHUB_TOKEN=redact_me_too"
     out = sr._safe_redact(line)
@@ -237,14 +253,14 @@ def test_write_specialist_done_partial(tmp_path):
     assert "ts" in payload
 
 
-def _finalize(r, tmp_path, payload):
+def _finalize(r, tmp_path, payload, params=None):
     """Drive ``_finalize`` far enough to inspect the artifact it writes."""
     prep = sr._PreparedRun(
         domain=SimpleNamespace(key="serving_specialist"),
         gap="gap-1",
         workspace=tmp_path,
     )
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params=dict(params or {})), extra={})
     result = r._finalize(
         ctx=ctx,
         prep=prep,
@@ -256,6 +272,28 @@ def _finalize(r, tmp_path, payload):
         patches_written=[],
     )
     return result, json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
+
+
+def test_a_specialist_keeps_only_citations_of_experiences_its_dispatch_showed(tmp_path):
+    shown_id, unshown_id = "exp-" + "1" * 32, "exp-" + "2" * 32
+    cite = {"id": shown_id, "stance": "avoid", "claim": "It reverted on this stack."}
+    _, written = _finalize(
+        _runner(),
+        tmp_path,
+        {
+            "proposal_set": [
+                {"name": "v1", "reason": "why", "experience_citations": [cite, {**cite, "id": unshown_id}]},
+                {"name": "v2", "reason": "why"},
+            ],
+            "experience_citations": [{**cite, "stance": "adapt"}, {**cite, "id": unshown_id, "stance": "adapt"}],
+            "summary": "s",
+        },
+        params={"kb_rendered_refs": [{"id": shown_id, "purpose": "representative"}]},
+    )
+
+    assert written["proposal_set"][0]["experience_citations"] == [cite]
+    assert "experience_citations" not in written["proposal_set"][1]
+    assert written["experience_citations"] == [{**cite, "stance": "adapt"}]
 
 
 def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(tmp_path):
@@ -373,12 +411,8 @@ def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, m
     one as ``missing_target`` — leaving an env-only proposal that toggled a
     switch with no code behind it and measured 0.0% five rounds running.
     """
-    aiter = tmp_path / "aiter"
-    aiter.mkdir()
-    (aiter / ".git").mkdir()
-    worldplay = tmp_path / "HY-WorldPlay"
-    worldplay.mkdir()
-    (worldplay / ".git").mkdir()
+    aiter = _checkout(tmp_path / "aiter", "aiter/__init__.py")
+    worldplay = _checkout(tmp_path / "HY-WorldPlay", "hyvideo/__init__.py")
     monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(worldplay))
 
     cfg = sr.SpecialistSubprocessConfig(
@@ -399,28 +433,54 @@ def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, m
         )
     )
 
-    _wt, base, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
+    _wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
 
     assert err == ""
-    assert base == worldplay, f"specialist would patch {seen.get('base')}, not the framework"
+    assert source.root == worldplay and seen["base"] == worldplay, f"specialist would patch {seen.get('base')}"
 
 
-def test_maybe_setup_worktree_falls_back_when_the_framework_is_not_a_checkout(tmp_path, monkeypatch):
-    """A pip-installed framework must not cost the specialist its isolation."""
-    aiter = tmp_path / "aiter"
-    aiter.mkdir()
-    (aiter / ".git").mkdir()
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(tmp_path / "not-a-checkout"))
+def test_maybe_setup_worktree_snapshots_a_framework_that_is_not_a_checkout(tmp_path, monkeypatch):
+    """A pip-installed framework keeps its isolation without borrowing whatever checkout sorts first."""
+    aiter = _checkout(tmp_path / "aiter", "aiter/__init__.py")
+    package = tmp_path / "site-packages" / "worldplay"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(package))
+
+    cfg = sr.SpecialistSubprocessConfig(framework_source_roots=(str(aiter),))
+    r = _runner(backend_factory=None, subprocess_config=cfg, session_dir=tmp_path / "session")
+    seen: dict = {}
+
+    def _fake_setup(base, worktree_path, branch):
+        seen["base"] = base
+        return worktree_path, ""
+
+    monkeypatch.setattr(sr, "_setup_worktree", _fake_setup)
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"framework": "worldplay"}))
+
+    _wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
+
+    assert err == ""
+    assert source.root == package and not source.checkout
+    assert seen["base"].parent == tmp_path / "session" / "tree_snapshots"
+    assert not (package / ".git").exists()
+
+
+def test_maybe_setup_worktree_has_nothing_to_isolate_without_a_named_tree(tmp_path, monkeypatch):
+    aiter = _checkout(tmp_path / "aiter", "aiter/__init__.py")
+    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(tmp_path / "absent"))
+    monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+    monkeypatch.setattr(sr, "resolve_framework_tree", lambda framework: "")
 
     cfg = sr.SpecialistSubprocessConfig(framework_source_roots=(str(aiter),))
     r = _runner(backend_factory=None, subprocess_config=cfg)
-    monkeypatch.setattr(sr, "_setup_worktree", lambda base, path, branch: (path, ""))
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"framework": "worldplay"}))
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(task_id="t", params={"framework": "worldplay", "domain": "framework_rewrite_specialist"})
+    )
 
-    _wt, base, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
+    wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
 
-    assert err == ""
-    assert base == aiter
+    assert (wt, source, err) == (None, None, sr.NO_GIT_FRAMEWORK_SOURCE_ROOT)
 
 
 def test_patch_path_within_bases_accepts_sandbox_paths(tmp_path):

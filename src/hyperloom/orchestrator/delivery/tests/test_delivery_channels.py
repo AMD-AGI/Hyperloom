@@ -15,7 +15,6 @@ from hyperloom.inference_optimizer.reference_script import render_reference_scri
 from hyperloom.orchestrator.actions.executors._nogit_patch import (
     _apply_patch_no_git,
     _reverse_applies_cleanly,
-    _revert_patches_no_git,
 )
 from hyperloom.orchestrator.bringup.trees import VCS_GIT, VCS_NONE
 from hyperloom.orchestrator.delivery import file_digest, ledger
@@ -95,8 +94,8 @@ def test_the_non_git_channel_records_every_backup_before_it_mutates(tmp_path: Pa
     assert persisted[0]["pre_image_sha256"] == pre_image
 
     # A process that lost the in-memory records still restores the tree.
-    reverted_ok, errors = _revert_patches_no_git([], backup_root=backup_root)
-    assert reverted_ok, errors
+    _reverted, errors = ledger.restore_records(ledger.load_records(backup_root))
+    assert not errors, errors
     assert target.read_text(encoding="utf-8") == "one\n"
 
 

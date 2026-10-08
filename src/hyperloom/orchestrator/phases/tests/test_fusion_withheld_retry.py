@@ -5,46 +5,36 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.tests.conftest import make_coordinator
 from hyperloom.orchestrator.phases.kernel import MAX_FUSION_WITHHELD_RETRIES, KernelPhase
 
 REQUIRED = KernelPhase._fusion_required_before_kernel_opt
 RECORD = KernelPhase._handle_fusion_result
 
 
-def _phase(last_fusion, *, spent: int = 0, session_dir=None):
-    """A stand-in carrying only what the two methods under test read."""
-    state = SimpleNamespace(
-        framework="sglang",
-        last_profile_trace="/tmp/decode.trace.json.gz",
-        last_fusion=last_fusion,
-        fusion_infra_aborts=0,
-        fusion_withheld_retries=spent,
-        macro_cycle=1,
-        save=lambda *a, **k: None,
-    )
-    bus = SimpleNamespace(posted=[])
+def _phase(last_fusion, *, spent: int = 0, session_dir):
+    """The real kernel phase over a real session, with the bus and integration stubbed out."""
+    coord = make_coordinator(session_dir)
+    state = coord.shared_state
+    state.framework = "sglang"
+    state.last_profile_trace = "/tmp/decode.trace.json.gz"
+    state.last_fusion = last_fusion or {}
+    state.fusion_withheld_retries = spent
+    state.macro_cycle = 1
 
-    async def _append_and_seq(message):
-        bus.posted.append(message)
-
-    bus.append_and_seq = _append_and_seq
-
-    async def _integrate_fusion(result):
+    async def _append_and_seq(_message):
         return None
 
-    phase = SimpleNamespace(
-        shared_state=state,
-        bus=bus,
-        session_dir=session_dir,
-        _integrate_fusion=_integrate_fusion,
-    )
-    phase._kernel_timeline = KernelPhase._kernel_timeline.__get__(phase)
-    phase._record_fusion_timeline = KernelPhase._record_fusion_timeline.__get__(phase)
+    async def _integrate_fusion(_result):
+        return None
+
+    coord.bus.append_and_seq = _append_and_seq
+    phase = coord.phase_kernel
+    phase._integrate_fusion = _integrate_fusion
     return phase
 
 
@@ -63,37 +53,37 @@ def _no_skip_env(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_SKIP_FUSION", raising=False)
 
 
-def test_a_round_with_unfunded_targets_is_retried():
+def test_a_round_with_unfunded_targets_is_retried(tmp_path):
     """The withheld targets were never tried, so the round answers for nothing."""
-    assert REQUIRED(_phase(_round(withheld=3))) is True
+    assert REQUIRED(_phase(_round(withheld=3), session_dir=tmp_path)) is True
 
 
-def test_repeated_unfunded_rounds_stop_being_retried():
+def test_repeated_unfunded_rounds_stop_being_retried(tmp_path):
     """Every retry re-runs discovery, so a target that keeps being re-discovered and re-withheld must not re-spend the budget without bound."""
-    assert REQUIRED(_phase(_round(withheld=3), spent=MAX_FUSION_WITHHELD_RETRIES)) is False
+    assert REQUIRED(_phase(_round(withheld=3), spent=MAX_FUSION_WITHHELD_RETRIES, session_dir=tmp_path)) is False
 
 
-def test_a_fully_funded_round_still_latches():
+def test_a_fully_funded_round_still_latches(tmp_path):
     """Nothing was withheld, so the round answers for the whole slate."""
-    assert REQUIRED(_phase(_round(withheld=0))) is False
+    assert REQUIRED(_phase(_round(withheld=0), session_dir=tmp_path)) is False
 
 
-def test_a_round_without_a_nomination_summary_is_unaffected():
+def test_a_round_without_a_nomination_summary_is_unaffected(tmp_path):
     """The combine path and every pre-contract record carry no summary."""
-    assert REQUIRED(_phase({"status": "complete", "micro_decision": "no_improvement"})) is False
+    assert REQUIRED(_phase({"status": "complete", "micro_decision": "no_improvement"}, session_dir=tmp_path)) is False
 
 
 @pytest.mark.parametrize("withheld", ["2", None, "", "not-a-number", -1])
-def test_an_unreadable_withheld_count_latches_as_before(withheld):
+def test_an_unreadable_withheld_count_latches_as_before(withheld, tmp_path):
     """The count round-trips through state.json, so its type is not guaranteed."""
-    assert REQUIRED(_phase(_round(withheld=withheld))) is False
+    assert REQUIRED(_phase(_round(withheld=withheld), session_dir=tmp_path)) is False
 
 
-def test_a_kept_round_is_still_blocked_by_its_own_status():
+def test_a_kept_round_is_still_blocked_by_its_own_status(tmp_path):
     """A KEEP is a real result; withheld targets do not re-open it."""
     kept = _round(withheld=3, status="ok")
     kept["kept"] = True
-    assert REQUIRED(_phase(kept)) is False
+    assert REQUIRED(_phase(kept, session_dir=tmp_path)) is False
 
 
 @pytest.mark.asyncio
@@ -122,28 +112,12 @@ async def test_the_counter_survives_a_state_round_trip(tmp_path):
     """
     from hyperloom.orchestrator.state.shared_state import SharedState
 
-    state = SharedState.load_or_init(tmp_path)
-    state.framework = "sglang"
-    state.last_profile_trace = "/tmp/decode.trace.json.gz"
-    phase = SimpleNamespace(shared_state=state, session_dir=tmp_path)
-    phase.bus = SimpleNamespace()
-
-    async def _append_and_seq(_message):
-        return None
-
-    phase.bus.append_and_seq = _append_and_seq
-
-    async def _integrate_fusion(_result):
-        return None
-
-    phase._integrate_fusion = _integrate_fusion
-    phase._kernel_timeline = KernelPhase._kernel_timeline.__get__(phase)
-    phase._record_fusion_timeline = KernelPhase._record_fusion_timeline.__get__(phase)
+    phase = _phase(None, session_dir=tmp_path)
 
     for _ in range(MAX_FUSION_WITHHELD_RETRIES):
         await RECORD(phase, _round(withheld=2))
 
     reloaded = SharedState.load_or_init(tmp_path)
     assert reloaded.fusion_withheld_retries == MAX_FUSION_WITHHELD_RETRIES
-    phase.shared_state = reloaded
+    phase._coord.shared_state = reloaded
     assert REQUIRED(phase) is False

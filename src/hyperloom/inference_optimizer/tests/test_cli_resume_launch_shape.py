@@ -65,7 +65,6 @@ def test_launch_shape_survives_a_state_roundtrip():
         nodes=4,
         warm_replay_enabled=False,
         warm_replay_min_confidence=0.55,
-        warm_replay_min_reproduce_pct=0.6,
         bypass_scripts_dir="/scripts",
         framework_repo_path="/fw",
         benchmark_backend="bypass",
@@ -78,7 +77,6 @@ def test_launch_shape_survives_a_state_roundtrip():
     assert restored.nodes == 4
     assert restored.warm_replay_enabled is False
     assert restored.warm_replay_min_confidence == 0.55
-    assert restored.warm_replay_min_reproduce_pct == 0.6
     assert restored.bypass_scripts_dir == "/scripts"
     assert restored.framework_repo_path == "/fw"
     assert restored.benchmark_backend == "bypass"
@@ -93,7 +91,6 @@ def test_pre_existing_state_without_the_fields_loads_defaults():
     assert restored.nodes == 1
     assert restored.warm_replay_enabled is True
     assert restored.warm_replay_min_confidence == 0.7
-    assert restored.warm_replay_min_reproduce_pct == 0.8
     assert restored.bypass_scripts_dir == ""
     assert restored.framework_repo_path == ""
     assert restored.benchmark_backend == ""

@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 
 
@@ -76,7 +76,8 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
         osl=1024,
         conc=64,
     )
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    phase = coord.phase_kernel
+    phase._record_geak_kernel_journey = lambda _result: None
 
     def _runner_should_not_be_needed(_name: str) -> Path:
         raise RuntimeError("runner should not be resolved when result.json exists")
@@ -91,9 +92,9 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
     async def _record_revalidation(*, reason: str) -> None:
         revalidations.append(reason)
 
-    coord.phase_kernel._revalidate_geak_candidate = _record_revalidation  # type: ignore[method-assign]
+    phase._revalidate_geak_candidate = _record_revalidation  # type: ignore[method-assign]
 
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await phase._run_geak_kernel_phase(from_phase="KERNEL")
 
     # The result.json is recovered into state, but as an unvalidated candidate.
     assert coord.shared_state.geak_result["status"] == "ok"
@@ -103,7 +104,6 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
     assert coord.shared_state.current_best["action"] == "baseline"
     assert coord.shared_state.cumulative_gain_validated == pytest.approx(0.0)
     assert not any(e.get("action") == "geak_e2e" for e in coord.shared_state.optimization_stack)
-    assert coord.shared_state.pending_escalate_hint == ESCALATE_HINT_SKIP_TO_SWEEP
 
     # The recovered candidate is handed to the same-harness revalidation.
     assert revalidations == ["geak_e2e_win_recovered"]
@@ -156,7 +156,7 @@ async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(
         _runner_resolved,
     )
 
-    await coord._run_geak_kernel_phase(from_phase="FRAMEWORK_AGENT")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="FRAMEWORK_AGENT")
 
     # The recovery short-circuit must not have fired; the normal path resolves the runner (and here aborts via the
     # injected error).
@@ -185,7 +185,8 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
         conc=64,
         max_model_len=2248,
     )
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    phase = coord.phase_kernel
+    phase._record_geak_kernel_journey = lambda _result: None
 
     monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.setenv("TP", "8")
@@ -199,7 +200,7 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
         _runner_resolved,
     )
 
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["max_model_len"] == 2248
@@ -266,7 +267,8 @@ async def test_an_agentx_handoff_names_the_server_script_not_the_aiperf_client(
         conc=8,
         baseline_config_path=str(recipe),
     )
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    phase = coord.phase_kernel
+    phase._record_geak_kernel_journey = lambda _result: None
 
     monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.setenv("TP", "8")
@@ -279,7 +281,7 @@ async def test_an_agentx_handoff_names_the_server_script_not_the_aiperf_client(
         _runner_resolved,
     )
 
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["launch_server_script"] == str(benchmarks / "vllm_mi355x.sh")
@@ -305,7 +307,8 @@ async def test_geak_handoff_forwards_the_actual_gpu_pin(
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = SharedState(baseline_tput=100.0, model_path="/models/m", gpu_type="mi355x")
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    phase = coord.phase_kernel
+    phase._record_geak_kernel_journey = lambda _result: None
 
     monkeypatch.setenv("TP", "1")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "7")
@@ -320,7 +323,7 @@ async def test_geak_handoff_forwards_the_actual_gpu_pin(
         _runner_resolved,
     )
 
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["schema_version"] >= 3
@@ -363,7 +366,8 @@ async def test_geak_handoff_keeps_a_hip_pin_against_the_recipe_autofill(
         gpu_type="mi355x",
         baseline_config_path=str(recipe),
     )
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    phase = coord.phase_kernel
+    phase._record_geak_kernel_journey = lambda _result: None
 
     monkeypatch.setenv("TP", "2")
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "4,5")
@@ -378,7 +382,7 @@ async def test_geak_handoff_keeps_a_hip_pin_against_the_recipe_autofill(
         _runner_resolved,
     )
 
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["gpu_pin"]["var"] == "HIP_VISIBLE_DEVICES"
