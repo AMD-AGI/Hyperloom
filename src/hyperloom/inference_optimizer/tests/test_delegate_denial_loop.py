@@ -57,7 +57,7 @@ async def test_delegate_terminal_collision_appends_retry_suffix(session_dir):
         await c.tasks.transition(first.task_id, "running", evidence={})
         await c.tasks.transition(first.task_id, "succeeded", evidence={})
 
-        await c._handle_delegate("orchestration", _delegate(key="dup-key-1"))
+        await c.router.handle_delegate("orchestration", _delegate(key="dup-key-1"))
         queued = await c.tasks.by_state("queued")
         keys = {t.idempotency_key for t in queued}
         assert "dup-key-1-retry1" in keys
@@ -76,7 +76,7 @@ async def test_delegate_running_collision_denies_without_new_task(session_dir):
             dispatch_class="llm",
         )
         before = len(await c.tasks.by_state("queued"))
-        await c._handle_delegate("orchestration", _delegate(key="dup-key-run"))
+        await c.router.handle_delegate("orchestration", _delegate(key="dup-key-run"))
         after = len(await c.tasks.by_state("queued"))
         assert after == before
         obs = await c.bus.tail(topic="observation")
@@ -96,7 +96,7 @@ async def test_delegate_source_patch_without_git_root_prunes_without_retry(sessi
     try:
         c.shared_state.framework = "sglang"
         c.shared_state.framework_repo_path = ""
-        await c._handle_delegate(
+        await c.router.handle_delegate(
             "orchestration",
             _delegate(
                 action="specialist",
@@ -118,7 +118,7 @@ async def test_delegate_fallback_key_uses_tick_and_content_fingerprint(session_d
     c = _silent_coordinator(session_dir)
     try:
         c.shared_state.tick = 42
-        await c._handle_delegate(
+        await c.router.handle_delegate(
             "orchestration",
             _delegate(key=None, params={"grid": [{"name": "a"}]}),
         )
@@ -151,7 +151,7 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
                 type=IntentType.DELEGATE,
                 payload={"action_name": "baseline", "target_proposal_msg_id": "proposal-42"},
             )
-            await coordinator._record_policy_denied(
+            await coordinator.writeback.record_policy_denied(
                 "orchestration",
                 intent,
                 PolicyDenied("denied", rule="phase_action_not_allowed", hint="wait"),
@@ -182,13 +182,13 @@ async def test_policy_denial_streak_records_streak_at_two(session_dir):
 
         intent = _delegate(action="backends", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
-        await c._record_policy_denied(
+        await c.writeback.record_policy_denied(
             "orchestration",
             intent,
             pd,
             action_name="backends",
         )
-        await c._record_policy_denied(
+        await c.writeback.record_policy_denied(
             "orchestration",
             intent,
             pd,
@@ -213,7 +213,7 @@ async def test_policy_denial_streak_no_longer_prunes_family_at_five(session_dir)
         intent = _delegate(action="params", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
         for _ in range(5):
-            await c._record_policy_denied(
+            await c.writeback.record_policy_denied(
                 "orchestration",
                 intent,
                 pd,
@@ -241,7 +241,7 @@ async def test_policy_denial_streak_no_longer_stops_run_at_ten(session_dir):
         intent = _delegate(action="backends", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
         for _ in range(10):
-            await c._record_policy_denied(
+            await c.writeback.record_policy_denied(
                 "orchestration",
                 intent,
                 pd,
@@ -267,14 +267,14 @@ async def test_successful_delegate_resets_policy_denial_streak(session_dir):
 
         intent = _delegate(key="k-reset")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
-        await c._record_policy_denied(
+        await c.writeback.record_policy_denied(
             "orchestration",
             intent,
             pd,
             action_name="long_running",
         )
         assert c.shared_state.policy_denial_streak.get("long_running:duplicate_idempotency_key") == 1
-        await c._handle_delegate("orchestration", _delegate(key="fresh-key"))
+        await c.router.handle_delegate("orchestration", _delegate(key="fresh-key"))
         assert not any(k.startswith("long_running:") for k in c.shared_state.policy_denial_streak)
     finally:
         await c.stop()
@@ -359,18 +359,16 @@ def test_dead_c_mission_summary_tag_points_at_explore():
     assert "validate_stack" not in text
 
 
-def test_mission_summary_surfaces_resume_pending_revalidation():
+def test_mission_summary_flags_a_stack_that_outgrew_its_validation():
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     s = SharedState(
         baseline_tput=100.0,
         optimization_stack=[{"action": "integrate_patch", "variant_name": "p1"}],
-        cumulative_gain_validated_stack_len=1,
-        resume_pending_revalidation=True,
+        cumulative_gain_validated_stack_len=0,
     )
     text = s.to_mission_summary()
-    assert "resume_pending_revalidation=true" in text
-    assert "recheck current stack" in text
+    assert "stack changed since last validation" in text
 
 
 # The Robustness prune_branch family list used to live in robustness.md, which was loaded every tick and discarded by

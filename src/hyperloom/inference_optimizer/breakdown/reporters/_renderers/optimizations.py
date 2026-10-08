@@ -4,11 +4,10 @@
 """Adopted-optimization renderer, read off the canonical stack ledger.
 
 Every figure here is read from ``outcome.validation``, which the stack timeline
-event recorded as each adoption was accepted. The section used to be projected
-from three v4 entity streams and published eight guard counts to report where
-the three disagreed; six of those counts have no referent once a fact is
-recorded at the moment it becomes true, and the two that remain are about the
-measurements rather than about the bookkeeping.
+event recorded as each adoption was accepted. A fact recorded at the moment
+it becomes true has no second stream to disagree with, so the only guard
+counts published are about the measurements rather than about the
+bookkeeping.
 """
 
 from __future__ import annotations

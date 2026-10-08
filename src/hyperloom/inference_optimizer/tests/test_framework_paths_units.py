@@ -878,3 +878,43 @@ class TestResolveFrameworkTree:
     def test_unregistered_name_is_rejected(self, name):
         with pytest.raises(KeyError):
             fp.resolve_framework_tree(name)
+
+
+def _git_tracking(checkout: Path, *files: str) -> Path:
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    for rel in files:
+        target = checkout / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(checkout), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(checkout), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"],
+        check=True,
+    )
+    return checkout
+
+
+class TestFrameworkApplyTree:
+    def test_a_package_in_a_checkout_is_edited_at_the_checkout(self, tmp_path):
+        checkout = _git_tracking(tmp_path / "sglang", "python/sglang/__init__.py")
+        tree = fp.framework_apply_tree(f"{checkout}/python/sglang/")
+        assert tree == fp.FrameworkTree(tree=checkout / "python" / "sglang", root=checkout, checkout=True)
+
+    def test_a_pip_installed_package_is_edited_in_place(self, tmp_path):
+        package = tmp_path / "site-packages" / "vllm"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        assert fp.framework_apply_tree(f"{package}/") == fp.FrameworkTree(tree=package, root=package, checkout=False)
+
+    def test_an_untracked_package_under_some_repository_is_not_that_repository(self, tmp_path):
+        project = _git_tracking(tmp_path / "project", "README.md")
+        package = project / ".venv" / "site-packages" / "vllm"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        assert fp.framework_apply_tree(str(package)) == fp.FrameworkTree(tree=package, root=package, checkout=False)
+
+    def test_nothing_named_is_nothing(self, tmp_path):
+        assert fp.framework_apply_tree("") is None
+        assert fp.framework_apply_tree(str(tmp_path / "absent")) is None

@@ -69,6 +69,7 @@ _NON_RETRYABLE_PROFILE_ERRORS = frozenset(
     {
         "agentx_multi_node_profile_unsupported",
         "primary_rank_trace_missing",
+        "recipe_lever_unavailable",
     }
 )
 _NON_RETRYABLE_CAPTURE_REASONS = frozenset(
@@ -202,7 +203,7 @@ def _extract_steady_state_retry_mode(
 
 
 def _extract_trace_path(profile_result: dict[str, Any]) -> str:
-    """Pick the trace path like Coordinator's ``_promote_to_shared_state``: prefer ``main_trace_path``, else
+    """Pick the trace path like Coordinator's ``promote_to_shared_state``: prefer ``main_trace_path``, else
     ``trace_files[0]`` for legacy results.
     """
     if not isinstance(profile_result, dict):
@@ -803,9 +804,7 @@ class RooflineExecutor:
                     profile_result.get("error_class") in _NON_RETRYABLE_PROFILE_ERRORS
                     or capture_reason in _NON_RETRYABLE_CAPTURE_REASONS
                 ):
-                    # Recorded before returning: this branch used to leave the attempt out of ``runs`` entirely,
-                    # so the one class of failure nobody can retry their way out of was also the one the event
-                    # could not describe.
+                    # Recorded before returning, so ``runs`` also describes the failure no retry can get past.
                     await _note_profile_run(
                         status="failed",
                         result=profile_result,
@@ -1531,6 +1530,8 @@ class RooflineExecutor:
 
         parent_task = parent_ctx.task
         params = dict(parent_task.params or {})
+        # Accuracy is gated by baseline and explore; a profile run only needs the trace.
+        params["disable_run_eval"] = True
         if disable_cuda_graph:
             from .baseline import _with_cuda_graph_disabled
 

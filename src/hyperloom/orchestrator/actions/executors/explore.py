@@ -33,8 +33,10 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.failure_evidence import (
+    UNMEASURED_OUTCOMES,
     FAILURE_STAGE_DECISION,
     FAILURE_STAGE_WARMUP,
+    classify_failure_attribution,
     make_failure_id,
     tail_excerpt,
 )
@@ -62,6 +64,7 @@ from ._grid_base import (
     TS_KILLED_OVERTIME,
     TS_SKIPPED_DEDUP,
 )
+from .benchmark_result import double_run_requested
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     _MN_BACKENDS_PRIORITY,
@@ -100,17 +103,34 @@ log = logging.getLogger(__name__)
 
 _now_iso = functools.partial(now_iso, "auto")
 
+STACK_REVALIDATE_SOURCE: str = "stack_revalidate"
+
+
+def is_stack_revalidation(params: dict | None) -> bool:
+    return str((params or {}).get("source") or "") == STACK_REVALIDATE_SOURCE
+
 
 # Audit/provenance metadata stashed on a GridVariant that must survive being rebuilt into a derived variant.
 _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "provenance",
+    "reasoning_origin",
     "scope",
     "overlay_pythonpath",
     "accepted_kernels",
     "kb_evidence",
     "pr_evidence",
     "source_evidence",
+    "experience_citations",
 )
+
+
+def _decision_fields(gv: Any) -> dict[str, Any]:
+    """Why this variant was proposed, as authored at action time, for every row that records it."""
+    return {
+        "note": gv.note,
+        "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
+        "experience_citations": list(getattr(gv, "experience_citations", []) or []),
+    }
 
 
 def _explore_eval_disabled(shared_state: Any, params: dict[str, Any]) -> bool:
@@ -170,6 +190,15 @@ def _variant_control_fields(variant: Any) -> dict[str, Any]:
     return out
 
 
+def _action_reasoning(raw: dict[str, Any]) -> tuple[str, str]:
+    """Return the action-authored rationale and the payload field that supplied it."""
+    for field in ("reasoning", "rationale", "reason", "note"):
+        value = str(raw.get(field) or "").strip()
+        if value:
+            return value, f"action_payload.{field}"
+    return "", ""
+
+
 def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     """Convert the LLM/specialist grid payload into GridVariant objects."""
     out: list[GridVariant] = []
@@ -177,17 +206,19 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         if not isinstance(raw, dict) or not raw.get("name"):
             continue
         fields = normalize_proposal(raw)
+        reasoning, reasoning_origin = _action_reasoning(raw)
         gv = GridVariant(
             name=fields["name"],
             extra_server_args=fields["extra_args"],
             extra_envs=fields["extra_envs"],
-            note=str(raw.get("note") or raw.get("provenance") or ""),
+            note=reasoning,
             remove_args=fields["remove_args"],
             unset_envs=fields["unset_envs"],
             args_mode=fields["args_mode"],
         )
         # Stash extra metadata on the GridVariant so the ledger writer can pull provenance/evidence.
         gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
+        gv.reasoning_origin = reasoning_origin  # type: ignore[attr-defined]
         gv.scope = str(raw.get("scope") or "")  # type: ignore[attr-defined]
         # Authored-kernel overlay dir (PYTHONPATH prefix); "" for env/flag variants.
         gv.overlay_pythonpath = str(raw.get("overlay_pythonpath") or "")  # type: ignore[attr-defined]
@@ -198,6 +229,10 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
+        # Validated against what the proposing agent was shown before the grid reached this executor.
+        gv.experience_citations = [  # type: ignore[attr-defined]
+            dict(item) for item in (raw.get("experience_citations") or []) if isinstance(item, dict)
+        ]
         out.append(gv)
     return out
 
@@ -506,7 +541,7 @@ class ExploreExecutor:
         # Revalidation reproduces the saved stack, so it never re-anchors.
         anchor, anchor_drifted = (
             (snapshot_tput, False)
-            if params.get("source") == "resume_stack_revalidate"
+            if params.get("source") == STACK_REVALIDATE_SOURCE
             else resolve_anchor_with_drift(snapshot_tput, ss)
         )
         if anchor > snapshot_tput:
@@ -693,7 +728,7 @@ class ExploreExecutor:
             # Honour an operator-pinned SGLANG_USE_AITER=0: drop variants that would re-enable the (hang-prone) aiter
             # MoE runner.
             runnable, _aiter_dropped = apply_aiter_moe_pin_filter(runnable)
-            # xDiT do-not-set list, plus flags the model class or the installed server does not support.
+            # xDiT do-not-set list, plus flags the model class does not support.
             runnable, _compat_dropped = apply_compatibility_filter(
                 runnable,
                 framework=framework,
@@ -788,7 +823,8 @@ class ExploreExecutor:
         lifecycle_port = int(lifecycle.get("port") or 0)
 
         # Warm-decision mode.
-        use_warm_decision = lifecycle_eligible and bool(getattr(ss, "baseline_double_run", True))
+        _double_run = double_run_requested(params)
+        use_warm_decision = lifecycle_eligible and _double_run
         # Admission uses the measured warm duration when this round reuses a server.
         decision_anchor_sec = (
             baseline_warm_runtime_sec if (use_warm_decision and baseline_warm_runtime_sec > 0) else baseline_runtime_sec
@@ -934,7 +970,7 @@ class ExploreExecutor:
                                 "extra_server_args": gv.extra_server_args,
                                 "extra_envs": dict(gv.extra_envs),
                                 **control_fields,
-                                "note": gv.note,
+                                **_decision_fields(gv),
                                 "outcome": TS_FAILED,
                                 "status": getattr(w, "status", "failed") if w is not None else "failed",
                                 "tput": None,
@@ -968,7 +1004,7 @@ class ExploreExecutor:
                                     "extra_server_args": gv.extra_server_args,
                                     "extra_envs": dict(gv.extra_envs),
                                     **control_fields,
-                                    "note": gv.note,
+                                    **_decision_fields(gv),
                                     "reason": "warmup_failed",
                                     "gain_pct": None,
                                     "tput": None,
@@ -1038,6 +1074,8 @@ class ExploreExecutor:
                         GRADED_INTVTY_P50: r.intvty_p50,
                         GRADED_DURATION: r.duration_seconds,
                         GRADED_ERROR_RATE: r.request_error_rate,
+                        # Graded against the session latency budget when one is set.
+                        "e2el_mean_ms": r.e2el_mean_ms,
                     }
                     stamp_output_per_gpu(variant_meas, getattr(ss, "tp", None))
                     graded = resolve_graded_comparison(
@@ -1065,7 +1103,7 @@ class ExploreExecutor:
                         gain = None
                         reason = (r.error or "")[-1200:] or "no_measurement"
                     elif graded.degrade_reason:
-                        # Same fail-closed rule as ``_lift_to_current_best``: an
+                        # Same fail-closed rule as ``lift_to_current_best``: an
                         # AgentX session that could not grade on interactivity
                         # does not KEEP on output throughput instead.
                         gain = None
@@ -1079,7 +1117,13 @@ class ExploreExecutor:
                     elif graded.verdict == VERDICT_REVERT:
                         gain = None
                         outcome = "REVERT"
-                        if _graded_on_intvty:
+                        if graded.veto_reason:
+                            # The variant is refused a round earlier than the
+                            # promotion gate would, so it is never folded onto the
+                            # stack and never becomes the anchor the rest of the
+                            # batch is graded against.
+                            reason = graded.veto_reason
+                        elif _graded_on_intvty:
                             reason = f"median_or_guard_failed ({axes})"
                         else:
                             reason = "gain_below_threshold"
@@ -1091,9 +1135,15 @@ class ExploreExecutor:
                         # all, which is why no row is appended then.
                         decision_gates.append(
                             {
-                                "gate": "graded_axes"
-                                if (_graded_on_intvty or graded.degrade_reason)
-                                else "keep_threshold",
+                                "gate": (
+                                    "latency_budget"
+                                    if graded.veto_reason
+                                    else (
+                                        "graded_axes"
+                                        if (_graded_on_intvty or graded.degrade_reason)
+                                        else "keep_threshold"
+                                    )
+                                ),
                                 "passed": (False if graded.degrade_reason else graded.verdict != VERDICT_REVERT),
                                 # The anchor is the reference; the floor the
                                 # candidate has to clear belongs to the gate, as
@@ -1163,7 +1213,7 @@ class ExploreExecutor:
                         "extra_server_args": gv.extra_server_args,
                         "extra_envs": dict(gv.extra_envs),
                         **control_fields,
-                        "note": gv.note,
+                        **_decision_fields(gv),
                         "outcome": outcome,
                         "status": r.status,
                         "tput": decision_tput,
@@ -1264,7 +1314,7 @@ class ExploreExecutor:
                             "effective_extra_server_args": next_effective_args,
                             "extra_envs": dict(next_envs),
                             **effective_control_fields,
-                            "note": gv.note,
+                            **_decision_fields(gv),
                             "provenance": provenance,
                             # Names of the authored kernels this config carried, when an overlay was loaded.
                             "accepted_kernels": list(getattr(gv, "accepted_kernels", []) or []),
@@ -1281,6 +1331,8 @@ class ExploreExecutor:
                             "total_throughput": r.total_token_throughput,
                             "e2e_norm_intvty_p90": r.intvty_p90,
                             "tpot_p90_ms": r.tpot_p90_ms,
+                            # Promotion re-checks the latency budget against this row, not the round's measurement.
+                            "e2el_mean_ms": r.e2el_mean_ms,
                             "single_workspace": r.workspace,
                             "launch_evidence": dict(r.launch_evidence or {}),
                             "launch_evidence_path": r.launch_evidence_path,
@@ -1326,7 +1378,7 @@ class ExploreExecutor:
                             "extra_server_args": gv.extra_server_args,
                             "extra_envs": dict(gv.extra_envs),
                             **control_fields,
-                            "note": gv.note,
+                            **_decision_fields(gv),
                             "reason": reason or "not_keep",
                             "gain_pct": gain,
                             "tput": decision_tput,
@@ -1415,6 +1467,14 @@ class ExploreExecutor:
                 metrics["wall_clock_ratio_vs_baseline"] = te.get(
                     "wall_clock_ratio_vs_baseline",
                 )
+            failure_attribution = ""
+            if outcome in UNMEASURED_OUTCOMES:
+                failure_attribution = classify_failure_attribution(
+                    error_class=te.get("error_class"),
+                    error_excerpt=te.get("error_excerpt"),
+                    reason=reasons_by_fp.get(fp_key, ""),
+                    explicit=te.get("failure_attribution"),
+                )
             per_variant_outcomes.append(
                 {
                     "variant_name": str(te.get("name") or ""),
@@ -1432,6 +1492,7 @@ class ExploreExecutor:
                     "metrics": metrics,
                     "reason": reasons_by_fp.get(fp_key, ""),
                     "error_class": str(te.get("error_class") or ""),
+                    "failure_attribution": failure_attribution,
                     "server_log_path": te.get("server_log_path"),
                     "workspace": te.get("workspace"),
                     "raw_result_path": te.get("raw_result_path"),
@@ -1440,7 +1501,12 @@ class ExploreExecutor:
                         "name": str(te.get("name") or ""),
                         "extra_server_args": str(te.get("extra_server_args") or ""),
                         "extra_envs": dict(te.get("extra_envs") or {}),
+                        "remove_args": list(te.get("remove_args") or []),
+                        "unset_envs": list(te.get("unset_envs") or []),
+                        "args_mode": str(te.get("args_mode") or "append"),
                         "note": str(te.get("note") or ""),
+                        "reasoning_origin": str(te.get("reasoning_origin") or ""),
+                        "experience_citations": list(te.get("experience_citations") or []),
                     },
                     # The verdicts and the stack behind them, as the round
                     # ruled. Absent keys mean the variant never got that far:
@@ -1516,9 +1582,9 @@ class ExploreExecutor:
             t.get("outcome") in ("KEEP", "REVERT", TS_KILLED_OVERTIME) for t in tested_update.values()
         )
         status = "succeeded" if produced_measurement or winners else "failed"
-        # A round that measured nothing because the run stopped it is not the same as one whose variants failed, and
-        # it used to be reported as a bare ``failed`` with no error_class at all -- nothing downstream could tell the
-        # two apart, so the KB could learn that these variants are bad.
+        # A round that measured nothing because the run stopped it is not the same as one whose variants failed. As a
+        # bare ``failed`` with no error_class nothing downstream could tell the two apart, and the KB would learn that
+        # these variants are bad.
         budget_error: dict[str, Any] = {}
         if status == "failed" and run_stop is not None:
             budget_error = {

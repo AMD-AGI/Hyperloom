@@ -16,7 +16,7 @@ from unittest.mock import patch
 import pytest
 
 from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
-from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
+from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli import parser as cli_parser
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
@@ -82,19 +82,12 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     monkeypatch.setenv("FRAMEWORK", "sglang")
     monkeypatch.setenv("GPU_TYPE", "mi300x")
     monkeypatch.setenv("TARGET_GPU_TYPE", "mi325x")
-    args = SimpleNamespace(
-        model="/models/Qwen3",
-        model_class="",
-        target_summary="",
-        max_hours=1,
-        no_kernel=False,
-        gpu_type="mi325x",
-        target_gain=None,
-        target_tput=None,
+    args = cli_parser._build_parser().parse_args(
+        ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi325x"]
     )
 
-    assert cli_model_gate._gpu_runner_type("mi325x") == "mi300x"
-    assert cli_model_gate._GFX_TO_RUNNER.get("gfx1100") is None
+    assert gpu_types._gpu_runner_type("mi325x") == "mi300x"
+    assert gpu_types._GFX_TO_RUNNER.get("gfx1100") is None
     manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
     state = cli_bootstrap._seed_shared_state(
         tmp_path,
@@ -112,18 +105,11 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     monkeypatch.setenv("FRAMEWORK", "sglang")
     monkeypatch.setenv("GPU_TYPE", "mi300x")
     monkeypatch.setenv("TARGET_GPU_TYPE", "mi308x")
-    args = SimpleNamespace(
-        model="/models/Qwen3",
-        model_class="",
-        target_summary="",
-        max_hours=1,
-        no_kernel=False,
-        gpu_type="mi308x",
-        target_gain=None,
-        target_tput=None,
+    args = cli_parser._build_parser().parse_args(
+        ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi308x"]
     )
 
-    assert cli_model_gate._gpu_runner_type("mi308x") == "mi300x"
+    assert gpu_types._gpu_runner_type("mi308x") == "mi300x"
     manifest = build_manifest(tmp_path, args=args, session_id="mi308x-session")
     state = cli_bootstrap._seed_shared_state(
         tmp_path,
@@ -747,6 +733,29 @@ def test_materialize_profile_restore_rejects_ignore_frontend_false(
     assert extra.rindex("ignore_frontend True") > extra.rindex("ignore_frontend False"), extra
 
 
+def test_materialize_profile_disables_the_summary_table_even_when_a_candidate_reenables_it(
+    tmp_path,
+    monkeypatch,
+):
+    """vLLM's post-stop key_averages() table blocked the engine and ballooned each worker past 100 GiB on an 8K-ISL
+    trace; nothing consumes it, so the profile run must never build it.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_server_args="--profiler-config.torch_profiler_dump_cuda_time_total True",
+        args_mode="replace",
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    flag = "--profiler-config.torch_profiler_dump_cuda_time_total"
+    assert extra.rindex(f"{flag} False") > extra.rindex(f"{flag} True"), extra
+
+
 def test_materialize_profile_restore_accepts_a_bound_that_already_holds(
     tmp_path,
     monkeypatch,
@@ -770,7 +779,8 @@ def test_materialize_profile_restore_accepts_a_bound_that_already_holds(
                 "--profiler-config.max_iterations 64 "
                 "--profiler-config.ignore_frontend True "
                 "--profiler-config.capture_torch_profiler True "
-                "--profiler-config.detailed_trace_annotation True"
+                "--profiler-config.detailed_trace_annotation True "
+                "--profiler-config.torch_profiler_dump_cuda_time_total False"
             ),
         },
     )
@@ -1143,6 +1153,57 @@ def test_tracelens_patch_status_separates_fine_from_never_tried(tmp_path, monkey
     assert _status(sglang=True, enable_patch="0") == "not_attempted"
 
 
+def test_sitecustomize_profile_applies_gc_patch_without_touching_patch_status(tmp_path, monkeypatch):
+    """sglang_gc_patch is applied on a profile round, and the roofline patch status stays ``not_attempted``."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    counts = _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+
+    assert counts == {"vllm": 0, "sglang": 1}, counts
+    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "not_attempted"
+
+
+def test_sitecustomize_profile_proceeds_when_gc_patch_is_unavailable(tmp_path, monkeypatch, caplog):
+    """No gc set for this SGLang: warn, but still materialize the profile round undegraded."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    counts = _mock_patchers(monkeypatch, vllm=False, sglang=False)
+    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    caplog.set_level("WARNING")
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+
+    assert counts == {"vllm": 0, "sglang": 1}, counts
+    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "not_attempted"
+    assert "HYPERLOOM_PROFILE_DEGRADED_REASON" not in envs
+    assert "profiling continues" in caplog.text
+
+
+def test_sitecustomize_non_profile_round_does_not_patch_sglang(tmp_path, monkeypatch):
+    """Baseline / optimize rounds capture no traces, so the installed SGLang is left alone."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    counts = _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    src = tmp_path / "baseline_sglang.yaml"
+    src.write_text(
+        yaml.safe_dump(
+            {"benchmark": {"framework": "sglang", "model": "/m", "envs": {"CONC": 32, "ISL": 256, "OSL": 1024}}}
+        )
+    )
+    _materialize_config_with_envs(src, tmp_path)
+
+    assert counts == {"vllm": 0, "sglang": 0}, counts
+
+
 def test_instrumentation_preflight_names_the_checks_it_dooms(tmp_path, monkeypatch):
     """A degraded patch makes checks 3 and 5 certain to fail, and the run says so before it starts."""
     import yaml
@@ -1214,7 +1275,18 @@ def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
     that tuple. A certificate written among the traces used to add a second unranked candidate, which makes
     ``require_single_rank`` resolve to nothing and lets the certificate win the size fallback over a small trace.
     """
-    from hyperloom.agents.kernel.tools._bypass_trace_reader import _trace_candidates, resolve_trace_file
+    import sys
+    from pathlib import Path as _Path
+
+    _tools_dir = str(_Path(__file__).resolve().parents[2] / "agents" / "kernel" / "tools")
+    _added = _tools_dir not in sys.path
+    if _added:
+        sys.path.insert(0, _tools_dir)
+    try:
+        from hyperloom.agents.kernel.tools._bypass_trace_reader import _trace_candidates, resolve_trace_file
+    finally:
+        if _added and _tools_dir in sys.path:
+            sys.path.remove(_tools_dir)
     from hyperloom.orchestrator.actions.executors.profile import _write_trace_certificate
 
     # A lone unranked trace: the certificate must not become the second candidate that makes this unresolvable.
@@ -2043,9 +2115,9 @@ async def test_coordinator_promotes_valid_baseline_even_with_failed_status(sessi
         "workspace": "/tmp/baseline",
         "materialized_config": "/tmp/baseline/config.yaml",
     }
-    assert c._is_promotable_result("baseline", payload)
+    assert c.writeback.is_promotable_result("baseline", payload)
 
-    await c._promote_to_shared_state("baseline", payload)
+    await c.writeback.promote_to_shared_state("baseline", payload)
 
     assert c.shared_state.baseline_tput == pytest.approx(1855.76)
     assert c.shared_state.current_best["tput"] == pytest.approx(1855.76)
@@ -3946,7 +4018,7 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
 
     with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"trace_analyze": fake_handler}):
         try:
-            await c._handle_intent(
+            await c.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.REQUEST,
@@ -3984,7 +4056,7 @@ async def test_coordinator_request_unknown_kind_auto_rejected(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.kernel_enabled = True
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.REQUEST,
@@ -4014,7 +4086,7 @@ async def test_coordinator_request_kernel_disabled_auto_rejected(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.kernel_enabled = False
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.REQUEST,
@@ -4045,7 +4117,7 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
 
     with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"trace_analyze": bad_handler}):
         try:
-            await c._handle_intent(
+            await c.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.REQUEST,
@@ -4060,12 +4132,6 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
             assert "boom" in r.payload["result"]["error"]
         finally:
             await c.stop()
-
-
-# Batch dispatch enablers: batch-parallel sizing + candidates_path injection.
-def test_default_kernel_batch_parallel_matches_full_node():
-    """Default fanout is sized for a single MI300X / MI355X node (8 GPU) so a typical ``run_optimization`` batch does NOT serialize behind an asyncio semaphore tighter than Ray's view of the cluster."""
-    assert krh._DEFAULT_KERNEL_BATCH_PARALLEL == 8
 
 
 # Multi-KEEP integrate queue: streaming record_partial, batch_mode dedup, base_tput auto-injection.
@@ -4097,7 +4163,7 @@ async def test_coordinator_streams_batch_results_and_dedups_final_record(
 
     with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"integrate": fake_handler}):
         try:
-            await c._handle_intent(
+            await c.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.REQUEST,
@@ -4144,7 +4210,7 @@ async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
 
     with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"integrate": fake_handler}):
         try:
-            await c._handle_intent(
+            await c.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.REQUEST,

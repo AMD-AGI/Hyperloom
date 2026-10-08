@@ -20,7 +20,6 @@ class FrameworkSpec:
     python_package: str | None
     # The image's default checkout of the framework's source; ``None`` when it has none.
     source_root: str | None
-    supports_server_reuse: bool
     throughput_unit: str
     has_denoiser_config: bool = False
 
@@ -38,7 +37,6 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         repo_url="https://github.com/sgl-project/sglang.git",
         python_package="sglang",
         source_root="/sgl-workspace/sglang/",
-        supports_server_reuse=True,
         throughput_unit="tok/s",
     ),
     "vllm": FrameworkSpec(
@@ -48,7 +46,6 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         repo_url="https://github.com/ROCm/vllm.git",
         python_package="vllm",
         source_root="/sgl-workspace/vllm/",
-        supports_server_reuse=True,
         throughput_unit="tok/s",
     ),
     "atom": FrameworkSpec(
@@ -58,7 +55,6 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         repo_url="https://github.com/ROCm/ATOM.git",
         python_package="atom",
         source_root="/app/ATOM/atom/",
-        supports_server_reuse=False,
         throughput_unit="tok/s",
     ),
     "xdit": FrameworkSpec(
@@ -68,7 +64,6 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         repo_url="https://github.com/xdit-project/xDiT.git",
         python_package="xfuser",
         source_root="/app/xDiT/",
-        supports_server_reuse=False,
         throughput_unit="img/s",
         # A diffusers pipeline: transformer/ + vae/ configs are on disk.
         has_denoiser_config=True,
@@ -81,7 +76,6 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         repo_url=None,
         python_package=None,
         source_root=None,
-        supports_server_reuse=False,
         throughput_unit="unit/s",
     ),
 }

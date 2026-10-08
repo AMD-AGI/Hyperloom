@@ -24,10 +24,13 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import subprocess
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.inference_optimizer import framework_registry as _reg
 
 log = logging.getLogger(__name__)
@@ -458,6 +461,96 @@ def resolve_session_framework_root() -> str:
     return generic[0] if generic else ""
 
 
+def enclosing_checkout(path: str) -> Path | None:
+    """Return the git checkout that contains ``path``, or ``None``.
+
+    A framework is named by its package dir (``<checkout>/python/sglang``), not
+    the repo root, so the checkout is found by walking up from it. ``.git`` may
+    be a file (worktree) or a dir (repo).
+
+    Args:
+        path: Directory inside the checkout, or the checkout root itself.
+
+    Returns:
+        Path | None: The checkout root, or ``None`` when ``path`` is not a
+        directory inside one.
+    """
+    if not str(path or "").strip():
+        return None
+    p = Path(path)
+    if not p.is_dir():
+        return None
+    for candidate in (p, *p.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+@dataclass(frozen=True)
+class FrameworkTree:
+    """The tree a session optimises, and where an edit to it lands.
+
+    Attributes:
+        tree: The tree as the session names it: a checkout, or a package dir.
+        root: Where patches against the tree apply: the checkout that tracks
+            ``tree``, or ``tree`` itself when no checkout does, as for a
+            pip-installed package. The latter is the form the framework source
+            roots already name such a package in.
+        checkout: Whether ``root`` is a git checkout tracking ``tree``.
+    """
+
+    tree: Path
+    root: Path
+    checkout: bool
+
+
+def _tracks(checkout: Path, tree: Path) -> bool:
+    """Whether ``checkout`` tracks any file under ``tree``.
+
+    A venv inside some unrelated repository sits under that repository's
+    ``.git`` without being part of it, so a ``.git`` above the tree is not
+    enough.
+    """
+    try:
+        rel = tree.resolve().relative_to(checkout.resolve()).as_posix() or "."
+    except (OSError, ValueError):
+        return False
+    try:
+        cp = subprocess.run(
+            ["git", *safe_directory_args(["-C", str(checkout), "ls-files", "--error-unmatch", "--", rel])],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return cp.returncode == 0
+
+
+def framework_apply_tree(tree: str) -> FrameworkTree | None:
+    """Classify the tree a session optimises by where an edit to it lands.
+
+    Args:
+        tree: The tree as named by :func:`resolve_framework_tree`, a session
+            root or an explicit declaration.
+
+    Returns:
+        FrameworkTree | None: The classification, or ``None`` when ``tree`` is
+        unset or not a directory here.
+    """
+    text = str(tree or "").strip().rstrip("/")
+    if not text:
+        return None
+    path = Path(text)
+    if not path.is_dir():
+        return None
+    checkout = enclosing_checkout(text)
+    if checkout is not None and _tracks(checkout, path):
+        return FrameworkTree(tree=path, root=checkout, checkout=True)
+    return FrameworkTree(tree=path, root=path, checkout=False)
+
+
 def resolve_framework_tree(framework: str) -> str:
     """Return the source tree belonging to ``framework``, or ``""``.
 
@@ -624,6 +717,8 @@ def resolved_within(value: str, root: str) -> bool:
 
 __all__ = [
     "FRAMEWORK_SOURCE_PACKAGES",
+    "FrameworkTree",
+    "framework_apply_tree",
     "probe_framework_source_roots_for_env",
     "resolve_framework_tree",
     "resolve_kernel_search_roots",

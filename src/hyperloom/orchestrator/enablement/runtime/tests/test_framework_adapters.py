@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import subprocess
 
+import pytest
 
 from hyperloom.common.failure_signature import (
     MISSING_MODEL_ARCH,
@@ -63,14 +64,14 @@ def test_sglang_supports_missing_arch_not_resource_constraint():
 
 def test_atom_and_xdit_never_acquire_a_runtime():
     for adapter in (AtomAdapter(), XditAdapter()):
-        assert adapter.build_stack_action(_gap(MISSING_MODEL_ARCH), framework=adapter.framework, model="m") is None
+        assert adapter.build_stack_action(_gap(MISSING_MODEL_ARCH)) is None
 
 
 def test_get_adapter_unknown_returns_null_no_raise():
     a = get_adapter("totally_unknown_fw")
     assert isinstance(a, NullAdapter)
     assert a.supports(_gap()) is False
-    assert a.build_stack_action(_gap(), framework="x", model="m") is None
+    assert a.build_stack_action(_gap()) is None
 
 
 def test_get_adapter_case_insensitive():
@@ -84,14 +85,14 @@ def test_get_adapter_case_insensitive():
 def test_vllm_no_rocm_index_returns_none(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_VLLM_ROCM_INDEX_URL", raising=False)
     a = VllmRocmAdapter()
-    assert a.build_stack_action(_gap(), framework="vllm", model="m") is None
+    assert a.build_stack_action(_gap()) is None
 
 
 def test_vllm_with_rocm_index_builds_wheel_action(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_VLLM_ROCM_INDEX_URL", "https://rocm.repo/whl")
     monkeypatch.delenv("HYPERLOOM_ENABLEMENT_INDEX_ALLOWLIST", raising=False)
     a = VllmRocmAdapter()
-    action = a.build_stack_action(_gap(), framework="vllm", model="m", gpu_type="mi355x")
+    action = a.build_stack_action(_gap(), gpu_type="mi355x")
     assert action is not None
     assert action.acquisition_method == "wheel"
     assert action.index_url == "https://rocm.repo/whl"
@@ -102,13 +103,13 @@ def test_vllm_index_not_in_allowlist_returns_none(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_VLLM_ROCM_INDEX_URL", "https://evil.repo/whl")
     monkeypatch.setenv("HYPERLOOM_ENABLEMENT_INDEX_ALLOWLIST", "https://rocm.repo")
     a = VllmRocmAdapter()
-    assert a.build_stack_action(_gap(), framework="vllm", model="m") is None
+    assert a.build_stack_action(_gap()) is None
 
 
 def test_vllm_resource_constraint_returns_none(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_VLLM_ROCM_INDEX_URL", "https://rocm.repo/whl")
     a = VllmRocmAdapter()
-    assert a.build_stack_action(_gap(RESOURCE_CONSTRAINT), framework="vllm", model="m") is None
+    assert a.build_stack_action(_gap(RESOURCE_CONSTRAINT)) is None
 
 
 def test_sglang_editable_ref_action(monkeypatch):
@@ -116,7 +117,7 @@ def test_sglang_editable_ref_action(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_SGLANG_REF", "v0.4.9")
     monkeypatch.delenv("HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST", raising=False)
     a = SglangAdapter()
-    action = a.build_stack_action(_gap(), framework="sglang", model="m")
+    action = a.build_stack_action(_gap())
     assert action is not None
     assert action.acquisition_method == "editable_ref"
     assert action.ref == "v0.4.9"
@@ -126,7 +127,7 @@ def test_sglang_no_source_no_index_returns_none(monkeypatch):
     for k in ("HYPERLOOM_SGLANG_REPO_URL", "HYPERLOOM_SGLANG_REF", "HYPERLOOM_SGLANG_INDEX_URL"):
         monkeypatch.delenv(k, raising=False)
     a = SglangAdapter()
-    assert a.build_stack_action(_gap(), framework="sglang", model="m") is None
+    assert a.build_stack_action(_gap()) is None
 
 
 # provision + ROCm verification (mocked run)
@@ -146,11 +147,15 @@ def _wheel_action() -> "ad.EnablementStackAction":
     )
 
 
+_PURELIB = "/attempt/venv/lib/python3.12/site-packages"
+
+
 def test_vllm_provision_ok(tmp_path, monkeypatch):
     # venv create ok, pip ok, torch-rocm ok, vllm-rocm ok, versions resolvable.
     run = _FakeRun(
         rules=[
             ("importlib.metadata", 0, "0.21.0", ""),
+            ("sysconfig", 0, f"{_PURELIB}\n", ""),
         ],
         default_rc=0,
     )
@@ -205,6 +210,64 @@ def test_vllm_provision_requires_index(tmp_path):
     result = a.provision(action, tmp_path / "attempt")
     assert result.ok is False
     assert "ROCm wheel index" in result.error
+
+
+# the tree an acquired runtime imports, which is the tree its patches apply to
+
+
+def test_vllm_provision_records_the_tree_the_wheel_lands_in(tmp_path):
+    """The wheel occupies the attempt venv alone; the shared framework tree is untouched by it."""
+    run = _FakeRun(rules=[("sysconfig", 0, f"{_PURELIB}\n", "")], default_rc=0)
+    result = VllmRocmAdapter(run=run).provision(_wheel_action(), tmp_path / "attempt")
+    assert result.ok is True, result.error
+    assert result.runtime.source_root == _PURELIB
+
+
+def _sglang_wheel_action() -> "ad.EnablementStackAction":
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
+
+    return EnablementStackAction(
+        kind="runtime_candidate",
+        framework="sglang",
+        gap_id="g",
+        capability="c",
+        acquisition_method="wheel",
+        index_url="https://rocm.repo/whl",
+    )
+
+
+@pytest.mark.parametrize(
+    "adapter, action",
+    [
+        pytest.param(VllmRocmAdapter, _wheel_action, id="vllm"),
+        pytest.param(SglangAdapter, _sglang_wheel_action, id="sglang"),
+    ],
+)
+def test_a_wheel_runtime_with_no_site_packages_fails_to_provision(tmp_path, adapter, action):
+    """Without the tree the wheel landed in, its patches would edit a tree the server never imports."""
+    run = _FakeRun(rules=[("sysconfig", 1, "", "")], default_rc=0)
+    result = adapter(run=run).provision(action(), tmp_path / "attempt")
+    assert result.ok is False
+    assert "site-packages" in result.error
+
+
+def test_sglang_editable_provision_records_the_clone_it_imports(tmp_path):
+    """An editable install executes the clone, and its diffs are cut against the repo root."""
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
+
+    action = EnablementStackAction(
+        kind="runtime_candidate",
+        framework="sglang",
+        gap_id="g",
+        capability="c",
+        acquisition_method="editable_ref",
+        repo_url="https://github.com/sgl-project/sglang.git",
+        ref="v0.4.9",
+    )
+    result = SglangAdapter(run=_FakeRun()).provision(action, tmp_path / "attempt")
+    assert result.ok is True, result.error
+    assert result.runtime.source_root == str(tmp_path / "attempt" / "src")
+    assert result.runtime.pythonpath_prefix == str(tmp_path / "attempt" / "src" / "python")
 
 
 # verify helpers

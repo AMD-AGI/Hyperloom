@@ -12,7 +12,6 @@ import pytest
 
 from hyperloom.orchestrator.bringup import trees
 from hyperloom.orchestrator.delivery import Artifact, Deliverable, parse_deliverable
-from hyperloom.orchestrator.delivery import ledger
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -173,15 +172,3 @@ def test_constructed_whole_file_artifact_keeps_its_wire_shape() -> None:
         "server_args": "",
         "setup_commands": [],
     }
-
-
-def test_the_backup_ledger_outlives_the_process_that_wrote_it(tmp_path: Path) -> None:
-    backup_root = tmp_path / "backups"
-    record = {"target": str(tmp_path / "a.py"), "backup_path": str(backup_root / "a.bak"), "revert_action": "restore"}
-    assert ledger.append_record(backup_root, record)
-
-    # A later process holds none of the records the apply took.
-    assert ledger.load_records(backup_root) == [record]
-    assert ledger.merge_records([], backup_root) == [record]
-    # The same record held in memory is not reverted twice.
-    assert ledger.merge_records([record], backup_root) == [record]

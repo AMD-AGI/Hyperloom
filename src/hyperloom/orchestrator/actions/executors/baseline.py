@@ -114,13 +114,15 @@ from ._inferencex_patcher import (
     failed_patch_anchors,
     failed_patch_anchors_in,
 )
+from ._git import _git_head_sha
 from ._magpie_patcher import ensure_client_tokenizer_hook, ensure_eval_concurrency_compat
 from ._patch_snapshot import (
     _create_patch_snapshot,
-    _patch_touched_paths_from_text as _patch_touched_paths,
+    _patch_touched_paths_from_text,
     _restore_patch_snapshot,
 )
 from .benchmark_result import (
+    double_run_requested,
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
     select_run_workspace,
@@ -789,23 +791,6 @@ def _is_double_run_accuracy_handoff(
     return _WARMUP_ROUND_DIR in Path(source).parts
 
 
-def _git_head_sha(repo_path: str) -> str:
-    """Return the current HEAD sha of a git repo, or empty string on failure."""
-    if not repo_path:
-        return ""
-    try:
-        result = subprocess.run(
-            ["git", *safe_directory_args(["rev-parse", "HEAD"], cwd=repo_path)],
-            cwd=repo_path,
-            capture_output=True,
-            timeout=5,
-            check=True,
-        )
-        return result.stdout.decode().strip()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        return ""
-
-
 def _git_toplevel(repo_path: str) -> str:
     """Return the work-tree root of ``repo_path``, or ``\"\"`` when it is not in one."""
     if not repo_path:
@@ -1023,10 +1008,12 @@ def _revert_warm_patch_state(
 ) -> dict[str, Any]:
     """Restore warm-replay patch mutations via git snapshot or nogit backups."""
     if nogit_backups:
-        from ._nogit_patch import _revert_patches_no_git
+        from ...delivery.ledger import restore_records
 
-        ok, errors = _revert_patches_no_git(list(nogit_backups))
-        return {"ok": ok, "errors": errors, "channel": "nogit"}
+        _restored, errors = restore_records(nogit_backups)
+        if errors:
+            log.warning("baseline_executor: nogit patch restore failed: %s", errors)
+        return {"ok": not errors, "errors": errors}
     return _revert_patches(target_repo, pre_sha, snapshot_manifest)
 
 
@@ -1176,7 +1163,7 @@ def _apply_warm_patches(
             reason = "unsafe_or_non_text_diff"
         elif patch_escapes_tree(content) is not None:
             reason = "path_escapes_tree"
-        elif not _patch_touched_paths(content):
+        elif not _patch_touched_paths_from_text(content):
             reason = "missing_touched_paths"
         if reason:
             if required_timeline:
@@ -1235,7 +1222,6 @@ def _apply_warm_patches(
     snapshot_manifest = primary["snapshot_manifest"]
     if any(tree["snapshot_manifest"] for tree in trees.values()):
         params["_warm_patch_trees"] = _warm_tree_records(trees, tree_order, before_mutation=True)
-        params["_warm_patch_snapshot_manifest"] = snapshot_manifest
         if before_mutation is not None and not bool(
             before_mutation(_warm_tree_records(trees, tree_order, before_mutation=True))
         ):
@@ -1400,7 +1386,7 @@ def _apply_warm_patches(
                             else "present_in_dirty_worktree"
                         )
                     else:
-                        touched = _patch_touched_paths(patch_content)
+                        touched = _patch_touched_paths_from_text(patch_content)
                         before_residue = _three_way_residue_snapshot(
                             target_repo,
                             touched,
@@ -1459,10 +1445,7 @@ def _apply_warm_patches(
         statuses.append(status)
 
     records = _warm_tree_records(trees, tree_order)
-    combined_backups = [backup for root in tree_order for backup in trees[root]["nogit_backups"]]
-    if combined_backups:
-        params["_warm_patch_nogit_backups"] = combined_backups
-    if any(tree["snapshot_manifest"] for tree in trees.values()):
+    if any(tree["snapshot_manifest"] or tree["nogit_backups"] for tree in trees.values()):
         params["_warm_patch_trees"] = records
     # A best-effort timeline reports only the patches that landed, so without
     # this the per-patch reasons computed above would die with this frame --
@@ -1544,22 +1527,9 @@ def _stamp_warm_patch_outcome(
         result["warm_patch_result"] = {"required": False, "status": "prepared", "patches": statuses}
 
 
-def _revert_legacy_warm_patch_trees(
-    params: Mapping[str, Any],
-    pre_sha: str,
-) -> dict[str, Any]:
+def _revert_legacy_warm_patch_trees(params: Mapping[str, Any]) -> dict[str, Any]:
     """Undo a legacy (non-required) apply so nothing leaks into the next task."""
-    if trees := list(params.get("_warm_patch_trees") or []):
-        return _revert_warm_patch_trees(trees)
-    backups = list(params.get("_warm_patch_nogit_backups") or [])
-    if not pre_sha and not backups:
-        return {"ok": True, "errors": [], "restored": []}
-    return _revert_warm_patch_state(
-        "",
-        pre_sha=pre_sha,
-        snapshot_manifest=params.get("_warm_patch_snapshot_manifest"),
-        nogit_backups=backups,
-    )
+    return _revert_warm_patch_trees(params.get("_warm_patch_trees") or [])
 
 
 def restore_warm_kernel_snapshots(
@@ -2508,11 +2478,8 @@ class BenchmarkRunExecutor:
         # Cold-start "warmup artifact" guard: the freshly-booted server's first benchmark window pays one-time cold
         # costs that inflate later gains into fictitious "improvements".
         lifecycle = _lifecycle.resolve_lifecycle_params(materialized_config_path)
-        double_run_requested = self._double_run_enabled(
-            params=params,
-            ctx_extra=extra,
-        )
-        double_run = double_run_requested and lifecycle["eligible"]
+        double_run_wanted = double_run_requested(params)
+        double_run = double_run_wanted and lifecycle["eligible"]
         if defer_accuracy_until_after_measure and double_run:
             # Only the lifecycle path can reuse the hot server for a staged accuracy round.
             _set_materialized_run_eval(
@@ -2733,7 +2700,7 @@ class BenchmarkRunExecutor:
         }
 
         if not double_run:
-            if double_run_requested and not lifecycle["eligible"]:
+            if double_run_wanted and not lifecycle["eligible"]:
                 log.info(
                     "baseline_executor: cold-start double-run not eligible (%s); running single round.",
                     lifecycle["reason"],
@@ -2755,7 +2722,7 @@ class BenchmarkRunExecutor:
                 # A required timeline's tree is promoted by prelude after this returns, so it must stay patched;
                 # reverting here handed prelude a clean tree and silently lost the replay.
                 if applied_patches and not isinstance(patch_application, dict):
-                    _revert_legacy_warm_patch_trees(params, _pre_patch_sha)
+                    _revert_legacy_warm_patch_trees(params)
                 if bench_lease is not None:
                     bench_lease.close()
 
@@ -3030,7 +2997,7 @@ class BenchmarkRunExecutor:
             # Revert warm-replay patches to prevent state leakage into subsequent tasks that reuse the same InferenceX
             # checkout.
             if applied_patches and not isinstance(patch_application, dict):
-                _revert_legacy_warm_patch_trees(params, _pre_patch_sha)
+                _revert_legacy_warm_patch_trees(params)
             if bench_lease is not None:
                 bench_lease.close()
 
@@ -3102,35 +3069,6 @@ class BenchmarkRunExecutor:
             **evidence,
         }
         return headroom_sec >= cost, priced
-
-    def _double_run_enabled(
-        self,
-        *,
-        params: dict[str, Any] | None = None,
-        ctx_extra: dict[str, Any] | None = None,
-    ) -> bool:
-        """Whether baseline double-run is enabled."""
-        params = params or {}
-        if "baseline_double_run" in params:
-            return is_truthy(params.get("baseline_double_run"))
-
-        extra = ctx_extra or {}
-        state = extra.get("shared_state") or self.shared_state
-        if state is not None:
-            return bool(getattr(state, "baseline_double_run", False))
-
-        try:
-            from ...state.shared_state import SharedState
-
-            session_dir = Path(str(extra.get("session_dir") or self.session_dir))
-            state = SharedState.load_or_init(session_dir)
-            return bool(getattr(state, "baseline_double_run", False))
-        except Exception:
-            log.debug(
-                "baseline_executor: could not resolve baseline_double_run from session state",
-                exc_info=True,
-            )
-            return True
 
     def _write_lifecycle_config(
         self,
@@ -3583,7 +3521,9 @@ class BenchmarkRunExecutor:
             """
             from ...bringup import observe_bringup, write_boot_observation
 
-            read = read_bringup_log(server_log)
+            # Magpie writes the server log into the workspace it creates, not to $SERVER_LOG.
+            workspace = select_run_workspace(output_dir, known_before=workspaces_before)
+            read = read_bringup_log(workspace / "server.log" if workspace is not None else server_log)
             verdict = observe_bringup(
                 server_log=read.text,
                 server_elapsed_sec=server_child_elapsed_sec(read.text),
@@ -4013,9 +3953,10 @@ class BenchmarkRunExecutor:
                 log.warning("baseline_executor: %s", eval_probe_summary(eval_probe))
 
         log.info(
-            "baseline_executor: %s %s (output) e2el=%.1fms",
+            "baseline_executor: %s %.1f %s (output) e2el=%.1fms",
             "success_with_warning" if warnings else "success",
-            framework_registry.format_primary_metric(eval_framework, result["output_throughput"]),
+            result["output_throughput"],
+            framework_registry.throughput_unit(eval_framework),
             result["e2el_mean_ms"] or 0.0,
         )
         return result
