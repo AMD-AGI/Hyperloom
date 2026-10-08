@@ -918,6 +918,35 @@ class ProfileExecutor(BenchmarkRunExecutor):
         )
         return str(probe_dir)
 
+    def _inject_trace_env_shim(self, config_path: Path) -> None:
+        """Put the trace-environment shim on the profile run's ``PYTHONPATH``, right after the host probe.
+
+        Python imports only the first ``sitecustomize``. The host-probe shim chains to the
+        first other one and this shim chains to the next one after it, so this position
+        keeps all three loading, including an overlay's ``sitecustomize`` that does not chain.
+        """
+        from hyperloom.inference_optimizer.session.paths import asset_root
+
+        from . import _framework_rewrite_evidence as _evidence
+
+        asset_dir = asset_root() / "assets" / "profile_trace_env"
+        cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        bench = cfg.get("benchmark") if isinstance(cfg, dict) else None
+        if not isinstance(bench, dict):
+            return
+        envs = bench.setdefault("envs", {})
+        if not isinstance(envs, dict):
+            return
+        current = str(envs.get("PYTHONPATH", "") or "").strip()
+        entry = str(asset_dir)
+        entries = [part for part in current.split(os.pathsep) if part]
+        if entry in entries:
+            return
+        probe = str(_evidence.probe_asset_dir())
+        entries.insert(entries.index(probe) + 1 if probe in entries else 0, entry)
+        envs["PYTHONPATH"] = os.pathsep.join(entries)
+        config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
     def _after_materialize_config(
         self,
         config_path: Path,
@@ -931,6 +960,10 @@ class ProfileExecutor(BenchmarkRunExecutor):
             log.warning("profile_executor: host-probe injection failed: %s", exc, exc_info=True)
             self._host_probe_dir = ""
             self._host_probe_status = f"probe_injection_failed: {exc}"
+        try:
+            self._inject_trace_env_shim(config_path)
+        except (OSError, yaml.YAMLError) as exc:
+            log.warning("profile_executor: trace-env shim injection failed: %s", exc, exc_info=True)
         try:
             cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         except Exception as exc:  # noqa: BLE001

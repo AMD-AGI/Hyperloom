@@ -242,6 +242,9 @@ hyperloom = [
     # PYTHONPATH prefix (see _framework_rewrite_evidence). Shipped so wheel
     # installs can arm it.
     "assets/host_probe/*.py",
+    # Start-up shim that keeps GPU events in the profile run's engine-process
+    # traces (see ProfileExecutor._inject_trace_env_shim).
+    "assets/profile_trace_env/*.py",
     # Slurm submission bundle (see docs/install/slurm.md).
     "assets/slurm/*.sh",
     "assets/slurm/*.sbatch",
