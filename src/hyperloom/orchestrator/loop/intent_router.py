@@ -453,7 +453,7 @@ class IntentRouter(CoordinatorCollaborator):
                 await handler(source, intent)
             else:
                 # Unknown / unhandled intent — record for replay.
-                await self._coord.writeback.record_observation(
+                await self.bus.record_observation(
                     source,
                     "observation",
                     {"intent": it.value, "payload": intent.payload},
@@ -468,7 +468,7 @@ class IntentRouter(CoordinatorCollaborator):
                 exc=exc,
             )
             try:
-                await self._coord.writeback.record_observation(
+                await self.bus.record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -487,7 +487,7 @@ class IntentRouter(CoordinatorCollaborator):
         action_name = intent.payload["action_name"]
         # Pruned families are advisory: proposal still queues with an advisory note.
         if self.shared_state.is_pruned(action_name):
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -511,7 +511,7 @@ class IntentRouter(CoordinatorCollaborator):
         if action_name == "integrate_patch":
             params = dict(payload.get("params") or {})
             if not await self._stamp_integrate_patch_owner(params):
-                await self._coord.writeback.record_observation(
+                await self.bus.record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -541,7 +541,7 @@ class IntentRouter(CoordinatorCollaborator):
         verdict_map = intent.payload.get("verdict_map")
         single_verdict = intent.payload.get("verdict")
         if pending is None:
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -635,7 +635,7 @@ class IntentRouter(CoordinatorCollaborator):
             verdict,
             downgraded_from_code,
         )
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {
@@ -672,7 +672,7 @@ class IntentRouter(CoordinatorCollaborator):
         """
         self.state.pending_proposals.pop(pending.proposal_msg_id, None)
         if is_upstream_pr_prescreen(pending.action_name, pending.payload):
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -801,7 +801,7 @@ class IntentRouter(CoordinatorCollaborator):
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
         if self.shared_state.is_pruned(action_name):
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -831,7 +831,7 @@ class IntentRouter(CoordinatorCollaborator):
         params = dict(payload.get("params") or {})
         if action_name == "integrate_patch":
             if not await self._stamp_integrate_patch_owner(params):
-                await self._coord.writeback.record_observation(
+                await self.bus.record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -1309,7 +1309,7 @@ class IntentRouter(CoordinatorCollaborator):
         try:
             new_ttl = await self.tasks.extend_lease(task_id, extra_sec)
         except (TaskNotFound, IllegalTransition) as exc:
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -1350,7 +1350,7 @@ class IntentRouter(CoordinatorCollaborator):
             wall_budget_error = repr(exc)[:200]
         # A swallowed GPU or wall-budget failure would leave the lane extended while the GPU reaper or subprocess
         # wall-clock cap can still interrupt the work — report the partial extension as degraded.
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {

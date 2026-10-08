@@ -487,16 +487,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
             hint=str(denied.hint or ""),
         )
 
-    async def record_observation(self, source: str, topic: str, payload: dict) -> None:
-        """Append a broadcast observation message to the bus.
-
-        Args:
-            source (str): The agent recording the observation.
-            topic (str): The bus topic to publish under.
-            payload (dict): The observation payload.
-        """
-        await self.bus.append_and_seq(Message.new(source, "*", topic, payload))
-
     @staticmethod
     def _keep_patch_sources(
         result: Mapping[str, Any],
@@ -2187,7 +2177,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             reason,
             len(spared),
         )
-        await self.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {
@@ -2549,7 +2539,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     measured_generation,
                     working_generation,
                 )
-                await self.record_observation(
+                await self.bus.record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -2745,7 +2735,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         measured,
                         cb_tput,
                     )
-                    await self.record_observation(
+                    await self.bus.record_observation(
                         "coordinator",
                         "observation",
                         {
@@ -2783,7 +2773,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         measured,
                         cb_tput,
                     )
-                    await self.record_observation(
+                    await self.bus.record_observation(
                         "coordinator",
                         "observation",
                         {
@@ -2893,7 +2883,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         and recorded > 0
                         and float(measured) < float(recorded) * floor / 100.0
                     ):
-                        await self.record_observation(
+                        await self.bus.record_observation(
                             "coordinator",
                             "observation",
                             {
@@ -3757,7 +3747,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             state.save(self.session_dir)
         except Exception:
             log.exception("Coordinator: resume consistency save failed")
-        await self.record_observation("coordinator", "observation", {"kind": "resume_consistency", **report})
+        await self.bus.record_observation("coordinator", "observation", {"kind": "resume_consistency", **report})
         return report
 
     def _replay_keep_from_result(self, kind: str, result: dict[str, Any]) -> bool:
@@ -4319,7 +4309,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                                 "reason": "workspace_missing",
                             }
                         )
-                        await self.record_observation(
+                        await self.bus.record_observation(
                             "coordinator",
                             "observation",
                             {
@@ -4349,7 +4339,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                             "task_id": payload.get("task_id"),
                         }
                     )
-                    await self.record_observation(
+                    await self.bus.record_observation(
                         "coordinator",
                         "observation",
                         {

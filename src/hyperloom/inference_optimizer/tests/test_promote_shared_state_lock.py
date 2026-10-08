@@ -1401,9 +1401,9 @@ async def test_resume_settles_state_before_draining_kb_outbox(
         "_resume_recover_pending_warm_replay",
         "_resume_recover_pending_revalidation",
         "_resume_recover_orphaned_keeps",
-        "record_observation",
     ):
         monkeypatch.setattr(coord.writeback, name, _noop)
+    monkeypatch.setattr(coord.bus, "record_observation", _noop)
 
     events: list[str] = []
     staged: list[dict] = []

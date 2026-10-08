@@ -44,7 +44,6 @@ def _dispatcher(tmp_path):
         is_promotable_result=lambda *_args: True,
         handle_unpromotable_result=AsyncMock(),
         record_intervention_for_task=lambda *_args: None,
-        record_observation=AsyncMock(),
     )
     stop = asyncio.Event()
     coord = SimpleNamespace(

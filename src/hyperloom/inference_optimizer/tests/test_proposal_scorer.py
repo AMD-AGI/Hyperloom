@@ -341,7 +341,7 @@ def _coord(tmp_path: Path, scorer):
     c.shared_state = _StubSharedState()
     c.specialist_dispatch._proposal_scorer = scorer
     c.knowledge_plane = None
-    c.writeback.record_observation = AsyncMock()  # type: ignore[method-assign]
+    c.bus = SimpleNamespace(record_observation=AsyncMock())
     return c
 
 

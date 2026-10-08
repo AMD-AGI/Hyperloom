@@ -243,7 +243,7 @@ class MachinePhase(CoordinatorCollaborator):
                 len(cancelled),
                 len(stopped),
             )
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {

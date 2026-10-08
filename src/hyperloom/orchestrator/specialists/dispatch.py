@@ -411,7 +411,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "reason": error[:200],
             },
         )
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {
@@ -455,7 +455,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             detail: Why no further retry was scheduled.
         """
         params = task.params or {}
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {

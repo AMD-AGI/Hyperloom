@@ -1441,7 +1441,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             task.kind,
             denied,
         )
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {

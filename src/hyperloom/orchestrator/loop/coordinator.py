@@ -1208,7 +1208,7 @@ class Coordinator:
                     latency_ms=int((time.perf_counter() - _t0) * 1000),
                     call_id=call_id,
                 )
-            await self.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "backend_error", "agent": agent_name, "error": repr(exc)},
@@ -1217,7 +1217,7 @@ class Coordinator:
             return
         except NoIntentEmitted as exc:
             # No parseable intents; surface as observation so the next tick self-corrects.
-            await self.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "no_intent_emitted", "agent": agent_name, "error": str(exc)[:500]},
@@ -1227,7 +1227,7 @@ class Coordinator:
         except Exception as exc:
             # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
-            await self.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "reactor_exception", "agent": agent_name, "error": format_exc_brief(exc, limit=500)},
@@ -1255,7 +1255,7 @@ class Coordinator:
             for intent in result.intents:
                 await self.router.handle_intent(agent_name, intent)
         if not result.intents and not request:
-            await self.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "no_intent_emitted", "agent": agent_name, "error": "the turn emitted no intents"},
@@ -1375,7 +1375,7 @@ class Coordinator:
         threshold = self._backend_error_streak_threshold
         if new_value >= threshold and self._backend_error_alarm_armed.get(agent_name, True):
             self._backend_error_alarm_armed[agent_name] = False
-            await self.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
