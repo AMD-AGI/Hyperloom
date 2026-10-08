@@ -1316,6 +1316,8 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "warm_replay_status": warm_status,
         "measure_round_dropped": bool(state.baseline_measure_round_dropped),
         "tput": _number(state.baseline_tput) or 0.0,
+        "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
+        "prelude_affordable_sec": prelude_affordable_seconds(state)[0],
         "session_usable_sec": session_usable_seconds(state),
         "phase_spent_sec": phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
         "runtime_sec": _positive_number(state.baseline_runtime_sec),
@@ -1821,6 +1823,12 @@ def replay_next_phase(
             and not bool(baseline.get("measure_round_dropped"))
             and (_number(baseline.get("tput")) or 0.0) > 0.0
         )
+        if normal and bool(baseline.get("initial_analysis_pending")):
+            # The transition barrier stops every running action, so leaving now would kill the initial
+            # roofline the baseline just enqueued. Hold until it books, but not into the optimization reserve.
+            affordable = _number(baseline.get("prelude_affordable_sec"))
+            if affordable is None or affordable > 0.0:
+                return None
         if normal:
             target = _post_prelude_target(optimize_enabled=optimize_enabled, kernel_enabled=kernel_enabled)
             evidence = {"baseline_tput": float(baseline["tput"]), **_prelude_viability(baseline)}

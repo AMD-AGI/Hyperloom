@@ -370,6 +370,70 @@ async def test_a_non_retryable_profile_failure_still_rows_the_attempt(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_an_orchestrator_cancelled_profile_is_not_retried(tmp_path):
+    """A retry inherits the cancelled scope, so each one is killed at boot and only burns server starts."""
+    calls = 0
+
+    async def fake_profile(ctx):
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "failed",
+            "error_class": "orchestrator_cancelled",
+            "error": "the orchestrator cancelled this action while this round was running",
+        }
+
+    async def fake_ta(payload, *, session_dir):
+        raise AssertionError("trace_analyze must not run after a cancelled profile")
+
+    recorder = MagicMock()
+    with (
+        patch("hyperloom.orchestrator.actions.executors.roofline.make_roofline_recorder", return_value=recorder),
+        patch("hyperloom.orchestrator.actions.executors.profile.profile_executor", new=fake_profile),
+        patch("hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler", new=fake_ta),
+    ):
+        result = await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
+
+    assert result["status"] == "failed"
+    assert calls == 1
+    assert recorder.record_profile_run.call_args.kwargs["failure"]["error_class"] == "orchestrator_cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_profile_with_a_flushed_trace_is_not_recovered(tmp_path):
+    """The trace-recovery branch would otherwise adopt it and run analysis and the re-profile in the cancelled scope."""
+    calls = 0
+
+    async def fake_profile(ctx):
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "failed",
+            "error_class": "orchestrator_cancelled",
+            "error": "the orchestrator cancelled this action while this round was running",
+            "main_trace_path": str(tmp_path / "trace.json.gz"),
+        }
+
+    async def fake_ta(payload, *, session_dir):
+        raise AssertionError("trace_analyze must not run after a cancelled profile")
+
+    recorder = MagicMock()
+    with (
+        patch("hyperloom.orchestrator.actions.executors.roofline.make_roofline_recorder", return_value=recorder),
+        patch("hyperloom.orchestrator.actions.executors.profile.profile_executor", new=fake_profile),
+        patch("hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler", new=fake_ta),
+    ):
+        result = await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
+
+    assert result["status"] == "failed"
+    assert calls == 1
+    recorder.adopt_profile_run.assert_not_called()
+    kwargs = recorder.record_profile_run.call_args.kwargs
+    assert kwargs["status"] == "failed"
+    assert kwargs["failure"]["error_class"] == "orchestrator_cancelled"
+
+
+@pytest.mark.asyncio
 async def test_instrumentation_is_drained_per_attempt_even_when_absent(tmp_path):
     """The executor is reached through a module-level name a substitute can occupy; the probe must tolerate that."""
     md = tmp_path / "analysis.md"

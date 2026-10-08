@@ -1430,6 +1430,15 @@
         "tput": {
           "type": "number"
         },
+        "initial_analysis_pending": {
+          "type": "boolean"
+        },
+        "prelude_affordable_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "session_usable_sec": {
           "type": [
             "number",

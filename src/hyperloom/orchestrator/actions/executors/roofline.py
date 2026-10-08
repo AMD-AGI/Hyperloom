@@ -23,6 +23,7 @@ from ...phases.machine_state import record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
+from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     ANALYSIS_ATTEMPT_COMPUTE_BOUND,
@@ -67,6 +68,7 @@ _TRACE_SUFFIXES = (".pt.trace.json.gz", ".pt.trace.json", ".trace.json.gz", ".tr
 _PREFLIGHT_STALE_TRACE_LIMIT = 20
 _NON_RETRYABLE_PROFILE_ERRORS = frozenset(
     {
+        ORCHESTRATOR_CANCELLED_CLASS,
         "agentx_multi_node_profile_unsupported",
         "primary_rank_trace_missing",
         "recipe_lever_unavailable",
@@ -772,7 +774,10 @@ class RooflineExecutor:
                 continue
             trace_path = _extract_trace_path(profile_result)
             if profile_result.get("status") != "succeeded":
-                if trace_path:
+                # A cancelled profile can already have flushed its trace; recovering it would analyze and
+                # re-profile inside the cancelled scope.
+                non_retryable = profile_result.get("error_class") in _NON_RETRYABLE_PROFILE_ERRORS
+                if trace_path and not non_retryable:
                     # A duplicate stop_profile failure can arrive after a trace was already flushed successfully.
                     profile_warning = {
                         "status": profile_result.get("status"),
@@ -800,10 +805,7 @@ class RooflineExecutor:
                 last_phase = "profile"
                 last_error = str(profile_result.get("error") or "profile sub-step failed")
                 capture_reason = str((profile_result.get("trace_capture") or {}).get("reason") or "")
-                if (
-                    profile_result.get("error_class") in _NON_RETRYABLE_PROFILE_ERRORS
-                    or capture_reason in _NON_RETRYABLE_CAPTURE_REASONS
-                ):
+                if non_retryable or capture_reason in _NON_RETRYABLE_CAPTURE_REASONS:
                     # Recorded before returning, so ``runs`` also describes the failure no retry can get past.
                     await _note_profile_run(
                         status="failed",
