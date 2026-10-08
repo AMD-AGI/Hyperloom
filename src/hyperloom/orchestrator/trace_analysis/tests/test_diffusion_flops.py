@@ -10,9 +10,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-import diffusion_flops as df
+from hyperloom.orchestrator.trace_analysis import diffusion_flops as df
 
 
 def _write_denoiser(tmp: Path, cfg: dict, sub: str = "transformer") -> Path:

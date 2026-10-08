@@ -5,15 +5,13 @@
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 import types
 from pathlib import Path
 
 import pytest
 
-
-_APPLY_TOOL_PATH = Path(__file__).resolve().parent.parent / "tools" / "apply_kernel_patch.py"
+from hyperloom.orchestrator.kernel import apply_kernel_patch
 
 _SGLANG_ROOT = "/sgl-workspace/sglang"
 _KDA_CUH = f"{_SGLANG_ROOT}/python/sglang/kernels/jit/csrc/attention/kda_packed_decode.cuh"
@@ -24,13 +22,8 @@ _EDITABLE_REINSTALL = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "py
 
 @pytest.fixture()
 def akp(monkeypatch) -> types.ModuleType:
-    spec = importlib.util.spec_from_file_location("_akp_sglang_jit_under_test", _APPLY_TOOL_PATH)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    monkeypatch.setattr(module, "_CACHED_KNOWN_TARGET_ROOTS", (_SGLANG_ROOT + "/",))
-    return module
+    monkeypatch.setattr(apply_kernel_patch, "_CACHED_KNOWN_TARGET_ROOTS", (_SGLANG_ROOT + "/",))
+    return apply_kernel_patch
 
 
 @pytest.mark.parametrize(

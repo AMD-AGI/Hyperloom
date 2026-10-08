@@ -127,8 +127,8 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200, python
     return result
 
 
-def _main(argv: list[str]) -> int:
-    """CLI: geak_runner.py <handoff.json> <output_dir> [--timeout-s N]."""
+def main(argv: list[str]) -> int:
+    """CLI: ``python -m hyperloom.orchestrator.kernel.geak_runner <handoff.json> <output_dir> [--timeout-s N]``."""
     import argparse
 
     ap = argparse.ArgumentParser(description="Run GEAK e2e once.")
@@ -160,4 +160,4 @@ def _main(argv: list[str]) -> int:
 if __name__ == "__main__":
     import sys
 
-    raise SystemExit(_main(sys.argv[1:]))
+    raise SystemExit(main(sys.argv[1:]))

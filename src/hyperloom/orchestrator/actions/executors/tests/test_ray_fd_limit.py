@@ -7,22 +7,13 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from pathlib import Path
 
-
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-BACKENDS_DIR = TOOLS_DIR / "backends"
-for d in (str(TOOLS_DIR), str(BACKENDS_DIR)):
-    if d not in sys.path:
-        sys.path.insert(0, d)
-
-import ray_runtime
+from hyperloom.orchestrator.actions.executors import _ray_runtime as ray_runtime
 
 # Minimum soft RLIMIT_NOFILE the raylet needs to stay up.
 TARGET_NOFILE = 65536
-KERNEL_ROOT = Path(__file__).resolve().parent.parent
-INSTALL_SH = KERNEL_ROOT / "scripts" / "install.sh"
+INSTALL_SH = Path(__file__).resolve().parents[4] / "inference_optimizer" / "assets" / "install_kernel_tools.sh"
 
 
 def _extract_shell_function(name: str) -> str:

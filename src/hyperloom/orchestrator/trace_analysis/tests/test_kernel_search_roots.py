@@ -10,12 +10,9 @@
 from __future__ import annotations
 
 import logging
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-import tracelens_analysis as tl
+from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tl
 
 
 class TestInstalledPackageDir:

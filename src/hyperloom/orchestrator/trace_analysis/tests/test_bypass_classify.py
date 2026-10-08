@@ -9,14 +9,10 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-from _bypass_classify import classify_kernel
+from hyperloom.orchestrator.trace_analysis._bypass_classify import classify_kernel
 
 
 # (device_kernel_name, expected_category) covering real sglang+aiter kernels.

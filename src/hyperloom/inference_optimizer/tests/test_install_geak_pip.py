@@ -11,8 +11,8 @@ import subprocess
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[5]
-INSTALL_SH = REPO_ROOT / "src" / "hyperloom" / "agents" / "kernel" / "scripts" / "install.sh"
+REPO_ROOT = Path(__file__).resolve().parents[4]
+INSTALL_SH = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "install_kernel_tools.sh"
 
 
 def _git(cwd: Path, *args: str) -> str:

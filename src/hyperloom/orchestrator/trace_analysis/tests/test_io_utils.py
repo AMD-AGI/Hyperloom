@@ -5,29 +5,12 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import tempfile
-from pathlib import Path
 
 import pytest
 
-_TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-
-
-def _load_module():
-    """Load _io_utils.py as an isolated module."""
-    spec = importlib.util.spec_from_file_location(
-        "io_utils_under_test",
-        _TOOLS_DIR / "_io_utils.py",
-    )
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
-
-
-io = _load_module()
+from hyperloom.orchestrator.trace_analysis import _io_utils as io
 
 
 def test_utc_now_is_iso8601_utc():

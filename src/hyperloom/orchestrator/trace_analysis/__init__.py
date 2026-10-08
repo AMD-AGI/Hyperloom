@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Kernel-agent tools (TraceLens analysis, kernel optimization, patch apply)."""
+"""Profile-trace analysis: TraceLens and bypass routes, roofline, and trace self-certification."""
 
 from __future__ import annotations

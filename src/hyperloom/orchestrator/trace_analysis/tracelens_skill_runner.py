@@ -20,7 +20,6 @@ import logging
 import os
 import re
 import shlex
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
@@ -33,20 +32,16 @@ from hyperloom.common.codex_session import (
 from hyperloom.common.llm_config import claude_sdk_env_options
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 
-# Sibling import works whether run as a script or loaded via importlib.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _capture_shapes import is_capture_dir_name
-from _io_utils import safe_float
-from _literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
-from _literal_utils import safe_literal_eval as _safe_literal_eval
-from _task_group_contract import (
+from ._capture_shapes import is_capture_dir_name
+from ._io_utils import safe_float
+from ._literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
+from ._literal_utils import safe_literal_eval as _safe_literal_eval
+from ._task_group_contract import (
     build_operator_identity,
     build_task_group_shape_cases,
     legacy_operator_identity_keys,
     operator_identity_key,
 )
-
-sys.path.pop(0)
 
 _log = logging.getLogger(__name__)
 
@@ -478,7 +473,7 @@ def _import_sdk() -> tuple[Any, Any]:
         import claude_agent_sdk as sdk  # type: ignore
     except ImportError as exc:  # pragma: no cover - exercised via caller fallback
         raise RuntimeError(
-            "claude_agent_sdk not installed; run src/hyperloom/agents/kernel/scripts/install.sh first"
+            "claude_agent_sdk not installed; run src/hyperloom/inference_optimizer/assets/install.sh first"
         ) from exc
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
         raise RuntimeError("claude_agent_sdk missing query / ClaudeAgentOptions")

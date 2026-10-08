@@ -13,15 +13,12 @@ import csv
 import gzip
 import io
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-import bypass_trace_analysis as bta
-import diffusion_roofline as dr
+from hyperloom.orchestrator.trace_analysis import bypass_trace_analysis as bta
+from hyperloom.orchestrator.trace_analysis import diffusion_roofline as dr
 
 _TRACE_EVENTS = [
     {"cat": "cpu_op", "name": "aten::paged_attn", "args": {"External id": 100}},

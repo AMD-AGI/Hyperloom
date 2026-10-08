@@ -19,15 +19,12 @@ stubbed so no live source tree is needed.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-import _analysis_json as aj
-import _kernel_source as ks
-import tracelens_analysis as tla
-from _kernel_partition import partition_kernels
+from hyperloom.orchestrator.trace_analysis import _analysis_json as aj
+from hyperloom.orchestrator.trace_analysis import _kernel_source as ks
+from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
+from hyperloom.orchestrator.trace_analysis._kernel_partition import partition_kernels
 from TraceLens.TraceUtils.kernel_source import ResolveResult, SourceLocation
 
 

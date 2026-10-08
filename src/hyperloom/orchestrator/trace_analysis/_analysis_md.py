@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from _kernel_category import canonical_category
+from ._kernel_category import canonical_category
 
 #: Placeholder for a cell a route does not model (keeps every table shape aligned).
 DASH = "\u2014"

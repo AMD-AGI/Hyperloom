@@ -6,28 +6,16 @@
 from __future__ import annotations
 
 import csv
-import importlib.util
-import sys
 from pathlib import Path
 
 import pytest
 
 
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-TL_PATH = TOOLS_DIR / "tracelens_analysis.py"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
-
-
 @pytest.fixture(scope="module")
 def tl_module():
-    spec = importlib.util.spec_from_file_location(
-        "tracelens_analysis_n36_under_test",
-        TL_PATH,
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    from hyperloom.orchestrator.trace_analysis import tracelens_analysis
+
+    return tracelens_analysis
 
 
 def _write_exec_details(

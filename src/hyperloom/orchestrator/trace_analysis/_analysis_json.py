@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from _kernel_source import ResolveResult, resolve_source_verdict
+from ._kernel_source import ResolveResult, resolve_source_verdict
 
 
 def load_report_tasks(analysis_json: str | Path, *, framework: str = "") -> list[dict[str, Any]]:

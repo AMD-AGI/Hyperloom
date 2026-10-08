@@ -26,21 +26,19 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Sibling modules live next to this tool (invoked by absolute path).
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import _bypass_report as _report
-import _bypass_trace_reader as _reader
-import _trace_shape_manifest as _tsm
+from . import _bypass_report as _report
+from . import _bypass_trace_reader as _reader
+from . import _trace_shape_manifest as _tsm
 
 from hyperloom.common.provenance import build_provenance as _shared_build_provenance
 from hyperloom.inference_optimizer import framework_registry
-from _idle_gate import (
+from ._idle_gate import (
     build_graph_under_recorded_warning,
     build_high_idle_warning,
     resolve_idle_pct_threshold,
 )
-from _denoise_steps import count_profiler_steps, resolve_perstep_divisor
-from _io_utils import atomic_write_json, utc_now, write_text
+from ._denoise_steps import count_profiler_steps, resolve_perstep_divisor
+from ._io_utils import atomic_write_json, utc_now, write_text
 
 
 AGGREGATION_SCOPE_FULL = "full_trace"
@@ -804,7 +802,7 @@ def main(argv: list[str] | None = None) -> int:
     diffusion_roofline_path: str | None = None
     if framework_registry.is_scriptable(args.framework):
         try:
-            from diffusion_roofline import build_report_from_bypass
+            from .diffusion_roofline import build_report_from_bypass
 
             _diff_steps = resolve_perstep_divisor(
                 requested_steps=requested_denoise_steps,

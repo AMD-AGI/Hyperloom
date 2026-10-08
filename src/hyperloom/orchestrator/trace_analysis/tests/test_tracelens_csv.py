@@ -13,16 +13,11 @@ from pathlib import Path
 
 import pytest
 
-# tools/ is not a package — stick its dir on sys.path so we can import.
-_TOOL_DIR = Path(__file__).resolve().parent.parent / "tools"
-if str(_TOOL_DIR) not in sys.path:
-    sys.path.insert(0, str(_TOOL_DIR))
-
-import tracelens_analysis as tla
-import _bypass_report as bypass_report
-import _idle_gate as idle_gate
-import _task_group_contract as task_group_contract
-import tracelens_skill_runner as tlr
+from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
+from hyperloom.orchestrator.trace_analysis import _bypass_report as bypass_report
+from hyperloom.orchestrator.trace_analysis import _idle_gate as idle_gate
+from hyperloom.orchestrator.trace_analysis import _task_group_contract as task_group_contract
+from hyperloom.orchestrator.trace_analysis import tracelens_skill_runner as tlr
 
 
 def test_default_top_k_uses_large_pool_by_default(monkeypatch):
@@ -3992,7 +3987,7 @@ def test_default_workspace_path_falls_back_to_workspace_path(monkeypatch):
 
 def test_default_workspace_path_final_fallback_to_hyperloom_default(monkeypatch):
     """No envs set → delegates to _paths, which adapts to the host."""
-    from hyperloom.agents.kernel.tools import _paths
+    from hyperloom.orchestrator.trace_analysis import _paths
 
     monkeypatch.delenv("USER_DATA_PATH", raising=False)
     monkeypatch.delenv("WORKSPACE_PATH", raising=False)

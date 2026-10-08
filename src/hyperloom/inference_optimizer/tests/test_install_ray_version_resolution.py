@@ -8,8 +8,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-KERNEL_ROOT = Path(__file__).resolve().parent.parent
-INSTALL_SH = KERNEL_ROOT / "scripts" / "install.sh"
+INSTALL_SH = Path(__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"
 
 
 def _extract_shell_function(name: str) -> str:

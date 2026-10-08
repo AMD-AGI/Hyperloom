@@ -36,9 +36,9 @@ done
 # overrides (HYPERLOOM_ROOT, MAGPIE_PATH, etc.) — the defaults below take
 # effect only when the corresponding env var is unset.
 #
-# REPO_ROOT / KERNEL_AGENT_ROOT default to the on-disk source location
-# (this script lives at src/hyperloom/agents/kernel/scripts/install.sh, so
-# KERNEL_AGENT_ROOT is one level up and REPO_ROOT is five levels up).
+# REPO_ROOT defaults to the on-disk source location (this script lives at
+# src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh, so
+# REPO_ROOT is four levels up).
 # Operator-provided read-only inputs
 # (TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT)
 # may stay outside USER_DATA_PATH.
@@ -49,7 +49,7 @@ done
 # USER_DATA_PATH-rooted defaults). If your launcher exported these,
 # either rename to USER_DATA_PATH or simply drop them.
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
 HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
 # Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
 # can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
@@ -1118,7 +1118,7 @@ ensure_tracelens() {
       # on a mid-clone crash) would leave an unpinned/half-cloned $TRACELENS_ROOT
       # that a concurrent reader (trace_analyze self-heal) treats as complete (#722).
       # Keep this temp-clone+pin+atomic-rename in lockstep with
-      # src/hyperloom/agents/kernel/tools/tracelens_analysis.py
+      # src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py
       # (_ensure_tracelens_checkout).
       mkdir -p "$(dirname "$TRACELENS_ROOT")"
       _tl_tmp="$(dirname "$TRACELENS_ROOT")/.$(basename "$TRACELENS_ROOT").clone.$$"
@@ -1282,7 +1282,7 @@ write_env_file() {
     # Pin TRACELENS_ROOT and TRACELENS_INTERNAL_ROOT to the (possibly
     # mirrored) values resolved by ensure_tracelens(). This is what lets
     # setsid nohup python -m hyperloom.inference_optimizer.cli optimize →
-    # src/hyperloom/agents/kernel/tools/tracelens_analysis.py inherit the writable
+    # python -m hyperloom.orchestrator.trace_analysis.tracelens_analysis inherit the writable
     # mirrors instead of falling back to the read-only /path defaults.
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
     if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
@@ -1291,7 +1291,7 @@ write_env_file() {
     fi
     [ -n "${HYPERLOOM_ROOT:-}" ] && echo "export HYPERLOOM_ROOT='${HYPERLOOM_ROOT}'"
     # e2e optimizer ("geak") checkout + runner (GEAK_ROOT / GEAK_E2E_RUNNER),
-    # consumed by src/hyperloom/agents/kernel/tools/backends/geak_runner.py.
+    # consumed by src/hyperloom/orchestrator/kernel/geak_runner.py.
     [ -n "${GEAK_E2E_RUNNER}" ] && echo "export GEAK_E2E_RUNNER='${GEAK_E2E_RUNNER}'"
     [ -n "${GEAK_ROOT}" ] && echo "export GEAK_ROOT='${GEAK_ROOT}'"
     [ -n "${GEAK_CLAUDE_MODEL_VAL}" ] && echo "export GEAK_CLAUDE_MODEL='${GEAK_CLAUDE_MODEL_VAL}'"

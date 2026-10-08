@@ -14,38 +14,21 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Iterable, Sequence
 
-try:  # in-package import
-    from hyperloom.agents.kernel.tools._bypass_trace_reader import (
-        _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
-        _MAX_EVENT_CHARS,
-        _MAX_TRACE_PREFIX_CHARS,
-        _open_trace_binary,
-        _rank_of,
-        _select_trace_file,
-        _trace_candidates,
-        _union_ms,
-        analyze_trace,
-        resolve_trace_file,
-        select_steady_window,
-        stream_events,
-    )
-    from hyperloom.agents.kernel.tools._capture_shapes import is_capture_fragment
-except ImportError:  # sys.path import
-    from _bypass_trace_reader import (
-        _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
-        _MAX_EVENT_CHARS,
-        _MAX_TRACE_PREFIX_CHARS,
-        _open_trace_binary,
-        _rank_of,
-        _select_trace_file,
-        _trace_candidates,
-        _union_ms,
-        analyze_trace,
-        resolve_trace_file,
-        select_steady_window,
-        stream_events,
-    )
-    from _capture_shapes import is_capture_fragment
+from ._bypass_trace_reader import (
+    _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
+    _MAX_EVENT_CHARS,
+    _MAX_TRACE_PREFIX_CHARS,
+    _open_trace_binary,
+    _rank_of,
+    _select_trace_file,
+    _trace_candidates,
+    _union_ms,
+    analyze_trace,
+    resolve_trace_file,
+    select_steady_window,
+    stream_events,
+)
+from ._capture_shapes import is_capture_fragment
 
 SCHEMA_VERSION = 1
 PROBE_VERSION = "selfcert-1.0.0"

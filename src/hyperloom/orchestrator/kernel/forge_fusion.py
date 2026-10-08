@@ -17,11 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Sibling import: kernel-agent tools cannot rely on the ``hyperloom`` import root.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _io_utils import truthy
-
-sys.path.pop(0)
+from hyperloom.orchestrator.trace_analysis._io_utils import truthy
 
 RESULT_BEGIN = "FORGE_FUSION_RESULT_BEGIN"
 RESULT_END = "FORGE_FUSION_RESULT_END"

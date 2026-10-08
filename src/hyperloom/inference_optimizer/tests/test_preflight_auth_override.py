@@ -213,7 +213,7 @@ def test_runtime_loader_still_rejects_a_missing_env_file(monkeypatch, tmp_path, 
 @pytest.fixture
 def credential_emitter():
     """Read the production emitter without running the installer or sourcing its output."""
-    script = Path(cli_preflight.__file__).resolve().parents[2] / "agents/kernel/scripts/install.sh"
+    script = Path(cli_preflight.__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"
     source = script.read_text(encoding="utf-8")
     match = re.search(r"^  _emit_credential_fallback\(\) \{\n.*?^  \}", source, re.MULTILINE | re.DOTALL)
     assert match, "production credential emitter not found"

@@ -14,18 +14,13 @@ from pathlib import Path
 
 import pytest
 
-
-_APPLY_TOOL_PATH = Path(__file__).resolve().parent.parent / "tools" / "apply_kernel_patch.py"
+from hyperloom.orchestrator.kernel import apply_kernel_patch
 
 
 @pytest.fixture()
-def akp() -> types.ModuleType:
-    spec = importlib.util.spec_from_file_location("_akp_isolated_aiter_under_test", _APPLY_TOOL_PATH)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+def akp(monkeypatch) -> types.ModuleType:
+    monkeypatch.setattr(apply_kernel_patch, "_CACHED_KNOWN_TARGET_ROOTS", None)
+    return apply_kernel_patch
 
 
 def _make_isolated_aiter(tmp_path: Path) -> tuple[Path, Path]:
@@ -1089,24 +1084,19 @@ def test_installed_custom_cache_requires_restore_trust_before_mutation(
     assert served.read_bytes() == b"baseline"
 
 
-def test_local_tool_loads_shared_core_outside_repository(tmp_path):
+def test_import_leaves_aiter_and_torch_unloaded(tmp_path):
     import subprocess
 
     script = """
-import importlib.util
 import sys
-from pathlib import Path
-spec = importlib.util.spec_from_file_location('standalone_apply', sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-assert module.aiter_jit_cache.__file__ == str(Path(sys.argv[1]).resolve().parents[3] / 'common' / 'aiter_jit_cache.py')
+import hyperloom.orchestrator.kernel.apply_kernel_patch
 assert 'aiter' not in sys.modules
 assert 'torch' not in sys.modules
 """
     proc = subprocess.run(
-        [sys.executable, "-I", "-S", "-B", "-c", script, str(_APPLY_TOOL_PATH)],
+        [sys.executable, "-B", "-c", script],
         cwd=tmp_path,
-        env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
+        env={**os.environ, "PYTHONPATH": str(Path(apply_kernel_patch.__file__).resolve().parents[3])},
         capture_output=True,
         text=True,
         timeout=30,

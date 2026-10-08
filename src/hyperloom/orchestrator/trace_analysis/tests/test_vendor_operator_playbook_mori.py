@@ -11,20 +11,12 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 from pathlib import Path
 
 import pytest
 
-_TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
-if str(_TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(_TOOLS_DIR))
-_BACKENDS_DIR = _TOOLS_DIR / "backends"
-if str(_BACKENDS_DIR) not in sys.path:
-    sys.path.insert(0, str(_BACKENDS_DIR))
-
-import tracelens_analysis as tla
-from _vendor_operator_playbooks import (
+from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
+from hyperloom.orchestrator.trace_analysis._vendor_operator_playbooks import (
     load_vendor_operator_playbooks,
     match_vendor_operator_playbook,
     resolve_kernel_anchor_path,
@@ -309,9 +301,9 @@ def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog
     )
     # Redirect the registry rather than patching ``Path.read_text``, which is ``pathlib.Path``'s and would answer for
     # every read in the process.
-    monkeypatch.setattr("_vendor_operator_playbooks._REGISTRY_PATH", registry)
+    monkeypatch.setattr("hyperloom.orchestrator.trace_analysis._vendor_operator_playbooks._REGISTRY_PATH", registry)
     _reset_vendor_operator_playbooks_cache()
-    with caplog.at_level(logging.WARNING, logger="_vendor_operator_playbooks"):
+    with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.trace_analysis._vendor_operator_playbooks"):
         loaded = load_vendor_operator_playbooks()
     _reset_vendor_operator_playbooks_cache()
 
@@ -353,12 +345,12 @@ def test_resolve_kernel_anchor_path_is_always_absolute(monkeypatch, tmp_path):
 
 def test_registry_json_is_valid_and_ships_in_package_data():
     """The JSON registry parses and pyproject.toml declares it as package-data (mirrors KernelForge's own wheel-packaging regression for framework/mori/)."""
-    registry_path = _TOOLS_DIR / "vendor_operator_playbooks.json"
+    registry_path = Path(__file__).resolve().parents[1] / "vendor_operator_playbooks.json"
     data = json.loads(registry_path.read_text(encoding="utf-8"))
     playbook_ids = {p["id"] for p in data["playbooks"]}
     assert "mori_ep_dispatch_combine" in playbook_ids
 
-    pyproject = registry_path.parents[5] / "pyproject.toml"
+    pyproject = registry_path.parents[4] / "pyproject.toml"
     assert pyproject.is_file()
     text = pyproject.read_text(encoding="utf-8")
     assert "vendor_operator_playbooks.json" in text

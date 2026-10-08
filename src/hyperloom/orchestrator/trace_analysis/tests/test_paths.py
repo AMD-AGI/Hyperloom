@@ -7,17 +7,10 @@ from __future__ import annotations
 
 import importlib
 import logging
-import sys
-from pathlib import Path
-
-
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
 
 
 def _reload_paths():
-    import _paths
+    from hyperloom.orchestrator.trace_analysis import _paths
 
     return importlib.reload(_paths)
 
@@ -34,7 +27,7 @@ def test_workspace_root_warns_once_when_unset(monkeypatch, caplog):
     paths = _reload_paths()
 
     expected = paths.default_workspace_root()
-    with caplog.at_level(logging.WARNING, logger="_paths"):
+    with caplog.at_level(logging.WARNING, logger=paths.log.name):
         assert paths.workspace_root() == expected
         assert paths.workspace_root() == expected
 

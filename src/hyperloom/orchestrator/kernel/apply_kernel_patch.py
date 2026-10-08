@@ -22,16 +22,8 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
-# Sibling import works whether run as a script or via importlib.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _io_utils import source_text_looks_complete, utc_now
-
-sys.path.pop(0)
-sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
-try:
-    from hyperloom.common import aiter_jit_cache
-finally:
-    sys.path.pop(0)
+from hyperloom.common import aiter_jit_cache
+from hyperloom.orchestrator.trace_analysis._io_utils import source_text_looks_complete, utc_now
 
 log = logging.getLogger(__name__)
 

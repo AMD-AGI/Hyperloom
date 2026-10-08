@@ -14,8 +14,7 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
+INSTALL_SCRIPT = Path(__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"
 
 # The env file's whole subject is "was this name already exported at launch", so every name these tests reason about
 # has to start out unset regardless of what the operator's shell carries.

@@ -15,21 +15,21 @@ import re
 from collections import Counter, defaultdict
 from typing import Any
 
-from _bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
-from _bypass_classify import classify_kernel
-from _bypass_fusion import analyze_fusion
-from _analysis_md import render_report
-from _bypass_roofline import compute_roofline
-from _kernel_category import canonical_category
-from _kernel_partition import build_kernel_candidates_document
+from ._bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
+from ._bypass_classify import classify_kernel
+from ._bypass_fusion import analyze_fusion
+from ._analysis_md import render_report
+from ._bypass_roofline import compute_roofline
+from ._kernel_category import canonical_category
+from ._kernel_partition import build_kernel_candidates_document
 
 # Source path mapping delegates to TraceLens' independent kernel_source
 # path-identifier; this path uses only TraceLens' path-mapping features,
 # not its analysis layer.
-from _kernel_source import resolve_source_verdict
-from _idle_gate import resolve_idle_pct_threshold
-from _roofline_source import PLACEHOLDER as _RL_PLACEHOLDER
-from _task_group_contract import (
+from ._kernel_source import resolve_source_verdict
+from ._idle_gate import resolve_idle_pct_threshold
+from ._roofline_source import PLACEHOLDER as _RL_PLACEHOLDER
+from ._task_group_contract import (
     build_operator_identity,
     build_task_group_shape_cases,
     legacy_operator_identity_keys,

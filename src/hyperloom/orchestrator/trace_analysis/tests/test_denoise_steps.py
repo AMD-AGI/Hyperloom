@@ -12,12 +12,9 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-import _denoise_steps as ds
+from hyperloom.orchestrator.trace_analysis import _denoise_steps as ds
 
 
 def test_divisor_prefers_requested_over_inferred():
@@ -57,7 +54,7 @@ class TestCallSiteBinding:
         return f
 
     def test_bypass_binds_requested_and_inferred_correctly(self, tmp_path, monkeypatch, capsys):
-        import bypass_trace_analysis as bta
+        from hyperloom.orchestrator.trace_analysis import bypass_trace_analysis as bta
 
         seen: dict = {}
 
@@ -95,8 +92,8 @@ class TestCallSiteBinding:
         assert seen["inferred_steps"] == 3, "the trace-derived count must bind to inferred_steps"
 
     def test_tracelens_binds_requested_and_inferred_correctly(self, tmp_path, monkeypatch):
-        import diffusion_roofline as dr
-        import tracelens_analysis as tl
+        from hyperloom.orchestrator.trace_analysis import diffusion_roofline as dr
+        from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tl
 
         seen: dict = {}
 
@@ -140,7 +137,7 @@ def test_bypass_cli_default_honours_the_shared_env_var(monkeypatch):
     """Both CLIs must derive the default from the same place."""
     import importlib
 
-    import bypass_trace_analysis as bta
+    from hyperloom.orchestrator.trace_analysis import bypass_trace_analysis as bta
 
     monkeypatch.setenv("HYPERLOOM_NUM_DENOISE_STEPS", "9")
     importlib.reload(bta)

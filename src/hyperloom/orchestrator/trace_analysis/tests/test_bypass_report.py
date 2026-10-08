@@ -11,13 +11,10 @@ from __future__ import annotations
 
 import csv
 import io
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-import _bypass_report as report
-from _kernel_partition import partition_kernels
+from hyperloom.orchestrator.trace_analysis import _bypass_report as report
+from hyperloom.orchestrator.trace_analysis._kernel_partition import partition_kernels
 from TraceLens.TraceUtils.kernel_source import ResolveResult, SourceLocation
 
 

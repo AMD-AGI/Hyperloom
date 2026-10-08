@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import subprocess
@@ -17,14 +16,8 @@ import pytest
 from hyperloom.common.codex_session import (
     CODEX_SANDBOX_MODE_ENV,
 )
+from hyperloom.orchestrator.kernel import forge_fusion
 from hyperloom.orchestrator.kernel.nomination_result import parse_outcome
-
-
-_MODULE_PATH = Path(__file__).resolve().parent.parent / "tools" / "forge_fusion.py"
-_SPEC = importlib.util.spec_from_file_location("forge_fusion_tool", _MODULE_PATH)
-assert _SPEC and _SPEC.loader
-forge_fusion = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(forge_fusion)
 
 
 @pytest.fixture(autouse=True)

@@ -5,11 +5,10 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 from pathlib import Path
 
-apk = importlib.import_module("hyperloom.agents.kernel.tools.apply_kernel_patch")
+from hyperloom.orchestrator.kernel import apply_kernel_patch as apk
 
 _BODY = "import torch\n\n\ndef fused_moe(x):\n    return x\n"
 

@@ -13,25 +13,15 @@ from pathlib import Path
 import pytest
 
 
-# Import module-level helpers without the heavy __main__ path.
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-TL_PATH = TOOLS_DIR / "tracelens_analysis.py"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
+_TL_MODULE = "hyperloom.orchestrator.trace_analysis.tracelens_analysis"
 
 
 @pytest.fixture(scope="module")
 def tl_module():
-    """Import tracelens_analysis.py as a module without executing main()."""
-    import importlib.util
+    """Import tracelens_analysis as a module without executing main()."""
+    from hyperloom.orchestrator.trace_analysis import tracelens_analysis
 
-    spec = importlib.util.spec_from_file_location(
-        "tracelens_analysis_under_test",
-        TL_PATH,
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    return tracelens_analysis
 
 
 def _write_exec_details(
@@ -340,9 +330,9 @@ def test_selected_chunk_not_in_csv_returns_none(tl_module, split_dir):
 
 
 def _run_help() -> str:
-    """Invoke `python tracelens_analysis.py --help` and return stdout."""
+    """Invoke `python -m hyperloom.orchestrator.trace_analysis.tracelens_analysis --help` and return stdout."""
     proc = subprocess.run(
-        [sys.executable, str(TL_PATH), "--help"],
+        [sys.executable, "-m", _TL_MODULE, "--help"],
         capture_output=True,
         text=True,
         timeout=60,
@@ -365,7 +355,8 @@ def test_cli_rejects_unknown_mode():
     proc = subprocess.run(
         [
             sys.executable,
-            str(TL_PATH),
+            "-m",
+            _TL_MODULE,
             "--trace-input",
             "/tmp/does-not-exist",
             "--workspace-path",

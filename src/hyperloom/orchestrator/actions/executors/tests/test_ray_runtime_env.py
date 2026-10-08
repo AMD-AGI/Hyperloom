@@ -1,18 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``backends/ray_runtime.py`` ``safe_runtime_env`` key/URL derivation."""
+"""Unit tests for ``_ray_runtime.py`` ``safe_runtime_env`` key/URL derivation."""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-_TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-sys.path.insert(0, str(_TOOLS_DIR / "backends"))
-sys.path.insert(0, str(_TOOLS_DIR))
-
-import ray_runtime
+from hyperloom.orchestrator.actions.executors import _ray_runtime as ray_runtime
 
 # Every key alias derived by safe_runtime_env, split by provider protocol.
 _OPENAI_KEYS = ("OPENAI_API_KEY",)

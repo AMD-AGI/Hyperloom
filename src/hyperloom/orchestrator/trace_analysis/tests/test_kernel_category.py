@@ -9,12 +9,8 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-import _kernel_category as kc
+from hyperloom.orchestrator.trace_analysis import _kernel_category as kc
 
 
 def test_casing_normalized_across_routes():

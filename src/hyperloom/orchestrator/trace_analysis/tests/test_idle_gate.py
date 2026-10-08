@@ -9,12 +9,9 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-import _idle_gate as ig
+from hyperloom.orchestrator.trace_analysis import _idle_gate as ig
 
 
 def test_threshold_default(monkeypatch):

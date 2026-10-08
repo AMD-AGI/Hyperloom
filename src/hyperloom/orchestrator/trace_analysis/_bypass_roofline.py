@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from _roofline_source import ANALYTICAL as _RL_ANALYTICAL
+from ._roofline_source import ANALYTICAL as _RL_ANALYTICAL
 
 # Compact AMD MAX-ACHIEVABLE (sustained) peak specs — same convention as the session roofline ceiling.
 _PEAK_TFLOPS_MI300: dict[str, float] = {

@@ -16,12 +16,11 @@ the target would break those legitimate reverts.
 
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 from pathlib import Path
 
-apk = importlib.import_module("hyperloom.agents.kernel.tools.apply_kernel_patch")
+from hyperloom.orchestrator.kernel import apply_kernel_patch as apk
 
 
 def _write_manifest(backup_dir: Path, manifest: dict) -> Path:

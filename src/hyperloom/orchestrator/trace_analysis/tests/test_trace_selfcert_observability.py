@@ -15,14 +15,9 @@ categorical answer.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
-# The tools tree supports both a package import and a bare sys.path import; the bare one has to resolve for the
-# package import to succeed, the same way ``profile.py`` arranges it before certifying.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-from hyperloom.agents.kernel.tools.trace_selfcert import (
+from hyperloom.orchestrator.trace_analysis.trace_selfcert import (
     build_verdict,
     certify_capture_sidecars,
     certify_trace_dir,

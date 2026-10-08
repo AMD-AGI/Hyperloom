@@ -54,26 +54,20 @@ except ImportError:
     _resolve_known_source_prefixes = None
 
 try:
-    from apply_kernel_patch import known_target_roots as _known_target_roots
+    from hyperloom.orchestrator.kernel.apply_kernel_patch import known_target_roots as _known_target_roots
 except ImportError:
     _known_target_roots = None
 
-try:
-    from _task_group_contract import native_operation_key as _native_operation_key
-except ImportError:
-    _native_operation_key = None
-
-# Unguarded like the other sibling imports below: a fallback here would silently
-# turn name normalization into the identity and mis-key every kernel lookup.
-from _task_group_contract import _strip_dispatch_decoration
+from ._task_group_contract import _strip_dispatch_decoration
+from ._task_group_contract import native_operation_key as _native_operation_key
 
 try:
     import aiter.jit.core as _aiter_jit_core  # type: ignore[import-untyped]
 except ImportError:
     _aiter_jit_core = None
 
-from tracelens_arch_benchmark import normalize_platform, populate_gpu_arch_json
-from tracelens_skill_runner import (
+from .tracelens_arch_benchmark import normalize_platform, populate_gpu_arch_json
+from .tracelens_skill_runner import (
     aggregate_by_source_function,
     discover_capture_folder,
     extract_compute_pct_from_analysis_md,
@@ -84,23 +78,23 @@ from tracelens_skill_runner import (
 )
 from TraceLens.Agent.Analysis.post_processing import render_analysis_json
 
-from _analysis_json import load_report_tasks
-from _kernel_partition import build_kernel_candidates_document
-from _io_utils import append_log, atomic_write_json, read_last_lines, utc_now
-from _literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
-from _literal_utils import safe_literal_eval as _safe_literal_eval
-from _nccl_summary_candidates import extract_collective_candidates
+from ._analysis_json import load_report_tasks
+from ._kernel_partition import build_kernel_candidates_document
+from ._io_utils import append_log, atomic_write_json, read_last_lines, utc_now
+from ._literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
+from ._literal_utils import safe_literal_eval as _safe_literal_eval
+from ._nccl_summary_candidates import extract_collective_candidates
 
 # Standalone-tool workspace-root resolver (cannot import hyperloom.inference_optimizer.session.paths; see _paths.py).
-from _paths import workspace_root
+from ._paths import workspace_root
 
 # Capture-vs-workload trace classification, shared across routes so a sidecar is
 # recognised identically whichever backend reads the profile.
-from _capture_shapes import is_capture_fragment as _shared_is_capture_fragment
+from ._capture_shapes import is_capture_fragment as _shared_is_capture_fragment
 
 # Trace-health gate thresholds + warnings (high idle, low compute): shared single
 # source of truth so the TraceLens and bypass routes gate on identical semantics.
-from _idle_gate import (
+from ._idle_gate import (
     build_graph_under_recorded_warning as _build_graph_under_recorded_warning,
     build_high_idle_warning as _build_high_idle_warning,
     build_low_compute_warning as _build_low_compute_warning,
@@ -110,7 +104,7 @@ from _idle_gate import (
 
 # Canonical roofline_source provenance enum, shared with the bypass route so both
 # emit the field from one vocabulary (see _roofline_source for the value ladder).
-from _roofline_source import (
+from ._roofline_source import (
     ANALYTICAL as _RL_ANALYTICAL,
     PLACEHOLDER as _RL_PLACEHOLDER,
 )
@@ -118,7 +112,7 @@ from _roofline_source import (
 # Vendor-operator-playbook registry: routes a closed-source vendor op (no
 # rewritable device source) to a validated KernelForge task bundle instead of
 # a source rewrite -- see KernelForge PR #88's mori dispatch/combine gap.
-from _vendor_operator_playbooks import (
+from ._vendor_operator_playbooks import (
     match_vendor_operator_playbook,
     resolve_kernel_anchor_path,
 )
@@ -322,7 +316,7 @@ def _graph_coverage_from_raw_trace(trace_path: str | Path | None) -> dict[str, A
     if not trace_path:
         return {}
     try:
-        import _bypass_trace_reader as _reader
+        from . import _bypass_trace_reader as _reader
 
         analyze = _reader.analyze_trace(str(trace_path), top_k=1, emit_launches=False)
         if analyze.get("truncated"):
@@ -4796,8 +4790,6 @@ def _with_demangled_symbol(candidate: dict[str, Any]) -> dict[str, Any]:
             ``device_kernel_name_demangled``.
     """
     row = dict(candidate)
-    if _native_operation_key is None:
-        return row
     raw = str(row.get("device_kernel_name") or row.get("name") or "").strip()
     if not raw:
         return row
@@ -4940,11 +4932,8 @@ def write_reports(
     diffusion_roofline_path = ""
     if framework_registry.is_scriptable(getattr(args, "framework", "")):
         try:
-            tools_dir = str(Path(__file__).resolve().parent)
-            if tools_dir not in sys.path:
-                sys.path.insert(0, tools_dir)
-            from diffusion_roofline import build_report as _build_diffusion_roofline  # noqa: WPS433
-            from _denoise_steps import count_profiler_steps, resolve_perstep_divisor  # noqa: WPS433
+            from .diffusion_roofline import build_report as _build_diffusion_roofline  # noqa: WPS433
+            from ._denoise_steps import count_profiler_steps, resolve_perstep_divisor  # noqa: WPS433
 
             # Per-step divisor: an operator-declared count wins over the one
             # inferred from the trace, matching the bypass route.
@@ -4972,7 +4961,7 @@ def write_reports(
                                     _model_dir = str(Path(_cfg).parent)
                                     break
                     if _model_dir and Path(_model_dir).is_dir():
-                        import diffusion_flops as _dflops  # noqa: WPS433
+                        from . import diffusion_flops as _dflops  # noqa: WPS433
 
                         _gpu = str(getattr(args, "target_platform", "") or "mi355x").strip() or "mi355x"
                         _prec = str(getattr(args, "precision", "") or "bf16").strip() or "bf16"
@@ -5113,7 +5102,7 @@ def main() -> int:
         "--tracelens-root",
         default=os.environ.get("TRACELENS_ROOT", ""),
         help="TraceLens public checkout (TRACELENS_ROOT). Required: "
-        "src/hyperloom/agents/kernel/scripts/install.sh exports it from "
+        "src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh exports it from "
         "kernel-agent.env.sh; pass --tracelens-root only when "
         "running outside the installer-managed env.",
     )
@@ -5554,7 +5543,7 @@ def main() -> int:
             if not tl_root_arg:
                 raise SystemExit(
                     "TraceLens root not provided: set TRACELENS_ROOT in env "
-                    "(src/hyperloom/agents/kernel/scripts/install.sh writes it to "
+                    "(src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh writes it to "
                     "kernel-agent.env.sh) or pass --tracelens-root."
                 )
             tl_root = Path(tl_root_arg)

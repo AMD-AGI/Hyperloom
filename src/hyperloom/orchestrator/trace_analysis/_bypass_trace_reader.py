@@ -18,8 +18,8 @@ from typing import Any, Iterator
 
 # Stdlib-only sibling; keeps this reader independent of TraceLens while sharing one capture-vs-workload rule with the
 # TraceLens route.
-from _capture_shapes import is_capture_fragment as _shared_is_capture_fragment
-from _trace_rank import select_primary_trace, trace_rank as _rank_of
+from ._capture_shapes import is_capture_fragment as _shared_is_capture_fragment
+from ._trace_rank import select_primary_trace, trace_rank as _rank_of
 
 # GPU device-side event categories (Kineto ``cat`` values).
 _GPU_KERNEL_CAT = "kernel"

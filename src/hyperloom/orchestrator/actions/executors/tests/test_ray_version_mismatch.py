@@ -7,18 +7,11 @@ from __future__ import annotations
 
 import sys
 import types
-from pathlib import Path
 from unittest import mock
 
 import pytest
 
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-BACKENDS_DIR = TOOLS_DIR / "backends"
-for d in (str(TOOLS_DIR), str(BACKENDS_DIR)):
-    if d not in sys.path:
-        sys.path.insert(0, d)
-
-import ray_runtime
+from hyperloom.orchestrator.actions.executors import _ray_runtime as ray_runtime
 
 
 _VERSION_MISMATCH_MSG = (

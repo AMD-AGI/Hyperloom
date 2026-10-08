@@ -9,13 +9,9 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-import _analysis_md as am
-import _bypass_report as br
+from hyperloom.orchestrator.trace_analysis import _analysis_md as am
+from hyperloom.orchestrator.trace_analysis import _bypass_report as br
 from test_bypass_report import _KERNELS, _analyze
 
 

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +20,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
 )
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
+from hyperloom.orchestrator.kernel import apply_kernel_patch
 
 
 @pytest.fixture(autouse=True)
@@ -590,64 +590,26 @@ class TestAtomPathPresentInAllThreeLocations:
 
     def test_atom_present_in_tracelens_reusable_roots(self):
         """The kernel-agent's tracelens_analysis ``_REUSABLE_SOURCE_ROOTS`` must track the orchestrator-side list."""
-        ka_path = (
-            Path(__file__).resolve().parents[4]
-            / "src"
-            / "hyperloom"
-            / "agents"
-            / "kernel"
-            / "tools"
-            / "tracelens_analysis.py"
-        )
-        if not ka_path.is_file():
-            pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
+        from hyperloom.orchestrator import trace_analysis
+
+        ka_path = Path(trace_analysis.__file__).resolve().parent / "tracelens_analysis.py"
         text = ka_path.read_text(encoding="utf-8")
         assert "/app/atom/atom/" in text.lower(), (
-            "src/hyperloom/agents/kernel/tools/tracelens_analysis.py _REUSABLE_SOURCE_ROOTS "
+            "src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py _REUSABLE_SOURCE_ROOTS "
             "is out of sync with src/hyperloom/orchestrator/kernel/"
             "request_handlers._REUSABLE_SOURCE_ROOTS (atom missing)"
         )
 
     def test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync(self):
         """The orchestrator gate and kernel-agent classifier derive reusable roots from the same source, so their atom subsets must match."""
-        ka_path = (
-            Path(__file__).resolve().parents[4]
-            / "src"
-            / "hyperloom"
-            / "agents"
-            / "kernel"
-            / "tools"
-            / "tracelens_analysis.py"
-        )
-        if not ka_path.is_file():
-            pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
         from hyperloom.orchestrator.kernel import (
             request_handlers as krh,
         )
+        from hyperloom.orchestrator.trace_analysis import tracelens_analysis
 
         orch_atom = frozenset(r.lower() for r in krh._reusable_source_roots() if "/atom/" in r.lower())
-        # Put the tools dir on sys.path: the sister tool imports sibling kernel-agent tools.
-        import importlib.util as _ilu
-        import sys as _sys
-
-        tools_dir = str(ka_path.parent)
-        added = tools_dir not in _sys.path
-        if added:
-            _sys.path.insert(0, tools_dir)
-        try:
-            spec = _ilu.spec_from_file_location(
-                "_tracelens_atom_sync_probe",
-                ka_path,
-            )
-            assert spec is not None and spec.loader is not None
-            mod = _ilu.module_from_spec(spec)
-            # Register before exec so self-referential dataclass annotations resolve.
-            _sys.modules[spec.name] = mod
-            spec.loader.exec_module(mod)
-            ka_atom = frozenset(r.lower() for r in mod._reusable_roots() if "/atom/" in r.lower())
-        finally:
-            if added and tools_dir in _sys.path:
-                _sys.path.remove(tools_dir)
+        tracelens_analysis._framework_source_roots.cache_clear()
+        ka_atom = frozenset(r.lower() for r in tracelens_analysis._reusable_roots() if "/atom/" in r.lower())
         assert orch_atom, "orchestrator reusable roots carry no atom entry"
         assert ka_atom, "tracelens reusable roots carry no atom entry"
         assert orch_atom == ka_atom, f"atom subsets diverged — orch={sorted(orch_atom)!r} ka={sorted(ka_atom)!r}"
@@ -682,22 +644,10 @@ def test_probe_framework_source_roots_includes_defaults(tmp_path, monkeypatch):
 
 
 # apply_kernel_patch known-target roots
-_APPLY_TOOL_PATH = (
-    Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "apply_kernel_patch.py"
-)
-
-
-@pytest.fixture(scope="module")
-def apply_tool() -> types.ModuleType:
-    spec = importlib.util.spec_from_file_location(
-        "_apply_kernel_patch_roots_test",
-        _APPLY_TOOL_PATH,
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+@pytest.fixture
+def apply_tool(monkeypatch) -> types.ModuleType:
+    monkeypatch.setattr(apply_kernel_patch, "_CACHED_KNOWN_TARGET_ROOTS", None)
+    return apply_kernel_patch
 
 
 def test_known_target_roots_includes_dist_packages_vllm(

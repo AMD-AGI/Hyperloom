@@ -674,7 +674,7 @@ def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
         ),
         (
             "kernel",
-            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh",
             [],
         ),
     ]
@@ -724,7 +724,7 @@ def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
         ),
         (
             "kernel",
-            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh",
             [],
         ),
     ]
@@ -821,7 +821,7 @@ def test_install_preflights_accept_oauth_only_credentials(tmp_path: Path):
         ),
         (
             "kernel",
-            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh",
             [],
         ),
     ]
@@ -912,7 +912,7 @@ def test_install_preflights_accept_oauth_alongside_bare_openai_key(tmp_path: Pat
         ),
         (
             "kernel",
-            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh",
             [],
         ),
     ]
@@ -960,7 +960,7 @@ def test_install_preflights_still_reject_gateway_url_with_bare_openai_key(tmp_pa
         ),
         (
             "kernel",
-            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh",
             [],
         ),
     ]
@@ -2733,7 +2733,7 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
 
 
 def test_kernel_install_no_longer_exports_openai_safe_credentials():
-    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh"
     script_text = install_script.read_text(encoding="utf-8")
     write_start = script_text.index("write_env_file() {")
     write_end = script_text.index("\nensure_geak()", write_start)
@@ -2881,7 +2881,7 @@ def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
 
 
 def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tmp_path: Path):
-    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh"
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
     upsert_end = script_text.index("\n# In --check-only mode")
@@ -2974,7 +2974,7 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
 
 def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
     """Writing kernel-agent env must NOT wipe the Anthropic creds the operator put in .env (an Anthropic-only setup must keep ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL after install)."""
-    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh"
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
     upsert_end = script_text.index("\n# In --check-only mode")
@@ -3072,7 +3072,7 @@ def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
             return f"/mnt/{path.drive[0].lower()}{rest}"
         return text
 
-    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh"
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
     upsert_end = script_text.index("\n# In --check-only mode")

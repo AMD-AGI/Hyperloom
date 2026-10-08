@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Ray cluster lifecycle helpers for kernel-agent backends."""
+"""Ray cluster lifecycle helpers for the Ray execution backend."""
 
 from __future__ import annotations
 

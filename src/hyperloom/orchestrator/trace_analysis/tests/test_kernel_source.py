@@ -18,12 +18,8 @@ the reader in ``test_analysis_json_reader.py``.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-import _kernel_source as ks
+from hyperloom.orchestrator.trace_analysis import _kernel_source as ks
 from TraceLens.TraceUtils.kernel_source import ResolveResult
 
 

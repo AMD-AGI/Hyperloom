@@ -9,12 +9,8 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-from _bypass_roofline import compute_roofline
+from hyperloom.orchestrator.trace_analysis._bypass_roofline import compute_roofline
 
 
 def test_large_square_gemm_is_compute_bound():

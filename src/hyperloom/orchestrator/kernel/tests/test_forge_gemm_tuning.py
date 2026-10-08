@@ -6,18 +6,10 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
-from pathlib import Path
 
+from hyperloom.orchestrator.kernel import forge_gemm_tuning
 from hyperloom.orchestrator.kernel import request_handlers as krh
-
-
-_MODULE_PATH = Path(__file__).resolve().parent.parent / "tools" / "forge_gemm_tuning.py"
-_SPEC = importlib.util.spec_from_file_location("forge_gemm_tuning_tool", _MODULE_PATH)
-assert _SPEC and _SPEC.loader
-forge_gemm_tuning = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(forge_gemm_tuning)
 
 
 def _payload() -> dict:

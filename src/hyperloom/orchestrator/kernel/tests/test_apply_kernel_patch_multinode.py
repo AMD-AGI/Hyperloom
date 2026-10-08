@@ -5,25 +5,17 @@
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 import types
-from pathlib import Path
 
 import pytest
 
+from hyperloom.orchestrator.kernel import apply_kernel_patch
 
-_APPLY_TOOL_PATH = Path(__file__).resolve().parent.parent / "tools" / "apply_kernel_patch.py"
 
-
-@pytest.fixture(scope="module")
-def akp() -> types.ModuleType:
-    spec = importlib.util.spec_from_file_location("_akp_multinode_under_test", _APPLY_TOOL_PATH)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+@pytest.fixture()
+def akp(monkeypatch) -> types.ModuleType:
+    monkeypatch.setattr(apply_kernel_patch, "_CACHED_KNOWN_TARGET_ROOTS", None)
+    return apply_kernel_patch
 
 
 def test_is_multi_node_true_when_env_ge_2(akp, monkeypatch):

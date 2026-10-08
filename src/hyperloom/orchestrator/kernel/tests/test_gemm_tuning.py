@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 import types
@@ -13,22 +12,7 @@ from pathlib import Path
 
 import pytest
 
-_TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-
-
-def _load_module():
-    """Load gemm_tuning.py as an isolated module without running main()."""
-    spec = importlib.util.spec_from_file_location(
-        "gemm_tuning_under_test",
-        _TOOLS_DIR / "gemm_tuning.py",
-    )
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
-
-
-gt = _load_module()
+from hyperloom.orchestrator.kernel import gemm_tuning as gt
 
 
 def test_json_line_emits_single_sorted_line(capsys):

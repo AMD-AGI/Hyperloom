@@ -8,17 +8,11 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 import tempfile
 import unittest
-from pathlib import Path
 import unittest.mock as mock
 
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
-
-from tracelens_analysis import (
+from hyperloom.orchestrator.trace_analysis.tracelens_analysis import (
     _defines_traced_triton_kernel,
     _flydsl_kernel_params,
     _flydsl_reusable_roots,
@@ -29,7 +23,7 @@ from tracelens_analysis import (
     enrich_candidates_with_runtime_metadata,
     source_type_for,
 )
-from tracelens_skill_runner import (
+from hyperloom.orchestrator.trace_analysis.tracelens_skill_runner import (
     UPSTREAM_CATEGORY_TO_GEAK,
     normalize_upstream_category,
 )
@@ -375,8 +369,6 @@ class TestCandidateEnvForwarding(unittest.TestCase):
     """``FLYDSL_*`` env vars must be forwarded to GEAK candidate metadata."""
 
     def setUp(self) -> None:
-        repo_root = Path(__file__).resolve().parents[5]
-        sys.path.insert(0, str(repo_root))
         from hyperloom.orchestrator.actions.executors import trace_analyze
 
         self.h = trace_analyze
@@ -403,8 +395,6 @@ class TestOrchestratorReusableRootsInSync(unittest.TestCase):
     """Orchestrator-side allowlist must stay in sync with the classifier."""
 
     def setUp(self) -> None:
-        repo_root = Path(__file__).resolve().parents[5]
-        sys.path.insert(0, str(repo_root))
         from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
         self.handlers = kernel_request_handlers

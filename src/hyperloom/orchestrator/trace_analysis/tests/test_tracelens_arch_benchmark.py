@@ -2,39 +2,22 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-_TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-_spec = importlib.util.spec_from_file_location(
-    "tracelens_arch_benchmark",
-    _TOOLS_DIR / "tracelens_arch_benchmark.py",
-)
-tab = importlib.util.module_from_spec(_spec)
-assert _spec.loader is not None
-sys.modules[_spec.name] = tab
-_spec.loader.exec_module(tab)
+from hyperloom.orchestrator.trace_analysis import tracelens_arch_benchmark as tab
 
 
 @pytest.fixture(scope="module")
 def tla():
-    """Import tracelens_analysis.py as a module without executing main()."""
-    spec = importlib.util.spec_from_file_location(
-        "tracelens_analysis_under_test",
-        _TOOLS_DIR / "tracelens_analysis.py",
-    )
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    # Register before exec so self-referential dataclass annotations resolve.
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    """Import tracelens_analysis as a module without executing main()."""
+    from hyperloom.orchestrator.trace_analysis import tracelens_analysis
+
+    return tracelens_analysis
 
 
 _VISIBLE_DEVICE_VARS = (

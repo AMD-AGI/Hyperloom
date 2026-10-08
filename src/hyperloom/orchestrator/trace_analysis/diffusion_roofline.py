@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from _io_utils import safe_float
+from ._io_utils import safe_float
 
 UNIFIED_CSV = "unified_perf_summary.csv"
 GPU_TIMELINE_CSV = "gpu_timeline.csv"
@@ -446,7 +446,7 @@ def main() -> int:
     # Approach-a absolute analytic ceiling (config-derived).
     if args.model_dir:
         try:
-            import diffusion_flops as _dflops
+            from . import diffusion_flops as _dflops
 
             gpu = args.target_platform or "mi355x"
             est = _dflops.analytic_ceiling(

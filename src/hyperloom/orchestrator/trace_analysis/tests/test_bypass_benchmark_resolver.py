@@ -9,12 +9,9 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-from _bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
+from hyperloom.orchestrator.trace_analysis._bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
 
 
 def _fake_repo(tmp_path: Path) -> Path:
@@ -85,7 +82,7 @@ def test_find_benchmark_files_inserts_double_dash(tmp_path, monkeypatch):
         captured.append(list(cmd))
         return _Proc()
 
-    import _bypass_benchmark_resolver as bbr
+    from hyperloom.orchestrator.trace_analysis import _bypass_benchmark_resolver as bbr
 
     monkeypatch.setattr(bbr.subprocess, "run", fake_run)
     bbr.find_benchmark_files("aiter::rmsnorm", str(repo / "csrc" / "kernels" / "rmsnorm_quant_kernels.cu"))

@@ -146,7 +146,7 @@ The seven rules from the retired `kernel_agent.md` live in executable Python:
 | IR-3 integration is mandatory after every KEEP | `phases/kernel_stack.py::KernelStackPhase.drain_pending_keep_integrates` (called by `intent_router.py`) |
 | IR-4 kill stale servers before restart | `_multi_node_server_lifecycle.py::restart_server_for_round` |
 | IR-5 safe process management | `orchestrator/actions/executors/_subprocess_kill.py` |
-| IR-6 use apply_kernel_patch.py --target-file | `actions/executors/_kernel_agent_tool.py::_maybe_apply_kernel_patch` → `agents/kernel/tools/apply_kernel_patch.py::apply_kernel_patch` |
+| IR-6 use apply_kernel_patch.py --target-file | `actions/executors/_kernel_agent_tool.py::_maybe_apply_kernel_patch` → `orchestrator/kernel/apply_kernel_patch.py::apply_kernel_patch` |
 | IR-7 never modify GEAK config | GEAK invocation wrappers in `request_handlers.py` / `geak_runner.py` |
 
 ## Backend selection
@@ -201,19 +201,19 @@ across ranks before reporting.
 Shell paths in this section follow the recommended `pip install --target .` layout.
 In a source checkout, replace the `hyperloom/` prefix with `src/hyperloom/`.
 
-The kernel tool scripts live under `hyperloom/agents/kernel/tools/` and are
-resolved at runtime through the `HYPERLOOM_KERNEL_AGENT_ROOT` env var (set to
-`<repo>/hyperloom/agents/kernel` by the CLI bootstrap). Install everything using:
+The kernel tools are modules of the `hyperloom.orchestrator.trace_analysis` and
+`hyperloom.orchestrator.kernel` packages; the ones that run as subprocesses are
+started with `python -m <module>`. Install everything using:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"    # workspace holding the hyperloom package
 # Pin the artifact root so the env file below has a known path. Left unset, the
 # CLI picks /workspace/hyperloom when writable and session/ under $PWD otherwise.
 export USER_DATA_PATH="${USER_DATA_PATH:-$REPO_ROOT/session}"
-bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
 ```
 
-`install.sh` is idempotent. It sets up TraceLens, GEAK, Ray, and writes the
+`install_kernel_tools.sh` is idempotent. It sets up TraceLens, GEAK, Ray, and writes the
 env file. Optimizer preflight loads that file in process; do not source it over
 the launching shell's selections. Re-run installation after a venv rebuild or
 when the prepared runtime is no longer valid.

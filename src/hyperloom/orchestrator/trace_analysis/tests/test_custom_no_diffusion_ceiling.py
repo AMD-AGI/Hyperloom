@@ -10,15 +10,12 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-import bypass_trace_analysis as bta
-import tracelens_analysis as tl
+from hyperloom.orchestrator.trace_analysis import bypass_trace_analysis as bta
+from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tl
 
 from hyperloom.inference_optimizer import framework_registry as fr
 
@@ -85,7 +82,7 @@ def _write_reports_for(tmp_path, framework):
 
 def _stub_trace_derived_report(monkeypatch):
     """Stand in for the TraceLens aggregation, which needs real perf CSVs."""
-    import diffusion_roofline as dr
+    from hyperloom.orchestrator.trace_analysis import diffusion_roofline as dr
 
     report = {"totals": {"sigma_ideal_roofline_us": 1234.0, "kernel_roofline_efficiency": 0.5}, "gpu_busy_ratio": 0.9}
     monkeypatch.setattr(dr, "build_report", lambda *args, **kwargs: dict(report))

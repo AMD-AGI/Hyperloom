@@ -18,8 +18,7 @@ from pathlib import Path
 import pytest
 
 
-ROOT = Path(__file__).resolve().parents[1]
-INSTALL_SH = ROOT / "scripts" / "install.sh"
+INSTALL_SH = Path(__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"
 _BASE_PATH = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
 
 
@@ -170,7 +169,7 @@ def _run_forge_validation(
         "TEST_INSTALLED": (tmp_path / "installed").as_posix(),
         "TEST_PROVIDER": "claude",
         "TEST_CASE": case,
-        "PYTHONPATH": str(INSTALL_SH.parents[4]),
+        "PYTHONPATH": str(INSTALL_SH.parents[3]),
         "FORGE_AGENT_BACKEND": "auto",
         "KNOWLEDGE_STORE_MODE": "local",
         "KERNEL_OPT_BACKEND_ORDER": "forge",
