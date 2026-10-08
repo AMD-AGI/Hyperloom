@@ -11,6 +11,7 @@ import importlib
 import json
 import logging
 import os
+import shutil
 import signal
 import uuid
 from dataclasses import dataclass, field
@@ -225,12 +226,30 @@ _EFFORT_ENV_ORCH: str = "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT"
 _EFFORT_ENV_KERNEL: str = "INFERENCE_OPTIMIZER_CLAUDE_KERNEL_EFFORT"
 _THINKING_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_THINKING"
 _CLI_PATH_ENV: str = "HYPERLOOM_CLAUDE_CLI_PATH"
+# The kernel-agent installer records the Claude CLI it resolved here (``kernel-agent.env.sh``).
+_INSTALLER_CLI_ENV: str = "GEAK_CLAUDE_BIN"
 
 # Per-role (env override, default effort) for :attr:`ClaudeBackend.effort_role`.
 _EFFORT_ROLES: dict[str, tuple[str, str]] = {
     "orchestration": (_EFFORT_ENV_ORCH, "medium"),
     "kernel": (_EFFORT_ENV_KERNEL, "low"),
 }
+
+
+def resolve_claude_executable() -> str:
+    """Resolve the Claude CLI Hyperloom's agents run, in-process and as subprocesses.
+
+    Order: ``$HYPERLOOM_CLAUDE_CLI_PATH`` (the operator pin), then the installer's record in ``$GEAK_CLAUDE_BIN``,
+    then ``claude`` on ``$PATH``. The installer may place the CLI outside ``$PATH`` (``~/.local/bin``).
+
+    Returns:
+        The resolved executable path, or ``""`` when none is executable.
+    """
+    for env_name in (_CLI_PATH_ENV, _INSTALLER_CLI_ENV):
+        candidate = os.environ.get(env_name, "").strip()
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return shutil.which("claude") or ""
 
 
 def _import_sdk() -> tuple[Any, Any, Any]:
@@ -664,7 +683,7 @@ class ClaudeBackend:
         kwargs: dict[str, Any] = {"max_turns": max_turns, "include_partial_messages": True}
         if self.model:
             kwargs["model"] = self.model
-        cli_path = os.environ.get(_CLI_PATH_ENV, "").strip()
+        cli_path = resolve_claude_executable()
         if cli_path:
             kwargs["cli_path"] = cli_path
         if system_prompt:
@@ -1054,4 +1073,4 @@ class ClaudeBackend:
         return t if isinstance(t, str) else ""
 
 
-__all__ = ["ClaudeBackend"]
+__all__ = ["ClaudeBackend", "resolve_claude_executable"]

@@ -53,6 +53,7 @@ def test_build_specialist_executor_subprocess_fallback_warns(monkeypatch, tmp_pa
 
     monkeypatch.setattr(shutil, "which", lambda _n: "")
     monkeypatch.delenv("GEAK_CLAUDE_BIN", raising=False)
+    monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
     with caplog.at_level(logging.WARNING, logger=cli_executors.log.name):
         executor = _build_specialist_executor(
             _spec_args("subprocess"),
@@ -71,6 +72,7 @@ def test_build_specialist_executor_subprocess_uses_the_recorded_claude(monkeypat
     recorded.write_text("#!/bin/sh\n", encoding="utf-8")
     recorded.chmod(0o755)
     monkeypatch.setattr(shutil, "which", lambda _n: "")
+    monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
     monkeypatch.setenv("GEAK_CLAUDE_BIN", str(recorded))
     with caplog.at_level(logging.WARNING, logger=cli_executors.log.name):
         executor = _build_specialist_executor(

@@ -84,9 +84,9 @@ def _build_specialist_executor(
     from hyperloom.orchestrator.specialists.runner import SpecialistRunner
     from hyperloom.orchestrator.specialists.domains import DEFAULT_SPECIALIST_MAX_TURNS
     from hyperloom.common.llm_config import AGENT_BACKEND_CODEX, preferred_agent_backend
+    from hyperloom.orchestrator.roles.claude import resolve_claude_executable
     from hyperloom.orchestrator.specialists.subprocess_ import (
         SpecialistSubprocessConfig,
-        resolve_claude_executable,
         resolve_codex_executable,
     )
 
