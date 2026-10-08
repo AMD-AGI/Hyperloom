@@ -35,6 +35,37 @@ class AssemblyPreparationError(ValueError):
     """No verified assembly implementation is available for optimization."""
 
 
+# The exact key set of ``assembly_preparation/result.json``; resume refuses any other shape.
+_READY_RECORD_FIELDS = frozenset(
+    {
+        "status",
+        "origin",
+        "kernel",
+        "assembly",
+        "gpu_target",
+        "source_base_commit",
+        "preparation_commit",
+        "source_sha256",
+        "launcher_sha256",
+        "initial_assembly_sha256",
+        "binding_manifest",
+        "binding_manifest_sha256",
+        "source_benchmark",
+        "initial_assembly_benchmark",
+        "roundtrip_mean_case_speedup",
+        "correctness",
+        "canonical_correctness",
+        "canonical_unverified_reason",
+        "acceptance_config_sha256",
+        "source_numerical_evidence",
+        "roundtrip_numerical_evidence",
+        "numerical_execution_probe_evidence",
+        "build_failure_probe_passed",
+        "execution_probe_passed",
+    }
+)
+
+
 def _git(workspace: Path, *args: str) -> str:
     result = subprocess.run(["git", "-C", str(workspace), *args], capture_output=True, text=True, check=True)
     return result.stdout.strip()
@@ -218,7 +249,8 @@ async def _verify_numerical_source(workspace: Path, assembly: Path, baseline: di
 def _load_ready(path: Path, workspace: Path, kernel: Path, assembly: Path, base_commit: str, target: str) -> dict:
     record: dict = json.loads(path.read_text(encoding="utf-8"))
     if (
-        record.get("schema_version") != 4
+        not isinstance(record, dict)
+        or set(record) != _READY_RECORD_FIELDS
         or record.get("status") != "ready"
         or record.get("kernel") != kernel.relative_to(workspace).as_posix()
         or record.get("assembly") != assembly.relative_to(workspace).as_posix()
@@ -340,7 +372,6 @@ async def prepare_assembly(
         if _git(workspace, "diff", "--cached", "--name-only"):
             _git(workspace, "commit", "-m", "forge: bind compiler assembly to original launcher")
         record = {
-            "schema_version": 4,
             "status": "ready",
             "origin": provenance["frontend"] + "_compiler" if capture else "existing_assembly",
             "kernel": paths[0],

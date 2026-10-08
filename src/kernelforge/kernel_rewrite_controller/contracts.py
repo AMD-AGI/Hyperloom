@@ -5,13 +5,11 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
 from kernelforge.knowledge.kernel_identity import KernelRecipeIdentity
-
-TASK_STATE_SCHEMA_VERSION = 1
 
 TASK_FILENAME = "task.json"
 DRIVER_FILENAME = "driver.py"
@@ -117,7 +115,6 @@ class TaskState:
     finished_at: str = ""
     workspace_dir: str = ""
     result_patch_dir: str = ""
-    schema_version: int = field(default=TASK_STATE_SCHEMA_VERSION, init=False)
 
     def __post_init__(self) -> None:
         if self.status not in TASK_STATUSES:
@@ -135,27 +132,19 @@ class TaskState:
         """Validate and deserialize a persisted task state."""
         if not isinstance(payload, dict):
             raise TaskStateError("task state must be a JSON object")
-        expected = {
-            "schema_version",
-            "status",
-            "reason",
-            "started_at",
-            "finished_at",
-            "workspace_dir",
-            "result_patch_dir",
-        }
+        expected = {item.name for item in fields(cls)}
+        missing = expected - set(payload)
+        if missing:
+            raise TaskStateError(f"task state missing fields: {', '.join(sorted(missing))}")
         unknown = set(payload) - expected
         if unknown:
             raise TaskStateError(f"task state has unknown fields: {', '.join(sorted(unknown))}")
-        version = payload.get("schema_version")
-        if isinstance(version, bool) or version != TASK_STATE_SCHEMA_VERSION:
-            raise TaskStateError(f"unsupported task state schema {version!r}; expected {TASK_STATE_SCHEMA_VERSION}")
-        status = payload.get("status")
+        status = payload["status"]
         if not isinstance(status, str):
             raise TaskStateError("TaskState.status must be a string")
         values: dict[str, str] = {}
         for name in ("reason", "started_at", "finished_at", "workspace_dir", "result_patch_dir"):
-            value = payload.get(name, "")
+            value = payload[name]
             if not isinstance(value, str):
                 raise TaskStateError(f"TaskState.{name} must be a string")
             values[name] = value
@@ -170,7 +159,6 @@ __all__ = [
     "SERVING_CONTEXT_FILENAME",
     "STATE_FILENAME",
     "TASK_FILENAME",
-    "TASK_STATE_SCHEMA_VERSION",
     "TASK_STATUSES",
     "TASK_STATUS_FAILED",
     "TASK_STATUS_READY",

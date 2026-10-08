@@ -84,9 +84,7 @@ async def test_the_gate_denies_while_the_exclusion_holds_and_not_after(store, cl
 
     clock.advance(120.0)
     settled = await store.settle(
-        "round-1",
-        holder_task_id="baseline-1",
-        fence=opened.fence,
+        await store.get("round-1"),
         outcome=BOOTED,
         now_unix=clock.wall(),
         request_id="req-settle",
@@ -103,7 +101,7 @@ async def test_a_settled_round_denies_nothing_however_it_ended(store, clock, out
     """Settling releases, whether or not anything confirmed the holder dead."""
     facts = ResourceFacts()
     gate = _gate(facts)
-    opened = await store.open(
+    await store.open(
         "round-1",
         holder_task_id="baseline-1",
         lease_sec=_LEASE,
@@ -112,9 +110,7 @@ async def test_a_settled_round_denies_nothing_however_it_ended(store, clock, out
     )
     clock.advance(_LEASE + 1.0)
     await store.settle(
-        "round-1",
-        holder_task_id="baseline-1",
-        fence=opened.fence,
+        await store.get("round-1"),
         outcome=outcome,
         now_unix=clock.wall(),
         request_id="req-settle",
@@ -171,9 +167,7 @@ async def test_an_open_round_keeps_denying_after_lease_expiry_until_settled(stor
     assert blocked.reason == EXCLUDED
 
     settled = await store.settle(
-        "round-1",
-        holder_task_id="baseline-1",
-        fence=opened.fence,
+        await store.get("round-1"),
         outcome=BOOTED,
         now_unix=clock.wall(),
         request_id="req-settle",

@@ -8,10 +8,7 @@ import pytest
 
 from kernelforge.loop import reporting
 from kernelforge.loop.recovery import load_published_best
-from kernelforge.loop.reporting import (
-    MANIFEST_SCHEMA_VERSION,
-    BestResultPublisher,
-)
+from kernelforge.loop.reporting import BestResultPublisher
 
 
 def _publish(
@@ -83,6 +80,7 @@ def test_each_keep_publishes_versioned_bundle_and_best_only_report(tmp_path):
     assert manifest["total_improved"] is True
     assert manifest["incremental_improved"] is True
     assert manifest["improved_during_search"] is True
+    assert set(manifest) == reporting.BEST_MANIFEST_FIELDS
     assert result == manifest
     assert "second verified improvement" in report
     assert "first verified improvement" not in report
@@ -175,56 +173,7 @@ def test_a_consistent_report_states_the_improvement_without_a_regression(tmp_pat
     assert "Aggregate regression" not in report
 
 
-def _downgrade_to_pre_badge_schema(tmp_path) -> None:
-    """Rewrite a published bundle the way the workspace looked before b9825da."""
-    root = tmp_path / "forge_experiments"
-    for path in (
-        root / "best" / "manifest.json",
-        root / "best_result.json",
-        root / "best" / "iter_001" / "publication.json",
-    ):
-        payload = json.loads(path.read_text())
-        payload.pop("aggregate_regression", None)
-        payload["schema_version"] = 1
-        payload["total_improved"] = payload["mean_case_speedup"] > 1.0
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-
-
-def test_republish_over_a_pre_badge_manifest_supersedes_it(tmp_path):
-    """The stale manifest is the published artifact until it is replaced."""
-    kernel = tmp_path / "kernel.py"
-    kernel.write_text("selected candidate\n")
-    publisher = BestResultPublisher(str(tmp_path))
-    _publish(
-        publisher,
-        iteration=1,
-        wall_ms=1.2,
-        mean_case_speedup=2.0,
-        plan="improve equal-weight case score",
-        changed_files=["kernel.py"],
-    )
-    _downgrade_to_pre_badge_schema(tmp_path)
-    stale = json.loads((tmp_path / "forge_experiments" / "best" / "manifest.json").read_text())
-
-    republished = _publish(
-        publisher,
-        iteration=1,
-        wall_ms=1.2,
-        mean_case_speedup=2.0,
-        plan="improve equal-weight case score",
-        changed_files=["kernel.py"],
-    )
-
-    published = json.loads((tmp_path / "forge_experiments" / "best" / "manifest.json").read_text())
-    assert stale["total_improved"] is True
-    assert published == republished
-    assert published["schema_version"] == MANIFEST_SCHEMA_VERSION
-    assert published["total_improved"] is False
-    assert "is not faster than the pristine baseline" in (published["aggregate_regression"])
-
-
-def test_a_conflicting_publication_of_the_same_schema_still_raises(tmp_path):
-    """Superseding an old schema must not turn every conflict into a rewrite."""
+def test_a_conflicting_publication_of_the_same_iteration_raises(tmp_path):
     kernel = tmp_path / "kernel.py"
     kernel.write_text("selected candidate\n")
     publisher = BestResultPublisher(str(tmp_path))
@@ -597,14 +546,12 @@ class TestPublishedBestLoader:
     def test_no_campaign_has_no_published_best(self, tmp_path):
         assert load_published_best(str(tmp_path)) is None
 
-    def test_a_result_from_an_older_schema_is_not_published(self, tmp_path):
+    def test_a_result_of_a_different_shape_is_not_published(self, tmp_path):
         result = tmp_path / "forge_experiments" / "best_result.json"
         result.parent.mkdir(parents=True)
-        # A bundle left by a previous release: its fields mean something else now.
         result.write_text(
             json.dumps(
                 {
-                    "schema_version": MANIFEST_SCHEMA_VERSION - 1,
                     "correctness_passed": True,
                     "iteration": 0,
                     "commit_hash": "abc123",
@@ -617,6 +564,6 @@ class TestPublishedBestLoader:
     def test_a_truncated_result_is_not_published(self, tmp_path):
         result = tmp_path / "forge_experiments" / "best_result.json"
         result.parent.mkdir(parents=True)
-        result.write_text('{"schema_version": 2, "correctness_pass')
+        result.write_text('{"correctness_pass')
 
         assert load_published_best(str(tmp_path)) is None

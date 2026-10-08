@@ -345,9 +345,7 @@ class Reconciler:
         successor = await self._successor(round_row.holder_task_id)
         if successor is not None:
             moved = await self._rounds.handoff(
-                round_row.round_id,
-                holder_task_id=round_row.holder_task_id,
-                fence=round_row.fence,
+                round_row,
                 new_holder_task_id=successor.task_id,
                 # A successor that declares no TTL inherits what the round has left.
                 lease_sec=float(successor.lease_ttl_sec) or (round_row.expires_unix - round_row.renewed_unix),
@@ -368,9 +366,7 @@ class Reconciler:
         """Settle a completed owner after its successor/review window ends."""
         outcome = EXPIRED_REAPED
         result = await self._rounds.settle(
-            round_row.round_id,
-            holder_task_id=round_row.holder_task_id,
-            fence=round_row.fence,
+            round_row,
             outcome=outcome,
             now_unix=now_unix,
             request_id=f"reconcile:{why}:{round_row.round_id}:{round_row.fence}",

@@ -19,7 +19,7 @@ from hyperloom.orchestrator.tests._helpers import patch_integrate_patch_roots
 
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 
-from hyperloom.orchestrator.tests._helpers import variant_result
+from hyperloom.orchestrator.tests._helpers import integrate_extra, variant_result
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
     _git_checkout_clean,
@@ -85,7 +85,7 @@ def _make_ctx(task_id: str, params: dict[str, Any], extra: dict | None = None) -
         idempotency_key=task_id,
         requires_lanes=tuple(),
     )
-    return RunnerContext(task=task, lease=None, extra=extra or {})
+    return RunnerContext(task=task, lease=None, extra=integrate_extra(params) if extra is None else extra)
 
 
 def _stub_bench(result: dict, gate: dict):
@@ -188,7 +188,7 @@ async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch
         called["setup"] = True
         return {"applied": [], "skipped": [], "failed": []}
 
-    monkeypatch.setattr(ip, "_run_setup_commands", _spy_setup)
+    monkeypatch.setattr(ip, "run_setup_commands", _spy_setup)
 
     class _SS:
         def get_specialist_patch_verdict(self, tid):
