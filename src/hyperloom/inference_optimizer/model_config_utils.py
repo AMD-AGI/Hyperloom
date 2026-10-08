@@ -349,20 +349,6 @@ def _fp8_is_per_channel_per_token(model_path: str) -> bool:
     return _fp8_weight_scale_is_per_channel(model_path) is True
 
 
-def _fp8_is_block_scale(model_path: str) -> bool:
-    """True when a serialized FP8 checkpoint uses block-scale quantization."""
-    data = _load_model_config_dict(model_path)
-    if not isinstance(data, dict):
-        return False
-    qc = data.get("quantization_config")
-    if not isinstance(qc, dict):
-        return False
-    if str(qc.get("quant_method") or "").strip().lower() != _FP8_QUANT_METHOD:
-        return False
-    # Require a non-empty weight_block_size.
-    return bool(qc.get("weight_block_size"))
-
-
 _MLA_KEYS = ("kv_lora_rank", "qk_rope_head_dim", "qk_nope_head_dim", "q_lora_rank")
 _MOE_EXPERT_KEYS = ("num_experts", "n_routed_experts", "num_local_experts")
 _SHARED_EXPERT_KEYS = ("n_shared_experts", "num_shared_experts", "moe_num_shared_experts")

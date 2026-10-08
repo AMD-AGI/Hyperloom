@@ -23,11 +23,6 @@ _DATA_ROOT = _PACKAGE_ROOT / "data"
 _STATE_DIR_NAME = "kernelforge"
 
 
-def packaged_data_root() -> Path:
-    """Root of the read-only resource trees shipped inside the package."""
-    return _DATA_ROOT
-
-
 def resource_path(name: str, project_root: str | Path | None = None, *, missing_ok: bool = False) -> Path:
     """Locate a shipped resource directory or file.
 
