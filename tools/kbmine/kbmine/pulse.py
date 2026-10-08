@@ -55,6 +55,8 @@ class PulseClient:
         self._token = token
         self._timeout = timeout
         self._ctx = ssl.create_default_context(cafile=ca_bundle) if ca_bundle else None
+        #: Why the last :meth:`session_breakdowns` walk ended early or skipped rows; empty when it read cleanly.
+        self.walk_notes: list[str] = []
 
     def get(self, path: str, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         url = self.base_url + path
@@ -78,25 +80,52 @@ class PulseClient:
         """Page ``/v1/session-breakdowns`` with ``limit``/``offset``.
 
         ``page_size`` is silently ignored by the service, so paging must use
-        ``limit``; a short page or a repeated offset ends the walk.
+        ``limit``. An empty or short page ends the walk, and so does a page that adds no new row: one whose sessions
+        were all read already (a server that ignores ``offset`` returns the same page forever) or that holds no row
+        object at all. A row whose ``session_id`` was already yielded is skipped, so no session is counted twice.
+        Every request either yields a new row or ends the walk, so it cannot loop. :attr:`walk_notes` says why a walk
+        stopped early or what it skipped.
         """
+        self.walk_notes = []
         offset = 0
         seen = 0
+        session_ids: set[str] = set()
+        repeated = malformed = 0
         while seen < max_rows:
-            payload = self.get(
-                "/v1/session-breakdowns",
-                {**filters, "limit": min(_PAGE, max_rows - seen), "offset": offset},
-            )
-            rows = payload.get("results") or []
-            if not rows:
-                return
+            requested = min(_PAGE, max_rows - seen)
+            payload = self.get("/v1/session-breakdowns", {**filters, "limit": requested, "offset": offset})
+            rows = payload.get("results") if isinstance(payload, Mapping) else None
+            if not isinstance(rows, list) or not rows:
+                break
+            added = 0
             for row in rows:
-                if isinstance(row, Mapping):
-                    yield dict(row)
-                    seen += 1
+                if not isinstance(row, Mapping):
+                    malformed += 1
+                    continue
+                session_id = str(row.get("session_id") or "")
+                if session_id and session_id in session_ids:
+                    repeated += 1
+                    continue
+                if session_id:
+                    session_ids.add(session_id)
+                yield dict(row)
+                seen += 1
+                added += 1
+                if seen >= max_rows:
+                    break
+            if not added:
+                self.walk_notes.append(
+                    f"pulse: the page at offset {offset} added no new row, so the walk stopped at {seen} rows; "
+                    "the service may be ignoring offset"
+                )
+                break
             offset += len(rows)
-            if len(rows) < min(_PAGE, max_rows - seen + len(rows)):
-                return
+            if len(rows) < requested:
+                break
+        if repeated:
+            self.walk_notes.append(f"pulse: skipped {repeated} row(s) repeating a session already read")
+        if malformed:
+            self.walk_notes.append(f"pulse: skipped {malformed} row(s) that were not objects")
 
 
 def _finite(value: Any) -> float | None:
