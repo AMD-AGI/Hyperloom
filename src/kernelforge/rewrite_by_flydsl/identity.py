@@ -24,6 +24,7 @@ from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 REWRITE_BACKEND = "flydsl"
 REWRITE_PRODUCER = "flydsl"
 
+
 def resolve_identity(
     spec: RewriteSpec,
     *,
