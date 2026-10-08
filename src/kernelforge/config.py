@@ -16,7 +16,7 @@ from hyperloom.common.reasoning_effort import (
     REASONING_EFFORT_LEVELS,
     normalize_reasoning_effort,
 )
-from kernelforge.knowledge.experience_store import KnowledgeConfig
+from kernelforge.knowledge.kb_store.config import KnowledgeConfig
 from kernelforge.resources import default_project_root, resource_path
 
 

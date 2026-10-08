@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from kernelforge.knowledge.implementation_identity import normalize_operator_name
+from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
 
 from hyperloom.common.coerce import to_float
 

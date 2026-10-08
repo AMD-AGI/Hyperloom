@@ -19,11 +19,11 @@ SPDX-License-Identifier = "MIT"
 # claim on top.
 [[annotations]]
 path = [
-    "src/kernelforge/data/examples/flydsl-softmax-forge-loop/softmax_kernel.py",
-    "src/kernelforge/data/local_knowledge/languages/flydsl/API_docs/examples/01-vectorAdd.py",
-    "src/kernelforge/data/local_knowledge/languages/flydsl/API_docs/examples/02-tiledCopy.py",
-    "src/kernelforge/data/local_knowledge/languages/flydsl/API_docs/examples/03-tiledMma.py",
-    "src/kernelforge/data/local_knowledge/languages/flydsl/API_docs/examples/04-preshuffle_gemm.py",
+    "src/kernelforge/examples/flydsl-softmax-forge-loop/softmax_kernel.py",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/examples/01-vectorAdd.py",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/examples/02-tiledCopy.py",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/examples/03-tiledMma.py",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/examples/04-preshuffle_gemm.py",
 ]
 precedence = "override"
 SPDX-FileCopyrightText = "FlyDSL Project Contributors"
@@ -33,7 +33,7 @@ SPDX-License-Identifier = "Apache-2.0"
 # SGLang's ``kernels/ops/moe/mxfp8_moe_amd_gfx95.py``. The rewrite pipeline
 # treats it as read-only input; the FlyDSL port it produces is AMD's.
 [[annotations]]
-path = "src/kernelforge/data/examples/triton2flydsl-mxfp8-grouped-gemm/mxfp8_grouped_gemm.py"
+path = "src/kernelforge/examples/triton2flydsl-mxfp8-grouped-gemm/mxfp8_grouped_gemm.py"
 precedence = "override"
 SPDX-FileCopyrightText = "SGLang Team and contributors"
 SPDX-License-Identifier = "Apache-2.0"

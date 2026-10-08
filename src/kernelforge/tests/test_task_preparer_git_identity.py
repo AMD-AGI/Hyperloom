@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-from kernelforge.knowledge import experience_integration
+from kernelforge.loop import knowledge_integration
 from kernelforge.loop import task_preparer
 
 FORGE_IDENTITY = "KernelForge <kernel-forge@localhost>"

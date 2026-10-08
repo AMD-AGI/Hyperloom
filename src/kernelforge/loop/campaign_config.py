@@ -17,11 +17,11 @@ from pathlib import Path
 
 from kernelforge.llm.git import git
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
-from kernelforge.knowledge.experience_sink import (
+from kernelforge.knowledge.kb_store.writer import (
     infer_source_owner_framework,
     resolve_operation,
 )
-from kernelforge.knowledge.implementation_identity import (
+from kernelforge.knowledge.kb_store.identity.implementation import (
     hash_implementation_identity,
     implementation_signature,
 )
