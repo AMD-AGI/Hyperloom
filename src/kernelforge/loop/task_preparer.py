@@ -131,8 +131,7 @@ _GRAPH_PROBE_SITECUSTOMIZE = r'''
 import atexit, json, os, sys
 
 _n = [0]
-# Collected only when the caller declares a rank count. A single-rank probe
-# reports replays alone, exactly as before.
+# Harness evidence is collected only when the caller declares a rank count.
 _expect_ranks = 0
 try:
     _expect_ranks = int(os.environ.get("GRAPH_PROBE_EXPECT_RANKS") or 0)
@@ -324,11 +323,6 @@ def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None =
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             return PROBE_FAILED, f"invalid graph probe shard {Path(shard).name}: {exc}"
 
-        if isinstance(payload, int) and not isinstance(payload, bool):
-            if payload < 0:
-                return PROBE_FAILED, f"invalid negative replay count in {Path(shard).name}"
-            unranked_replays.append(payload)
-            continue
         if not isinstance(payload, dict):
             return PROBE_FAILED, f"invalid graph probe shard payload in {Path(shard).name}"
 

@@ -123,9 +123,7 @@ async def _seed_stalled(rounds: RoundStore, n: int) -> None:
         holder = f"holder-{i:03d}"
         await rounds.open(rid, holder_task_id=holder, lease_sec=3600.0, now_unix=float(i), request_id=rid)
         await rounds.settle(
-            rid,
-            holder_task_id=holder,
-            fence=1,
+            await rounds.get(rid),
             outcome=FAILED,
             now_unix=float(i) + 1.0,
             request_id=f"settle-{rid}",

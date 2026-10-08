@@ -182,16 +182,13 @@ def graded_framework(params: Mapping[str, Any], materialized_config: str) -> str
 
     The materialized config is what the launch read, so its own
     ``benchmark.framework`` outranks the round's params and the ambient
-    ``$FRAMEWORK``; those remain the fallback for a round whose config could
-    not be read.
+    ``$FRAMEWORK``; those decide only for a round that named no config, or
+    whose config declares no framework.
     """
     if materialized_config:
         from ...actions.executors._server_argv import _benchmark_envs
 
-        try:
-            declared, _envs = _benchmark_envs(materialized_config)
-        except (OSError, ValueError):
-            declared = None
+        declared, _envs = _benchmark_envs(materialized_config)
         if declared:
             return str(declared).strip().lower()
     from hyperloom.inference_optimizer.framework_registry import DEFAULT_FRAMEWORK
@@ -213,10 +210,7 @@ def graded_launch_env(override: Mapping[str, Any] | None, materialized_config: s
         return env
     from ...actions.executors._server_argv import config_launch_env
 
-    try:
-        return config_launch_env(materialized_config, env)
-    except (OSError, ValueError):
-        return env
+    return config_launch_env(materialized_config, env)
 
 
 def probe_keep_environment(

@@ -35,26 +35,9 @@ _COLLAPSE_ALLOWED: tuple[tuple[str, str, str], ...] = (
 # Occurrences that are deliberate. Each entry is (path glob, line regex, why).
 _ALLOWED: tuple[tuple[str, str, str], ...] = (
     (
-        "*",
-        r"KERNEL_AGENTS_MAX_TURNS",
-        "Removed environment variable. The literal exists only so Config.from_env "
-        "can warn the operator that it is ignored; renaming it silences the warning.",
-    ),
-    (
-        "src/kernelforge/agent_backends/registry.py",
-        r"kernel_agents\.agent_providers",
-        "Pre-rename entry-point group, still read so third-party provider plugins "
-        "keep loading (with a DeprecationWarning).",
-    ),
-    (
         "src/kernelforge/tests/test_rename_completeness.py",
         r".",
         "This file names the old spellings in order to forbid them.",
-    ),
-    (
-        "src/kernelforge/tests/test_provider_registry.py",
-        r"kernel_agents",
-        "Coverage for the deprecated entry-point group's dual-read; the test has to name the group it is asserting on.",
     ),
     (
         "src/kernelforge/tests/test_agent_env_contract.py",

@@ -18,10 +18,13 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from ...source_snapshot import snapshot_source_layer
 from .projections import root_id_for, select_linked_build
+
+if TYPE_CHECKING:
+    from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 PATCH_APPLY = "patch_apply"
 ARTIFACT_INSTALL = "artifact_install"
@@ -233,7 +236,7 @@ def _portable_manifest(
 
 
 def levers_without_readers(
-    enablement: Any,
+    enablement: EnablementRound,
     framework_root: Path | None,
     *,
     framework: str,
@@ -261,24 +264,24 @@ def levers_without_readers(
     one.
 
     Returns:
-        The lever names with no reader, ``[]`` when a scan found none, and
-        ``None`` when the tree could not be read -- which is not evidence
-        that every lever has one.
+        The lever names with no reader, ``[]`` when a scan found none or
+        there was nothing to scan for, and ``None`` when the tree was not
+        resolved or could not be read -- which is not evidence that every
+        lever has one.
     """
-    if framework_root is None or not framework.strip():
+    if not framework.strip():
         return []
     # This KEEP's own effective config wins. The standing ``accepted_config``
     # is not replaced with it until the lane re-arms on the result, so a
     # lever this round introduced -- the one the recipe will export -- is
     # not in shared state yet, and scanning only that would check every
     # round's levers except the decisive one.
-    accepted = getattr(enablement, "accepted_config", None) or {}
-    envs = {**accepted.get("extra_envs", {}), **(effective_config or {}).get("extra_envs", {})}
+    envs = {**enablement.accepted_config.get("extra_envs", {}), **(effective_config or {}).get("extra_envs", {})}
     prefix = f"{framework.strip().upper()}_"
     names = sorted({str(k).strip() for k in envs if str(k).strip().startswith(prefix)})
     if not names:
         return []
-    if not framework_root.is_dir():
+    if framework_root is None or not framework_root.is_dir():
         # An empty walk over a tree that is not there would report every
         # lever as unread, which is a refusal built out of nothing.
         return None
@@ -303,25 +306,20 @@ def _build_output_trees(attempt_root: Path) -> list[Path]:
     The build records them in its ``result.json`` as the prefixes a runtime
     would import from; that is the build's own statement of where its output
     lives, so it is read rather than guessed at. A result that cannot be
-    read falls back to the candidate worktrees the layout puts them in --
-    still narrower than the attempt root, which also holds cloned
-    dependencies and any provisioned virtual environment.
+    read, or names no prefix, names no tree.
     """
     result = attempt_root / "result.json"
     try:
         payload = json.loads(result.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        payload = {}
+        return []
     runtime = payload.get("runtime") if isinstance(payload, dict) else None
     prefixes = (runtime or {}).get("pythonpath_prefixes") if isinstance(runtime, dict) else None
-    trees = [Path(str(p)) for p in prefixes if str(p).strip()] if isinstance(prefixes, list) else []
-    if trees:
-        return trees
-    return sorted(d for d in attempt_root.glob("candidates/*/worktree") if d.is_dir())
+    return [Path(str(p)) for p in prefixes if str(p).strip()] if isinstance(prefixes, list) else []
 
 
 def build_extensions_not_carried(
-    enablement: Any, framework_root: Path | None, *, specialist_task_id: str = ""
+    enablement: EnablementRound, framework_root: Path | None, *, specialist_task_id: str = ""
 ) -> list[str] | None:
     """Return the build's compiled extensions the framework root does not have.
 
@@ -352,19 +350,18 @@ def build_extensions_not_carried(
         The names left behind, ``[]`` only after at least one of the linked
         build's output trees was scanned and nothing was missing (or when no
         build is linked, there being nothing to carry), and ``None`` when a
-        build is linked whose outputs could not be read -- an absent tree, a
-        cleaned-up worktree or an unreadable file. None of those are
+        build is linked whose outputs could not be read -- a result that
+        names no output tree, a named tree that is gone, an unreadable file,
+        or no framework root to compare them against. None of those are
         evidence that anything was carried.
     """
-    if framework_root is None:
-        return []
-    rounds = list(getattr(enablement, "kept_rounds", None) or [])
+    rounds = list(enablement.kept_rounds)
     current = str(specialist_task_id or "").strip()
     if current and not any(str((r or {}).get("task_id") or "").strip() == current for r in rounds):
         rounds.append({"task_id": current})
     state = {
-        "build_manifest": list(getattr(enablement, "build_manifest", None) or []),
-        "last_specialist_task_id": str(getattr(enablement, "last_specialist_task_id", "") or ""),
+        "build_manifest": list(enablement.build_manifest),
+        "last_specialist_task_id": enablement.last_specialist_task_id,
         "kept_rounds": rounds,
     }
     _sentinel, row = select_linked_build(state)
@@ -374,6 +371,8 @@ def build_extensions_not_carried(
     attempt_root_text = str((row or {}).get("attempt_root") or "").strip()
     if not attempt_root_text:
         return []
+    if framework_root is None:
+        return None
     attempt_root = Path(attempt_root_text)
     if not attempt_root.is_dir():
         return None
@@ -383,9 +382,9 @@ def build_extensions_not_carried(
             d for d in (prefix / framework_root.name for prefix in _build_output_trees(attempt_root)) if d.is_dir()
         ]
         if not package_roots:
-            # The build named output trees that are gone, or named none and
-            # the candidate worktrees have been cleaned up. Either way this
-            # scanned nothing, which is not the same as finding nothing.
+            # The build named no output tree, or named trees that are gone.
+            # Either way this scanned nothing, which is not the same as
+            # finding nothing.
             return None
         built_files = sorted((package, built) for package in package_roots for built in package.rglob("*.so"))
     except OSError:
