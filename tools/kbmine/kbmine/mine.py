@@ -674,9 +674,10 @@ def estimate_from_sessions(
         pool_warnings.append(f"pool mixes framework versions {version_mix}; a fixed upstream regression inflates gain")
     if len(precision_mix) > 1:
         pool_warnings.append(f"pool mixes precisions {precision_mix}; replay requires an exact precision match")
-    if shape is None and len(shape_groups) > 1:
+    if len(shape_groups) > 1:
+        unscoped = [key for key in _SHAPE_KEYS if _positive_int((shape or {}).get(key)) is None]
         pool_warnings.append(
-            f"pool mixes {len(shape_groups)} workload shapes; pass tp/conc/isl/osl to scope, or read by_shape"
+            f"pool mixes {len(shape_groups)} workload shapes; pass {'/'.join(unscoped)} to scope, or read by_shape"
         )
 
     n = len(rows)
@@ -750,10 +751,17 @@ def search_inference_identities(
     match: dict[str, str] | None = None,
     hardware_in: list[str] | None = None,
     max_identities: int = 200,
+    counts: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Page ``POST /v1/kb/search`` for inference identities."""
+    """Page ``POST /v1/kb/search`` for inference identities.
+
+    When *counts* is given, ``counts["matched"]`` is set to the ``total`` the store reported for the search (``None``
+    when it reported none), so a caller can say how much of the match it did not read.
+    """
     items: list[dict[str, Any]] = []
     offset = 0
+    if counts is not None:
+        counts["matched"] = None
     for _ in range(_SEARCH_PAGE_CAP):
         if len(items) >= max_identities:
             break
@@ -765,6 +773,8 @@ def search_inference_identities(
             limit=min(_SEARCH_PAGE, max_identities - len(items)),
         )
         page = result.get("items") if isinstance(result, Mapping) else None
+        if counts is not None and counts["matched"] is None and isinstance(result, Mapping):
+            counts["matched"] = _positive_int(result.get("total"))
         if not isinstance(page, list) or not page:
             break
         for item in page:
@@ -785,18 +795,27 @@ def fetch_session_documents(
     hardware_in: list[str] | None = None,
     max_identities: int = 50,
     canonical_ids: list[str] | None = None,
+    counts: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Download per-session envelopes for matching identities."""
+    """Download per-session envelopes for matching identities.
+
+    When *counts* is given it receives ``fetched`` (identities read) and ``matched`` (identities the store holds for
+    the search, ``None`` when unreported or when explicit ids were given).
+    """
     errors: list[str] = []
+    counts = {} if counts is None else counts
     if canonical_ids:
         identities = [{"canonical_id": cid} for cid in canonical_ids]
+        counts["matched"] = None
     else:
         identities = search_inference_identities(
             store,
             match=match,
             hardware_in=hardware_in,
             max_identities=max_identities,
+            counts=counts,
         )
+    counts["fetched"] = len(identities)
     documents: list[dict[str, Any]] = []
     for item in identities:
         cid = str(item.get("canonical_id") or "").strip()

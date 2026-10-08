@@ -3,6 +3,10 @@
 
 """Standalone client for the KB store.
 
+kbmine's copy of ``src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/kb_store_client.py``. It differs only
+by the ``ca_bundle`` parameter (and ``KB_STORE_CA_BUNDLE`` in :meth:`KBStoreClient.from_env`), which passes an
+explicit CA bundle to every request; carry upstream fixes over by re-copying that file and re-applying this change.
+
 Intentionally stdlib-only so producers (Hyperloom orchestrator, agents,
 CLI tools) can vendor this single file without pulling in boto3 or an
 async HTTP stack. Uploads and downloads go straight to the object store
@@ -28,9 +32,9 @@ record must never fail the optimization run that produced it.
 from __future__ import annotations
 
 import hashlib
-import ssl
 import json
 import os
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -99,9 +103,9 @@ class KBStoreClient:
         base_url: str,
         token: str,
         *,
-        ca_bundle: str | None = None,
         timeout_sec: float = DEFAULT_TIMEOUT_SEC,
         parallelism: int = DEFAULT_PARALLELISM,
+        ca_bundle: str | None = None,
     ) -> None:
         if not base_url:
             raise KBStoreError("base_url is required")
@@ -109,9 +113,8 @@ class KBStoreClient:
         self._token = token or ""
         self._timeout = timeout_sec
         self._parallelism = max(1, parallelism)
-        # Explicit CA bundle, same reason as PulseClient: the KB host is signed
-        # by an internal CA, and leaving this to an ambient SSL_CERT_FILE makes
-        # a missing root look like an auth failure. None keeps stdlib defaults.
+        # The KB host is signed by an internal CA; leaving that to an ambient SSL_CERT_FILE makes a missing root look
+        # like an auth failure. None keeps the stdlib defaults.
         self._ctx = ssl.create_default_context(cafile=ca_bundle) if ca_bundle else None
 
     @classmethod
@@ -178,9 +181,8 @@ class KBStoreClient:
     def _scope_query(scope: dict[str, Any] | None) -> str:
         if not scope:
             return ""
-        return "?" + urllib.parse.urlencode(
-            {key: scope[key] for key in ("kernel_optimizer", "tp", "conc", "isl", "osl")}
-        )
+        # Scope dimensions are defined by the identity scheme.
+        return "?" + urllib.parse.urlencode(scope)
 
     # -- knowledge ----------------------------------------------------------
 
@@ -192,6 +194,7 @@ class KBStoreClient:
         session_id: str = "",
         mode: str = "merge",
         scope: dict[str, Any] | None = None,
+        objective_schema: str = "",
     ) -> dict[str, Any]:
         """Record what this producer knows about an identity.
 
@@ -205,6 +208,8 @@ class KBStoreClient:
             payload["session_id"] = session_id
         if scope:
             payload["scope"] = dict(scope)
+        if objective_schema:
+            payload["objective_schema"] = objective_schema
         return self._request("POST", f"/v1/kb/{self._quote(canonical_id)}", payload)
 
     def get_session(self, canonical_id: str, session_id: str) -> dict[str, Any] | None:
