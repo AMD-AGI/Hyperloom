@@ -184,11 +184,11 @@ EOF
 }
 
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
-# Pin Magpie's native AgentX launch contract, custom-model replay, and eval-path fix.
+# Pin Magpie's native AgentX launch contract, eval fixes, and optional SGLang shape discovery.
 # Operators can re-pin with MAGPIE_REF=<tag|sha>. Generic benchmarks keep the
 # importability contract; native AgentX additionally requires the audited
 # source identity and recipe-fingerprint capabilities.
-MAGPIE_REF="${MAGPIE_REF:-cf805323f0a6db6c63a0aa4ffcce7acf4e830ea6}"
+MAGPIE_REF="${MAGPIE_REF:-d80eb4d3dad7fabe01ce81d049e2983adf2c86dd}"
 MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
 
 # aiperf (SemiAnalysis AgentX benchmark client) — pinned to an immutable commit

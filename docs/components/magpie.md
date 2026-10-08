@@ -42,14 +42,18 @@ Each run produces a `benchmark_report.json` that Hyperloom parses to extract
 throughput/measurements and pick winners. Hyperloom pins the Magpie
 [v0.3.0 release](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) plus native launch overrides, custom-model replay, and the
 generic client/eval compatibility fixes at immutable commit
-`cf805323f0a6db6c63a0aa4ffcce7acf4e830ea6`. The fixes keep evaluation scripts
+`d80eb4d3dad7fabe01ce81d049e2983adf2c86dd`. The fixes keep evaluation scripts
 bound to their intended InferenceX source after directory changes and run the
 packaged benchmark client with Transformers 5 in a separate Python environment.
 The serving framework environment is unchanged. The pinned scripts also support
 Hyperloom's client tokenizer and trust settings directly, so compatibility checks
-leave the audited Magpie package unchanged. The launch extensions are pinned development commits rather than a new Magpie
-release. Earlier GPU validation used the v0.3.0 release commit and does not
+leave the audited Magpie package unchanged. These capabilities are pinned to a merged Magpie
+commit beyond v0.3.0. Earlier GPU validation used the v0.3.0 release commit and does not
 validate these extensions; their source and wheel share an audited execution tree.
+The pin includes [Magpie #117](https://github.com/AMD-AGI/Magpie/pull/117): SGLang detailed
+profiling accepts runtimes without shape discovery and enables each shape-discovery
+option only when supported. Graph-mode captures still require graph profiling support
+and retain per-batch graph trace export.
 With `benchmark.agentx: enable`, Magpie resolves the serving specification,
 owns server startup and cleanup, and runs the maintained InferenceX/AIPerf client.
 The integration validates the package, recipe/client sources, and effective

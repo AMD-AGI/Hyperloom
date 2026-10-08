@@ -1,7 +1,7 @@
 # Native Magpie AgentX: GLM-5.2 on MI355X
 
 This example pins Magpie v0.3.0 plus native launch overrides, custom-model replay, and client/eval compatibility fixes to commit
-cf805323f0a6db6c63a0aa4ffcce7acf4e830ea6 and InferenceX commit
+d80eb4d3dad7fabe01ce81d049e2983adf2c86dd and InferenceX commit
 408c015be4b22d14c69518643609669405507077. The YAML omits
 `inferencex_path`, so preflight reuses or clones that tested pin. An optional
 `benchmark.inferencex_path` only nominates a preferred writable checkout:

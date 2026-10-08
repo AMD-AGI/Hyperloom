@@ -80,7 +80,7 @@ set `HYPERLOOM_AGENTX=1` and pass the usual model, framework, GPU, precision, an
 concurrency arguments; Magpie resolves the native recipe and launcher. This
 integration is pinned to Magpie
 [v0.3.0](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) plus native launch overrides, custom-model replay, and generic
-client/eval compatibility fixes at commit `cf805323f0a6db6c63a0aa4ffcce7acf4e830ea6` and InferenceX commit
+client/eval compatibility fixes at commit `d80eb4d3dad7fabe01ce81d049e2983adf2c86dd` and InferenceX commit
 `408c015be4b22d14c69518643609669405507077`.
 
 New AgentX sessions record native backend epoch 4 and retain Hyperloom's

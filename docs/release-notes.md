@@ -97,9 +97,12 @@ is a patch release on top of 1.1.2. The per-change history is on the
   retain their measurement-only contract. No historical baseline or KEEP is
   migrated. Unsupported or ambiguous recipes fail before measurement. The
   pinned pair is Magpie v0.3.0 plus native launch overrides, custom-model replay, and client/eval compatibility fixes at commit
-  `cf805323f0a6db6c63a0aa4ffcce7acf4e830ea6` and InferenceX commit
+  `d80eb4d3dad7fabe01ce81d049e2983adf2c86dd` and InferenceX commit
   `408c015be4b22d14c69518643609669405507077`. Both dependencies are pinned by
-  immutable commit for reproducible AgentX measurements. The upstream hotfix
+  immutable commit for reproducible AgentX measurements. SGLang detailed profiling
+  no longer requires shape discovery; unsupported shape-discovery options are omitted,
+  while graph profiling support remains required for graph-mode captures.
+  The upstream hotfix
   keeps generic GSM8K evaluation and its probe files reachable after benchmark
   directory changes. The packaged benchmark client uses Transformers 5 in its
   own Python environment, without upgrading the serving framework. Client tokenizer

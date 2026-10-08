@@ -872,7 +872,7 @@ Native AgentX measurements are materialized from that source YAML as Magpie
 `agentx: enable` runs.
 The canonical identity and launcher are intentionally separate from the local
 checkpoint path. The pinned pair is Magpie v0.3.0 plus native launch overrides, custom-model replay, and client/eval
-compatibility fixes at commit `cf805323f0a6db6c63a0aa4ffcce7acf4e830ea6` and InferenceX commit
+compatibility fixes at commit `d80eb4d3dad7fabe01ce81d049e2983adf2c86dd` and InferenceX commit
 `408c015be4b22d14c69518643609669405507077`:
 
 | Variable | Required | Default | Description |
